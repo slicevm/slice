@@ -658,6 +658,67 @@ pub fn run_source_isolated(
     }
 }
 
+/// Disassembles a `SLICESNP` binary bytecode buffer into human-readable Tier-0/Tier-2 opcodes.
+pub fn disassemble_bytecode(bytecode: &[u8]) -> Result<Vec<String>> {
+    if bytecode.len() < 8 || &bytecode[0..8] != SNAPSHOT_MAGIC {
+        bail!("Invalid SLICESNP bytecode header");
+    }
+    let module: BytecodeModule = serde_json::from_slice(&bytecode[8..])?;
+    let mut lines = Vec::with_capacity(module.ops.len() + 2);
+    for (idx, op) in module.ops.iter().enumerate() {
+        let formatted = match op {
+            BytecodeOp::ConstNum { dst, val } => format!("{:04}  CONST_NUM       %{} <- {}", idx, dst, val),
+            BytecodeOp::ConstStr { dst, val } => format!("{:04}  CONST_STR       %{} <- {:?}", idx, dst, val),
+            BytecodeOp::ImportCas { dst, specifier } => {
+                format!("{:04}  IMPORT_CAS      %{} <- cas_resolve({:?})", idx, dst, specifier)
+            }
+            BytecodeOp::AddNum { dst, lhs, rhs } => {
+                format!("{:04}  ADD_F64         %{} <- %{} + %{}", idx, dst, lhs, rhs)
+            }
+            BytecodeOp::NumericLoopKernel { dst, iterations } => {
+                format!("{:04}  LOOP_SIMD_T2    %{} <- sum(0..{})", idx, dst, iterations)
+            }
+            BytecodeOp::FibKernel { dst, n } => {
+                format!("{:04}  FIB_NATIVE_T2   %{} <- fib({})", idx, dst, n)
+            }
+            BytecodeOp::CryptoDigest {
+                dst,
+                payload,
+                rounds,
+            } => format!(
+                "{:04}  BLAKE3_SIMD_T2  %{} <- digest({:?}, rounds={})",
+                idx, dst, payload, rounds
+            ),
+            BytecodeOp::JsonTransform { dst, iterations, .. } => {
+                format!("{:04}  JSON_XFORM_T2   %{} <- parse_stringify(iters={})", idx, dst, iterations)
+            }
+            BytecodeOp::WinterTcRoute { dst, method, url } => {
+                format!("{:04}  WINTERTC_ROUTE  %{} <- {} {}", idx, dst, method, url)
+            }
+            BytecodeOp::MutateIntrinsic { target } => {
+                format!("{:04}  SES_CHECK_MUT   trap_if_frozen({:?})", idx, target)
+            }
+            BytecodeOp::VfsRead { dst, path } => {
+                format!("{:04}  OCAP_VFS_READ   %{} <- vfs_read({:?})", idx, dst, path)
+            }
+            BytecodeOp::NetFetch { dst, host, path } => {
+                format!("{:04}  OCAP_NET_FETCH  %{} <- https://{}{}", idx, dst, host, path)
+            }
+            BytecodeOp::EnvGet { dst, key } => {
+                format!("{:04}  OCAP_ENV_GET    %{} <- env({:?})", idx, dst, key)
+            }
+            BytecodeOp::ConsoleLog { expr } => {
+                format!("{:04}  STDOUT_EMIT     print(%{})", idx, expr)
+            }
+            BytecodeOp::ReturnVar { var } => {
+                format!("{:04}  RET_VAL         return %{}", idx, var)
+            }
+        };
+        lines.push(formatted);
+    }
+    Ok(lines)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

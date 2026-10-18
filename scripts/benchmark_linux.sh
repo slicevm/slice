@@ -107,3 +107,14 @@ echo "========================================================================="
 "$SLICE_BIN" microvm-bench --tenants=1000
 "$SLICE_BIN" verify-security
 
+echo "========================================================================="
+echo "  6. PRODUCTION TOOLING VERIFICATION (doctor, inspect, serve, compile)"
+echo "========================================================================="
+"$SLICE_BIN" doctor
+"$SLICE_BIN" inspect "$COLD_CAS"
+"$SLICE_BIN" serve "$COLD_CAS" --smoke-test
+"$SLICE_BIN" compile "$COLD_TS" -o /tmp/slice_standalone_demo
+/tmp/slice_standalone_demo --metrics
+rm -f /tmp/slice_standalone_demo
+
+

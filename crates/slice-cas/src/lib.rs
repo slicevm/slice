@@ -466,6 +466,99 @@ impl MappedCasArchive {
     pub fn entrypoint_blob(&self) -> Option<&CasBlobEntry> {
         self.header.blobs.get(&self.header.entrypoint_hash)
     }
+
+    /// Opens a `.cas` archive embedded at `cas_offset` inside a larger file (such as a standalone executable).
+    pub fn open_from_offset(path: &Path, cas_offset: usize, cas_len: usize) -> Result<Self> {
+        let file = File::open(path)
+            .with_context(|| format!("Failed to open standalone binary {}", path.display()))?;
+        let mmap = unsafe { Mmap::map(&file)? };
+
+        if cas_offset + cas_len > mmap.len() || cas_len < 32 {
+            bail!("Invalid embedded CAS offset/length in {}", path.display());
+        }
+        let slice = &mmap[cas_offset..cas_offset + cas_len];
+        if &slice[0..8] != CAS_MAGIC {
+            bail!("Invalid embedded SLICE_CAS magic header");
+        }
+
+        let version = u32::from_le_bytes(slice[8..12].try_into()?);
+        if version != CAS_VERSION {
+            bail!("Unsupported SLICE_CAS version: {}", version);
+        }
+
+        let header_len = u64::from_le_bytes(slice[16..24].try_into()?) as usize;
+        let rel_data_start = u64::from_le_bytes(slice[24..32].try_into()?) as usize;
+        let header: CasIndexHeader = serde_json::from_slice(&slice[32..32 + header_len])?;
+
+        Ok(Self {
+            mmap: Arc::new(mmap),
+            header,
+            data_start_offset: cas_offset + rel_data_start,
+        })
+    }
+
+    /// Checks if the current running executable has an embedded `SLICEEXE` trailer and maps it in O(1).
+    pub fn open_embedded_self() -> Result<Option<Self>> {
+        let exe_path = std::env::current_exe()?;
+        let file = File::open(&exe_path)?;
+        let mmap = unsafe { Mmap::map(&file)? };
+        if mmap.len() < 24 {
+            return Ok(None);
+        }
+        let tail_start = mmap.len() - 24;
+        if &mmap[tail_start + 16..tail_start + 24] != b"SLICEEXE" {
+            return Ok(None);
+        }
+        let cas_offset = u64::from_le_bytes(mmap[tail_start..tail_start + 8].try_into()?) as usize;
+        let cas_len = u64::from_le_bytes(mmap[tail_start + 8..tail_start + 16].try_into()?) as usize;
+        drop(mmap);
+        let archive = Self::open_from_offset(&exe_path, cas_offset, cas_len)?;
+        Ok(Some(archive))
+    }
+}
+
+/// Embeds a compiled `.cas` archive into a copy of the `slice` runtime binary to produce a
+/// zero-dependency standalone executable (`slice compile`).
+pub fn embed_cas_into_executable(
+    base_exe_path: &Path,
+    cas_file_path: &Path,
+    output_exe_path: &Path,
+) -> Result<u64> {
+    let mut exe_bytes = std::fs::read(base_exe_path)
+        .with_context(|| format!("Failed to read base executable {}", base_exe_path.display()))?;
+    let cas_bytes = std::fs::read(cas_file_path)
+        .with_context(|| format!("Failed to read CAS archive {}", cas_file_path.display()))?;
+
+    // Pad executable size to 64-byte cache line alignment so embedded CAS remains 64-byte aligned
+    let rem = exe_bytes.len() % CACHE_LINE_ALIGN;
+    if rem != 0 {
+        exe_bytes.resize(exe_bytes.len() + (CACHE_LINE_ALIGN - rem), 0);
+    }
+
+    let cas_offset = exe_bytes.len() as u64;
+    let cas_len = cas_bytes.len() as u64;
+
+    exe_bytes.extend_from_slice(&cas_bytes);
+    exe_bytes.extend_from_slice(&cas_offset.to_le_bytes());
+    exe_bytes.extend_from_slice(&cas_len.to_le_bytes());
+    exe_bytes.extend_from_slice(b"SLICEEXE");
+
+    std::fs::write(output_exe_path, &exe_bytes).with_context(|| {
+        format!(
+            "Failed to write standalone executable to {}",
+            output_exe_path.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(output_exe_path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(output_exe_path, perms)?;
+    }
+
+    Ok(exe_bytes.len() as u64)
 }
 
 #[cfg(test)]

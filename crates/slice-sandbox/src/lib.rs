@@ -297,6 +297,139 @@ impl Drop for TenantCompartment {
     }
 }
 
+/// Declarative Project & OCap Manifest (`slice.toml`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SliceManifest {
+    pub name: String,
+    pub version: String,
+    pub entrypoint: String,
+    pub fuel_limit: u64,
+    pub memory_limit_kb: usize,
+    pub capabilities: CapabilityToken,
+}
+
+impl Default for SliceManifest {
+    fn default() -> Self {
+        Self {
+            name: "slice-edge-service".to_string(),
+            version: "0.1.0".to_string(),
+            entrypoint: "./src/index.ts".to_string(),
+            fuel_limit: 50_000_000,
+            memory_limit_kb: 4096,
+            capabilities: CapabilityToken::pure_compute(),
+        }
+    }
+}
+
+impl SliceManifest {
+    /// Parses a `slice.toml` configuration string without external heavy dependencies.
+    pub fn parse_toml(content: &str) -> Self {
+        let mut manifest = Self::default();
+        let mut current_section = "";
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                current_section = &trimmed[1..trimmed.len() - 1];
+                continue;
+            }
+            if let Some((k, v)) = trimmed.split_once('=') {
+                let key = k.trim();
+                let val = v.trim();
+                match (current_section, key) {
+                    ("package", "name") => {
+                        manifest.name = val.trim_matches('"').trim_matches('\'').to_string();
+                    }
+                    ("package", "version") => {
+                        manifest.version = val.trim_matches('"').trim_matches('\'').to_string();
+                    }
+                    ("package", "entrypoint") => {
+                        manifest.entrypoint = val.trim_matches('"').trim_matches('\'').to_string();
+                    }
+                    ("limits", "fuel") => {
+                        let digits: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
+                        if let Ok(n) = digits.parse::<u64>() {
+                            manifest.fuel_limit = n;
+                        }
+                    }
+                    ("limits", "memory_kb") => {
+                        let digits: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
+                        if let Ok(n) = digits.parse::<usize>() {
+                            manifest.memory_limit_kb = n;
+                        }
+                    }
+                    ("capabilities", "allow_read") => {
+                        for item in parse_toml_string_array(val) {
+                            manifest.capabilities.allowed_read_prefixes.push(item);
+                        }
+                    }
+                    ("capabilities", "allow_write") => {
+                        for item in parse_toml_string_array(val) {
+                            manifest.capabilities.allowed_write_prefixes.push(item);
+                        }
+                    }
+                    ("capabilities", "allow_net") => {
+                        for item in parse_toml_string_array(val) {
+                            manifest.capabilities.allowed_net_hosts.insert(item);
+                        }
+                    }
+                    ("capabilities.env", _) => {
+                        let env_val = val.trim_matches('"').trim_matches('\'').to_string();
+                        manifest
+                            .capabilities
+                            .allowed_env_keys
+                            .insert(key.to_string(), env_val);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        manifest
+    }
+
+    /// Generates a documented default `slice.toml` file for `slice init`.
+    pub fn default_template(project_name: &str) -> String {
+        format!(
+            r#"# Slice (Nexus-JS) Declarative MicroVM & Object Capability Manifest
+
+[package]
+name = "{}"
+version = "0.1.0"
+entrypoint = "./src/index.ts"
+
+[limits]
+# Deterministic CPU instruction fuel ceiling per tenant invocation
+fuel = 50_000_000
+# Hard per-compartment memory allocation ceiling in KB
+memory_kb = 4096
+
+[capabilities]
+# Attenuated Virtual Filesystem read prefixes (Zero ambient filesystem access)
+allow_read = ["/app/public", "/app/config"]
+# Attenuated outbound network host:port allowlist
+allow_net = ["api.internal:443", "edge.slice.local:80"]
+
+[capabilities.env]
+SERVICE_STAGE = "production"
+RUNTIME_ENGINE = "Slice-NexusJS"
+"#,
+            project_name
+        )
+    }
+}
+
+fn parse_toml_string_array(raw: &str) -> Vec<String> {
+    let inner = raw.trim().trim_start_matches('[').trim_end_matches(']');
+    inner
+        .split(',')
+        .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
