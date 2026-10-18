@@ -1,0 +1,15 @@
+[package]
+name = "slice-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+slice-cas = { path = "../slice-cas" }
+slice-io = { path = "../slice-io" }
+slice-sandbox = { path = "../slice-sandbox" }
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+

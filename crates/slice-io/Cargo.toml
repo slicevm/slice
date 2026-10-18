@@ -1,0 +1,13 @@
+[package]
+name = "slice-io"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"
+

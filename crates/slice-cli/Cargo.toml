@@ -1,0 +1,19 @@
+[package]
+name = "slice-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "slice"
+path = "src/main.rs"
+
+[dependencies]
+slice-cas = { path = "../slice-cas" }
+slice-io = { path = "../slice-io" }
+slice-sandbox = { path = "../slice-sandbox" }
+slice-engine = { path = "../slice-engine" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+libc.workspace = true
+

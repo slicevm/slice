@@ -1,0 +1,13 @@
+[package]
+name = "slice-cas"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+blake3.workspace = true
+memmap2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+

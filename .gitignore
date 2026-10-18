@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.cas
+*.snap
+/benchmarks/workloads/module_graph/generated
+/docs/raw_results_*.json
+.vscode
