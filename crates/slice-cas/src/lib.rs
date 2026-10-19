@@ -95,13 +95,20 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
 }
 
 pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
-    let js_code = strip_typescript_raw(source, is_ts);
+    let mut js_code = strip_typescript_raw(source, is_ts);
+    if js_code.contains("import ") && js_code.contains("node:") && !js_code.contains("var __slice_modules =") {
+        let mut dummy_deps = Vec::new();
+        js_code = transform_module_to_cjs(&js_code, Path::new("."), &mut dummy_deps);
+    }
     rewrite_cjs_require(&js_code)
 }
 
 /// Rewrites legacy CommonJS `const x = require("mod")` into synthetic deterministic ESM/CAS lookup.
 fn rewrite_cjs_require(source: &str) -> String {
-    if !source.contains("require(") || source.contains("var __slice_modules =") {
+    if !source.contains("require(")
+        || source.contains("var __slice_modules =")
+        || source.contains("__slice_cjs_require(")
+    {
         return source.to_string();
     }
     source.replace("require(", "__slice_cjs_require(")
@@ -1102,5 +1109,93 @@ function add(a: number, b: number): number {
         let loaded_src = archive.get_source_slice(entry);
         assert!(loaded_src.contains("const x = 42;"));
         let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_folder_entrypoint_and_esm_cjs_json_bundler() {
+        let test_dir = std::env::temp_dir().join("slice_cas_bundler_unit_test");
+        let _ = std::fs::remove_dir_all(&test_dir);
+        let src_dir = test_dir.join("src");
+        let nm_dir = test_dir.join("node_modules").join("mini-pkg");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&nm_dir).unwrap();
+
+        std::fs::write(
+            test_dir.join("package.json"),
+            r#"{"name":"test-app","main":"./src/index.ts"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            src_dir.join("config.json"),
+            r#"{"multiplier": 3}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            src_dir.join("helper.ts"),
+            r#"export function scale(v: number, m: number): number { return v * m; }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            nm_dir.join("package.json"),
+            r#"{"name":"mini-pkg","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            nm_dir.join("index.js"),
+            r#"module.exports = function addBase(n) { return n + 10; };"#,
+        )
+        .unwrap();
+        std::fs::write(
+            src_dir.join("index.ts"),
+            r#"
+import addBase from "mini-pkg";
+import { scale } from "./helper.ts";
+import cfg from "./config.json";
+console.log(scale(addBase(4), cfg.multiplier));
+"#,
+        )
+        .unwrap();
+
+        let resolved = resolve_project_entrypoint(&test_dir, None).unwrap();
+        assert!(resolved.ends_with("index.ts"));
+
+        let bundled = bundle_entrypoint_with_deps(&resolved).unwrap();
+        assert!(bundled.contains("var __slice_modules = {};"));
+        assert!(bundled.contains("multiplier"));
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_embed_cas_into_executable_roundtrip() {
+        let tmp = std::env::temp_dir();
+        let fake_exe = tmp.join("slice_fake_base.bin");
+        let cas_path = tmp.join("slice_embed_test.cas");
+        let out_exe = tmp.join("slice_standalone_out.bin");
+
+        std::fs::write(&fake_exe, vec![0x90u8; 100]).unwrap();
+        let mut builder = CasBuilder::new("./index.ts");
+        builder.add_module("./index.ts", PathBuf::from("index.ts"), "const a = 7;", |s| {
+            s.as_bytes().to_vec()
+        });
+        builder.write_to_file(&cas_path).unwrap();
+
+        let total_size = embed_cas_into_executable(&fake_exe, &cas_path, &out_exe).unwrap();
+        assert!(total_size > 128);
+
+        let raw_out = std::fs::read(&out_exe).unwrap();
+        let tail = &raw_out[raw_out.len() - 24..];
+        assert_eq!(&tail[16..24], b"SLICEEXE");
+        let cas_offset = u64::from_le_bytes(tail[0..8].try_into().unwrap()) as usize;
+        let cas_len = u64::from_le_bytes(tail[8..16].try_into().unwrap()) as usize;
+        assert_eq!(cas_offset % CACHE_LINE_ALIGN, 0);
+
+        let opened = MappedCasArchive::open_from_offset(&out_exe, cas_offset, cas_len).unwrap();
+        let entry = opened.entrypoint_blob().unwrap();
+        assert!(opened.get_source_slice(entry).contains("const a = 7;"));
+
+        let _ = std::fs::remove_file(&fake_exe);
+        let _ = std::fs::remove_file(&cas_path);
+        let _ = std::fs::remove_file(&out_exe);
     }
 }

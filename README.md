@@ -59,14 +59,15 @@ This creates:
 * `slice.toml`: Declarative Object-Capability (OCap) policy and resource cage configuration.
 * `src/index.ts`: TypeScript edge entrypoint.
 
-### 3. Run TypeScript or Pre-Packed CAS Bundles (`slice run`)
+### 3. Run TypeScript Files, Folder Apps, or Pre-Packed CAS Bundles (`slice run`)
 
 ```bash
-# Execute a raw TypeScript file directly in a zero-trust compartment
+# Execute a raw TypeScript file or an entire project folder (with package.json & node_modules)
 slice run ./src/index.ts --allow-env=SERVICE_STAGE=prod --metrics
+slice run ./docker-tests/apps/02-npm-ecosystem-suite --metrics
 
-# Pack an entire dependency tree into a 64-byte aligned BLAKE3 .cas archive
-slice pack ./src ./bundle.cas --entry=./index.ts
+# Pack an entire folder app (including transitive node_modules) into a 64-byte aligned BLAKE3 .cas archive
+slice pack ./docker-tests/apps/02-npm-ecosystem-suite ./bundle.cas
 
 # Execute the memory-mapped .cas bundle with 0 stat() syscalls
 slice run ./bundle.cas --metrics
@@ -74,10 +75,10 @@ slice run ./bundle.cas --metrics
 
 ### 4. Compile a Standalone Zero-Dependency Executable (`slice compile`)
 
-Embeds your compiled `.cas` archive and `SLICESNP` bytecode directly into a self-contained ~625 KB binary:
+Embeds your compiled `.cas` archive and `SLICESNP`/`SLICEBOA` bytecode directly into a self-contained native binary:
 
 ```bash
-slice compile ./src/index.ts -o my-edge-app
+slice compile ./docker-tests/apps/01-fintech-checkout -o my-edge-app
 ./my-edge-app --metrics
 ```
 

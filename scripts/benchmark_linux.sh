@@ -115,6 +115,8 @@ echo "========================================================================="
 "$SLICE_BIN" serve "$COLD_CAS" --smoke-test
 "$SLICE_BIN" compile "$COLD_TS" -o /tmp/slice_standalone_demo
 /tmp/slice_standalone_demo --metrics
-rm -f /tmp/slice_standalone_demo
+rm -f /tmp/slice_standalone_demo "$COLD_CAS" "$COMPUTE_CAS" "$MOD_CAS"
+rm -rf "$ROOT_DIR/benchmarks/workloads/module_graph"
+
 
 

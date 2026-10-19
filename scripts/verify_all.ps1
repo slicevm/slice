@@ -9,16 +9,22 @@ $ErrorActionPreference = "Stop"
 $RootDir = Split-Path -Parent $PSScriptRoot
 Set-Location $RootDir
 
-Write-Host "[1/4] Running Rust workspace unit tests..."
+Write-Host "[1/5] Running Rust workspace clippy & unit tests..."
+cargo clippy --all-targets -- -D warnings
 cargo test --workspace
 
-Write-Host "[2/4] Building optimized release binary..."
+Write-Host "[2/5] Building optimized release binary..."
 cargo build --release
 
-Write-Host "[3/4] Running Windows Local Benchmark Suite..."
+Write-Host "[3/5] Running Windows Local Benchmark Suite..."
 powershell -ExecutionPolicy Bypass -File .\scripts\benchmark_windows.ps1
 
-Write-Host "[4/4] Building and Running Linux Docker Benchmark Suite..."
+Write-Host "[4/5] Building and Running Linux Docker Synthetic & MicroVM Benchmark Suite..."
 docker build -t slice-linux-bench .
 docker run --rm --privileged slice-linux-bench
+
+Write-Host "[5/5] Building and Running Linux Docker Folder-Apps, NPM & Disk I/O Suite..."
+docker build -f docker-tests/Dockerfile -t slice-real-stack-bench .
+docker run --rm slice-real-stack-bench
+
 

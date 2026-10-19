@@ -66,6 +66,11 @@ impl CapabilityToken {
         self
     }
 
+    pub fn with_write_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.allowed_write_prefixes.push(prefix.into());
+        self
+    }
+
     pub fn with_net_host(mut self, host: impl Into<String>) -> Self {
         self.allowed_net_hosts.insert(host.into());
         self
@@ -258,6 +263,27 @@ impl TenantCompartment {
             }
         }
         Err(SandboxViolation::FsReadDenied {
+            tenant_id: self.tenant_id.clone(),
+            path: path.to_string(),
+        })
+    }
+
+    /// Verifies attenuated VFS write capability for `path`.
+    #[inline]
+    pub fn verify_fs_write(&self, path: &str) -> Result<(), SandboxViolation> {
+        let normalized = path.replace('\\', "/");
+        if normalized.contains("..") {
+            return Err(SandboxViolation::FsWriteDenied {
+                tenant_id: self.tenant_id.clone(),
+                path: path.to_string(),
+            });
+        }
+        for prefix in &self.capabilities.allowed_write_prefixes {
+            if normalized.starts_with(prefix) {
+                return Ok(());
+            }
+        }
+        Err(SandboxViolation::FsWriteDenied {
             tenant_id: self.tenant_id.clone(),
             path: path.to_string(),
         })
@@ -468,6 +494,54 @@ mod tests {
         // 5. Fuel limit preemption
         assert!(tenant.consume_fuel(5_000).is_ok());
         assert!(tenant.consume_fuel(6_000).is_err());
+
+        // 6. Memory ceiling enforcement
+        assert!(tenant.alloc_memory(16_384).is_ok());
+        assert!(matches!(
+            tenant.alloc_memory(128_000),
+            Err(SandboxViolation::MemoryCeilingExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn test_slice_manifest_toml_parsing_and_fs_write_ocap() {
+        let toml_str = r#"
+[package]
+name = "edge-gateway"
+version = "0.2.0"
+entrypoint = "./src/main.ts"
+
+[limits]
+fuel = 25_000_000
+memory_kb = 8192
+
+[capabilities]
+allow_read = ["/data/read", "/config"]
+allow_write = ["/tmp/shards"]
+allow_net = ["api.stripe.com:443"]
+
+[capabilities.env]
+NODE_ENV = "production"
+"#;
+        let manifest = SliceManifest::parse_toml(toml_str);
+        assert_eq!(manifest.name, "edge-gateway");
+        assert_eq!(manifest.version, "0.2.0");
+        assert_eq!(manifest.entrypoint, "./src/main.ts");
+        assert_eq!(manifest.fuel_limit, 25_000_000);
+        assert_eq!(manifest.memory_limit_kb, 8192);
+
+        let tenant = TenantCompartment::new(
+            "tenant-manifest",
+            2,
+            manifest.capabilities,
+            manifest.fuel_limit,
+            manifest.memory_limit_kb * 1024,
+        );
+        assert!(tenant.verify_fs_read("/data/read/items.json").is_ok());
+        assert!(tenant.verify_fs_write("/tmp/shards/shard_00.jsonl").is_ok());
+        assert!(tenant.verify_fs_write("/etc/crontab").is_err());
+        assert!(tenant.verify_fs_write("/tmp/shards/../../etc/passwd").is_err());
+        assert_eq!(tenant.verify_env_read("NODE_ENV"), Ok("production"));
     }
 }
 

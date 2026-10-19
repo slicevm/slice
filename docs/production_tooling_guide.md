@@ -2,10 +2,10 @@
 
 ## 1. Overview of the Production Toolchain
 
-Slice `v0.2.0` provides a complete developer and production deployment workflow packaged inside a single **625 KB** native Rust executable (`slice`):
+Slice `v0.2.0` provides a complete developer and production deployment workflow packaged inside a single self-contained native Rust executable (`slice`, embedding the **Oxc** TypeScript compiler, transitive `node_modules` bundler, **Boa** ES2024+ VM, and **Slice** Zero-Stat CAS + Tier-0/Tier-2 engine):
 
 1. **Project Initialization & Policy Configuration (`slice init` & `slice.toml`)**
-2. **Zero-Stat Content-Addressed Packaging (`slice pack`)**
+2. **Zero-Stat Content-Addressed Packaging (`slice pack` for single files or full `package.json` + `node_modules` folders)**
 3. **Standalone Single-Binary Compilation (`slice compile`)**
 4. **Bytecode & CAS Radix Disassembly (`slice inspect`)**
 5. **Multi-Tenant WinterTC HTTP MicroVM Hosting (`slice serve`)**
@@ -16,24 +16,28 @@ Slice `v0.2.0` provides a complete developer and production deployment workflow 
 
 ## 2. Workflow 1: Zero-Stat CAS Packaging vs. Standalone Executables
 
-### 2.1 Packing a Module Graph (`slice pack`)
-When deploying to a multi-tenant edge cluster where thousands of workers share a common host binary:
+### 2.1 Packing a Folder Application or Module Graph (`slice pack`)
+When deploying a multi-file TypeScript project (including third-party `node_modules/` dependencies) to a multi-tenant edge cluster:
 ```bash
+# Pack an entire project folder (resolves slice.toml / package.json / src/index.ts + node_modules)
+slice pack ./my-edge-app ./service.cas
+
+# Or pack a directory with an explicit entrypoint
 slice pack ./src ./service.cas --entry=./index.ts
 ```
-* Strips all TypeScript type annotations at build time.
-* Compiles every module into `SLICESNP` binary bytecode.
+* Strips all TypeScript type annotations at build time via **Oxc (`v0.152.0`)** and links transitive ESM (`import`/`export`) and CommonJS (`require`/`module.exports`) modules from `src/` and `node_modules/`.
+* Compiles every module into `SLICESNP` or zero-copy `SLICEBOA` binary bytecode.
 * Computes a 256-bit **BLAKE3** hash over the canonicalized source and bytecode.
 * Aligns every blob to a **64-byte CPU cache line** boundary.
-* At runtime (`slice run ./service.cas`), the file is mapped via `mmap(MAP_SHARED)` with **0 `stat()` syscalls**.
+* At runtime (`slice run ./service.cas`), the file is mapped via `mmap(MAP_SHARED)` with **0 `stat()` syscalls** (`0.23 us` isolate instantiation).
 
 ### 2.2 Compiling a Self-Contained Binary (`slice compile`)
 When deploying to minimal container images (`FROM scratch` or `distroless`) or distributing CLI tools:
 ```bash
-slice compile ./src/index.ts -o ./my-service
+slice compile ./my-edge-app -o ./my-service
 ```
 * Appends the 64-byte aligned `.cas` archive directly to the `slice` runtime executable followed by a 24-byte `SLICEEXE` trailer (`[u64 cas_offset][u64 cas_len][b"SLICEEXE"]`).
-* When `./my-service` boots, it maps its own executable image via `mmap`, locates the `SLICEEXE` trailer in O(1) time, and executes the embedded `SLICESNP` snapshot in `< 25 microseconds` without extracting any temporary files to disk.
+* When `./my-service` boots, it maps its own executable image via `mmap`, locates the `SLICEEXE` trailer in O(1) time, and executes the embedded `SLICESNP`/`SLICEBOA` snapshot without extracting any temporary files to disk.
 
 ---
 

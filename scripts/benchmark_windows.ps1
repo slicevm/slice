@@ -104,5 +104,8 @@ $SummaryJson = @{
 } | ConvertTo-Json -Depth 6
 
 Set-Content -Path (Join-Path $RootDir "docs\raw_results_windows.json") -Value $SummaryJson
+Remove-Item -Force $ColdStartCas, $ComputeCas, $ModGraphCas -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force (Join-Path $RootDir "benchmarks\workloads\module_graph") -ErrorAction SilentlyContinue
 Write-Host "Saved Windows benchmark telemetry to docs/raw_results_windows.json"
+
 

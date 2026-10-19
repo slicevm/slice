@@ -129,10 +129,57 @@ slice/
     4. [`04-edge-api-gateway`](file:///p:/opensource/slice/docker-tests/apps/04-edge-api-gateway/src/index.ts): Multi-file Edge API Gateway with external npm `fast-querystring@1.1.2` and `ms@2.1.3` (**9.863 ms** in Slice vs **14.812 ms** Bun, **40.520 ms** Deno, **67.782 ms** Node.js).
   - [x] Verified **100% byte-for-byte identical JSON output** across all 4 runtimes on all 4 folder applications.
 
+### Phase 6: Systematic Codebase Audit, Cleanup & Unit Test Expansion [COMPLETED]
+- [x] **1. Zero-Warning Clippy & Workspace Audit:**
+  - [x] Audited all 5 workspace crates (`slice-cas`, `slice-io`, `slice-sandbox`, `slice-engine`, `slice-cli`), fixing the `clippy::manual_flatten` warning in `slice-cli` and synchronizing `[workspace.package] version = "0.2.0"` in `Cargo.toml`.
+  - [x] Unified folder-based project resolution (`resolve_project_entrypoint` + `bundle_entrypoint_with_deps`) across all CLI subcommands (`run`, `pack`, `compile`, `inspect`, and `serve`).
+  - [x] Completed OCap write capability APIs (`CapabilityToken::with_write_prefix`, `TenantCompartment::verify_fs_write`, and CLI `--allow-write=` flag).
+  - [x] Cleaned stale build artifacts (`archive/`, `dist/`, leftover `.cas` and generated `.mjs` benchmark directories) and updated benchmark scripts to auto-clean temporary artifacts.
+- [x] **2. Comprehensive Unit Test Suite Across All 5 Crates (13 Unit Tests):**
+  - [x] `slice-cas`: Added unit tests for folder entrypoint resolution, multi-file ESM + CommonJS + `.json` + `node_modules` bundling, and `SLICEEXE` 64-byte aligned binary trailer roundtrips.
+  - [x] `slice-io`: Added unit tests for `RegisteredBufferPool` slot acquisition, exhaustion, slice reading, and reuse lifecycle.
+  - [x] `slice-sandbox`: Added unit tests for `SliceManifest::parse_toml`, `verify_fs_write` prefix/traversal enforcement, and `MemoryCeilingExceeded` cage traps.
+  - [x] `slice-engine`: Added unit tests for zero-copy `SLICEBOA` bytecode framing, NIST FIPS-180-4 SHA-256 test vectors, `node:fs`/`node:path` host bridge roundtrips, and all 5 OCap/SES security containment vectors.
+  - [x] `slice-cli`: Added unit tests for 5-vector CLI security verification, folder-to-CAS building, and cross-platform process RSS telemetry.
+
 ---
 
-## 5. Future Roadmap (Phase 6+: Distributed Edge Mesh & Polyglot WASI 0.2 Cluster)
+## 5. Key Engineering Learnings from Real-World NPM & Disk I/O Benchmarking
 
-- **Phase 6.1: Live Snapshot Migration Across Edge Nodes:** Sub-millisecond teleportation of dirty `TenantCompartment` pages over QUIC/RDMA.
-- **Phase 6.2: WASI 0.2 Component Model Linker:** Native composition of Rust/C++/Go `.wasm` components alongside `SLICESNP` TypeScript isolates in the same zero-copy shared memory cage.
-- **Phase 6.3: Distributed Content-Addressable Registry:** Peer-to-peer BLAKE3 CAS chunk distribution across global POPs via `io_uring` zero-copy `splice`/`sendfile`.
+1. **Zero-Copy Bytecode Framing (`SLICEBOA` vs JSON-serialized `SLICESNP`):**
+   - Wrapping large bundled `node_modules` payloads inside JSON-serialized `BytecodeModule` structs incurred `~220 us` of `serde_json` string unescaping at startup. Introducing the 8-byte `SLICEBOA` zero-copy header allowed `SliceIsolate` to pass a `&str` slice directly from the `mmap` `.cas` buffer into the VM with **0 heap copies**, dropping isolate instantiation from `229 us` down to **`0.23 us`**.
+2. **Dense Fast-Arrays vs Accessor Properties (`Object.defineProperty`) in `boa_engine`:**
+   - Converting CommonJS array tables (such as `semver/internal/re.js` `re[]` and `safeRe[]`) into `Object.defineProperty` getters caused Boa (`boa_engine`) to demote the array from a contiguous `FastArray` into a sparse dictionary object, slowing indexed lookups down by ~40%. Keeping `safeRe[index] = re[index]` as a dense array assignment while eliminating redundant `{0,256}` bounded-quantifier regex compilations preserved dense array fast paths and reduced `semver` execution time by ~30%.
+3. **Oxc Comment/Whitespace Stripping on Plain `.js` Dependencies:**
+   - Running Oxc's parser + codegen on third-party `.js` packages (`node_modules/semver`) strips extensive JSDoc/markdown comments at `slice pack` time, shrinking bundle size and accelerating runtime JS parsing.
+4. **Lazy CommonJS Module Evaluation (`new Function` String Thunks):**
+   - Emitting unreferenced transitive submodules in large barrel packages (`semver/index.js` with 48 submodules) as string-backed lazy loaders (`__slice_modules[id] = "..."` compiled on first `require()`) prevents the JS parser from parsing the AST of the 37 unused submodules at startup.
+5. **Regex-Free Built-In Host Modules (`node:path`, `node:fs`, `node:crypto`):**
+   - Avoiding regex literals inside hot built-in methods (`path.join`, `path.basename`, `path.dirname`) and delegating `fs.*` and FIPS-180-4 `crypto.createHash("sha256")` directly to native Rust host functions (`NativeFunction::from_fn_ptr`) eliminates regex state-machine allocations on every I/O call.
+
+---
+
+## 6. Next-Gen Extreme Performance Roadmap (Phase 7+: Pushing Slice to the Absolute Limit)
+
+### Phase 7.1: Pre-Warmed `Boa` Context Snapshot Pool & Native Rust Built-In Objects
+- [ ] **Problem:** `exec_boa_full_es_vm` currently constructs `boa_engine::Context::default()` and evaluates a 140-line JS `prelude` (`console`, `node:fs`, `node:path`, `node:crypto`, `Buffer`, `process`) on every single isolate invocation (`~1.5 ms` baseline cost).
+- [ ] **Solution:** Maintain a thread-local pool of pre-initialized `boa_engine::Context` realms (with intrinsics locked down and `node:*` built-in modules pre-registered as native Rust `JsObject`s), reducing `SLICEBOA` cold execution overhead by an additional **40% - 60%**.
+
+### Phase 7.2: AOT Oxc Semantic Tree-Shaking (Dead-Export Elimination for `node_modules`)
+- [ ] **Problem:** Barrel packages like `semver/index.js` export 42 functions even when an application only calls `valid`, `coerce`, `satisfies`, and `gt`.
+- [ ] **Solution:** Use `oxc::semantic::SemanticBuilder` symbol reference graphs during `bundle_entrypoint_with_deps` to statically prune unreferenced exports and unreachable `node_modules` files at `slice pack` time, cutting `.cas` archive size for `02-npm-ecosystem-suite` from `196 KB` down to `< 25 KB`.
+
+### Phase 7.3: Native Rust Fast-Path Intrinsics for Hot NPM Patterns & Bulk JSONL I/O
+- [ ] **Problem:** Pure-JS interpreters spend ~60% of `02-npm-ecosystem-suite` and `03-disk-io-log-pipeline` inside `semver` regex matching and 200x `JSON.parse`/`JSON.stringify` loops.
+- [ ] **Solution:**
+  - Expose native Rust SIMD-accelerated `JSON` batch helpers and native `semver` / URL / querystring host intrinsics (`__slice_semver_*`, `__slice_fast_qs_parse`) backed by Rust crates while preserving 100% behavioral parity.
+  - Route `node:fs` batch reads/writes through `slice-io` registered slab buffers (`RegisteredBufferPool`).
+
+### Phase 7.4: End-to-End OCap Enforcement on Native Boa Host Hooks & Linux Seccomp-BPF
+- [ ] Wire `TenantCompartment::verify_fs_read`, `verify_fs_write`, `verify_net_connect`, and `verify_env_read` directly into the `boa_engine` native host functions (`__slice_fs_*`) so `slice.toml` OCap policies govern all `node:fs` calls inside full ES2024+ apps.
+- [ ] Add optional Linux `seccomp-bpf` filter installation (`prctl(PR_SET_SECCOMP)`) to enforce kernel-level syscall sandboxing alongside Intel MPK (`WRPKRU`).
+
+### Phase 7.5: Distributed Edge Mesh & WASI 0.2 Component Model Linker
+- [ ] **Live Snapshot Migration Across Edge Nodes:** Sub-millisecond teleportation of dirty `TenantCompartment` pages over QUIC/RDMA.
+- [ ] **WASI 0.2 Component Model Linker:** Native composition of Rust/C++/Go `.wasm` components alongside `SLICESNP`/`SLICEBOA` TypeScript isolates in the same zero-copy shared memory cage.
+

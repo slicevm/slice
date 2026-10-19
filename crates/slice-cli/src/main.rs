@@ -215,6 +215,8 @@ fn cmd_run(args: &[String]) -> Result<()> {
     for arg in args {
         if let Some(prefix) = arg.strip_prefix("--allow-read=") {
             caps = caps.with_read_prefix(prefix);
+        } else if let Some(prefix) = arg.strip_prefix("--allow-write=") {
+            caps = caps.with_write_prefix(prefix);
         } else if let Some(host) = arg.strip_prefix("--allow-net=") {
             caps = caps.with_net_host(host);
         } else if let Some(kv) = arg.strip_prefix("--allow-env=") {
@@ -444,8 +446,9 @@ fn cmd_inspect(args: &[String]) -> Result<()> {
         }
         println!("=========================================================================");
     } else {
-        let raw = std::fs::read_to_string(path)?;
-        let bc = compile_source_to_bytecode(&raw);
+        let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
+        let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
+        let bc = compile_source_to_bytecode(&bundled);
         let disasm = disassemble_bytecode(&bc)?;
         println!("=========================================================================");
         println!("  SLICESNP BYTECODE DISASSEMBLY: {} ({} bytes)", path.display(), bc.len());
@@ -487,8 +490,9 @@ console.log(route_res);
             let entry = archive.entrypoint_blob().context("Missing CAS entrypoint")?;
             archive.get_bytecode_slice(entry).to_vec()
         } else {
-            let raw = std::fs::read_to_string(p)?;
-            compile_source_to_bytecode(&raw)
+            let entry_file = slice_cas::resolve_project_entrypoint(p, None)?;
+            let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
+            compile_source_to_bytecode(&bundled)
         }
     } else {
         compile_source_to_bytecode(default_handler_src)
@@ -533,18 +537,16 @@ console.log(route_res);
     );
 
     let mut req_counter: u32 = 0;
-    for stream in listener.incoming() {
-        if let Ok(stream) = stream {
-            req_counter = req_counter.wrapping_add(1);
-            let _ = handle_http_microvm_request(
-                stream,
-                req_counter,
-                &bytecode,
-                &caps,
-                fuel_limit,
-                mem_limit,
-            );
-        }
+    for stream in listener.incoming().flatten() {
+        req_counter = req_counter.wrapping_add(1);
+        let _ = handle_http_microvm_request(
+            stream,
+            req_counter,
+            &bytecode,
+            &caps,
+            fuel_limit,
+            mem_limit,
+        );
     }
     Ok(())
 }
@@ -1018,3 +1020,42 @@ fn measure_current_process_rss_kb() -> u64 {
 
     2048
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_security_checks_and_rss_telemetry() {
+        let blocked = run_security_containment_checks().unwrap();
+        assert_eq!(blocked, 5);
+
+        let rss_kb = measure_current_process_rss_kb();
+        assert!(rss_kb > 0);
+    }
+
+    #[test]
+    fn test_cli_build_cas_archive_from_folder() {
+        let tmp_dir = env::temp_dir().join("slice_cli_test_folder_app");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(tmp_dir.join("src")).unwrap();
+        std::fs::write(
+            tmp_dir.join("package.json"),
+            r#"{"name":"cli-folder-test","main":"./src/index.ts"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp_dir.join("src").join("index.ts"),
+            "const val: number = 99;\nconsole.log(val);\n",
+        )
+        .unwrap();
+
+        let out_cas = tmp_dir.join("out.cas");
+        let header = build_cas_archive(&tmp_dir, &out_cas, "./src/index.ts").unwrap();
+        assert_eq!(header.blobs.len(), 1);
+        assert!(out_cas.exists());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+}
+
