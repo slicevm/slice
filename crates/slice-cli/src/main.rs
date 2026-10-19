@@ -610,7 +610,7 @@ fn handle_http_microvm_request(
 
 fn cmd_repl() -> Result<()> {
     println!("Slice (Nexus-JS) v0.2.0 Interactive SES-Locked Compartment Shell");
-    println!("Commands: :metrics, :caps, :reset, :quit");
+    println!("Commands: :help, :metrics, :caps, :vars, :reset, :quit");
     let (caps, fuel_limit, mem_limit) = load_manifest_or_default();
     let mut isolate = SliceIsolate::spawn("repl-tenant", 1, caps.clone(), fuel_limit, mem_limit);
     let stdin = std::io::stdin();
@@ -628,8 +628,19 @@ fn cmd_repl() -> Result<()> {
             continue;
         }
         match trimmed {
-            ":quit" | ":exit" | ":q" => break,
-            ":reset" => {
+            ":quit" | ":exit" | ":q" | ".exit" | ".quit" => break,
+            ":help" | ":h" | ".help" | "help" => {
+                println!("Slice (Nexus-JS) Interactive SES Shell Help:");
+                println!("  :help / .help  - Show this help message");
+                println!("  :metrics       - Show current Execution Tier, CPU Fuel, Memory, and Hardware PKEY");
+                println!("  :caps          - Show active Object-Capability (OCap) permissions for this compartment");
+                println!("  :reset         - Reset compartment state, SES intrinsics, and fuel counter");
+                println!("  :quit / :q     - Exit the shell");
+                println!("  JavaScript/TS  - Supports var/let/const, arithmetic (t * 4), functions, arrays,");
+                println!("                   objects, loops, console.log(), print(), Math.*, JSON.*, fib(n)");
+                continue;
+            }
+            ":reset" | ".clear" => {
                 isolate = SliceIsolate::spawn("repl-tenant", 1, caps.clone(), fuel_limit, mem_limit);
                 println!("Compartment reset (fresh SES intrinsics & fuel counter).");
                 continue;
@@ -648,6 +659,10 @@ fn cmd_repl() -> Result<()> {
                     isolate.compartment.memory_limit_bytes,
                     isolate.compartment.pkey_domain.pkey
                 );
+                continue;
+            }
+            _ if trimmed.starts_with(':') => {
+                println!("Unknown shell command '{}'. Type :help for available commands.", trimmed);
                 continue;
             }
             _ => {}
