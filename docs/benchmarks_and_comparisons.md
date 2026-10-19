@@ -128,44 +128,40 @@ Using `slice microvm-bench --tenants=1000` and `slice verify-security`, we spawn
 
 ---
 
-## 5. Real-Life Production Stack Benchmarks (`docker-tests/` — Oxc + Boa VM)
+## 5. Folder-Based Real-Life Production Applications, External NPM Libraries & Disk I/O Benchmarks (`docker-tests/apps/`)
 
-To validate Slice on full-featured production TypeScript codebases (exercising interfaces, union types, classes, private properties, functional `.map`/`.reduce`/`.some` pipelines, rate limiting, Bearer token authentication, regional VAT/discount calculation, fraud risk scoring, and JSON serialization), we created [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) with two real-world stacks:
-- **Stack 1 ([`production_stack.ts`](file:///p:/opensource/slice/docker-tests/real-stack-app/src/production_stack.ts)):** E-Commerce & Fintech Checkout Microservice processing 50 multi-tenant orders.
-- **Stack 2 ([`api_gateway_pipeline.ts`](file:///p:/opensource/slice/docker-tests/real-stack-app/src/api_gateway_pipeline.ts)):** Edge API Gateway, Bearer Token Auth, Sliding Quota Rate-Limiter & Telemetry Pipeline processing 100 HTTP requests.
+To validate Slice on modern folder-based production TypeScript applications using multi-file ESM/CommonJS module trees, real third-party `node_modules/` libraries (`semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`), FIPS-180-4 SHA-256 cryptography (`node:crypto`), and real disk I/O (`node:fs`, `node:path`, `node:os`), we built [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) comparing Slice against the **absolute latest official releases** of **Bun (`v1.4.3`)**, **Deno (`v2.9.7`)**, and **Node.js (`v26.12.0`)**:
 
-All 4 runtimes produce **100% byte-for-byte identical JSON output** on both stacks:
-- Stack 1 Output: `{"service":"slice-fintech-checkout-v1","transactionsProcessed":50,"approvedCount":50,"aggregateRevenueCents":4932364,"lastAuditSignature":"sig_6290122"}`
-- Stack 2 Output: `{"service":"slice-edge-gateway-v1","totalRequests":100,"status200":75,"status401":25,"status429":0,"status404":0,"totalResponseBytes":5475,"latencyPoints":300}`
+1. **App 1 ([`apps/01-fintech-checkout/`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts)):** Multi-file TypeScript E-Commerce & Fintech Checkout Engine (`types.ts`, `audit_crypto.ts`, `pricing_engine.ts`, `index.ts`) with `node:crypto` SHA-256 receipt signing over 50 checkout orders.
+2. **App 2 ([`apps/02-npm-ecosystem-suite/`](file:///p:/opensource/slice/docker-tests/apps/02-npm-ecosystem-suite/src/index.ts)):** External NPM Ecosystem Suite (`release_planner.ts`, `config_loader.ts`, `index.ts`) bundling and executing `semver@7.6.3`, `ms@2.1.3`, and `ini@4.1.3` from `node_modules/` across 20 service release manifests and cluster SLA configs.
+3. **App 3 ([`apps/03-disk-io-log-pipeline/`](file:///p:/opensource/slice/docker-tests/apps/03-disk-io-log-pipeline/src/index.ts)):** High-Throughput Disk I/O & JSONL Log Pipeline (`log_generator.ts`, `io_aggregator.ts`, `index.ts`) creating, writing, stating, directory-scanning, reading, parsing, SHA-256 verifying, and unlinking 10 JSONL log shard files (`200` records, `15,796 bytes`).
+4. **App 4 ([`apps/04-edge-api-gateway/`](file:///p:/opensource/slice/docker-tests/apps/04-edge-api-gateway/src/index.ts)):** Multi-file Edge API Gateway (`auth_middleware.ts`, `rate_limiter.ts`, `router.ts`, `index.ts`) using `fast-querystring@1.1.2` and `ms@2.1.3` from `node_modules/` with Bearer token auth and sliding-window rate limiting over 100 requests.
 
-### 5.1 Stack 1 Latency: Fintech Checkout Engine (50 Orders, Linux Docker x86_64)
+All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 4 folder applications:
+- App 1 Output: `{"app":"01-fintech-checkout","ordersProcessed":50,"approvedCount":50,"aggregateRevenueCents":4932364,"lastSha256Signature":"636588368661f40b"}`
+- App 2 Output: `{"app":"02-npm-ecosystem-suite","libraries":["semver@7.6.3","ms@2.1.3","ini@4.1.3"],"validManifests":20,"rangeSatisfied":5,"upgradesRequired":20,"highestSemver":"5.0.0","totalSlaTimeoutMs":197500,"edgeCacheTtlMs":7200000,"heartbeatInterval":"2 minutes","sha256Digest":"ef97948c06f43da9"}`
+- App 3 Output: `{"app":"03-disk-io-log-pipeline","shardsScanned":10,"recordsParsed":200,"totalDiskBytes":15796,"error5xxCount":28,"rateLimit429Count":28,"totalBytesTransferred":851796,"maxLatencyMs":121,"summarySha256":"4cbda5d6e5f1f7ca"}`
+- App 4 Output: `{"app":"04-edge-api-gateway","libraries":["fast-querystring@1.1.2","ms@2.1.3"],"totalRequests":100,"status200":75,"status401":25,"status429":0,"status404":0,"totalResponseBytes":6700,"latencyPoints":300,"gatewaySha256":"552ff4506f3699d0"}`
 
-| Runtime | Min Total Process Time | Avg Total Process Time | Internal Isolate Exec | Speedup vs Node.js | Speedup vs Bun |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Slice (CAS + Oxc + Boa VM)** | **4.685 ms** | **5.092 ms** | **2.23 ms (`2232.74 us`)** | **7.86x faster** | **1.33x faster** |
-| **Slice (Standalone Binary)** | **4.715 ms** | **5.176 ms** | **2.23 ms** | **7.81x faster** | **1.32x faster** |
-| **Slice (Raw `.ts` + Oxc + Boa VM)** | **4.864 ms** | **5.457 ms** | **2.25 ms** | **7.57x faster** | **1.28x faster** |
-| Bun v1.3.14 | 6.216 ms | 6.948 ms | N/A | 5.93x faster | 1.00x |
-| Deno v2.8.3 | 18.659 ms | 20.624 ms | N/A | 1.97x faster | 0.33x |
-| Node.js v22.22.3 (`--experimental-strip-types`) | 36.843 ms | 51.867 ms | N/A | 1.00x | 0.17x |
+### 5.1 Execution Latency Across All 4 Folder Applications (Linux Docker `x86_64`, 20 Runs)
 
-### 5.2 Stack 2 Latency: Edge API Gateway & Rate-Limiter Pipeline (100 Requests, Linux Docker x86_64)
+| Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec | Bun `v1.4.3` | Deno `v2.9.7` | Node.js `v26.12.0` | Speedup vs Node.js | Speedup vs Bun |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256) | **6.270 ms** (Avg 6.601 ms) | **3.684 ms** (`0.24 us` init) | 12.896 ms | 36.331 ms | 64.775 ms | **10.33x faster** | **2.06x faster** |
+| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **19.139 ms** (Avg 20.268 ms) | **15.895 ms** (`6.37 us` init) | 20.610 ms | 51.333 ms | 75.508 ms | **3.95x faster** | **1.08x faster** |
+| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk I/O) | **11.425 ms** (Avg 12.303 ms) | **8.020 ms** (`0.23 us` init) | 13.488 ms | 43.511 ms | 67.315 ms | **5.89x faster** | **1.18x faster** |
+| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms`) | **9.863 ms** (Avg 10.389 ms) | **8.090 ms** (`0.26 us` init) | 14.812 ms | 40.520 ms | 67.782 ms | **6.87x faster** | **1.50x faster** |
 
-| Runtime | Min Total Process Time | Avg Total Process Time | Internal Isolate Exec | Speedup vs Node.js | Speedup vs Bun |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Slice (Standalone Binary)** | **4.810 ms** | **5.325 ms** | **2.26 ms (`2264.07 us`)** | **10.47x faster** | **1.33x faster** |
-| **Slice (CAS + Oxc + Boa VM)** | **4.972 ms** | **5.336 ms** | **2.26 ms** | **10.13x faster** | **1.28x faster** |
-| **Slice (Raw `.ts` + Oxc + Boa VM)** | **5.262 ms** | **5.623 ms** | **2.28 ms** | **9.57x faster** | **1.21x faster** |
-| Bun v1.3.14 | 6.376 ms | 6.804 ms | N/A | 7.90x faster | 1.00x |
-| Deno v2.8.3 | 18.690 ms | 19.956 ms | N/A | 2.70x faster | 0.34x |
-| Node.js v22.22.3 (`--experimental-strip-types`) | 50.375 ms | 54.618 ms | N/A | 1.00x | 0.13x |
+### 5.2 Peak Memory Footprint on External NPM & Disk I/O Apps (`Max RSS` via `/usr/bin/time -v`)
 
-### 5.3 Real Production Stack Peak Memory Footprint (Max RSS via `/usr/bin/time -v`)
-
-| Runtime & Workload | Peak Memory (Max RSS KB) | Peak Memory (MB) | Memory Efficiency vs Node.js |
+| Runtime & Folder Application | Peak Memory (Max RSS KB) | Peak Memory (MB) | Memory Advantage vs Node.js `v26.12.0` |
 | :--- | :--- | :--- | :--- |
-| **Slice (Gateway CAS + Boa VM)** | **9,600 KB** | **9.38 MB** | **6.48x less memory** |
-| **Slice (Fintech CAS + Boa VM)** | **9,728 KB** | **9.50 MB** | **6.39x less memory** |
-| Bun v1.3.14 (Fintech `.ts`) | 18,304 KB | 17.88 MB | 3.40x less memory |
-| Deno v2.8.3 (Fintech `.ts`) | 31,104 KB | 30.38 MB | 2.00x less memory |
-| Node.js v22.22.3 (Fintech `.ts`) | 62,176 KB | 60.72 MB | 1.00x |
+| **Slice (`03-disk-io-log-pipeline`: 10 Shards Disk I/O)** | **11,776 KB** | **11.50 MB** | **6.21x less memory** |
+| **Slice (`02-npm-ecosystem-suite`: `semver`+`ms`+`ini`)** | **12,928 KB** | **12.62 MB** | **5.64x less memory** |
+| Bun `v1.4.3` (`03-disk-io-log-pipeline`) | 21,632 KB | 21.12 MB | 3.38x less memory |
+| Bun `v1.4.3` (`02-npm-ecosystem-suite`) | 30,336 KB | 29.62 MB | 2.40x less memory |
+| Deno `v2.9.7` (`03-disk-io-log-pipeline`) | 46,976 KB | 45.88 MB | 1.56x less memory |
+| Deno `v2.9.7` (`02-npm-ecosystem-suite`) | 47,488 KB | 46.38 MB | 1.53x less memory |
+| Node.js `v26.12.0` (`02-npm-ecosystem-suite`) | 72,860 KB | 71.15 MB | 1.00x |
+| Node.js `v26.12.0` (`03-disk-io-log-pipeline`) | 73,112 KB | 71.40 MB | 1.00x |
+

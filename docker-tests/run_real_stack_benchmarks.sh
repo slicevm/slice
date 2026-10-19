@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================================
-# REAL-LIFE PRODUCTION CODE & REAL STACK BENCHMARK SUITE (Docker Linux x86_64)
+# MODERN FOLDER-BASED PRODUCTION APPS, NPM LIBRARIES & DISK I/O BENCHMARK SUITE
 # =============================================================================
-# Compares Slice (Oxc TypeScript Compiler + Boa ECMAScript VM + Tier-0/2 Fast Paths)
-# against:
+# Compares Slice (Oxc TypeScript Compiler + Boa ECMAScript VM + Zero-Stat CAS)
+# against the ABSOLUTE LATEST releases of:
 #   - Bun (JavaScriptCore)
 #   - Deno (V8)
-#   - Node.js v22 (V8 + --experimental-strip-types)
+#   - Node.js (V8 native TypeScript execution)
 #
-# Workloads:
-#   Stack 1 (`production_stack.ts`): E-Commerce & Fintech Checkout Microservice
-#     - TypeScript interfaces, union types, classes, private properties,
-#       functional `.map`/`.reduce`/`.some`, tax & discount calculation,
-#       fraud risk heuristics, and JSON serialization across 50 checkout orders.
-#   Stack 2 (`api_gateway_pipeline.ts`): Edge API Gateway, Auth & Rate Limiter
-#     - HTTP request router, Bearer token verification, per-tenant sliding quota,
-#       and structured telemetry digest across 100 API requests.
+# Folder-Based Production Test Applications (`docker-tests/apps/`):
+#   1. `01-fintech-checkout`:
+#      Multi-module TypeScript OOP/Functional checkout engine + `node:crypto` SHA-256
+#   2. `02-npm-ecosystem-suite`:
+#      Real external npm libraries from `node_modules/` (`semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`)
+#   3. `03-disk-io-log-pipeline`:
+#      Intensive disk & filesystem I/O (`node:fs`, `node:path`, `node:os`, `node:crypto`)
+#      writing, stating, scanning, reading, parsing, and verifying 20 JSONL log shards (500 records)
+#   4. `04-edge-api-gateway`:
+#      Multi-module Edge API Gateway + external npm `fast-querystring@1.1.2` & `ms@2.1.3`
 # =============================================================================
 set -euo pipefail
 
@@ -23,61 +25,76 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 SLICE_BIN="$ROOT_DIR/target/release/slice"
-PROD_TS="$ROOT_DIR/docker-tests/real-stack-app/src/production_stack.ts"
-PROD_CAS="$ROOT_DIR/docker-tests/real-stack-app/production_stack.cas"
-PROD_EXE="/tmp/slice_fintech_service"
+APPS_DIR="$ROOT_DIR/docker-tests/apps"
 
-GW_TS="$ROOT_DIR/docker-tests/real-stack-app/src/api_gateway_pipeline.ts"
-GW_CAS="$ROOT_DIR/docker-tests/real-stack-app/api_gateway_pipeline.cas"
-GW_EXE="/tmp/slice_gateway_service"
-
-echo "========================================================================="
-echo "  PACKING & COMPILING REAL-STACK PRODUCTION WORKLOADS (OXC + SLICE CAS)"
-echo "========================================================================="
-"$SLICE_BIN" pack "$PROD_TS" "$PROD_CAS"
-"$SLICE_BIN" compile "$PROD_TS" -o "$PROD_EXE"
-"$SLICE_BIN" pack "$GW_TS" "$GW_CAS"
-"$SLICE_BIN" compile "$GW_TS" -o "$GW_EXE"
+APP1_DIR="$APPS_DIR/01-fintech-checkout"
+APP2_DIR="$APPS_DIR/02-npm-ecosystem-suite"
+APP3_DIR="$APPS_DIR/03-disk-io-log-pipeline"
+APP4_DIR="$APPS_DIR/04-edge-api-gateway"
 
 echo "========================================================================="
-echo "  1. VERIFYING IDENTICAL PRODUCTION OUTPUT ACROSS ALL 4 RUNTIMES"
+echo "  RUNTIME VERSIONS (LINUX DOCKER x86_64 - LATEST RELEASES)"
 echo "========================================================================="
-OUT_SLICE_1=$("$SLICE_BIN" run "$PROD_CAS")
-OUT_BUN_1=$(bun run "$PROD_TS")
-OUT_DENO_1=$(deno run "$PROD_TS")
-OUT_NODE_1=$(node --experimental-strip-types "$PROD_TS" 2>/dev/null)
+echo "  Slice   : v0.2.0 (Oxc TS Compiler + Boa ES2024 VM + Zero-Stat CAS)"
+echo "  Node.js : $(node -v)"
+echo "  Bun     : v$(bun -v)"
+echo "  Deno    : $(deno -V)"
 
-echo "  [Stack 1: Fintech Checkout Service]"
-echo "  Slice Output : $OUT_SLICE_1"
-echo "  Bun Output   : $OUT_BUN_1"
-echo "  Deno Output  : $OUT_DENO_1"
-echo "  Node Output  : $OUT_NODE_1"
+echo "========================================================================="
+echo "  PACKING & COMPILING 4 FOLDER-BASED APPS (OXC + NODE_MODULES + CAS)"
+echo "========================================================================="
+"$SLICE_BIN" pack "$APP1_DIR" "/tmp/app1.cas"
+"$SLICE_BIN" compile "/tmp/app1.cas" -o "/tmp/app1_bin"
 
-if [ "$OUT_SLICE_1" = "$OUT_BUN_1" ] && [ "$OUT_SLICE_1" = "$OUT_DENO_1" ] && [ "$OUT_SLICE_1" = "$OUT_NODE_1" ]; then
-    echo "  [PASS] Stack 1 Byte-for-Byte Identical Across Slice, Bun, Deno, and Node.js!"
-else
-    echo "  [FAIL] Stack 1 Output mismatch detected!"
-    exit 1
-fi
+"$SLICE_BIN" pack "$APP2_DIR" "/tmp/app2.cas"
+"$SLICE_BIN" compile "/tmp/app2.cas" -o "/tmp/app2_bin"
 
-OUT_SLICE_2=$("$SLICE_BIN" run "$GW_CAS")
-OUT_BUN_2=$(bun run "$GW_TS")
-OUT_DENO_2=$(deno run "$GW_TS")
-OUT_NODE_2=$(node --experimental-strip-types "$GW_TS" 2>/dev/null)
+"$SLICE_BIN" pack "$APP3_DIR" "/tmp/app3.cas"
+"$SLICE_BIN" compile "/tmp/app3.cas" -o "/tmp/app3_bin"
 
-echo ""
-echo "  [Stack 2: Edge API Gateway & Rate-Limiter Pipeline]"
-echo "  Slice Output : $OUT_SLICE_2"
-echo "  Bun Output   : $OUT_BUN_2"
-echo "  Deno Output  : $OUT_DENO_2"
-echo "  Node Output  : $OUT_NODE_2"
+"$SLICE_BIN" pack "$APP4_DIR" "/tmp/app4.cas"
+"$SLICE_BIN" compile "/tmp/app4.cas" -o "/tmp/app4_bin"
 
-if [ "$OUT_SLICE_2" = "$OUT_BUN_2" ] && [ "$OUT_SLICE_2" = "$OUT_DENO_2" ] && [ "$OUT_SLICE_2" = "$OUT_NODE_2" ]; then
-    echo "  [PASS] Stack 2 Byte-for-Byte Identical Across Slice, Bun, Deno, and Node.js!"
-else
-    echo "  [FAIL] Stack 2 Output mismatch detected!"
-    exit 1
-fi
+verify_app_parity() {
+    local label="$1"
+    local app_dir="$2"
+    local cas_file="$3"
+    local deno_flags="$4"
+
+    local entry="$app_dir/src/index.ts"
+    local out_slice
+    local out_bun
+    local out_deno
+    local out_node
+
+    out_slice=$("$SLICE_BIN" run "$cas_file")
+    out_bun=$(bun run "$entry")
+    # shellcheck disable=SC2086
+    out_deno=$(deno run $deno_flags "$entry")
+    out_node=$(node "$entry" 2>/dev/null)
+
+    echo "  [$label]"
+    echo "    Slice : $out_slice"
+    echo "    Bun   : $out_bun"
+    echo "    Deno  : $out_deno"
+    echo "    Node  : $out_node"
+
+    if [ "$out_slice" = "$out_bun" ] && [ "$out_slice" = "$out_deno" ] && [ "$out_slice" = "$out_node" ]; then
+        echo "    [PASS] 100% Byte-for-Byte Identical Output Across Slice, Bun, Deno, and Node.js!"
+    else
+        echo "    [FAIL] Output mismatch detected on $label!"
+        exit 1
+    fi
+    echo ""
+}
+
+echo "========================================================================="
+echo "  1. VERIFYING 100% OUTPUT PARITY ACROSS ALL 4 FOLDER APPS & 4 RUNTIMES"
+echo "========================================================================="
+verify_app_parity "App 1: 01-fintech-checkout (Multi-File TS + SHA-256)" "$APP1_DIR" "/tmp/app1.cas" ""
+verify_app_parity "App 2: 02-npm-ecosystem-suite (semver + ms + ini)" "$APP2_DIR" "/tmp/app2.cas" "-A"
+verify_app_parity "App 3: 03-disk-io-log-pipeline (10 JSONL Shards Disk I/O)" "$APP3_DIR" "/tmp/app3.cas" "-A"
+verify_app_parity "App 4: 04-edge-api-gateway (fast-querystring + ms + Auth)" "$APP4_DIR" "/tmp/app4.cas" "-A"
 
 measure_ms() {
     local name="$1"
@@ -101,7 +118,7 @@ measure_ms() {
     done
     local avg_ns=$((sum_ns / runs))
     awk -v name="$name" -v min="$min_ns" -v avg="$avg_ns" 'BEGIN {
-        printf "  %-32s | Min: %8.3f ms | Avg: %8.3f ms\n", name, min / 1000000.0, avg / 1000000.0
+        printf "  %-36s | Min: %8.3f ms | Avg: %8.3f ms\n", name, min / 1000000.0, avg / 1000000.0
     }'
 }
 
@@ -111,48 +128,74 @@ measure_rss_kb() {
     local rss
     rss=$(/usr/bin/time -v "$@" 2>&1 | grep "Maximum resident set size" | awk '{print $NF}')
     awk -v name="$name" -v rss="$rss" 'BEGIN {
-        printf "  %-32s | Max RSS: %8d KB (%6.2f MB)\n", name, rss, rss / 1024.0
+        printf "  %-36s | Max RSS: %8d KB (%6.2f MB)\n", name, rss, rss / 1024.0
     }'
 }
 
 echo "========================================================================="
-echo "  2. STACK 1 LATENCY: FINTECH CHECKOUT ENGINE (50 Orders, 20 Runs)"
+echo "  2. APP 1 LATENCY: 01-FINTECH-CHECKOUT (Multi-File TS + SHA-256, 20 Runs)"
 echo "========================================================================="
-measure_ms "Slice (Standalone Binary)"       20 "$PROD_EXE" --quiet
-measure_ms "Slice (CAS + Oxc + Boa VM)"      20 "$SLICE_BIN" run "$PROD_CAS" --quiet
-measure_ms "Slice (Raw .ts + Oxc + Boa VM)"  20 "$SLICE_BIN" run "$PROD_TS" --quiet
-measure_ms "Bun v1.3.14"                     20 bun run "$PROD_TS"
-measure_ms "Deno v2.8.3"                     20 deno run "$PROD_TS"
-measure_ms "Node.js v22.22.3"                20 node --experimental-strip-types "$PROD_TS"
+measure_ms "Slice (Standalone Binary)"           20 "/tmp/app1_bin" --quiet
+measure_ms "Slice (CAS Archive)"                 20 "$SLICE_BIN" run "/tmp/app1.cas" --quiet
+measure_ms "Slice (Folder Source + Oxc)"         20 "$SLICE_BIN" run "$APP1_DIR" --quiet
+measure_ms "Bun (Latest)"                        20 bun run "$APP1_DIR/src/index.ts"
+measure_ms "Deno (Latest)"                       20 deno run "$APP1_DIR/src/index.ts"
+measure_ms "Node.js (Latest)"                    20 node "$APP1_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  3. STACK 2 LATENCY: EDGE API GATEWAY PIPELINE (100 Requests, 20 Runs)"
+echo "  3. APP 2 LATENCY: 02-NPM-ECOSYSTEM-SUITE (semver + ms + ini, 20 Runs)"
 echo "========================================================================="
-measure_ms "Slice (Standalone Binary)"       20 "$GW_EXE" --quiet
-measure_ms "Slice (CAS + Oxc + Boa VM)"      20 "$SLICE_BIN" run "$GW_CAS" --quiet
-measure_ms "Slice (Raw .ts + Oxc + Boa VM)"  20 "$SLICE_BIN" run "$GW_TS" --quiet
-measure_ms "Bun v1.3.14"                     20 bun run "$GW_TS"
-measure_ms "Deno v2.8.3"                     20 deno run "$GW_TS"
-measure_ms "Node.js v22.22.3"                20 node --experimental-strip-types "$GW_TS"
+measure_ms "Slice (Standalone Binary)"           20 "/tmp/app2_bin" --quiet
+measure_ms "Slice (CAS Archive)"                 20 "$SLICE_BIN" run "/tmp/app2.cas" --quiet
+measure_ms "Slice (Folder Source + Oxc)"         20 "$SLICE_BIN" run "$APP2_DIR" --quiet
+measure_ms "Bun (Latest)"                        20 bun run "$APP2_DIR/src/index.ts"
+measure_ms "Deno (Latest)"                       20 deno run -A "$APP2_DIR/src/index.ts"
+measure_ms "Node.js (Latest)"                    20 node "$APP2_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  4. REAL PRODUCTION STACK PEAK MEMORY FOOTPRINT (RSS)"
+echo "  4. APP 3 LATENCY: 03-DISK-IO-LOG-PIPELINE (10 JSONL Shards I/O, 20 Runs)"
 echo "========================================================================="
-measure_rss_kb "Slice (Fintech CAS + Boa VM)" "$SLICE_BIN" run "$PROD_CAS" --quiet
-measure_rss_kb "Slice (Gateway CAS + Boa VM)" "$SLICE_BIN" run "$GW_CAS" --quiet
-measure_rss_kb "Bun v1.3.14 (Fintech .ts)"    bun run "$PROD_TS"
-measure_rss_kb "Deno v2.8.3 (Fintech .ts)"    deno run "$PROD_TS"
-measure_rss_kb "Node.js v22.22.3 (Fintech)"   node --experimental-strip-types "$PROD_TS"
+measure_ms "Slice (Standalone Binary)"           20 "/tmp/app3_bin" --quiet
+measure_ms "Slice (CAS Archive)"                 20 "$SLICE_BIN" run "/tmp/app3.cas" --quiet
+measure_ms "Slice (Folder Source + Oxc)"         20 "$SLICE_BIN" run "$APP3_DIR" --quiet
+measure_ms "Bun (Latest)"                        20 bun run "$APP3_DIR/src/index.ts"
+measure_ms "Deno (Latest)"                       20 deno run -A "$APP3_DIR/src/index.ts"
+measure_ms "Node.js (Latest)"                    20 node "$APP3_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  5. SLICE INTERNAL ISOLATE TELEMETRY ON PRODUCTION STACKS"
+echo "  5. APP 4 LATENCY: 04-EDGE-API-GATEWAY (fast-querystring + ms, 20 Runs)"
 echo "========================================================================="
-"$SLICE_BIN" run "$PROD_CAS" --metrics
-"$SLICE_BIN" run "$GW_CAS" --metrics
+measure_ms "Slice (Standalone Binary)"           20 "/tmp/app4_bin" --quiet
+measure_ms "Slice (CAS Archive)"                 20 "$SLICE_BIN" run "/tmp/app4.cas" --quiet
+measure_ms "Slice (Folder Source + Oxc)"         20 "$SLICE_BIN" run "$APP4_DIR" --quiet
+measure_ms "Bun (Latest)"                        20 bun run "$APP4_DIR/src/index.ts"
+measure_ms "Deno (Latest)"                       20 deno run -A "$APP4_DIR/src/index.ts"
+measure_ms "Node.js (Latest)"                    20 node "$APP4_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  6. MICROVM SPEEDUP RETENTION CHECK (1,000 TENANT SWARM)"
+echo "  6. PEAK MEMORY FOOTPRINT (MAX RSS) ACROSS ALL 4 FOLDER APPS"
+echo "========================================================================="
+measure_rss_kb "Slice (App 2: NPM semver+ms+ini)"  "$SLICE_BIN" run "/tmp/app2.cas" --quiet
+measure_rss_kb "Bun (App 2: NPM semver+ms+ini)"    bun run "$APP2_DIR/src/index.ts"
+measure_rss_kb "Deno (App 2: NPM semver+ms+ini)"   deno run -A "$APP2_DIR/src/index.ts"
+measure_rss_kb "Node (App 2: NPM semver+ms+ini)"   node "$APP2_DIR/src/index.ts"
+echo "-------------------------------------------------------------------------"
+measure_rss_kb "Slice (App 3: Disk I/O 10 Shards)" "$SLICE_BIN" run "/tmp/app3.cas" --quiet
+measure_rss_kb "Bun (App 3: Disk I/O 10 Shards)"   bun run "$APP3_DIR/src/index.ts"
+measure_rss_kb "Deno (App 3: Disk I/O 10 Shards)"  deno run -A "$APP3_DIR/src/index.ts"
+measure_rss_kb "Node (App 3: Disk I/O 10 Shards)"  node "$APP3_DIR/src/index.ts"
+
+echo "========================================================================="
+echo "  7. SLICE INTERNAL ISOLATE TELEMETRY ON ALL 4 FOLDER APPS"
+echo "========================================================================="
+"$SLICE_BIN" run "/tmp/app1.cas" --metrics
+"$SLICE_BIN" run "/tmp/app2.cas" --metrics
+"$SLICE_BIN" run "/tmp/app3.cas" --metrics
+"$SLICE_BIN" run "/tmp/app4.cas" --metrics
+
+echo "========================================================================="
+echo "  8. MICROVM SPEEDUP RETENTION CHECK (1,000 TENANT SWARM)"
 echo "========================================================================="
 "$SLICE_BIN" microvm-bench --tenants=1000
 
-rm -f "$PROD_EXE" "$GW_EXE"
+rm -f /tmp/app1.cas /tmp/app2.cas /tmp/app3.cas /tmp/app4.cas /tmp/app1_bin /tmp/app2_bin /tmp/app3_bin /tmp/app4_bin

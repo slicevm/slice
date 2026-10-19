@@ -1,0 +1,8 @@
+{
+  "name": "01-fintech-checkout",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts"
+}
+

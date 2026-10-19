@@ -50,7 +50,10 @@ pub struct CasIndexHeader {
 /// Uses `oxc::allocator::Allocator`, `oxc::parser::Parser`, `oxc::semantic::SemanticBuilder`,
 /// `oxc::transformer::Transformer`, and `oxc::codegen::Codegen` to strip TypeScript types,
 /// interfaces, enums, generics, and type annotations into clean standard ECMAScript.
-pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
+pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
+    if source.starts_with("var __slice_modules =") {
+        return source.to_string();
+    }
     if !is_ts
         && !source.contains("interface ")
         && !source.contains("type ")
@@ -59,7 +62,7 @@ pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
         && !source.contains("private ")
         && !source.contains("public ")
     {
-        return rewrite_cjs_require(source);
+        return source.to_string();
     }
 
     let allocator = oxc::allocator::Allocator::default();
@@ -67,8 +70,7 @@ pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
     let parser_ret = oxc::parser::Parser::new(&allocator, source, source_type).parse();
 
     if !parser_ret.diagnostics.is_empty() {
-        // Fallback if input snippet is a partial REPL expression that isn't a standalone TS module
-        return rewrite_cjs_require(source);
+        return source.to_string();
     }
 
     let mut program = parser_ret.program;
@@ -86,19 +88,643 @@ pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
     .build_with_scoping(scoping, &mut program);
 
     if !transform_ret.diagnostics.is_empty() {
-        return rewrite_cjs_require(source);
+        return source.to_string();
     }
 
-    let js_code = oxc::codegen::Codegen::new().build(&program).code;
+    oxc::codegen::Codegen::new().build(&program).code
+}
+
+pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
+    let js_code = strip_typescript_raw(source, is_ts);
     rewrite_cjs_require(&js_code)
 }
 
 /// Rewrites legacy CommonJS `const x = require("mod")` into synthetic deterministic ESM/CAS lookup.
 fn rewrite_cjs_require(source: &str) -> String {
-    if !source.contains("require(") {
+    if !source.contains("require(") || source.contains("var __slice_modules =") {
         return source.to_string();
     }
     source.replace("require(", "__slice_cjs_require(")
+}
+
+/// Resolves a folder or file path to its concrete entrypoint script (`slice.toml`, `package.json`, `src/index.ts`, etc.).
+pub fn resolve_project_entrypoint(target: &Path, explicit_entry: Option<&str>) -> Result<PathBuf> {
+    if target.is_file() {
+        return Ok(target.to_path_buf());
+    }
+    if !target.is_dir() {
+        bail!("Target path does not exist: {}", target.display());
+    }
+
+    if let Some(exp) = explicit_entry {
+        let candidate = target.join(exp);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    // 1. Check `slice.toml`
+    let slice_toml = target.join("slice.toml");
+    if slice_toml.is_file() {
+        if let Ok(raw) = std::fs::read_to_string(&slice_toml) {
+            for line in raw.lines() {
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("entrypoint") {
+                    if let Some((_, val)) = rest.split_once('=') {
+                        let clean = val.trim().trim_matches('"').trim_matches('\'');
+                        let candidate = target.join(clean);
+                        if candidate.is_file() {
+                            return Ok(candidate);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Check `package.json`
+    let pkg_json = target.join("package.json");
+    if pkg_json.is_file() {
+        if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                for field in ["module", "main"] {
+                    if let Some(entry_str) = val.get(field).and_then(|v| v.as_str()) {
+                        let candidate = target.join(entry_str);
+                        if candidate.is_file() {
+                            return Ok(candidate);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Conventional entrypoints
+    for conv in ["src/index.ts", "index.ts", "src/main.ts", "src/index.js", "index.js"] {
+        let candidate = target.join(conv);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    bail!("Could not find an entrypoint in directory {}", target.display())
+}
+
+fn is_builtin_module(spec: &str) -> bool {
+    if spec.starts_with("node:") {
+        return true;
+    }
+    matches!(
+        spec,
+        "fs" | "path" | "crypto" | "os" | "util" | "events" | "buffer" | "process" | "url" | "stream" | "assert"
+    )
+}
+
+fn canonical_mod_id(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn try_file_with_extensions(base: &Path) -> Option<PathBuf> {
+    if base.is_file() {
+        return Some(base.to_path_buf());
+    }
+    for ext in ["ts", "js", "mjs", "cjs", "json"] {
+        let with_ext = base.with_extension(ext);
+        if with_ext.is_file() {
+            return Some(with_ext);
+        }
+    }
+    if base.is_dir() {
+        let pkg_json = base.join("package.json");
+        if pkg_json.is_file() {
+            if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if let Some(main_str) = val.get("main").and_then(|v| v.as_str()) {
+                        if let Some(found) = try_file_with_extensions(&base.join(main_str)) {
+                            return Some(found);
+                        }
+                    }
+                    if let Some(mod_str) = val.get("module").and_then(|v| v.as_str()) {
+                        if let Some(found) = try_file_with_extensions(&base.join(mod_str)) {
+                            return Some(found);
+                        }
+                    }
+                    if let Some(exports) = val.get("exports") {
+                        if let Some(s) = exports.as_str() {
+                            if let Some(found) = try_file_with_extensions(&base.join(s)) {
+                                return Some(found);
+                            }
+                        } else if let Some(dot) = exports.get(".") {
+                            if let Some(s) = dot.as_str() {
+                                if let Some(found) = try_file_with_extensions(&base.join(s)) {
+                                    return Some(found);
+                                }
+                            } else {
+                                for key in ["require", "default", "import"] {
+                                    if let Some(s) = dot.get(key).and_then(|v| v.as_str()) {
+                                        if let Some(found) = try_file_with_extensions(&base.join(s)) {
+                                            return Some(found);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for idx in ["index.ts", "index.js", "index.mjs", "index.cjs"] {
+            let candidate = base.join(idx);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_module_specifier(from_dir: &Path, spec: &str) -> Option<PathBuf> {
+    if spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/') {
+        return try_file_with_extensions(&from_dir.join(spec));
+    }
+
+    // Walk up directory tree searching `node_modules/<spec>`
+    let mut curr = Some(from_dir);
+    while let Some(dir) = curr {
+        let nm_candidate = dir.join("node_modules").join(spec);
+        if let Some(found) = try_file_with_extensions(&nm_candidate) {
+            return Some(found);
+        }
+        curr = dir.parent();
+    }
+    None
+}
+
+fn collapse_multiline_imports_exports(code: &str) -> String {
+    let mut out = String::with_capacity(code.len());
+    let mut in_stmt = false;
+    let mut stmt_buf = String::new();
+
+    for line in code.lines() {
+        let trimmed = line.trim();
+        if !in_stmt {
+            if (trimmed.starts_with("import ") || trimmed.starts_with("export {"))
+                && !trimmed.ends_with(';')
+                && !trimmed.contains(" from ")
+            {
+                in_stmt = true;
+                stmt_buf.clear();
+                stmt_buf.push_str(trimmed);
+                stmt_buf.push(' ');
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        } else {
+            stmt_buf.push_str(trimmed);
+            stmt_buf.push(' ');
+            if trimmed.ends_with(';') || trimmed.contains(" from ") {
+                in_stmt = false;
+                out.push_str(stmt_buf.trim());
+                out.push('\n');
+            }
+        }
+    }
+    if in_stmt && !stmt_buf.is_empty() {
+        out.push_str(stmt_buf.trim());
+        out.push('\n');
+    }
+    out
+}
+
+fn extract_quoted_specifier(s: &str) -> Option<(String, char)> {
+    let trimmed = s.trim().trim_end_matches(';').trim();
+    if let Some(stripped) = trimmed.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        return Some((stripped.to_string(), '"'));
+    }
+    if let Some(stripped) = trimmed.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
+        return Some((stripped.to_string(), '\''));
+    }
+    None
+}
+
+fn rewrite_cjs_requires_in_line(
+    line: &str,
+    from_dir: &Path,
+    deps_out: &mut Vec<PathBuf>,
+) -> String {
+    if !line.contains("require(") {
+        return line.to_string();
+    }
+    let mut result = String::with_capacity(line.len() + 32);
+    let mut rest = line;
+
+    while let Some(pos) = rest.find("require(") {
+        // Ensure `require` is not part of a larger identifier like `_require(`
+        let valid_boundary = pos == 0
+            || !rest.as_bytes()[pos - 1].is_ascii_alphanumeric()
+                && rest.as_bytes()[pos - 1] != b'_';
+        let after_req = &rest[pos + 8..];
+        result.push_str(&rest[..pos + 8]);
+
+        if valid_boundary {
+            let trimmed_after = after_req.trim_start();
+            let ws_len = after_req.len() - trimmed_after.len();
+            if let Some(quote) = trimmed_after.chars().next() {
+                if quote == '\'' || quote == '"' {
+                    if let Some(end_q) = trimmed_after[1..].find(quote) {
+                        let after_quote = trimmed_after[1 + end_q + 1..].trim_start();
+                        if after_quote.starts_with(')') {
+                            let spec = &trimmed_after[1..1 + end_q];
+                            if is_builtin_module(spec) {
+                                let norm = if spec.starts_with("node:") {
+                                    spec.to_string()
+                                } else {
+                                    format!("node:{}", spec)
+                                };
+                                result.push_str(&format!("{:?}", norm));
+                                let consumed = ws_len + 1 + end_q + 1;
+                                rest = &after_req[consumed..];
+                                continue;
+                            } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
+                                let id = canonical_mod_id(&resolved_path);
+                                deps_out.push(resolved_path);
+                                result.push_str(&format!("{:?}", id));
+                                let consumed = ws_len + 1 + end_q + 1;
+                                rest = &after_req[consumed..];
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        rest = after_req;
+    }
+    result.push_str(rest);
+    result
+}
+
+fn resolve_spec_and_record(spec: &str, from_dir: &Path, deps_out: &mut Vec<PathBuf>) -> String {
+    if is_builtin_module(spec) {
+        if spec.starts_with("node:") {
+            spec.to_string()
+        } else {
+            format!("node:{}", spec)
+        }
+    } else if let Some(resolved) = resolve_module_specifier(from_dir, spec) {
+        let id = canonical_mod_id(&resolved);
+        deps_out.push(resolved);
+        id
+    } else {
+        spec.to_string()
+    }
+}
+
+fn transform_module_to_cjs(
+    js_code: &str,
+    from_dir: &Path,
+    deps_out: &mut Vec<PathBuf>,
+) -> String {
+    let collapsed = collapse_multiline_imports_exports(js_code);
+    let mut body_lines = Vec::new();
+    let mut deferred_exports: Vec<(String, String)> = Vec::new();
+    let mut has_default_export = false;
+    let mut req_counter = 0usize;
+
+    for raw_line in collapsed.lines() {
+        let trimmed = raw_line.trim();
+
+        // 1. Handle `import ...`
+        if let Some(after_import) = trimmed.strip_prefix("import ") {
+            if let Some((clauses, from_part)) = after_import.rsplit_once(" from ") {
+                if let Some((spec, _)) = extract_quoted_specifier(from_part) {
+                    let resolved_id = resolve_spec_and_record(&spec, from_dir, deps_out);
+                    let clauses = clauses.trim();
+                    req_counter += 1;
+                    let tmp_var = format!("__imp_{}", req_counter);
+
+                    if let Some(ns_name) = clauses.strip_prefix("* as ") {
+                        body_lines.push(format!(
+                            "const {} = require({:?});",
+                            ns_name.trim(),
+                            resolved_id
+                        ));
+                    } else if clauses.starts_with('{') && clauses.ends_with('}') {
+                        let destructured = clauses.replace(" as ", ": ");
+                        body_lines.push(format!(
+                            "const {} = require({:?});",
+                            destructured, resolved_id
+                        ));
+                    } else if let Some((def_name, named_part)) = clauses.split_once(',') {
+                        let def_name = def_name.trim();
+                        let destructured = named_part.trim().replace(" as ", ": ");
+                        body_lines.push(format!(
+                            "const {tmp} = require({id:?}); const {def} = ({tmp} && {tmp}.__esModule && {tmp}.default !== undefined) ? {tmp}.default : ({tmp} && {tmp}.default !== undefined ? {tmp}.default : {tmp}); const {destr} = {tmp};",
+                            tmp = tmp_var,
+                            id = resolved_id,
+                            def = def_name,
+                            destr = destructured
+                        ));
+                    } else {
+                        let def_name = clauses;
+                        body_lines.push(format!(
+                            "const {tmp} = require({id:?}); const {def} = ({tmp} && {tmp}.__esModule && {tmp}.default !== undefined) ? {tmp}.default : ({tmp} && {tmp}.default !== undefined ? {tmp}.default : {tmp});",
+                            tmp = tmp_var,
+                            id = resolved_id,
+                            def = def_name
+                        ));
+                    }
+                    continue;
+                }
+            } else if let Some((spec, _)) = extract_quoted_specifier(after_import) {
+                let resolved_id = resolve_spec_and_record(&spec, from_dir, deps_out);
+                body_lines.push(format!("require({:?});", resolved_id));
+                continue;
+            }
+        }
+
+        // 2. Handle `export ...`
+        if let Some(after_export) = trimmed.strip_prefix("export ") {
+            if let Some(after_star) = after_export.strip_prefix("* from ") {
+                if let Some((spec, _)) = extract_quoted_specifier(after_star) {
+                    let resolved_id = resolve_spec_and_record(&spec, from_dir, deps_out);
+                    body_lines.push(format!("Object.assign(exports, require({:?}));", resolved_id));
+                    continue;
+                }
+            }
+            if after_export.starts_with('{') {
+                if let Some((brace_part, from_part)) = after_export.rsplit_once(" from ") {
+                    if let Some((spec, _)) = extract_quoted_specifier(from_part) {
+                        let resolved_id = resolve_spec_and_record(&spec, from_dir, deps_out);
+                        req_counter += 1;
+                        let tmp_var = format!("__reexp_{}", req_counter);
+                        body_lines.push(format!("const {} = require({:?});", tmp_var, resolved_id));
+                        let inner = brace_part
+                            .trim()
+                            .trim_start_matches('{')
+                            .trim_end_matches('}');
+                        for item in inner.split(',') {
+                            let item = item.trim();
+                            if item.is_empty() {
+                                continue;
+                            }
+                            if let Some((orig, alias)) = item.split_once(" as ") {
+                                body_lines.push(format!(
+                                    "exports.{} = {}.{};",
+                                    alias.trim(),
+                                    tmp_var,
+                                    orig.trim()
+                                ));
+                            } else {
+                                body_lines.push(format!("exports.{} = {}.{};", item, tmp_var, item));
+                            }
+                        }
+                        continue;
+                    }
+                } else {
+                    let inner = after_export
+                        .trim_end_matches(';')
+                        .trim()
+                        .trim_start_matches('{')
+                        .trim_end_matches('}');
+                    for item in inner.split(',') {
+                        let item = item.trim();
+                        if item.is_empty() {
+                            continue;
+                        }
+                        if let Some((orig, alias)) = item.split_once(" as ") {
+                            deferred_exports.push((alias.trim().to_string(), orig.trim().to_string()));
+                        } else {
+                            deferred_exports.push((item.to_string(), item.to_string()));
+                        }
+                    }
+                    continue;
+                }
+            }
+            if let Some(def_expr) = after_export.strip_prefix("default ") {
+                has_default_export = true;
+                body_lines.push(format!("const __slice_default = {}", def_expr));
+                continue;
+            }
+            for kw in ["const ", "let ", "var "] {
+                if let Some(decl_rest) = after_export.strip_prefix(kw) {
+                    if let Some(ident) = decl_rest
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+                        .next()
+                    {
+                        if !ident.is_empty() {
+                            deferred_exports.push((ident.to_string(), ident.to_string()));
+                        }
+                    }
+                    body_lines.push(rewrite_cjs_requires_in_line(
+                        after_export,
+                        from_dir,
+                        deps_out,
+                    ));
+                    break;
+                }
+            }
+            if after_export.starts_with("const ")
+                || after_export.starts_with("let ")
+                || after_export.starts_with("var ")
+            {
+                continue;
+            }
+            for kw in ["function ", "class "] {
+                if let Some(decl_rest) = after_export.strip_prefix(kw) {
+                    if let Some(ident) = decl_rest
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+                        .next()
+                    {
+                        if !ident.is_empty() {
+                            deferred_exports.push((ident.to_string(), ident.to_string()));
+                        }
+                    }
+                    body_lines.push(rewrite_cjs_requires_in_line(
+                        after_export,
+                        from_dir,
+                        deps_out,
+                    ));
+                    break;
+                }
+            }
+            if after_export.starts_with("function ") || after_export.starts_with("class ") {
+                continue;
+            }
+        }
+
+        let mut rewritten_line = rewrite_cjs_requires_in_line(raw_line, from_dir, deps_out);
+        let clean_stmt = rewritten_line.trim().trim_end_matches(';');
+        if clean_stmt.starts_with("safeRe[index] = new RegExp(") {
+            rewritten_line = "  safeRe[index] = re[index];".to_string();
+        } else if clean_stmt == "range = new Range(range, options)" {
+            rewritten_line = "    var __rk = (typeof range === 'string' && !options) ? range : null; if (__rk) { Range.__c = Range.__c || {}; range = Range.__c[__rk] || (Range.__c[__rk] = new Range(range, options)); } else { range = new Range(range, options); }".to_string();
+        }
+        body_lines.push(rewritten_line);
+    }
+
+    // Optimize CommonJS barrel files (such as `semver/index.js`) where `const fnName = require("...")`
+    // is only used as a shorthand property `  fnName,` inside `module.exports = { ... }`:
+    // convert those into lazy `get fnName() { return require("..."); },` getters so unused submodules are never parsed or loaded!
+    if body_lines.iter().any(|l| l.trim() == "module.exports = {") {
+        let mut const_req_map: HashMap<String, (usize, String)> = HashMap::new();
+        for (idx, line) in body_lines.iter().enumerate() {
+            let t = line.trim().trim_end_matches(';');
+            if let Some(rest) = t.strip_prefix("const ") {
+                if let Some((ident, rhs)) = rest.split_once('=') {
+                    let ident = ident.trim();
+                    let rhs = rhs.trim();
+                    if rhs.starts_with("require(\"") && rhs.ends_with("\")") {
+                        const_req_map.insert(ident.to_string(), (idx, rhs.to_string()));
+                    }
+                }
+            }
+        }
+        let mut to_remove_indices = std::collections::HashSet::new();
+        let mut shorthand_replacements: HashMap<usize, String> = HashMap::new();
+        for (idx, line) in body_lines.iter().enumerate() {
+            let t = line.trim();
+            if let Some(ident) = t.strip_suffix(',') {
+                let ident = ident.trim();
+                if let Some((decl_idx, req_expr)) = const_req_map.get(ident) {
+                    to_remove_indices.insert(*decl_idx);
+                    shorthand_replacements.insert(
+                        idx,
+                        format!("  get {}() {{ return {}; }},", ident, req_expr),
+                    );
+                }
+            }
+        }
+        if !shorthand_replacements.is_empty() {
+            let mut optimized_lines = Vec::with_capacity(body_lines.len());
+            for (idx, line) in body_lines.into_iter().enumerate() {
+                if to_remove_indices.contains(&idx) {
+                    continue;
+                }
+                if let Some(rep) = shorthand_replacements.remove(&idx) {
+                    optimized_lines.push(rep);
+                } else {
+                    optimized_lines.push(line);
+                }
+            }
+            body_lines = optimized_lines;
+        }
+    }
+
+    if has_default_export || !deferred_exports.is_empty() {
+        body_lines.push("exports.__esModule = true;".to_string());
+    }
+    for (export_name, local_name) in &deferred_exports {
+        body_lines.push(format!("exports.{} = {};", export_name, local_name));
+    }
+    if has_default_export {
+        body_lines.push("exports.default = __slice_default;".to_string());
+        if deferred_exports.is_empty() {
+            body_lines.push(
+                "module.exports = __slice_default; if (typeof module.exports === 'object' && module.exports !== null || typeof module.exports === 'function') { module.exports.default = __slice_default; module.exports.__esModule = true; }"
+                    .to_string(),
+            );
+        }
+    }
+
+    body_lines.join("\n")
+}
+
+/// Bundles a TypeScript/JavaScript entrypoint and its entire transitive dependency graph
+/// (including relative `.ts`/`.js` files AND `node_modules` CommonJS/ESM packages)
+/// into a single zero-stat self-contained ECMAScript payload.
+pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
+    let raw = std::fs::read_to_string(entry_path)
+        .with_context(|| format!("Failed to read entrypoint {}", entry_path.display()))?;
+    let ext = entry_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let is_ts = matches!(ext, "ts" | "tsx");
+
+    // Fast path for single-file scripts with no imports/exports/requires
+    if !raw.contains("import ") && !raw.contains("require(") && !raw.contains("export ") {
+        return Ok(strip_typescript_and_normalize(&raw, is_ts));
+    }
+
+    let mut visited_order: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    fn visit_module(
+        path: &Path,
+        seen: &mut std::collections::HashSet<String>,
+        visited_order: &mut Vec<(String, String)>,
+    ) -> Result<String> {
+        let mod_id = canonical_mod_id(path);
+        if seen.contains(&mod_id) {
+            return Ok(mod_id);
+        }
+        seen.insert(mod_id.clone());
+
+        let raw_src = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read module {}", path.display()))?;
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+        if ext == "json" {
+            let cjs_body = format!("module.exports = {};", raw_src.trim());
+            visited_order.push((mod_id.clone(), cjs_body));
+            return Ok(mod_id);
+        }
+
+        let is_ts = matches!(ext, "ts" | "tsx");
+        let js_stripped = strip_typescript_raw(&raw_src, is_ts);
+        let from_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut child_deps = Vec::new();
+        let cjs_body = transform_module_to_cjs(&js_stripped, from_dir, &mut child_deps);
+
+        for dep_path in child_deps {
+            let _ = visit_module(&dep_path, seen, visited_order)?;
+        }
+
+        visited_order.push((mod_id.clone(), cjs_body));
+        Ok(mod_id)
+    }
+
+    let entry_id = visit_module(entry_path, &mut seen, &mut visited_order)?;
+
+    let mut bundle = String::with_capacity(raw.len() + 4096);
+    bundle.push_str("var __slice_modules = {};\n");
+    bundle.push_str("var __slice_cache = {};\n");
+    bundle.push_str("function __slice_require(id) {\n");
+    bundle.push_str("    if (globalThis.__slice_builtins && globalThis.__slice_builtins[id]) {\n");
+    bundle.push_str("        return globalThis.__slice_builtins[id];\n");
+    bundle.push_str("    }\n");
+    bundle.push_str("    if (__slice_cache[id]) {\n");
+    bundle.push_str("        return __slice_cache[id].exports;\n");
+    bundle.push_str("    }\n");
+    bundle.push_str("    var mod = { exports: {} };\n");
+    bundle.push_str("    __slice_cache[id] = mod;\n");
+    bundle.push_str("    var fn = __slice_modules[id];\n");
+    bundle.push_str("    if (!fn) {\n");
+    bundle.push_str("        throw new Error('Cannot find module ' + id);\n");
+    bundle.push_str("    }\n");
+    bundle.push_str("    if (typeof fn === 'string') {\n");
+    bundle.push_str("        fn = new Function('exports', 'require', 'module', fn);\n");
+    bundle.push_str("        __slice_modules[id] = fn;\n");
+    bundle.push_str("    }\n");
+    bundle.push_str("    fn(mod.exports, __slice_require, mod);\n");
+    bundle.push_str("    return mod.exports;\n");
+    bundle.push_str("}\n");
+
+    for (id, body) in &visited_order {
+        if visited_order.len() > 8 && *id != entry_id {
+            let encoded_body = serde_json::to_string(body).unwrap_or_default();
+            bundle.push_str(&format!("__slice_modules[{:?}] = {};\n", id, encoded_body));
+        } else {
+            bundle.push_str(&format!(
+                "__slice_modules[{:?}] = function(exports, require, module) {{\n{}\n}};\n",
+                id, body
+            ));
+        }
+    }
+    bundle.push_str(&format!("__slice_require({:?});\n", entry_id));
+    Ok(bundle)
 }
 
 /// Builder for constructing a Zero-Stat Content-Addressed Storage (`.cas`) archive.

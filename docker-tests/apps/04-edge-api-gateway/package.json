@@ -1,0 +1,12 @@
+{
+  "name": "04-edge-api-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "fast-querystring": "1.1.2",
+    "ms": "2.1.3"
+  }
+}
+

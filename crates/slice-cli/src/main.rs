@@ -259,9 +259,9 @@ fn cmd_run(args: &[String]) -> Result<()> {
         let bytecode = archive.get_bytecode_slice(entry);
         isolate.execute_bytecode(bytecode, Some(&archive))?
     } else {
-        let raw_source = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read source file {}", path.display()))?;
-        let bytecode = compile_source_to_bytecode(&raw_source);
+        let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
+        let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
+        let bytecode = compile_source_to_bytecode(&bundled_source);
         isolate.execute_bytecode(&bytecode, None)?
     };
 
@@ -287,19 +287,25 @@ fn cmd_run(args: &[String]) -> Result<()> {
 }
 
 fn build_cas_archive(input_path: &Path, output_path: &Path, entrypoint: &str) -> Result<slice_cas::CasIndexHeader> {
-    let builder = if input_path.is_file() {
-        let file_name = input_path
+    let is_folder_app = input_path.is_dir()
+        && (input_path.join("package.json").is_file()
+            || input_path.join("slice.toml").is_file()
+            || input_path.join("src").is_dir());
+
+    let builder = if input_path.is_file() || is_folder_app {
+        let entry_file = slice_cas::resolve_project_entrypoint(input_path, Some(entrypoint))?;
+        let file_name = entry_file
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
         let spec = format!("./{}", file_name);
         let mut b = CasBuilder::new(&spec);
-        let raw = std::fs::read_to_string(input_path)?;
+        let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
         b.add_module(
             spec,
-            input_path.to_path_buf(),
-            &raw,
+            entry_file,
+            &bundled,
             compile_source_to_bytecode,
         );
         b

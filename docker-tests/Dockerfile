@@ -13,19 +13,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     unzip \
     xz-utils \
+    jq \
+    libatomic1 \
     time \
     procps \
     gawk \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js v22, Bun, and Deno for side-by-side real-stack production comparison
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
+# 1. Install the ABSOLUTE LATEST official release of Node.js directly from nodejs.org/dist/index.json
+RUN NODE_LATEST=$(curl -fsSL https://nodejs.org/dist/index.json | jq -r '.[0].version') \
+    && echo "Installing latest Node.js: ${NODE_LATEST}" \
+    && curl -fsSL "https://nodejs.org/dist/${NODE_LATEST}/node-${NODE_LATEST}-linux-x64.tar.xz" \
+       | tar -xJ --strip-components=1 -C /usr/local
 
+# 2. Install the ABSOLUTE LATEST official release of Bun
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
 
+# 3. Install the ABSOLUTE LATEST official release of Deno
 RUN curl -fsSL https://deno.land/install.sh | sh
 ENV PATH="/root/.deno/bin:${PATH}"
 
@@ -34,8 +39,11 @@ COPY --from=builder /workspace/target/release/slice /app/target/release/slice
 COPY benchmarks /app/benchmarks
 COPY scripts /app/scripts
 COPY docker-tests /app/docker-tests
-RUN sed -i 's/\r$//' /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh \
+
+# Install real external npm packages in the folder-based test applications
+RUN bun install --cwd /app/docker-tests/apps/02-npm-ecosystem-suite \
+    && bun install --cwd /app/docker-tests/apps/04-edge-api-gateway \
+    && sed -i 's/\r$//' /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh \
     && chmod +x /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh
 
 CMD ["/app/docker-tests/run_real_stack_benchmarks.sh"]
-

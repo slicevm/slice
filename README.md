@@ -164,22 +164,25 @@ SERVICE_STAGE = "production"
 | `slice microvm-bench` | Spawn 1,000 isolated tenants and benchmark P50/P99 cold-start, CAS, and I/O rings. |
 | `slice verify-security` | Execute the 5-vector OCap, SES prototype lockdown, and CPU fuel DoS verification suite. |
 
-## Real-Life Production Stack Benchmarks (`docker-tests/`)
+## Folder-Based Real-Life Production Applications, External NPM Libraries & Disk I/O Benchmarks (`docker-tests/apps/`)
 
-In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) runs real-life production TypeScript microservices through **Oxc** (production Rust TypeScript compiler) + **Boa ECMAScript VM** + **Slice CAS** and verifies **100% byte-for-byte identical JSON output** against Bun, Deno, and Node.js:
+In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) runs 4 folder-based multi-module production TypeScript applications (with real external `node_modules/` packages `semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`, FIPS-180-4 SHA-256 `node:crypto`, and real `node:fs` disk I/O) and verifies **100% byte-for-byte identical JSON output** against the **absolute latest releases** of Bun (`v1.4.3`), Deno (`v2.9.7`), and Node.js (`v26.12.0`):
 
-| Real-Stack Production Metric (Linux Docker `x86_64`) | Slice (Oxc + Boa + CAS) | Bun (`v1.3.14`) | Deno (`v2.8.3`) | Node.js (`v22.22.3`) |
+| Folder-Based Production App (Linux Docker `x86_64`) | Slice (`v0.2.0`) | Bun (`v1.4.3`) | Deno (`v2.9.7`) | Node.js (`v26.12.0`) |
 | :--- | :--- | :--- | :--- | :--- |
-| **Fintech Checkout Stack (`production_stack.ts`, 50 orders)** | **4.685 ms** (`2.23 ms` VM) | 6.216 ms | 18.659 ms | 36.843 ms |
-| **Edge API Gateway Stack (`api_gateway_pipeline.ts`, 100 reqs)** | **4.810 ms** (`2.26 ms` VM) | 6.376 ms | 18.690 ms | 50.375 ms |
-| **Production Stack Peak Memory Footprint (Max RSS)** | **9.38 MB (`9,600 KB`)** | 17.88 MB (`18,304 KB`) | 30.38 MB (`31,104 KB`) | 60.72 MB (`62,176 KB`) |
-| **1,000-Tenant MicroVM Isolate Cold-Start (P50)** | **3.21 us (`0.00321 ms`)** | N/A | N/A | N/A |
+| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256, 50 orders) | **6.270 ms** (`3.68 ms` isolate) | 12.896 ms | 36.331 ms | 64.775 ms |
+| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini` from `node_modules`) | **19.139 ms** (`15.89 ms` isolate) | 20.610 ms | 51.333 ms | 75.508 ms |
+| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk Write/Scan/Read/Unlink) | **11.425 ms** (`8.02 ms` isolate) | 13.488 ms | 43.511 ms | 67.315 ms |
+| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms` + Auth, 100 reqs) | **9.863 ms** (`8.09 ms` isolate) | 14.812 ms | 40.520 ms | 67.782 ms |
+| **Peak Memory Footprint: Disk I/O App (Max RSS)** | **11.50 MB (`11,776 KB`)** | 21.12 MB (`21,632 KB`) | 45.88 MB (`46,976 KB`) | 71.40 MB (`73,112 KB`) |
+| **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **12.62 MB (`12,928 KB`)** | 29.62 MB (`30,336 KB`) | 46.38 MB (`47,488 KB`) | 71.15 MB (`72,860 KB`) |
+| **1,000-Tenant MicroVM Isolate Cold-Start (Min)** | **3.13 us (`0.00313 ms`)** | N/A | N/A | N/A |
 
-Run the full Docker real-stack benchmark suite yourself:
+Run the full Docker folder-app benchmark suite yourself:
 
 ```powershell
 docker build -f docker-tests/Dockerfile -t slice-real-stack-bench .
-docker run --rm --privileged slice-real-stack-bench
+docker run --rm slice-real-stack-bench
 ```
 
 ---

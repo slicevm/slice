@@ -3,6 +3,7 @@
 **/*.rs.bk
 *.cas
 *.snap
+**/node_modules/
 /benchmarks/workloads/module_graph/generated
 /docs/raw_results_*.json
 .vscode

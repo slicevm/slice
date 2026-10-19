@@ -1410,6 +1410,9 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
     // `try `, `catch`, `switch `, `RegExp`, `Map`, `Set`, `Promise`, `Symbol`, `.some(`, `Math.round`)
     let uses_full_es_vm = source.contains("class ")
         || source.contains("this.")
+        || source.contains("var __slice_modules =")
+        || source.contains("node:")
+        || source.contains("createHash(")
         || source.contains("try ")
         || source.contains("try{")
         || source.contains("switch ")
@@ -1426,14 +1429,9 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         && !source.contains("while (true)")
         && !source.contains("while(true)")
     {
-        let module = BytecodeModule {
-            ops: vec![BytecodeOp::BoaFullEsVm { js_code: source }],
-            static_exports: HashMap::new(),
-        };
-        let mut bytes = Vec::with_capacity(256);
-        bytes.extend_from_slice(SNAPSHOT_MAGIC);
-        let payload = serde_json::to_vec(&module).unwrap_or_default();
-        bytes.extend_from_slice(&payload);
+        let mut bytes = Vec::with_capacity(8 + source.len());
+        bytes.extend_from_slice(b"SLICEBOA");
+        bytes.extend_from_slice(source.as_bytes());
         return bytes;
     }
 
@@ -1568,7 +1566,7 @@ impl SliceIsolate {
         }
     }
 
-    /// Executes pre-compiled `SLICESNP` bytecode directly from an in-memory or `mmap` CAS slice.
+    /// Executes pre-compiled `SLICESNP` or `SLICEBOA` bytecode directly from an in-memory or `mmap` CAS slice.
     pub fn execute_bytecode(
         &mut self,
         bytecode: &[u8],
@@ -1576,6 +1574,32 @@ impl SliceIsolate {
     ) -> Result<ExecutionMetrics, SandboxViolation> {
         let start = Instant::now();
         self.compartment.pkey_domain.enter_domain();
+
+        // Zero-copy fast path for SLICEBOA raw ECMAScript bundles
+        if bytecode.len() >= 8 && &bytecode[0..8] == b"SLICEBOA" {
+            let instantiate_ns = start.elapsed().as_nanos() as u64;
+            let exec_start = Instant::now();
+            self.compartment.consume_fuel(25)?;
+            self.current_tier = ExecutionTier::Tier1Baseline;
+            let js_code = std::str::from_utf8(&bytecode[8..]).unwrap_or_default();
+            let last_val = self.exec_boa_full_es_vm(js_code)?;
+            let exec_ns = exec_start.elapsed().as_nanos() as u64;
+            let total_ns = start.elapsed().as_nanos() as u64;
+            return Ok(ExecutionMetrics {
+                tenant_id: self.compartment.tenant_id.clone(),
+                highest_tier_reached: self.current_tier,
+                instantiate_time_ns: instantiate_ns,
+                execution_time_ns: exec_ns,
+                total_time_ns: total_ns,
+                fuel_consumed: self.compartment.fuel_consumed,
+                memory_used_bytes: self.compartment.memory_used_bytes,
+                pkey_domain: self.compartment.pkey_domain.pkey,
+                cas_modules_resolved: self.cas_modules_resolved,
+                os_stat_syscalls: 0,
+                stdout: self.stdout.clone(),
+                return_value: last_val.to_string(),
+            });
+        }
 
         let module: BytecodeModule = if bytecode.len() >= 8 && &bytecode[0..8] == SNAPSHOT_MAGIC {
             serde_json::from_slice(&bytecode[8..]).unwrap_or(BytecodeModule {
@@ -2462,11 +2486,13 @@ impl SliceIsolate {
     }
 
     /// Executes full ES2024+ JavaScript inside the production **Boa (`boa_engine`)** ECMAScript VM,
-    /// capturing `console.log` / `print` output and enforcing SES compartment limits.
+    /// capturing `console.log` / `print` output, providing native Rust I/O & SHA-256 host hooks,
+    /// and enforcing SES compartment limits.
     fn exec_boa_full_es_vm(&mut self, js_code: &str) -> Result<JsValue, SandboxViolation> {
         let mut ctx = boa_engine::Context::default();
+        register_slice_native_host_functions(&mut ctx);
 
-        // Install a lightweight stdout collector on globalThis (`console.log` & `print`)
+        // Install stdout collector and Node/WinterTC built-in modules (`node:fs`, `node:path`, `node:crypto`, `node:os`, `Buffer`, `process`)
         let prelude = r#"
 globalThis.__slice_stdout = [];
 globalThis.console = {
@@ -2483,6 +2509,141 @@ globalThis.console = {
     error: function() { globalThis.console.log.apply(null, arguments); }
 };
 globalThis.print = globalThis.console.log;
+
+var __fs_mod = {
+    readFileSync: function(p, _enc) { return globalThis.__slice_fs_read_file_sync(String(p)); },
+    writeFileSync: function(p, data) { return globalThis.__slice_fs_write_file_sync(String(p), String(data)); },
+    appendFileSync: function(p, data) { return globalThis.__slice_fs_append_file_sync(String(p), String(data)); },
+    existsSync: function(p) { return Boolean(globalThis.__slice_fs_exists_sync(String(p))); },
+    mkdirSync: function(p, _opts) { return globalThis.__slice_fs_mkdir_sync(String(p)); },
+    readdirSync: function(p) { return JSON.parse(globalThis.__slice_fs_readdir_sync(String(p))); },
+    statSync: function(p) {
+        return { size: globalThis.__slice_fs_stat_sync(String(p)) };
+    },
+    unlinkSync: function(p) { return globalThis.__slice_fs_rm_sync(String(p)); },
+    rmSync: function(p, _opts) { return globalThis.__slice_fs_rm_sync(String(p)); }
+};
+__fs_mod.default = __fs_mod;
+__fs_mod.__esModule = true;
+
+var __path_mod = {
+    sep: "/",
+    join: function() {
+        var out = "";
+        for (var i = 0; i < arguments.length; i++) {
+            var seg = String(arguments[i] || "");
+            if (!seg) continue;
+            if (seg.indexOf("\\") >= 0) seg = seg.split("\\").join("/");
+            while (out.length > 0 && seg.charCodeAt(0) === 47) seg = seg.slice(1);
+            while (i < arguments.length - 1 && seg.length > 0 && seg.charCodeAt(seg.length - 1) === 47) seg = seg.slice(0, -1);
+            if (!seg) continue;
+            out = out.length > 0 ? (out + "/" + seg) : seg;
+        }
+        return out || ".";
+    },
+    resolve: function() { return __path_mod.join.apply(null, arguments); },
+    basename: function(p, ext) {
+        var s = String(p);
+        if (s.indexOf("\\") >= 0) s = s.split("\\").join("/");
+        while (s.length > 1 && s.charCodeAt(s.length - 1) === 47) s = s.slice(0, -1);
+        var idx = s.lastIndexOf("/");
+        var base = idx >= 0 ? s.slice(idx + 1) : s;
+        if (ext && base.endsWith(ext)) return base.slice(0, base.length - ext.length);
+        return base;
+    },
+    dirname: function(p) {
+        var s = String(p);
+        if (s.indexOf("\\") >= 0) s = s.split("\\").join("/");
+        while (s.length > 1 && s.charCodeAt(s.length - 1) === 47) s = s.slice(0, -1);
+        var idx = s.lastIndexOf("/");
+        return idx > 0 ? s.slice(0, idx) : (idx === 0 ? "/" : ".");
+    },
+    extname: function(p) {
+        var b = __path_mod.basename(p);
+        var idx = b.lastIndexOf(".");
+        return idx > 0 ? b.slice(idx) : "";
+    }
+};
+__path_mod.default = __path_mod;
+__path_mod.__esModule = true;
+
+var __crypto_mod = {
+    createHash: function(_algo) {
+        var chunks = [];
+        return {
+            update: function(data) { chunks.push(String(data)); return this; },
+            digest: function(_enc) { return globalThis.__slice_crypto_sha256(chunks.join("")); }
+        };
+    },
+    createHmac: function(_algo, secret) {
+        var chunks = [String(secret), ":"];
+        return {
+            update: function(data) { chunks.push(String(data)); return this; },
+            digest: function(_enc) { return globalThis.__slice_crypto_sha256(chunks.join("")); }
+        };
+    }
+};
+__crypto_mod.default = __crypto_mod;
+__crypto_mod.__esModule = true;
+
+var __os_mod = {
+    tmpdir: function() { return globalThis.__slice_os_tmpdir(); },
+    platform: function() { return "linux"; },
+    arch: function() { return "x64"; },
+    EOL: "\n"
+};
+__os_mod.default = __os_mod;
+__os_mod.__esModule = true;
+
+var __util_mod = {
+    inspect: function(v) { return typeof v === "object" ? JSON.stringify(v) : String(v); },
+    deprecate: function(fn) { return fn; },
+    promisify: function(fn) { return fn; }
+};
+__util_mod.default = __util_mod;
+
+globalThis.Buffer = {
+    from: function(input, _enc) {
+        var s = typeof input === "string" ? input : String(input);
+        return {
+            length: s.length,
+            toString: function(_e) { return s; }
+        };
+    },
+    isBuffer: function(_b) { return false; },
+    byteLength: function(s) { return String(s).length; }
+};
+
+globalThis.process = {
+    env: { NODE_ENV: "production" },
+    cwd: function() { return "."; },
+    platform: "linux",
+    arch: "x64",
+    version: "v24.0.0",
+    versions: { node: "24.0.0" },
+    argv: ["slice"]
+};
+
+globalThis.__slice_builtins = {
+    "fs": __fs_mod,
+    "node:fs": __fs_mod,
+    "path": __path_mod,
+    "node:path": __path_mod,
+    "crypto": __crypto_mod,
+    "node:crypto": __crypto_mod,
+    "os": __os_mod,
+    "node:os": __os_mod,
+    "util": __util_mod,
+    "node:util": __util_mod,
+    "buffer": { Buffer: globalThis.Buffer, default: { Buffer: globalThis.Buffer } },
+    "node:buffer": { Buffer: globalThis.Buffer, default: { Buffer: globalThis.Buffer } },
+    "process": globalThis.process,
+    "node:process": globalThis.process
+};
+globalThis.__slice_cjs_require = function(id) {
+    if (globalThis.__slice_builtins[id]) return globalThis.__slice_builtins[id];
+    throw new Error("Module not found: " + id);
+};
 "#;
         let _ = ctx.eval(boa_engine::Source::from_bytes(prelude));
 
@@ -2521,6 +2682,272 @@ globalThis.print = globalThis.console.log;
             Err(err) => Ok(JsValue::Str(format!("Uncaught {}", err))),
         }
     }
+}
+
+fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_read_file_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            Ok(BoaVal::from(js_string!(content)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_write_file_sync"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let data = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if std::fs::write(&path, data.as_bytes()).is_err() {
+                if let Some(parent) = std::path::Path::new(&path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(&path, data.as_bytes());
+            }
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_append_file_sync"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            use std::io::Write;
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let data = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = f.write_all(data.as_bytes());
+            }
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_exists_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            Ok(BoaVal::from(std::path::Path::new(&path).exists()))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_mkdir_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let _ = std::fs::create_dir_all(&path);
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_readdir_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let mut entries = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(&path) {
+                for entry in rd.flatten() {
+                    entries.push(entry.file_name().to_string_lossy().to_string());
+                }
+            }
+            entries.sort();
+            let json = serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string());
+            Ok(BoaVal::from(js_string!(json)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_stat_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            Ok(BoaVal::from(size as f64))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_rm_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let p = std::path::Path::new(&path);
+            if p.is_dir() {
+                let _ = std::fs::remove_dir_all(p);
+            } else {
+                let _ = std::fs::remove_file(p);
+            }
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_os_tmpdir"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let tmp = std::env::temp_dir()
+                .to_string_lossy()
+                .replace('\\', "/");
+            Ok(BoaVal::from(js_string!(tmp)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_sha256"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let input = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let hex = sha256_hex(input.as_bytes());
+            Ok(BoaVal::from(js_string!(hex)))
+        }),
+    );
+}
+
+/// Pure-Rust FIPS-180-4 SHA-256 implementation for 100% deterministic `node:crypto` compatibility.
+fn sha256_hex(data: &[u8]) -> String {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+
+    let bit_len = (data.len() as u64) * 8;
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while (msg.len() % 64) != 56 {
+        msg.push(0x00);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in msg.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    format!(
+        "{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
+        h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]
+    )
 }
 
 fn js_value_to_json_string(val: &JsValue) -> String {
@@ -2591,8 +3018,14 @@ pub fn run_source_isolated(
     }
 }
 
-/// Disassembles a `SLICESNP` binary bytecode buffer into human-readable Tier-0/Tier-2 opcodes.
+/// Disassembles a `SLICESNP` or `SLICEBOA` binary bytecode buffer into human-readable opcodes.
 pub fn disassemble_bytecode(bytecode: &[u8]) -> Result<Vec<String>> {
+    if bytecode.len() >= 8 && &bytecode[0..8] == b"SLICEBOA" {
+        return Ok(vec![format!(
+            "0000  BOA_ES2024_VM   [Zero-Copy Oxc Transpiled JS: {} bytes]",
+            bytecode.len() - 8
+        )]);
+    }
     if bytecode.len() < 8 || &bytecode[0..8] != SNAPSHOT_MAGIC {
         bail!("Invalid SLICESNP bytecode header");
     }
