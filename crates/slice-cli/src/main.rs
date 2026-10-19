@@ -210,6 +210,7 @@ fn cmd_run(args: &[String]) -> Result<()> {
     let (mut caps, mut fuel_limit, mut mem_limit) = load_manifest_or_default();
     let mut quiet = false;
     let mut print_metrics = false;
+    let mut prewarm_pool = false;
     let mut target_opt: Option<String> = None;
 
     for arg in args {
@@ -231,6 +232,8 @@ fn cmd_run(args: &[String]) -> Result<()> {
             quiet = true;
         } else if arg == "--metrics" {
             print_metrics = true;
+        } else if arg == "--warm" {
+            prewarm_pool = true;
         } else if !arg.starts_with('-') && target_opt.is_none() {
             target_opt = Some(arg.clone());
         }
@@ -249,6 +252,10 @@ fn cmd_run(args: &[String]) -> Result<()> {
             }
         }
     };
+
+    if prewarm_pool {
+        SliceIsolate::prewarm_boa_pool(1);
+    }
 
     let path = Path::new(&target);
     let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps, fuel_limit, mem_limit);
@@ -505,6 +512,9 @@ console.log(route_res);
         let caps_clone = caps.clone();
 
         let server_thread = std::thread::spawn(move || -> Result<()> {
+            if bc_clone.starts_with(b"SLICEBOA") {
+                SliceIsolate::prewarm_boa_pool(1);
+            }
             if let Ok((stream, _)) = listener.accept() {
                 handle_http_microvm_request(stream, 1, &bc_clone, &caps_clone, fuel_limit, mem_limit)?;
             }
@@ -527,6 +537,10 @@ console.log(route_res);
         }
         println!("=========================================================================");
         return Ok(());
+    }
+
+    if bytecode.starts_with(b"SLICEBOA") {
+        SliceIsolate::prewarm_boa_pool(2);
     }
 
     let addr = format!("0.0.0.0:{}", port);

@@ -69,8 +69,9 @@ slice run ./docker-tests/apps/02-npm-ecosystem-suite --metrics
 # Pack an entire folder app (including transitive node_modules) into a 64-byte aligned BLAKE3 .cas archive
 slice pack ./docker-tests/apps/02-npm-ecosystem-suite ./bundle.cas
 
-# Execute the memory-mapped .cas bundle with 0 stat() syscalls
+# Execute the memory-mapped .cas bundle with 0 stat() syscalls (or pass --warm to pre-warm the thread-local Boa pool)
 slice run ./bundle.cas --metrics
+slice run ./bundle.cas --warm --metrics
 ```
 
 ### 4. Compile a Standalone Zero-Dependency Executable (`slice compile`)

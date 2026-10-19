@@ -186,12 +186,18 @@ measure_rss_kb "Deno (App 3: Disk I/O 10 Shards)"  deno run -A "$APP3_DIR/src/in
 measure_rss_kb "Node (App 3: Disk I/O 10 Shards)"  node "$APP3_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  7. SLICE INTERNAL ISOLATE TELEMETRY ON ALL 4 FOLDER APPS"
+echo "  7. SLICE INTERNAL ISOLATE TELEMETRY (COLD REALM VS WARM POOL)"
 echo "========================================================================="
-"$SLICE_BIN" run "/tmp/app1.cas" --metrics
-"$SLICE_BIN" run "/tmp/app2.cas" --metrics
-"$SLICE_BIN" run "/tmp/app3.cas" --metrics
-"$SLICE_BIN" run "/tmp/app4.cas" --metrics
+echo "  --- Cold Realm Telemetry ---"
+"$SLICE_BIN" run "/tmp/app1.cas" --quiet --metrics
+"$SLICE_BIN" run "/tmp/app2.cas" --quiet --metrics
+"$SLICE_BIN" run "/tmp/app3.cas" --quiet --metrics
+"$SLICE_BIN" run "/tmp/app4.cas" --quiet --metrics
+echo "  --- Pre-Warmed Boa Pool Telemetry (--warm) ---"
+"$SLICE_BIN" run "/tmp/app1.cas" --warm --quiet --metrics
+"$SLICE_BIN" run "/tmp/app2.cas" --warm --quiet --metrics
+"$SLICE_BIN" run "/tmp/app3.cas" --warm --quiet --metrics
+"$SLICE_BIN" run "/tmp/app4.cas" --warm --quiet --metrics
 
 echo "========================================================================="
 echo "  8. MICROVM SPEEDUP RETENTION CHECK (1,000 TENANT SWARM)"

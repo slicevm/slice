@@ -1404,6 +1404,12 @@ fn expr_to_dotted_chain(expr: &Expr) -> String {
 /// Combines **Oxc** production TypeScript transpilation, **Tier-0/Tier-2** fast-path SIMD intrinsics,
 /// and **Boa (`boa_engine`)** full-spec ES2024+ execution for classes, closures, RegExp, Map/Set, and OOP.
 pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
+    if raw_source.starts_with("var __slice_modules =") {
+        let mut bytes = Vec::with_capacity(8 + raw_source.len());
+        bytes.extend_from_slice(b"SLICEBOA");
+        bytes.extend_from_slice(raw_source.as_bytes());
+        return bytes;
+    }
     let source = strip_typescript_and_normalize(raw_source, true);
 
     // Check if the Oxc-transpiled code uses full ES2024+ OOP/runtime features (`class `, `new `,
@@ -2485,186 +2491,44 @@ impl SliceIsolate {
         }
     }
 
+    /// Pre-warms `count` full-ES2024+ `boa_engine::Context` realms on the current worker thread
+    /// with all native Rust host intrinsics (`__slice_console_log`, `__slice_path_join`, `__slice_fs_*`,
+    /// `__slice_crypto_sha256`, `__slice_os_tmpdir`) and the `node:*` module loader already evaluated.
+    pub fn prewarm_boa_pool(count: usize) {
+        BOA_CONTEXT_POOL.with(|pool| {
+            let mut pool_borrow = pool.borrow_mut();
+            while pool_borrow.len() < count {
+                pool_borrow.push(create_warm_boa_context());
+            }
+        });
+    }
+
+    /// Returns the number of pre-warmed `boa_engine::Context` realms currently available in the thread-local pool.
+    pub fn boa_pool_available() -> usize {
+        BOA_CONTEXT_POOL.with(|pool| pool.borrow().len())
+    }
+
     /// Executes full ES2024+ JavaScript inside the production **Boa (`boa_engine`)** ECMAScript VM,
-    /// capturing `console.log` / `print` output, providing native Rust I/O & SHA-256 host hooks,
-    /// and enforcing SES compartment limits.
+    /// reusing pre-warmed contexts from `BOA_CONTEXT_POOL`, capturing `console.log` / `print` output
+    /// via zero-eval native host hooks, and enforcing SES compartment limits.
     fn exec_boa_full_es_vm(&mut self, js_code: &str) -> Result<JsValue, SandboxViolation> {
-        let mut ctx = boa_engine::Context::default();
-        register_slice_native_host_functions(&mut ctx);
+        BOA_STDOUT.with(|out| out.borrow_mut().clear());
 
-        // Install stdout collector and Node/WinterTC built-in modules (`node:fs`, `node:path`, `node:crypto`, `node:os`, `Buffer`, `process`)
-        let prelude = r#"
-globalThis.__slice_stdout = [];
-globalThis.console = {
-    log: function() {
-        var parts = [];
-        for (var i = 0; i < arguments.length; i++) {
-            var a = arguments[i];
-            parts.push(typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a));
-        }
-        globalThis.__slice_stdout.push(parts.join(' '));
-    },
-    info: function() { globalThis.console.log.apply(null, arguments); },
-    warn: function() { globalThis.console.log.apply(null, arguments); },
-    error: function() { globalThis.console.log.apply(null, arguments); }
-};
-globalThis.print = globalThis.console.log;
+        let mut ctx = acquire_warm_boa_context();
+        let scoped_code = format!("{{\n{}\n}}", js_code);
+        let eval_res = ctx.eval(boa_engine::Source::from_bytes(scoped_code.as_bytes()));
 
-var __fs_mod = {
-    readFileSync: function(p, _enc) { return globalThis.__slice_fs_read_file_sync(String(p)); },
-    writeFileSync: function(p, data) { return globalThis.__slice_fs_write_file_sync(String(p), String(data)); },
-    appendFileSync: function(p, data) { return globalThis.__slice_fs_append_file_sync(String(p), String(data)); },
-    existsSync: function(p) { return Boolean(globalThis.__slice_fs_exists_sync(String(p))); },
-    mkdirSync: function(p, _opts) { return globalThis.__slice_fs_mkdir_sync(String(p)); },
-    readdirSync: function(p) { return JSON.parse(globalThis.__slice_fs_readdir_sync(String(p))); },
-    statSync: function(p) {
-        return { size: globalThis.__slice_fs_stat_sync(String(p)) };
-    },
-    unlinkSync: function(p) { return globalThis.__slice_fs_rm_sync(String(p)); },
-    rmSync: function(p, _opts) { return globalThis.__slice_fs_rm_sync(String(p)); }
-};
-__fs_mod.default = __fs_mod;
-__fs_mod.__esModule = true;
-
-var __path_mod = {
-    sep: "/",
-    join: function() {
-        var out = "";
-        for (var i = 0; i < arguments.length; i++) {
-            var seg = String(arguments[i] || "");
-            if (!seg) continue;
-            if (seg.indexOf("\\") >= 0) seg = seg.split("\\").join("/");
-            while (out.length > 0 && seg.charCodeAt(0) === 47) seg = seg.slice(1);
-            while (i < arguments.length - 1 && seg.length > 0 && seg.charCodeAt(seg.length - 1) === 47) seg = seg.slice(0, -1);
-            if (!seg) continue;
-            out = out.length > 0 ? (out + "/" + seg) : seg;
-        }
-        return out || ".";
-    },
-    resolve: function() { return __path_mod.join.apply(null, arguments); },
-    basename: function(p, ext) {
-        var s = String(p);
-        if (s.indexOf("\\") >= 0) s = s.split("\\").join("/");
-        while (s.length > 1 && s.charCodeAt(s.length - 1) === 47) s = s.slice(0, -1);
-        var idx = s.lastIndexOf("/");
-        var base = idx >= 0 ? s.slice(idx + 1) : s;
-        if (ext && base.endsWith(ext)) return base.slice(0, base.length - ext.length);
-        return base;
-    },
-    dirname: function(p) {
-        var s = String(p);
-        if (s.indexOf("\\") >= 0) s = s.split("\\").join("/");
-        while (s.length > 1 && s.charCodeAt(s.length - 1) === 47) s = s.slice(0, -1);
-        var idx = s.lastIndexOf("/");
-        return idx > 0 ? s.slice(0, idx) : (idx === 0 ? "/" : ".");
-    },
-    extname: function(p) {
-        var b = __path_mod.basename(p);
-        var idx = b.lastIndexOf(".");
-        return idx > 0 ? b.slice(idx) : "";
-    }
-};
-__path_mod.default = __path_mod;
-__path_mod.__esModule = true;
-
-var __crypto_mod = {
-    createHash: function(_algo) {
-        var chunks = [];
-        return {
-            update: function(data) { chunks.push(String(data)); return this; },
-            digest: function(_enc) { return globalThis.__slice_crypto_sha256(chunks.join("")); }
-        };
-    },
-    createHmac: function(_algo, secret) {
-        var chunks = [String(secret), ":"];
-        return {
-            update: function(data) { chunks.push(String(data)); return this; },
-            digest: function(_enc) { return globalThis.__slice_crypto_sha256(chunks.join("")); }
-        };
-    }
-};
-__crypto_mod.default = __crypto_mod;
-__crypto_mod.__esModule = true;
-
-var __os_mod = {
-    tmpdir: function() { return globalThis.__slice_os_tmpdir(); },
-    platform: function() { return "linux"; },
-    arch: function() { return "x64"; },
-    EOL: "\n"
-};
-__os_mod.default = __os_mod;
-__os_mod.__esModule = true;
-
-var __util_mod = {
-    inspect: function(v) { return typeof v === "object" ? JSON.stringify(v) : String(v); },
-    deprecate: function(fn) { return fn; },
-    promisify: function(fn) { return fn; }
-};
-__util_mod.default = __util_mod;
-
-globalThis.Buffer = {
-    from: function(input, _enc) {
-        var s = typeof input === "string" ? input : String(input);
-        return {
-            length: s.length,
-            toString: function(_e) { return s; }
-        };
-    },
-    isBuffer: function(_b) { return false; },
-    byteLength: function(s) { return String(s).length; }
-};
-
-globalThis.process = {
-    env: { NODE_ENV: "production" },
-    cwd: function() { return "."; },
-    platform: "linux",
-    arch: "x64",
-    version: "v24.0.0",
-    versions: { node: "24.0.0" },
-    argv: ["slice"]
-};
-
-globalThis.__slice_builtins = {
-    "fs": __fs_mod,
-    "node:fs": __fs_mod,
-    "path": __path_mod,
-    "node:path": __path_mod,
-    "crypto": __crypto_mod,
-    "node:crypto": __crypto_mod,
-    "os": __os_mod,
-    "node:os": __os_mod,
-    "util": __util_mod,
-    "node:util": __util_mod,
-    "buffer": { Buffer: globalThis.Buffer, default: { Buffer: globalThis.Buffer } },
-    "node:buffer": { Buffer: globalThis.Buffer, default: { Buffer: globalThis.Buffer } },
-    "process": globalThis.process,
-    "node:process": globalThis.process
-};
-globalThis.__slice_cjs_require = function(id) {
-    if (globalThis.__slice_builtins[id]) return globalThis.__slice_builtins[id];
-    throw new Error("Module not found: " + id);
-};
-globalThis.require = globalThis.__slice_cjs_require;
-"#;
-        let _ = ctx.eval(boa_engine::Source::from_bytes(prelude));
-
-        let eval_res = ctx.eval(boa_engine::Source::from_bytes(js_code));
-
-        // Harvest captured stdout lines from globalThis.__slice_stdout
-        if let Ok(logs_val) = ctx.eval(boa_engine::Source::from_bytes(
-            "globalThis.__slice_stdout.join('\\n')",
-        )) {
-            if let Ok(logs_str) = logs_val.to_string(&mut ctx) {
-                let s = logs_str.to_std_string_escaped();
-                if !s.is_empty() {
-                    for line in s.lines() {
-                        self.stdout.push(line.to_string());
-                    }
+        // Harvest captured stdout lines directly from thread-local Rust Vec<String> (zero second eval!)
+        BOA_STDOUT.with(|out| {
+            let mut captured = out.borrow_mut();
+            for line in captured.drain(..) {
+                for subline in line.lines() {
+                    self.stdout.push(subline.to_string());
                 }
             }
-        }
+        });
 
-        match eval_res {
+        let result = match eval_res {
             Ok(val) => {
                 if val.is_undefined() {
                     Ok(JsValue::Undefined)
@@ -2681,12 +2545,226 @@ globalThis.require = globalThis.__slice_cjs_require;
                 }
             }
             Err(err) => Ok(JsValue::Str(format!("Uncaught {}", err))),
-        }
+        };
+
+        release_warm_boa_context(ctx);
+        result
     }
+}
+
+thread_local! {
+    static BOA_STDOUT: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static BOA_CONTEXT_POOL: std::cell::RefCell<std::mem::ManuallyDrop<Vec<boa_engine::Context>>> =
+        const { std::cell::RefCell::new(std::mem::ManuallyDrop::new(Vec::new())) };
+}
+
+fn acquire_warm_boa_context() -> boa_engine::Context {
+    BOA_CONTEXT_POOL
+        .with(|pool| pool.borrow_mut().pop())
+        .unwrap_or_else(create_warm_boa_context)
+}
+
+fn release_warm_boa_context(ctx: boa_engine::Context) {
+    BOA_CONTEXT_POOL.with(|pool| {
+        let mut p = pool.borrow_mut();
+        if p.len() < 8 {
+            p.push(ctx);
+        }
+    });
+}
+
+fn create_warm_boa_context() -> boa_engine::Context {
+    let mut ctx = boa_engine::Context::default();
+    register_slice_native_host_functions(&mut ctx);
+
+    // Compact, lazy-initialized Node/WinterTC built-in loader (`node:fs`, `node:path`, `node:crypto`, `node:os`, `Buffer`, `process`)
+    const PRELUDE: &str = r#"
+globalThis.console = {
+    log: function(a) {
+        if (arguments.length === 1 && typeof a === 'string') {
+            return globalThis.__slice_console_log(a);
+        }
+        var parts = [];
+        for (var i = 0; i < arguments.length; i++) {
+            var v = arguments[i];
+            parts.push(typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v));
+        }
+        globalThis.__slice_console_log(parts.join(' '));
+    },
+    info: function() { globalThis.console.log.apply(null, arguments); },
+    warn: function() { globalThis.console.log.apply(null, arguments); },
+    error: function() { globalThis.console.log.apply(null, arguments); }
+};
+globalThis.print = globalThis.console.log;
+globalThis.process = {
+    env: { NODE_ENV: "production" },
+    cwd: function() { return "."; },
+    platform: "linux",
+    arch: "x64",
+    version: "v24.0.0",
+    versions: { node: "24.0.0" },
+    argv: ["slice"]
+};
+globalThis.Buffer = {
+    from: function(input) {
+        var s = typeof input === "string" ? input : String(input);
+        return { length: s.length, toString: function() { return s; } };
+    },
+    isBuffer: function() { return false; },
+    byteLength: function(s) { return String(s).length; }
+};
+globalThis.__slice_builtins = Object.create(null);
+globalThis.__slice_cjs_require = function(id) {
+    var b = globalThis.__slice_builtins;
+    if (b[id]) return b[id];
+    if (id === "crypto" || id === "node:crypto") {
+        var m = {
+            createHash: function() {
+                var c = "";
+                return {
+                    update: function(d) { c += String(d); return this; },
+                    digest: function() { return globalThis.__slice_crypto_sha256(c); }
+                };
+            },
+            createHmac: function(_a, secret) {
+                var c = String(secret) + ":";
+                return {
+                    update: function(d) { c += String(d); return this; },
+                    digest: function() { return globalThis.__slice_crypto_sha256(c); }
+                };
+            }
+        };
+        m.default = m; m.__esModule = true;
+        return (b["crypto"] = b["node:crypto"] = m);
+    }
+    if (id === "fs" || id === "node:fs") {
+        var m = {
+            readFileSync: function(p) { return globalThis.__slice_fs_read_file_sync(String(p)); },
+            writeFileSync: function(p, d) { return globalThis.__slice_fs_write_file_sync(String(p), String(d)); },
+            appendFileSync: function(p, d) { return globalThis.__slice_fs_append_file_sync(String(p), String(d)); },
+            existsSync: function(p) { return Boolean(globalThis.__slice_fs_exists_sync(String(p))); },
+            mkdirSync: function(p) { return globalThis.__slice_fs_mkdir_sync(String(p)); },
+            readdirSync: function(p) { return JSON.parse(globalThis.__slice_fs_readdir_sync(String(p))); },
+            statSync: function(p) { return { size: globalThis.__slice_fs_stat_sync(String(p)) }; },
+            unlinkSync: function(p) { return globalThis.__slice_fs_rm_sync(String(p)); },
+            rmSync: function(p) { return globalThis.__slice_fs_rm_sync(String(p)); }
+        };
+        m.default = m; m.__esModule = true;
+        return (b["fs"] = b["node:fs"] = m);
+    }
+    if (id === "path" || id === "node:path") {
+        var m = {
+            sep: "/",
+            join: function() { return globalThis.__slice_path_join.apply(null, arguments); },
+            resolve: function() { return globalThis.__slice_path_join.apply(null, arguments); },
+            basename: function(p, ext) {
+                var s = String(p).replace(/\\/g, "/").replace(/\/+$/, "");
+                var i = s.lastIndexOf("/");
+                var base = i >= 0 ? s.slice(i + 1) : s;
+                return (ext && base.endsWith(ext)) ? base.slice(0, base.length - ext.length) : base;
+            },
+            dirname: function(p) {
+                var s = String(p).replace(/\\/g, "/").replace(/\/+$/, "");
+                var i = s.lastIndexOf("/");
+                return i > 0 ? s.slice(0, i) : (i === 0 ? "/" : ".");
+            },
+            extname: function(p) {
+                var base = m.basename(p);
+                var i = base.lastIndexOf(".");
+                return i > 0 ? base.slice(i) : "";
+            }
+        };
+        m.default = m; m.__esModule = true;
+        return (b["path"] = b["node:path"] = m);
+    }
+    if (id === "os" || id === "node:os") {
+        var m = {
+            tmpdir: function() { return globalThis.__slice_os_tmpdir(); },
+            platform: function() { return "linux"; },
+            arch: function() { return "x64"; },
+            EOL: "\n"
+        };
+        m.default = m; m.__esModule = true;
+        return (b["os"] = b["node:os"] = m);
+    }
+    if (id === "util" || id === "node:util") {
+        var m = {
+            inspect: function(v) { return typeof v === "object" ? JSON.stringify(v) : String(v); },
+            deprecate: function(fn) { return fn; },
+            promisify: function(fn) { return fn; }
+        };
+        m.default = m;
+        return (b["util"] = b["node:util"] = m);
+    }
+    if (id === "buffer" || id === "node:buffer") {
+        var m = { Buffer: globalThis.Buffer, default: { Buffer: globalThis.Buffer } };
+        return (b["buffer"] = b["node:buffer"] = m);
+    }
+    if (id === "process" || id === "node:process") {
+        return (b["process"] = b["node:process"] = globalThis.process);
+    }
+    throw new Error("Module not found: " + id);
+};
+globalThis.require = globalThis.__slice_cjs_require;
+"#;
+    let _ = ctx.eval(boa_engine::Source::from_bytes(PRELUDE));
+    ctx
 }
 
 fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
     use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_console_log"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let line = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            BOA_STDOUT.with(|out| out.borrow_mut().push(line));
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_path_join"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let mut out = String::with_capacity(64);
+            for (idx, arg) in args.iter().enumerate() {
+                let s = arg.to_string(context)?.to_std_string_escaped();
+                if s.is_empty() {
+                    continue;
+                }
+                let normalized = if s.contains('\\') {
+                    s.replace('\\', "/")
+                } else {
+                    s
+                };
+                let mut seg = normalized.as_str();
+                if !out.is_empty() {
+                    seg = seg.trim_start_matches('/');
+                }
+                if idx + 1 < args.len() && seg.len() > 1 {
+                    seg = seg.trim_end_matches('/');
+                }
+                if seg.is_empty() {
+                    continue;
+                }
+                if !out.is_empty() && !out.ends_with('/') {
+                    out.push('/');
+                }
+                out.push_str(seg);
+            }
+            if out.is_empty() {
+                out.push('.');
+            }
+            Ok(BoaVal::from(js_string!(out)))
+        }),
+    );
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_fs_read_file_sync"),
@@ -3279,5 +3357,51 @@ console.log(JSON.stringify({ match: readBack === digest, size: statSize, prefix8
             iso5.execute_bytecode(&compile_source_to_bytecode("while (true) {}"), None),
             Err(SandboxViolation::CpuFuelExhausted { .. })
         ));
+    }
+
+    #[test]
+    fn test_warm_boa_context_pool_speedup_and_reuse() {
+        SliceIsolate::prewarm_boa_pool(2);
+        assert!(SliceIsolate::boa_pool_available() >= 2);
+
+        let ts_code = r#"
+import * as crypto from "node:crypto";
+import * as path from "node:path";
+
+class FastEdgeWorker {
+    public compute(route: string): string {
+        const normalized = path.join("/v1/edge", route, "check");
+        const sig = crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 12);
+        return normalized + ":" + sig;
+    }
+}
+
+const w = new FastEdgeWorker();
+console.log(w.compute("checkout"));
+"#;
+        let bundled = slice_cas::strip_typescript_and_normalize(ts_code, true);
+        let bc = compile_source_to_bytecode(&bundled);
+
+        let mut isolate = SliceIsolate::spawn(
+            "warm-pool-tenant",
+            1,
+            CapabilityToken::pure_compute(),
+            10_000_000,
+            4 * 1024 * 1024,
+        );
+        let m1 = isolate.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(m1.stdout[0], "/v1/edge/checkout/check:6d3e872e9820");
+
+        // Second execution reuses the warm Boa realm returned to BOA_CONTEXT_POOL
+        let mut isolate2 = SliceIsolate::spawn(
+            "warm-pool-tenant-2",
+            2,
+            CapabilityToken::pure_compute(),
+            10_000_000,
+            4 * 1024 * 1024,
+        );
+        let m2 = isolate2.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(m2.stdout[0], "/v1/edge/checkout/check:6d3e872e9820");
+        assert!(SliceIsolate::boa_pool_available() >= 2);
     }
 }

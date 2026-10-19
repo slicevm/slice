@@ -3,7 +3,9 @@
 //! Replaces readiness-based `libuv` thread pools with lockless Submission Queue (SQ)
 //! and Completion Queue (CQ) rings backed by pre-registered, page-aligned fixed buffers.
 
-use anyhow::{bail, Result};
+#[cfg(target_os = "windows")]
+use anyhow::bail;
+use anyhow::Result;
 use std::collections::VecDeque;
 
 pub const DEFAULT_RING_ENTRIES: u32 = 256;

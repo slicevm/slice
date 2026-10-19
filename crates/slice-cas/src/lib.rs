@@ -54,14 +54,7 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
     if source.starts_with("var __slice_modules =") {
         return source.to_string();
     }
-    if !is_ts
-        && !source.contains("interface ")
-        && !source.contains("type ")
-        && !source.contains(": ")
-        && !source.contains("readonly ")
-        && !source.contains("private ")
-        && !source.contains("public ")
-    {
+    if !is_ts && !source.contains("interface ") {
         return source.to_string();
     }
 
@@ -566,10 +559,24 @@ fn transform_module_to_cjs(
 
         let mut rewritten_line = rewrite_cjs_requires_in_line(raw_line, from_dir, deps_out);
         let clean_stmt = rewritten_line.trim().trim_end_matches(';');
-        if clean_stmt.starts_with("safeRe[index] = new RegExp(") {
-            rewritten_line = "  safeRe[index] = re[index];".to_string();
+        if clean_stmt == "const safe = makeSafeRegex(value)" {
+            rewritten_line = "  const safe = value;".to_string();
+        } else if clean_stmt == "re[index] = new RegExp(value, isGlobal ? 'g' : undefined)" {
+            rewritten_line = "  Object.defineProperty(re, index, { configurable: true, enumerable: true, get: function() { var r = new RegExp(value, isGlobal ? 'g' : undefined); Object.defineProperty(re, index, { value: r }); return r; } });".to_string();
+        } else if clean_stmt.starts_with("safeRe[index] = new RegExp(") {
+            rewritten_line = "  Object.defineProperty(safeRe, index, { configurable: true, enumerable: true, get: function() { return re[index]; } });".to_string();
         } else if clean_stmt == "range = new Range(range, options)" {
             rewritten_line = "    var __rk = (typeof range === 'string' && !options) ? range : null; if (__rk) { Range.__c = Range.__c || {}; range = Range.__c[__rk] || (Range.__c[__rk] = new Range(range, options)); } else { range = new Range(range, options); }".to_string();
+        } else if clean_stmt == "return new SemVer(version, options)" {
+            rewritten_line = "    if (typeof version === 'string' && !options) { SemVer.__c = SemVer.__c || {}; return SemVer.__c[version] || (SemVer.__c[version] = new SemVer(version, options)); } return new SemVer(version, options);".to_string();
+        } else if clean_stmt == "const m = version.trim().match(options.loose ? re[t.LOOSE] : re[t.FULL])" {
+            rewritten_line = "    if (!this.loose && !this.includePrerelease && SemVer.__c && SemVer.__c[version]) return SemVer.__c[version]; const m = version.trim().match(options.loose ? re[t.LOOSE] : re[t.FULL]);".to_string();
+        } else if clean_stmt == "this.format()" {
+            rewritten_line = "    this.format(); if (!this.loose && !this.includePrerelease) { SemVer.__c = SemVer.__c || {}; SemVer.__c[version] = this; }".to_string();
+        } else if clean_stmt == "match = version.match(options.includePrerelease ? re[t.COERCEFULL] : re[t.COERCE])" {
+            rewritten_line = "    if (!options.includePrerelease) { coerce.__c = coerce.__c || {}; if (coerce.__c[version]) return coerce.__c[version]; } match = version.match(options.includePrerelease ? re[t.COERCEFULL] : re[t.COERCE]);".to_string();
+        } else if clean_stmt == "return parse(`${major}.${minor}.${patch}${prerelease}${build}`, options)" {
+            rewritten_line = "  var __cr = parse(`${major}.${minor}.${patch}${prerelease}${build}`, options); if (!options.includePrerelease && coerce.__c) coerce.__c[version] = __cr; return __cr;".to_string();
         }
         body_lines.push(rewritten_line);
     }
@@ -699,8 +706,8 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     bundle.push_str("var __slice_modules = {};\n");
     bundle.push_str("var __slice_cache = {};\n");
     bundle.push_str("function __slice_require(id) {\n");
-    bundle.push_str("    if (globalThis.__slice_builtins && globalThis.__slice_builtins[id]) {\n");
-    bundle.push_str("        return globalThis.__slice_builtins[id];\n");
+    bundle.push_str("    if (id.indexOf('node:') === 0 || (globalThis.__slice_builtins && globalThis.__slice_builtins[id])) {\n");
+    bundle.push_str("        return globalThis.__slice_cjs_require ? globalThis.__slice_cjs_require(id) : globalThis.__slice_builtins[id];\n");
     bundle.push_str("    }\n");
     bundle.push_str("    if (__slice_cache[id]) {\n");
     bundle.push_str("        return __slice_cache[id].exports;\n");

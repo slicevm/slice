@@ -145,23 +145,24 @@ All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 4
 
 ### 5.1 Execution Latency Across All 4 Folder Applications (Linux Docker `x86_64`, 20 Runs)
 
-| Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec | Bun `v1.4.3` | Deno `v2.9.7` | Node.js `v26.12.0` | Speedup vs Node.js | Speedup vs Bun |
+| Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.3` | Deno `v2.9.7` | Node.js `v26.12.0` | Speedup vs Node.js | Speedup vs Bun |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256) | **6.270 ms** (Avg 6.601 ms) | **3.684 ms** (`0.24 us` init) | 12.896 ms | 36.331 ms | 64.775 ms | **10.33x faster** | **2.06x faster** |
-| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **19.139 ms** (Avg 20.268 ms) | **15.895 ms** (`6.37 us` init) | 20.610 ms | 51.333 ms | 75.508 ms | **3.95x faster** | **1.08x faster** |
-| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk I/O) | **11.425 ms** (Avg 12.303 ms) | **8.020 ms** (`0.23 us` init) | 13.488 ms | 43.511 ms | 67.315 ms | **5.89x faster** | **1.18x faster** |
-| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms`) | **9.863 ms** (Avg 10.389 ms) | **8.090 ms** (`0.26 us` init) | 14.812 ms | 40.520 ms | 67.782 ms | **6.87x faster** | **1.50x faster** |
+| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256) | **6.207 ms** (Avg 6.609 ms) | **3.718 ms / 1.877 ms** (`0.21 us` init) | 13.548 ms | 36.492 ms | 64.485 ms | **10.39x faster** | **2.18x faster** |
+| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **17.825 ms** (Avg 18.803 ms) | **15.828 ms / 14.422 ms** (`5.42 us` init) | 20.577 ms | 52.546 ms | 78.095 ms | **4.38x faster** | **1.15x faster** |
+| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk I/O) | **10.658 ms** (Avg 11.373 ms) | **8.240 ms / 6.598 ms** (`0.26 us` init) | 13.490 ms | 53.626 ms | 64.072 ms | **6.01x faster** | **1.27x faster** |
+| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms`) | **9.517 ms** (Avg 10.381 ms) | **6.997 ms / 5.472 ms** (`0.29 us` init) | 14.607 ms | 41.594 ms | 67.650 ms | **7.11x faster** | **1.53x faster** |
 
 ### 5.2 Peak Memory Footprint on External NPM & Disk I/O Apps (`Max RSS` via `/usr/bin/time -v`)
 
 | Runtime & Folder Application | Peak Memory (Max RSS KB) | Peak Memory (MB) | Memory Advantage vs Node.js `v26.12.0` |
 | :--- | :--- | :--- | :--- |
 | **Slice (`03-disk-io-log-pipeline`: 10 Shards Disk I/O)** | **11,776 KB** | **11.50 MB** | **6.21x less memory** |
-| **Slice (`02-npm-ecosystem-suite`: `semver`+`ms`+`ini`)** | **12,928 KB** | **12.62 MB** | **5.64x less memory** |
-| Bun `v1.4.3` (`03-disk-io-log-pipeline`) | 21,632 KB | 21.12 MB | 3.38x less memory |
-| Bun `v1.4.3` (`02-npm-ecosystem-suite`) | 30,336 KB | 29.62 MB | 2.40x less memory |
-| Deno `v2.9.7` (`03-disk-io-log-pipeline`) | 46,976 KB | 45.88 MB | 1.56x less memory |
-| Deno `v2.9.7` (`02-npm-ecosystem-suite`) | 47,488 KB | 46.38 MB | 1.53x less memory |
-| Node.js `v26.12.0` (`02-npm-ecosystem-suite`) | 72,860 KB | 71.15 MB | 1.00x |
-| Node.js `v26.12.0` (`03-disk-io-log-pipeline`) | 73,112 KB | 71.40 MB | 1.00x |
+| **Slice (`02-npm-ecosystem-suite`: `semver`+`ms`+`ini`)** | **12,160 KB** | **11.88 MB** | **5.98x less memory** |
+| Bun `v1.4.3` (`03-disk-io-log-pipeline`) | 21,888 KB | 21.38 MB | 3.34x less memory |
+| Bun `v1.4.3` (`02-npm-ecosystem-suite`) | 30,464 KB | 29.75 MB | 2.39x less memory |
+| Deno `v2.9.7` (`03-disk-io-log-pipeline`) | 46,588 KB | 45.50 MB | 1.57x less memory |
+| Deno `v2.9.7` (`02-npm-ecosystem-suite`) | 47,744 KB | 46.62 MB | 1.52x less memory |
+| Node.js `v26.12.0` (`02-npm-ecosystem-suite`) | 72,732 KB | 71.03 MB | 1.00x |
+| Node.js `v26.12.0` (`03-disk-io-log-pipeline`) | 72,988 KB | 71.28 MB | 1.00x |
+
 
