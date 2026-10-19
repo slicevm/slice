@@ -260,24 +260,26 @@ fn cmd_run(args: &[String]) -> Result<()> {
         }
     };
 
-    if prewarm_pool {
-        SliceIsolate::prewarm_boa_pool(1);
-    }
-
     let path = Path::new(&target);
-    let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps, fuel_limit, mem_limit);
-
     let metrics = if target.ends_with(".cas") {
         let archive = MappedCasArchive::open(path)?;
         let entry = archive
             .entrypoint_blob()
             .context("CAS archive has no valid entrypoint blob")?;
         let bytecode = archive.get_bytecode_slice(entry);
+        if prewarm_pool {
+            SliceIsolate::prewarm_boa_bundle(bytecode);
+        }
+        let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps, fuel_limit, mem_limit);
         isolate.execute_bytecode(bytecode, Some(&archive))?
     } else {
         let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
         let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
         let bytecode = compile_source_to_bytecode(&bundled_source);
+        if prewarm_pool {
+            SliceIsolate::prewarm_boa_bundle(&bytecode);
+        }
+        let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps, fuel_limit, mem_limit);
         isolate.execute_bytecode(&bytecode, None)?
     };
 

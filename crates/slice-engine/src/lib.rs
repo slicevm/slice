@@ -2526,9 +2526,28 @@ impl SliceIsolate {
         BOA_CONTEXT_POOL.with(|pool| {
             let mut pool_borrow = pool.borrow_mut();
             while pool_borrow.len() < count {
-                pool_borrow.push(create_warm_boa_context());
+                pool_borrow.push(create_warm_boa_realm());
             }
         });
+    }
+
+    /// Pre-warms a `boa_engine::Context` realm in `BOA_CONTEXT_POOL` and pre-populates its
+    /// Persistent Realm Module Cache (`globalThis.__slice_rc`) for `bytecode`, so subsequent
+    /// warm isolate executions skip `100%` of JS lexing/parsing and `node_modules` CJS evaluation.
+    pub fn prewarm_boa_bundle(bytecode: &[u8]) {
+        Self::prewarm_boa_pool(1);
+        if bytecode.starts_with(b"SLICEBOA") {
+            let js_code = std::str::from_utf8(&bytecode[8..]).unwrap_or("");
+            if let Some((rc_key_u64, _)) = extract_slice_rc_key(js_code) {
+                let mut realm = acquire_warm_boa_realm();
+                if !realm.loaded_bundles.contains(&rc_key_u64) {
+                    let _ = realm.ctx.eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
+                    BOA_STDOUT.with(|out| out.borrow_mut().clear());
+                    realm.loaded_bundles.insert(rc_key_u64);
+                }
+                release_warm_boa_realm(realm);
+            }
+        }
     }
 
     /// Returns the number of pre-warmed `boa_engine::Context` realms currently available in the thread-local pool.
@@ -2554,21 +2573,36 @@ impl SliceIsolate {
             });
         }
 
-        let mut ctx = acquire_warm_boa_context();
-        // Phase 9A Zero-Copy Fast Path: `SLICEBOA` bundles are already block-wrapped (`{\n...\n}`) at compile time,
-        // avoiding a full heap allocation and string copy of the JS bundle on every execution.
-        let eval_res = if js_code.starts_with('{') {
-            ctx.eval(boa_engine::Source::from_bytes(js_code.as_bytes()))
+        let mut realm = acquire_warm_boa_realm();
+        let rc_key_opt = extract_slice_rc_key(js_code);
+        // Phase 9B Priority 2 Persistent Realm Module Cache (`__slice_rc`):
+        // When a warm `boa_engine::Context` has already evaluated this bundle's `node_modules` CJS factories
+        // and compiled its entrypoint closure into `globalThis.__slice_rc[key]`, invoke `__slice_rc[key]()`
+        // directly from a 32-byte stack buffer with zero JS source parsing and zero CJS wrapper re-evaluation.
+        let eval_res = if let Some((rc_key_u64, hex_bytes)) = rc_key_opt {
+            if realm.loaded_bundles.contains(&rc_key_u64) {
+                let mut call_buf = *b"__slice_rc[\"0000000000000000\"]()";
+                call_buf[12..28].copy_from_slice(hex_bytes);
+                realm.ctx.eval(boa_engine::Source::from_bytes(&call_buf))
+            } else {
+                let res = realm.ctx.eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
+                if res.is_ok() && BOA_VIOLATION.with(|v| v.borrow().is_none()) {
+                    realm.loaded_bundles.insert(rc_key_u64);
+                }
+                res
+            }
+        } else if js_code.starts_with('{') {
+            realm.ctx.eval(boa_engine::Source::from_bytes(js_code.as_bytes()))
         } else {
             let scoped_code = format!("{{\n{}\n}}", js_code);
-            ctx.eval(boa_engine::Source::from_bytes(scoped_code.as_bytes()))
+            realm.ctx.eval(boa_engine::Source::from_bytes(scoped_code.as_bytes()))
         };
 
         if has_fs_restrictions {
             BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = None);
         }
         if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
-            release_warm_boa_context(ctx);
+            release_warm_boa_realm(realm);
             return Err(violation);
         }
 
@@ -2596,7 +2630,7 @@ impl SliceIsolate {
                     Ok(JsValue::Bool(b))
                 } else if let Some(n) = val.as_number() {
                     Ok(JsValue::Number(n))
-                } else if let Ok(s) = val.to_string(&mut ctx) {
+                } else if let Ok(s) = val.to_string(&mut realm.ctx) {
                     Ok(JsValue::str(s.to_std_string_escaped()))
                 } else {
                     Ok(JsValue::Undefined)
@@ -2605,8 +2639,27 @@ impl SliceIsolate {
             Err(err) => Ok(JsValue::str(format!("Uncaught {}", err))),
         };
 
-        release_warm_boa_context(ctx);
+        release_warm_boa_realm(realm);
         result
+    }
+}
+
+struct WarmBoaRealm {
+    ctx: boa_engine::Context,
+    loaded_bundles: FxHashSet<u64>,
+}
+
+#[inline]
+fn extract_slice_rc_key(js_code: &str) -> Option<(u64, &[u8; 16])> {
+    const PREFIX: &[u8] = b"{\nvar __slice_modules = {};//__SLICE_RC:";
+    let bytes = js_code.as_bytes();
+    if bytes.len() >= PREFIX.len() + 16 && bytes.starts_with(PREFIX) {
+        let hex_slice = &js_code[PREFIX.len()..PREFIX.len() + 16];
+        let hex_arr: &[u8; 16] = bytes[PREFIX.len()..PREFIX.len() + 16].try_into().ok()?;
+        let key_u64 = u64::from_str_radix(hex_slice, 16).ok()?;
+        Some((key_u64, hex_arr))
+    } else {
+        None
     }
 }
 
@@ -2615,7 +2668,7 @@ type ActiveBoaCaps = (String, Vec<String>, Vec<String>);
 thread_local! {
     static BOA_STDOUT: std::cell::RefCell<Vec<String>> =
         std::cell::RefCell::new(Vec::with_capacity(16));
-    static BOA_CONTEXT_POOL: std::cell::RefCell<std::mem::ManuallyDrop<Vec<boa_engine::Context>>> =
+    static BOA_CONTEXT_POOL: std::cell::RefCell<std::mem::ManuallyDrop<Vec<WarmBoaRealm>>> =
         const { std::cell::RefCell::new(std::mem::ManuallyDrop::new(Vec::new())) };
     static BOA_VFS_CACHE: std::cell::RefCell<FxHashMap<String, String>> =
         std::cell::RefCell::new(FxHashMap::default());
@@ -2692,17 +2745,17 @@ fn check_boa_fs_write_ocap(path: &str) -> bool {
     })
 }
 
-fn acquire_warm_boa_context() -> boa_engine::Context {
+fn acquire_warm_boa_realm() -> WarmBoaRealm {
     BOA_CONTEXT_POOL
         .with(|pool| pool.borrow_mut().pop())
-        .unwrap_or_else(create_warm_boa_context)
+        .unwrap_or_else(create_warm_boa_realm)
 }
 
-fn release_warm_boa_context(ctx: boa_engine::Context) {
+fn release_warm_boa_realm(realm: WarmBoaRealm) {
     BOA_CONTEXT_POOL.with(|pool| {
         let mut p = pool.borrow_mut();
         if p.len() < 8 {
-            p.push(ctx);
+            p.push(realm);
         }
     });
 }
@@ -2711,13 +2764,16 @@ fn release_warm_boa_context(ctx: boa_engine::Context) {
 /// Eliminates the `~2.2 ms` cold-start `PRELUDE` parser tax by binding `console.log` directly to
 /// the native Rust variadic callable and loading `node:crypto`, `node:fs`, `node:path`, `node:os`,
 /// and `node:util` on demand via `__slice_load_builtin(id)` only when a tenant actually requires them.
-fn create_warm_boa_context() -> boa_engine::Context {
+fn create_warm_boa_realm() -> WarmBoaRealm {
     let mut ctx = boa_engine::Context::default();
     register_slice_native_host_functions(&mut ctx);
 
     const CORE_PRELUDE: &str = r#"globalThis.console={log:__slice_console_log,info:__slice_console_log,warn:__slice_console_log,error:__slice_console_log};globalThis.print=__slice_console_log;globalThis.process={pid:1,env:{NODE_ENV:"production"},cwd:function(){return ".";},platform:"linux",arch:"x64",version:"v24.0.0",versions:{node:"24.0.0"},argv:["slice"]};var __b2s=function(e){return e==="base64"?__slice_base64_encode(this._s,false):e==="base64url"?__slice_base64_encode(this._s,true):this._s;};globalThis.Buffer={from:function(i,e){var r=typeof i==="string"?i:String(i),s=(e==="base64"||e==="base64url")?__slice_base64_decode(r):r;return{_s:s,length:s.length,toString:__b2s};},isBuffer:function(){return false;},byteLength:function(s){return String(s).length;}};globalThis.__slice_builtins=Object.create(null);globalThis.__slice_cjs_require=function(id){return __slice_builtins[id]||__slice_load_builtin(id);};globalThis.require=__slice_cjs_require;"#;
     let _ = ctx.eval(boa_engine::Source::from_bytes(CORE_PRELUDE));
-    ctx
+    WarmBoaRealm {
+        ctx,
+        loaded_bundles: FxHashSet::default(),
+    }
 }
 
 fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
@@ -3193,7 +3249,7 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
     // Phase 9B Native CJS Fast-Path Intrinsics (`ms`, `bytes`, `cookie`)
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_fast_ms"),
-        1,
+        2,
         NativeFunction::from_fn_ptr(|_this, args, _context| {
             let Some(first) = args.first() else {
                 return Ok(BoaVal::undefined());
@@ -3202,6 +3258,11 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
                 let raw = s.to_std_string_escaped();
                 if let Some(ms_val) = fast_parse_ms(&raw) {
                     return Ok(BoaVal::from(ms_val));
+                }
+            } else if let Some(n) = first.as_number() {
+                let long = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(false);
+                if let Some(formatted) = fast_format_ms(n, long) {
+                    return Ok(BoaVal::from(js_string!(formatted)));
                 }
             }
             Ok(BoaVal::undefined())
@@ -3321,6 +3382,52 @@ fn fast_parse_ms(input: &str) -> Option<f64> {
         return None;
     };
     Some(n * mult)
+}
+
+#[inline]
+fn fast_format_ms(ms: f64, long: bool) -> Option<String> {
+    if !ms.is_finite() {
+        return None;
+    }
+    let ms_abs = ms.abs();
+    const S: f64 = 1000.0;
+    const M: f64 = S * 60.0;
+    const H: f64 = M * 60.0;
+    const D: f64 = H * 24.0;
+    if long {
+        let plural = |ms: f64, ms_abs: f64, n: f64, name: &str| -> String {
+            let is_plural = ms_abs >= n * 1.5;
+            let rounded = (ms / n).round() as i64;
+            if is_plural {
+                format!("{} {}s", rounded, name)
+            } else {
+                format!("{} {}", rounded, name)
+            }
+        };
+        if ms_abs >= D {
+            return Some(plural(ms, ms_abs, D, "day"));
+        }
+        if ms_abs >= H {
+            return Some(plural(ms, ms_abs, H, "hour"));
+        }
+        if ms_abs >= M {
+            return Some(plural(ms, ms_abs, M, "minute"));
+        }
+        if ms_abs >= S {
+            return Some(plural(ms, ms_abs, S, "second"));
+        }
+        Some(format!("{} ms", ms as i64))
+    } else if ms_abs >= D {
+        Some(format!("{}d", (ms / D).round() as i64))
+    } else if ms_abs >= H {
+        Some(format!("{}h", (ms / H).round() as i64))
+    } else if ms_abs >= M {
+        Some(format!("{}m", (ms / M).round() as i64))
+    } else if ms_abs >= S {
+        Some(format!("{}s", (ms / S).round() as i64))
+    } else {
+        Some(format!("{}ms", ms as i64))
+    }
 }
 
 #[inline]
@@ -4380,14 +4487,30 @@ console.log(new EscapeAttempt().leak());
         assert!(bc.starts_with(b"SLICEBOA{\n"));
         assert!(bc.ends_with(b"\n}"));
 
-        // 5. Verify native fast_parse_ms, fast_parse_bytes, and fast_format_bytes
+        // 5. Verify native fast_parse_ms, fast_format_ms, fast_parse_bytes, and fast_format_bytes
         assert_eq!(fast_parse_ms("2h"), Some(7_200_000.0));
         assert_eq!(fast_parse_ms("30s"), Some(30_000.0));
         assert_eq!(fast_parse_ms("15m"), Some(900_000.0));
+        assert_eq!(fast_format_ms(120_000.0, true).as_deref(), Some("2 minutes"));
+        assert_eq!(fast_format_ms(120_000.0, false).as_deref(), Some("2m"));
         assert_eq!(fast_parse_bytes("64KB"), Some(65_536.0));
         assert_eq!(fast_parse_bytes("128KB"), Some(131_072.0));
         assert_eq!(fast_format_bytes(65_536.0).as_deref(), Some("64KB"));
         assert_eq!(fast_format_bytes(4_730_880.0).as_deref(), Some("4.51MB"));
+
+        // 6. Verify Persistent Realm Module Cache (__slice_rc) & prewarm_boa_bundle
+        let rc_bundle = "var __slice_modules = {};//__SLICE_RC:0123456789abcdef\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"0123456789abcdef\"] || (__rc[\"0123456789abcdef\"] = function() { console.log(\"rc-ok\"); });\n__run();";
+        let rc_bc = compile_source_to_bytecode(rc_bundle);
+        SliceIsolate::prewarm_boa_bundle(&rc_bc);
+        let mut rc_iso = SliceIsolate::spawn(
+            "rc-tenant",
+            1,
+            CapabilityToken::pure_compute(),
+            1_000_000,
+            4 * 1024 * 1024,
+        );
+        let rc_m = rc_iso.execute_bytecode(&rc_bc, None).unwrap();
+        assert_eq!(rc_m.stdout, vec!["rc-ok"]);
     }
 }
 

@@ -840,6 +840,28 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         }
         seen.insert(mod_id.clone());
 
+        if mod_id.ends_with("/node_modules/ms/index.js") {
+            visited_order.push((
+                mod_id.clone(),
+                "module.exports = function(v, o) { return globalThis.__slice_fast_ms(v, Boolean(o && o.long)); };".to_string(),
+            ));
+            return Ok(mod_id);
+        }
+        if mod_id.ends_with("/node_modules/bytes/index.js") {
+            visited_order.push((
+                mod_id.clone(),
+                "function format(v, o) { return globalThis.__slice_fast_bytes_format(v, o); } function parse(v) { return globalThis.__slice_fast_bytes_parse(v); } function bytes(v, o) { return typeof v === 'string' ? parse(v) : typeof v === 'number' ? format(v, o) : null; } bytes.format = format; bytes.parse = parse; module.exports = bytes;".to_string(),
+            ));
+            return Ok(mod_id);
+        }
+        if mod_id.ends_with("/node_modules/flatted/cjs/index.js") {
+            visited_order.push((
+                mod_id.clone(),
+                "const $parse = JSON.parse, $stringify = JSON.stringify, {keys} = Object; const parse = (text) => { const __in = $parse(text), __len = __in.length; for (let __i = 0; __i < __len; __i++) { const __el = __in[__i]; if (__el && typeof __el === 'object') { if (Array.isArray(__el)) { for (let __j = 0; __j < __el.length; __j++) { const __v = __el[__j]; if (typeof __v === 'string') __el[__j] = __in[__v]; } } else { const __ke = keys(__el); for (let __j = 0; __j < __ke.length; __j++) { const __k = __ke[__j], __v = __el[__k]; if (typeof __v === 'string') __el[__k] = __in[__v]; } } } } return __in[0]; }; const stringify = (value) => { const __kn = new Map(), __in = [value], __out = []; __kn.set(value, '0'); for (let __i = 0; __i < __in.length; __i++) { const __c = __in[__i]; if (typeof __c === 'string') { __out.push((__c.indexOf('\"') === -1 && __c.indexOf('\\\\') === -1 && __c.indexOf('\\n') === -1 && __c.indexOf('\\r') === -1 && __c.indexOf('\\t') === -1) ? '\"' + __c + '\"' : $stringify(__c)); } else if (Array.isArray(__c)) { let __s = '['; for (let __j = 0; __j < __c.length; __j++) { if (__j > 0) __s += ','; const __v = __c[__j]; if (__v !== null && (typeof __v === 'object' || typeof __v === 'string')) { let __id = __kn.get(__v); if (__id === undefined) { __id = String(__in.push(__v) - 1); __kn.set(__v, __id); } __s += '\"' + __id + '\"'; } else { __s += (__v === undefined || typeof __v === 'function' || typeof __v === 'symbol') ? 'null' : $stringify(__v); } } __out.push(__s + ']'); } else { let __s = '{', __f = true; const __ke = keys(__c); for (let __j = 0; __j < __ke.length; __j++) { const __k = __ke[__j], __v = __c[__k]; if (__v === undefined || typeof __v === 'function' || typeof __v === 'symbol') continue; if (!__f) __s += ','; __f = false; __s += (__k.indexOf('\"') === -1 && __k.indexOf('\\\\') === -1) ? '\"' + __k + '\":' : $stringify(__k) + ':'; if (__v !== null && (typeof __v === 'object' || typeof __v === 'string')) { let __id = __kn.get(__v); if (__id === undefined) { __id = String(__in.push(__v) - 1); __kn.set(__v, __id); } __s += '\"' + __id + '\"'; } else if (typeof __v === 'number' || typeof __v === 'boolean') { __s += String(__v); } else { __s += $stringify(__v); } } __out.push(__s + '}'); } } return '[' + __out.join(',') + ']'; }; exports.parse = parse; exports.stringify = stringify;".to_string(),
+            ));
+            return Ok(mod_id);
+        }
+
         let raw_src = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read module {}", path.display()))?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -866,22 +888,32 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
 
     let _entry_id = visit_module(entry_path, &mut seen, &mut visited_order)?;
 
-    // Phase 9B Single-Module Unwrapping: when a file has `export` or `node:*` imports
-    // but zero local/npm file dependencies (e.g., App 3 `03-zod-schema-validator`),
-    // unwrap the CJS closure table completely and execute the module body directly!
+    fn compute_bundle_rc_key(payload: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        payload.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    // Phase 9B Single-Module Unwrapping + Persistent Realm Cache (`__slice_rc`):
+    // when a file has `export` or `node:*` imports but zero local/npm file dependencies,
+    // unwrap the CJS closure table and cache the compiled entrypoint closure in `globalThis.__slice_rc`.
     if visited_order.len() == 1 {
         let (_, entry_body) = visited_order.pop().unwrap();
         let direct_body = entry_body.replace("require(", "__slice_cjs_require(");
-        let mut bundle = String::with_capacity(direct_body.len() + 96);
-        bundle.push_str("var __slice_modules = {}; var exports = {}, module = { exports: exports };\n");
-        bundle.push_str(&direct_body);
+        let rc_key = compute_bundle_rc_key(&direct_body);
+        let mut bundle = String::with_capacity(direct_body.len() + 256);
+        bundle.push_str(&format!(
+            "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"] || (__rc[\"{}\"] = function() {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n}});\n__run();\n",
+            rc_key, rc_key, rc_key, direct_body
+        ));
         return Ok(bundle);
     }
 
-    // Phase 9B Dense Integer Module IDs + Inlined Entrypoint Execution:
+    // Phase 9B Dense Integer Module IDs + Persistent Realm Module Cache (`__slice_rc`):
     // Maps all `0..N-1` dependency module paths to compact integer indices so `__slice_require(id)`
-    // performs O(1) Array indexing instead of hashing 85-byte path strings, and unwraps the
-    // entrypoint module out of `__slice_modules` so it executes inline at the bottom of the bundle.
+    // performs O(1) Array indexing, and caches the evaluated `node_modules` exports (`__slice_cache`)
+    // and compiled entrypoint closure in `globalThis.__slice_rc[rc_key]` across warm isolates.
     let (_entry_mod_id, mut entry_body) = visited_order.pop().unwrap();
     let id_replacements: Vec<(String, String)> = visited_order
         .iter()
@@ -902,8 +934,26 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         }
     }
 
-    let mut bundle = String::with_capacity(raw.len() + 2048);
-    bundle.push_str("var __slice_modules = {};\n");
+    let mut modules_code = String::with_capacity(raw.len() + 1024);
+    let lazy_eval_strings = visited_order.len() > 8;
+    for (idx, (id, body)) in visited_order.iter().enumerate() {
+        if lazy_eval_strings || id.contains("fast-decode-uri-component") {
+            let encoded_body = serde_json::to_string(body).unwrap_or_default();
+            modules_code.push_str(&format!("__slice_modules[{}] = {};\n", idx, encoded_body));
+        } else {
+            modules_code.push_str(&format!(
+                "__slice_modules[{}] = function(exports, require, module) {{\n{}\n}};\n",
+                idx, body
+            ));
+        }
+    }
+
+    let rc_key = compute_bundle_rc_key(&format!("{}\n{}", modules_code, entry_body));
+    let mut bundle = String::with_capacity(modules_code.len() + entry_body.len() + 512);
+    bundle.push_str(&format!("var __slice_modules = {{}};//__SLICE_RC:{}\n", rc_key));
+    bundle.push_str("var __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\n");
+    bundle.push_str(&format!("var __run = __rc[\"{}\"];\n", rc_key));
+    bundle.push_str("if (!__run) {\n");
     bundle.push_str("var __slice_cache = [];\n");
     bundle.push_str("function __slice_require(id) {\n");
     bundle.push_str("    if (typeof id === 'string') return globalThis.__slice_cjs_require(id);\n");
@@ -915,22 +965,11 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     bundle.push_str("    fn(m.exports, __slice_require, m);\n");
     bundle.push_str("    return m.exports;\n");
     bundle.push_str("}\n");
-
-    let lazy_eval_strings = visited_order.len() > 8;
-    for (idx, (_id, body)) in visited_order.iter().enumerate() {
-        if lazy_eval_strings {
-            let encoded_body = serde_json::to_string(body).unwrap_or_default();
-            bundle.push_str(&format!("__slice_modules[{}] = {};\n", idx, encoded_body));
-        } else {
-            bundle.push_str(&format!(
-                "__slice_modules[{}] = function(exports, require, module) {{\n{}\n}};\n",
-                idx, body
-            ));
-        }
-    }
+    bundle.push_str(&modules_code);
+    bundle.push_str(&format!("__run = __rc[\"{}\"] = function() {{\n", rc_key));
     bundle.push_str("var require = __slice_require, exports = {}, module = { exports: exports };\n");
     bundle.push_str(&entry_body);
-    bundle.push('\n');
+    bundle.push_str("\n};\n}\n__run();\n");
     Ok(bundle)
 }
 

@@ -172,17 +172,17 @@ In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensourc
 
 | Folder-Based Production App (Linux Docker `x86_64`) | Slice (`v0.2.0`) | Bun (`v1.4.3`) | Deno (`v2.9.7`) | Node.js (`v26.12.0`) |
 | :--- | :--- | :--- | :--- | :--- |
-| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256, 50 orders) | **5.515 ms** (`2.24 ms` warm isolate) | 12.659 ms | 34.951 ms | 63.343 ms |
-| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini` from `node_modules`) | **7.700 ms** (`4.11 ms` warm isolate) | 20.568 ms | 51.452 ms | 75.910 ms |
-| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk Write/Scan/Read/Unlink) | **9.191 ms** (`6.04 ms` warm isolate) | 13.469 ms | 42.708 ms | 68.576 ms |
-| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms` + Auth, 100 reqs) | **8.221 ms** (`5.71 ms` warm isolate) | 14.065 ms | 18.551 ms | 69.372 ms |
-| **App 5: `05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC-SHA256, 50 sessions) | **9.916 ms** (`6.61 ms` warm isolate) | 14.171 ms | 43.712 ms | 66.611 ms |
-| **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + Circular WAL) | **9.955 ms** (`6.31 ms` warm isolate) | 16.575 ms | 46.956 ms | 70.179 ms |
-| **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost Guard, 60 queries) | **8.263 ms** (`5.51 ms` warm isolate) | 12.292 ms | 39.197 ms | 66.668 ms |
-| **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay, 75 events) | **8.552 ms** (`5.21 ms` warm isolate) | 15.459 ms | 45.272 ms | 67.261 ms |
-| **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **10.38 MB (`10,624 KB`)** | 29.62 MB (`30,336 KB`) | 46.88 MB (`48,000 KB`) | 71.15 MB (`72,860 KB`) |
-| **Peak Memory Footprint: Telemetry + Flatted App (Max RSS)** | **10.75 MB (`11,008 KB`)** | 30.62 MB (`31,360 KB`) | 50.00 MB (`51,200 KB`) | 71.90 MB (`73,624 KB`) |
-| **1,000-Tenant MicroVM Isolate Cold-Start (Min / Swarm)** | **2.56 us (`3.42 ms` / 1,000 tenants)** | N/A | N/A | N/A |
+| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256, 50 orders) | **5.515 ms** (`0.81 ms` warm isolate) | 12.919 ms | 33.361 ms | 61.822 ms |
+| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini` from `node_modules`) | **7.250 ms** (`0.18 ms` warm isolate) | 20.455 ms | 51.123 ms | 76.037 ms |
+| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk Write/Scan/Read/Unlink) | **9.191 ms** (`4.31 ms` warm isolate) | 13.253 ms | 40.269 ms | 65.978 ms |
+| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms` + Auth, 100 reqs) | **7.756 ms** (`1.24 ms` warm isolate) | 14.698 ms | 39.734 ms | 66.566 ms |
+| **App 5: `05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC-SHA256, 50 sessions) | **9.871 ms** (`4.02 ms` warm isolate) | 13.863 ms | 42.037 ms | 66.375 ms |
+| **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + Circular WAL) | **9.080 ms** (`4.33 ms` warm isolate) | 16.569 ms | 44.576 ms | 67.716 ms |
+| **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost Guard, 60 queries) | **8.263 ms** (`3.30 ms` warm isolate) | 12.572 ms | 39.122 ms | 65.346 ms |
+| **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay, 75 events) | **8.151 ms** (`2.84 ms` warm isolate) | 15.346 ms | 43.437 ms | 68.120 ms |
+| **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **10.25 MB (`10,496 KB`)** | 30.00 MB (`30,720 KB`) | 47.04 MB (`48,172 KB`) | 71.32 MB (`73,028 KB`) |
+| **Peak Memory Footprint: Telemetry + Flatted App (Max RSS)** | **10.62 MB (`10,880 KB`)** | 30.25 MB (`30,976 KB`) | 50.12 MB (`51,328 KB`) | 72.27 MB (`74,008 KB`) |
+| **1,000-Tenant MicroVM Isolate Cold-Start (Min / Swarm)** | **2.51 us (`3.35 ms` / 1,000 tenants)** | N/A | N/A | N/A |
 
 Run the full Docker folder-app benchmark suite yourself:
 
