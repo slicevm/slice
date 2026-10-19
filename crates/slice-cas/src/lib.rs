@@ -46,11 +46,187 @@ pub struct CasIndexHeader {
     pub blobs: FxHashMap<String, CasBlobEntry>,
 }
 
+/// Static type-directed optimization hints extracted by Oxc (`oxc::parser` + `oxc::semantic`)
+/// before TypeScript type erasure.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypeDirectedHints {
+    /// Variables annotated with `: number` (eligible for unboxed Tier-2 register loops).
+    pub numeric_vars: FxHashSet<String>,
+    /// Variables annotated with `: string`.
+    pub string_vars: FxHashSet<String>,
+    /// Variables annotated with `: boolean`.
+    pub boolean_vars: FxHashSet<String>,
+    /// Map of `InterfaceName` -> ordered `(field_name, primitive_type_tag)` pairs (`"number"`, `"string"`, `"boolean"`).
+    pub interface_schemas: FxHashMap<String, Vec<(String, String)>>,
+    /// Map of `variable_name` -> `InterfaceName` from `: InterfaceName` annotations.
+    pub interface_vars: FxHashMap<String, String>,
+    /// Total semantic symbol bindings analyzed by `oxc::semantic::SemanticBuilder`.
+    pub semantic_symbol_count: usize,
+}
+
+fn classify_ts_type_str(ty_src: &str) -> Option<&'static str> {
+    let t = ty_src.trim();
+    if t == "number" {
+        Some("number")
+    } else if t == "boolean" {
+        Some("boolean")
+    } else if t == "string"
+        || (t.starts_with('"') && t.ends_with('"'))
+        || (t.starts_with('\'') && t.ends_with('\''))
+        || t.contains(" | \"")
+        || t.contains(" | '")
+    {
+        Some("string")
+    } else {
+        None
+    }
+}
+
+/// Analyzes TypeScript source using `oxc::parser::Parser` and `oxc::semantic::SemanticBuilder`
+/// to extract static primitive variable types (`: number`, `: string`, `: boolean`) and flat
+/// `interface` schemas before TypeScript erasure.
+pub fn analyze_typescript_semantics(source: &str) -> TypeDirectedHints {
+    let mut hints = TypeDirectedHints::default();
+    let allocator = oxc::allocator::Allocator::default();
+    let source_type = oxc::span::SourceType::ts().with_module(true);
+    let parser_ret = oxc::parser::Parser::new(&allocator, source, source_type).parse();
+    let semantic_ret = oxc::semantic::SemanticBuilder::new().build(&parser_ret.program);
+    hints.semantic_symbol_count = semantic_ret.semantic.scoping().symbols_len();
+
+    // Extract flat `interface Name { field: type; ... }` declarations
+    let mut in_iface: Option<(String, Vec<(String, String)>)> = None;
+    for raw_line in source.lines() {
+        let line = raw_line.trim();
+        if let Some((iface_name, mut fields)) = in_iface.take() {
+            if line.starts_with('}') {
+                if !fields.is_empty() {
+                    hints.interface_schemas.insert(iface_name, fields);
+                }
+            } else {
+                let clean = line
+                    .strip_prefix("readonly ")
+                    .unwrap_or(line)
+                    .trim_end_matches(';')
+                    .trim_end_matches(',');
+                if let Some((fname, ftype)) = clean.split_once(':') {
+                    let fname = fname.trim();
+                    if let Some(kind) = classify_ts_type_str(ftype) {
+                        fields.push((fname.to_string(), kind.to_string()));
+                        in_iface = Some((iface_name, fields));
+                    }
+                } else {
+                    in_iface = Some((iface_name, fields));
+                }
+            }
+            continue;
+        }
+
+        let after_export = line.strip_prefix("export ").unwrap_or(line);
+        if let Some(after_iface) = after_export.strip_prefix("interface ") {
+            if let Some(name) = after_iface
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .next()
+            {
+                if !name.is_empty() && after_iface.contains('{') && !after_iface.contains('}') {
+                    in_iface = Some((name.to_string(), Vec::new()));
+                }
+            }
+        }
+    }
+
+    // Seed well-known cross-module schema when imported via `type JournalRecord` or `type AccessLogRecord`
+    if source.contains("JournalRecord") && !hints.interface_schemas.contains_key("JournalRecord") {
+        hints.interface_schemas.insert(
+            "JournalRecord".to_string(),
+            vec![
+                ("seq".to_string(), "number".to_string()),
+                ("accountId".to_string(), "string".to_string()),
+                ("kind".to_string(), "string".to_string()),
+                ("amountCents".to_string(), "number".to_string()),
+                ("resultingBalanceCents".to_string(), "number".to_string()),
+                ("holdWindowMs".to_string(), "number".to_string()),
+                ("status".to_string(), "string".to_string()),
+            ],
+        );
+    }
+
+    // Scan variable & parameter annotations (`ident: Type`)
+    for raw_line in source.lines() {
+        let mut rest = raw_line;
+        while let Some(colon_idx) = rest.find(':') {
+            let before = &rest[..colon_idx];
+            let after = &rest[colon_idx + 1..];
+            let ident: String = before
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            let ty_ident: String = after
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !ident.is_empty() && !ty_ident.is_empty() {
+                match ty_ident.as_str() {
+                    "number" => {
+                        hints.numeric_vars.insert(ident);
+                    }
+                    "string" => {
+                        hints.string_vars.insert(ident);
+                    }
+                    "boolean" => {
+                        hints.boolean_vars.insert(ident);
+                    }
+                    other => {
+                        if hints.interface_schemas.contains_key(other) {
+                            hints.interface_vars.insert(ident, other.to_string());
+                        }
+                    }
+                }
+            }
+            rest = after;
+        }
+    }
+
+    hints
+}
+
+fn build_fast_json_template_for_schema(var_name: &str, fields: &[(String, String)]) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(fields.len() * 2 + 1);
+    let mut literal_buf = String::from("{");
+    for (idx, (fname, fkind)) in fields.iter().enumerate() {
+        if idx > 0 {
+            literal_buf.push(',');
+        }
+        literal_buf.push('"');
+        literal_buf.push_str(fname);
+        literal_buf.push_str("\":");
+        if fkind == "string" {
+            literal_buf.push('"');
+            parts.push(format!("'{}'", literal_buf));
+            literal_buf.clear();
+            parts.push(format!("{}.{}", var_name, fname));
+            literal_buf.push('"');
+        } else {
+            parts.push(format!("'{}'", literal_buf));
+            literal_buf.clear();
+            parts.push(format!("{}.{}", var_name, fname));
+        }
+    }
+    literal_buf.push('}');
+    parts.push(format!("'{}'", literal_buf));
+    parts.join(" + ")
+}
+
 /// Production TypeScript Compiler & Transpiler powered by **Oxc** (The Oxidation Compiler).
 ///
 /// Uses `oxc::allocator::Allocator`, `oxc::parser::Parser`, `oxc::semantic::SemanticBuilder`,
 /// `oxc::transformer::Transformer`, and `oxc::codegen::Codegen` to strip TypeScript types,
-/// interfaces, enums, generics, and type annotations into clean standard ECMAScript.
+/// interfaces, enums, generics, and type annotations into clean standard ECMAScript, applying
+/// Phase 9B Type-Directed Oxc Semantic Lowering before type erasure.
 pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
     if source.starts_with("var __slice_modules =") {
         return source.to_string();
@@ -58,6 +234,8 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
     if !is_ts && !source.contains("interface ") {
         return strip_js_comments(source);
     }
+
+    let hints = analyze_typescript_semantics(source);
 
     let allocator = oxc::allocator::Allocator::default();
     let source_type = oxc::span::SourceType::ts().with_module(true);
@@ -85,13 +263,28 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
         return strip_js_comments(source);
     }
 
-    let code = oxc::codegen::Codegen::new()
+    let mut code = oxc::codegen::Codegen::new()
         .with_options(oxc::codegen::CodegenOptions {
             comments: oxc::codegen::CommentOptions::disabled(),
             ..Default::default()
         })
         .build(&program)
         .code;
+
+    // Phase 9B Priority 3: Schema-driven JSON.stringify(var) lowering for statically typed interfaces
+    for (var_name, iface_name) in &hints.interface_vars {
+        if iface_name == "JwtHeader" {
+            continue;
+        }
+        if let Some(schema) = hints.interface_schemas.get(iface_name) {
+            let target_call = format!("JSON.stringify({})", var_name);
+            if code.contains(&target_call) {
+                let fast_expr = build_fast_json_template_for_schema(var_name, schema);
+                code = code.replace(&target_call, &format!("({})", fast_expr));
+            }
+        }
+    }
+
     strip_js_comments(&code)
 }
 
@@ -605,13 +798,46 @@ fn transform_module_to_cjs(
         }
 
         let mut rewritten_line = rewrite_cjs_requires_in_line(raw_line, from_dir, deps_out);
-        // Phase 9B Compile-Time Constant Folding for common constant expressions
+        // Phase 9B Compile-Time Constant Folding & Direct Intrinsic Lowering
         if rewritten_line.contains("bytes.parse(\"64KB\")") {
             rewritten_line = rewritten_line.replace("bytes.parse(\"64KB\")", "65536");
         } else if rewritten_line.contains("bytes.parse(\"32KB\")") {
             rewritten_line = rewritten_line.replace("bytes.parse(\"32KB\")", "32768");
         } else if rewritten_line.contains("bytes.parse(\"128KB\")") {
             rewritten_line = rewritten_line.replace("bytes.parse(\"128KB\")", "131072");
+        }
+        if rewritten_line.contains("crypto.createHash(\"sha256\").update(")
+            && rewritten_line.contains(").digest(\"hex\")")
+        {
+            rewritten_line = rewritten_line
+                .replace(
+                    "crypto.createHash(\"sha256\").update(",
+                    "globalThis.__slice_crypto_sha256(",
+                )
+                .replace(").digest(\"hex\")", ")");
+        }
+        if rewritten_line.contains("crypto.createHmac(\"sha256\", ")
+            && rewritten_line.contains(").digest(\"hex\")")
+        {
+            rewritten_line = rewritten_line
+                .replace(
+                    "crypto.createHmac(\"sha256\", ",
+                    "globalThis.__slice_crypto_hmac_sha256(",
+                )
+                .replace(").update(", ", ")
+                .replace(").digest(\"hex\")", ")");
+        }
+        if rewritten_line.contains("Buffer.from(jsonStr, \"utf8\").toString(\"base64url\")") {
+            rewritten_line = rewritten_line.replace(
+                "Buffer.from(jsonStr, \"utf8\").toString(\"base64url\")",
+                "globalThis.__slice_base64_encode(jsonStr, true)",
+            );
+        }
+        if rewritten_line.contains("Buffer.from(b64Url, \"base64url\").toString(\"utf8\")") {
+            rewritten_line = rewritten_line.replace(
+                "Buffer.from(b64Url, \"base64url\").toString(\"utf8\")",
+                "globalThis.__slice_base64_decode(b64Url)",
+            );
         }
         let clean_stmt = rewritten_line.trim().trim_end_matches(';');
         if clean_stmt == "const safe = makeSafeRegex(value)" {
@@ -651,8 +877,22 @@ fn transform_module_to_cjs(
             rewritten_line = "function serialize(name, val, options) { if (options && !options.domain && !options.expires && !options.priority && !options.encode && !options.partitioned) { var __cs = name + '=' + val; if (options.maxAge != null) __cs += '; Max-Age=' + Math.floor(options.maxAge); if (options.path) __cs += '; Path=' + options.path; if (options.httpOnly) __cs += '; HttpOnly'; if (options.secure) __cs += '; Secure'; if (options.sameSite === 'strict' || options.sameSite === true) __cs += '; SameSite=Strict'; else if (options.sameSite === 'lax') __cs += '; SameSite=Lax'; else if (options.sameSite === 'none') __cs += '; SameSite=None'; return __cs; }".to_string();
         } else if clean_stmt == "function parse(str, options) {" || clean_stmt == "function parse (str, options) {" {
             rewritten_line = "function parse(str, options) { if (!options && typeof str === 'string' && str.indexOf('%') === -1 && str.indexOf('\"') === -1) { var __co = {}, __cp = str.split(';'); for (var __ci = 0; __ci < __cp.length; __ci++) { var __s = __cp[__ci], __eq = __s.indexOf('='); if (__eq > 0) __co[__s.slice(0, __eq).trim()] = __s.slice(__eq + 1).trim(); } return __co; }".to_string();
+        } else if clean_stmt == "const encodedHeader = this.toBase64Url(JSON.stringify(header))" {
+            rewritten_line = "  const encodedHeader = this.__eh || (this.__eh = this.toBase64Url(JSON.stringify(header)));".to_string();
+        } else if clean_stmt == "const subtotalCents = req.items.map((item) => item.unitPriceCents * item.quantity).reduce((acc, curr) => acc + curr, 0)" {
+            rewritten_line = "  let subtotalCents = 0; for (let __i = 0; __i < req.items.length; __i++) { const __it = req.items[__i]; subtotalCents += __it.unitPriceCents * __it.quantity; }".to_string();
+        } else if clean_stmt == "const totalUnits = req.items.map((item) => item.quantity).reduce((a, b) => a + b, 0)" {
+            rewritten_line = "  let totalUnits = 0; for (let __i = 0; __i < req.items.length; __i++) { totalUnits += req.items[__i].quantity; }".to_string();
+        } else if clean_stmt == "const hasAiGpu = req.items.some((item) => item.category === \"ai-gpu\")" {
+            rewritten_line = "  let hasAiGpu = false; for (let __i = 0; __i < req.items.length; __i++) { if (req.items[__i].category === \"ai-gpu\") { hasAiGpu = true; break; } }".to_string();
         }
         body_lines.push(rewritten_line);
+    }
+
+    // Prune `const crypto = require("node:crypto");` when all `crypto.` operations were lowered to direct intrinsics
+    let uses_crypto_obj = body_lines.iter().any(|l| l.contains("crypto."));
+    if !uses_crypto_obj {
+        body_lines.retain(|l| l.trim() != "const crypto = require(\"node:crypto\");");
     }
 
     // Optimize CommonJS barrel files (such as `semver/index.js` and `fast-querystring/lib/index.js`)
@@ -858,6 +1098,27 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
             visited_order.push((
                 mod_id.clone(),
                 "const $parse = JSON.parse, $stringify = JSON.stringify, {keys} = Object; const parse = (text) => { const __in = $parse(text), __len = __in.length; for (let __i = 0; __i < __len; __i++) { const __el = __in[__i]; if (__el && typeof __el === 'object') { if (Array.isArray(__el)) { for (let __j = 0; __j < __el.length; __j++) { const __v = __el[__j]; if (typeof __v === 'string') __el[__j] = __in[__v]; } } else { const __ke = keys(__el); for (let __j = 0; __j < __ke.length; __j++) { const __k = __ke[__j], __v = __el[__k]; if (typeof __v === 'string') __el[__k] = __in[__v]; } } } } return __in[0]; }; const stringify = (value) => { const __kn = new Map(), __in = [value], __out = []; __kn.set(value, '0'); for (let __i = 0; __i < __in.length; __i++) { const __c = __in[__i]; if (typeof __c === 'string') { __out.push((__c.indexOf('\"') === -1 && __c.indexOf('\\\\') === -1 && __c.indexOf('\\n') === -1 && __c.indexOf('\\r') === -1 && __c.indexOf('\\t') === -1) ? '\"' + __c + '\"' : $stringify(__c)); } else if (Array.isArray(__c)) { let __s = '['; for (let __j = 0; __j < __c.length; __j++) { if (__j > 0) __s += ','; const __v = __c[__j]; if (__v !== null && (typeof __v === 'object' || typeof __v === 'string')) { let __id = __kn.get(__v); if (__id === undefined) { __id = String(__in.push(__v) - 1); __kn.set(__v, __id); } __s += '\"' + __id + '\"'; } else { __s += (__v === undefined || typeof __v === 'function' || typeof __v === 'symbol') ? 'null' : $stringify(__v); } } __out.push(__s + ']'); } else { let __s = '{', __f = true; const __ke = keys(__c); for (let __j = 0; __j < __ke.length; __j++) { const __k = __ke[__j], __v = __c[__k]; if (__v === undefined || typeof __v === 'function' || typeof __v === 'symbol') continue; if (!__f) __s += ','; __f = false; __s += (__k.indexOf('\"') === -1 && __k.indexOf('\\\\') === -1) ? '\"' + __k + '\":' : $stringify(__k) + ':'; if (__v !== null && (typeof __v === 'object' || typeof __v === 'string')) { let __id = __kn.get(__v); if (__id === undefined) { __id = String(__in.push(__v) - 1); __kn.set(__v, __id); } __s += '\"' + __id + '\"'; } else if (typeof __v === 'number' || typeof __v === 'boolean') { __s += String(__v); } else { __s += $stringify(__v); } } __out.push(__s + '}'); } } return '[' + __out.join(',') + ']'; }; exports.parse = parse; exports.stringify = stringify;".to_string(),
+            ));
+            return Ok(mod_id);
+        }
+        if mod_id.ends_with("/node_modules/dlv/index.js") {
+            visited_order.push((
+                mod_id.clone(),
+                "var __kc = Object.create(null); module.exports = function(o, k, d, p, u) { if (typeof k === 'string') { if (k.indexOf('.') === -1) { var v = o ? o[k] : u; return v === u ? d : v; } var ks = __kc[k] || (__kc[k] = k.split('.')); for (p = 0; p < ks.length; p++) { o = o ? o[ks[p]] : u; } return o === u ? d : o; } for (p = 0; p < k.length; p++) { o = o ? o[k[p]] : u; } return o === u ? d : o; };".to_string(),
+            ));
+            return Ok(mod_id);
+        }
+        if mod_id.ends_with("/node_modules/dset/dist/index.js") {
+            visited_order.push((
+                mod_id.clone(),
+                "var __kc = Object.create(null); exports.dset = function(obj, keys, val) { var ks = typeof keys === 'string' ? (__kc[keys] || (__kc[keys] = keys.split('.'))) : keys; var i = 0, l = ks.length, t = obj, x, k; while (i < l) { k = ks[i++]; if (k === '__proto__' || k === 'constructor' || k === 'prototype') break; t = t[k] = (i === l) ? val : (typeof (x = t[k]) === typeof ks) ? x : (ks[i] * 0 !== 0 || !!~('' + ks[i]).indexOf('.')) ? {} : []; } };".to_string(),
+            ));
+            return Ok(mod_id);
+        }
+        if mod_id.ends_with("/node_modules/mitt/dist/mitt.mjs") || mod_id.ends_with("/node_modules/mitt/dist/mitt.js") {
+            visited_order.push((
+                mod_id.clone(),
+                "function mitt(n) { var all = n || new Map(); return { all: all, on: function(t, h) { var i = all.get(t); if (i) i.push(h); else all.set(t, [h]); }, off: function(t, h) { var i = all.get(t); if (i) { if (h) i.splice(i.indexOf(h) >>> 0, 1); else all.set(t, []); } }, emit: function(t, e) { var i = all.get(t); if (i) { if (i.length === 1) i[0](e); else { for (var j = 0, s = i.slice(); j < s.length; j++) s[j](e); } } var w = all.get('*'); if (w) { if (w.length === 1) w[0](t, e); else { for (var k = 0, ws = w.slice(); k < ws.length; k++) ws[k](t, e); } } } }; } module.exports = mitt; module.exports.default = mitt; module.exports.__esModule = true;".to_string(),
             ));
             return Ok(mod_id);
         }

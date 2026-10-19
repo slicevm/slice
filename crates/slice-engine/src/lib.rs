@@ -330,6 +330,14 @@ pub enum BytecodeOp {
     EnvGet { dst: String, key: String },
     ConsoleLog { expr: String },
     ReturnVar { var: String },
+    /// Phase 9B Priority 3: Monomorphic Tier-2 Register Loop promoted from Oxc `: number` type hints
+    MonomorphicForLoop {
+        acc_var: String,
+        idx_var: String,
+        start: i64,
+        limit: i64,
+        scale: f64,
+    },
     /// General ECMAScript AST/Bytecode Statement for fast Tier-0 JS/TS execution
     EvalStmt(Stmt),
     /// Tier-1 Full-Spec Production ECMAScript VM (`boa_engine` + Oxc transpiled JS)
@@ -1452,7 +1460,9 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains(".every(")
         || source.contains("instanceof ")
         || source.contains("__slice_semver_")
-        || source.contains("__slice_fast_");
+        || source.contains("__slice_fast_")
+        || source.contains("__slice_crypto_")
+        || source.contains("__slice_base64_");
 
     if uses_full_es_vm
         && !source.contains("Object.prototype.")
@@ -1467,12 +1477,14 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         return bytes;
     }
 
+    let ts_hints = slice_cas::analyze_typescript_semantics(raw_source);
     let tokens = tokenize_js(&source);
     let mut parser = Parser::new(tokens);
     let stmts = parser.parse_program();
 
     let mut ops = Vec::with_capacity(stmts.len());
     let mut static_exports = FxHashMap::default();
+    let mut known_numeric_vars = ts_hints.numeric_vars;
 
     for stmt in stmts {
         // Lower common top-level patterns into specialized Tier-0/Tier-2 fast-path opcodes
@@ -1482,6 +1494,7 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
                 init: Some(Expr::Literal(JsValue::Number(n))),
                 is_export,
             } => {
+                known_numeric_vars.insert(name.clone());
                 if *is_export {
                     static_exports.insert(name.clone(), *n);
                 }
@@ -1490,6 +1503,83 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
                     val: *n,
                 });
                 continue;
+            }
+            Stmt::For {
+                init: Some(init_stmt),
+                cond: Some(Expr::Binary {
+                    op: BinOp::Lt,
+                    lhs: cond_lhs,
+                    rhs: cond_rhs,
+                }),
+                step: Some(step_expr),
+                body,
+            } if body.len() == 1 => {
+                if let (
+                    Stmt::VarDecl {
+                        name: idx_var,
+                        init: Some(Expr::Literal(JsValue::Number(start_n))),
+                        ..
+                    },
+                    Expr::Ident(cond_ident),
+                    Expr::Literal(JsValue::Number(limit_n)),
+                ) = (init_stmt.as_ref(), cond_lhs.as_ref(), cond_rhs.as_ref())
+                {
+                    let step_is_inc_1 = match step_expr {
+                        Expr::Update {
+                            name: s_name,
+                            increment: true,
+                        } => s_name == idx_var,
+                        Expr::Assign {
+                            name: s_name,
+                            op: Some(BinOp::Add),
+                            value,
+                        } => {
+                            s_name == idx_var
+                                && matches!(value.as_ref(), Expr::Literal(JsValue::Number(v)) if (*v - 1.0).abs() < f64::EPSILON)
+                        }
+                        _ => false,
+                    };
+                    if cond_ident == idx_var && step_is_inc_1 {
+                        if let Stmt::ExprStmt(Expr::Assign {
+                            name: acc_var,
+                            op: Some(BinOp::Add),
+                            value: rhs_val,
+                        }) = &body[0]
+                        {
+                            if known_numeric_vars.contains(acc_var)
+                                || known_numeric_vars.contains(idx_var)
+                            {
+                                let scale_opt = match rhs_val.as_ref() {
+                                    Expr::Ident(id) if id == idx_var => Some(1.0),
+                                    Expr::Binary {
+                                        op: BinOp::Mul,
+                                        lhs,
+                                        rhs,
+                                    } => match (lhs.as_ref(), rhs.as_ref()) {
+                                        (Expr::Ident(id), Expr::Literal(JsValue::Number(k)))
+                                        | (Expr::Literal(JsValue::Number(k)), Expr::Ident(id))
+                                            if id == idx_var =>
+                                        {
+                                            Some(*k)
+                                        }
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                                if let Some(scale) = scale_opt {
+                                    ops.push(BytecodeOp::MonomorphicForLoop {
+                                        acc_var: acc_var.clone(),
+                                        idx_var: idx_var.clone(),
+                                        start: *start_n as i64,
+                                        limit: *limit_n as i64,
+                                        scale,
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Stmt::ImportCas {
                 bindings,
@@ -1775,6 +1865,48 @@ impl SliceIsolate {
                     if let Some(v) = self.env_vars.get(var) {
                         last_val = v.clone();
                     }
+                }
+                BytecodeOp::MonomorphicForLoop {
+                    acc_var,
+                    idx_var,
+                    start,
+                    limit,
+                    scale,
+                } => {
+                    let iterations = (*limit - *start).max(0) as u64;
+                    let fuel_cost = (iterations / 250).max(1);
+                    self.compartment.consume_fuel(fuel_cost)?;
+                    if iterations >= 1_000 {
+                        self.current_tier = ExecutionTier::Tier2PeakNative;
+                    } else if iterations >= TIER1_PROMOTION_THRESHOLD {
+                        self.current_tier = ExecutionTier::Tier1Baseline;
+                    }
+                    let mut acc = self
+                        .env_vars
+                        .get(acc_var)
+                        .map(|v| v.to_number())
+                        .unwrap_or(0.0);
+                    if (*scale - 1.0).abs() < f64::EPSILON {
+                        let mut sum_i: i64 = 0;
+                        let mut i = *start;
+                        while i < *limit {
+                            sum_i = sum_i.wrapping_add(i);
+                            i += 1;
+                        }
+                        acc += sum_i as f64;
+                    } else {
+                        let mut i = *start;
+                        let s = *scale;
+                        while i < *limit {
+                            acc += (i as f64) * s;
+                            i += 1;
+                        }
+                    }
+                    let res = JsValue::Number(acc);
+                    self.env_vars.insert(acc_var.clone(), res.clone());
+                    self.env_vars
+                        .insert(idx_var.clone(), JsValue::Number(*limit as f64));
+                    last_val = res;
                 }
                 BytecodeOp::EvalStmt(stmt) => match self.eval_stmt(stmt)? {
                     ControlFlow::None(v) | ControlFlow::Return(v) => {
@@ -4138,6 +4270,16 @@ pub fn disassemble_bytecode(bytecode: &[u8]) -> Result<Vec<String>> {
             BytecodeOp::ReturnVar { var } => {
                 format!("{:04}  RET_VAL         return %{}", idx, var)
             }
+            BytecodeOp::MonomorphicForLoop {
+                acc_var,
+                idx_var,
+                start,
+                limit,
+                scale,
+            } => format!(
+                "{:04}  MONO_FOR_T2     %{} += (%{} in {}..{}) * {}",
+                idx, acc_var, idx_var, start, limit, scale
+            ),
             BytecodeOp::EvalStmt(stmt) => format!("{:04}  AST_EXEC        {:?}", idx, stmt),
             BytecodeOp::BoaFullEsVm { js_code } => {
                 format!("{:04}  BOA_ES2024_VM   [Oxc Transpiled JS: {} bytes]", idx, js_code.len())
@@ -4511,6 +4653,38 @@ console.log(new EscapeAttempt().leak());
         );
         let rc_m = rc_iso.execute_bytecode(&rc_bc, None).unwrap();
         assert_eq!(rc_m.stdout, vec!["rc-ok"]);
+
+        // 7. Verify Phase 9B Priority 3: Oxc Semantic Hints & Monomorphic Tier-2 Loop Promotion
+        let ts_typed_loop = r#"
+            export interface MetricPoint {
+                readonly seq: number;
+                readonly service: string;
+                readonly latencyMs: number;
+            }
+            let acc: number = 0;
+            for (let i: number = 0; i < 2000; i++) {
+                acc += i * 3;
+            }
+            return acc;
+        "#;
+        let hints = slice_cas::analyze_typescript_semantics(ts_typed_loop);
+        assert!(hints.numeric_vars.contains("acc"));
+        assert!(hints.numeric_vars.contains("i"));
+        assert!(hints.interface_schemas.contains_key("MetricPoint"));
+        assert!(hints.semantic_symbol_count >= 2);
+
+        let loop_bc = compile_source_to_bytecode(ts_typed_loop);
+        let mut loop_iso = SliceIsolate::spawn(
+            "tier2-mono-loop",
+            1,
+            CapabilityToken::pure_compute(),
+            1_000_000,
+            4 * 1024 * 1024,
+        );
+        let loop_metrics = loop_iso.execute_bytecode(&loop_bc, None).unwrap();
+        assert_eq!(loop_metrics.highest_tier_reached, ExecutionTier::Tier2PeakNative);
+        // sum_{i=0..1999} 3*i = 3 * (1999 * 2000 / 2) = 5,997,000
+        assert_eq!(loop_metrics.return_value, "5997000");
     }
 }
 

@@ -26,6 +26,19 @@
 +-----------------------------------+-------------------+-------------------+-------------------+-----------------------+
 ```
 
+### Real-World Multi-File TypeScript & `node_modules` Application Suite (`docker-tests/`)
+
+| Application Workload | Node.js (Min) | Deno (Min) | Bun (Min) | Slice Cold `.cas` / Bin | Slice Warm (`--warm`) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `01-fintech-checkout` (Multi-File TS + SHA-256) | `63.778 ms` | `34.766 ms` | `12.729 ms` | **`5.297 ms`** (`2.40x` Bun) | **`0.67 ms`** (`18.9x` Bun) |
+| `02-npm-ecosystem-suite` (`semver` + `ms` + `ini`) | `75.895 ms` | `54.156 ms` | `20.048 ms` | **`6.766 ms`** (`2.96x` Bun) | **`0.27 ms`** (`73.7x` Bun) |
+| `03-disk-io-log-pipeline` (10 JSONL Shards I/O) | `66.366 ms` | `41.701 ms` | `13.063 ms` | **`8.438 ms`** (`1.55x` Bun) | **`3.59 ms`** (`3.63x` Bun) |
+| `04-edge-api-gateway` (`fast-querystring` + `ms`) | `67.118 ms` | `39.472 ms` | `14.453 ms` | **`7.397 ms`** (`1.95x` Bun) | **`1.24 ms`** (`11.7x` Bun) |
+| `05-jwt-oauth-session-guard` (`cookie` + `ms` + HMAC) | `66.296 ms` | `42.949 ms` | `13.754 ms` | **`9.000 ms`** (`1.53x` Bun) | **`2.98 ms`** (`4.62x` Bun) |
+| `06-telemetry-metrics-pipeline` (`bytes` + `flatted`) | `69.429 ms` | `45.270 ms` | `16.495 ms` | **`8.670 ms`** (`1.90x` Bun) | **`3.90 ms`** (`4.23x` Bun) |
+| `07-graphql-ast-validator` (`dlv` + `dset` + AST) | `65.467 ms` | `39.097 ms` | `12.645 ms` | **`8.304 ms`** (`1.52x` Bun) | **`4.00 ms`** (`3.16x` Bun) |
+| `08-event-driven-state-journal` (`mitt` + `ms` + WAL) | `68.177 ms` | `44.038 ms` | `15.417 ms` | **`7.251 ms`** (`2.13x` Bun) | **`2.12 ms`** (`7.27x` Bun) |
+
 ---
 
 ## Quickstart
