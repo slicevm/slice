@@ -3541,6 +3541,140 @@ impl Sha256State {
 
     #[inline]
     fn compress_block(h: &mut [u32; 8], chunk: &[u8]) {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            static SHA_NI_STATUS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+            let status = SHA_NI_STATUS.load(std::sync::atomic::Ordering::Relaxed);
+            let use_sha_ni = if status == 1 {
+                true
+            } else if status == 2 {
+                false
+            } else {
+                let detected = std::arch::is_x86_feature_detected!("sha")
+                    && std::arch::is_x86_feature_detected!("sse4.1")
+                    && std::arch::is_x86_feature_detected!("ssse3");
+                SHA_NI_STATUS.store(if detected { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+                detected
+            };
+            if use_sha_ni {
+                unsafe {
+                    Self::compress_block_sha_ni(h, chunk);
+                }
+                return;
+            }
+        }
+        Self::compress_block_soft(h, chunk);
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[target_feature(enable = "sha,sse4.1,ssse3")]
+    unsafe fn compress_block_sha_ni(h: &mut [u32; 8], chunk: &[u8]) {
+        #[cfg(target_arch = "x86")]
+        use std::arch::x86::*;
+        #[cfg(target_arch = "x86_64")]
+        use std::arch::x86_64::*;
+
+        let shuf_mask = _mm_set_epi64x(0x0c0d0e0f08090a0b, 0x0405060700010203);
+
+        let state0_in = _mm_loadu_si128(h.as_ptr() as *const __m128i);
+        let state1_in = _mm_loadu_si128(h.as_ptr().add(4) as *const __m128i);
+
+        let tmp = _mm_shuffle_epi32(state0_in, 0xB1);
+        let state1_shuf = _mm_shuffle_epi32(state1_in, 0x1B);
+        let mut state0 = _mm_alignr_epi8(tmp, state1_shuf, 8);
+        let mut state1 = _mm_blend_epi16(state1_shuf, tmp, 0xF0);
+
+        let abef_save = state0;
+        let cdgh_save = state1;
+
+        let ptr = chunk.as_ptr() as *const __m128i;
+        let mut msg0 = _mm_shuffle_epi8(_mm_loadu_si128(ptr), shuf_mask);
+        let mut msg1 = _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(1)), shuf_mask);
+        let mut msg2 = _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(2)), shuf_mask);
+        let mut msg3 = _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(3)), shuf_mask);
+
+        macro_rules! sha256_4rounds {
+            ($msg:expr, $k3:expr, $k2:expr, $k1:expr, $k0:expr) => {{
+                let msg_k = _mm_add_epi32($msg, _mm_set_epi32($k3 as i32, $k2 as i32, $k1 as i32, $k0 as i32));
+                state1 = _mm_sha256rnds2_epu32(state1, state0, msg_k);
+                state0 = _mm_sha256rnds2_epu32(state0, state1, _mm_srli_si128(msg_k, 8));
+            }};
+        }
+
+        // Rounds 0..15
+        sha256_4rounds!(msg0, 0xe9b5dba5u32, 0xb5c0fbcfu32, 0x71374491u32, 0x428a2f98u32);
+        sha256_4rounds!(msg1, 0xab1c5ed5u32, 0x923f82a4u32, 0x59f111f1u32, 0x3956c25bu32);
+        msg0 = _mm_sha256msg1_epu32(msg0, msg1);
+        sha256_4rounds!(msg2, 0x550c7dc3u32, 0x243185beu32, 0x12835b01u32, 0xd807aa98u32);
+        msg1 = _mm_sha256msg1_epu32(msg1, msg2);
+        msg0 = _mm_add_epi32(msg0, _mm_alignr_epi8(msg3, msg2, 4));
+        msg0 = _mm_sha256msg2_epu32(msg0, msg3);
+        sha256_4rounds!(msg3, 0xc19bf174u32, 0x9bdc06a7u32, 0x80deb1feu32, 0x72be5d74u32);
+        msg2 = _mm_sha256msg1_epu32(msg2, msg3);
+        msg1 = _mm_add_epi32(msg1, _mm_alignr_epi8(msg0, msg3, 4));
+        msg1 = _mm_sha256msg2_epu32(msg1, msg0);
+
+        // Rounds 16..31
+        sha256_4rounds!(msg0, 0x240ca1ccu32, 0x0fc19dc6u32, 0xefbe4786u32, 0xe49b69c1u32);
+        msg3 = _mm_sha256msg1_epu32(msg3, msg0);
+        msg2 = _mm_add_epi32(msg2, _mm_alignr_epi8(msg1, msg0, 4));
+        msg2 = _mm_sha256msg2_epu32(msg2, msg1);
+        sha256_4rounds!(msg1, 0x76f988dau32, 0x5cb0a9dcu32, 0x4a7484aau32, 0x2de92c6fu32);
+        msg0 = _mm_sha256msg1_epu32(msg0, msg1);
+        msg3 = _mm_add_epi32(msg3, _mm_alignr_epi8(msg2, msg1, 4));
+        msg3 = _mm_sha256msg2_epu32(msg3, msg2);
+        sha256_4rounds!(msg2, 0xbf597fc7u32, 0xb00327c8u32, 0xa831c66du32, 0x983e5152u32);
+        msg1 = _mm_sha256msg1_epu32(msg1, msg2);
+        msg0 = _mm_add_epi32(msg0, _mm_alignr_epi8(msg3, msg2, 4));
+        msg0 = _mm_sha256msg2_epu32(msg0, msg3);
+        sha256_4rounds!(msg3, 0x14292967u32, 0x06ca6351u32, 0xd5a79147u32, 0xc6e00bf3u32);
+        msg2 = _mm_sha256msg1_epu32(msg2, msg3);
+        msg1 = _mm_add_epi32(msg1, _mm_alignr_epi8(msg0, msg3, 4));
+        msg1 = _mm_sha256msg2_epu32(msg1, msg0);
+
+        // Rounds 32..47
+        sha256_4rounds!(msg0, 0x53380d13u32, 0x4d2c6dfcu32, 0x2e1b2138u32, 0x27b70a85u32);
+        msg3 = _mm_sha256msg1_epu32(msg3, msg0);
+        msg2 = _mm_add_epi32(msg2, _mm_alignr_epi8(msg1, msg0, 4));
+        msg2 = _mm_sha256msg2_epu32(msg2, msg1);
+        sha256_4rounds!(msg1, 0x92722c85u32, 0x81c2c92eu32, 0x766a0abbu32, 0x650a7354u32);
+        msg0 = _mm_sha256msg1_epu32(msg0, msg1);
+        msg3 = _mm_add_epi32(msg3, _mm_alignr_epi8(msg2, msg1, 4));
+        msg3 = _mm_sha256msg2_epu32(msg3, msg2);
+        sha256_4rounds!(msg2, 0xc76c51a3u32, 0xc24b8b70u32, 0xa81a664bu32, 0xa2bfe8a1u32);
+        msg1 = _mm_sha256msg1_epu32(msg1, msg2);
+        msg0 = _mm_add_epi32(msg0, _mm_alignr_epi8(msg3, msg2, 4));
+        msg0 = _mm_sha256msg2_epu32(msg0, msg3);
+        sha256_4rounds!(msg3, 0x106aa070u32, 0xf40e3585u32, 0xd6990624u32, 0xd192e819u32);
+        msg2 = _mm_sha256msg1_epu32(msg2, msg3);
+        msg1 = _mm_add_epi32(msg1, _mm_alignr_epi8(msg0, msg3, 4));
+        msg1 = _mm_sha256msg2_epu32(msg1, msg0);
+
+        // Rounds 48..63
+        sha256_4rounds!(msg0, 0x34b0bcb5u32, 0x2748774cu32, 0x1e376c08u32, 0x19a4c116u32);
+        msg3 = _mm_sha256msg1_epu32(msg3, msg0);
+        msg2 = _mm_add_epi32(msg2, _mm_alignr_epi8(msg1, msg0, 4));
+        msg2 = _mm_sha256msg2_epu32(msg2, msg1);
+        sha256_4rounds!(msg1, 0x682e6ff3u32, 0x5b9cca4fu32, 0x4ed8aa4au32, 0x391c0cb3u32);
+        msg3 = _mm_add_epi32(msg3, _mm_alignr_epi8(msg2, msg1, 4));
+        msg3 = _mm_sha256msg2_epu32(msg3, msg2);
+        sha256_4rounds!(msg2, 0x8cc70208u32, 0x84c87814u32, 0x78a5636fu32, 0x748f82eeu32);
+        sha256_4rounds!(msg3, 0xc67178f2u32, 0xbef9a3f7u32, 0xa4506cebu32, 0x90befffau32);
+
+        state0 = _mm_add_epi32(state0, abef_save);
+        state1 = _mm_add_epi32(state1, cdgh_save);
+
+        let out_tmp = _mm_shuffle_epi32(state0, 0x1B);
+        let out_s1 = _mm_shuffle_epi32(state1, 0xB1);
+        let out0 = _mm_blend_epi16(out_tmp, out_s1, 0xF0);
+        let out1 = _mm_alignr_epi8(out_s1, out_tmp, 8);
+
+        _mm_storeu_si128(h.as_mut_ptr() as *mut __m128i, out0);
+        _mm_storeu_si128(h.as_mut_ptr().add(4) as *mut __m128i, out1);
+    }
+
+    #[inline]
+    fn compress_block_soft(h: &mut [u32; 8], chunk: &[u8]) {
         const K: [u32; 64] = [
             0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
             0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -4216,6 +4350,21 @@ console.log(new EscapeAttempt().leak());
             streamer.update(chunk);
         }
         assert_eq!(digest_to_hex(&streamer.finalize()), expected_hex);
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if std::arch::is_x86_feature_detected!("sha")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+            && std::arch::is_x86_feature_detected!("ssse3")
+        {
+            let mut s_soft = Sha256State::new();
+            let mut s_hw = Sha256State::new();
+            let block: &[u8; 64] = payload[..64].try_into().unwrap();
+            Sha256State::compress_block_soft(&mut s_soft.h, block);
+            unsafe {
+                Sha256State::compress_block_sha_ni(&mut s_hw.h, block);
+            }
+            assert_eq!(s_soft.h, s_hw.h);
+        }
 
         // 3. Verify HMAC-SHA256 with both short key (<=64B) and long key (>64B)
         let hmac_short = hmac_sha256_hex(b"secret-key", payload);
