@@ -209,9 +209,117 @@ slice/
     - **`08-event-driven-state-journal` (`mitt@3.0.1`, `ms@2.1.3`):** CQRS event-sourced ledger bus via `mitt`, append-only JSONL write-ahead log (`fs.appendFileSync`), full state replay, and deterministic state convergence verification over 75 events (`11.917 ms` Slice vs `15.262 ms` Bun, `44.417 ms` Deno, `67.596 ms` Node.js).
   - Verified **100% byte-for-byte identical JSON output** across all 8 applications and all 4 runtimes (`Slice v0.2.0`, `Bun v1.4.3`, `Deno v2.9.7`, `Node.js v26.12.0`).
 
-### Phase 8: Distributed Edge Mesh & WASI 0.2 Component Model Linker (Future Horizon)
+### Phase 8: Future Implementation — Zero-Penalty Baked-In Telemetry, Continuous Profiling, Distributed Edge Mesh & WASI 0.2
+
+#### Phase 8.1: Zero-Penalty Baked-In Telemetry & Continuous Live Profiler (`crates/slice-telemetry`)
+A production-grade, always-on observability and continuous profiling subsystem engineered directly into the Slice runtime kernel with **`< 0.5%` CPU overhead (`~2-5 ns` per event)** and **zero runtime heap allocations on the hot execution path**, designed for live multi-tenant edge services (`slice serve`) and deployed standalone binaries (`slice compile`).
+
+- [ ] **1. Hardware Timestamp Counter (`TSC`) & Deterministic Fuel Piggybacking (`< 2 ns` Overhead):**
+  - **Mechanism:** Rather than invoking OS clock syscalls (`clock_gettime`) on every span or instruction, piggyback directly on `TenantCompartment::consume_fuel` (`crates/slice-sandbox/src/lib.rs`) and read the CPU's invariant hardware timestamp counter (`std::arch::x86_64::_rdtsc` on `x86_64`, `CNTVCT_EL0` on `aarch64`) at coarse execution boundaries (`cas_mmap_ns`, `isolate_init_ns`, `tier0_eval_ns`, `tier2_jit_ns`, `boa_exec_ns`, `host_io_ns`, `ocap_verify_ns`).
+  - **Zero-Contention Thread-Local Cache-Line Slots:** Store per-worker telemetry counters inside cache-line-aligned (`#[repr(C, align(64))]`) thread-local structs (`ThreadTelemetrySlot`) using `Ordering::Relaxed` atomic writes (`AtomicU64`). Because only the owning worker thread writes to its slot and the background scraper thread only reads periodically, CPU cache-coherency bus locking and false sharing are completely eliminated.
+- [ ] **2. Zero-Cost Compile-Time USDT (User-Statically Defined Tracepoints) & eBPF Probes (`0.00%` Inactive Overhead):**
+  - **Mechanism:** Embed static ELF `.note.stapsdt` / DTrace NOP instructions (`usdt` crate / inline `asm!("nop")`) at critical runtime lifecycle hooks:
+    - `slice:isolate:spawn(tenant_id, cas_hash, tier_mode)`
+    - `slice:isolate:complete(tenant_id, fuel_consumed, peak_arena_bytes, elapsed_tsc)`
+    - `slice:sandbox:ocap_violation(tenant_id, cap_kind, target_resource)`
+    - `slice:engine:tier_promote(tenant_id, fn_id, loop_iterations)`
+    - `slice:io:uring_submit(tenant_id, opcode, fd, bytes)`
+  - **Why It Is a Killer Feature:** When no external profiler is attached, the CPU executes a single 1-byte `NOP` instruction (`0.00%` measurable overhead). In live production, SREs and platform engineers can attach `bpftrace`, `perf`, Parca, or Datadog eBPF agents dynamically to any running `slice serve` node or `slice compile` binary to inspect per-tenant latencies and capability denials without restarting or redeploying the process.
+- [ ] **3. Continuous Statistical Sampling Profiler (`perf_event_open` + Lock-Free `mmap` SPSC Ring Buffer):**
+  - **Mechanism:** Instead of instrumenting every JS function enter/exit (which adds 15-40% overhead in traditional VMs), configure a hardware PMU cycle/instruction overflow interrupt (`perf_event_open` on Linux / programmable fuel-stride sampling every $N = 10{,}000$ fuel ticks across all OSes).
+  - **Lightweight Shadow Frame Stack:** Maintain a fixed 64-entry thread-local array of `(ModuleId, FunctionId, BytecodeOffset)` updated via a single indexed pointer write on function calls. When a sample tick triggers, copy the current shadow stack depth into a pre-allocated, lock-free Single-Producer Single-Consumer (`SPSC`) `mmap` ring buffer.
+  - **Live Flamegraphs (`pprof` & Speedscope):** A background low-priority consumer thread drains the SPSC ring buffer, symbolizes `(ModuleId, FunctionId)` against the `.cas` `CasIndexHeader` string table, and exposes live per-tenant CPU and fuel flamegraphs (`GET /debug/pprof/profile?tenant=<id>` and `slice profile --pid <pid> --flamegraph out.svg`).
+- [ ] **4. Pre-Allocated Inline Quantile Sketches (`HdrHistogram` / `DDSketch`) & Zero-Alloc `/metrics` Endpoint:**
+  - **Mechanism:** Record per-route and per-tenant latency distributions into pre-allocated, bounded logarithmic bucket arrays (`DDSketch` / `HdrHistogram` with 2-bit/3-bit sub-bucket mantissa precision) inside each worker thread (`~3-6 ns` bitwise bucket index calculation via `leading_zeros()`).
+  - **Native OpenMetrics / Prometheus & OTLP Binary Export:** Expose a built-in zero-allocation `/metrics` endpoint on `slice serve` (plus optional binary OpenTelemetry `OTLP/gRPC` push export) reporting live P50, P90, P95, P99, and P99.9 isolate latencies, active `TenantCompartment` arena utilization, OCap violation counters, and `BOA_VFS_CACHE` hit ratios.
+- [ ] **5. Built-In CLI Flight Recorder (`slice top` & `slice trace`):**
+  - Attach to any local or remote Slice process over a shared-memory (`shm_open` / `mmap`) telemetry ring buffer to render a live terminal dashboard (`slice top`) displaying real-time per-tenant RPS, P99 latency, fuel burn rate, and memory high-water marks with zero network overhead.
+
+#### Phase 8.2: Distributed Edge Mesh & WASI 0.2 Component Model Linker
 - [ ] **Live Snapshot Migration Across Edge Nodes:** Sub-millisecond teleportation of dirty `TenantCompartment` pages over QUIC/RDMA.
 - [ ] **WASI 0.2 Component Model Linker:** Native composition of Rust/C++/Go `.wasm` components alongside `SLICESNP`/`SLICEBOA` TypeScript isolates in the same zero-copy shared memory cage.
 
+---
 
+### Phase 9: Codebase-Wide Rust Micro-Optimization Sweep & Next-Gen Comparative Runtime Architecture
 
+#### Phase 9A: Known Rust Performance, Memory Footprint & Binary Size Patterns (Codebase Sweep Checklist)
+Based on a full audit of our workspace (`crates/slice-cas`, `crates/slice-engine`, `crates/slice-io`, `crates/slice-sandbox`, `crates/slice-cli`) and established high-performance systems Rust patterns, the following targeted micro-optimizations can be systematically applied across the codebase:
+
+- [ ] **1. Replace `std::collections::HashMap` / `HashSet` (SipHash-1-3) with `rustc_hash::FxHashMap` / `ahash` on All Non-Cryptographic Hot Paths:**
+  - **Where in Codebase:**
+    - `crates/slice-engine/src/lib.rs`: `SliceIsolate::env_vars`, `BOA_VFS_CACHE`, `BOA_VFS_DIRS`, `JsValue::Object(HashMap<String, JsValue>)`, `Tier2JitEngine::compiled_blocks`, and `SnapshotProgram` environment maps.
+    - `crates/slice-cas/src/lib.rs`: `CasIndexHeader::radix_resolution_map` and `entries`, plus `visited` / `pruned_files` sets during `pack_directory_to_cas`.
+    - `crates/slice-sandbox/src/lib.rs`: `ObjectCapabilities::allowed_env_keys`.
+  - **Why & Expected Gain:** Rust's default `SipHash-1-3` is designed to resist HashDoS attacks on untrusted network keys, adding substantial multi-round XOR-rotate overhead on short strings and integer keys. Replacing internal compiler/VFS/variable maps with `FxHashMap` (single multiply-XOR word hash) reduces lookup latency by **3x to 5x** and shrinks instruction cache footprint.
+
+- [ ] **2. Shrink `JsValue` Enum Layout from `48+ bytes` to `16 bytes` (or `8-byte` NaN-Boxed Payload):**
+  - **Where in Codebase:** `crates/slice-engine/src/lib.rs` (`pub enum JsValue`).
+  - **Problem:** Currently `JsValue` embeds `String` (24 bytes), `Vec<JsValue>` (24 bytes), and `HashMap<String, JsValue>` (48 bytes) inline inside enum variants. Because a Rust `enum` is sized to its largest variant plus discriminant alignment, **every single `JsValue::Number(f64)` or `JsValue::Boolean(bool)` copies 48-56 bytes on the stack** during Tier-0 expression evaluation.
+  - **Fix:** Box or arena-allocate heap variants (`JsValue::String(CompactString)` or `Rc<str>`, `JsValue::Array(Box<Vec<JsValue>>)`, `JsValue::Object(Box<FxHashMap<CompactString, JsValue>>)`) so `std::mem::size_of::<JsValue>() == 16` (or `8` via IEEE-754 quiet-NaN tagging), cutting L1 data-cache pressure by **3x** across Tier-0 and snapshot cloning.
+  - **Verification Gate:** Add `const _: () = assert!(std::mem::size_of::<JsValue>() <= 16);` at compile time.
+
+- [ ] **3. Eliminate Short-String Heap Allocations with `CompactString` / `SmallVec` and String Interning (`Spur`):**
+  - **Where in Codebase:**
+    - `crates/slice-engine/src/lib.rs`: `FlatStatement` identifier names (`name: String`, `target: String`, `prop: String`, `key: String`) and `FlatExpr` tokens (`Var(String)`, `StringLit(String)`).
+    - `crates/slice-cas/src/lib.rs`: `ModuleEntry::specifier` (`String`).
+  - **Fix:**
+    - Use `compact_str::CompactString` (which inlines strings up to 24 bytes directly inside the 24-byte struct representation without heap allocation) or intern all AST identifiers into a contiguous string table (`Vec<u8>` + `u32` symbol IDs) during `compile_source_to_snapshot`.
+    - Integer symbol IDs turn Tier-0 variable resolution from string hashing into a **`O(1)` direct array index (`vars[sym_id as usize]`)**, eliminating all string comparisons during loop execution.
+
+- [ ] **4. Zero-Copy Streaming SHA-256 (`sha256_bytes`) Without Full Input Cloning:**
+  - **Where in Codebase:** `crates/slice-engine/src/lib.rs` (`fn sha256_bytes(data: &[u8]) -> [u8; 32]`).
+  - **Problem:** Currently `sha256_bytes` starts with `let mut msg = data.to_vec();` and pads the vector on the heap before hashing 64-byte chunks.
+  - **Fix:** Process `data.chunks_exact(64)` directly from the borrowed `&[u8]` slice in place with zero heap allocation, and construct only the final 1 or 2 padded 64-byte tail blocks in a fixed stack array (`let mut tail = [0u8; 128];`). This eliminates 100% of heap allocations inside `sha256_hex`, `hmac_sha256_hex`, and CAS integrity verification.
+
+- [ ] **5. Thread-Local Scratch Buffer Reuse (`clear()` Without `shrink_to_fit()`):**
+  - **Where in Codebase:** `crates/slice-engine/src/lib.rs` (`BOA_STDOUT`, `SliceIsolate::stdout_log`, JSON/hex formatting buffers).
+  - **Problem:** `BOA_STDOUT.with(|buf| std::mem::take(&mut *buf.borrow_mut()))` transfers ownership of the heap buffer out of the thread-local on every `execute_boa_source` call, forcing the next execution to re-allocate and grow the `String` buffer from `0` capacity.
+  - **Fix:** Pre-reserve a `4 KB` buffer in `BOA_STDOUT` and clone/slice the output bytes while calling `.clear()` on the thread-local `String` to retain capacity across warm runs, or write directly into a caller-provided `&mut String` / `TenantCompartment` output buffer.
+
+- [ ] **6. Struct Field Ordering & Cache-Line Packing (`#[repr(C)]`):**
+  - **Where in Codebase:** `TenantCompartment` (`crates/slice-sandbox/src/lib.rs`), `CasIndexHeader` (`crates/slice-cas/src/lib.rs`), and `SliceIsolate` (`crates/slice-engine/src/lib.rs`).
+  - **Fix:** Group hot scalar fields checked on every instruction (`fuel_remaining`, `fuel_limit`, `memory_used_bytes`, `memory_limit_bytes`) into the first 32 bytes of `TenantCompartment` so a single L1 cache line fetch satisfies both fuel and memory boundary checks, separating cold `ObjectCapabilities` vectors onto a second cache line.
+
+- [ ] **7. Release Binary Size & Global Allocator Optimization (`strip`, `mimalloc`, Cold Error Outlining):**
+  - **Where in Codebase:** Root `Cargo.toml` and `crates/slice-cli/src/main.rs`.
+  - **Fix:**
+    - Add `strip = "symbols"` to `[profile.release]` in `Cargo.toml` to cut the compiled `slice` CLI and `slice compile` standalone executable size from **`~10.0 MB` down to `~4.2 MB`** (improving OS executable page-in latency and reducing container image size).
+    - Annotate error formatting and OCap violation constructors with `#[cold]` and `#[inline(never)]` so LLVM keeps cold error-handling code out of hot instruction loops.
+    - Add an optional `mimalloc` global allocator feature (`#[global_allocator] static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;`) to accelerate multi-threaded allocation throughput under `slice serve` and `BoaFullEsVm`.
+
+---
+
+#### Phase 9B: Comparative Runtime Design Matrix & Novel Next-Gen Architectural Improvements
+
+##### 1. How Slice (`Nexus-JS`) Compares Against Modern JS/TS Runtime Architectures
+
+| Architectural Dimension | Node.js (`v26` / V8) & Deno (`v2.9` / V8) | Bun (`v1.4` / JavaScriptCore) | QuickJS-NG / Static Hermes / Porffor | Slice (`v0.2.0` Current) | Slice (`v0.3+` Next-Gen Target) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **TypeScript Pipeline** | Runtime TS strip or SWC/tsc build step | Runtime JSC lexer/transpiler per launch | Static Hermes / Porffor compile ahead-of-time | **AOT Oxc `v0.126`** at `slice pack` (`0.00 ms` runtime TS cost) | **Type-Directed Oxc Semantic Lowering** -> Monomorphic Tier-2 Native Opcodes |
+| **Cold-Start Payload** | V8 heap snapshot + JS source parsing (`40-75 ms`) | JSC bytecode cache + Zig bundler (`12-20 ms`) | QuickJS bytecode array (`2-5 ms`) | **`SLICESNP` Binary AST** (`<0.5 ms`) or **`SLICEBOA` Bundled IIFE** (`4-8 ms`) | **`SLICEBC` Pre-Compiled Bytecode + `mmap(MAP_PRIVATE)` CoW Heap Image (`<0.3 ms`)** |
+| **Value Representation** | 32-bit Compressed Pointers in 4 GB V8 Cage | 64-bit NaN-Boxing (`JSValue` = 8 bytes) | 64-bit NaN-Boxing (8 bytes) or 16-byte tagged union | `JsValue` Rust Enum (48+ bytes) + `boa_engine::JsValue` | **8-Byte NaN-Boxed `SliceVal` + Interned `u32` Symbol Table** |
+| **CommonJS / `node_modules` Execution** | Full runtime `fs.stat` + CJS wrapper evaluation | Fast Zig resolver + runtime CJS wrapper execution | Slow or unsupported `node_modules` tree | **Compile-Time Tree-Shaking + `__slice_semver_*` Rust Intrinsics + `BOA_VFS_CACHE`** | **Pre-Evaluated CJS Heap Snapshot (Zero Runtime `require()` Wrapper Execution)** |
+| **Memory Footprint (`Max RSS`)** | `40 MB - 77 MB` per process | `25 MB - 38 MB` per process | `3 MB - 8 MB` (no npm ecosystem) | **`9.8 MB - 12.1 MB`** (full npm ecosystem) | **`4.5 MB - 7.5 MB`** (via `strip`, `SLICEBC`, & CoW Arena) |
+
+##### 2. Novel High-Gain Architectural Improvements for Phase 9+
+
+- [ ] **1. `SLICEBC`: Ahead-of-Time Pre-Compiled Bytecode Serialization (Eliminating Runtime JS Parsing in `BoaFullEsVm`):**
+  - **Bottleneck Identified:** Currently, when `slice pack` emits a `SLICEBOA` payload for complex ES2024+ / `node_modules` apps, it stores an Oxc-bundled JavaScript source string inside `.cas`. On cold start (`Cold Isolate Exec`), `BoaFullEsVm` still runs `boa_engine`'s lexer, AST parser, and bytecompiler over that JS source (`~2.5 ms - 3.5 ms` of the `7.8 ms` cold start).
+  - **Architectural Breakthrough:** Move lexical analysis, AST parsing, scope resolution, and bytecode compilation **entirely into `slice pack`**. Serialize the compiled register/stack bytecode instructions, constant pool, and interned string table directly into `.cas` as a `SLICEBC` binary section (`#[repr(C)]` aligned). At runtime, `slice run` maps the bytecode pages directly into the VM interpreter loop with **zero runtime lexing or parsing**, cutting `SLICEBOA` cold execution time in half (`~7.8 ms -> ~3.5 ms`).
+
+- [ ] **2. Pre-Evaluated CommonJS Module Initialization Snapshots (Inspired by Cloudflare `workerd` & Wizer):**
+  - **Bottleneck Identified:** Even with our `WITH_BOA_CONTEXT` thread-local warm cache, the first execution of a bundle inside a new process must execute the top-level initialization code of every required `node_modules` package (`__commonJS` factory wrappers, regex compilation, constant table creation, prototype wiring).
+  - **Architectural Breakthrough:** During `slice pack` (or at container build time), execute the top-level module initialization phase (`__require("entry")` module setup up to the exported handler entrypoint), freeze the resulting initialized global/module heap state into a deterministic snapshot page inside `.cas`, and start every `slice run` invocation **after** `node_modules` initialization has already completed.
+
+- [ ] **3. Copy-on-Write (`mmap(MAP_PRIVATE)`) Realm Heap Forking for Sub-100us Multi-Tenant Spawning:**
+  - **Mechanism:** Store a pre-initialized linear memory arena inside the `.cas` file aligned to OS `4096-byte` page boundaries. When spawning a new `TenantCompartment`, map the pre-initialized heap pages with `mmap(..., PROT_READ | PROT_WRITE, MAP_PRIVATE, cas_fd, offset)`.
+  - **Why It Wins:** The OS kernel shares physical RAM pages across thousands of concurrent isolates via hardware page tables and only allocates a physical 4 KB page when a tenant mutates a specific page (Copy-on-Write fault). Resetting an isolate between requests requires only unmapping or `madvise(MADV_DONTNEED)` on dirtied pages—achieving `< 50 us` full-ecosystem isolate reset with near-zero per-tenant RAM overhead.
+
+- [ ] **4. Type-Directed Oxc Semantic Lowering (Inspired by Static Hermes & Porffor):**
+  - **Mechanism:** Right now, Oxc strips TypeScript types during `slice pack`. Instead, run `oxc_semantic::SemanticBuilder` before stripping types to extract explicit TypeScript type annotations (`x: number`, `arr: Float64Array`, `id: string`).
+  - **Why It Wins:** Functions with proven numeric or string parameter types can bypass dynamic JS type-checking and coercion completely, compiling directly at `slice pack` time into specialized unboxed Tier-2 `f64` / `i64` native register instructions and SIMD vector loops (`#[target_feature(enable = "avx2")]` / NEON).
+
+- [ ] **5. Hardware Crypto Intrinsics (`SHA-NI` / ARMv8 Cryptography Extensions) & SIMD JSON Scanning:**
+  - **Mechanism:** Detect CPU hardware SHA extensions at runtime (`std::arch::is_x86_feature_detected!("sha")`) inside `crates/slice-engine/src/lib.rs` to dispatch `sha256_bytes` and `hmac_sha256_hex` to hardware `_mm_sha256rnds2_epu32` instructions instead of software 64-round loops, and integrate SIMD structural JSON indexing (`simd-json` / SWAR 64-bit quote/brace bitmasks) for `JSON.parse` and JSONL log pipelines.
+  - **Expected Gain:** **5x to 8x faster** JWT HMAC-SHA256 verification and content-addressed `.cas` hashing (`App 01`, `App 02`, `App 04`, `App 05`) and **3x faster** bulk JSONL parsing (`App 03`, `App 06`, `App 08`).
