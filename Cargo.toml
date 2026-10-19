@@ -24,6 +24,7 @@ thiserror = "1.0"
 libc = "0.2"
 oxc = { version = "=0.152.0", features = ["transformer", "codegen", "semantic"] }
 boa_engine = { version = "0.22", default-features = false }
+rustc-hash = "2.1"
 
 [profile.release]
 opt-level = 3

@@ -11,4 +11,5 @@ serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 oxc.workspace = true
+rustc-hash.workspace = true
 

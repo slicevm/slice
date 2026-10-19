@@ -9,4 +9,5 @@ thiserror.workspace = true
 serde.workspace = true
 libc.workspace = true
 blake3.workspace = true
+rustc-hash.workspace = true
 

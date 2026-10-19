@@ -7,8 +7,9 @@
 //! 4. Hardware Memory Protection Keys (`pkey_alloc` / `WRPKRU` on Linux x86_64) switching page
 //!    permissions in < 20 CPU clock cycles.
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::borrow::Cow;
 use thiserror::Error;
 
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
@@ -51,12 +52,13 @@ pub enum SandboxViolation {
 pub struct CapabilityToken {
     pub allowed_read_prefixes: Vec<String>,
     pub allowed_write_prefixes: Vec<String>,
-    pub allowed_net_hosts: HashSet<String>,
-    pub allowed_env_keys: HashMap<String, String>,
+    pub allowed_net_hosts: FxHashSet<String>,
+    pub allowed_env_keys: FxHashMap<String, String>,
 }
 
 impl CapabilityToken {
     /// Pure compute compartment with zero I/O or environment authority.
+    #[inline]
     pub fn pure_compute() -> Self {
         Self::default()
     }
@@ -83,16 +85,18 @@ impl CapabilityToken {
 }
 
 /// Hardware Memory Protection Key (Intel MPK / ARM POE) domain descriptor.
+#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct HardwareProtectionDomain {
     pub pkey: i32,
-    pub hardware_enforced: bool,
     pub pkru_mask: u32,
+    pub hardware_enforced: bool,
 }
 
 impl HardwareProtectionDomain {
     /// Allocates a hardware protection key via Linux `pkey_alloc` when supported by CPU/kernel,
     /// or assigns a virtualized protection domain tag (1..15) for deterministic domain tracking.
+    #[inline]
     pub fn allocate(tenant_slot: u32) -> Self {
         let domain_slot = ((tenant_slot % 15) + 1) as i32;
 
@@ -104,8 +108,8 @@ impl HardwareProtectionDomain {
                 let mask = !(0b11u32 << (pkey * 2));
                 return Self {
                     pkey,
-                    hardware_enforced: true,
                     pkru_mask: mask,
+                    hardware_enforced: true,
                 };
             }
         }
@@ -113,13 +117,13 @@ impl HardwareProtectionDomain {
         let mask = !(0b11u32 << (domain_slot * 2));
         Self {
             pkey: domain_slot,
-            hardware_enforced: false,
             pkru_mask: mask,
+            hardware_enforced: false,
         }
     }
 
     /// Executes a sub-20-cycle domain switch into this tenant's protection key domain.
-    #[inline]
+    #[inline(always)]
     pub fn enter_domain(&self) {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         {
@@ -141,6 +145,7 @@ impl HardwareProtectionDomain {
     }
 
     /// Releases the hardware protection key if allocated via kernel `pkey_alloc`.
+    #[inline]
     pub fn release(&self) {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         {
@@ -154,24 +159,50 @@ impl HardwareProtectionDomain {
     }
 }
 
+/// Zero-allocation static check for SES frozen intrinsics.
+#[inline(always)]
+pub fn is_frozen_intrinsic(target: &str) -> bool {
+    matches!(
+        target,
+        "Object.prototype"
+            | "Array.prototype"
+            | "Function.prototype"
+            | "String.prototype"
+            | "Number.prototype"
+            | "Boolean.prototype"
+            | "RegExp.prototype"
+            | "Error.prototype"
+            | "Promise.prototype"
+            | "Reflect"
+            | "JSON"
+            | "Math"
+    )
+}
+
 /// Isolated MicroVM-Grade Tenant Compartment.
 ///
-/// Encapsulates frozen SES intrinsics, attenuated OCap capability tokens,
-/// deterministic CPU instruction fuel, memory allocation accounting, and hardware PKEY state.
+/// Phase 9A Cache-Line Packing (`#[repr(C)]`):
+/// Hot scalar fields checked on every instruction (`fuel_consumed`, `fuel_limit`,
+/// `memory_used_bytes`, `memory_limit_bytes`, `pkey_domain`, `ses_locked_down`)
+/// are packed into the first 48 bytes (single 64-byte L1 cache line), while cold
+/// `tenant_id` and `capabilities` sit on the second cache line.
+#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct TenantCompartment {
-    pub tenant_id: String,
-    pub ses_locked_down: bool,
-    pub capabilities: CapabilityToken,
-    pub pkey_domain: HardwareProtectionDomain,
-    pub fuel_limit: u64,
+    // --- Hot L1 Cache Line 0 (48 bytes) ---
     pub fuel_consumed: u64,
-    pub memory_limit_bytes: usize,
+    pub fuel_limit: u64,
     pub memory_used_bytes: usize,
-    frozen_intrinsics: HashSet<String>,
+    pub memory_limit_bytes: usize,
+    pub pkey_domain: HardwareProtectionDomain,
+    pub ses_locked_down: bool,
+    // --- Cold Cache Line 1 ---
+    pub tenant_id: String,
+    pub capabilities: CapabilityToken,
 }
 
 impl TenantCompartment {
+    #[inline]
     pub fn new(
         tenant_id: impl Into<String>,
         slot_id: u32,
@@ -179,114 +210,148 @@ impl TenantCompartment {
         fuel_limit: u64,
         memory_limit_bytes: usize,
     ) -> Self {
-        let mut frozen = HashSet::with_capacity(16);
-        for intrinsic in [
-            "Object.prototype",
-            "Array.prototype",
-            "Function.prototype",
-            "String.prototype",
-            "Number.prototype",
-            "Promise.prototype",
-            "Reflect",
-            "JSON",
-            "Math",
-        ] {
-            frozen.insert(intrinsic.to_string());
-        }
-
         Self {
-            tenant_id: tenant_id.into(),
-            ses_locked_down: true,
-            capabilities,
-            pkey_domain: HardwareProtectionDomain::allocate(slot_id),
-            fuel_limit,
             fuel_consumed: 0,
-            memory_limit_bytes,
+            fuel_limit,
             memory_used_bytes: 4096, // 4 KB base compartment header frame
-            frozen_intrinsics: frozen,
+            memory_limit_bytes,
+            pkey_domain: HardwareProtectionDomain::allocate(slot_id),
+            ses_locked_down: true,
+            tenant_id: tenant_id.into(),
+            capabilities,
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn trap_fuel_exhausted(&self) -> SandboxViolation {
+        SandboxViolation::CpuFuelExhausted {
+            tenant_id: self.tenant_id.clone(),
+            limit: self.fuel_limit,
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn trap_memory_exceeded(&self, requested: usize) -> SandboxViolation {
+        SandboxViolation::MemoryCeilingExceeded {
+            tenant_id: self.tenant_id.clone(),
+            requested,
+            limit: self.memory_limit_bytes,
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn trap_intrinsic_mutation(&self, target_object: &str) -> SandboxViolation {
+        SandboxViolation::IntrinsicMutationBlocked {
+            tenant_id: self.tenant_id.clone(),
+            intrinsic: target_object.to_string(),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn trap_fs_read(&self, path: &str) -> SandboxViolation {
+        SandboxViolation::FsReadDenied {
+            tenant_id: self.tenant_id.clone(),
+            path: path.to_string(),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn trap_fs_write(&self, path: &str) -> SandboxViolation {
+        SandboxViolation::FsWriteDenied {
+            tenant_id: self.tenant_id.clone(),
+            path: path.to_string(),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn trap_net_access(&self, host: &str) -> SandboxViolation {
+        SandboxViolation::NetAccessDenied {
+            tenant_id: self.tenant_id.clone(),
+            host: host.to_string(),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn trap_env_access(&self, key: &str) -> SandboxViolation {
+        SandboxViolation::EnvAccessDenied {
+            tenant_id: self.tenant_id.clone(),
+            key: key.to_string(),
         }
     }
 
     /// Consumes `ops` deterministic instruction fuel units, trapping immediately if exceeded.
-    #[inline]
+    #[inline(always)]
     pub fn consume_fuel(&mut self, ops: u64) -> Result<(), SandboxViolation> {
         self.fuel_consumed = self.fuel_consumed.saturating_add(ops);
         if self.fuel_consumed > self.fuel_limit {
-            return Err(SandboxViolation::CpuFuelExhausted {
-                tenant_id: self.tenant_id.clone(),
-                limit: self.fuel_limit,
-            });
+            return Err(self.trap_fuel_exhausted());
         }
         Ok(())
     }
 
     /// Allocates bytes inside the tenant's isolated heap cage, trapping if exceeding the cap.
-    #[inline]
+    #[inline(always)]
     pub fn alloc_memory(&mut self, bytes: usize) -> Result<(), SandboxViolation> {
         let next = self.memory_used_bytes.saturating_add(bytes);
         if next > self.memory_limit_bytes {
-            return Err(SandboxViolation::MemoryCeilingExceeded {
-                tenant_id: self.tenant_id.clone(),
-                requested: next,
-                limit: self.memory_limit_bytes,
-            });
+            return Err(self.trap_memory_exceeded(next));
         }
         self.memory_used_bytes = next;
         Ok(())
     }
 
     /// Verifies SES `lockdown()` protection before any property mutation on a root object.
-    #[inline]
+    #[inline(always)]
     pub fn verify_property_mutation(&self, target_object: &str) -> Result<(), SandboxViolation> {
-        if self.ses_locked_down && self.frozen_intrinsics.contains(target_object) {
-            return Err(SandboxViolation::IntrinsicMutationBlocked {
-                tenant_id: self.tenant_id.clone(),
-                intrinsic: target_object.to_string(),
-            });
+        if self.ses_locked_down && is_frozen_intrinsic(target_object) {
+            return Err(self.trap_intrinsic_mutation(target_object));
         }
         Ok(())
     }
 
-    /// Verifies attenuated VFS read capability for `path`.
+    /// Verifies attenuated VFS read capability for `path` using zero-copy `Cow` normalization.
     #[inline]
     pub fn verify_fs_read(&self, path: &str) -> Result<(), SandboxViolation> {
-        let normalized = path.replace('\\', "/");
+        let normalized: Cow<'_, str> = if path.as_bytes().contains(&b'\\') {
+            Cow::Owned(path.replace('\\', "/"))
+        } else {
+            Cow::Borrowed(path)
+        };
         if normalized.contains("..") {
-            return Err(SandboxViolation::FsReadDenied {
-                tenant_id: self.tenant_id.clone(),
-                path: path.to_string(),
-            });
+            return Err(self.trap_fs_read(path));
         }
         for prefix in &self.capabilities.allowed_read_prefixes {
             if normalized.starts_with(prefix) {
                 return Ok(());
             }
         }
-        Err(SandboxViolation::FsReadDenied {
-            tenant_id: self.tenant_id.clone(),
-            path: path.to_string(),
-        })
+        Err(self.trap_fs_read(path))
     }
 
-    /// Verifies attenuated VFS write capability for `path`.
+    /// Verifies attenuated VFS write capability for `path` using zero-copy `Cow` normalization.
     #[inline]
     pub fn verify_fs_write(&self, path: &str) -> Result<(), SandboxViolation> {
-        let normalized = path.replace('\\', "/");
+        let normalized: Cow<'_, str> = if path.as_bytes().contains(&b'\\') {
+            Cow::Owned(path.replace('\\', "/"))
+        } else {
+            Cow::Borrowed(path)
+        };
         if normalized.contains("..") {
-            return Err(SandboxViolation::FsWriteDenied {
-                tenant_id: self.tenant_id.clone(),
-                path: path.to_string(),
-            });
+            return Err(self.trap_fs_write(path));
         }
         for prefix in &self.capabilities.allowed_write_prefixes {
             if normalized.starts_with(prefix) {
                 return Ok(());
             }
         }
-        Err(SandboxViolation::FsWriteDenied {
-            tenant_id: self.tenant_id.clone(),
-            path: path.to_string(),
-        })
+        Err(self.trap_fs_write(path))
     }
 
     /// Verifies attenuated outbound network capability for `host`.
@@ -297,10 +362,7 @@ impl TenantCompartment {
         {
             return Ok(());
         }
-        Err(SandboxViolation::NetAccessDenied {
-            tenant_id: self.tenant_id.clone(),
-            host: host.to_string(),
-        })
+        Err(self.trap_net_access(host))
     }
 
     /// Verifies attenuated environment variable access for `key`.
@@ -310,10 +372,7 @@ impl TenantCompartment {
             .allowed_env_keys
             .get(key)
             .map(|s| s.as_str())
-            .ok_or_else(|| SandboxViolation::EnvAccessDenied {
-                tenant_id: self.tenant_id.clone(),
-                key: key.to_string(),
-            })
+            .ok_or_else(|| self.trap_env_access(key))
     }
 }
 
@@ -543,5 +602,34 @@ NODE_ENV = "production"
         assert!(tenant.verify_fs_write("/tmp/shards/../../etc/passwd").is_err());
         assert_eq!(tenant.verify_env_read("NODE_ENV"), Ok("production"));
     }
+
+    #[test]
+    fn test_phase_9a_compartment_layout_and_zero_alloc_intrinsics() {
+        // Verify all 9 frozen SES intrinsics match via zero-allocation compile-time trie
+        for intrinsic in [
+            "Object.prototype",
+            "Array.prototype",
+            "Function.prototype",
+            "Promise.prototype",
+            "String.prototype",
+            "Number.prototype",
+            "Boolean.prototype",
+            "RegExp.prototype",
+            "Error.prototype",
+        ] {
+            assert!(is_frozen_intrinsic(intrinsic));
+        }
+        assert!(!is_frozen_intrinsic("CustomClass.prototype"));
+
+        // Verify Windows backslash normalization still works via Cow::Owned fallback
+        let caps = CapabilityToken::pure_compute()
+            .with_read_prefix("/app/data")
+            .with_write_prefix("/tmp/out");
+        let tenant = TenantCompartment::new("tenant-9a", 3, caps, 10_000, 65536);
+        assert!(tenant.verify_fs_read(r"\app\data\file.json").is_ok());
+        assert!(tenant.verify_fs_write(r"\tmp/out\result.txt").is_ok());
+    }
 }
+
+
 

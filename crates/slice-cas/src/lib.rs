@@ -7,8 +7,8 @@
 
 use anyhow::{bail, Context, Result};
 use memmap2::Mmap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,15 +22,16 @@ pub const CACHE_LINE_ALIGN: usize = 64;
 pub type Blake3Hash = [u8; 32];
 
 /// Metadata entry in the CAS Radix/Index table pointing to a 64-byte aligned slice.
+#[repr(C)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CasBlobEntry {
-    pub hash_hex: String,
     pub offset: u64,
     pub source_len: u64,
     pub bytecode_offset: u64,
     pub bytecode_len: u64,
-    pub original_specifier: String,
     pub is_typescript: bool,
+    pub hash_hex: String,
+    pub original_specifier: String,
 }
 
 /// Deterministic Radix / Hash resolution table embedded in the CAS header.
@@ -40,9 +41,9 @@ pub struct CasIndexHeader {
     pub entrypoint_specifier: String,
     pub entrypoint_hash: String,
     /// Maps `(issuer_context, import_specifier)` or canonical specifier -> `hash_hex`
-    pub radix_resolution_map: HashMap<String, String>,
+    pub radix_resolution_map: FxHashMap<String, String>,
     /// Maps `hash_hex` -> `CasBlobEntry`
-    pub blobs: HashMap<String, CasBlobEntry>,
+    pub blobs: FxHashMap<String, CasBlobEntry>,
 }
 
 /// Production TypeScript Compiler & Transpiler powered by **Oxc** (The Oxidation Compiler).
@@ -585,7 +586,7 @@ fn transform_module_to_cjs(
     // is used inside `module.exports = { ... }`:
     // convert those into lazy getters or native Rust fast-path wrappers so unused submodules are never parsed or loaded!
     if body_lines.iter().any(|l| l.trim() == "module.exports = {") {
-        let mut const_req_map: HashMap<String, (usize, String)> = HashMap::new();
+        let mut const_req_map: FxHashMap<String, (usize, String)> = FxHashMap::default();
         for (idx, line) in body_lines.iter().enumerate() {
             let t = line.trim().trim_end_matches(';');
             if let Some(rest) = t.strip_prefix("const ") {
@@ -601,9 +602,9 @@ fn transform_module_to_cjs(
         let is_semver_barrel = const_req_map.contains_key("satisfies")
             && const_req_map.contains_key("coerce")
             && const_req_map.contains_key("SemVer");
-        let mut to_remove_indices = std::collections::HashSet::new();
-        let mut shorthand_replacements: HashMap<usize, String> = HashMap::new();
-        let mut pruned_req_ids = std::collections::HashSet::new();
+        let mut to_remove_indices = FxHashSet::default();
+        let mut shorthand_replacements: FxHashMap<usize, String> = FxHashMap::default();
+        let mut pruned_req_ids = FxHashSet::default();
 
         for (idx, line) in body_lines.iter().enumerate() {
             let t = line.trim();
@@ -732,11 +733,11 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     }
 
     let mut visited_order: Vec<(String, String)> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen: FxHashSet<String> = FxHashSet::default();
 
     fn visit_module(
         path: &Path,
-        seen: &mut std::collections::HashSet<String>,
+        seen: &mut FxHashSet<String>,
         visited_order: &mut Vec<(String, String)>,
     ) -> Result<String> {
         let mod_id = canonical_mod_id(path);
@@ -877,8 +878,8 @@ impl CasBuilder {
 
     /// Serializes the entire module graph into an immutable, 64-byte aligned `.cas` archive file.
     pub fn write_to_file(&self, output_path: &Path) -> Result<CasIndexHeader> {
-        let mut radix_map = HashMap::new();
-        let mut blobs = HashMap::new();
+        let mut radix_map = FxHashMap::default();
+        let mut blobs = FxHashMap::default();
         let mut data_payload: Vec<u8> = Vec::new();
         let mut entry_hash = String::new();
 

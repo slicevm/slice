@@ -1632,6 +1632,7 @@ dependencies = [
  "blake3",
  "memmap2",
  "oxc",
+ "rustc-hash",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1659,6 +1660,7 @@ dependencies = [
  "blake3",
  "boa_engine",
  "oxc",
+ "rustc-hash",
  "serde",
  "serde_json",
  "slice-cas",
@@ -1684,6 +1686,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "libc",
+ "rustc-hash",
  "serde",
  "thiserror 1.0.69",
 ]
