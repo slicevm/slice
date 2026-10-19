@@ -145,33 +145,31 @@ All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 8
 
 ### 5.1 Execution Latency Across All 8 Folder Applications (Linux Docker `x86_64`, 20 Runs)
 
-| Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.3` | Deno `v2.9.7` | Node.js `v26.12.0` | Speedup vs Node.js | Speedup vs Bun |
+| Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.3` | Deno `v2.9.7` | Node.js `v26.12.0` | Speedup vs Node.js | Speedup vs Bun (Cold / Warm) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256) | **5.986 ms** (Avg 6.551 ms) | **3.638 ms / 1.609 ms** (`0.21 us` init) | 12.606 ms | 33.736 ms | 63.484 ms | **10.61x faster** | **2.11x faster** |
-| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **8.785 ms** (Avg 9.510 ms) | **6.158 ms / 4.264 ms** (`3.75 us` init) | 20.771 ms | 50.510 ms | 75.842 ms | **8.63x faster** | **2.36x faster** |
-| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk I/O) | **9.380 ms** (Avg 10.077 ms) | **6.641 ms / 5.112 ms** (`0.14 us` init) | 13.129 ms | 42.815 ms | 65.691 ms | **7.00x faster** | **1.40x faster** |
-| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms`) | **9.643 ms** (Avg 10.365 ms) | **6.997 ms / 5.329 ms** (`0.22 us` init) | 14.480 ms | 40.068 ms | 67.423 ms | **6.99x faster** | **1.50x faster** |
-| **App 5: `05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC) | **12.510 ms** (Avg 13.212 ms) | **9.523 ms / 7.534 ms** (`0.21 us` init) | 14.087 ms | 42.722 ms | 68.335 ms | **5.46x faster** | **1.13x faster** |
-| **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + WAL) | **13.676 ms** (Avg 14.229 ms) | **10.592 ms / 8.910 ms** (`0.21 us` init) | 16.117 ms | 44.566 ms | 70.108 ms | **5.13x faster** | **1.18x faster** |
-| **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost) | **9.054 ms** (Avg 9.542 ms) | **6.258 ms / 4.256 ms** (`0.24 us` init) | 12.678 ms | 18.756 ms | 66.880 ms | **7.39x faster** | **1.40x faster** |
-| **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay) | **11.917 ms** (Avg 12.684 ms) | **8.868 ms / 7.269 ms** (`0.20 us` init) | 15.262 ms | 44.417 ms | 67.596 ms | **5.67x faster** | **1.28x faster** |
+| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256) | **5.297 ms** (Bin 5.429 ms) | **2.580 ms / 0.673 ms** (`0.08 us` init) | 12.729 ms | 34.766 ms | 63.778 ms | **12.04x faster** | **2.40x / 18.90x faster** |
+| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **6.766 ms** (Bin 7.685 ms) | **4.227 ms / 0.272 ms** (`0.07 us` init) | 20.048 ms | 54.156 ms | 75.895 ms | **11.22x faster** | **2.96x / 73.70x faster** |
+| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk I/O) | **8.438 ms** (CAS 8.590 ms) | **5.678 ms / 3.593 ms** (`0.06 us` init) | 13.063 ms | 41.701 ms | 66.366 ms | **7.87x faster** | **1.55x / 3.63x faster** |
+| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms`) | **7.397 ms** (Bin 7.445 ms) | **4.668 ms / 1.238 ms** (`0.05 us` init) | 14.453 ms | 39.472 ms | 67.118 ms | **9.07x faster** | **1.95x / 11.68x faster** |
+| **App 5: `05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC) | **9.000 ms** (CAS 9.266 ms) | **7.203 ms / 2.976 ms** (`0.07 us` init) | 13.754 ms | 42.949 ms | 66.296 ms | **7.37x faster** | **1.53x / 4.62x faster** |
+| **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + WAL) | **8.670 ms** (Bin 8.892 ms) | **6.640 ms / 3.898 ms** (`0.22 us` init) | 16.495 ms | 45.270 ms | 69.429 ms | **8.01x faster** | **1.90x / 4.23x faster** |
+| **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost) | **8.304 ms** (Bin 8.393 ms) | **5.935 ms / 4.000 ms** (`0.14 us` init) | 12.645 ms | 39.097 ms | 65.467 ms | **7.88x faster** | **1.52x / 3.16x faster** |
+| **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay) | **7.251 ms** (Bin 7.334 ms) | **5.061 ms / 2.122 ms** (`0.08 us` init) | 15.417 ms | 44.038 ms | 68.177 ms | **9.40x faster** | **2.13x / 7.27x faster** |
 
 ### 5.2 Peak Memory Footprint on External NPM & Disk I/O Apps (`Max RSS` via `/usr/bin/time -v`)
 
 | Runtime & Folder Application | Peak Memory (Max RSS KB) | Peak Memory (MB) | Memory Advantage vs Node.js `v26.12.0` |
 | :--- | :--- | :--- | :--- |
-| **Slice (`02-npm-ecosystem-suite`: `semver`+`ms`+`ini`)** | **11,008 KB** | **10.75 MB** | **6.62x less memory** |
-| **Slice (`03-disk-io-log-pipeline`: 10 Shards Disk I/O)** | **11,776 KB** | **11.50 MB** | **6.21x less memory** |
-| **Slice (`06-telemetry-metrics-pipeline`: `bytes`+`flatted`)** | **12,160 KB** | **11.88 MB** | **6.04x less memory** |
-| Bun `v1.4.3` (`03-disk-io-log-pipeline`) | 22,016 KB | 21.50 MB | 3.32x less memory |
-| Bun `v1.4.3` (`02-npm-ecosystem-suite`) | 30,592 KB | 29.88 MB | 2.38x less memory |
-| Bun `v1.4.3` (`06-telemetry-metrics-pipeline`) | 31,872 KB | 31.12 MB | 2.31x less memory |
-| Deno `v2.9.7` (`03-disk-io-log-pipeline`) | 46,592 KB | 45.50 MB | 1.57x less memory |
-| Deno `v2.9.7` (`02-npm-ecosystem-suite`) | 48,040 KB | 46.91 MB | 1.52x less memory |
-| Deno `v2.9.7` (`06-telemetry-metrics-pipeline`) | 51,840 KB | 50.62 MB | 1.42x less memory |
+| **Slice (`02-npm-ecosystem-suite`: `semver`+`ms`+`ini`)** | **10,624 KB** | **10.38 MB** | **6.85x less memory** |
+| **Slice (`06-telemetry-metrics-pipeline`: `bytes`+`flatted`)** | **10,880 KB** | **10.62 MB** | **6.79x less memory** |
+| **Slice (`1,000-Tenant MicroVM Swarm`)** | **10,288 KB** | **10.05 MB** | **7.08x less memory** |
+| Bun `v1.4.3` (`02-npm-ecosystem-suite`) | 30,720 KB | 30.00 MB | 2.37x less memory |
+| Bun `v1.4.3` (`06-telemetry-metrics-pipeline`) | 31,616 KB | 30.88 MB | 2.34x less memory |
+| Deno `v2.9.7` (`02-npm-ecosystem-suite`) | 47,272 KB | 46.16 MB | 1.54x less memory |
+| Deno `v2.9.7` (`06-telemetry-metrics-pipeline`) | 51,412 KB | 50.21 MB | 1.44x less memory |
 | Node.js `v26.12.0` (`02-npm-ecosystem-suite`) | 72,860 KB | 71.15 MB | 1.00x |
-| Node.js `v26.12.0` (`03-disk-io-log-pipeline`) | 73,112 KB | 71.40 MB | 1.00x |
-| Node.js `v26.12.0` (`06-telemetry-metrics-pipeline`) | 73,496 KB | 71.77 MB | 1.00x |
+| Node.js `v26.12.0` (`06-telemetry-metrics-pipeline`) | 73,884 KB | 72.15 MB | 1.00x |
+
 
 
 

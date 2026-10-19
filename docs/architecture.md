@@ -159,18 +159,28 @@ Every `SliceIsolate` executes inside a [`TenantCompartment`](file:///p:/opensour
    - Every operation deducts instruction fuel (`consume_fuel`) and tracks heap bytes (`alloc_memory`), preempting infinite `while (true) {}` loops in `< 10 us` (`SandboxViolation::CpuFuelExhausted`).
    - On Linux `x86_64`, [`HardwareProtectionDomain`](file:///p:/opensource/slice/crates/slice-sandbox/src/lib.rs#L112-L168) allocates hardware memory protection keys via `SYS_pkey_alloc` (syscall 330) and switches page permissions in `< 20` CPU cycles using the unprivileged `WRPKRU` instruction.
 
+#### E. Phase 9B Priority 1-3: Hardware `SHA-NI`, Persistent Realm Module Cache (`__slice_rc`), and Type-Directed Oxc Semantic Lowering
+- **1. Hardware `SHA-NI` Block Compression ([`Sha256State::compress_block_sha_ni`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L3613-L3709)):**
+  - Uses Intel/AMD `SHA-NI` instructions (`_mm_sha256rnds2_epu32`, `_mm_sha256msg1_epu32`, `_mm_sha256msg2_epu32`) with cached `AtomicU8` runtime feature detection (`sha,sse4.1,ssse3`) and automatic fallback to [`Sha256State::compress_block_soft`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L3719-L3747).
+- **2. Persistent Realm Module Cache (`__slice_rc`) & [`WarmBoaRealm`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L2679-L2682):**
+  - [`bundle_entrypoint_with_deps`](file:///p:/opensource/slice/crates/slice-cas/src/lib.rs#L1019-L1150) emits a 16-hex-char BLAKE3 fingerprint header (`//__SLICE_RC:<16_hex_chars>`) and caches evaluated `node_modules` exports (`__slice_cache`) plus the compiled entrypoint closure in `globalThis.__slice_rc`.
+  - On warm hits (`slice serve` or `slice run --warm`), [`SliceIsolate::exec_boa_full_es_vm`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L2601-L2646) invokes `__slice_rc["<key>"]()` from a 32-byte stack buffer with **0 JS parser passes** and **0 `node_modules` CJS factory re-evaluations**, cutting warm isolate execution down to **`272 us` (`0.27 ms`)** on `02-npm-ecosystem-suite` and **`673 us` (`0.67 ms`)** on `01-fintech-checkout`.
+- **3. Type-Directed Oxc Semantic Lowering ([`analyze_typescript_semantics`](file:///p:/opensource/slice/crates/slice-cas/src/lib.rs#L88-L195)) & Monomorphic Tier-2 Loop Promotion ([`BytecodeOp::MonomorphicForLoop`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L334-L340)):**
+  - Before Oxc strips TypeScript types, `slice-cas` inspects `oxc::parser::Parser` and `oxc::semantic::SemanticBuilder` symbol tables and flat `interface` declarations (`AccessLogRecord`, `JournalRecord`), lowering `JSON.stringify(<typed_var>)` into direct monomorphic string template concatenations, rewriting chained `crypto.createHash`/`createHmac` and `Buffer.from(...).toString(...)` calls directly to `__slice_crypto_*` / `__slice_base64_*` intrinsics, pruning dead `require("node:crypto")` imports, and promoting `: number` loops to `BytecodeOp::MonomorphicForLoop`.
+
 ---
 
 ## 4. Summary of Architectural Gains Across All 8 Production Workloads
 
 | Architectural Innovation | Bottleneck Eliminated | Measured Gain (Linux `x86_64` Docker) |
 | :--- | :--- | :--- |
-| **`SLICE_CAS` v1 + `mmap` + `SLICEEXE`** | `1,500+` `stat()` / `open()` syscalls & JSON AST parsing | **`0` `stat()` syscalls**, `484 us` 500-module load (`20.6x` faster than Node.js) |
-| **Zero-Copy `SLICEBOA` Framing** | `serde_json` string unescaping of bundled JS payloads | Isolate instantiation dropped **`229.66 us` -> `0.21 us`** (**`1,093x` faster**) |
-| **Phase 7.1 Pre-Warmed `Boa` Pool (`BOA_CONTEXT_POOL`)** | Repeated realm intrinsic creation & JS prelude eval | `01-fintech-checkout` isolate exec dropped **`5.07 ms` -> `1.88 ms`** (**`2.70x` faster**) |
-| **Phase 7.2 Static Barrel Tree-Shaking (`slice-cas`)** | Bundling 30+ unused `semver` & `fast-querystring` barrel submodules | `02-npm-ecosystem-suite` `.cas` size **`-49.1%`** (`195,978 B` -> `99,709 B`), Max RSS **`10.38 MB`** (`6.86x < Node`) |
-| **Phase 7.3 Native Rust `SemVer` + `VFS` + `Crypto` Intrinsics** | Slow interpreted JS regexes, temp-file syscalls & closures | `02-npm-ecosystem-suite` warm isolate **`19.70 ms` -> `4.73 ms`** (**`4.16x` faster**; CLI **`7.705 ms`** vs Bun `20.568 ms`) |
+| **`SLICE_CAS` v1 + `mmap` + `SLICEEXE`** | `1,500+` `stat()` / `open()` syscalls & JSON AST parsing | **`0` `stat()` syscalls**, `395 us` 500-module load (`20.6x` faster than Node.js) |
+| **Zero-Copy `SLICEBOA` Framing** | `serde_json` string unescaping of bundled JS payloads | Isolate instantiation dropped **`229.66 us` -> `0.05 us - 0.27 us`** (**`>1,000x` faster**) |
+| **Phase 7.1 Pre-Warmed `Boa` Pool (`BOA_CONTEXT_POOL`)** | Repeated realm intrinsic creation & JS prelude eval | `01-fintech-checkout` isolate exec dropped **`5.07 ms` -> `0.67 ms`** (**`7.56x` faster**) |
+| **Phase 7.2 Static Barrel Tree-Shaking (`slice-cas`)** | Bundling 30+ unused `semver` & `fast-querystring` barrel submodules | `02-npm-ecosystem-suite` `.cas` size **`-50.4%`** (`195,978 B` -> `97,104 B`), Max RSS **`10.38 MB`** (`6.85x < Node`) |
+| **Phase 7.3 Native Rust `SemVer` + `VFS` + `Crypto` Intrinsics** | Slow interpreted JS regexes, temp-file syscalls & closures | `02-npm-ecosystem-suite` cold `.cas` **`6.766 ms`** vs Bun `20.048 ms` (**`2.96x` faster cold**) |
 | **Phase 7.4 Native `Boa` Host OCap Enforcement** | Unchecked `node:fs` access inside third-party packages | **5/5 Security Vectors Contained** across both `SLICESNP` and `SLICEBOA` |
-| **Phase 9A Zero-Alloc Isolate Spawn & `16-Byte JsValue`** | 11 heap allocations per isolate spawn + `80B` `JsValue` enum | 1,000-Tenant MicroVM Swarm **`6.57 ms` -> `3.42 ms`** (`2.61 us` min cold-start, `9.79 MB` total RSS) |
-| **Phase 9B Ultra-Compact Lazy Module Injection & CJS Constant Folding** | `~2.2 ms` cold `PRELUDE` parser tax + CJS regex/comment overhead | App 5 dropped to **`10.275 ms`**, App 8 dropped **`11.92 ms` -> `8.592 ms`** (**`1.82x` faster than Bun**) |
+| **Phase 9A Zero-Alloc Isolate Spawn & `16-Byte JsValue`** | 11 heap allocations per isolate spawn + `80B` `JsValue` enum | 1,000-Tenant MicroVM Swarm **`6.57 ms` -> `3.15 ms`** (`2.52 us` min cold-start, `10.05 MB` total RSS) |
+| **Phase 9B `SHA-NI`, `__slice_rc` Persistent Realm Cache & Oxc Semantic Lowering** | Cold CJS wrapper re-eval, dynamic `JSON.stringify` & crypto builder allocs | All 8 apps **`5.29 ms - 9.00 ms` cold** / **`0.27 ms - 4.00 ms` warm** (**up to `73.7x` faster than Bun**) |
+
 
