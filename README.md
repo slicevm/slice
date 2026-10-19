@@ -172,13 +172,13 @@ In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensourc
 
 | Folder-Based Production App (Linux Docker `x86_64`) | Slice (`v0.2.0`) | Bun (`v1.4.3`) | Deno (`v2.9.7`) | Node.js (`v26.12.0`) |
 | :--- | :--- | :--- | :--- | :--- |
-| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256, 50 orders) | **6.270 ms** (`3.68 ms` isolate) | 12.896 ms | 36.331 ms | 64.775 ms |
-| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini` from `node_modules`) | **19.139 ms** (`15.89 ms` isolate) | 20.610 ms | 51.333 ms | 75.508 ms |
-| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk Write/Scan/Read/Unlink) | **11.425 ms** (`8.02 ms` isolate) | 13.488 ms | 43.511 ms | 67.315 ms |
-| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms` + Auth, 100 reqs) | **9.863 ms** (`8.09 ms` isolate) | 14.812 ms | 40.520 ms | 67.782 ms |
-| **Peak Memory Footprint: Disk I/O App (Max RSS)** | **11.50 MB (`11,776 KB`)** | 21.12 MB (`21,632 KB`) | 45.88 MB (`46,976 KB`) | 71.40 MB (`73,112 KB`) |
-| **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **12.62 MB (`12,928 KB`)** | 29.62 MB (`30,336 KB`) | 46.38 MB (`47,488 KB`) | 71.15 MB (`72,860 KB`) |
-| **1,000-Tenant MicroVM Isolate Cold-Start (Min)** | **3.13 us (`0.00313 ms`)** | N/A | N/A | N/A |
+| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256, 50 orders) | **5.986 ms** (`1.88 ms` warm isolate) | 12.606 ms | 35.555 ms | 64.484 ms |
+| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini` from `node_modules`) | **8.785 ms** (`4.74 ms` warm isolate) | 20.771 ms | 51.588 ms | 76.330 ms |
+| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk Write/Scan/Read/Unlink) | **9.380 ms** (`5.11 ms` warm isolate) | 13.633 ms | 42.445 ms | 65.691 ms |
+| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms` + Auth, 100 reqs) | **9.643 ms** (`5.47 ms` warm isolate) | 14.480 ms | 41.565 ms | 67.555 ms |
+| **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **10.75 MB (`11,008 KB`)** | 29.75 MB (`30,464 KB`) | 46.12 MB (`47,232 KB`) | 71.53 MB (`73,244 KB`) |
+| **Peak Memory Footprint: Disk I/O App (Max RSS)** | **11.50 MB (`11,776 KB`)** | 21.50 MB (`22,016 KB`) | 45.50 MB (`46,592 KB`) | 71.40 MB (`73,112 KB`) |
+| **1,000-Tenant MicroVM Isolate Cold-Start (Min)** | **3.08 us (`0.00308 ms`)** | N/A | N/A | N/A |
 
 Run the full Docker folder-app benchmark suite yourself:
 

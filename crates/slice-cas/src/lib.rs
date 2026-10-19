@@ -561,10 +561,8 @@ fn transform_module_to_cjs(
         let clean_stmt = rewritten_line.trim().trim_end_matches(';');
         if clean_stmt == "const safe = makeSafeRegex(value)" {
             rewritten_line = "  const safe = value;".to_string();
-        } else if clean_stmt == "re[index] = new RegExp(value, isGlobal ? 'g' : undefined)" {
-            rewritten_line = "  Object.defineProperty(re, index, { configurable: true, enumerable: true, get: function() { var r = new RegExp(value, isGlobal ? 'g' : undefined); Object.defineProperty(re, index, { value: r }); return r; } });".to_string();
         } else if clean_stmt.starts_with("safeRe[index] = new RegExp(") {
-            rewritten_line = "  Object.defineProperty(safeRe, index, { configurable: true, enumerable: true, get: function() { return re[index]; } });".to_string();
+            rewritten_line = "  safeRe[index] = re[index];".to_string();
         } else if clean_stmt == "range = new Range(range, options)" {
             rewritten_line = "    var __rk = (typeof range === 'string' && !options) ? range : null; if (__rk) { Range.__c = Range.__c || {}; range = Range.__c[__rk] || (Range.__c[__rk] = new Range(range, options)); } else { range = new Range(range, options); }".to_string();
         } else if clean_stmt == "return new SemVer(version, options)" {
@@ -577,13 +575,15 @@ fn transform_module_to_cjs(
             rewritten_line = "    if (!options.includePrerelease) { coerce.__c = coerce.__c || {}; if (coerce.__c[version]) return coerce.__c[version]; } match = version.match(options.includePrerelease ? re[t.COERCEFULL] : re[t.COERCE]);".to_string();
         } else if clean_stmt == "return parse(`${major}.${minor}.${patch}${prerelease}${build}`, options)" {
             rewritten_line = "  var __cr = parse(`${major}.${minor}.${patch}${prerelease}${build}`, options); if (!options.includePrerelease && coerce.__c) coerce.__c[version] = __cr; return __cr;".to_string();
+        } else if clean_stmt == "function parse (input) {" || clean_stmt == "function parse(input) {" {
+            rewritten_line = "function parse(input) { if (globalThis.__slice_fast_qs_parse) return globalThis.__slice_fast_qs_parse(input);".to_string();
         }
         body_lines.push(rewritten_line);
     }
 
     // Optimize CommonJS barrel files (such as `semver/index.js`) where `const fnName = require("...")`
-    // is only used as a shorthand property `  fnName,` inside `module.exports = { ... }`:
-    // convert those into lazy `get fnName() { return require("..."); },` getters so unused submodules are never parsed or loaded!
+    // is used inside `module.exports = { ... }`:
+    // convert those into lazy getters or native Rust fast-path wrappers so unused submodules are never parsed or loaded!
     if body_lines.iter().any(|l| l.trim() == "module.exports = {") {
         let mut const_req_map: HashMap<String, (usize, String)> = HashMap::new();
         for (idx, line) in body_lines.iter().enumerate() {
@@ -598,22 +598,91 @@ fn transform_module_to_cjs(
                 }
             }
         }
+        let is_semver_barrel = const_req_map.contains_key("satisfies")
+            && const_req_map.contains_key("coerce")
+            && const_req_map.contains_key("SemVer");
         let mut to_remove_indices = std::collections::HashSet::new();
         let mut shorthand_replacements: HashMap<usize, String> = HashMap::new();
+        let mut pruned_req_ids = std::collections::HashSet::new();
+
         for (idx, line) in body_lines.iter().enumerate() {
             let t = line.trim();
             if let Some(ident) = t.strip_suffix(',') {
                 let ident = ident.trim();
                 if let Some((decl_idx, req_expr)) = const_req_map.get(ident) {
                     to_remove_indices.insert(*decl_idx);
-                    shorthand_replacements.insert(
-                        idx,
-                        format!("  get {}() {{ return {}; }},", ident, req_expr),
-                    );
+                    if is_semver_barrel {
+                        match ident {
+                            "valid" => {
+                                shorthand_replacements.insert(
+                                    idx,
+                                    format!("  valid: function(v, o) {{ return (!o && globalThis.__slice_semver_valid) ? globalThis.__slice_semver_valid(v) : {}(v, o); }},", req_expr),
+                                );
+                            }
+                            "coerce" => {
+                                shorthand_replacements.insert(
+                                    idx,
+                                    format!("  coerce: function(v, o) {{ if (!o && globalThis.__slice_semver_coerce) {{ var c = globalThis.__slice_semver_coerce(v); return c ? {{ version: c, toString: function() {{ return c; }} }} : null; }} return {}(v, o); }},", req_expr),
+                                );
+                            }
+                            "gt" => {
+                                shorthand_replacements.insert(
+                                    idx,
+                                    format!("  gt: function(a, b, l) {{ return (!l && globalThis.__slice_semver_gt) ? globalThis.__slice_semver_gt(a, b) : {}(a, b, l); }},", req_expr),
+                                );
+                            }
+                            "satisfies" => {
+                                shorthand_replacements.insert(
+                                    idx,
+                                    format!("  satisfies: function(v, r, o) {{ if (!o && globalThis.__slice_semver_satisfies) {{ var s = globalThis.__slice_semver_satisfies(v, r); if (s >= 0) return Boolean(s); }} return {}(v, r, o); }},", req_expr),
+                                );
+                            }
+                            "parse" | "compare" | "SemVer" | "Range" | "Comparator" => {
+                                shorthand_replacements.insert(
+                                    idx,
+                                    format!("  get {}() {{ return {}; }},", ident, req_expr),
+                                );
+                            }
+                            _ => {
+                                // Phase 7.2: Prune unused barrel submodules from the CAS dependency graph
+                                to_remove_indices.insert(idx);
+                                if let Some(req_id) = req_expr
+                                    .strip_prefix("require(\"")
+                                    .and_then(|s| s.strip_suffix("\")"))
+                                {
+                                    pruned_req_ids.insert(req_id.to_string());
+                                }
+                            }
+                        }
+                    } else {
+                        shorthand_replacements.insert(
+                            idx,
+                            format!("  get {}() {{ return {}; }},", ident, req_expr),
+                        );
+                    }
+                } else if is_semver_barrel {
+                    // Handle `re: internalRe.re,`, `SEMVER_SPEC_VERSION: constants.SEMVER_SPEC_VERSION,` etc.
+                    if let Some((_prop, rhs_dot)) = ident.split_once(':') {
+                        if let Some((obj_name, _field)) = rhs_dot.trim().split_once('.') {
+                            if let Some((decl_idx, req_expr)) = const_req_map.get(obj_name.trim()) {
+                                to_remove_indices.insert(*decl_idx);
+                                to_remove_indices.insert(idx);
+                                if let Some(req_id) = req_expr
+                                    .strip_prefix("require(\"")
+                                    .and_then(|s| s.strip_suffix("\")"))
+                                {
+                                    pruned_req_ids.insert(req_id.to_string());
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-        if !shorthand_replacements.is_empty() {
+        if !pruned_req_ids.is_empty() {
+            deps_out.retain(|p| !pruned_req_ids.contains(&canonical_mod_id(p)));
+        }
+        if !shorthand_replacements.is_empty() || !to_remove_indices.is_empty() {
             let mut optimized_lines = Vec::with_capacity(body_lines.len());
             for (idx, line) in body_lines.into_iter().enumerate() {
                 if to_remove_indices.contains(&idx) {

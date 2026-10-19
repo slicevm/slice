@@ -1427,7 +1427,8 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains("new RegExp")
         || source.contains(".some(")
         || source.contains(".every(")
-        || source.contains("instanceof ");
+        || source.contains("instanceof ")
+        || source.contains("__slice_semver_");
 
     if uses_full_es_vm
         && !source.contains("Object.prototype.")
@@ -2513,10 +2514,23 @@ impl SliceIsolate {
     /// via zero-eval native host hooks, and enforcing SES compartment limits.
     fn exec_boa_full_es_vm(&mut self, js_code: &str) -> Result<JsValue, SandboxViolation> {
         BOA_STDOUT.with(|out| out.borrow_mut().clear());
+        BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
+        BOA_ACTIVE_CAPS.with(|c| {
+            *c.borrow_mut() = Some((
+                self.compartment.tenant_id.clone(),
+                self.compartment.capabilities.clone(),
+            ));
+        });
 
         let mut ctx = acquire_warm_boa_context();
         let scoped_code = format!("{{\n{}\n}}", js_code);
         let eval_res = ctx.eval(boa_engine::Source::from_bytes(scoped_code.as_bytes()));
+
+        BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = None);
+        if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
+            release_warm_boa_context(ctx);
+            return Err(violation);
+        }
 
         // Harvest captured stdout lines directly from thread-local Rust Vec<String> (zero second eval!)
         BOA_STDOUT.with(|out| {
@@ -2556,6 +2570,83 @@ thread_local! {
     static BOA_STDOUT: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     static BOA_CONTEXT_POOL: std::cell::RefCell<std::mem::ManuallyDrop<Vec<boa_engine::Context>>> =
         const { std::cell::RefCell::new(std::mem::ManuallyDrop::new(Vec::new())) };
+    static BOA_VFS_CACHE: std::cell::RefCell<HashMap<String, String>> = std::cell::RefCell::new(HashMap::new());
+    static BOA_VFS_DIRS: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+    static BOA_ACTIVE_CAPS: std::cell::RefCell<Option<(String, CapabilityToken)>> =
+        const { std::cell::RefCell::new(None) };
+    static BOA_VIOLATION: std::cell::RefCell<Option<SandboxViolation>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn norm_vfs_path(p: &str) -> String {
+    let mut s = p.replace('\\', "/");
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    s
+}
+
+fn check_boa_fs_read_ocap(path: &str) -> bool {
+    BOA_ACTIVE_CAPS.with(|c| {
+        if let Some((tenant_id, caps)) = &*c.borrow() {
+            if path.contains("..") {
+                BOA_VIOLATION.with(|v| {
+                    *v.borrow_mut() = Some(SandboxViolation::FsReadDenied {
+                        tenant_id: tenant_id.clone(),
+                        path: path.to_string(),
+                    });
+                });
+                return false;
+            }
+            if !caps.allowed_read_prefixes.is_empty()
+                && !caps
+                    .allowed_read_prefixes
+                    .iter()
+                    .any(|prefix| path.starts_with(prefix))
+            {
+                BOA_VIOLATION.with(|v| {
+                    *v.borrow_mut() = Some(SandboxViolation::FsReadDenied {
+                        tenant_id: tenant_id.clone(),
+                        path: path.to_string(),
+                    });
+                });
+                return false;
+            }
+        }
+        true
+    })
+}
+
+fn check_boa_fs_write_ocap(path: &str) -> bool {
+    BOA_ACTIVE_CAPS.with(|c| {
+        if let Some((tenant_id, caps)) = &*c.borrow() {
+            if path.contains("..") {
+                BOA_VIOLATION.with(|v| {
+                    *v.borrow_mut() = Some(SandboxViolation::FsReadDenied {
+                        tenant_id: tenant_id.clone(),
+                        path: path.to_string(),
+                    });
+                });
+                return false;
+            }
+            if !caps.allowed_write_prefixes.is_empty()
+                && !caps
+                    .allowed_write_prefixes
+                    .iter()
+                    .any(|prefix| path.starts_with(prefix))
+            {
+                BOA_VIOLATION.with(|v| {
+                    *v.borrow_mut() = Some(SandboxViolation::FsReadDenied {
+                        tenant_id: tenant_id.clone(),
+                        path: path.to_string(),
+                    });
+                });
+                return false;
+            }
+        }
+        true
+    })
 }
 
 fn acquire_warm_boa_context() -> boa_engine::Context {
@@ -2618,20 +2709,19 @@ globalThis.__slice_cjs_require = function(id) {
     var b = globalThis.__slice_builtins;
     if (b[id]) return b[id];
     if (id === "crypto" || id === "node:crypto") {
+        var __hasher = {
+            _c: "",
+            update: function(d) { this._c += String(d); return this; },
+            digest: function() { var r = globalThis.__slice_crypto_sha256(this._c); this._c = ""; return r; }
+        };
         var m = {
             createHash: function() {
-                var c = "";
-                return {
-                    update: function(d) { c += String(d); return this; },
-                    digest: function() { return globalThis.__slice_crypto_sha256(c); }
-                };
+                __hasher._c = "";
+                return __hasher;
             },
             createHmac: function(_a, secret) {
-                var c = String(secret) + ":";
-                return {
-                    update: function(d) { c += String(d); return this; },
-                    digest: function() { return globalThis.__slice_crypto_sha256(c); }
-                };
+                __hasher._c = String(secret) + ":";
+                return __hasher;
             }
         };
         m.default = m; m.__esModule = true;
@@ -2776,7 +2866,13 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            if !check_boa_fs_read_ocap(&path) {
+                return Ok(BoaVal::from(js_string!("")));
+            }
+            let norm = norm_vfs_path(&path);
+            let content = BOA_VFS_CACHE
+                .with(|c| c.borrow().get(&norm).cloned())
+                .unwrap_or_else(|| std::fs::read_to_string(&path).unwrap_or_default());
             Ok(BoaVal::from(js_string!(content)))
         }),
     );
@@ -2791,18 +2887,25 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            if !check_boa_fs_write_ocap(&path) {
+                return Ok(BoaVal::undefined());
+            }
             let data = args
                 .get(1)
                 .map(|v| v.to_string(context))
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            if std::fs::write(&path, data.as_bytes()).is_err() {
-                if let Some(parent) = std::path::Path::new(&path).parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::fs::write(&path, data.as_bytes());
+            let norm = norm_vfs_path(&path);
+            if let Some(idx) = norm.rfind('/') {
+                let parent = &norm[..idx];
+                BOA_VFS_DIRS.with(|d| {
+                    d.borrow_mut().insert(parent.to_string());
+                });
             }
+            BOA_VFS_CACHE.with(|c| {
+                c.borrow_mut().insert(norm, data);
+            });
             Ok(BoaVal::undefined())
         }),
     );
@@ -2811,22 +2914,29 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
         js_string!("__slice_fs_append_file_sync"),
         2,
         NativeFunction::from_fn_ptr(|_this, args, context| {
-            use std::io::Write;
             let path = args
                 .first()
                 .map(|v| v.to_string(context))
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            if !check_boa_fs_write_ocap(&path) {
+                return Ok(BoaVal::undefined());
+            }
             let data = args
                 .get(1)
                 .map(|v| v.to_string(context))
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                let _ = f.write_all(data.as_bytes());
-            }
+            let norm = norm_vfs_path(&path);
+            BOA_VFS_CACHE.with(|c| {
+                let mut map = c.borrow_mut();
+                let entry = map
+                    .entry(norm)
+                    .or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_default());
+                entry.push_str(&data);
+            });
             Ok(BoaVal::undefined())
         }),
     );
@@ -2841,7 +2951,11 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            Ok(BoaVal::from(std::path::Path::new(&path).exists()))
+            let norm = norm_vfs_path(&path);
+            let exists = BOA_VFS_CACHE.with(|c| c.borrow().contains_key(&norm))
+                || BOA_VFS_DIRS.with(|d| d.borrow().contains(&norm))
+                || std::path::Path::new(&path).exists();
+            Ok(BoaVal::from(exists))
         }),
     );
 
@@ -2855,7 +2969,10 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            let _ = std::fs::create_dir_all(&path);
+            let norm = norm_vfs_path(&path);
+            BOA_VFS_DIRS.with(|d| {
+                d.borrow_mut().insert(norm);
+            });
             Ok(BoaVal::undefined())
         }),
     );
@@ -2870,13 +2987,24 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            let mut entries = Vec::new();
+            let norm_dir = norm_vfs_path(&path);
+            let prefix = format!("{}/", norm_dir);
+            let mut entries_set = std::collections::BTreeSet::new();
+            BOA_VFS_CACHE.with(|c| {
+                for k in c.borrow().keys() {
+                    if let Some(rest) = k.strip_prefix(&prefix) {
+                        if !rest.contains('/') && !rest.is_empty() {
+                            entries_set.insert(rest.to_string());
+                        }
+                    }
+                }
+            });
             if let Ok(rd) = std::fs::read_dir(&path) {
                 for entry in rd.flatten() {
-                    entries.push(entry.file_name().to_string_lossy().to_string());
+                    entries_set.insert(entry.file_name().to_string_lossy().to_string());
                 }
             }
-            entries.sort();
+            let entries: Vec<String> = entries_set.into_iter().collect();
             let json = serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string());
             Ok(BoaVal::from(js_string!(json)))
         }),
@@ -2892,7 +3020,10 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let norm = norm_vfs_path(&path);
+            let size = BOA_VFS_CACHE
+                .with(|c| c.borrow().get(&norm).map(|v| v.len() as u64))
+                .unwrap_or_else(|| std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0));
             Ok(BoaVal::from(size as f64))
         }),
     );
@@ -2907,11 +3038,25 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            let norm = norm_vfs_path(&path);
+            let prefix = format!("{}/", norm);
+            BOA_VFS_CACHE.with(|c| {
+                let mut map = c.borrow_mut();
+                map.remove(&norm);
+                map.retain(|k, _| !k.starts_with(&prefix));
+            });
+            BOA_VFS_DIRS.with(|d| {
+                let mut dirs = d.borrow_mut();
+                dirs.remove(&norm);
+                dirs.retain(|k| !k.starts_with(&prefix));
+            });
             let p = std::path::Path::new(&path);
-            if p.is_dir() {
-                let _ = std::fs::remove_dir_all(p);
-            } else {
-                let _ = std::fs::remove_file(p);
+            if p.exists() {
+                if p.is_dir() {
+                    let _ = std::fs::remove_dir_all(p);
+                } else {
+                    let _ = std::fs::remove_file(p);
+                }
             }
             Ok(BoaVal::undefined())
         }),
@@ -2942,6 +3087,218 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
             Ok(BoaVal::from(js_string!(hex)))
         }),
     );
+
+    // Phase 7.3: Native Rust SemVer Fast-Path Intrinsics
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_semver_valid"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let Some(first) = args.first() else {
+                return Ok(BoaVal::null());
+            };
+            if first.is_null() || first.is_undefined() {
+                return Ok(BoaVal::null());
+            }
+            let s = if let Some(obj) = first.as_object() {
+                if let Ok(v) = obj.get(js_string!("version"), context) {
+                    v.to_string(context)?.to_std_string_escaped()
+                } else {
+                    first.to_string(context)?.to_std_string_escaped()
+                }
+            } else {
+                first.to_string(context)?.to_std_string_escaped()
+            };
+            match semver_parse_strict_xyz(&s) {
+                Some((maj, min, pat)) => Ok(BoaVal::from(js_string!(format!("{}.{}.{}", maj, min, pat)))),
+                None => Ok(BoaVal::null()),
+            }
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_semver_coerce"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let Some(first) = args.first() else {
+                return Ok(BoaVal::null());
+            };
+            let s = first.to_string(context)?.to_std_string_escaped();
+            match semver_coerce_xyz(&s) {
+                Some((maj, min, pat)) => Ok(BoaVal::from(js_string!(format!("{}.{}.{}", maj, min, pat)))),
+                None => Ok(BoaVal::null()),
+            }
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_semver_gt"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let a = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let b = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if let (Some(va), Some(vb)) = (semver_parse_strict_xyz(&a), semver_parse_strict_xyz(&b)) {
+                Ok(BoaVal::from(va > vb))
+            } else {
+                Ok(BoaVal::from(false))
+            }
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_semver_satisfies"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let ver = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let rng = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            match semver_satisfies_xyz(&ver, &rng) {
+                Some(true) => Ok(BoaVal::from(1)),
+                Some(false) => Ok(BoaVal::from(0)),
+                None => Ok(BoaVal::from(-1)),
+            }
+        }),
+    );
+}
+
+fn semver_parse_strict_xyz(input: &str) -> Option<(u64, u64, u64)> {
+    let trimmed = input.trim();
+    let stripped = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('='))
+        .unwrap_or(trimmed)
+        .trim_start();
+    if stripped.contains('-') || stripped.contains('+') {
+        return None;
+    }
+    let mut parts = stripped.split('.');
+    let p1 = parts.next()?;
+    let p2 = parts.next()?;
+    let p3 = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    for p in [p1, p2, p3] {
+        if p.is_empty() || (p.len() > 1 && p.starts_with('0')) || !p.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+    }
+    Some((p1.parse().ok()?, p2.parse().ok()?, p3.parse().ok()?))
+}
+
+fn semver_coerce_xyz(input: &str) -> Option<(u64, u64, u64)> {
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && !bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    let start_maj = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    let maj: u64 = input[start_maj..i].parse().ok()?;
+    let mut min: u64 = 0;
+    let mut pat: u64 = 0;
+    if i < bytes.len() && bytes[i] == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+        i += 1;
+        let start_min = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        min = input[start_min..i].parse().ok()?;
+        if i < bytes.len() && bytes[i] == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            i += 1;
+            let start_pat = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            pat = input[start_pat..i].parse().ok()?;
+        }
+    }
+    Some((maj, min, pat))
+}
+
+fn semver_satisfies_xyz(ver_str: &str, range_str: &str) -> Option<bool> {
+    let v = semver_parse_strict_xyz(ver_str)?;
+    if range_str.contains("||")
+        || range_str.contains(" - ")
+        || range_str.contains('x')
+        || range_str.contains('X')
+        || range_str.contains('*')
+        || range_str.contains('-')
+    {
+        return None;
+    }
+    for token in range_str.split_whitespace() {
+        if let Some(rest) = token.strip_prefix('^') {
+            let (rmaj, rmin, rpat) = semver_parse_strict_xyz(rest)?;
+            if v < (rmaj, rmin, rpat) {
+                return Some(false);
+            }
+            let upper = if rmaj > 0 {
+                (rmaj + 1, 0, 0)
+            } else if rmin > 0 {
+                (0, rmin + 1, 0)
+            } else {
+                (0, 0, rpat + 1)
+            };
+            if v >= upper {
+                return Some(false);
+            }
+        } else if let Some(rest) = token.strip_prefix('~') {
+            let (rmaj, rmin, rpat) = semver_parse_strict_xyz(rest)?;
+            if v < (rmaj, rmin, rpat) || v >= (rmaj, rmin + 1, 0) {
+                return Some(false);
+            }
+        } else if let Some(rest) = token.strip_prefix(">=") {
+            let r = semver_parse_strict_xyz(rest)?;
+            if v < r {
+                return Some(false);
+            }
+        } else if let Some(rest) = token.strip_prefix("<=") {
+            let r = semver_parse_strict_xyz(rest)?;
+            if v > r {
+                return Some(false);
+            }
+        } else if let Some(rest) = token.strip_prefix('>') {
+            let r = semver_parse_strict_xyz(rest)?;
+            if v <= r {
+                return Some(false);
+            }
+        } else if let Some(rest) = token.strip_prefix('<') {
+            let r = semver_parse_strict_xyz(rest)?;
+            if v >= r {
+                return Some(false);
+            }
+        } else {
+            let r = semver_parse_strict_xyz(token)?;
+            if v != r {
+                return Some(false);
+            }
+        }
+    }
+    Some(true)
 }
 
 /// Pure-Rust FIPS-180-4 SHA-256 implementation for 100% deterministic `node:crypto` compatibility.
@@ -3404,4 +3761,62 @@ console.log(w.compute("checkout"));
         assert_eq!(m2.stdout[0], "/v1/edge/checkout/check:6d3e872e9820");
         assert!(SliceIsolate::boa_pool_available() >= 2);
     }
+
+    #[test]
+    fn test_phase_7_3_native_semver_and_phase_7_4_boa_ocap_enforcement() {
+        let ts_code = r#"
+class SemverChecker {
+    public run(): string {
+        const v1 = __slice_semver_valid("v2.4.8");
+        const v2 = __slice_semver_valid("invalid");
+        const c1 = __slice_semver_coerce("v42.6.7.9.3-alpha");
+        const gt1 = __slice_semver_gt("2.1.0", "2.0.9");
+        const sat1 = __slice_semver_satisfies("1.5.2", ">=1.2.0 <2.0.0");
+        const sat2 = __slice_semver_satisfies("2.0.0", "^1.2.3");
+        return JSON.stringify({ v1, v2, c1, gt1, sat1, sat2 });
+    }
 }
+
+console.log(new SemverChecker().run());
+"#;
+        let bundled = slice_cas::strip_typescript_and_normalize(ts_code, true);
+        let bc = compile_source_to_bytecode(&bundled);
+        let mut iso = SliceIsolate::spawn(
+            "semver-tenant",
+            1,
+            CapabilityToken::pure_compute(),
+            10_000_000,
+            4 * 1024 * 1024,
+        );
+        let m = iso.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(
+            m.stdout[0],
+            r#"{"v1":"2.4.8","v2":null,"c1":"42.6.7","gt1":true,"sat1":1,"sat2":0}"#
+        );
+
+        // Phase 7.4: Verify native Boa `node:fs` enforces OCap path traversal & read prefixes
+        let ocap_escape_ts = r#"
+import * as fs from "node:fs";
+class EscapeAttempt {
+    public leak(): string {
+        return fs.readFileSync("/etc/../etc/shadow", "utf8");
+    }
+}
+console.log(new EscapeAttempt().leak());
+"#;
+        let ocap_bundled = slice_cas::strip_typescript_and_normalize(ocap_escape_ts, true);
+        let ocap_bc = compile_source_to_bytecode(&ocap_bundled);
+        let mut ocap_iso = SliceIsolate::spawn(
+            "ocap-boa-tenant",
+            2,
+            CapabilityToken::pure_compute().with_read_prefix("/app/safe"),
+            10_000_000,
+            4 * 1024 * 1024,
+        );
+        assert!(matches!(
+            ocap_iso.execute_bytecode(&ocap_bc, None),
+            Err(SandboxViolation::FsReadDenied { .. })
+        ));
+    }
+}
+
