@@ -1,7 +1,7 @@
-FROM rust:1.85-bookworm AS builder
+FROM rust:latest AS builder
 
 WORKDIR /workspace
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
 RUN cargo test --workspace && cargo build --release
@@ -33,7 +33,8 @@ WORKDIR /app
 COPY --from=builder /workspace/target/release/slice /app/target/release/slice
 COPY benchmarks /app/benchmarks
 COPY scripts /app/scripts
-RUN sed -i 's/\r$//' /app/scripts/benchmark_linux.sh && chmod +x /app/scripts/benchmark_linux.sh
+COPY docker-tests /app/docker-tests
+RUN sed -i 's/\r$//' /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh \
+    && chmod +x /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh
 
 CMD ["/app/scripts/benchmark_linux.sh"]
-

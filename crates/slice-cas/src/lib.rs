@@ -45,171 +45,52 @@ pub struct CasIndexHeader {
     pub blobs: HashMap<String, CasBlobEntry>,
 }
 
-/// Fast zero-copy TypeScript type stripper & CommonJS synthetic ESM rewriter.
+/// Production TypeScript Compiler & Transpiler powered by **Oxc** (The Oxidation Compiler).
 ///
-/// Strips `: TypeAnnotation`, `interface ... {}`, `type ... = ...;`, and `as Type`
-/// constructs while preserving line structure and transforming `require("x")` calls.
+/// Uses `oxc::allocator::Allocator`, `oxc::parser::Parser`, `oxc::semantic::SemanticBuilder`,
+/// `oxc::transformer::Transformer`, and `oxc::codegen::Codegen` to strip TypeScript types,
+/// interfaces, enums, generics, and type annotations into clean standard ECMAScript.
 pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
-    if !is_ts && !source.contains("interface ") && !source.contains(": ") {
+    if !is_ts
+        && !source.contains("interface ")
+        && !source.contains("type ")
+        && !source.contains(": ")
+        && !source.contains("readonly ")
+        && !source.contains("private ")
+        && !source.contains("public ")
+    {
         return rewrite_cjs_require(source);
     }
 
-    let mut out = String::with_capacity(source.len());
-    let mut lines = source.lines().peekable();
-    let mut in_interface_block = false;
-    let mut brace_depth: i32 = 0;
+    let allocator = oxc::allocator::Allocator::default();
+    let source_type = oxc::span::SourceType::ts().with_module(true);
+    let parser_ret = oxc::parser::Parser::new(&allocator, source, source_type).parse();
 
-    while let Some(line) = lines.next() {
-        let trimmed = line.trim();
-
-        // Skip standalone `type Foo = ...;` declarations
-        if (trimmed.starts_with("type ") || trimmed.starts_with("export type "))
-            && trimmed.contains('=')
-            && trimmed.ends_with(';')
-        {
-            continue;
-        }
-
-        // Skip `interface Foo { ... }` blocks
-        if trimmed.starts_with("interface ") || trimmed.starts_with("export interface ") {
-            in_interface_block = true;
-            brace_depth = 0;
-            for ch in trimmed.chars() {
-                if ch == '{' {
-                    brace_depth += 1;
-                } else if ch == '}' {
-                    brace_depth -= 1;
-                }
-            }
-            if brace_depth <= 0 && trimmed.contains('}') {
-                in_interface_block = false;
-            }
-            continue;
-        }
-
-        if in_interface_block {
-            for ch in trimmed.chars() {
-                if ch == '{' {
-                    brace_depth += 1;
-                } else if ch == '}' {
-                    brace_depth -= 1;
-                }
-            }
-            if brace_depth <= 0 {
-                in_interface_block = false;
-            }
-            continue;
-        }
-
-        let stripped_line = strip_inline_ts_types(line);
-        out.push_str(&stripped_line);
-        out.push('\n');
+    if !parser_ret.diagnostics.is_empty() {
+        // Fallback if input snippet is a partial REPL expression that isn't a standalone TS module
+        return rewrite_cjs_require(source);
     }
 
-    rewrite_cjs_require(&out)
-}
+    let mut program = parser_ret.program;
+    let scoping = oxc::semantic::SemanticBuilder::new()
+        .build(&program)
+        .semantic
+        .into_scoping();
 
-fn strip_inline_ts_types(line: &str) -> String {
-    let bytes = line.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    let mut in_string: Option<u8> = None;
+    let transform_options = oxc::transformer::TransformOptions::default();
+    let transform_ret = oxc::transformer::Transformer::new(
+        &allocator,
+        Path::new("module.ts"),
+        &transform_options,
+    )
+    .build_with_scoping(scoping, &mut program);
 
-    while i < bytes.len() {
-        let b = bytes[i];
-
-        if let Some(quote) = in_string {
-            result.push(b);
-            if b == b'\\' && i + 1 < bytes.len() {
-                i += 1;
-                result.push(bytes[i]);
-            } else if b == quote {
-                in_string = None;
-            }
-            i += 1;
-            continue;
-        }
-
-        if b == b'"' || b == b'\'' || b == b'`' {
-            in_string = Some(b);
-            result.push(b);
-            i += 1;
-            continue;
-        }
-
-        // Preserve comments
-        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            result.extend_from_slice(&bytes[i..]);
-            break;
-        }
-
-        // Detect `: Type` annotations after identifiers or `)`
-        if b == b':' {
-            // Check if this is part of an object literal `{ key: value }` vs type annotation
-            // Type annotations typically follow `const x: number =`, `function f(a: number): number`, etc.
-            let prev_non_space = result.iter().rev().find(|&&c| c != b' ').copied();
-            let rest = &line[i + 1..];
-            let trimmed_rest = rest.trim_start();
-            let looks_like_type = trimmed_rest.starts_with("number")
-                || trimmed_rest.starts_with("string")
-                || trimmed_rest.starts_with("boolean")
-                || trimmed_rest.starts_with("any")
-                || trimmed_rest.starts_with("void")
-                || trimmed_rest.starts_with("unknown")
-                || trimmed_rest.starts_with("never")
-                || trimmed_rest.starts_with("Record<")
-                || trimmed_rest.starts_with("Array<")
-                || trimmed_rest.starts_with("Promise<")
-                || trimmed_rest.starts_with("Uint8Array")
-                || (prev_non_space == Some(b')')
-                    && trimmed_rest
-                        .chars()
-                        .next()
-                        .map(|c| c.is_ascii_alphabetic())
-                        .unwrap_or(false));
-
-            if looks_like_type {
-                i += 1;
-                let mut angle_depth = 0;
-                while i < bytes.len() {
-                    let c = bytes[i];
-                    if c == b'<' {
-                        angle_depth += 1;
-                    } else if c == b'>' && angle_depth > 0 {
-                        angle_depth -= 1;
-                        i += 1;
-                        continue;
-                    }
-                    if angle_depth == 0
-                        && (c == b'='
-                            || c == b','
-                            || c == b')'
-                            || c == b';'
-                            || c == b'{'
-                            || c == b'\n')
-                    {
-                        if c == b'=' {
-                            result.push(b' ');
-                            i += 1;
-                            while i < bytes.len() && bytes[i] == b' ' {
-                                i += 1;
-                            }
-                            result.push(b'=');
-                            result.push(b' ');
-                        }
-                        break;
-                    }
-                    i += 1;
-                }
-                continue;
-            }
-        }
-
-        result.push(b);
-        i += 1;
+    if !transform_ret.diagnostics.is_empty() {
+        return rewrite_cjs_require(source);
     }
 
-    String::from_utf8_lossy(&result).into_owned()
+    let js_code = oxc::codegen::Codegen::new().build(&program).code;
+    rewrite_cjs_require(&js_code)
 }
 
 /// Rewrites legacy CommonJS `const x = require("mod")` into synthetic deterministic ESM/CAS lookup.

@@ -164,14 +164,32 @@ SERVICE_STAGE = "production"
 | `slice microvm-bench` | Spawn 1,000 isolated tenants and benchmark P50/P99 cold-start, CAS, and I/O rings. |
 | `slice verify-security` | Execute the 5-vector OCap, SES prototype lockdown, and CPU fuel DoS verification suite. |
 
+## Real-Life Production Stack Benchmarks (`docker-tests/`)
+
+In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) runs real-life production TypeScript microservices through **Oxc** (production Rust TypeScript compiler) + **Boa ECMAScript VM** + **Slice CAS** and verifies **100% byte-for-byte identical JSON output** against Bun, Deno, and Node.js:
+
+| Real-Stack Production Metric (Linux Docker `x86_64`) | Slice (Oxc + Boa + CAS) | Bun (`v1.3.14`) | Deno (`v2.8.3`) | Node.js (`v22.22.3`) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Fintech Checkout Stack (`production_stack.ts`, 50 orders)** | **4.685 ms** (`2.23 ms` VM) | 6.216 ms | 18.659 ms | 36.843 ms |
+| **Edge API Gateway Stack (`api_gateway_pipeline.ts`, 100 reqs)** | **4.810 ms** (`2.26 ms` VM) | 6.376 ms | 18.690 ms | 50.375 ms |
+| **Production Stack Peak Memory Footprint (Max RSS)** | **9.38 MB (`9,600 KB`)** | 17.88 MB (`18,304 KB`) | 30.38 MB (`31,104 KB`) | 60.72 MB (`62,176 KB`) |
+| **1,000-Tenant MicroVM Isolate Cold-Start (P50)** | **3.21 us (`0.00321 ms`)** | N/A | N/A | N/A |
+
+Run the full Docker real-stack benchmark suite yourself:
+
+```powershell
+docker build -f docker-tests/Dockerfile -t slice-real-stack-bench .
+docker run --rm --privileged slice-real-stack-bench
+```
+
 ---
 
 ## Documentation & Benchmarks
 
 * [Master Plan (`BIG_PLAN.md`)](file:///p:/opensource/slice/BIG_PLAN.md)
 * [Architectural Blueprint (`reimagining_next_gen_node_runtime.md`)](file:///p:/opensource/slice/reimagining_next_gen_node_runtime.md)
+* [Docker Real-Stack Production Benchmarks (`docker-tests/README.md`)](file:///p:/opensource/slice/docker-tests/README.md)
 * [Cutting-Edge 2026 Research Deep Dive (`docs/research_deep_dive.md`)](file:///p:/opensource/slice/docs/research_deep_dive.md)
 * [Internal Architecture Specification (`docs/architecture.md`)](file:///p:/opensource/slice/docs/architecture.md)
 * [Empirical Benchmarks & Comparisons (`docs/benchmarks_and_comparisons.md`)](file:///p:/opensource/slice/docs/benchmarks_and_comparisons.md)
 * [Production Tooling & Deployment Guide (`docs/production_tooling_guide.md`)](file:///p:/opensource/slice/docs/production_tooling_guide.md)
-

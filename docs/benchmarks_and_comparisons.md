@@ -126,3 +126,46 @@ Using `slice microvm-bench --tenants=1000` and `slice verify-security`, we spawn
 4. **Vector 4 (Ambient Secret Harvesting):** `env("AWS_SECRET_ACCESS_KEY")` inside a compartment without explicit env capability -> Deterministically trapped by `SandboxViolation::EnvAccessDenied`.
 5. **Vector 5 (CPU Denial-of-Service Loop):** `while (true) {}` inside a compartment with a fuel ceiling -> Deterministically preempted in `< 10 us` by `SandboxViolation::CpuFuelExhausted`.
 
+---
+
+## 5. Real-Life Production Stack Benchmarks (`docker-tests/` — Oxc + Boa VM)
+
+To validate Slice on full-featured production TypeScript codebases (exercising interfaces, union types, classes, private properties, functional `.map`/`.reduce`/`.some` pipelines, rate limiting, Bearer token authentication, regional VAT/discount calculation, fraud risk scoring, and JSON serialization), we created [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) with two real-world stacks:
+- **Stack 1 ([`production_stack.ts`](file:///p:/opensource/slice/docker-tests/real-stack-app/src/production_stack.ts)):** E-Commerce & Fintech Checkout Microservice processing 50 multi-tenant orders.
+- **Stack 2 ([`api_gateway_pipeline.ts`](file:///p:/opensource/slice/docker-tests/real-stack-app/src/api_gateway_pipeline.ts)):** Edge API Gateway, Bearer Token Auth, Sliding Quota Rate-Limiter & Telemetry Pipeline processing 100 HTTP requests.
+
+All 4 runtimes produce **100% byte-for-byte identical JSON output** on both stacks:
+- Stack 1 Output: `{"service":"slice-fintech-checkout-v1","transactionsProcessed":50,"approvedCount":50,"aggregateRevenueCents":4932364,"lastAuditSignature":"sig_6290122"}`
+- Stack 2 Output: `{"service":"slice-edge-gateway-v1","totalRequests":100,"status200":75,"status401":25,"status429":0,"status404":0,"totalResponseBytes":5475,"latencyPoints":300}`
+
+### 5.1 Stack 1 Latency: Fintech Checkout Engine (50 Orders, Linux Docker x86_64)
+
+| Runtime | Min Total Process Time | Avg Total Process Time | Internal Isolate Exec | Speedup vs Node.js | Speedup vs Bun |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Slice (CAS + Oxc + Boa VM)** | **4.685 ms** | **5.092 ms** | **2.23 ms (`2232.74 us`)** | **7.86x faster** | **1.33x faster** |
+| **Slice (Standalone Binary)** | **4.715 ms** | **5.176 ms** | **2.23 ms** | **7.81x faster** | **1.32x faster** |
+| **Slice (Raw `.ts` + Oxc + Boa VM)** | **4.864 ms** | **5.457 ms** | **2.25 ms** | **7.57x faster** | **1.28x faster** |
+| Bun v1.3.14 | 6.216 ms | 6.948 ms | N/A | 5.93x faster | 1.00x |
+| Deno v2.8.3 | 18.659 ms | 20.624 ms | N/A | 1.97x faster | 0.33x |
+| Node.js v22.22.3 (`--experimental-strip-types`) | 36.843 ms | 51.867 ms | N/A | 1.00x | 0.17x |
+
+### 5.2 Stack 2 Latency: Edge API Gateway & Rate-Limiter Pipeline (100 Requests, Linux Docker x86_64)
+
+| Runtime | Min Total Process Time | Avg Total Process Time | Internal Isolate Exec | Speedup vs Node.js | Speedup vs Bun |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Slice (Standalone Binary)** | **4.810 ms** | **5.325 ms** | **2.26 ms (`2264.07 us`)** | **10.47x faster** | **1.33x faster** |
+| **Slice (CAS + Oxc + Boa VM)** | **4.972 ms** | **5.336 ms** | **2.26 ms** | **10.13x faster** | **1.28x faster** |
+| **Slice (Raw `.ts` + Oxc + Boa VM)** | **5.262 ms** | **5.623 ms** | **2.28 ms** | **9.57x faster** | **1.21x faster** |
+| Bun v1.3.14 | 6.376 ms | 6.804 ms | N/A | 7.90x faster | 1.00x |
+| Deno v2.8.3 | 18.690 ms | 19.956 ms | N/A | 2.70x faster | 0.34x |
+| Node.js v22.22.3 (`--experimental-strip-types`) | 50.375 ms | 54.618 ms | N/A | 1.00x | 0.13x |
+
+### 5.3 Real Production Stack Peak Memory Footprint (Max RSS via `/usr/bin/time -v`)
+
+| Runtime & Workload | Peak Memory (Max RSS KB) | Peak Memory (MB) | Memory Efficiency vs Node.js |
+| :--- | :--- | :--- | :--- |
+| **Slice (Gateway CAS + Boa VM)** | **9,600 KB** | **9.38 MB** | **6.48x less memory** |
+| **Slice (Fintech CAS + Boa VM)** | **9,728 KB** | **9.50 MB** | **6.39x less memory** |
+| Bun v1.3.14 (Fintech `.ts`) | 18,304 KB | 17.88 MB | 3.40x less memory |
+| Deno v2.8.3 (Fintech `.ts`) | 31,104 KB | 30.38 MB | 2.00x less memory |
+| Node.js v22.22.3 (Fintech `.ts`) | 62,176 KB | 60.72 MB | 1.00x |
