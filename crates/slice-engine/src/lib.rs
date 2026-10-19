@@ -2697,9 +2697,17 @@ globalThis.process = {
     argv: ["slice"]
 };
 globalThis.Buffer = {
-    from: function(input) {
-        var s = typeof input === "string" ? input : String(input);
-        return { length: s.length, toString: function() { return s; } };
+    from: function(input, enc) {
+        var raw = typeof input === "string" ? input : String(input);
+        var bytesStr = (enc === "base64" || enc === "base64url") ? globalThis.__slice_base64_decode(raw) : raw;
+        return {
+            length: bytesStr.length,
+            toString: function(outEnc) {
+                if (outEnc === "base64") return globalThis.__slice_base64_encode(bytesStr, false);
+                if (outEnc === "base64url") return globalThis.__slice_base64_encode(bytesStr, true);
+                return bytesStr;
+            }
+        };
     },
     isBuffer: function() { return false; },
     byteLength: function(s) { return String(s).length; }
@@ -2711,17 +2719,43 @@ globalThis.__slice_cjs_require = function(id) {
     if (id === "crypto" || id === "node:crypto") {
         var __hasher = {
             _c: "",
+            _busy: false,
             update: function(d) { this._c += String(d); return this; },
-            digest: function() { var r = globalThis.__slice_crypto_sha256(this._c); this._c = ""; return r; }
+            digest: function() { var r = globalThis.__slice_crypto_sha256(this._c); this._c = ""; this._busy = false; return r; }
+        };
+        var __hmac = {
+            _k: "",
+            _c: "",
+            _busy: false,
+            update: function(d) { this._c += String(d); return this; },
+            digest: function() { var r = globalThis.__slice_crypto_hmac_sha256(this._k, this._c); this._c = ""; this._busy = false; return r; }
         };
         var m = {
             createHash: function() {
-                __hasher._c = "";
-                return __hasher;
+                if (!__hasher._busy) {
+                    __hasher._c = "";
+                    __hasher._busy = true;
+                    return __hasher;
+                }
+                return {
+                    _c: "",
+                    update: function(d) { this._c += String(d); return this; },
+                    digest: function() { return globalThis.__slice_crypto_sha256(this._c); }
+                };
             },
             createHmac: function(_a, secret) {
-                __hasher._c = String(secret) + ":";
-                return __hasher;
+                var k = String(secret);
+                if (!__hmac._busy) {
+                    __hmac._k = k;
+                    __hmac._c = "";
+                    __hmac._busy = true;
+                    return __hmac;
+                }
+                return {
+                    _c: "",
+                    update: function(d) { this._c += String(d); return this; },
+                    digest: function() { return globalThis.__slice_crypto_hmac_sha256(k, this._c); }
+                };
             }
         };
         m.default = m; m.__esModule = true;
@@ -3088,6 +3122,58 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
         }),
     );
 
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_hmac_sha256"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let key = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let msg = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let hex = hmac_sha256_hex(key.as_bytes(), msg.as_bytes());
+            Ok(BoaVal::from(js_string!(hex)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_base64_encode"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let input = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let url_safe = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(false);
+            let encoded = base64_encode(input.as_bytes(), url_safe);
+            Ok(BoaVal::from(js_string!(encoded)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_base64_decode"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let input = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let decoded = String::from_utf8_lossy(&base64_decode(&input)).into_owned();
+            Ok(BoaVal::from(js_string!(decoded)))
+        }),
+    );
+
     // Phase 7.3: Native Rust SemVer Fast-Path Intrinsics
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_semver_valid"),
@@ -3302,7 +3388,7 @@ fn semver_satisfies_xyz(ver_str: &str, range_str: &str) -> Option<bool> {
 }
 
 /// Pure-Rust FIPS-180-4 SHA-256 implementation for 100% deterministic `node:crypto` compatibility.
-fn sha256_hex(data: &[u8]) -> String {
+fn sha256_bytes(data: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
         0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -3380,10 +3466,104 @@ fn sha256_hex(data: &[u8]) -> String {
         h[7] = h[7].wrapping_add(hh);
     }
 
-    format!(
-        "{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
-        h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]
-    )
+    let mut out = [0u8; 32];
+    for (idx, word) in h.iter().enumerate() {
+        let bytes = word.to_be_bytes();
+        out[idx * 4] = bytes[0];
+        out[idx * 4 + 1] = bytes[1];
+        out[idx * 4 + 2] = bytes[2];
+        out[idx * 4 + 3] = bytes[3];
+    }
+    out
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    let digest = sha256_bytes(data);
+    let mut s = String::with_capacity(64);
+    for b in digest {
+        use std::fmt::Write;
+        let _ = write!(&mut s, "{:02x}", b);
+    }
+    s
+}
+
+/// RFC 2104 HMAC-SHA256 implementation for 100% deterministic `crypto.createHmac("sha256", key)` compatibility.
+fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    let mut key_block = [0u8; 64];
+    if key.len() > 64 {
+        let hashed_key = sha256_bytes(key);
+        key_block[..32].copy_from_slice(&hashed_key);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+
+    let mut inner_input = Vec::with_capacity(64 + message.len());
+    inner_input.extend_from_slice(&ipad);
+    inner_input.extend_from_slice(message);
+    let inner_hash = sha256_bytes(&inner_input);
+
+    let mut outer_input = [0u8; 64 + 32];
+    outer_input[..64].copy_from_slice(&opad);
+    outer_input[64..].copy_from_slice(&inner_hash);
+    sha256_hex(&outer_input)
+}
+
+fn base64_encode(data: &[u8], url_safe: bool) -> String {
+    const STD_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const URL_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let table = if url_safe { URL_TABLE } else { STD_TABLE };
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(table[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(table[((triple >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(table[((triple >> 6) & 0x3f) as usize] as char);
+        } else if !url_safe {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(table[(triple & 0x3f) as usize] as char);
+        } else if !url_safe {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn base64_decode(input: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity((input.len() * 3) / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for b in input.bytes() {
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' | b'\r' | b'\n' | b' ' | b'\t' => continue,
+            _ => continue,
+        };
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xff) as u8);
+        }
+    }
+    out
 }
 
 fn js_value_to_json_string(val: &JsValue) -> String {

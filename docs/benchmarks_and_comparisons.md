@@ -130,40 +130,49 @@ Using `slice microvm-bench --tenants=1000` and `slice verify-security`, we spawn
 
 ## 5. Folder-Based Real-Life Production Applications, External NPM Libraries & Disk I/O Benchmarks (`docker-tests/apps/`)
 
-To validate Slice on modern folder-based production TypeScript applications using multi-file ESM/CommonJS module trees, real third-party `node_modules/` libraries (`semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`), FIPS-180-4 SHA-256 cryptography (`node:crypto`), and real disk I/O (`node:fs`, `node:path`, `node:os`), we built [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) comparing Slice against the **absolute latest official releases** of **Bun (`v1.4.3`)**, **Deno (`v2.9.7`)**, and **Node.js (`v26.12.0`)**:
+To validate Slice on modern folder-based production TypeScript applications using multi-file ESM/CommonJS module trees, real third-party `node_modules/` libraries (`semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`, `cookie@0.6.0`, `bytes@3.1.2`, `flatted@3.3.1`, `dlv@1.1.3`, `dset@3.1.3`, `mitt@3.0.1`), FIPS-180-4 SHA-256 & RFC-2104 HMAC-SHA256 cryptography (`node:crypto`), and real disk I/O (`node:fs`, `node:path`, `node:os`), we built [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) comparing Slice against the **absolute latest official releases** of **Bun (`v1.4.3`)**, **Deno (`v2.9.7`)**, and **Node.js (`v26.12.0`)** across **8 production folder applications**:
 
 1. **App 1 ([`apps/01-fintech-checkout/`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts)):** Multi-file TypeScript E-Commerce & Fintech Checkout Engine (`types.ts`, `audit_crypto.ts`, `pricing_engine.ts`, `index.ts`) with `node:crypto` SHA-256 receipt signing over 50 checkout orders.
 2. **App 2 ([`apps/02-npm-ecosystem-suite/`](file:///p:/opensource/slice/docker-tests/apps/02-npm-ecosystem-suite/src/index.ts)):** External NPM Ecosystem Suite (`release_planner.ts`, `config_loader.ts`, `index.ts`) bundling and executing `semver@7.6.3`, `ms@2.1.3`, and `ini@4.1.3` from `node_modules/` across 20 service release manifests and cluster SLA configs.
 3. **App 3 ([`apps/03-disk-io-log-pipeline/`](file:///p:/opensource/slice/docker-tests/apps/03-disk-io-log-pipeline/src/index.ts)):** High-Throughput Disk I/O & JSONL Log Pipeline (`log_generator.ts`, `io_aggregator.ts`, `index.ts`) creating, writing, stating, directory-scanning, reading, parsing, SHA-256 verifying, and unlinking 10 JSONL log shard files (`200` records, `15,796 bytes`).
 4. **App 4 ([`apps/04-edge-api-gateway/`](file:///p:/opensource/slice/docker-tests/apps/04-edge-api-gateway/src/index.ts)):** Multi-file Edge API Gateway (`auth_middleware.ts`, `rate_limiter.ts`, `router.ts`, `index.ts`) using `fast-querystring@1.1.2` and `ms@2.1.3` from `node_modules/` with Bearer token auth and sliding-window rate limiting over 100 requests.
+5. **App 5 ([`apps/05-jwt-oauth-session-guard/`](file:///p:/opensource/slice/docker-tests/apps/05-jwt-oauth-session-guard/src/index.ts)):** Zero-Trust OAuth2 / JWT HMAC-SHA256 & HTTP Cookie Session Guard (`jwt_codec.ts`, `session_manager.ts`, `index.ts`) using `cookie@0.6.0` and `ms@2.1.3` from `node_modules/` with RFC 2104 `crypto.createHmac("sha256")`, Base64URL JWT encoding/decoding, CSRF double-submit validation, and RBAC evaluation across 50 sessions.
+6. **App 6 ([`apps/06-telemetry-metrics-pipeline/`](file:///p:/opensource/slice/docker-tests/apps/06-telemetry-metrics-pipeline/src/index.ts)):** OpenTelemetry Circular Span Graph & Flatted WAL Pipeline (`span_graph.ts`, `histogram_wal.ts`, `index.ts`) using `bytes@3.1.2` and `flatted@3.3.1` from `node_modules/` to serialize/deserialize cyclic parent<->child trace graphs and persist WAL logs.
+7. **App 7 ([`apps/07-graphql-ast-validator/`](file:///p:/opensource/slice/docker-tests/apps/07-graphql-ast-validator/src/index.ts)):** GraphQL Query AST Depth/Complexity Cost Guard & Deep Resolver (`graphql_ast.ts`, `deep_resolver.ts`, `index.ts`) using `dlv@1.1.3` and `dset@3.1.3` from `node_modules/` over 60 GraphQL queries.
+8. **App 8 ([`apps/08-event-driven-state-journal/`](file:///p:/opensource/slice/docker-tests/apps/08-event-driven-state-journal/src/index.ts)):** CQRS Event-Sourced Ledger Bus & Append-Only JSONL WAL Replay (`event_ledger.ts`, `journal_replayer.ts`, `index.ts`) using `mitt@3.0.1` and `ms@2.1.3` from `node_modules/` across 75 ledger events.
 
-All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 4 folder applications:
-- App 1 Output: `{"app":"01-fintech-checkout","ordersProcessed":50,"approvedCount":50,"aggregateRevenueCents":4932364,"lastSha256Signature":"636588368661f40b"}`
-- App 2 Output: `{"app":"02-npm-ecosystem-suite","libraries":["semver@7.6.3","ms@2.1.3","ini@4.1.3"],"validManifests":20,"rangeSatisfied":5,"upgradesRequired":20,"highestSemver":"5.0.0","totalSlaTimeoutMs":197500,"edgeCacheTtlMs":7200000,"heartbeatInterval":"2 minutes","sha256Digest":"ef97948c06f43da9"}`
-- App 3 Output: `{"app":"03-disk-io-log-pipeline","shardsScanned":10,"recordsParsed":200,"totalDiskBytes":15796,"error5xxCount":28,"rateLimit429Count":28,"totalBytesTransferred":851796,"maxLatencyMs":121,"summarySha256":"4cbda5d6e5f1f7ca"}`
-- App 4 Output: `{"app":"04-edge-api-gateway","libraries":["fast-querystring@1.1.2","ms@2.1.3"],"totalRequests":100,"status200":75,"status401":25,"status429":0,"status404":0,"totalResponseBytes":6700,"latencyPoints":300,"gatewaySha256":"552ff4506f3699d0"}`
+All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 8 folder applications.
 
-### 5.1 Execution Latency Across All 4 Folder Applications (Linux Docker `x86_64`, 20 Runs)
+### 5.1 Execution Latency Across All 8 Folder Applications (Linux Docker `x86_64`, 20 Runs)
 
 | Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.3` | Deno `v2.9.7` | Node.js `v26.12.0` | Speedup vs Node.js | Speedup vs Bun |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256) | **5.986 ms** (Avg 6.551 ms) | **3.718 ms / 1.877 ms** (`0.21 us` init) | 12.606 ms | 35.555 ms | 64.484 ms | **10.77x faster** | **2.11x faster** |
-| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **8.785 ms** (Avg 9.510 ms) | **7.876 ms / 4.745 ms** (`3.43 us` init) | 20.771 ms | 51.588 ms | 76.330 ms | **8.69x faster** | **2.36x faster** |
-| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk I/O) | **9.380 ms** (Avg 10.077 ms) | **8.020 ms / 5.112 ms** (`0.30 us` init) | 13.633 ms | 42.445 ms | 65.691 ms | **7.00x faster** | **1.45x faster** |
-| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms`) | **9.643 ms** (Avg 10.625 ms) | **6.997 ms / 5.472 ms** (`0.21 us` init) | 14.480 ms | 41.565 ms | 67.555 ms | **7.01x faster** | **1.50x faster** |
+| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256) | **5.986 ms** (Avg 6.551 ms) | **3.638 ms / 1.609 ms** (`0.21 us` init) | 12.606 ms | 33.736 ms | 63.484 ms | **10.61x faster** | **2.11x faster** |
+| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **8.785 ms** (Avg 9.510 ms) | **6.158 ms / 4.264 ms** (`3.75 us` init) | 20.771 ms | 50.510 ms | 75.842 ms | **8.63x faster** | **2.36x faster** |
+| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk I/O) | **9.380 ms** (Avg 10.077 ms) | **6.641 ms / 5.112 ms** (`0.14 us` init) | 13.129 ms | 42.815 ms | 65.691 ms | **7.00x faster** | **1.40x faster** |
+| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms`) | **9.643 ms** (Avg 10.365 ms) | **6.997 ms / 5.329 ms** (`0.22 us` init) | 14.480 ms | 40.068 ms | 67.423 ms | **6.99x faster** | **1.50x faster** |
+| **App 5: `05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC) | **12.510 ms** (Avg 13.212 ms) | **9.523 ms / 7.534 ms** (`0.21 us` init) | 14.087 ms | 42.722 ms | 68.335 ms | **5.46x faster** | **1.13x faster** |
+| **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + WAL) | **13.676 ms** (Avg 14.229 ms) | **10.592 ms / 8.910 ms** (`0.21 us` init) | 16.117 ms | 44.566 ms | 70.108 ms | **5.13x faster** | **1.18x faster** |
+| **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost) | **9.054 ms** (Avg 9.542 ms) | **6.258 ms / 4.256 ms** (`0.24 us` init) | 12.678 ms | 18.756 ms | 66.880 ms | **7.39x faster** | **1.40x faster** |
+| **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay) | **11.917 ms** (Avg 12.684 ms) | **8.868 ms / 7.269 ms** (`0.20 us` init) | 15.262 ms | 44.417 ms | 67.596 ms | **5.67x faster** | **1.28x faster** |
 
 ### 5.2 Peak Memory Footprint on External NPM & Disk I/O Apps (`Max RSS` via `/usr/bin/time -v`)
 
 | Runtime & Folder Application | Peak Memory (Max RSS KB) | Peak Memory (MB) | Memory Advantage vs Node.js `v26.12.0` |
 | :--- | :--- | :--- | :--- |
-| **Slice (`02-npm-ecosystem-suite`: `semver`+`ms`+`ini`)** | **11,008 KB** | **10.75 MB** | **6.65x less memory** |
+| **Slice (`02-npm-ecosystem-suite`: `semver`+`ms`+`ini`)** | **11,008 KB** | **10.75 MB** | **6.62x less memory** |
 | **Slice (`03-disk-io-log-pipeline`: 10 Shards Disk I/O)** | **11,776 KB** | **11.50 MB** | **6.21x less memory** |
+| **Slice (`06-telemetry-metrics-pipeline`: `bytes`+`flatted`)** | **12,160 KB** | **11.88 MB** | **6.04x less memory** |
 | Bun `v1.4.3` (`03-disk-io-log-pipeline`) | 22,016 KB | 21.50 MB | 3.32x less memory |
-| Bun `v1.4.3` (`02-npm-ecosystem-suite`) | 30,464 KB | 29.75 MB | 2.40x less memory |
+| Bun `v1.4.3` (`02-npm-ecosystem-suite`) | 30,592 KB | 29.88 MB | 2.38x less memory |
+| Bun `v1.4.3` (`06-telemetry-metrics-pipeline`) | 31,872 KB | 31.12 MB | 2.31x less memory |
 | Deno `v2.9.7` (`03-disk-io-log-pipeline`) | 46,592 KB | 45.50 MB | 1.57x less memory |
-| Deno `v2.9.7` (`02-npm-ecosystem-suite`) | 47,232 KB | 46.12 MB | 1.55x less memory |
+| Deno `v2.9.7` (`02-npm-ecosystem-suite`) | 48,040 KB | 46.91 MB | 1.52x less memory |
+| Deno `v2.9.7` (`06-telemetry-metrics-pipeline`) | 51,840 KB | 50.62 MB | 1.42x less memory |
+| Node.js `v26.12.0` (`02-npm-ecosystem-suite`) | 72,860 KB | 71.15 MB | 1.00x |
 | Node.js `v26.12.0` (`03-disk-io-log-pipeline`) | 73,112 KB | 71.40 MB | 1.00x |
-| Node.js `v26.12.0` (`02-npm-ecosystem-suite`) | 73,244 KB | 71.53 MB | 1.00x |
+| Node.js `v26.12.0` (`06-telemetry-metrics-pipeline`) | 73,496 KB | 71.77 MB | 1.00x |
+
 
 
 

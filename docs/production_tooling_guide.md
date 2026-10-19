@@ -53,7 +53,7 @@ slice serve ./service.cas --port=3000
 1. Parses the `X-Slice-Tenant` HTTP header (or assigns a deterministic slot ID).
 2. Allocates a `TenantCompartment` with frozen SES intrinsics (`Object.prototype` locked down), attenuated `CapabilityToken` permissions from `slice.toml`, deterministic CPU fuel limits, and an isolated `PKEY` memory protection domain.
 3. Enters the hardware protection domain (`WRPKRU` on Linux `x86_64`).
-4. Executes the pre-compiled `SLICESNP` bytecode directly from the shared `mmap` region.
+4. Executes the pre-compiled `SLICESNP` or zero-copy `SLICEBOA` bytecode directly from the shared `mmap` region (reusing pre-warmed `BOA_CONTEXT_POOL` realms with lexical block isolation).
 5. Emits execution telemetry headers on the HTTP response:
    * `X-Slice-Tenant`: Active tenant compartment identifier.
    * `X-Slice-Isolate-Us`: Isolate instantiation + execution latency in microseconds.
@@ -65,7 +65,7 @@ slice serve ./service.cas --port=3000
 
 ## 4. Workflow 3: Bytecode Disassembly & CAS Auditing (`slice inspect`)
 
-Use `slice inspect` to verify that hot loops and cryptographic routines are lowered to Tier-2 native SIMD opcodes and that all OCap gates are present:
+Use `slice inspect` on `.ts` scripts, project folders, or `.cas` archives to verify that hot loops and cryptographic routines are lowered to Tier-2 native SIMD opcodes or zero-copy `SLICEBOA` frames:
 
 ```
 =========================================================================
@@ -80,11 +80,13 @@ Use `slice inspect` to verify that hot loops and cryptographic routines are lowe
 
 ---
 
-## 5. Workflow 4: Host Kernel Diagnostics (`slice doctor`)
+## 5. Workflow 4: Host Kernel & Warm Pool Diagnostics (`slice doctor` & `slice info`)
 
-Before deploying to production edge nodes, run `slice doctor` to verify:
+Before deploying to production edge nodes, run `slice doctor` and `slice info` to verify:
 * **Completion Ring Backend:** Confirms whether `Linux io_uring (SQPOLL + Fixed Buffers)` or `Windows NT IOCP` is active.
-* **Registered Slab Buffers:** Verifies pre-allocated `64 x 64 KB` (`4 MB`) zero-copy I/O slab buffers.
+* **Registered Slab Buffers:** Verifies pre-allocated `128 x 64 KB` (`8 MB`) zero-copy I/O slab buffers.
+* **Pre-Warmed Boa ES2024 Pool:** Verifies that `BOA_CONTEXT_POOL` pre-warms and recycles ready ECMAScript realms for zero-init `SLICEBOA` execution (`slice run --warm`).
 * **Hardware Memory Protection Keys:** Reports the active `PKEY` slot and `PKRU` bitmask (`0xffffffcf`).
 * **Security Containment Audit:** Executes all 5 multi-tenant attack vectors (prototype pollution, unauthorized `/etc/shadow` read, outbound network exfiltration, secret `env` harvesting, and `while(true)` CPU DoS) and verifies 5/5 traps.
+
 

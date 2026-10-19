@@ -43,6 +43,10 @@ COPY docker-tests /app/docker-tests
 # Install real external npm packages in the folder-based test applications
 RUN bun install --cwd /app/docker-tests/apps/02-npm-ecosystem-suite \
     && bun install --cwd /app/docker-tests/apps/04-edge-api-gateway \
+    && bun install --cwd /app/docker-tests/apps/05-jwt-oauth-session-guard \
+    && bun install --cwd /app/docker-tests/apps/06-telemetry-metrics-pipeline \
+    && bun install --cwd /app/docker-tests/apps/07-graphql-ast-validator \
+    && bun install --cwd /app/docker-tests/apps/08-event-driven-state-journal \
     && sed -i 's/\r$//' /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh \
     && chmod +x /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh
 

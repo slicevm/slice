@@ -85,6 +85,10 @@ fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
     let args: Vec<String> = env::args().collect();
     let quiet = args.iter().any(|a| a == "--quiet" || a == "-q");
     let print_metrics = args.iter().any(|a| a == "--metrics");
+    let warm = args.iter().any(|a| a == "--warm");
+    if warm {
+        SliceIsolate::prewarm_boa_pool(1);
+    }
 
     let (caps, fuel_limit, mem_limit) = load_manifest_or_default();
     let mut isolate = SliceIsolate::spawn("standalone-exe", 1, caps, fuel_limit, mem_limit);
@@ -101,9 +105,10 @@ fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
     }
     if print_metrics {
         println!(
-            "[Slice Standalone] Tier: {:?} | Instantiate: {:.2} us | Total: {:.2} us | Memory: {} B | Stat Syscalls: 0",
+            "[Slice Standalone] Tier: {:?} | Instantiate: {:.2} us | Exec: {:.2} us | Total: {:.2} us | Memory: {} B | Stat Syscalls: 0",
             metrics.highest_tier_reached,
             metrics.instantiate_time_ns as f64 / 1_000.0,
+            metrics.execution_time_ns as f64 / 1_000.0,
             metrics.total_time_ns as f64 / 1_000.0,
             metrics.memory_used_bytes
         );
@@ -116,13 +121,13 @@ fn print_usage() {
     println!();
     println!("Core Commands:");
     println!("  slice init [dir]                               Scaffold a new TypeScript Edge project with slice.toml");
-    println!("  slice run [script.ts|bundle.cas] [flags]       Execute a script, .cas bundle, or slice.toml project");
-    println!("  slice serve [script.ts|bundle.cas] [--port=N]  Launch multi-tenant WinterTC HTTP MicroVM server");
-    println!("  slice pack <input> <output.cas>                Pack a module tree into a Zero-Stat BLAKE3 .cas archive");
-    println!("  slice compile <input> -o <binary>              Compile a script or .cas into a standalone executable");
-    println!("  slice inspect <bundle.cas|script.ts>           Disassemble SLICESNP bytecode and inspect CAS Radix table");
+    println!("  slice run [target] [--warm] [--metrics]        Execute a script, folder app, .cas bundle, or slice.toml");
+    println!("  slice serve [target] [--port=N] [--smoke-test] Launch multi-tenant WinterTC HTTP MicroVM server");
+    println!("  slice pack <input> <output.cas>                Pack a file or folder app into a Zero-Stat BLAKE3 .cas archive");
+    println!("  slice compile <input> -o <binary>              Compile a script, folder app, or .cas into a standalone binary");
+    println!("  slice inspect <bundle.cas|script.ts|dir>       Disassemble SLICESNP/SLICEBOA bytecode and inspect CAS Radix table");
     println!("  slice repl                                     Start interactive SES-locked TypeScript/JS shell");
-    println!("  slice doctor                                   Audit host OS kernel io_uring/IOCP, MPK, and capabilities");
+    println!("  slice doctor                                   Audit host OS kernel io_uring/IOCP, MPK, Warm Pool, and OCap");
     println!("  slice microvm-bench [--tenants=1000] [--json]  Run 1,000-tenant MicroVM cold-start & density benchmark");
     println!("  slice verify-security                          Run 5-vector OCap, SES, and Fuel containment verification");
     println!("  slice info                                     Display runtime architecture and active kernel rings");
@@ -140,7 +145,9 @@ fn cmd_info() -> Result<()> {
         "  Zero-Stat CAS Format  : SLICE_CAS v{} (64-byte aligned BLAKE3 mmap + SLICEEXE)",
         slice_cas::CAS_VERSION
     );
-    println!("  Execution Pipeline    : Tier-0 SLICESNP -> Tier-1 Baseline -> Tier-2 Native SIMD");
+    println!("  TypeScript & Bundler  : Oxc v0.152.0 AOT Compiler + Static Barrel Tree-Shaking");
+    println!("  Execution Pipeline    : Tier-0 SLICESNP -> Tier-1 Zero-Copy SLICEBOA (Warm Pool) -> Tier-2 SIMD");
+    println!("  Native Fast Intrinsics: FIPS-180-4 SHA-256 / RFC-2104 HMAC / SemVer / In-Memory VFS Slab");
     println!("  Security Architecture : SES Lockdown + TC39 OCap Compartments + Hardware PKEY/Cage");
     Ok(())
 }
@@ -738,6 +745,11 @@ fn cmd_doctor() -> Result<()> {
         pkey_domain.pkey, pkey_domain.pkru_mask, pkey_domain.hardware_enforced
     );
     println!("  [OK] CAS Cache-Line Alignment   : {} bytes (Zero-Copy mmap ready)", slice_cas::CACHE_LINE_ALIGN);
+    SliceIsolate::prewarm_boa_pool(2);
+    println!(
+        "  [OK] Pre-Warmed Boa ES2024 Pool : {} Ready Realms (Zero-Init SLICEBOA Fast Path)",
+        SliceIsolate::boa_pool_available()
+    );
     println!("  [OK] Current Host Process RSS   : {} KB ({:.2} MB)", rss_kb, rss_kb as f64 / 1024.0);
     let blocked = run_security_containment_checks()?;
     println!("  [OK] OCap / SES Security Audit  : {}/5 Attack Vectors Blocked", blocked);

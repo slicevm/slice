@@ -1,0 +1,12 @@
+{
+  "name": "08-event-driven-state-journal",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "mitt": "3.0.1",
+    "ms": "2.1.3"
+  }
+}
+

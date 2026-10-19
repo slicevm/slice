@@ -168,17 +168,22 @@ SERVICE_STAGE = "production"
 
 ## Folder-Based Real-Life Production Applications, External NPM Libraries & Disk I/O Benchmarks (`docker-tests/apps/`)
 
-In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) runs 4 folder-based multi-module production TypeScript applications (with real external `node_modules/` packages `semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`, FIPS-180-4 SHA-256 `node:crypto`, and real `node:fs` disk I/O) and verifies **100% byte-for-byte identical JSON output** against the **absolute latest releases** of Bun (`v1.4.3`), Deno (`v2.9.7`), and Node.js (`v26.12.0`):
+In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) runs **8 folder-based multi-module production TypeScript applications** (with real external `node_modules/` packages `semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`, `cookie@0.6.0`, `bytes@3.1.2`, `flatted@3.3.1`, `dlv@1.1.3`, `dset@3.1.3`, `mitt@3.0.1`, FIPS-180-4 SHA-256 & RFC-2104 HMAC-SHA256 `node:crypto`, and `node:fs` disk I/O) and verifies **100% byte-for-byte identical JSON output** against the **absolute latest releases** of Bun (`v1.4.3`), Deno (`v2.9.7`), and Node.js (`v26.12.0`):
 
 | Folder-Based Production App (Linux Docker `x86_64`) | Slice (`v0.2.0`) | Bun (`v1.4.3`) | Deno (`v2.9.7`) | Node.js (`v26.12.0`) |
 | :--- | :--- | :--- | :--- | :--- |
-| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256, 50 orders) | **5.986 ms** (`1.88 ms` warm isolate) | 12.606 ms | 35.555 ms | 64.484 ms |
-| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini` from `node_modules`) | **8.785 ms** (`4.74 ms` warm isolate) | 20.771 ms | 51.588 ms | 76.330 ms |
-| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk Write/Scan/Read/Unlink) | **9.380 ms** (`5.11 ms` warm isolate) | 13.633 ms | 42.445 ms | 65.691 ms |
-| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms` + Auth, 100 reqs) | **9.643 ms** (`5.47 ms` warm isolate) | 14.480 ms | 41.565 ms | 67.555 ms |
-| **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **10.75 MB (`11,008 KB`)** | 29.75 MB (`30,464 KB`) | 46.12 MB (`47,232 KB`) | 71.53 MB (`73,244 KB`) |
+| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256, 50 orders) | **5.986 ms** (`1.61 ms` warm isolate) | 12.606 ms | 33.736 ms | 63.484 ms |
+| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini` from `node_modules`) | **8.785 ms** (`4.26 ms` warm isolate) | 20.771 ms | 50.510 ms | 75.842 ms |
+| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk Write/Scan/Read/Unlink) | **9.380 ms** (`5.11 ms` warm isolate) | 13.129 ms | 42.815 ms | 65.691 ms |
+| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms` + Auth, 100 reqs) | **9.643 ms** (`5.33 ms` warm isolate) | 14.480 ms | 40.068 ms | 67.423 ms |
+| **App 5: `05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC-SHA256, 50 sessions) | **12.510 ms** (`7.53 ms` warm isolate) | 14.087 ms | 42.722 ms | 68.335 ms |
+| **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + Circular WAL) | **13.676 ms** (`8.91 ms` warm isolate) | 16.117 ms | 44.566 ms | 70.108 ms |
+| **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost Guard, 60 queries) | **9.054 ms** (`4.26 ms` warm isolate) | 12.678 ms | 18.756 ms | 66.880 ms |
+| **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay, 75 events) | **11.917 ms** (`7.27 ms` warm isolate) | 15.262 ms | 44.417 ms | 67.596 ms |
+| **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **10.75 MB (`11,008 KB`)** | 29.88 MB (`30,592 KB`) | 46.91 MB (`48,040 KB`) | 71.15 MB (`72,860 KB`) |
 | **Peak Memory Footprint: Disk I/O App (Max RSS)** | **11.50 MB (`11,776 KB`)** | 21.50 MB (`22,016 KB`) | 45.50 MB (`46,592 KB`) | 71.40 MB (`73,112 KB`) |
-| **1,000-Tenant MicroVM Isolate Cold-Start (Min)** | **3.08 us (`0.00308 ms`)** | N/A | N/A | N/A |
+| **Peak Memory Footprint: Telemetry + Flatted App (Max RSS)** | **11.88 MB (`12,160 KB`)** | 31.12 MB (`31,872 KB`) | 50.62 MB (`51,840 KB`) | 71.77 MB (`73,496 KB`) |
+| **1,000-Tenant MicroVM Isolate Cold-Start (Min)** | **3.02 us (`0.00302 ms`)** | N/A | N/A | N/A |
 
 Run the full Docker folder-app benchmark suite yourself:
 

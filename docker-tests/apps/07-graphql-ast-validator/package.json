@@ -1,0 +1,12 @@
+{
+  "name": "07-graphql-ast-validator",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "dlv": "1.1.3",
+    "dset": "3.1.3"
+  }
+}
+
