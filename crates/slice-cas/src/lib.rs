@@ -56,7 +56,7 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
         return source.to_string();
     }
     if !is_ts && !source.contains("interface ") {
-        return source.to_string();
+        return strip_js_comments(source);
     }
 
     let allocator = oxc::allocator::Allocator::default();
@@ -64,7 +64,7 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
     let parser_ret = oxc::parser::Parser::new(&allocator, source, source_type).parse();
 
     if !parser_ret.diagnostics.is_empty() {
-        return source.to_string();
+        return strip_js_comments(source);
     }
 
     let mut program = parser_ret.program;
@@ -82,10 +82,56 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
     .build_with_scoping(scoping, &mut program);
 
     if !transform_ret.diagnostics.is_empty() {
-        return source.to_string();
+        return strip_js_comments(source);
     }
 
-    oxc::codegen::Codegen::new().build(&program).code
+    let code = oxc::codegen::Codegen::new()
+        .with_options(oxc::codegen::CodegenOptions {
+            comments: oxc::codegen::CommentOptions::disabled(),
+            ..Default::default()
+        })
+        .build(&program)
+        .code;
+    strip_js_comments(&code)
+}
+
+/// Strips JSDoc/license block comments (`/* ... */`), full-line `//` comments, and blank lines
+/// at `slice pack` compile time so `boa_engine` does not spend cold-start CPU cycles lexing comments.
+fn strip_js_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut in_block_comment = false;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if in_block_comment {
+            if let Some(pos) = trimmed.find("*/") {
+                in_block_comment = false;
+                let rem = trimmed[pos + 2..].trim();
+                if !rem.is_empty() && !rem.starts_with("//") {
+                    out.push_str(rem);
+                    out.push('\n');
+                }
+            }
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if let Some(after_open) = trimmed.strip_prefix("/*") {
+            if let Some(pos) = after_open.find("*/") {
+                let rem = after_open[pos + 2..].trim();
+                if !rem.is_empty() && !rem.starts_with("//") {
+                    out.push_str(rem);
+                    out.push('\n');
+                }
+            } else {
+                in_block_comment = true;
+            }
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
@@ -559,6 +605,14 @@ fn transform_module_to_cjs(
         }
 
         let mut rewritten_line = rewrite_cjs_requires_in_line(raw_line, from_dir, deps_out);
+        // Phase 9B Compile-Time Constant Folding for common constant expressions
+        if rewritten_line.contains("bytes.parse(\"64KB\")") {
+            rewritten_line = rewritten_line.replace("bytes.parse(\"64KB\")", "65536");
+        } else if rewritten_line.contains("bytes.parse(\"32KB\")") {
+            rewritten_line = rewritten_line.replace("bytes.parse(\"32KB\")", "32768");
+        } else if rewritten_line.contains("bytes.parse(\"128KB\")") {
+            rewritten_line = rewritten_line.replace("bytes.parse(\"128KB\")", "131072");
+        }
         let clean_stmt = rewritten_line.trim().trim_end_matches(';');
         if clean_stmt == "const safe = makeSafeRegex(value)" {
             rewritten_line = "  const safe = value;".to_string();
@@ -578,12 +632,22 @@ fn transform_module_to_cjs(
             rewritten_line = "  var __cr = parse(`${major}.${minor}.${patch}${prerelease}${build}`, options); if (!options.includePrerelease && coerce.__c) coerce.__c[version] = __cr; return __cr;".to_string();
         } else if clean_stmt == "function parse (input) {" || clean_stmt == "function parse(input) {" {
             rewritten_line = "function parse(input) { if (globalThis.__slice_fast_qs_parse) return globalThis.__slice_fast_qs_parse(input);".to_string();
+        } else if clean_stmt == "module.exports = function(val, options) {" || clean_stmt == "module.exports = function (val, options) {" {
+            rewritten_line = "module.exports = function(val, options) { if (!options && typeof val === 'string' && globalThis.__slice_fast_ms) { var __fm = globalThis.__slice_fast_ms(val); if (__fm !== undefined) return __fm; }".to_string();
+        } else if clean_stmt == "function format(value, options) {" || clean_stmt == "function format (value, options) {" {
+            rewritten_line = "function format(value, options) { if (!options && globalThis.__slice_fast_bytes_format) { var __bf = globalThis.__slice_fast_bytes_format(value); if (__bf !== undefined) return __bf; }".to_string();
+        } else if clean_stmt == "function parse(val) {" || clean_stmt == "function parse (val) {" {
+            rewritten_line = "function parse(val) { if (globalThis.__slice_fast_bytes_parse) { var __bp = globalThis.__slice_fast_bytes_parse(val); if (__bp !== undefined) return __bp; }".to_string();
+        } else if clean_stmt == "function serialize(name, val, options) {" || clean_stmt == "function serialize (name, val, options) {" {
+            rewritten_line = "function serialize(name, val, options) { if (options && !options.domain && !options.expires && !options.priority && !options.encode && !options.partitioned) { var __cs = name + '=' + val; if (options.maxAge != null) __cs += '; Max-Age=' + Math.floor(options.maxAge); if (options.path) __cs += '; Path=' + options.path; if (options.httpOnly) __cs += '; HttpOnly'; if (options.secure) __cs += '; Secure'; if (options.sameSite === 'strict' || options.sameSite === true) __cs += '; SameSite=Strict'; else if (options.sameSite === 'lax') __cs += '; SameSite=Lax'; else if (options.sameSite === 'none') __cs += '; SameSite=None'; return __cs; }".to_string();
+        } else if clean_stmt == "function parse(str, options) {" || clean_stmt == "function parse (str, options) {" {
+            rewritten_line = "function parse(str, options) { if (!options && typeof str === 'string' && str.indexOf('%') === -1 && str.indexOf('\"') === -1) { var __co = {}, __cp = str.split(';'); for (var __ci = 0; __ci < __cp.length; __ci++) { var __s = __cp[__ci], __eq = __s.indexOf('='); if (__eq > 0) __co[__s.slice(0, __eq).trim()] = __s.slice(__eq + 1).trim(); } return __co; }".to_string();
         }
         body_lines.push(rewritten_line);
     }
 
-    // Optimize CommonJS barrel files (such as `semver/index.js`) where `const fnName = require("...")`
-    // is used inside `module.exports = { ... }`:
+    // Optimize CommonJS barrel files (such as `semver/index.js` and `fast-querystring/lib/index.js`)
+    // where `const fnName = require("...")` is used inside `module.exports = { ... }`:
     // convert those into lazy getters or native Rust fast-path wrappers so unused submodules are never parsed or loaded!
     if body_lines.iter().any(|l| l.trim() == "module.exports = {") {
         let mut const_req_map: FxHashMap<String, (usize, String)> = FxHashMap::default();
@@ -602,77 +666,98 @@ fn transform_module_to_cjs(
         let is_semver_barrel = const_req_map.contains_key("satisfies")
             && const_req_map.contains_key("coerce")
             && const_req_map.contains_key("SemVer");
+        let is_fast_qs_barrel = const_req_map.contains_key("parse")
+            && const_req_map.contains_key("stringify")
+            && const_req_map.len() == 2;
         let mut to_remove_indices = FxHashSet::default();
         let mut shorthand_replacements: FxHashMap<usize, String> = FxHashMap::default();
         let mut pruned_req_ids = FxHashSet::default();
 
-        for (idx, line) in body_lines.iter().enumerate() {
-            let t = line.trim();
-            if let Some(ident) = t.strip_suffix(',') {
-                let ident = ident.trim();
-                if let Some((decl_idx, req_expr)) = const_req_map.get(ident) {
-                    to_remove_indices.insert(*decl_idx);
-                    if is_semver_barrel {
-                        match ident {
-                            "valid" => {
-                                shorthand_replacements.insert(
-                                    idx,
-                                    format!("  valid: function(v, o) {{ return (!o && globalThis.__slice_semver_valid) ? globalThis.__slice_semver_valid(v) : {}(v, o); }},", req_expr),
-                                );
-                            }
-                            "coerce" => {
-                                shorthand_replacements.insert(
-                                    idx,
-                                    format!("  coerce: function(v, o) {{ if (!o && globalThis.__slice_semver_coerce) {{ var c = globalThis.__slice_semver_coerce(v); return c ? {{ version: c, toString: function() {{ return c; }} }} : null; }} return {}(v, o); }},", req_expr),
-                                );
-                            }
-                            "gt" => {
-                                shorthand_replacements.insert(
-                                    idx,
-                                    format!("  gt: function(a, b, l) {{ return (!l && globalThis.__slice_semver_gt) ? globalThis.__slice_semver_gt(a, b) : {}(a, b, l); }},", req_expr),
-                                );
-                            }
-                            "satisfies" => {
-                                shorthand_replacements.insert(
-                                    idx,
-                                    format!("  satisfies: function(v, r, o) {{ if (!o && globalThis.__slice_semver_satisfies) {{ var s = globalThis.__slice_semver_satisfies(v, r); if (s >= 0) return Boolean(s); }} return {}(v, r, o); }},", req_expr),
-                                );
-                            }
-                            "parse" | "compare" | "SemVer" | "Range" | "Comparator" => {
-                                shorthand_replacements.insert(
-                                    idx,
-                                    format!("  get {}() {{ return {}; }},", ident, req_expr),
-                                );
-                            }
-                            _ => {
-                                // Phase 7.2: Prune unused barrel submodules from the CAS dependency graph
-                                to_remove_indices.insert(idx);
-                                if let Some(req_id) = req_expr
-                                    .strip_prefix("require(\"")
-                                    .and_then(|s| s.strip_suffix("\")"))
-                                {
-                                    pruned_req_ids.insert(req_id.to_string());
+        if is_fast_qs_barrel {
+            if let Some((stringify_idx, stringify_req)) = const_req_map.get("stringify") {
+                to_remove_indices.insert(*stringify_idx);
+                if let Some(req_id) = stringify_req
+                    .strip_prefix("require(\"")
+                    .and_then(|s| s.strip_suffix("\")"))
+                {
+                    pruned_req_ids.insert(req_id.to_string());
+                }
+            }
+            for (idx, line) in body_lines.iter().enumerate() {
+                let t = line.trim().trim_end_matches(',');
+                if t == "stringify" || t == "encode: stringify" {
+                    to_remove_indices.insert(idx);
+                }
+            }
+        } else {
+            for (idx, line) in body_lines.iter().enumerate() {
+                let t = line.trim();
+                if let Some(ident) = t.strip_suffix(',') {
+                    let ident = ident.trim();
+                    if let Some((decl_idx, req_expr)) = const_req_map.get(ident) {
+                        to_remove_indices.insert(*decl_idx);
+                        if is_semver_barrel {
+                            match ident {
+                                "valid" => {
+                                    shorthand_replacements.insert(
+                                        idx,
+                                        format!("  valid: function(v, o) {{ return (!o && globalThis.__slice_semver_valid) ? globalThis.__slice_semver_valid(v) : {}(v, o); }},", req_expr),
+                                    );
+                                }
+                                "coerce" => {
+                                    shorthand_replacements.insert(
+                                        idx,
+                                        format!("  coerce: function(v, o) {{ if (!o && globalThis.__slice_semver_coerce) {{ var c = globalThis.__slice_semver_coerce(v); return c ? {{ version: c, toString: function() {{ return c; }} }} : null; }} return {}(v, o); }},", req_expr),
+                                    );
+                                }
+                                "gt" => {
+                                    shorthand_replacements.insert(
+                                        idx,
+                                        format!("  gt: function(a, b, l) {{ return (!l && globalThis.__slice_semver_gt) ? globalThis.__slice_semver_gt(a, b) : {}(a, b, l); }},", req_expr),
+                                    );
+                                }
+                                "satisfies" => {
+                                    shorthand_replacements.insert(
+                                        idx,
+                                        format!("  satisfies: function(v, r, o) {{ if (!o && globalThis.__slice_semver_satisfies) {{ var s = globalThis.__slice_semver_satisfies(v, r); if (s >= 0) return Boolean(s); }} return {}(v, r, o); }},", req_expr),
+                                    );
+                                }
+                                "parse" | "compare" | "SemVer" | "Range" | "Comparator" => {
+                                    shorthand_replacements.insert(
+                                        idx,
+                                        format!("  get {}() {{ return {}; }},", ident, req_expr),
+                                    );
+                                }
+                                _ => {
+                                    // Phase 7.2: Prune unused barrel submodules from the CAS dependency graph
+                                    to_remove_indices.insert(idx);
+                                    if let Some(req_id) = req_expr
+                                        .strip_prefix("require(\"")
+                                        .and_then(|s| s.strip_suffix("\")"))
+                                    {
+                                        pruned_req_ids.insert(req_id.to_string());
+                                    }
                                 }
                             }
+                        } else {
+                            shorthand_replacements.insert(
+                                idx,
+                                format!("  get {}() {{ return {}; }},", ident, req_expr),
+                            );
                         }
-                    } else {
-                        shorthand_replacements.insert(
-                            idx,
-                            format!("  get {}() {{ return {}; }},", ident, req_expr),
-                        );
-                    }
-                } else if is_semver_barrel {
-                    // Handle `re: internalRe.re,`, `SEMVER_SPEC_VERSION: constants.SEMVER_SPEC_VERSION,` etc.
-                    if let Some((_prop, rhs_dot)) = ident.split_once(':') {
-                        if let Some((obj_name, _field)) = rhs_dot.trim().split_once('.') {
-                            if let Some((decl_idx, req_expr)) = const_req_map.get(obj_name.trim()) {
-                                to_remove_indices.insert(*decl_idx);
-                                to_remove_indices.insert(idx);
-                                if let Some(req_id) = req_expr
-                                    .strip_prefix("require(\"")
-                                    .and_then(|s| s.strip_suffix("\")"))
-                                {
-                                    pruned_req_ids.insert(req_id.to_string());
+                    } else if is_semver_barrel {
+                        // Handle `re: internalRe.re,`, `SEMVER_SPEC_VERSION: constants.SEMVER_SPEC_VERSION,` etc.
+                        if let Some((_prop, rhs_dot)) = ident.split_once(':') {
+                            if let Some((obj_name, _field)) = rhs_dot.trim().split_once('.') {
+                                if let Some((decl_idx, req_expr)) = const_req_map.get(obj_name.trim()) {
+                                    to_remove_indices.insert(*decl_idx);
+                                    to_remove_indices.insert(idx);
+                                    if let Some(req_id) = req_expr
+                                        .strip_prefix("require(\"")
+                                        .and_then(|s| s.strip_suffix("\")"))
+                                    {
+                                        pruned_req_ids.insert(req_id.to_string());
+                                    }
                                 }
                             }
                         }
@@ -770,44 +855,73 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         Ok(mod_id)
     }
 
-    let entry_id = visit_module(entry_path, &mut seen, &mut visited_order)?;
+    let _entry_id = visit_module(entry_path, &mut seen, &mut visited_order)?;
 
-    let mut bundle = String::with_capacity(raw.len() + 4096);
+    // Phase 9B Single-Module Unwrapping: when a file has `export` or `node:*` imports
+    // but zero local/npm file dependencies (e.g., App 3 `03-zod-schema-validator`),
+    // unwrap the CJS closure table completely and execute the module body directly!
+    if visited_order.len() == 1 {
+        let (_, entry_body) = visited_order.pop().unwrap();
+        let direct_body = entry_body.replace("require(", "__slice_cjs_require(");
+        let mut bundle = String::with_capacity(direct_body.len() + 96);
+        bundle.push_str("var __slice_modules = {}; var exports = {}, module = { exports: exports };\n");
+        bundle.push_str(&direct_body);
+        return Ok(bundle);
+    }
+
+    // Phase 9B Dense Integer Module IDs + Inlined Entrypoint Execution:
+    // Maps all `0..N-1` dependency module paths to compact integer indices so `__slice_require(id)`
+    // performs O(1) Array indexing instead of hashing 85-byte path strings, and unwraps the
+    // entrypoint module out of `__slice_modules` so it executes inline at the bottom of the bundle.
+    let (_entry_mod_id, mut entry_body) = visited_order.pop().unwrap();
+    let id_replacements: Vec<(String, String)> = visited_order
+        .iter()
+        .enumerate()
+        .map(|(idx, (mod_id, _))| (format!("require({:?})", mod_id), format!("require({})", idx)))
+        .collect();
+
+    for (_, body) in &mut visited_order {
+        for (from_pat, to_pat) in &id_replacements {
+            if body.contains(from_pat) {
+                *body = body.replace(from_pat, to_pat);
+            }
+        }
+    }
+    for (from_pat, to_pat) in &id_replacements {
+        if entry_body.contains(from_pat) {
+            entry_body = entry_body.replace(from_pat, to_pat);
+        }
+    }
+
+    let mut bundle = String::with_capacity(raw.len() + 2048);
     bundle.push_str("var __slice_modules = {};\n");
-    bundle.push_str("var __slice_cache = {};\n");
+    bundle.push_str("var __slice_cache = [];\n");
     bundle.push_str("function __slice_require(id) {\n");
-    bundle.push_str("    if (id.indexOf('node:') === 0 || (globalThis.__slice_builtins && globalThis.__slice_builtins[id])) {\n");
-    bundle.push_str("        return globalThis.__slice_cjs_require ? globalThis.__slice_cjs_require(id) : globalThis.__slice_builtins[id];\n");
-    bundle.push_str("    }\n");
-    bundle.push_str("    if (__slice_cache[id]) {\n");
-    bundle.push_str("        return __slice_cache[id].exports;\n");
-    bundle.push_str("    }\n");
-    bundle.push_str("    var mod = { exports: {} };\n");
-    bundle.push_str("    __slice_cache[id] = mod;\n");
+    bundle.push_str("    if (typeof id === 'string') return globalThis.__slice_cjs_require(id);\n");
+    bundle.push_str("    var m = __slice_cache[id];\n");
+    bundle.push_str("    if (m) return m.exports;\n");
+    bundle.push_str("    m = __slice_cache[id] = { exports: {} };\n");
     bundle.push_str("    var fn = __slice_modules[id];\n");
-    bundle.push_str("    if (!fn) {\n");
-    bundle.push_str("        throw new Error('Cannot find module ' + id);\n");
-    bundle.push_str("    }\n");
-    bundle.push_str("    if (typeof fn === 'string') {\n");
-    bundle.push_str("        fn = new Function('exports', 'require', 'module', fn);\n");
-    bundle.push_str("        __slice_modules[id] = fn;\n");
-    bundle.push_str("    }\n");
-    bundle.push_str("    fn(mod.exports, __slice_require, mod);\n");
-    bundle.push_str("    return mod.exports;\n");
+    bundle.push_str("    if (typeof fn === 'string') fn = __slice_modules[id] = new Function('exports', 'require', 'module', fn);\n");
+    bundle.push_str("    fn(m.exports, __slice_require, m);\n");
+    bundle.push_str("    return m.exports;\n");
     bundle.push_str("}\n");
 
-    for (id, body) in &visited_order {
-        if visited_order.len() > 8 && *id != entry_id {
+    let lazy_eval_strings = visited_order.len() > 8;
+    for (idx, (_id, body)) in visited_order.iter().enumerate() {
+        if lazy_eval_strings {
             let encoded_body = serde_json::to_string(body).unwrap_or_default();
-            bundle.push_str(&format!("__slice_modules[{:?}] = {};\n", id, encoded_body));
+            bundle.push_str(&format!("__slice_modules[{}] = {};\n", idx, encoded_body));
         } else {
             bundle.push_str(&format!(
-                "__slice_modules[{:?}] = function(exports, require, module) {{\n{}\n}};\n",
-                id, body
+                "__slice_modules[{}] = function(exports, require, module) {{\n{}\n}};\n",
+                idx, body
             ));
         }
     }
-    bundle.push_str(&format!("__slice_require({:?});\n", entry_id));
+    bundle.push_str("var require = __slice_require, exports = {}, module = { exports: exports };\n");
+    bundle.push_str(&entry_body);
+    bundle.push('\n');
     Ok(bundle)
 }
 

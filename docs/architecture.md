@@ -168,6 +168,9 @@ Every `SliceIsolate` executes inside a [`TenantCompartment`](file:///p:/opensour
 | **`SLICE_CAS` v1 + `mmap` + `SLICEEXE`** | `1,500+` `stat()` / `open()` syscalls & JSON AST parsing | **`0` `stat()` syscalls**, `484 us` 500-module load (`20.6x` faster than Node.js) |
 | **Zero-Copy `SLICEBOA` Framing** | `serde_json` string unescaping of bundled JS payloads | Isolate instantiation dropped **`229.66 us` -> `0.21 us`** (**`1,093x` faster**) |
 | **Phase 7.1 Pre-Warmed `Boa` Pool (`BOA_CONTEXT_POOL`)** | Repeated realm intrinsic creation & JS prelude eval | `01-fintech-checkout` isolate exec dropped **`5.07 ms` -> `1.88 ms`** (**`2.70x` faster**) |
-| **Phase 7.2 Static Barrel Tree-Shaking (`slice-cas`)** | Bundling 30+ unused `semver` barrel submodules | `02-npm-ecosystem-suite` `.cas` size **`-30.0%`**, Max RSS **`10.75 MB`** (`6.65x < Node`) |
-| **Phase 7.3 Native Rust `SemVer` + `VFS` + `Crypto` Intrinsics** | Slow interpreted JS regexes, temp-file syscalls & closures | `02-npm-ecosystem-suite` warm isolate **`19.70 ms` -> `4.74 ms`** (**`4.15x` faster**; CLI **`8.785 ms`** vs Bun `20.771 ms`) |
+| **Phase 7.2 Static Barrel Tree-Shaking (`slice-cas`)** | Bundling 30+ unused `semver` & `fast-querystring` barrel submodules | `02-npm-ecosystem-suite` `.cas` size **`-49.1%`** (`195,978 B` -> `99,709 B`), Max RSS **`10.38 MB`** (`6.86x < Node`) |
+| **Phase 7.3 Native Rust `SemVer` + `VFS` + `Crypto` Intrinsics** | Slow interpreted JS regexes, temp-file syscalls & closures | `02-npm-ecosystem-suite` warm isolate **`19.70 ms` -> `4.73 ms`** (**`4.16x` faster**; CLI **`7.705 ms`** vs Bun `20.568 ms`) |
 | **Phase 7.4 Native `Boa` Host OCap Enforcement** | Unchecked `node:fs` access inside third-party packages | **5/5 Security Vectors Contained** across both `SLICESNP` and `SLICEBOA` |
+| **Phase 9A Zero-Alloc Isolate Spawn & `16-Byte JsValue`** | 11 heap allocations per isolate spawn + `80B` `JsValue` enum | 1,000-Tenant MicroVM Swarm **`6.57 ms` -> `3.42 ms`** (`2.61 us` min cold-start, `9.79 MB` total RSS) |
+| **Phase 9B Ultra-Compact Lazy Module Injection & CJS Constant Folding** | `~2.2 ms` cold `PRELUDE` parser tax + CJS regex/comment overhead | App 5 dropped to **`10.275 ms`**, App 8 dropped **`11.92 ms` -> `8.592 ms`** (**`1.82x` faster than Bun**) |
+
