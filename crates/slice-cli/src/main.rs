@@ -218,6 +218,7 @@ fn cmd_run(args: &[String]) -> Result<()> {
     let mut quiet = false;
     let mut print_metrics = false;
     let mut prewarm_pool = false;
+    let mut deterministic_seed: Option<u64> = None;
     let mut target_opt: Option<String> = None;
 
     for arg in args {
@@ -235,6 +236,10 @@ fn cmd_run(args: &[String]) -> Result<()> {
             fuel_limit = f.parse().unwrap_or(fuel_limit);
         } else if let Some(m) = arg.strip_prefix("--memory=") {
             mem_limit = m.parse().unwrap_or(mem_limit);
+        } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
+            deterministic_seed = Some(seed_str.parse().unwrap_or(42));
+        } else if arg == "--deterministic" {
+            deterministic_seed = Some(42);
         } else if arg == "--quiet" || arg == "-q" {
             quiet = true;
         } else if arg == "--metrics" {
@@ -271,6 +276,7 @@ fn cmd_run(args: &[String]) -> Result<()> {
             SliceIsolate::prewarm_boa_bundle(bytecode);
         }
         let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps, fuel_limit, mem_limit);
+        isolate.set_deterministic_seed(deterministic_seed);
         isolate.execute_bytecode(bytecode, Some(&archive))?
     } else {
         let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
@@ -280,6 +286,7 @@ fn cmd_run(args: &[String]) -> Result<()> {
             SliceIsolate::prewarm_boa_bundle(&bytecode);
         }
         let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps, fuel_limit, mem_limit);
+        isolate.set_deterministic_seed(deterministic_seed);
         isolate.execute_bytecode(&bytecode, None)?
     };
 
@@ -481,6 +488,8 @@ fn cmd_serve(args: &[String]) -> Result<()> {
     let mut port: u16 = 3000;
     let mut smoke_test = false;
     let mut max_requests_opt: Option<usize> = None;
+    let mut tenant_dir_opt: Option<PathBuf> = None;
+    let mut deterministic_seed: Option<u64> = None;
     let mut workers: usize = std::thread::available_parallelism()
         .map(|n| n.get().clamp(1, 8))
         .unwrap_or(4);
@@ -493,6 +502,12 @@ fn cmd_serve(args: &[String]) -> Result<()> {
             workers = w.parse().unwrap_or(4).max(1);
         } else if let Some(m) = arg.strip_prefix("--max-requests=") {
             max_requests_opt = m.parse().ok();
+        } else if let Some(td) = arg.strip_prefix("--tenant-dir=") {
+            tenant_dir_opt = Some(PathBuf::from(td));
+        } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
+            deterministic_seed = Some(seed_str.parse().unwrap_or(42));
+        } else if arg == "--deterministic" {
+            deterministic_seed = Some(42);
         } else if arg == "--smoke-test" || arg == "--once" {
             smoke_test = true;
         } else if !arg.starts_with('-') && target_opt.is_none() {
@@ -537,6 +552,8 @@ console.log(route_res);
                     stream,
                     1,
                     &bc_clone,
+                    None,
+                    deterministic_seed,
                     &caps_clone,
                     fuel_limit,
                     mem_limit,
@@ -576,11 +593,13 @@ console.log(route_res);
     );
 
     let req_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tenant_dir_arc = tenant_dir_opt.map(std::sync::Arc::new);
     let mut handles = Vec::with_capacity(workers.saturating_sub(1));
 
     for worker_idx in 1..workers {
         let listener_clone = std::sync::Arc::clone(&listener);
         let bc_clone = std::sync::Arc::clone(&bytecode);
+        let td_clone = tenant_dir_arc.as_ref().map(std::sync::Arc::clone);
         let caps_clone = caps.clone();
         let counter_clone = std::sync::Arc::clone(&req_counter);
         handles.push(std::thread::spawn(move || {
@@ -594,6 +613,8 @@ console.log(route_res);
                     stream,
                     local_slot,
                     &bc_clone,
+                    td_clone.as_deref().map(|p| p.as_path()),
+                    deterministic_seed,
                     &caps_clone,
                     fuel_limit,
                     mem_limit,
@@ -615,6 +636,8 @@ console.log(route_res);
             stream,
             local_slot,
             &bytecode,
+            tenant_dir_arc.as_deref().map(|p| p.as_path()),
+            deterministic_seed,
             &caps,
             fuel_limit,
             mem_limit,
@@ -624,6 +647,61 @@ console.log(route_res);
         );
     }
     Ok(())
+}
+
+type TenantCasCacheEntry = (u128, u64, std::sync::Arc<Vec<u8>>);
+
+thread_local! {
+    static TENANT_CAS_CACHE: std::cell::RefCell<std::collections::HashMap<String, TenantCasCacheEntry>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Resolves a per-tenant `.cas` archive from `tenant_dir` (`<tenant_id>.cas` or `default.cas`),
+/// automatically hot-swapping and pre-warming the bundle when the file's modification timestamp
+/// or byte length changes on disk, with zero dropped TCP connections.
+fn resolve_tenant_bytecode_hotswap(
+    tenant_dir: &Path,
+    tenant_id: &str,
+) -> Option<std::sync::Arc<Vec<u8>>> {
+    let safe_tenant: String = tenant_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if safe_tenant.is_empty() {
+        return None;
+    }
+    let mut candidate = tenant_dir.join(format!("{}.cas", safe_tenant));
+    if !candidate.is_file() {
+        candidate = tenant_dir.join("default.cas");
+        if !candidate.is_file() {
+            return None;
+        }
+    }
+    let meta = std::fs::metadata(&candidate).ok()?;
+    let file_len = meta.len();
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+
+    TENANT_CAS_CACHE.with(|cache| {
+        if let Some((cached_mtime, cached_len, arc_bc)) = cache.borrow().get(&safe_tenant) {
+            if *cached_mtime == mtime_ns && *cached_len == file_len {
+                return Some(std::sync::Arc::clone(arc_bc));
+            }
+        }
+        let archive = MappedCasArchive::open(&candidate).ok()?;
+        let entry = archive.entrypoint_blob()?;
+        let bc_vec = archive.get_bytecode_slice(entry).to_vec();
+        SliceIsolate::prewarm_boa_bundle(&bc_vec);
+        let arc_bc = std::sync::Arc::new(bc_vec);
+        cache
+            .borrow_mut()
+            .insert(safe_tenant, (mtime_ns, file_len, std::sync::Arc::clone(&arc_bc)));
+        Some(arc_bc)
+    })
 }
 
 #[inline]
@@ -665,6 +743,8 @@ fn serve_connection_keep_alive(
     mut stream: TcpStream,
     mut slot_id: u32,
     bytecode: &[u8],
+    tenant_dir_opt: Option<&Path>,
+    deterministic_seed: Option<u64>,
     caps: &CapabilityToken,
     fuel_limit: u64,
     mem_limit: usize,
@@ -676,6 +756,7 @@ fn serve_connection_keep_alive(
     let mut filled: usize = 0;
     write_buf.clear();
     let mut isolate = SliceIsolate::spawn("tenant-default", slot_id, caps.clone(), fuel_limit, mem_limit);
+    isolate.set_deterministic_seed(deterministic_seed);
 
     loop {
         // 1. Read until complete HTTP headers (`\r\n\r\n`) are present in `read_buf[..filled]`
@@ -703,11 +784,23 @@ fn serve_connection_keep_alive(
         let method = parts.next().unwrap_or("GET");
         let raw_target = parts.next().unwrap_or("/");
         let version = parts.next().unwrap_or("HTTP/1.1");
-        let (path, query) = raw_target.split_once('?').unwrap_or((raw_target, ""));
+        let (raw_path, query) = raw_target.split_once('?').unwrap_or((raw_target, ""));
 
         let mut keep_alive = !version.ends_with("1.0");
         let mut content_length: usize = 0;
+        let mut path = raw_path;
         let mut tenant_id: &str = "tenant-default";
+        if let Some(rest) = raw_path.strip_prefix("/t/") {
+            if let Some((t_seg, sub)) = rest.split_once('/') {
+                if !t_seg.is_empty() {
+                    tenant_id = t_seg;
+                    path = if sub.is_empty() { "/" } else { &raw_path[2 + t_seg.len()..] };
+                }
+            } else if !rest.is_empty() {
+                tenant_id = rest;
+                path = "/";
+            }
+        }
         let mut headers_stack: [(&str, &str); 16] = [("", ""); 16];
         let mut headers_len: usize = 0;
 
@@ -760,7 +853,10 @@ fn serve_connection_keep_alive(
         let has_more_pipelined =
             keep_alive && find_http_header_end(&after_hdr_buf[body_len..body_filled]).is_some();
 
-        match isolate.execute_http_request(bytecode, None, &req_ctx) {
+        let dynamic_bc = tenant_dir_opt.and_then(|td| resolve_tenant_bytecode_hotswap(td, tenant_id));
+        let active_bytecode: &[u8] = dynamic_bc.as_deref().map(|v| v.as_slice()).unwrap_or(bytecode);
+
+        match isolate.execute_http_request(active_bytecode, None, &req_ctx) {
             Ok(outcome) => {
                 let isolate_us = outcome.metrics.total_time_ns / 1_000;
                 let total_us = req_start.elapsed().as_nanos() / 1_000;
@@ -1302,6 +1398,8 @@ new PipelinedEdge().run();
                     stream,
                     0,
                     &bc_server,
+                    None,
+                    None,
                     &CapabilityToken::pure_compute(),
                     2_000_000,
                     4 * 1024 * 1024,
@@ -1330,6 +1428,39 @@ new PipelinedEdge().run();
         assert!(response_str.contains("GET /alpha [tenant-a] body="));
         assert!(response_str.contains("POST /beta [tenant-b] body=pong"));
     }
+
+    #[test]
+    fn test_tag_n2_multi_tenant_cas_router_and_zero_downtime_hotswap() {
+        let tmp_dir = env::temp_dir().join("slice_n2_tenant_dir_test");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        // Build tenant-alpha v1 .cas and tenant-beta .cas
+        let alpha_src = tmp_dir.join("alpha.ts");
+        let beta_src = tmp_dir.join("beta.ts");
+        std::fs::write(&alpha_src, "Slice.respond(200, \"alpha-v1:hits=\" + Slice.kv.incr(\"h\", 1), \"text/plain\");\n").unwrap();
+        std::fs::write(&beta_src, "Slice.respond(200, \"beta-v1:hits=\" + Slice.kv.incr(\"h\", 10), \"text/plain\");\n").unwrap();
+
+        let alpha_cas = tmp_dir.join("tenant-alpha.cas");
+        let beta_cas = tmp_dir.join("tenant-beta.cas");
+        build_cas_archive(&alpha_src, &alpha_cas, "./alpha.ts").unwrap();
+        build_cas_archive(&beta_src, &beta_cas, "./beta.ts").unwrap();
+
+        // Verify initial resolution
+        let bc_alpha_v1 = resolve_tenant_bytecode_hotswap(&tmp_dir, "tenant-alpha").unwrap();
+        let bc_beta_v1 = resolve_tenant_bytecode_hotswap(&tmp_dir, "tenant-beta").unwrap();
+        assert_ne!(bc_alpha_v1.as_slice(), bc_beta_v1.as_slice());
+
+        // Hot-swap tenant-alpha.cas on disk with v2 (different byte length & mtime)
+        std::fs::write(&alpha_src, "Slice.respond(200, \"alpha-v2-hotswapped:hits=\" + Slice.kv.incr(\"h\", 1), \"text/plain\");\n").unwrap();
+        build_cas_archive(&alpha_src, &alpha_cas, "./alpha.ts").unwrap();
+
+        let bc_alpha_v2 = resolve_tenant_bytecode_hotswap(&tmp_dir, "tenant-alpha").unwrap();
+        assert_ne!(bc_alpha_v1.as_slice(), bc_alpha_v2.as_slice());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
 }
+
 
 

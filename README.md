@@ -104,17 +104,22 @@ slice compile ./docker-tests/apps/01-fintech-checkout -o my-edge-app
 # Start multi-worker Keep-Alive server on port 3000 with 8 shared-nothing worker threads
 slice serve ./bundle.cas --port=3000 --workers=8
 
+# Or serve a multi-tenant directory of .cas archives with automatic zero-downtime hot-swapping
+slice serve --port=3000 --workers=8 --tenant-dir=./tenants
+
 # Or run a self-contained pipelined Keep-Alive smoke test with telemetry headers
 slice serve ./bundle.cas --smoke-test
 ```
 
-Inside TypeScript/JavaScript handlers, use the native **WinterTC Request/Response Bridge** (`Slice.request()`, `Slice.respond()`, and post-response `Slice.waitUntil()`):
+Inside TypeScript/JavaScript handlers, use the native **WinterTC Request/Response Bridge** (`Slice.request()`, `Slice.respond()`, post-response `Slice.waitUntil()`) and the **16-Way Sharded Edge KV & Atomic Counter Slab** (`Slice.kv`):
 ```typescript
 const req = Slice.request(); // { method, path, query, tenant, tenantId, body, header(name) }
+const hits = Slice.kv.incr("rate:window", 1); // Tenant-isolated atomic counter (< 0.6 us)
+Slice.kv.set("session:last", req.path, 60_000); // Tenant-isolated KV with 60s TTL
 Slice.waitUntil(() => {
     // Executed after HTTP response bytes are flushed to the client socket!
 });
-Slice.respond(200, { ok: true, method: req.method, path: req.path, tenant: req.tenant }, "application/json");
+Slice.respond(200, { ok: true, method: req.method, path: req.path, tenant: req.tenant, hits }, "application/json");
 ```
 
 Every HTTP response includes real-time microVM execution headers:
@@ -209,16 +214,17 @@ In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensourc
 | **`slice serve` HTTP/1.1 Keep-Alive (Tier-1 WinterTC, `--workers=8`)** | **96,287 req/s (`10.39 us/req`)** | 88,132 req/s (`11.35 us`) | 102,481 req/s (`9.76 us`) | 55,810 req/s (`17.92 us`) |
 | **1,000-Tenant MicroVM Isolate Cold-Start (Min / Swarm)** | **1.00 us (`1.42 ms` / 1,000 tenants)** | N/A | N/A | N/A |
 
-Run the full Docker benchmark suite or filter by tags (`all`, `apps`, `n1`, `serve`, `swarm`):
+Run the full Docker benchmark suite or filter by tags (`all`, `apps`, `n1`, `n2`, `serve`, `swarm`):
 
 ```powershell
 docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
-# Run all benchmarks (8 folder apps + Phase N1 HTTP server + 1,000-tenant swarm)
+# Run all benchmarks (8 folder apps + Phase N1 HTTP server + Phase N2 Serverless/KV + 1,000-tenant swarm)
 docker run --rm slice-realworld-bench
-# Or run only a specific tagged subset (e.g. Phase N1 HTTP server + swarm)
-docker run --rm -e SLICE_BENCH_TAGS=n1,swarm slice-realworld-bench
+# Or run only a specific tagged subset (e.g. Phase N1 + Phase N2 + swarm)
+docker run --rm -e SLICE_BENCH_TAGS=n1,n2,swarm slice-realworld-bench
 # Run tagged Rust unit tests
 cargo test tag_n1
+cargo test tag_n2
 ```
 
 ---

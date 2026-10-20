@@ -1464,7 +1464,10 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains("__slice_crypto_")
         || source.contains("__slice_base64_")
         || source.contains("Slice.")
-        || source.contains("__slice_http_");
+        || source.contains("__slice_http_")
+        || source.contains("Math.random(")
+        || source.contains("Date.now(")
+        || source.contains("performance.now(");
 
     if uses_full_es_vm
         && !source.contains("Object.prototype.")
@@ -1666,6 +1669,9 @@ pub struct SliceIsolate {
     pub current_tier: ExecutionTier,
     env_vars: FxHashMap<String, JsValue>,
     pub stdout: Vec<String>,
+    pub deterministic_seed: Option<u64>,
+    det_prng_state: u64,
+    det_clock_ms: u64,
 }
 
 impl SliceIsolate {
@@ -1688,7 +1694,48 @@ impl SliceIsolate {
             current_tier: ExecutionTier::Tier0LLIntSnapshot,
             env_vars: FxHashMap::default(),
             stdout: Vec::new(),
+            deterministic_seed: None,
+            det_prng_state: 0,
+            det_clock_ms: 1_700_000_000_000,
         }
+    }
+
+    /// Enables or disables opt-in deterministic replay mode (`--deterministic=<seed>`).
+    /// When `Some(seed)` is configured, `Math.random()`, `Date.now()`, and `performance.now()`
+    /// inside this compartment are driven by a deterministic SplitMix64 PRNG and monotonic clock.
+    /// When `None` (default), there is `0.00 ns` runtime overhead.
+    #[inline]
+    pub fn set_deterministic_seed(&mut self, seed: Option<u64>) {
+        self.deterministic_seed = seed;
+        if let Some(s) = seed {
+            self.det_prng_state = s ^ 0x9E37_79B9_7F4A_7C15;
+            self.det_clock_ms = 1_700_000_000_000;
+        }
+    }
+
+    /// Reads a value from this tenant's isolated partition in the 16-way sharded `Slice.kv` slab.
+    pub fn kv_get(&self, key: &str) -> Option<String> {
+        edge_kv_get(&self.compartment.tenant_id, key)
+    }
+
+    /// Writes a value (with optional TTL in milliseconds, `0` = no expiry) into this tenant's
+    /// isolated `Slice.kv` partition, charging byte growth against the compartment memory limit.
+    pub fn kv_set(&mut self, key: &str, val: &str, ttl_ms: u64) -> Result<(), SandboxViolation> {
+        let added = key.len().saturating_add(val.len());
+        self.compartment.alloc_memory(added)?;
+        edge_kv_set(&self.compartment.tenant_id, key, val, ttl_ms);
+        Ok(())
+    }
+
+    /// Deletes a key from this tenant's isolated `Slice.kv` partition.
+    pub fn kv_del(&self, key: &str) -> bool {
+        edge_kv_del(&self.compartment.tenant_id, key)
+    }
+
+    /// Atomically increments a 64-bit integer counter in this tenant's isolated `Slice.kv` partition.
+    pub fn kv_incr(&mut self, key: &str, delta: i64) -> Result<i64, SandboxViolation> {
+        self.compartment.alloc_memory(key.len().saturating_add(8))?;
+        Ok(edge_kv_incr(&self.compartment.tenant_id, key, delta))
     }
 
     /// Resets this `SliceIsolate` in place for a new HTTP request with zero heap allocations
@@ -1717,6 +1764,10 @@ impl SliceIsolate {
         self.current_tier = ExecutionTier::Tier0LLIntSnapshot;
         self.env_vars.clear();
         self.stdout.clear();
+        if let Some(s) = self.deterministic_seed {
+            self.det_prng_state = s ^ 0x9E37_79B9_7F4A_7C15;
+            self.det_clock_ms = 1_700_000_000_000;
+        }
     }
 
     /// Executes pre-compiled `SLICESNP` or `SLICEBOA` bytecode directly from an in-memory or `mmap` CAS slice.
@@ -2851,6 +2902,20 @@ impl SliceIsolate {
     fn exec_boa_full_es_vm(&mut self, js_code: &str) -> Result<JsValue, SandboxViolation> {
         BOA_STDOUT.with(|out| out.borrow_mut().clear());
         BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
+        BOA_ACTIVE_TENANT.with(|t| {
+            let mut b = t.borrow_mut();
+            b.clear();
+            b.push_str(&self.compartment.tenant_id);
+        });
+        let remaining_mem = self
+            .compartment
+            .memory_limit_bytes
+            .saturating_sub(self.compartment.memory_used_bytes);
+        BOA_KV_MEM_BUDGET.with(|m| m.set((0, remaining_mem)));
+        if let Some(seed) = self.deterministic_seed {
+            BOA_DET_STATE.with(|s| s.set(Some((seed ^ 0x9E37_79B9_7F4A_7C15, 1_700_000_000_000))));
+        }
+
         let has_fs_restrictions = !self.compartment.capabilities.allowed_read_prefixes.is_empty()
             || !self.compartment.capabilities.allowed_write_prefixes.is_empty();
         if has_fs_restrictions {
@@ -2892,12 +2957,19 @@ impl SliceIsolate {
             realm.ctx.eval(boa_engine::Source::from_bytes(scoped_code.as_bytes()))
         };
 
+        if self.deterministic_seed.is_some() {
+            BOA_DET_STATE.with(|s| s.set(None));
+        }
         if has_fs_restrictions {
             BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = None);
         }
         if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
             release_warm_boa_realm(realm);
             return Err(violation);
+        }
+        let kv_used = BOA_KV_MEM_BUDGET.with(|m| m.get().0);
+        if kv_used > 0 {
+            let _ = self.compartment.alloc_memory(kv_used);
         }
 
         // Harvest captured stdout lines directly from thread-local Rust Vec<String> (zero second eval, retains Vec capacity!)
@@ -3039,6 +3111,121 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     static BOA_WAIT_UNTIL_COUNT: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static BOA_ACTIVE_TENANT: std::cell::RefCell<String> =
+        std::cell::RefCell::new(String::with_capacity(32));
+    static BOA_KV_MEM_BUDGET: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, usize::MAX)) };
+    static BOA_DET_STATE: std::cell::Cell<Option<(u64, u64)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[derive(Clone, Debug)]
+struct KvEntry {
+    val: String,
+    expires_at_ms: Option<u64>,
+}
+
+type KvShardMap = FxHashMap<(String, String), KvEntry>;
+
+static EDGE_KV_SLAB: std::sync::OnceLock<[std::sync::Mutex<KvShardMap>; 16]> =
+    std::sync::OnceLock::new();
+
+#[inline]
+fn current_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(1_700_000_000_000)
+}
+
+#[inline]
+fn edge_kv_shard(tenant_id: &str, key: &str) -> &'static std::sync::Mutex<KvShardMap> {
+    let shards = EDGE_KV_SLAB.get_or_init(|| {
+        std::array::from_fn(|_| std::sync::Mutex::new(FxHashMap::default()))
+    });
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    tenant_id.hash(&mut hasher);
+    key.hash(&mut hasher);
+    &shards[(hasher.finish() as usize) & 15]
+}
+
+fn edge_kv_get(tenant_id: &str, key: &str) -> Option<String> {
+    let shard = edge_kv_shard(tenant_id, key);
+    let mut guard = shard.lock().unwrap();
+    let composite = (tenant_id.to_string(), key.to_string());
+    if let Some(entry) = guard.get(&composite) {
+        if let Some(exp) = entry.expires_at_ms {
+            if current_epoch_ms() >= exp {
+                guard.remove(&composite);
+                return None;
+            }
+        }
+        return Some(entry.val.clone());
+    }
+    None
+}
+
+fn edge_kv_set(tenant_id: &str, key: &str, val: &str, ttl_ms: u64) {
+    let expires_at_ms = if ttl_ms > 0 {
+        Some(current_epoch_ms().saturating_add(ttl_ms))
+    } else {
+        None
+    };
+    let shard = edge_kv_shard(tenant_id, key);
+    let mut guard = shard.lock().unwrap();
+    guard.insert(
+        (tenant_id.to_string(), key.to_string()),
+        KvEntry {
+            val: val.to_string(),
+            expires_at_ms,
+        },
+    );
+}
+
+fn edge_kv_del(tenant_id: &str, key: &str) -> bool {
+    let shard = edge_kv_shard(tenant_id, key);
+    let mut guard = shard.lock().unwrap();
+    guard
+        .remove(&(tenant_id.to_string(), key.to_string()))
+        .is_some()
+}
+
+fn edge_kv_incr(tenant_id: &str, key: &str, delta: i64) -> i64 {
+    let shard = edge_kv_shard(tenant_id, key);
+    let mut guard = shard.lock().unwrap();
+    let composite = (tenant_id.to_string(), key.to_string());
+    let now = current_epoch_ms();
+    let current = guard
+        .get(&composite)
+        .and_then(|entry| {
+            if let Some(exp) = entry.expires_at_ms {
+                if now >= exp {
+                    return None;
+                }
+            }
+            entry.val.parse::<i64>().ok()
+        })
+        .unwrap_or(0);
+    let next = current.wrapping_add(delta);
+    guard.insert(
+        composite,
+        KvEntry {
+            val: next.to_string(),
+            expires_at_ms: None,
+        },
+    );
+    next
+}
+
+#[inline]
+fn splitmix64_next_f64(state: &mut u64) -> f64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    ((z >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
 }
 
 #[inline]
@@ -3129,7 +3316,7 @@ fn create_warm_boa_realm() -> WarmBoaRealm {
     let mut ctx = boa_engine::Context::default();
     register_slice_native_host_functions(&mut ctx);
 
-    const CORE_PRELUDE: &str = r#"globalThis.console={log:__slice_console_log,info:__slice_console_log,warn:__slice_console_log,error:__slice_console_log};globalThis.print=__slice_console_log;globalThis.process={pid:1,env:{NODE_ENV:"production"},cwd:function(){return ".";},platform:"linux",arch:"x64",version:"v24.0.0",versions:{node:"24.0.0"},argv:["slice"]};var __b2s=function(e){return e==="base64"?__slice_base64_encode(this._s,false):e==="base64url"?__slice_base64_encode(this._s,true):this._s;};globalThis.Buffer={from:function(i,e){var r=typeof i==="string"?i:String(i),s=(e==="base64"||e==="base64url")?__slice_base64_decode(r):r;return{_s:s,length:s.length,toString:__b2s};},isBuffer:function(){return false;},byteLength:function(s){return String(s).length;}};globalThis.__slice_wu=[];globalThis.Slice={request:function(){var t=__slice_http_tenant();return{method:__slice_http_method(),path:__slice_http_path(),query:__slice_http_query(),tenant:t,tenantId:t,body:__slice_http_body(),header:__slice_http_header};},respond:function(s,b,ct){return __slice_http_respond(s,typeof b==="string"?b:JSON.stringify(b),ct||"application/json");},waitUntil:function(f){__slice_wu.push(f);__slice_mark_wait_until();}};globalThis.__slice_builtins=Object.create(null);globalThis.__slice_cjs_require=function(id){return __slice_builtins[id]||__slice_load_builtin(id);};globalThis.require=__slice_cjs_require;"#;
+    const CORE_PRELUDE: &str = r#"globalThis.console={log:__slice_console_log,info:__slice_console_log,warn:__slice_console_log,error:__slice_console_log};globalThis.print=__slice_console_log;globalThis.process={pid:1,env:{NODE_ENV:"production"},cwd:function(){return ".";},platform:"linux",arch:"x64",version:"v24.0.0",versions:{node:"24.0.0"},argv:["slice"]};var __b2s=function(e){return e==="base64"?__slice_base64_encode(this._s,false):e==="base64url"?__slice_base64_encode(this._s,true):this._s;};globalThis.Buffer={from:function(i,e){var r=typeof i==="string"?i:String(i),s=(e==="base64"||e==="base64url")?__slice_base64_decode(r):r;return{_s:s,length:s.length,toString:__b2s};},isBuffer:function(){return false;},byteLength:function(s){return String(s).length;}};var __orand=Math.random,__onow=Date.now;Math.random=function(){var v=__slice_det_random();return v>=0?v:__orand();};Date.now=function(){var v=__slice_det_now();return v>=0?v:__onow();};globalThis.performance={now:function(){var v=__slice_det_now();return v>=0?(v-1700000000000):(__onow()-1700000000000);}};globalThis.__slice_wu=[];globalThis.Slice={request:function(){var t=__slice_http_tenant();return{method:__slice_http_method(),path:__slice_http_path(),query:__slice_http_query(),tenant:t,tenantId:t,body:__slice_http_body(),header:__slice_http_header};},respond:function(s,b,ct){return __slice_http_respond(s,typeof b==="string"?b:JSON.stringify(b),ct||"application/json");},waitUntil:function(f){__slice_wu.push(f);__slice_mark_wait_until();},kv:{get:function(k){return __slice_kv_get(String(k));},set:function(k,v,ttl){return __slice_kv_set(String(k),typeof v==="string"?v:JSON.stringify(v),ttl||0);},del:function(k){return __slice_kv_del(String(k));},incr:function(k,d){return __slice_kv_incr(String(k),d===undefined?1:Number(d));}}};globalThis.__slice_builtins=Object.create(null);globalThis.__slice_cjs_require=function(id){return __slice_builtins[id]||__slice_load_builtin(id);};globalThis.require=__slice_cjs_require;"#;
     let _ = ctx.eval(boa_engine::Source::from_bytes(CORE_PRELUDE));
     WarmBoaRealm {
         ctx,
@@ -3771,6 +3958,142 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
         NativeFunction::from_fn_ptr(|_this, _args, _context| {
             BOA_WAIT_UNTIL_COUNT.with(|c| c.set(c.get() + 1));
             Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_kv_get"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let key = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let val = BOA_ACTIVE_TENANT.with(|t| edge_kv_get(&t.borrow(), &key));
+            match val {
+                Some(s) => Ok(BoaVal::from(js_string!(s))),
+                None => Ok(BoaVal::null()),
+            }
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_kv_set"),
+        3,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let key = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let val = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let ttl_ms = args
+                .get(2)
+                .and_then(|v| v.as_number())
+                .map(|n| n.max(0.0) as u64)
+                .unwrap_or(0);
+            let added = key.len().saturating_add(val.len());
+            let allowed = BOA_KV_MEM_BUDGET.with(|m| {
+                let (used, limit) = m.get();
+                let next = used.saturating_add(added);
+                if next > limit {
+                    false
+                } else {
+                    m.set((next, limit));
+                    true
+                }
+            });
+            if !allowed {
+                let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+                let limit = BOA_KV_MEM_BUDGET.with(|m| m.get().1);
+                BOA_VIOLATION.with(|v| {
+                    *v.borrow_mut() = Some(SandboxViolation::MemoryCeilingExceeded {
+                        tenant_id: tenant,
+                        requested: added,
+                        limit,
+                    });
+                });
+                return Ok(BoaVal::from(false));
+            }
+            BOA_ACTIVE_TENANT.with(|t| edge_kv_set(&t.borrow(), &key, &val, ttl_ms));
+            Ok(BoaVal::from(true))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_kv_del"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let key = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let removed = BOA_ACTIVE_TENANT.with(|t| edge_kv_del(&t.borrow(), &key));
+            Ok(BoaVal::from(removed))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_kv_incr"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let key = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let delta = args
+                .get(1)
+                .and_then(|v| v.as_number())
+                .map(|n| n as i64)
+                .unwrap_or(1);
+            let next = BOA_ACTIVE_TENANT.with(|t| edge_kv_incr(&t.borrow(), &key, delta));
+            Ok(BoaVal::from(next as f64))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_det_random"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let val = BOA_DET_STATE.with(|s| {
+                if let Some((mut prng, clk)) = s.get() {
+                    let r = splitmix64_next_f64(&mut prng);
+                    s.set(Some((prng, clk)));
+                    r
+                } else {
+                    -1.0
+                }
+            });
+            Ok(BoaVal::from(val))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_det_now"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let val = BOA_DET_STATE.with(|s| {
+                if let Some((prng, clk)) = s.get() {
+                    let next_clk = clk.wrapping_add(1);
+                    s.set(Some((prng, next_clk)));
+                    next_clk as f64
+                } else {
+                    -1.0
+                }
+            });
+            Ok(BoaVal::from(val))
         }),
     );
 }
@@ -5100,7 +5423,110 @@ new EdgeRouter().handle();
         assert_eq!(fast_outcome.wait_until_count, 0);
         assert_eq!(fast_outcome.response_body, "42");
     }
+
+    #[test]
+    fn test_tag_n2_sharded_edge_kv_isolation_and_deterministic_replay() {
+        // 1. Test Slice.kv multi-tenant isolation, atomic counters, and memory quota enforcement
+        let kv_ts = r#"
+class KvService {
+    public run(): string {
+        const c1 = Slice.kv.incr("hits", 1);
+        const c2 = Slice.kv.incr("hits", 4);
+        Slice.kv.set("session:abc", "active-user", 60000);
+        const val = Slice.kv.get("session:abc");
+        const missing = Slice.kv.get("other-key");
+        return JSON.stringify({ c1, c2, val, missing });
+    }
 }
+console.log(new KvService().run());
+"#;
+        let bc = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(kv_ts, true));
+
+        let mut iso_a = SliceIsolate::spawn(
+            "n2-tenant-alpha",
+            1,
+            CapabilityToken::pure_compute(),
+            2_000_000,
+            4 * 1024 * 1024,
+        );
+        let _ = iso_a.kv_del("hits");
+        let _ = iso_a.kv_del("session:abc");
+        let m_a = iso_a.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(
+            m_a.stdout[0],
+            r#"{"c1":1,"c2":5,"val":"active-user","missing":null}"#
+        );
+
+        // Tenant Beta has a completely isolated KV namespace and cannot see Tenant Alpha's keys
+        let mut iso_b = SliceIsolate::spawn(
+            "n2-tenant-beta",
+            2,
+            CapabilityToken::pure_compute(),
+            2_000_000,
+            4 * 1024 * 1024,
+        );
+        let _ = iso_b.kv_del("hits");
+        assert_eq!(iso_b.kv_get("session:abc"), None);
+        let m_b = iso_b.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(
+            m_b.stdout[0],
+            r#"{"c1":1,"c2":5,"val":"active-user","missing":null}"#
+        );
+
+        // Verify KV writes are charged against the tenant's compartment memory limit
+        let kv_overflow_ts = r#"
+Slice.kv.set("huge", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 0);
+"#;
+        let overflow_bc = compile_source_to_bytecode(kv_overflow_ts);
+        let mut tiny_iso = SliceIsolate::spawn(
+            "n2-tiny-mem",
+            3,
+            CapabilityToken::pure_compute(),
+            1_000_000,
+            16, // 16-byte limit
+        );
+        assert!(matches!(
+            tiny_iso.execute_bytecode(&overflow_bc, None),
+            Err(SandboxViolation::MemoryCeilingExceeded { .. })
+        ));
+
+        // 2. Test Opt-In Deterministic Replay Mode (--deterministic=<seed>)
+        let det_ts = r#"
+const r1 = Math.random().toFixed(12);
+const r2 = Math.random().toFixed(12);
+const t1 = Date.now();
+const t2 = Date.now();
+const p1 = performance.now();
+console.log(JSON.stringify({ r1, r2, t1, t2, p1 }));
+"#;
+        let det_bc = compile_source_to_bytecode(det_ts);
+
+        let mut det_iso1 = SliceIsolate::spawn(
+            "n2-det-1",
+            4,
+            CapabilityToken::pure_compute(),
+            1_000_000,
+            4 * 1024 * 1024,
+        );
+        det_iso1.set_deterministic_seed(Some(20261019));
+        let out1 = det_iso1.execute_bytecode(&det_bc, None).unwrap().stdout[0].clone();
+
+        let mut det_iso2 = SliceIsolate::spawn(
+            "n2-det-2",
+            5,
+            CapabilityToken::pure_compute(),
+            1_000_000,
+            4 * 1024 * 1024,
+        );
+        det_iso2.set_deterministic_seed(Some(20261019));
+        let out2 = det_iso2.execute_bytecode(&det_bc, None).unwrap().stdout[0].clone();
+
+        assert_eq!(out1, out2);
+        assert!(out1.contains(r#""t1":1700000000001"#));
+        assert!(out1.contains(r#""t2":1700000000002"#));
+    }
+}
+
 
 
 

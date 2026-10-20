@@ -182,7 +182,9 @@ Every `SliceIsolate` executes inside a [`TenantCompartment`](file:///p:/opensour
 | **Phase 7.4 Native `Boa` Host OCap Enforcement** | Unchecked `node:fs` access inside third-party packages | **5/5 Security Vectors Contained** across both `SLICESNP` and `SLICEBOA` |
 | **Phase 9A Zero-Alloc Isolate Spawn & `16-Byte JsValue`** | 11 heap allocations per isolate spawn + `80B` `JsValue` enum | 1,000-Tenant MicroVM Swarm **`6.57 ms` -> `1.42 ms`** (`1.00 us` min cold-start, `9.93 MB` total RSS) |
 | **Phase 9B `SHA-NI`, `__slice_rc` Persistent Realm Cache & Oxc Semantic Lowering** | Cold CJS wrapper re-eval, dynamic `JSON.stringify` & crypto builder allocs | All 8 apps **`5.18 ms - 9.34 ms` cold** / **`0.19 ms - 4.19 ms` warm** (**up to `73.7x` faster than Bun**) |
-| **Phase N1 State-of-the-Art `slice serve` (`--workers=N`, Keep-Alive, Pipelining, Direct `JsObject::call` & WinterTC Bridge)** | Per-request TCP handshake, `BufReader` line allocs, & `ctx.eval` re-parsing on warm HTTP requests | **`152,376 req/s` (`6.56 us/req`)** in Tier-0 CAS (**`1.73x` faster than `Bun.serve`**) and **`96,287 req/s` (`10.39 us/req`)** in Tier-1 WinterTC (**beating `Bun.serve`**) |
+| **Phase N1 State-of-the-Art `slice serve` (`--workers=N`, Keep-Alive, Pipelining, Direct `JsObject::call` & WinterTC Bridge)** | Per-request TCP handshake, `BufReader` line allocs, & `ctx.eval` re-parsing on warm HTTP requests | **`152,376 req/s` (`6.56 us/req`)** in Tier-0 CAS (**`1.73x` faster than `Bun.serve`**) and **`107,274 req/s` (`9.32 us/req`)** in Tier-1 WinterTC (**beating both `Bun.serve` and `Deno.serve`**) |
+| **Phase N2 Sharded `Slice.kv`, Multi-Tenant `--tenant-dir` Hot-Swap, & `--deterministic` Replay** | External Redis round-trips for edge rate-limiting, server restarts on tenant deploy, & non-deterministic PRNG/clocks | **`586.10 us` for 1,001 `Slice.kv` ops** (`0.58 us/op`), zero-downtime `.cas` hot-swap, & 100% bit-for-bit SplitMix64 replay |
+
 
 
 

@@ -47,16 +47,22 @@ slice compile ./my-edge-app -o ./my-service
 
 ```bash
 slice serve ./service.cas --port=3000 --workers=8
+# Or route per-tenant .cas bundles dynamically with live zero-downtime hot-swapping:
+slice serve --port=3000 --workers=8 --tenant-dir=./tenants
+# Or run in deterministic replay mode (SplitMix64 PRNG + monotonic virtual clock):
+slice run ./service.cas --deterministic=20261019
 ```
 
-### WinterTC Request/Response & `waitUntil` Bridge
-Handlers can inspect zero-copy HTTP request metadata, return custom status codes and content types, and schedule post-response background tasks within the tenant's remaining CPU fuel budget:
+### WinterTC Request/Response, `waitUntil`, & Sharded `Slice.kv` Bridge
+Handlers can inspect zero-copy HTTP request metadata, query or mutate their tenant-isolated partition in the 16-way sharded `Slice.kv` slab (`get`, `set`, `del`, `incr`), return custom status codes and content types, and schedule post-response background tasks within the tenant's remaining CPU fuel budget:
 ```typescript
 const req = Slice.request(); // { method, path, query, tenant, tenantId, body, header(name) }
+const hits = Slice.kv.incr("rate:window", 1);
+Slice.kv.set("last:path", req.path, 60_000);
 Slice.waitUntil(() => {
     // Runs after the HTTP response bytes have been flushed to the client socket
 });
-Slice.respond(200, { ok: true, method: req.method, path: req.path, tenant: req.tenant }, "application/json");
+Slice.respond(200, { ok: true, method: req.method, path: req.path, tenant: req.tenant, hits }, "application/json");
 ```
 
 ### Per-Request Isolation Lifecycle

@@ -387,6 +387,96 @@ run_http_bench "Node.js http.createServer (Latest V8)"      18084 node /tmp/n1_n
 rm -f /tmp/n1_*.ts /tmp/n1_*.mjs /tmp/n1_*.cas
 fi
 
+if should_run_tag "n2"; then
+echo "========================================================================="
+echo "  [TAG: n2] PHASE N2 SERVERLESS & MICROVM PRIMITIVES VERIFICATION & BENCH"
+echo "  Sharded Slice.kv Slab + Multi-Tenant --tenant-dir Hot-Swap + Replay"
+echo "========================================================================="
+
+# 1. Verify Opt-In Deterministic Replay (--deterministic=<seed>)
+cat << 'EOF' > /tmp/n2_det_replay.ts
+const r1 = Math.random().toFixed(12);
+const r2 = Math.random().toFixed(12);
+const t1 = Date.now();
+const t2 = Date.now();
+const p1 = performance.now();
+console.log(JSON.stringify({ r1, r2, t1, t2, p1 }));
+EOF
+"$SLICE_BIN" pack /tmp/n2_det_replay.ts /tmp/n2_det_replay.cas >/dev/null
+det_run_1=$("$SLICE_BIN" run /tmp/n2_det_replay.cas --deterministic=20261019)
+det_run_2=$("$SLICE_BIN" run /tmp/n2_det_replay.cas --deterministic=20261019)
+echo "  [1. Deterministic Replay (--deterministic=20261019)]"
+echo "    Run 1 : $det_run_1"
+echo "    Run 2 : $det_run_2"
+if [ "$det_run_1" = "$det_run_2" ]; then
+    echo "    [PASS] 100% Bit-for-Bit Identical PRNG & Virtual Clock Replay!"
+else
+    echo "    [FAIL] Deterministic replay mismatch!"
+    exit 1
+fi
+
+# 2. Verify Multi-Tenant Dynamic .cas Router & Zero-Downtime Atomic Hot-Swap (--tenant-dir)
+mkdir -p /tmp/n2_tenants
+cat << 'EOF' > /tmp/n2_tenants/alpha.ts
+const hits = Slice.kv.incr("requests", 1);
+Slice.respond(200, JSON.stringify({ tenant: "alpha", version: "v1", hits }), "application/json");
+EOF
+cat << 'EOF' > /tmp/n2_tenants/beta.ts
+const hits = Slice.kv.incr("requests", 10);
+Slice.respond(200, JSON.stringify({ tenant: "beta", version: "v1", hits }), "application/json");
+EOF
+"$SLICE_BIN" pack /tmp/n2_tenants/alpha.ts /tmp/n2_tenants/tenant-alpha.cas >/dev/null
+"$SLICE_BIN" pack /tmp/n2_tenants/beta.ts /tmp/n2_tenants/tenant-beta.cas >/dev/null
+
+"$SLICE_BIN" serve --port=18090 --workers=4 --tenant-dir=/tmp/n2_tenants >/dev/null 2>&1 &
+n2_srv_pid=$!
+for _ in $(seq 1 60); do
+    if node -e "import('node:net').then(n=>{const s=n.connect(18090,'127.0.0.1',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1))})" 2>/dev/null; then
+        break
+    fi
+    sleep 0.05
+done
+
+alpha_v1=$(curl -fsSL -H "X-Slice-Tenant: tenant-alpha" http://127.0.0.1:18090/check)
+beta_v1=$(curl -fsSL -H "X-Slice-Tenant: tenant-beta" http://127.0.0.1:18090/check)
+
+# Atomic live hot-swap of tenant-alpha.cas while server is running!
+cat << 'EOF' > /tmp/n2_tenants/alpha_v2.ts
+const hits = Slice.kv.incr("requests", 1);
+Slice.respond(200, JSON.stringify({ tenant: "alpha", version: "v2-hot-swapped", hits }), "application/json");
+EOF
+"$SLICE_BIN" pack /tmp/n2_tenants/alpha_v2.ts /tmp/n2_tenants/tenant-alpha.cas >/dev/null
+alpha_v2=$(curl -fsSL -H "X-Slice-Tenant: tenant-alpha" http://127.0.0.1:18090/check)
+
+echo "  [2. Multi-Tenant Dynamic Router + Zero-Downtime Hot-Swap + Isolated Slice.kv]"
+echo "    Tenant Alpha (v1)          : $alpha_v1"
+echo "    Tenant Beta  (v1 isolated) : $beta_v1"
+echo "    Tenant Alpha (v2 hot-swap) : $alpha_v2"
+
+# 3. Benchmark Sharded Slice.kv Stateful Edge Rate-Limiter (1,000 KV Get+Set+Incr Ops in Isolate)
+cat << 'EOF' > /tmp/n2_kv_bench.ts
+class EdgeKvBench {
+    public run(): string {
+        let total = 0;
+        for (let i = 0; i < 500; i++) {
+            total = Slice.kv.incr("rate:window", 1);
+            Slice.kv.set("token:last", "tok_" + i, 60000);
+        }
+        const last = Slice.kv.get("token:last");
+        return JSON.stringify({ ops: 1001, total, last });
+    }
+}
+console.log(new EdgeKvBench().run());
+EOF
+"$SLICE_BIN" pack /tmp/n2_kv_bench.ts /tmp/n2_kv_bench.cas >/dev/null
+echo "  [3. Sharded Slice.kv 1,001-Op Stateful Rate-Limiter Telemetry (--warm)]"
+"$SLICE_BIN" run /tmp/n2_kv_bench.cas --warm --metrics
+
+kill -9 "$n2_srv_pid" >/dev/null 2>&1 || true
+wait "$n2_srv_pid" 2>/dev/null || true
+rm -rf /tmp/n2_*
+fi
+
 if should_run_tag "swarm"; then
 echo "========================================================================="
 echo "  [TAG: swarm] MICROVM SPEEDUP RETENTION CHECK (1,000 TENANT SWARM)"
