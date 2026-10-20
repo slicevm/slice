@@ -41,25 +41,34 @@ slice compile ./my-edge-app -o ./my-service
 
 ---
 
-## 3. Workflow 2: Multi-Tenant HTTP MicroVM Server (`slice serve`)
+## 3. Workflow 2: State-of-the-Art Multi-Tenant HTTP MicroVM Server (`slice serve`)
 
-`slice serve` runs an edge HTTP server where **every incoming HTTP request** executes inside a freshly spawned, hardware- and OCap-isolated `SliceIsolate`:
+`slice serve` runs a shared-nothing **Thread-Per-Core (`--workers=N`)** HTTP/1.1 `Keep-Alive` and pipelined edge server where **every incoming HTTP request** executes inside a hardware- and OCap-isolated `SliceIsolate` (`152,376 req/s` in Tier-0 CAS mode, `96,287 req/s` in Tier-1 WinterTC mode):
 
 ```bash
-slice serve ./service.cas --port=3000
+slice serve ./service.cas --port=3000 --workers=8
+```
+
+### WinterTC Request/Response & `waitUntil` Bridge
+Handlers can inspect zero-copy HTTP request metadata, return custom status codes and content types, and schedule post-response background tasks within the tenant's remaining CPU fuel budget:
+```typescript
+const req = Slice.request(); // { method, path, query, tenant, tenantId, body, header(name) }
+Slice.waitUntil(() => {
+    // Runs after the HTTP response bytes have been flushed to the client socket
+});
+Slice.respond(200, { ok: true, method: req.method, path: req.path, tenant: req.tenant }, "application/json");
 ```
 
 ### Per-Request Isolation Lifecycle
-1. Parses the `X-Slice-Tenant` HTTP header (or assigns a deterministic slot ID).
-2. Allocates a `TenantCompartment` with frozen SES intrinsics (`Object.prototype` locked down), attenuated `CapabilityToken` permissions from `slice.toml`, deterministic CPU fuel limits, and an isolated `PKEY` memory protection domain.
-3. Enters the hardware protection domain (`WRPKRU` on Linux `x86_64`).
-4. Executes the pre-compiled `SLICESNP` or zero-copy `SLICEBOA` bytecode directly from the shared `mmap` region (reusing pre-warmed `BOA_CONTEXT_POOL` realms with lexical block isolation).
+1. Zero-allocation stack HTTP/1.1 parser (`find_http_header_end` + `[(&str, &str); 16]`) extracts `method`, `path`, `query`, `X-Slice-Tenant`, `Content-Length`, `Connection: keep-alive`, and request body directly from the worker's reusable 64 KB buffer.
+2. Resets the worker's `SliceIsolate` in place (`reset_for_request`) with zero heap allocations for `CapabilityToken` or `tenant_id`, assigning and entering a fresh `MPK/PKU` hardware protection domain (`WRPKRU` on Linux `x86_64`) and resetting CPU fuel and memory limits.
+3. Executes the pre-compiled `SLICESNP` (`SNP_MODULE_CACHE`) or zero-copy `SLICEBOA` bytecode (`WarmBoaRealm::loaded_bundles` direct `JsObject::call` with zero `ctx.eval` overhead).
+4. Flushes the HTTP/1.1 response (batching multiple responses into a single vectorized `write_all` syscall when pipelined requests are present in the read buffer), and then drains any queued `Slice.waitUntil(fn)` callbacks.
 5. Emits execution telemetry headers on the HTTP response:
    * `X-Slice-Tenant`: Active tenant compartment identifier.
-   * `X-Slice-Isolate-Us`: Isolate instantiation + execution latency in microseconds.
-   * `X-Slice-Tier`: Highest execution tier reached (`Tier0LLIntSnapshot`, `Tier1Baseline`, or `Tier2PeakNative`).
+   * `X-Slice-Isolate-Us`: Isolate execution latency in microseconds.
+   * `X-Slice-Total-Us`: Total end-to-end request latency in microseconds.
    * `X-Slice-Fuel-Used`: Deterministic instruction fuel consumed by the request.
-   * `X-Slice-Pkey-Domain`: Active hardware protection key domain.
 
 ---
 

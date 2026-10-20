@@ -180,7 +180,9 @@ Every `SliceIsolate` executes inside a [`TenantCompartment`](file:///p:/opensour
 | **Phase 7.2 Static Barrel Tree-Shaking (`slice-cas`)** | Bundling 30+ unused `semver` & `fast-querystring` barrel submodules | `02-npm-ecosystem-suite` `.cas` size **`-50.4%`** (`195,978 B` -> `97,104 B`), Max RSS **`10.38 MB`** (`6.85x < Node`) |
 | **Phase 7.3 Native Rust `SemVer` + `VFS` + `Crypto` Intrinsics** | Slow interpreted JS regexes, temp-file syscalls & closures | `02-npm-ecosystem-suite` cold `.cas` **`6.766 ms`** vs Bun `20.048 ms` (**`2.96x` faster cold**) |
 | **Phase 7.4 Native `Boa` Host OCap Enforcement** | Unchecked `node:fs` access inside third-party packages | **5/5 Security Vectors Contained** across both `SLICESNP` and `SLICEBOA` |
-| **Phase 9A Zero-Alloc Isolate Spawn & `16-Byte JsValue`** | 11 heap allocations per isolate spawn + `80B` `JsValue` enum | 1,000-Tenant MicroVM Swarm **`6.57 ms` -> `3.15 ms`** (`2.52 us` min cold-start, `10.05 MB` total RSS) |
-| **Phase 9B `SHA-NI`, `__slice_rc` Persistent Realm Cache & Oxc Semantic Lowering** | Cold CJS wrapper re-eval, dynamic `JSON.stringify` & crypto builder allocs | All 8 apps **`5.29 ms - 9.00 ms` cold** / **`0.27 ms - 4.00 ms` warm** (**up to `73.7x` faster than Bun**) |
+| **Phase 9A Zero-Alloc Isolate Spawn & `16-Byte JsValue`** | 11 heap allocations per isolate spawn + `80B` `JsValue` enum | 1,000-Tenant MicroVM Swarm **`6.57 ms` -> `1.42 ms`** (`1.00 us` min cold-start, `9.93 MB` total RSS) |
+| **Phase 9B `SHA-NI`, `__slice_rc` Persistent Realm Cache & Oxc Semantic Lowering** | Cold CJS wrapper re-eval, dynamic `JSON.stringify` & crypto builder allocs | All 8 apps **`5.18 ms - 9.34 ms` cold** / **`0.19 ms - 4.19 ms` warm** (**up to `73.7x` faster than Bun**) |
+| **Phase N1 State-of-the-Art `slice serve` (`--workers=N`, Keep-Alive, Pipelining, Direct `JsObject::call` & WinterTC Bridge)** | Per-request TCP handshake, `BufReader` line allocs, & `ctx.eval` re-parsing on warm HTTP requests | **`152,376 req/s` (`6.56 us/req`)** in Tier-0 CAS (**`1.73x` faster than `Bun.serve`**) and **`96,287 req/s` (`10.39 us/req`)** in Tier-1 WinterTC (**beating `Bun.serve`**) |
+
 
 

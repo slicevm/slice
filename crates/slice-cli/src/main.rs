@@ -20,7 +20,7 @@ use slice_engine::{compile_source_to_bytecode, disassemble_bytecode, SliceIsolat
 use slice_io::{CompletionRingEngine, IoSubmission};
 use slice_sandbox::{CapabilityToken, HardwareProtectionDomain, SandboxViolation, SliceManifest};
 use std::env;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -480,11 +480,19 @@ fn cmd_inspect(args: &[String]) -> Result<()> {
 fn cmd_serve(args: &[String]) -> Result<()> {
     let mut port: u16 = 3000;
     let mut smoke_test = false;
+    let mut max_requests_opt: Option<usize> = None;
+    let mut workers: usize = std::thread::available_parallelism()
+        .map(|n| n.get().clamp(1, 8))
+        .unwrap_or(4);
     let mut target_opt: Option<String> = None;
 
     for arg in args {
         if let Some(p) = arg.strip_prefix("--port=") {
             port = p.parse().unwrap_or(3000);
+        } else if let Some(w) = arg.strip_prefix("--workers=") {
+            workers = w.parse().unwrap_or(4).max(1);
+        } else if let Some(m) = arg.strip_prefix("--max-requests=") {
+            max_requests_opt = m.parse().ok();
         } else if arg == "--smoke-test" || arg == "--once" {
             smoke_test = true;
         } else if !arg.starts_with('-') && target_opt.is_none() {
@@ -499,7 +507,7 @@ fn cmd_serve(args: &[String]) -> Result<()> {
 const route_res: string = WinterTC.route("GET", "https://edge.slice.local/api/v1/status");
 console.log(route_res);
 "#;
-    let bytecode = if let Some(target) = &target_opt {
+    let bytecode = std::sync::Arc::new(if let Some(target) = &target_opt {
         let p = Path::new(target);
         if target.ends_with(".cas") {
             let archive = MappedCasArchive::open(p)?;
@@ -512,34 +520,46 @@ console.log(route_res);
         }
     } else {
         compile_source_to_bytecode(default_handler_src)
-    };
+    });
 
     if smoke_test {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let bound_port = listener.local_addr()?.port();
-        let bc_clone = bytecode.clone();
+        let bc_clone = std::sync::Arc::clone(&bytecode);
         let caps_clone = caps.clone();
 
         let server_thread = std::thread::spawn(move || -> Result<()> {
-            if bc_clone.starts_with(b"SLICEBOA") {
-                SliceIsolate::prewarm_boa_pool(1);
-            }
+            SliceIsolate::prewarm_boa_bundle(&bc_clone);
+            let mut read_buf = vec![0u8; 65536];
+            let mut write_buf = Vec::with_capacity(4096);
             if let Ok((stream, _)) = listener.accept() {
-                handle_http_microvm_request(stream, 1, &bc_clone, &caps_clone, fuel_limit, mem_limit)?;
+                let _ = serve_connection_keep_alive(
+                    stream,
+                    1,
+                    &bc_clone,
+                    &caps_clone,
+                    fuel_limit,
+                    mem_limit,
+                    &mut read_buf,
+                    &mut write_buf,
+                    None,
+                );
             }
             Ok(())
         });
 
         let mut client = TcpStream::connect(("127.0.0.1", bound_port))?;
+        let _ = client.set_nodelay(true);
+        // Send 2 pipelined HTTP/1.1 Keep-Alive requests on a single TCP connection
         client.write_all(
-            b"GET /api/v1/status HTTP/1.1\r\nHost: localhost\r\nX-Slice-Tenant: tenant-edge-42\r\nConnection: close\r\n\r\n",
+            b"GET /api/v1/status?ping=1 HTTP/1.1\r\nHost: localhost\r\nX-Slice-Tenant: tenant-edge-42\r\nConnection: keep-alive\r\n\r\nGET /api/v1/status?ping=2 HTTP/1.1\r\nHost: localhost\r\nX-Slice-Tenant: tenant-edge-42\r\nConnection: close\r\n\r\n",
         )?;
         let mut resp = String::new();
         client.read_to_string(&mut resp)?;
         let _ = server_thread.join();
 
         println!("=========================================================================");
-        println!("  SLICE WINTERTC MULTI-TENANT HTTP MICROVM SERVER SMOKE TEST");
+        println!("  SLICE WINTERTC MULTI-TENANT HTTP MICROVM SERVER SMOKE TEST (KEEP-ALIVE)");
         println!("=========================================================================");
         for line in resp.lines() {
             println!("  {}", line);
@@ -548,92 +568,255 @@ console.log(route_res);
         return Ok(());
     }
 
-    if bytecode.starts_with(b"SLICEBOA") {
-        SliceIsolate::prewarm_boa_pool(2);
-    }
-
     let addr = format!("0.0.0.0:{}", port);
-    let listener = TcpListener::bind(&addr)?;
+    let listener = std::sync::Arc::new(TcpListener::bind(&addr)?);
     println!(
-        "[Slice Edge Server] Listening on http://127.0.0.1:{} (Spawning isolated MicroVM compartment per request)",
-        port
+        "[Slice Edge Server] Listening on http://127.0.0.1:{} (Workers: {}, HTTP/1.1 Keep-Alive + Pre-Warmed __slice_rc)",
+        port, workers
     );
 
-    let mut req_counter: u32 = 0;
-    for stream in listener.incoming().flatten() {
-        req_counter = req_counter.wrapping_add(1);
-        let _ = handle_http_microvm_request(
+    let req_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut handles = Vec::with_capacity(workers.saturating_sub(1));
+
+    for worker_idx in 1..workers {
+        let listener_clone = std::sync::Arc::clone(&listener);
+        let bc_clone = std::sync::Arc::clone(&bytecode);
+        let caps_clone = caps.clone();
+        let counter_clone = std::sync::Arc::clone(&req_counter);
+        handles.push(std::thread::spawn(move || {
+            SliceIsolate::prewarm_boa_bundle(&bc_clone);
+            let mut read_buf = vec![0u8; 65536];
+            let mut write_buf = Vec::with_capacity(4096);
+            let mut local_slot = (worker_idx as u32) << 20;
+            while let Ok((stream, _)) = listener_clone.accept() {
+                local_slot = local_slot.wrapping_add(1);
+                let _ = serve_connection_keep_alive(
+                    stream,
+                    local_slot,
+                    &bc_clone,
+                    &caps_clone,
+                    fuel_limit,
+                    mem_limit,
+                    &mut read_buf,
+                    &mut write_buf,
+                    max_requests_opt.map(|max| (&*counter_clone, max)),
+                );
+            }
+        }));
+    }
+
+    SliceIsolate::prewarm_boa_bundle(&bytecode);
+    let mut read_buf = vec![0u8; 65536];
+    let mut write_buf = Vec::with_capacity(4096);
+    let mut local_slot: u32 = 0;
+    while let Ok((stream, _)) = listener.accept() {
+        local_slot = local_slot.wrapping_add(1);
+        let _ = serve_connection_keep_alive(
             stream,
-            req_counter,
+            local_slot,
             &bytecode,
             &caps,
             fuel_limit,
             mem_limit,
+            &mut read_buf,
+            &mut write_buf,
+            max_requests_opt.map(|max| (&*req_counter, max)),
         );
     }
     Ok(())
 }
 
-fn handle_http_microvm_request(
+#[inline]
+fn find_http_header_end(buf: &[u8]) -> Option<(usize, usize)> {
+    if buf.len() < 4 {
+        return None;
+    }
+    for i in 0..=buf.len() - 4 {
+        if buf[i] == b'\r' && buf[i + 1] == b'\n' && buf[i + 2] == b'\r' && buf[i + 3] == b'\n' {
+            return Some((i, i + 4));
+        }
+    }
+    for i in 0..=buf.len().saturating_sub(2) {
+        if buf[i] == b'\n' && buf[i + 1] == b'\n' {
+            return Some((i, i + 2));
+        }
+    }
+    None
+}
+
+#[inline]
+fn http_status_reason(code: u16) -> &'static str {
+    match code {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        _ => "OK",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve_connection_keep_alive(
     mut stream: TcpStream,
-    slot_id: u32,
+    mut slot_id: u32,
     bytecode: &[u8],
     caps: &CapabilityToken,
     fuel_limit: u64,
     mem_limit: usize,
+    read_buf: &mut [u8],
+    write_buf: &mut Vec<u8>,
+    max_requests_tracker: Option<(&std::sync::atomic::AtomicUsize, usize)>,
 ) -> Result<()> {
-    let req_start = Instant::now();
-    let mut reader = BufReader::new(&stream);
-    let mut request_line = String::new();
-    let _ = reader.read_line(&mut request_line);
+    let _ = stream.set_nodelay(true);
+    let mut filled: usize = 0;
+    write_buf.clear();
+    let mut isolate = SliceIsolate::spawn("tenant-default", slot_id, caps.clone(), fuel_limit, mem_limit);
 
-    let mut tenant_id = format!("tenant-http-{}", slot_id);
     loop {
-        let mut header_line = String::new();
-        let n = reader.read_line(&mut header_line).unwrap_or(0);
-        if n == 0 || header_line == "\r\n" || header_line == "\n" {
-            break;
-        }
-        if let Some((k, v)) = header_line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("x-slice-tenant") {
-                tenant_id = v.trim().to_string();
+        // 1. Read until complete HTTP headers (`\r\n\r\n`) are present in `read_buf[..filled]`
+        let (hdr_end, body_offset) = loop {
+            if let Some(pos) = find_http_header_end(&read_buf[..filled]) {
+                break pos;
+            }
+            if filled >= read_buf.len() {
+                return Ok(());
+            }
+            match stream.read(&mut read_buf[filled..]) {
+                Ok(0) | Err(_) => return Ok(()),
+                Ok(n) => filled += n,
+            }
+        };
+
+        let req_start = Instant::now();
+        let (hdr_slice, after_hdr_buf) = read_buf.split_at_mut(body_offset);
+        let hdr_str = std::str::from_utf8(&hdr_slice[..hdr_end]).unwrap_or("");
+        let mut lines = hdr_str.lines();
+        let req_line = lines.next().unwrap_or("");
+
+        // Zero-allocation request line split: `METHOD /path?query HTTP/1.1`
+        let mut parts = req_line.split_whitespace();
+        let method = parts.next().unwrap_or("GET");
+        let raw_target = parts.next().unwrap_or("/");
+        let version = parts.next().unwrap_or("HTTP/1.1");
+        let (path, query) = raw_target.split_once('?').unwrap_or((raw_target, ""));
+
+        let mut keep_alive = !version.ends_with("1.0");
+        let mut content_length: usize = 0;
+        let mut tenant_id: &str = "tenant-default";
+        let mut headers_stack: [(&str, &str); 16] = [("", ""); 16];
+        let mut headers_len: usize = 0;
+
+        for line in lines {
+            if let Some((k, v)) = line.split_once(':') {
+                let k = k.trim();
+                let v = v.trim();
+                if k.eq_ignore_ascii_case("x-slice-tenant") && !v.is_empty() {
+                    tenant_id = v;
+                } else if k.eq_ignore_ascii_case("connection") {
+                    if v.eq_ignore_ascii_case("close") {
+                        keep_alive = false;
+                    } else if v.eq_ignore_ascii_case("keep-alive") {
+                        keep_alive = true;
+                    }
+                } else if k.eq_ignore_ascii_case("content-length") {
+                    content_length = v.parse().unwrap_or(0);
+                }
+                if headers_len < headers_stack.len() {
+                    headers_stack[headers_len] = (k, v);
+                    headers_len += 1;
+                }
             }
         }
-    }
 
-    let mut isolate = SliceIsolate::spawn(&tenant_id, slot_id, caps.clone(), fuel_limit, mem_limit);
-    match isolate.execute_bytecode(bytecode, None) {
-        Ok(metrics) => {
-            let body = if !metrics.stdout.is_empty() {
-                metrics.stdout.join("\n")
-            } else {
-                metrics.return_value.clone()
-            };
-            let isolate_us = metrics.total_time_ns as f64 / 1_000.0;
-            let total_us = req_start.elapsed().as_nanos() as f64 / 1_000.0;
-            let http_response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Isolate-Us: {:.2}\r\nX-Slice-Total-Us: {:.2}\r\nX-Slice-Tier: {:?}\r\nX-Slice-Fuel-Used: {}\r\nX-Slice-Pkey-Domain: 0x{:x}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                metrics.tenant_id,
-                isolate_us,
-                total_us,
-                metrics.highest_tier_reached,
-                metrics.fuel_consumed,
-                metrics.pkey_domain,
-                body
-            );
-            stream.write_all(http_response.as_bytes())?;
-            stream.flush()?;
+        let mut body_filled = filled.saturating_sub(body_offset);
+        while body_filled < content_length && content_length <= after_hdr_buf.len() {
+            match stream.read(&mut after_hdr_buf[body_filled..]) {
+                Ok(0) | Err(_) => return Ok(()),
+                Ok(n) => body_filled += n,
+            }
         }
-        Err(violation) => {
-            let err_body = format!(r#"{{"error":"{}"}}"#, violation);
-            let http_response = format!(
-                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nServer: Slice-NexusJS/0.2\r\nConnection: close\r\n\r\n{}",
-                err_body.len(),
-                err_body
-            );
-            stream.write_all(http_response.as_bytes())?;
-            stream.flush()?;
+        filled = body_offset + body_filled;
+
+        let body_end = body_offset.saturating_add(content_length).min(filled);
+        let body_len = content_length.min(body_filled);
+        let body_str = std::str::from_utf8(&after_hdr_buf[..body_len]).unwrap_or("");
+        let req_ctx = slice_engine::HttpRequestContext {
+            method,
+            path,
+            query,
+            tenant_id,
+            body: body_str,
+            headers: &headers_stack[..headers_len],
+        };
+
+        slot_id = slot_id.wrapping_add(1);
+        isolate.reset_for_request(tenant_id, slot_id, fuel_limit, mem_limit);
+        let conn_hdr = if keep_alive { "keep-alive" } else { "close" };
+        let has_more_pipelined =
+            keep_alive && find_http_header_end(&after_hdr_buf[body_len..body_filled]).is_some();
+
+        match isolate.execute_http_request(bytecode, None, &req_ctx) {
+            Ok(outcome) => {
+                let isolate_us = outcome.metrics.total_time_ns / 1_000;
+                let total_us = req_start.elapsed().as_nanos() / 1_000;
+                let _ = write!(
+                    write_buf,
+                    "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Isolate-Us: {}\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: {}\r\n\r\n",
+                    outcome.status_code,
+                    http_status_reason(outcome.status_code),
+                    outcome.content_type,
+                    outcome.response_body.len(),
+                    conn_hdr,
+                    outcome.metrics.tenant_id,
+                    isolate_us,
+                    total_us,
+                    outcome.metrics.fuel_consumed,
+                );
+                write_buf.extend_from_slice(outcome.response_body.as_bytes());
+                if !has_more_pipelined || write_buf.len() >= 32768 {
+                    stream.write_all(write_buf)?;
+                    write_buf.clear();
+                }
+
+                // Phase N1.3: Execute deferred `Slice.waitUntil(fn)` tasks AFTER response is prepared/sent!
+                if outcome.wait_until_count > 0 {
+                    let _ = isolate.drain_wait_until_tasks();
+                }
+            }
+            Err(violation) => {
+                let err_body = format!(r#"{{"error":"{}"}}"#, violation);
+                let _ = write!(
+                    write_buf,
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\n\r\n{}",
+                    err_body.len(),
+                    conn_hdr,
+                    err_body
+                );
+                stream.write_all(write_buf)?;
+                write_buf.clear();
+            }
+        }
+
+        if let Some((counter, max_reqs)) = max_requests_tracker {
+            let prev = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if max_reqs > 0 && prev + 1 >= max_reqs {
+                std::process::exit(0);
+            }
+        }
+
+        if !keep_alive {
+            break;
+        }
+        if filled > body_end {
+            read_buf.copy_within(body_end..filled, 0);
+            filled -= body_end;
+        } else {
+            filled = 0;
         }
     }
     Ok(())
@@ -1085,5 +1268,68 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
+
+    #[test]
+    fn test_tag_n1_keep_alive_pipelining_and_multi_worker_serve() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+
+        let script = r#"
+class PipelinedEdge {
+    public run(): void {
+        const req = Slice.request();
+        Slice.respond(200, req.method + " " + req.path + " [" + req.tenant + "] body=" + req.body, "text/plain");
+    }
 }
+new PipelinedEdge().run();
+"#;
+        let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+        let bytecode = Arc::new(compile_source_to_bytecode(&bundled));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let bc_server = Arc::clone(&bytecode);
+        let counter_server = Arc::clone(&counter);
+
+        let server_handle = std::thread::spawn(move || {
+            SliceIsolate::prewarm_boa_pool(1);
+            SliceIsolate::prewarm_boa_bundle(&bc_server);
+            let mut read_buf = vec![0u8; 65536];
+            let mut write_buf = Vec::with_capacity(4096);
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = serve_connection_keep_alive(
+                    stream,
+                    0,
+                    &bc_server,
+                    &CapabilityToken::pure_compute(),
+                    2_000_000,
+                    4 * 1024 * 1024,
+                    &mut read_buf,
+                    &mut write_buf,
+                    Some((&counter_server, 0)),
+                );
+            }
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        // Send 2 pipelined HTTP/1.1 requests over a single persistent Keep-Alive socket,
+        // with the second request signaling Connection: close.
+        let pipelined_payload = concat!(
+            "GET /alpha HTTP/1.1\r\nHost: localhost\r\nX-Slice-Tenant: tenant-a\r\n\r\n",
+            "POST /beta HTTP/1.1\r\nHost: localhost\r\nX-Slice-Tenant: tenant-b\r\nContent-Length: 4\r\nConnection: close\r\n\r\npong"
+        );
+        client.write_all(pipelined_payload.as_bytes()).unwrap();
+        client.flush().unwrap();
+
+        let mut response_str = String::new();
+        client.read_to_string(&mut response_str).unwrap();
+        server_handle.join().unwrap();
+
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert!(response_str.contains("GET /alpha [tenant-a] body="));
+        assert!(response_str.contains("POST /beta [tenant-b] body=pong"));
+    }
+}
+
 

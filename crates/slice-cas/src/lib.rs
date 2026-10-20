@@ -1061,8 +1061,13 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     let ext = entry_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let is_ts = matches!(ext, "ts" | "tsx");
 
-    // Fast path for single-file scripts with no imports/exports/requires
-    if !raw.contains("import ") && !raw.contains("require(") && !raw.contains("export ") {
+    // Fast path for single-file scripts with no imports/exports/requires/classes/WinterTC bridge
+    if !raw.contains("import ")
+        && !raw.contains("require(")
+        && !raw.contains("export ")
+        && !raw.contains("class ")
+        && !raw.contains("Slice.")
+    {
         return Ok(strip_typescript_and_normalize(&raw, is_ts));
     }
 

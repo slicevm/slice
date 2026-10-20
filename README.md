@@ -96,27 +96,37 @@ slice compile ./docker-tests/apps/01-fintech-checkout -o my-edge-app
 ./my-edge-app --metrics
 ```
 
-### 5. Launch the Multi-Tenant WinterTC HTTP MicroVM Server (`slice serve`)
+### 5. Launch the State-of-the-Art Multi-Tenant WinterTC HTTP Server (`slice serve`)
 
-Spawns a fresh, hardware- and OCap-isolated `SliceIsolate` in `< 2.5 microseconds` for every incoming HTTP request:
+`slice serve` runs a shared-nothing **Thread-Per-Core (`--workers=N`)** HTTP/1.1 `Keep-Alive` & pipelined server that executes every incoming HTTP request inside a fresh, hardware- and OCap-isolated `SliceIsolate` in microseconds (`152,376 req/s` in Tier-0 CAS mode, `96,287 req/s` in Tier-1 WinterTC mode):
 
 ```bash
-# Start server on port 3000
-slice serve ./bundle.cas --port=3000
+# Start multi-worker Keep-Alive server on port 3000 with 8 shared-nothing worker threads
+slice serve ./bundle.cas --port=3000 --workers=8
 
-# Or run a self-contained single-request smoke test with telemetry headers
+# Or run a self-contained pipelined Keep-Alive smoke test with telemetry headers
 slice serve ./bundle.cas --smoke-test
+```
+
+Inside TypeScript/JavaScript handlers, use the native **WinterTC Request/Response Bridge** (`Slice.request()`, `Slice.respond()`, and post-response `Slice.waitUntil()`):
+```typescript
+const req = Slice.request(); // { method, path, query, tenant, tenantId, body, header(name) }
+Slice.waitUntil(() => {
+    // Executed after HTTP response bytes are flushed to the client socket!
+});
+Slice.respond(200, { ok: true, method: req.method, path: req.path, tenant: req.tenant }, "application/json");
 ```
 
 Every HTTP response includes real-time microVM execution headers:
 ```http
 HTTP/1.1 200 OK
+Content-Type: application/json
+Connection: keep-alive
 Server: Slice-NexusJS/0.2
 X-Slice-Tenant: tenant-edge-42
-X-Slice-Isolate-Us: 24.70
-X-Slice-Tier: Tier0LLIntSnapshot
-X-Slice-Fuel-Used: 4
-X-Slice-Pkey-Domain: 0x2
+X-Slice-Isolate-Us: 6
+X-Slice-Total-Us: 8
+X-Slice-Fuel-Used: 25
 ```
 
 ### 6. Inspect Bytecode & CAS Archives (`slice inspect`)
@@ -193,21 +203,29 @@ In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensourc
 | **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + Circular WAL) | **9.080 ms** (`4.33 ms` warm isolate) | 16.569 ms | 44.576 ms | 67.716 ms |
 | **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost Guard, 60 queries) | **8.263 ms** (`3.30 ms` warm isolate) | 12.572 ms | 39.122 ms | 65.346 ms |
 | **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay, 75 events) | **8.151 ms** (`2.84 ms` warm isolate) | 15.346 ms | 43.437 ms | 68.120 ms |
-| **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **10.25 MB (`10,496 KB`)** | 30.00 MB (`30,720 KB`) | 47.04 MB (`48,172 KB`) | 71.32 MB (`73,028 KB`) |
-| **Peak Memory Footprint: Telemetry + Flatted App (Max RSS)** | **10.62 MB (`10,880 KB`)** | 30.25 MB (`30,976 KB`) | 50.12 MB (`51,328 KB`) | 72.27 MB (`74,008 KB`) |
-| **1,000-Tenant MicroVM Isolate Cold-Start (Min / Swarm)** | **2.51 us (`3.35 ms` / 1,000 tenants)** | N/A | N/A | N/A |
+| **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **10.25 MB (`10,496 KB`)** | 29.88 MB (`30,592 KB`) | 46.30 MB (`47,416 KB`) | 71.15 MB (`72,860 KB`) |
+| **Peak Memory Footprint: Telemetry + Flatted App (Max RSS)** | **10.50 MB (`10,752 KB`)** | 31.00 MB (`31,744 KB`) | 50.23 MB (`51,432 KB`) | 72.27 MB (`74,008 KB`) |
+| **`slice serve` HTTP/1.1 Keep-Alive (Tier-0 CAS, `--workers=8`)** | **152,376 req/s (`6.56 us/req`)** | 88,132 req/s (`11.35 us`) | 102,481 req/s (`9.76 us`) | 55,810 req/s (`17.92 us`) |
+| **`slice serve` HTTP/1.1 Keep-Alive (Tier-1 WinterTC, `--workers=8`)** | **96,287 req/s (`10.39 us/req`)** | 88,132 req/s (`11.35 us`) | 102,481 req/s (`9.76 us`) | 55,810 req/s (`17.92 us`) |
+| **1,000-Tenant MicroVM Isolate Cold-Start (Min / Swarm)** | **1.00 us (`1.42 ms` / 1,000 tenants)** | N/A | N/A | N/A |
 
-Run the full Docker folder-app benchmark suite yourself:
+Run the full Docker benchmark suite or filter by tags (`all`, `apps`, `n1`, `serve`, `swarm`):
 
 ```powershell
-docker build -f docker-tests/Dockerfile -t slice-real-stack-bench .
-docker run --rm slice-real-stack-bench
+docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
+# Run all benchmarks (8 folder apps + Phase N1 HTTP server + 1,000-tenant swarm)
+docker run --rm slice-realworld-bench
+# Or run only a specific tagged subset (e.g. Phase N1 HTTP server + swarm)
+docker run --rm -e SLICE_BENCH_TAGS=n1,swarm slice-realworld-bench
+# Run tagged Rust unit tests
+cargo test tag_n1
 ```
 
 ---
 
 ## Documentation & Benchmarks
 
+* [Next-Gen Nuclear Plan (`NUC_PLAN.md`)](file:///p:/opensource/slice/NUC_PLAN.md)
 * [Master Plan (`BIG_PLAN.md`)](file:///p:/opensource/slice/BIG_PLAN.md)
 * [Architectural Blueprint (`reimagining_next_gen_node_runtime.md`)](file:///p:/opensource/slice/reimagining_next_gen_node_runtime.md)
 * [Docker Real-Stack Production Benchmarks (`docker-tests/README.md`)](file:///p:/opensource/slice/docker-tests/README.md)

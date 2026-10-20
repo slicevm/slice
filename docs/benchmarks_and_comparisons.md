@@ -170,6 +170,21 @@ All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 8
 | Node.js `v26.12.0` (`02-npm-ecosystem-suite`) | 72,860 KB | 71.15 MB | 1.00x |
 | Node.js `v26.12.0` (`06-telemetry-metrics-pipeline`) | 73,884 KB | 72.15 MB | 1.00x |
 
+---
+
+## 7. Phase N1 `slice serve` Multi-Tenant HTTP/1.1 Keep-Alive & Pipelined Benchmark
+
+Verified inside Linux Docker `x86_64` (`SLICE_BENCH_TAGS=n1`, 16,000 HTTP/1.1 Keep-Alive requests across 8 persistent sockets with pipeline depth 8):
+
+| Server / Runtime | Multi-Tenant Isolation Model | Throughput (`req/s`) | Avg Latency (`us/req`) | Total Time (16k Reqs) | Speedup vs `Bun.serve` |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`slice serve` (Tier-0 CAS, `--workers=8`)** | **Per-Request OCap + SES + Fuel + PKU Isolate** | **152,376 req/s** | **6.56 us/req** | **105.0 ms** | **1.73x faster** |
+| **`slice serve` (Tier-1 WinterTC, `--workers=8`)** | **Per-Request OCap + SES + Fuel + PKU Isolate** | **96,287 req/s** | **10.39 us/req** | **166.2 ms** | **1.09x faster** |
+| **`Bun.serve` (`v1.4.3`, JSC)** | Shared Single-Process Heap (No Tenant Isolation) | 88,132 req/s | 11.35 us/req | 181.5 ms | 1.00x (Baseline) |
+| **`Deno.serve` (`v2.9.7`, V8)** | Shared Single-Process Heap (No Tenant Isolation) | 102,481 req/s | 9.76 us/req | 156.1 ms | 1.16x |
+| **`Node.js http.createServer` (`v26.12.0`, V8)** | Shared Single-Process Heap (No Tenant Isolation) | 55,810 req/s | 17.92 us/req | 286.7 ms | 0.63x |
+
+
 
 
 

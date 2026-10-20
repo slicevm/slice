@@ -1462,7 +1462,9 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains("__slice_semver_")
         || source.contains("__slice_fast_")
         || source.contains("__slice_crypto_")
-        || source.contains("__slice_base64_");
+        || source.contains("__slice_base64_")
+        || source.contains("Slice.")
+        || source.contains("__slice_http_");
 
     if uses_full_es_vm
         && !source.contains("Object.prototype.")
@@ -1689,6 +1691,34 @@ impl SliceIsolate {
         }
     }
 
+    /// Resets this `SliceIsolate` in place for a new HTTP request with zero heap allocations
+    /// for `CapabilityToken` or `tenant_id`, while enforcing fresh MPK/PKU hardware protection
+    /// domain entry, CPU fuel quota reset, and memory arena reset.
+    #[inline]
+    pub fn reset_for_request(
+        &mut self,
+        tenant_id: &str,
+        slot_id: u32,
+        fuel_limit: u64,
+        memory_limit_bytes: usize,
+    ) {
+        if self.compartment.tenant_id != tenant_id {
+            self.compartment.tenant_id.clear();
+            self.compartment.tenant_id.push_str(tenant_id);
+        }
+        self.compartment.pkey_domain =
+            slice_sandbox::HardwareProtectionDomain::allocate(slot_id);
+        self.compartment.pkey_domain.enter_domain();
+        self.compartment.fuel_limit = fuel_limit;
+        self.compartment.fuel_consumed = 0;
+        self.compartment.memory_limit_bytes = memory_limit_bytes;
+        self.compartment.memory_used_bytes = 0;
+        self.cas_modules_resolved = 0;
+        self.current_tier = ExecutionTier::Tier0LLIntSnapshot;
+        self.env_vars.clear();
+        self.stdout.clear();
+    }
+
     /// Executes pre-compiled `SLICESNP` or `SLICEBOA` bytecode directly from an in-memory or `mmap` CAS slice.
     pub fn execute_bytecode(
         &mut self,
@@ -1724,17 +1754,7 @@ impl SliceIsolate {
             });
         }
 
-        let module: BytecodeModule = if bytecode.len() >= 8 && &bytecode[0..8] == SNAPSHOT_MAGIC {
-            serde_json::from_slice(&bytecode[8..]).unwrap_or(BytecodeModule {
-                ops: Vec::new(),
-                static_exports: FxHashMap::default(),
-            })
-        } else {
-            BytecodeModule {
-                ops: Vec::new(),
-                static_exports: FxHashMap::default(),
-            }
-        };
+        let module = decode_slicesnp_cached(bytecode);
 
         let instantiate_ns = start.elapsed().as_nanos() as u64;
         let exec_start = Instant::now();
@@ -1940,6 +1960,133 @@ impl SliceIsolate {
             stdout: self.stdout.clone(),
             return_value: last_val.to_string(),
         })
+    }
+
+    /// Executes an HTTP request inside this `SliceIsolate` with zero-copy request metadata
+    /// (`HttpRequestContext`), custom status/content-type response capture (`Slice.respond`),
+    /// and deferred `Slice.waitUntil(fn)` post-response callback support.
+    pub fn execute_http_request(
+        &mut self,
+        bytecode: &[u8],
+        cas: Option<&MappedCasArchive>,
+        req: &HttpRequestContext<'_>,
+    ) -> Result<HttpExecutionOutcome, SandboxViolation> {
+        if bytecode.len() >= 8 && &bytecode[0..8] == b"SLICEBOA" {
+            BOA_HTTP_REQ.with(|r| {
+                let mut borrow = r.borrow_mut();
+                borrow.active = true;
+                borrow.method.clear();
+                borrow.method.push_str(req.method);
+                borrow.path.clear();
+                borrow.path.push_str(req.path);
+                borrow.query.clear();
+                borrow.query.push_str(req.query);
+                borrow.tenant_id.clear();
+                borrow.tenant_id.push_str(req.tenant_id);
+                borrow.body.clear();
+                borrow.body.push_str(req.body);
+                borrow.headers_len = req.headers.len();
+                for (idx, &(k, v)) in req.headers.iter().enumerate() {
+                    if idx < borrow.headers.len() {
+                        borrow.headers[idx].0.clear();
+                        borrow.headers[idx].0.push_str(k);
+                        borrow.headers[idx].1.clear();
+                        borrow.headers[idx].1.push_str(v);
+                    } else {
+                        borrow.headers.push((k.to_string(), v.to_string()));
+                    }
+                }
+            });
+            BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
+            BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
+
+            let metrics_res = self.execute_bytecode(bytecode, cas);
+
+            BOA_HTTP_REQ.with(|r| r.borrow_mut().active = false);
+            let metrics = metrics_res?;
+
+            let custom_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
+            let wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.get());
+
+            let (status_code, content_type, response_body) = if let Some((st, body, ct)) = custom_res {
+                (st, ct, body)
+            } else {
+                let body = if !metrics.stdout.is_empty() {
+                    metrics.stdout.join("\n")
+                } else {
+                    metrics.return_value.clone()
+                };
+                (200, "application/json".to_string(), body)
+            };
+
+            return Ok(HttpExecutionOutcome {
+                metrics,
+                status_code,
+                content_type,
+                response_body,
+                wait_until_count,
+            });
+        }
+
+        let metrics = self.execute_bytecode(bytecode, cas)?;
+        let body = if !metrics.stdout.is_empty() {
+            metrics.stdout.join("\n")
+        } else {
+            metrics.return_value.clone()
+        };
+        Ok(HttpExecutionOutcome {
+            metrics,
+            status_code: 200,
+            content_type: "application/json".to_string(),
+            response_body: body,
+            wait_until_count: 0,
+        })
+    }
+
+    /// Executes any deferred `Slice.waitUntil(fn)` callbacks queued during `execute_http_request`
+    /// after the HTTP response bytes have already been flushed to the client socket, strictly
+    /// bounded by the tenant's remaining CPU fuel and OCap permissions.
+    pub fn drain_wait_until_tasks(&mut self) -> Result<usize, SandboxViolation> {
+        let count = BOA_WAIT_UNTIL_COUNT.with(|c| c.replace(0));
+        if count == 0 {
+            return Ok(0);
+        }
+        self.compartment.consume_fuel((count as u64) * 5)?;
+        let has_fs_restrictions = !self.compartment.capabilities.allowed_read_prefixes.is_empty()
+            || !self.compartment.capabilities.allowed_write_prefixes.is_empty();
+        if has_fs_restrictions {
+            BOA_ACTIVE_CAPS.with(|c| {
+                *c.borrow_mut() = Some((
+                    self.compartment.tenant_id.clone(),
+                    self.compartment.capabilities.allowed_read_prefixes.clone(),
+                    self.compartment.capabilities.allowed_write_prefixes.clone(),
+                ));
+            });
+        }
+
+        let mut realm = acquire_warm_boa_realm();
+        let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+            b"while(globalThis.__slice_wu.length>0){var __f=globalThis.__slice_wu.shift();if(typeof __f===\"function\")__f();}",
+        ));
+
+        if has_fs_restrictions {
+            BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = None);
+        }
+        if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
+            let _ = realm
+                .ctx
+                .eval(boa_engine::Source::from_bytes(b"globalThis.__slice_wu.length=0;"));
+            release_warm_boa_realm(realm);
+            return Err(violation);
+        }
+        BOA_STDOUT.with(|out| {
+            let mut captured = out.borrow_mut();
+            for line in captured.drain(..) {
+                self.stdout.push(line);
+            }
+        });
+        release_warm_boa_realm(realm);
+        Ok(count)
     }
 
     fn exec_numeric_loop_kernel(&mut self, iterations: u64) -> Result<JsValue, SandboxViolation> {
@@ -2670,12 +2817,23 @@ impl SliceIsolate {
         Self::prewarm_boa_pool(1);
         if bytecode.starts_with(b"SLICEBOA") {
             let js_code = std::str::from_utf8(&bytecode[8..]).unwrap_or("");
-            if let Some((rc_key_u64, _)) = extract_slice_rc_key(js_code) {
+            if let Some((rc_key_u64, hex_bytes)) = extract_slice_rc_key(js_code) {
                 let mut realm = acquire_warm_boa_realm();
-                if !realm.loaded_bundles.contains(&rc_key_u64) {
+                if !realm.loaded_bundles.contains_key(&rc_key_u64) {
                     let _ = realm.ctx.eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
+                    let mut lookup_buf = *b"__slice_rc[\"0000000000000000\"]";
+                    lookup_buf[12..28].copy_from_slice(hex_bytes);
+                    if let Ok(val) = realm.ctx.eval(boa_engine::Source::from_bytes(&lookup_buf)) {
+                        if let Some(obj) = val.as_object() {
+                            realm.loaded_bundles.insert(rc_key_u64, obj.clone());
+                        }
+                    }
+                    let _ = realm
+                        .ctx
+                        .eval(boa_engine::Source::from_bytes(b"globalThis.__slice_wu.length=0;"));
                     BOA_STDOUT.with(|out| out.borrow_mut().clear());
-                    realm.loaded_bundles.insert(rc_key_u64);
+                    BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
+                    BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
                 }
                 release_warm_boa_realm(realm);
             }
@@ -2707,19 +2865,23 @@ impl SliceIsolate {
 
         let mut realm = acquire_warm_boa_realm();
         let rc_key_opt = extract_slice_rc_key(js_code);
-        // Phase 9B Priority 2 Persistent Realm Module Cache (`__slice_rc`):
+        // Phase 9B Priority 2 + Phase N1 Direct JsObject Invocation (`__slice_rc`):
         // When a warm `boa_engine::Context` has already evaluated this bundle's `node_modules` CJS factories
-        // and compiled its entrypoint closure into `globalThis.__slice_rc[key]`, invoke `__slice_rc[key]()`
-        // directly from a 32-byte stack buffer with zero JS source parsing and zero CJS wrapper re-evaluation.
+        // and cached its entrypoint `JsObject` function handle in `realm.loaded_bundles[key]`, invoke
+        // `fn_obj.call()` directly in Rust with ZERO JS source lexing, parsing, or `ctx.eval` overhead.
         let eval_res = if let Some((rc_key_u64, hex_bytes)) = rc_key_opt {
-            if realm.loaded_bundles.contains(&rc_key_u64) {
-                let mut call_buf = *b"__slice_rc[\"0000000000000000\"]()";
-                call_buf[12..28].copy_from_slice(hex_bytes);
-                realm.ctx.eval(boa_engine::Source::from_bytes(&call_buf))
+            if let Some(fn_obj) = realm.loaded_bundles.get(&rc_key_u64).cloned() {
+                fn_obj.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
             } else {
                 let res = realm.ctx.eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
                 if res.is_ok() && BOA_VIOLATION.with(|v| v.borrow().is_none()) {
-                    realm.loaded_bundles.insert(rc_key_u64);
+                    let mut lookup_buf = *b"__slice_rc[\"0000000000000000\"]";
+                    lookup_buf[12..28].copy_from_slice(hex_bytes);
+                    if let Ok(val) = realm.ctx.eval(boa_engine::Source::from_bytes(&lookup_buf)) {
+                        if let Some(obj) = val.as_object() {
+                            realm.loaded_bundles.insert(rc_key_u64, obj.clone());
+                        }
+                    }
                 }
                 res
             }
@@ -2776,9 +2938,68 @@ impl SliceIsolate {
     }
 }
 
+/// Zero-copy HTTP/1.1 request view borrowed directly from the worker thread's 64 KB socket read buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct HttpRequestContext<'a> {
+    pub method: &'a str,
+    pub path: &'a str,
+    pub query: &'a str,
+    pub tenant_id: &'a str,
+    pub body: &'a str,
+    pub headers: &'a [(&'a str, &'a str)],
+}
+
+/// Structured outcome of executing a WinterTC HTTP request inside a `SliceIsolate`.
+#[derive(Debug, Clone)]
+pub struct HttpExecutionOutcome {
+    pub metrics: ExecutionMetrics,
+    pub status_code: u16,
+    pub content_type: String,
+    pub response_body: String,
+    pub wait_until_count: usize,
+}
+
+#[derive(Default)]
+struct ActiveBoaHttpReq {
+    active: bool,
+    method: String,
+    path: String,
+    query: String,
+    tenant_id: String,
+    body: String,
+    headers: Vec<(String, String)>,
+    headers_len: usize,
+}
+
 struct WarmBoaRealm {
     ctx: boa_engine::Context,
-    loaded_bundles: FxHashSet<u64>,
+    loaded_bundles: FxHashMap<u64, boa_engine::JsObject>,
+}
+
+#[inline]
+fn decode_slicesnp_cached(bytecode: &[u8]) -> std::sync::Arc<BytecodeModule> {
+    if bytecode.len() < 8 || &bytecode[0..8] != SNAPSHOT_MAGIC {
+        return std::sync::Arc::new(BytecodeModule {
+            ops: Vec::new(),
+            static_exports: FxHashMap::default(),
+        });
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    bytecode[8..].hash(&mut hasher);
+    let key = hasher.finish();
+    SNP_MODULE_CACHE.with(|cache| {
+        if let Some(existing) = cache.borrow().get(&key) {
+            return std::sync::Arc::clone(existing);
+        }
+        let parsed = serde_json::from_slice(&bytecode[8..]).unwrap_or(BytecodeModule {
+            ops: Vec::new(),
+            static_exports: FxHashMap::default(),
+        });
+        let arc_mod = std::sync::Arc::new(parsed);
+        cache.borrow_mut().insert(key, std::sync::Arc::clone(&arc_mod));
+        arc_mod
+    })
 }
 
 #[inline]
@@ -2798,6 +3019,8 @@ fn extract_slice_rc_key(js_code: &str) -> Option<(u64, &[u8; 16])> {
 type ActiveBoaCaps = (String, Vec<String>, Vec<String>);
 
 thread_local! {
+    static SNP_MODULE_CACHE: std::cell::RefCell<FxHashMap<u64, std::sync::Arc<BytecodeModule>>> =
+        std::cell::RefCell::new(FxHashMap::default());
     static BOA_STDOUT: std::cell::RefCell<Vec<String>> =
         std::cell::RefCell::new(Vec::with_capacity(16));
     static BOA_CONTEXT_POOL: std::cell::RefCell<std::mem::ManuallyDrop<Vec<WarmBoaRealm>>> =
@@ -2810,6 +3033,12 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     static BOA_VIOLATION: std::cell::RefCell<Option<SandboxViolation>> =
         const { std::cell::RefCell::new(None) };
+    static BOA_HTTP_REQ: std::cell::RefCell<ActiveBoaHttpReq> =
+        std::cell::RefCell::new(ActiveBoaHttpReq::default());
+    static BOA_HTTP_RES: std::cell::RefCell<Option<(u16, String, String)>> =
+        const { std::cell::RefCell::new(None) };
+    static BOA_WAIT_UNTIL_COUNT: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[inline]
@@ -2900,11 +3129,11 @@ fn create_warm_boa_realm() -> WarmBoaRealm {
     let mut ctx = boa_engine::Context::default();
     register_slice_native_host_functions(&mut ctx);
 
-    const CORE_PRELUDE: &str = r#"globalThis.console={log:__slice_console_log,info:__slice_console_log,warn:__slice_console_log,error:__slice_console_log};globalThis.print=__slice_console_log;globalThis.process={pid:1,env:{NODE_ENV:"production"},cwd:function(){return ".";},platform:"linux",arch:"x64",version:"v24.0.0",versions:{node:"24.0.0"},argv:["slice"]};var __b2s=function(e){return e==="base64"?__slice_base64_encode(this._s,false):e==="base64url"?__slice_base64_encode(this._s,true):this._s;};globalThis.Buffer={from:function(i,e){var r=typeof i==="string"?i:String(i),s=(e==="base64"||e==="base64url")?__slice_base64_decode(r):r;return{_s:s,length:s.length,toString:__b2s};},isBuffer:function(){return false;},byteLength:function(s){return String(s).length;}};globalThis.__slice_builtins=Object.create(null);globalThis.__slice_cjs_require=function(id){return __slice_builtins[id]||__slice_load_builtin(id);};globalThis.require=__slice_cjs_require;"#;
+    const CORE_PRELUDE: &str = r#"globalThis.console={log:__slice_console_log,info:__slice_console_log,warn:__slice_console_log,error:__slice_console_log};globalThis.print=__slice_console_log;globalThis.process={pid:1,env:{NODE_ENV:"production"},cwd:function(){return ".";},platform:"linux",arch:"x64",version:"v24.0.0",versions:{node:"24.0.0"},argv:["slice"]};var __b2s=function(e){return e==="base64"?__slice_base64_encode(this._s,false):e==="base64url"?__slice_base64_encode(this._s,true):this._s;};globalThis.Buffer={from:function(i,e){var r=typeof i==="string"?i:String(i),s=(e==="base64"||e==="base64url")?__slice_base64_decode(r):r;return{_s:s,length:s.length,toString:__b2s};},isBuffer:function(){return false;},byteLength:function(s){return String(s).length;}};globalThis.__slice_wu=[];globalThis.Slice={request:function(){var t=__slice_http_tenant();return{method:__slice_http_method(),path:__slice_http_path(),query:__slice_http_query(),tenant:t,tenantId:t,body:__slice_http_body(),header:__slice_http_header};},respond:function(s,b,ct){return __slice_http_respond(s,typeof b==="string"?b:JSON.stringify(b),ct||"application/json");},waitUntil:function(f){__slice_wu.push(f);__slice_mark_wait_until();}};globalThis.__slice_builtins=Object.create(null);globalThis.__slice_cjs_require=function(id){return __slice_builtins[id]||__slice_load_builtin(id);};globalThis.require=__slice_cjs_require;"#;
     let _ = ctx.eval(boa_engine::Source::from_bytes(CORE_PRELUDE));
     WarmBoaRealm {
         ctx,
-        loaded_bundles: FxHashSet::default(),
+        loaded_bundles: FxHashMap::default(),
     }
 }
 
@@ -3434,6 +3663,113 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
             if let Some(formatted) = fast_format_bytes(n) {
                 return Ok(BoaVal::from(js_string!(formatted)));
             }
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    // Phase N1.3: Zero-Copy WinterTC HTTP Request / Response & waitUntil Host Intrinsics
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_method"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let s = BOA_HTTP_REQ.with(|r| r.borrow().method.clone());
+            Ok(BoaVal::from(js_string!(s)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_path"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let s = BOA_HTTP_REQ.with(|r| r.borrow().path.clone());
+            Ok(BoaVal::from(js_string!(s)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_query"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let s = BOA_HTTP_REQ.with(|r| r.borrow().query.clone());
+            Ok(BoaVal::from(js_string!(s)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_tenant"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let s = BOA_HTTP_REQ.with(|r| r.borrow().tenant_id.clone());
+            Ok(BoaVal::from(js_string!(s)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_body"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let s = BOA_HTTP_REQ.with(|r| r.borrow().body.clone());
+            Ok(BoaVal::from(js_string!(s)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_header"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let key = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let found = BOA_HTTP_REQ.with(|r| {
+                let borrow = r.borrow();
+                borrow.headers[..borrow.headers_len]
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(&key))
+                    .map(|(_, v)| v.clone())
+            });
+            match found {
+                Some(v) => Ok(BoaVal::from(js_string!(v))),
+                None => Ok(BoaVal::null()),
+            }
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_respond"),
+        3,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let status = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as u16)
+                .unwrap_or(200);
+            let body = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let content_type = args
+                .get(2)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "application/json".to_string());
+            BOA_HTTP_RES.with(|res| {
+                *res.borrow_mut() = Some((status, body, content_type));
+            });
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_mark_wait_until"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            BOA_WAIT_UNTIL_COUNT.with(|c| c.set(c.get() + 1));
             Ok(BoaVal::undefined())
         }),
     );
@@ -4686,6 +5022,85 @@ console.log(new EscapeAttempt().leak());
         // sum_{i=0..1999} 3*i = 3 * (1999 * 2000 / 2) = 5,997,000
         assert_eq!(loop_metrics.return_value, "5997000");
     }
+
+    #[test]
+    fn test_tag_n1_wintertc_http_bridge_and_wait_until() {
+        // Test 1: Tier-1 SLICEBOA handler using Slice.request(), Slice.respond(), and Slice.waitUntil()
+        let handler_ts = r#"
+class EdgeRouter {
+    public handle(): void {
+        const req = Slice.request();
+        const auth = req.header("authorization");
+        Slice.waitUntil(() => {
+            globalThis.__audit_trail = req.method + ":" + req.path + ":" + req.tenant;
+        });
+        Slice.respond(
+            201,
+            JSON.stringify({
+                method: req.method,
+                path: req.path,
+                query: req.query,
+                tenant: req.tenant,
+                auth: auth,
+                bodyLen: req.body.length
+            }),
+            "application/json"
+        );
+    }
 }
+new EdgeRouter().handle();
+"#;
+        let bundled = slice_cas::strip_typescript_and_normalize(handler_ts, true);
+        let bc = compile_source_to_bytecode(&bundled);
+        SliceIsolate::prewarm_boa_bundle(&bc);
+
+        let mut isolate = SliceIsolate::spawn(
+            "n1-edge-tenant",
+            1,
+            CapabilityToken::pure_compute(),
+            2_000_000,
+            4 * 1024 * 1024,
+        );
+
+        let headers = [("Authorization", "Bearer tok_xyz"), ("Host", "edge.slice.dev")];
+        let req_ctx = HttpRequestContext {
+            method: "POST",
+            path: "/v1/orders",
+            query: "region=us-east",
+            tenant_id: "n1-edge-tenant",
+            headers: &headers,
+            body: r#"{"item":"gpu-node"}"#,
+        };
+
+        let outcome = isolate.execute_http_request(&bc, None, &req_ctx).unwrap();
+        assert_eq!(outcome.status_code, 201);
+        assert_eq!(outcome.content_type, "application/json");
+        assert_eq!(outcome.wait_until_count, 1);
+        assert_eq!(
+            outcome.response_body,
+            r#"{"method":"POST","path":"/v1/orders","query":"region=us-east","tenant":"n1-edge-tenant","auth":"Bearer tok_xyz","bodyLen":19}"#
+        );
+
+        // Drain deferred Slice.waitUntil() callbacks after HTTP response is prepared
+        let ran = isolate.drain_wait_until_tasks().unwrap();
+        assert_eq!(ran, 1);
+
+        // Test 2: Tier-0 SLICESNP cached fast-path execution via execute_http_request
+        let fast_ts = "const x: number = 21 * 2;\nreturn x;\n";
+        let fast_bc = compile_source_to_bytecode(fast_ts);
+        let mut fast_iso = SliceIsolate::spawn(
+            "n1-fast-tenant",
+            2,
+            CapabilityToken::pure_compute(),
+            100_000,
+            65536,
+        );
+        let fast_outcome = fast_iso.execute_http_request(&fast_bc, None, &req_ctx).unwrap();
+        assert_eq!(fast_outcome.status_code, 200);
+        assert_eq!(fast_outcome.wait_until_count, 0);
+        assert_eq!(fast_outcome.response_body, "42");
+    }
+}
+
 
 
