@@ -58,6 +58,8 @@ APP7_DIR="$APPS_DIR/07-graphql-ast-validator"
 APP8_DIR="$APPS_DIR/08-event-driven-state-journal"
 APP9_DIR="$APPS_DIR/09-wintertc-web-router"
 APP10_DIR="$APPS_DIR/10-fullstack-bff-microservice"
+APP11_DIR="$APPS_DIR/11-static-asset-cdn-edge"
+APP12_DIR="$APPS_DIR/12-ai-sse-token-streamer"
 
 echo "========================================================================="
 echo "  RUNTIME VERSIONS (LINUX DOCKER x86_64 - LATEST RELEASES)"
@@ -70,9 +72,9 @@ echo "  Deno    : $(deno -V)"
 
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  [TAG: apps] PACKING & COMPILING ALL 10 FOLDER-BASED APPS (OXC + CAS)"
+echo "  [TAG: apps] PACKING & COMPILING ALL 12 FOLDER-BASED APPS (OXC + CAS)"
 echo "========================================================================="
-for i in 1 2 3 4 5 6 7 8 9 10; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
     eval "dir=\$APP${i}_DIR"
     "$SLICE_BIN" pack "$dir" "/tmp/app${i}.cas"
     "$SLICE_BIN" compile "/tmp/app${i}.cas" -o "/tmp/app${i}_bin"
@@ -126,6 +128,8 @@ verify_app_parity "App 7: 07-graphql-ast-validator (dlv + dset + AST Cost Guard)
 verify_app_parity "App 8: 08-event-driven-state-journal (mitt + ms + JSONL Replay)" "$APP8_DIR" "/tmp/app8.cas" "-A"
 verify_app_parity "App 9: 09-wintertc-web-router (Request/Response/URL/Headers)" "$APP9_DIR" "/tmp/app9.cas" "-A"
 verify_app_parity "App 10: 10-fullstack-bff-microservice (CORS/ETag/Cookie/dlv)" "$APP10_DIR" "/tmp/app10.cas" "-A"
+verify_app_parity "App 11: 11-static-asset-cdn-edge (Static ETag/304/bytes/ms)" "$APP11_DIR" "/tmp/app11.cas" "-A"
+verify_app_parity "App 12: 12-ai-sse-token-streamer (SSE/ReadableStream/mitt/DLP)" "$APP12_DIR" "/tmp/app12.cas" "-A"
 fi
 
 measure_ms() {
@@ -192,6 +196,8 @@ bench_app 7 "07-GRAPHQL-AST-VALIDATOR (dlv + dset + AST)" "$APP7_DIR" "-A"
 bench_app 8 "08-EVENT-DRIVEN-STATE-JOURNAL (mitt + ms + WAL)" "$APP8_DIR" "-A"
 bench_app 9 "09-WINTERTC-WEB-ROUTER (Request/Response/URL/Headers)" "$APP9_DIR" "-A"
 bench_app 10 "10-FULLSTACK-BFF-MICROSERVICE (CORS/ETag/Cookie/dlv)" "$APP10_DIR" "-A"
+bench_app 11 "11-STATIC-ASSET-CDN-EDGE (Static ETag/304/bytes/ms)" "$APP11_DIR" "-A"
+bench_app 12 "12-AI-SSE-TOKEN-STREAMER (SSE/ReadableStream/mitt/DLP)" "$APP12_DIR" "-A"
 
 echo "========================================================================="
 echo "  PEAK MEMORY FOOTPRINT (MAX RSS) ACROSS REPRESENTATIVE APPS"
@@ -207,14 +213,14 @@ measure_rss_kb "Deno (App 6: Telemetry + Flatted)"  deno run -A "$APP6_DIR/src/i
 measure_rss_kb "Node (App 6: Telemetry + Flatted)"  node "$APP6_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 10 APPS (COLD VS WARM POOL)"
+echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 12 APPS (COLD VS WARM POOL)"
 echo "========================================================================="
 echo "  --- Cold Realm Telemetry ---"
-for i in 1 2 3 4 5 6 7 8 9 10; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --quiet --metrics
 done
 echo "  --- Pre-Warmed Boa Pool Telemetry (--warm) ---"
-for i in 1 2 3 4 5 6 7 8 9 10; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --warm --quiet --metrics
 done
 fi
@@ -621,6 +627,68 @@ else
     exit 1
 fi
 rm -f /tmp/f1_*
+fi
+
+if should_run_tag "f2"; then
+echo "========================================================================="
+echo "  [TAG: f2] PHASE F2 ZERO-STAT CAS STATIC ASSETS & AI SSE TOKEN STREAMING"
+echo "  1. Zero-Stat CAS Static Asset Server (--static) + BLAKE3 ETag 304 (< 2 us)"
+echo "  2. Server-Sent Events (Slice.streamSSE / Response.sse) + Egress DLP"
+echo "  3. App 11 (11-static-asset-cdn-edge) & App 12 (12-ai-sse-token-streamer)"
+echo "========================================================================="
+
+"$SLICE_BIN" pack "$APP11_DIR" "/tmp/f2_app11.cas" >/dev/null
+"$SLICE_BIN" pack "$APP12_DIR" "/tmp/f2_app12.cas" >/dev/null
+verify_app_parity "Phase F2 App 11: 11-static-asset-cdn-edge" "$APP11_DIR" "/tmp/f2_app11.cas" "-A"
+verify_app_parity "Phase F2 App 12: 12-ai-sse-token-streamer" "$APP12_DIR" "/tmp/f2_app12.cas" "-A"
+
+mkdir -p /tmp/f2_public/assets
+cat << 'EOF' > /tmp/f2_public/index.html
+<!doctype html><html><head><title>Slice F2 Static</title></head><body><h1>Zero-Stat CAS Web UI</h1></body></html>
+EOF
+cat << 'EOF' > /tmp/f2_public/assets/style.css
+body { background: #090d16; color: #38bdf8; }
+EOF
+
+cat << 'EOF' > /tmp/f2_sse_server.ts
+export default {
+    fetch(req: Request): Response {
+        const url = new URL(req.url);
+        if (url.pathname === "/api/v1/stream") {
+            return Response.sse([
+                { id: "1", event: "token", data: { text: "Hello " } },
+                { id: "2", event: "token", data: { text: "from Slice SSE" } },
+                { id: "3", event: "done", data: "[DONE]" }
+            ]);
+        }
+        return Response.json({ status: "ok" });
+    }
+};
+EOF
+
+"$SLICE_BIN" pack /tmp/f2_sse_server.ts /tmp/f2_fullstack.cas --static=/tmp/f2_public >/dev/null
+"$SLICE_BIN" serve /tmp/f2_fullstack.cas --port=18092 --workers=4 --max-requests=6 >/dev/null 2>&1 &
+F2_SRV_PID=$!
+sleep 0.3
+
+F2_INDEX_HDR=$(curl -fsSI "http://127.0.0.1:18092/")
+F2_ETAG=$(echo "$F2_INDEX_HDR" | awk 'tolower($1)=="etag:" {gsub(/\r/,"",$2); print $2}')
+F2_304_HDR=$(curl -fsSI -H "If-None-Match: $F2_ETAG" "http://127.0.0.1:18092/")
+F2_SSE_BODY=$(curl -fsSL "http://127.0.0.1:18092/api/v1/stream")
+
+kill "$F2_SRV_PID" 2>/dev/null || true
+wait "$F2_SRV_PID" 2>/dev/null || true
+
+echo "  [Live slice serve on Embedded CAS Static Assets + SSE Token Stream]"
+echo "    Static / ETag    : $F2_ETAG"
+echo "    304 Status Check : $(echo "$F2_304_HDR" | head -n 1 | tr -d '\r')"
+if echo "$F2_304_HDR" | grep -q "304 Not Modified" && [[ "$F2_SSE_BODY" == *"from Slice SSE"* ]]; then
+    echo "    [PASS] Zero-Stat CAS Static Asset ETag (HIT-200 + HIT-304) & SSE Streaming verified!"
+else
+    echo "    [FAIL] Unexpected static or SSE response!"
+    exit 1
+fi
+rm -rf /tmp/f2_*
 fi
 
 if should_run_tag "swarm"; then

@@ -22,3 +22,4 @@ export interface BffBenchmarkSummary {
   totalCacheTtlSec: number;
   finalStateHash: string;
 }
+

@@ -1,0 +1,11 @@
+{
+  "name": "12-ai-sse-token-streamer",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./src/index.ts",
+  "dependencies": {
+    "mitt": "3.0.1",
+    "ms": "2.1.3"
+  }
+}
+

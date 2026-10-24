@@ -48,6 +48,8 @@ RUN bun install --cwd /app/docker-tests/apps/02-npm-ecosystem-suite \
     && bun install --cwd /app/docker-tests/apps/07-graphql-ast-validator \
     && bun install --cwd /app/docker-tests/apps/08-event-driven-state-journal \
     && bun install --cwd /app/docker-tests/apps/10-fullstack-bff-microservice \
+    && bun install --cwd /app/docker-tests/apps/11-static-asset-cdn-edge \
+    && bun install --cwd /app/docker-tests/apps/12-ai-sse-token-streamer \
     && sed -i 's/\r$//' /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh \
     && chmod +x /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh
 

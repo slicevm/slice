@@ -325,13 +325,27 @@ fn cmd_run(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn build_cas_archive(input_path: &Path, output_path: &Path, entrypoint: &str) -> Result<slice_cas::CasIndexHeader> {
+#[cfg(test)]
+fn build_cas_archive(
+    input_path: &Path,
+    output_path: &Path,
+    entrypoint: &str,
+) -> Result<slice_cas::CasIndexHeader> {
+    build_cas_archive_with_static(input_path, output_path, entrypoint, None)
+}
+
+fn build_cas_archive_with_static(
+    input_path: &Path,
+    output_path: &Path,
+    entrypoint: &str,
+    static_dir_opt: Option<&Path>,
+) -> Result<slice_cas::CasIndexHeader> {
     let is_folder_app = input_path.is_dir()
         && (input_path.join("package.json").is_file()
             || input_path.join("slice.toml").is_file()
             || input_path.join("src").is_dir());
 
-    let builder = if input_path.is_file() || is_folder_app {
+    let mut builder = if input_path.is_file() || is_folder_app {
         let entry_file = slice_cas::resolve_project_entrypoint(input_path, Some(entrypoint))?;
         let file_name = entry_file
             .file_name()
@@ -354,25 +368,37 @@ fn build_cas_archive(input_path: &Path, output_path: &Path, entrypoint: &str) ->
         b
     };
 
+    if let Some(static_dir) = static_dir_opt {
+        builder.ingest_static_directory(static_dir)?;
+    }
+
     builder.write_to_file(output_path)
 }
 
 fn cmd_pack(args: &[String]) -> Result<()> {
     if args.len() < 2 {
-        bail!("Usage: slice pack <input_file_or_dir> <output.cas> [--entry=./index.ts]");
+        bail!("Usage: slice pack <input_file_or_dir> <output.cas> [--entry=./index.ts] [--static=./public]");
     }
     let input_path = Path::new(&args[0]);
     let output_path = Path::new(&args[1]);
     let mut entrypoint = String::from("./index.ts");
+    let mut static_dir_opt: Option<PathBuf> = None;
 
     for arg in &args[2..] {
         if let Some(e) = arg.strip_prefix("--entry=") {
             entrypoint = e.to_string();
+        } else if let Some(sd) = arg.strip_prefix("--static=") {
+            static_dir_opt = Some(PathBuf::from(sd));
         }
     }
 
     let start = Instant::now();
-    let header = build_cas_archive(input_path, output_path, &entrypoint)?;
+    let header = build_cas_archive_with_static(
+        input_path,
+        output_path,
+        &entrypoint,
+        static_dir_opt.as_deref(),
+    )?;
     let elapsed_ms = start.elapsed().as_secs_f64() * 1_000.0;
     let file_size = std::fs::metadata(output_path)?.len();
 
@@ -388,11 +414,12 @@ fn cmd_pack(args: &[String]) -> Result<()> {
 
 fn cmd_compile(args: &[String]) -> Result<()> {
     if args.is_empty() {
-        bail!("Usage: slice compile <input_script_or_dir_or_cas> [-o <output_binary>] [--entry=./index.ts]");
+        bail!("Usage: slice compile <input_script_or_dir_or_cas> [-o <output_binary>] [--entry=./index.ts] [--static=./public]");
     }
     let input_path = Path::new(&args[0]);
     let mut output_bin: Option<PathBuf> = None;
     let mut entrypoint = String::from("./index.ts");
+    let mut static_dir_opt: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -406,6 +433,8 @@ fn cmd_compile(args: &[String]) -> Result<()> {
             output_bin = Some(PathBuf::from(out));
         } else if let Some(e) = args[i].strip_prefix("--entry=") {
             entrypoint = e.to_string();
+        } else if let Some(sd) = args[i].strip_prefix("--static=") {
+            static_dir_opt = Some(PathBuf::from(sd));
         }
         i += 1;
     }
@@ -424,7 +453,12 @@ fn cmd_compile(args: &[String]) -> Result<()> {
     let cas_to_embed = if input_path.extension().and_then(|e| e.to_str()) == Some("cas") {
         input_path.to_path_buf()
     } else {
-        build_cas_archive(input_path, &temp_cas, &entrypoint)?;
+        build_cas_archive_with_static(
+            input_path,
+            &temp_cas,
+            &entrypoint,
+            static_dir_opt.as_deref(),
+        )?;
         temp_cas.clone()
     };
 
@@ -503,6 +537,7 @@ fn cmd_serve(args: &[String]) -> Result<()> {
     let mut smoke_test = false;
     let mut max_requests_opt: Option<usize> = None;
     let mut tenant_dir_opt: Option<PathBuf> = None;
+    let mut static_dir_opt: Option<PathBuf> = None;
     let mut deterministic_seed: Option<u64> = None;
     let mut workers: usize = std::thread::available_parallelism()
         .map(|n| n.get().clamp(1, 8))
@@ -518,6 +553,8 @@ fn cmd_serve(args: &[String]) -> Result<()> {
             max_requests_opt = m.parse().ok();
         } else if let Some(td) = arg.strip_prefix("--tenant-dir=") {
             tenant_dir_opt = Some(PathBuf::from(td));
+        } else if let Some(sd) = arg.strip_prefix("--static=") {
+            static_dir_opt = Some(PathBuf::from(sd));
         } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
             deterministic_seed = Some(seed_str.parse().unwrap_or(42));
         } else if arg == "--deterministic" {
@@ -531,15 +568,17 @@ fn cmd_serve(args: &[String]) -> Result<()> {
 
     let (caps, fuel_limit, mem_limit) = load_manifest_or_default();
 
-    // Pre-compile or map handler bytecode
+    // Pre-compile or map handler bytecode and extract any embedded CAS static assets
     let default_handler_src = r#"
 const route_res: string = WinterTC.route("GET", "https://edge.slice.local/api/v1/status");
 console.log(route_res);
 "#;
+    let mut static_table = slice_cas::StaticAssetTable::new();
     let bytecode = std::sync::Arc::new(if let Some(target) = &target_opt {
         let p = Path::new(target);
         if target.ends_with(".cas") {
             let archive = MappedCasArchive::open(p)?;
+            static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
             let entry = archive.entrypoint_blob().context("Missing CAS entrypoint")?;
             archive.get_bytecode_slice(entry).to_vec()
         } else {
@@ -547,14 +586,31 @@ console.log(route_res);
             let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
             compile_source_to_bytecode(&bundled)
         }
+    } else if let Ok(Some(archive)) = MappedCasArchive::open_embedded_self() {
+        static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
+        if let Some(entry) = archive.entrypoint_blob() {
+            archive.get_bytecode_slice(entry).to_vec()
+        } else {
+            compile_source_to_bytecode(default_handler_src)
+        }
     } else {
         compile_source_to_bytecode(default_handler_src)
     });
+
+    if let Some(static_dir) = &static_dir_opt {
+        static_table.extend_from_directory(static_dir)?;
+    }
+    let static_table_arc = if static_table.is_empty() {
+        None
+    } else {
+        Some(std::sync::Arc::new(static_table))
+    };
 
     if smoke_test {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let bound_port = listener.local_addr()?.port();
         let bc_clone = std::sync::Arc::clone(&bytecode);
+        let st_clone = static_table_arc.as_ref().map(std::sync::Arc::clone);
         let caps_clone = caps.clone();
 
         let server_thread = std::thread::spawn(move || -> Result<()> {
@@ -567,6 +623,7 @@ console.log(route_res);
                     1,
                     &bc_clone,
                     None,
+                    st_clone.as_deref(),
                     deterministic_seed,
                     &caps_clone,
                     fuel_limit,
@@ -614,6 +671,7 @@ console.log(route_res);
         let listener_clone = std::sync::Arc::clone(&listener);
         let bc_clone = std::sync::Arc::clone(&bytecode);
         let td_clone = tenant_dir_arc.as_ref().map(std::sync::Arc::clone);
+        let st_clone = static_table_arc.as_ref().map(std::sync::Arc::clone);
         let caps_clone = caps.clone();
         let counter_clone = std::sync::Arc::clone(&req_counter);
         handles.push(std::thread::spawn(move || {
@@ -628,6 +686,7 @@ console.log(route_res);
                     local_slot,
                     &bc_clone,
                     td_clone.as_deref().map(|p| p.as_path()),
+                    st_clone.as_deref(),
                     deterministic_seed,
                     &caps_clone,
                     fuel_limit,
@@ -651,6 +710,7 @@ console.log(route_res);
             local_slot,
             &bytecode,
             tenant_dir_arc.as_deref().map(|p| p.as_path()),
+            static_table_arc.as_deref(),
             deterministic_seed,
             &caps,
             fuel_limit,
@@ -742,6 +802,11 @@ fn http_status_reason(code: u16) -> &'static str {
         200 => "OK",
         201 => "Created",
         204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
@@ -758,6 +823,7 @@ fn serve_connection_keep_alive(
     mut slot_id: u32,
     bytecode: &[u8],
     tenant_dir_opt: Option<&Path>,
+    static_assets_opt: Option<&slice_cas::StaticAssetTable>,
     deterministic_seed: Option<u64>,
     caps: &CapabilityToken,
     fuel_limit: u64,
@@ -802,6 +868,7 @@ fn serve_connection_keep_alive(
 
         let mut keep_alive = !version.ends_with("1.0");
         let mut content_length: usize = 0;
+        let mut if_none_match: &str = "";
         let mut path = raw_path;
         let mut tenant_id: &str = "tenant-default";
         if let Some(rest) = raw_path.strip_prefix("/t/") {
@@ -832,6 +899,8 @@ fn serve_connection_keep_alive(
                     }
                 } else if k.eq_ignore_ascii_case("content-length") {
                     content_length = v.parse().unwrap_or(0);
+                } else if k.eq_ignore_ascii_case("if-none-match") {
+                    if_none_match = v;
                 }
                 if headers_len < headers_stack.len() {
                     headers_stack[headers_len] = (k, v);
@@ -851,6 +920,67 @@ fn serve_connection_keep_alive(
 
         let body_end = body_offset.saturating_add(content_length).min(filled);
         let body_len = content_length.min(body_filled);
+        let conn_hdr = if keep_alive { "keep-alive" } else { "close" };
+        let has_more_pipelined =
+            keep_alive && find_http_header_end(&after_hdr_buf[body_len..body_filled]).is_some();
+
+        // Phase F2: Zero-Stat CAS / In-Memory Static Asset Fast-Path (`< 2 us`, 0 JS VM spinup, 0 disk syscalls)
+        if let Some(static_table) = static_assets_opt {
+            if method == "GET" || method == "HEAD" {
+                if let Some(asset) = static_table.resolve(path) {
+                    let is_304 = !if_none_match.is_empty()
+                        && (if_none_match == "*"
+                            || if_none_match.contains(&asset.etag_quoted)
+                            || if_none_match.trim_matches('"') == asset.etag_quoted.trim_matches('"'));
+                    let total_us = req_start.elapsed().as_nanos() / 1_000;
+                    if is_304 {
+                        let _ = write!(
+                            write_buf,
+                            "HTTP/1.1 304 Not Modified\r\nETag: {}\r\nCache-Control: public, max-age=3600\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Static: HIT-304\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: 0\r\n\r\n",
+                            asset.etag_quoted,
+                            conn_hdr,
+                            tenant_id,
+                            total_us,
+                        );
+                    } else {
+                        let _ = write!(
+                            write_buf,
+                            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nETag: {}\r\nCache-Control: public, max-age=3600\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Static: HIT-200\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: 0\r\n\r\n",
+                            asset.content_type,
+                            asset.payload.len(),
+                            asset.etag_quoted,
+                            conn_hdr,
+                            tenant_id,
+                            total_us,
+                        );
+                        if method != "HEAD" {
+                            write_buf.extend_from_slice(&asset.payload);
+                        }
+                    }
+                    if !has_more_pipelined || write_buf.len() >= 32768 {
+                        stream.write_all(write_buf)?;
+                        write_buf.clear();
+                    }
+                    if let Some((counter, max_reqs)) = max_requests_tracker {
+                        let prev = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if max_reqs > 0 && prev + 1 >= max_reqs {
+                            std::process::exit(0);
+                        }
+                    }
+                    if !keep_alive {
+                        break;
+                    }
+                    if filled > body_end {
+                        read_buf.copy_within(body_end..filled, 0);
+                        filled -= body_end;
+                    } else {
+                        filled = 0;
+                    }
+                    continue;
+                }
+            }
+        }
+
         let body_str = std::str::from_utf8(&after_hdr_buf[..body_len]).unwrap_or("");
         let req_ctx = slice_engine::HttpRequestContext {
             method,
@@ -863,9 +993,6 @@ fn serve_connection_keep_alive(
 
         slot_id = slot_id.wrapping_add(1);
         isolate.reset_for_request(tenant_id, slot_id, fuel_limit, mem_limit);
-        let conn_hdr = if keep_alive { "keep-alive" } else { "close" };
-        let has_more_pipelined =
-            keep_alive && find_http_header_end(&after_hdr_buf[body_len..body_filled]).is_some();
 
         let dynamic_bc = tenant_dir_opt.and_then(|td| resolve_tenant_bytecode_hotswap(td, tenant_id));
         let active_bytecode: &[u8] = dynamic_bc.as_deref().map(|v| v.as_slice()).unwrap_or(bytecode);
@@ -874,12 +1001,18 @@ fn serve_connection_keep_alive(
             Ok(outcome) => {
                 let isolate_us = outcome.metrics.total_time_ns / 1_000;
                 let total_us = req_start.elapsed().as_nanos() / 1_000;
+                let extra_sse_hdr = if outcome.content_type.starts_with("text/event-stream") {
+                    "Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\n"
+                } else {
+                    ""
+                };
                 let _ = write!(
                     write_buf,
-                    "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Isolate-Us: {}\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: {}\r\n\r\n",
+                    "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}Content-Length: {}\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Isolate-Us: {}\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: {}\r\n\r\n",
                     outcome.status_code,
                     http_status_reason(outcome.status_code),
                     outcome.content_type,
+                    extra_sse_hdr,
                     outcome.response_body.len(),
                     conn_hdr,
                     outcome.metrics.tenant_id,
@@ -1677,6 +1810,7 @@ new PipelinedEdge().run();
                     &bc_server,
                     None,
                     None,
+                    None,
                     &CapabilityToken::pure_compute(),
                     2_000_000,
                     4 * 1024 * 1024,
@@ -1887,6 +2021,7 @@ export default {
                     &bc_server,
                     None,
                     None,
+                    None,
                     &CapabilityToken::pure_compute(),
                     2_000_000,
                     4 * 1024 * 1024,
@@ -1915,6 +2050,117 @@ export default {
         assert!(response_str.contains(r#"{"ok":true,"tenant":"acme-ai","category":"gpu","count":3}"#));
         assert!(response_str.contains("HTTP/1.1 201 Created"));
         assert!(response_str.contains(r#"{"ok":true,"tenant":"acme-ai","created":"B200"}"#));
+    }
+
+    #[test]
+    fn test_tag_f2_zero_stat_static_asset_etag_and_sse_streaming() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+
+        let tmp_dir = env::temp_dir().join("slice_f2_static_sse_test");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(tmp_dir.join("src")).unwrap();
+        std::fs::create_dir_all(tmp_dir.join("public/assets")).unwrap();
+
+        let html_content = "<!doctype html><html><head><title>Slice Fullstack</title></head><body><h1>Hello Edge</h1></body></html>";
+        let css_content = "body { background: #0b0f19; color: #f8fafc; }";
+        std::fs::write(tmp_dir.join("public/index.html"), html_content).unwrap();
+        std::fs::write(tmp_dir.join("public/assets/app.css"), css_content).unwrap();
+
+        std::fs::write(
+            tmp_dir.join("src/index.ts"),
+            r#"
+export default {
+    fetch(req: Request): Response {
+        const url = new URL(req.url);
+        if (url.pathname === "/api/v1/events") {
+            return Slice.streamSSE([
+                { id: "1", event: "token", data: { chunk: "alpha" } },
+                { id: "2", event: "done", data: "[DONE]" }
+            ]);
+        }
+        return Response.json({ api: true, path: url.pathname });
+    }
+};
+"#,
+        )
+        .unwrap();
+
+        let cas_out = tmp_dir.join("fullstack.cas");
+        build_cas_archive_with_static(
+            &tmp_dir.join("src/index.ts"),
+            &cas_out,
+            "./index.ts",
+            Some(&tmp_dir.join("public")),
+        )
+        .unwrap();
+
+        let archive = MappedCasArchive::open(&cas_out).unwrap();
+        let static_table = Arc::new(slice_cas::StaticAssetTable::from_cas_archive(&archive));
+        let index_entry = static_table.resolve("/").expect("Missing / index.html in CAS static table");
+        let index_etag = index_entry.etag_quoted.clone();
+
+        let entry_blob = archive.entrypoint_blob().unwrap();
+        let bytecode = Arc::new(archive.get_bytecode_slice(entry_blob).to_vec());
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let bc_server = Arc::clone(&bytecode);
+        let st_server = Arc::clone(&static_table);
+        let counter_server = Arc::clone(&counter);
+
+        let server_handle = std::thread::spawn(move || {
+            SliceIsolate::prewarm_boa_pool(1);
+            SliceIsolate::prewarm_boa_bundle(&bc_server);
+            let mut read_buf = vec![0u8; 65536];
+            let mut write_buf = Vec::with_capacity(4096);
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = serve_connection_keep_alive(
+                    stream,
+                    0,
+                    &bc_server,
+                    None,
+                    Some(&st_server),
+                    None,
+                    &CapabilityToken::pure_compute(),
+                    2_000_000,
+                    4 * 1024 * 1024,
+                    &mut read_buf,
+                    &mut write_buf,
+                    Some((&counter_server, 0)),
+                );
+            }
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        let pipelined_payload = format!(
+            concat!(
+                "GET / HTTP/1.1\r\nHost: edge.slice.local\r\n\r\n",
+                "GET / HTTP/1.1\r\nHost: edge.slice.local\r\nIf-None-Match: {}\r\n\r\n",
+                "GET /assets/app.css HTTP/1.1\r\nHost: edge.slice.local\r\n\r\n",
+                "GET /api/v1/events HTTP/1.1\r\nHost: edge.slice.local\r\nConnection: close\r\n\r\n"
+            ),
+            index_etag
+        );
+        client.write_all(pipelined_payload.as_bytes()).unwrap();
+        client.flush().unwrap();
+
+        let mut response_str = String::new();
+        client.read_to_string(&mut response_str).unwrap();
+        server_handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 4);
+        assert!(response_str.contains("X-Slice-Static: HIT-200"));
+        assert!(response_str.contains("X-Slice-Static: HIT-304"));
+        assert!(response_str.contains("HTTP/1.1 304 Not Modified"));
+        assert!(response_str.contains(html_content));
+        assert!(response_str.contains(css_content));
+        assert!(response_str.contains("Content-Type: text/event-stream; charset=utf-8"));
+        assert!(response_str.contains("id: 1\nevent: token\ndata: {\"chunk\":\"alpha\"}\n\n"));
     }
 }
 

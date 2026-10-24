@@ -1277,6 +1277,142 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     Ok(bundle)
 }
 
+/// Detects the canonical HTTP `Content-Type` header for a static web asset based on its file extension.
+pub fn detect_static_mime_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" | "cjs" => "application/javascript; charset=utf-8",
+        "json" | "map" => "application/json",
+        "svg" => "image/svg+xml",
+        "wasm" => "application/wasm",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "txt" | "md" => "text/plain; charset=utf-8",
+        "xml" => "application/xml",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Pre-indexed zero-stat static web asset with cryptographic BLAKE3 `ETag`.
+#[derive(Clone, Debug)]
+pub struct StaticAssetEntry {
+    pub url_path: String,
+    pub content_type: String,
+    pub etag_quoted: String,
+    pub payload: Arc<Vec<u8>>,
+}
+
+/// Zero-Stat in-memory / CAS-backed static asset lookup table (`O(1)` by URL path).
+#[derive(Clone, Debug, Default)]
+pub struct StaticAssetTable {
+    pub by_path: FxHashMap<String, StaticAssetEntry>,
+}
+
+impl StaticAssetTable {
+    pub fn new() -> Self {
+        Self {
+            by_path: FxHashMap::default(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_path.is_empty()
+    }
+
+    pub fn insert_asset(&mut self, rel_url_path: &str, content_type: String, etag_hex16: &str, payload: Arc<Vec<u8>>) {
+        let clean_path = if rel_url_path.starts_with('/') {
+            rel_url_path.to_string()
+        } else {
+            format!("/{}", rel_url_path)
+        };
+        let etag_quoted = format!("\"{}\"", etag_hex16);
+        let entry = StaticAssetEntry {
+            url_path: clean_path.clone(),
+            content_type,
+            etag_quoted,
+            payload,
+        };
+        if clean_path == "/index.html" {
+            self.by_path.insert("/".to_string(), entry.clone());
+        } else if let Some(dir_prefix) = clean_path.strip_suffix("/index.html") {
+            if !dir_prefix.is_empty() {
+                self.by_path.insert(dir_prefix.to_string(), entry.clone());
+                self.by_path.insert(format!("{}/", dir_prefix), entry.clone());
+            }
+        }
+        self.by_path.insert(clean_path, entry);
+    }
+
+    /// Recursively loads a static asset directory (`--static=./public`) and pre-computes
+    /// 256-bit BLAKE3 `ETag` digests for instant `304 Not Modified` negotiation.
+    pub fn extend_from_directory(&mut self, static_dir: &Path) -> Result<usize> {
+        if !static_dir.exists() {
+            bail!("Static asset directory does not exist: {}", static_dir.display());
+        }
+        let mut count = 0;
+        let mut stack = vec![static_dir.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.is_file() {
+                    let rel = path
+                        .strip_prefix(static_dir)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let raw_bytes = std::fs::read(&path)?;
+                    let hash_hex = blake3::hash(&raw_bytes).to_hex().to_string();
+                    let mime = detect_static_mime_type(&path).to_string();
+                    let url_path = format!("/{}", rel);
+                    self.insert_asset(&url_path, mime, &hash_hex[..16], Arc::new(raw_bytes));
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    /// Extracts all embedded `static:/...` blobs from a memory-mapped `.cas` archive.
+    pub fn from_cas_archive(archive: &MappedCasArchive) -> Self {
+        let mut table = Self::new();
+        for (spec, hash_hex) in &archive.header.radix_resolution_map {
+            if let Some(url_path) = spec.strip_prefix("static:") {
+                if let Some(blob) = archive.header.blobs.get(hash_hex) {
+                    let mime = archive.get_source_slice(blob).to_string();
+                    let bytes = archive.get_bytecode_slice(blob).to_vec();
+                    let etag_prefix = if blob.hash_hex.len() >= 16 {
+                        &blob.hash_hex[..16]
+                    } else {
+                        blob.hash_hex.as_str()
+                    };
+                    table.insert_asset(url_path, mime, etag_prefix, Arc::new(bytes));
+                }
+            }
+        }
+        table
+    }
+
+    #[inline]
+    pub fn resolve(&self, url_path: &str) -> Option<&StaticAssetEntry> {
+        self.by_path.get(url_path)
+    }
+}
+
 /// Builder for constructing a Zero-Stat Content-Addressed Storage (`.cas`) archive.
 pub struct CasBuilder {
     entrypoint: String,
@@ -1342,6 +1478,38 @@ impl CasBuilder {
         Ok(count)
     }
 
+    /// Recursively ingests static web assets (`--static=./public`) into the CAS archive under
+    /// `static:/<rel_path>` specifiers so an entire full-stack Web UI + API can be packed into a
+    /// single `.cas` archive or compiled into a single `SLICEEXE` executable.
+    pub fn ingest_static_directory(&mut self, static_dir: &Path) -> Result<usize> {
+        if !static_dir.exists() {
+            bail!("Static asset directory does not exist: {}", static_dir.display());
+        }
+        let mut count = 0;
+        let mut stack = vec![static_dir.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.is_file() {
+                    let rel = path
+                        .strip_prefix(static_dir)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let specifier = format!("static:/{}", rel);
+                    let raw_bytes = std::fs::read(&path)?;
+                    let mime = detect_static_mime_type(&path).to_string();
+                    self.modules.push((specifier, path, mime, raw_bytes));
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
+    }
+
     /// Serializes the entire module graph into an immutable, 64-byte aligned `.cas` archive file.
     pub fn write_to_file(&self, output_path: &Path) -> Result<CasIndexHeader> {
         let mut radix_map = FxHashMap::default();
@@ -1350,28 +1518,41 @@ impl CasBuilder {
         let mut entry_hash = String::new();
 
         for (specifier, _path, normalized_source, bytecode) in &self.modules {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(normalized_source.as_bytes());
-            hasher.update(bytecode);
-            let hash = hasher.finalize();
-            let hash_hex = hash.to_hex().to_string();
+            let is_static = specifier.starts_with("static:/");
+            let hash_hex = if is_static {
+                blake3::hash(bytecode).to_hex().to_string()
+            } else {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(normalized_source.as_bytes());
+                hasher.update(bytecode);
+                hasher.finalize().to_hex().to_string()
+            };
 
             // Register multiple normalized keys in the O(1) resolution table
             radix_map.insert(specifier.clone(), hash_hex.clone());
-            let stripped_ext = specifier
-                .trim_end_matches(".ts")
-                .trim_end_matches(".js")
-                .trim_end_matches(".mjs")
-                .to_string();
-            radix_map.insert(stripped_ext.clone(), hash_hex.clone());
-            if let Some(bare) = stripped_ext.strip_prefix("./") {
-                radix_map.insert(bare.to_string(), hash_hex.clone());
-            }
+            if is_static {
+                if specifier == "static:/index.html" {
+                    radix_map.insert("static:/".to_string(), hash_hex.clone());
+                } else if let Some(dir_prefix) = specifier.strip_suffix("/index.html") {
+                    radix_map.insert(dir_prefix.to_string(), hash_hex.clone());
+                    radix_map.insert(format!("{}/", dir_prefix), hash_hex.clone());
+                }
+            } else {
+                let stripped_ext = specifier
+                    .trim_end_matches(".ts")
+                    .trim_end_matches(".js")
+                    .trim_end_matches(".mjs")
+                    .to_string();
+                radix_map.insert(stripped_ext.clone(), hash_hex.clone());
+                if let Some(bare) = stripped_ext.strip_prefix("./") {
+                    radix_map.insert(bare.to_string(), hash_hex.clone());
+                }
 
-            if *specifier == self.entrypoint
-                || stripped_ext == self.entrypoint.trim_end_matches(".ts").trim_end_matches(".js")
-            {
-                entry_hash = hash_hex.clone();
+                if *specifier == self.entrypoint
+                    || stripped_ext == self.entrypoint.trim_end_matches(".ts").trim_end_matches(".js")
+                {
+                    entry_hash = hash_hex.clone();
+                }
             }
 
             if !blobs.contains_key(&hash_hex) {

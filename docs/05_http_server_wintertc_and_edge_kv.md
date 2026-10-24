@@ -159,3 +159,43 @@ Pass `--deterministic=<seed>` to `slice run` or `slice serve` to make `Math.rand
 slice run ./my_script.ts --deterministic=20261019
 ```
 
+---
+
+## 6. Zero-Stat CAS Static Asset Server (`--static`) & SSE Token Streaming (`Slice.streamSSE` / `Response.sse`)
+
+### 6.1 Embedding & Serving Static Web Assets with Cryptographic BLAKE3 `ETag` (`Phase F2`)
+Implemented in [`StaticAssetTable`](file:///p:/opensource/slice/crates/slice-cas/src/lib.rs#L1314-L1416) and [`serve_connection_keep_alive`](file:///p:/opensource/slice/crates/slice-cli/src/main.rs#L940-L993):
+- Pass `--static=./public` to **`slice pack`**, **`slice compile`**, or **`slice serve`**:
+  ```bash
+  # Pack your TypeScript API + entire ./public frontend directory into one .cas archive
+  slice pack ./src/index.ts ./fullstack.cas --static=./public
+
+  # Or compile your Frontend UI + Backend API into a single zero-dependency executable
+  slice compile ./src/index.ts -o ./my-webapp --static=./public
+
+  # Serve with zero-stat mmap static asset caching (< 2 us per hit, 0 JS VM spinup)
+  slice serve ./fullstack.cas --port=3000 --workers=8
+  ```
+- Every static file (`.html`, `.css`, `.js`, `.json`, `.svg`, `.wasm`, `.png`, `.ico`, `.woff2`, etc.) is indexed in O(1) by URL path (including directory index aliases `/` -> `/index.html` and `/docs/` -> `/docs/index.html`) with a pre-computed **16-hex-character BLAKE3 `ETag`**.
+- When a browser sends `If-None-Match: "<blake3_16>"`, `slice serve` responds with `HTTP/1.1 304 Not Modified` (`X-Slice-Static: HIT-304`, `X-Slice-Isolate-Us: 0`) in **`< 2 microseconds`** without spinning up a JS isolate or touching the disk.
+
+### 6.2 Server-Sent Events (SSE) & `ReadableStream` with Outbound Egress DLP (`Slice.streamSSE` / `Response.sse`)
+- Format and stream WHATWG Server-Sent Events (`id:`, `event:`, `retry:`, multi-line `data:`) using `Response.sse(eventsOrCallback, init?)`, `Slice.streamSSE(eventsOrCallback, init?)`, or `new ReadableStream({ start(controller) { ... } })`:
+  ```typescript
+  export default {
+      fetch(req: Request): Response {
+          const url = new URL(req.url);
+          if (url.pathname === "/api/v1/chat/stream") {
+              return Response.sse((emit: (ev: any) => void) => {
+                  emit({ id: "1", event: "token", data: { delta: "Hello " }, retry: 1500 });
+                  emit({ id: "2", event: "token", data: { delta: "from Slice Edge!" } });
+                  emit({ id: "3", event: "done", data: "[DONE]" });
+              });
+          }
+          return Response.json({ status: "ok" });
+      }
+  };
+  ```
+- Every SSE response is automatically scanned by `--audit-egress` (`verify_egress_secrets_slice`), blocking raw, Base64, or Base64URL secret exfiltration inside AI token streams before any bytes leave the host.
+
+

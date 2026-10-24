@@ -133,3 +133,4 @@ async function runBenchmarkSuite(): Promise<void> {
 }
 
 runBenchmarkSuite();
+

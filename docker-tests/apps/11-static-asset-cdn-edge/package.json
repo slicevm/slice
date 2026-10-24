@@ -1,0 +1,11 @@
+{
+  "name": "11-static-asset-cdn-edge",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./src/index.ts",
+  "dependencies": {
+    "bytes": "3.1.2",
+    "ms": "2.1.3"
+  }
+}
+
