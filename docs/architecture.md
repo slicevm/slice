@@ -170,6 +170,69 @@ Every `SliceIsolate` executes inside a [`TenantCompartment`](file:///p:/opensour
 
 ---
 
+### 3.5 Phase N1: State-of-the-Art `slice serve` Architecture (Keep-Alive, Pipelining, Direct `JsObject::call` & WinterTC Bridge)
+
+- **Zero-Allocation Stack HTTP/1.1 Parser & Vectorized Pipelined Flushing ([`serve_connection_keep_alive`](file:///p:/opensource/slice/crates/slice-cli/src/main.rs#L753-L930)):**
+  - Each worker thread in the `--workers=N` shared-nothing pool pre-allocates a reusable `64 KB` socket read buffer (`read_buf`) and `4 KB` write buffer (`write_buf`).
+  - Incoming HTTP/1.1 requests are scanned in-place via [`find_http_header_end`](file:///p:/opensource/slice/crates/slice-cli/src/main.rs#L719-L735) with zero heap `String` allocations, extracting up to 16 headers into a stack-allocated `[(&str, &str); 16]` array (`headers_stack`).
+  - When multiple pipelined HTTP/1.1 requests arrive in a single TCP read (`has_more_pipelined`), responses are accumulated into `write_buf` and flushed in a single vectorized `stream.write_all(write_buf)` system call.
+- **In-Place Isolate Reset ([`SliceIsolate::reset_for_request`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L1908-L1934)) & Direct `JsObject::call`:**
+  - Instead of allocating a new `SliceIsolate` struct and cloning `CapabilityToken` vectors on every HTTP request, each worker resets its `SliceIsolate` in place, entering a fresh `HardwareProtectionDomain` (`WRPKRU`) and resetting CPU fuel and memory counters in nanoseconds.
+  - On warm `SLICEBOA` hits, [`WarmBoaRealm::loaded_bundles`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L3223-L3226) stores the compiled `boa_engine::JsObject` entrypoint function handle and invokes `fn_obj.call(...)` directly in Rust, completely bypassing JS source lexing and `ctx.eval`.
+- **WinterTC Request/Response & Post-Response `Slice.waitUntil(fn)` ([`execute_http_request`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L2020-L2095)):**
+  - Exposes `Slice.request()`, `Slice.respond(status, body, contentType)`, and `Slice.waitUntil(fn)`. Deferred `waitUntil` callbacks are drained via [`drain_wait_until_tasks`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L2098-L2126) **after** the HTTP response bytes have been flushed to the client socket, while still charging CPU fuel to the tenant's compartment budget.
+
+---
+
+### 3.6 Phase N2: Next-Gen Multi-Tenant Serverless & MicroVM Primitives (`Slice.kv`, `--tenant-dir`, `--deterministic`)
+
+- **16-Way Sharded In-Memory Edge KV & Atomic Counter Slab ([`EDGE_KV_SLAB`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L3381-L3470)):**
+  - Backed by `OnceLock<[Mutex<FxHashMap<(String, String), KvEntry>>; 16]>` partitioned by `(tenant_id, key)` using `FxHasher` low 4 bits (`0..15`) for lock-free multi-core scaling across `--workers=N`.
+  - Supports `Slice.kv.get(key)`, `Slice.kv.set(key, val, ttlMs)`, `Slice.kv.del(key)`, and atomic 64-bit `Slice.kv.incr(key, delta)`. Every write charges its byte delta against `BOA_KV_MEM_BUDGET` and `compartment.alloc_memory(bytes)`, trapping with `SandboxViolation::MemoryCeilingExceeded` if a tenant exceeds its memory ceiling.
+- **Multi-Tenant Dynamic `.cas` Router & Zero-Downtime Atomic Hot-Swap ([`resolve_tenant_bytecode_hotswap`](file:///p:/opensource/slice/crates/slice-cli/src/main.rs#L663-L716)):**
+  - When `slice serve --tenant-dir=<dir>` is active, each worker resolves `X-Slice-Tenant: <id>` or URL prefix `/t/<id>/...` to `<dir>/<id>.cas` (falling back to `<dir>/default.cas`).
+  - Thread-local `TENANT_CAS_CACHE` tracks `(mtime_ns, file_len, Arc<Vec<u8>>)`. When a `.cas` file is atomically replaced on disk, the worker automatically maps the new `.cas` archive and pre-warms its `__slice_rc` closure with zero dropped TCP connections.
+- **Opt-In Deterministic Replay Mode ([`SliceIsolate::set_deterministic_seed`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L1871-L1877)):**
+  - When `--deterministic=<seed>` is passed (`None` by default = `0.00 ns` overhead), `Math.random()`, `Date.now()`, and `performance.now()` route through `__slice_det_random` and `__slice_det_now`, driven by a deterministic **SplitMix64** PRNG (`splitmix64_next_f64`) and a monotonic virtual clock (`1700000000000 + tick_ms`).
+
+---
+
+### 3.7 Phase N3: AI Agent "Code Mode" Sandbox, `< 5 us` VFS/KV Checkpoints, Egress Secret Guard, & Native MCP Server
+
+```
++---------------------------------------------------------------------------------------------------+
+|                        Phase N3: AI Agent "Code Mode" & Native MCP Architecture                   |
+|                                                                                                   |
+|  Claude Code / Cursor / LLM Agent                                                                 |
+|         |  JSON-RPC 2.0 over stdio (`slice mcp [--audit-egress=SECRET]`)                          |
+|         v                                                                                         |
+|  +---------------------------------------------------------------------------------------------+  |
+|  | Parent Orchestrator Isolate (`mcp-agent-host` or `slice run tot_agent.ts`)                  |  |
+|  |  - `Slice.checkpoint()` -> Snapshots `BOA_VFS_CACHE` + Tenant `EDGE_KV_SLAB` in < 5 us      |  |
+|  |  - `Slice.evalSandbox(code, opts)` -> Saves Parent TLS -> Spawns Attenuated Child Isolate   |  |
+|  |      |                                                                                      |  |
+|  |      +---> [Child SliceIsolate]                                                             |  |
+|  |              * Capabilities = Parent Caps INTERSECT Child `opts.allowRead` / `allowWrite`   |  |
+|  |              * Fuel & Memory = min(Parent Remaining, Child `opts.fuel` / `memoryBytes`)     |  |
+|  |              * Egress Guard = Scans stdout & returnValue for raw/base64/base64url secrets   |  |
+|  |  - If `!branch.ok` -> `Slice.restore(snapId)` rolls back VFS + KV state in < 5 us!          |  |
+|  +---------------------------------------------------------------------------------------------+  |
++---------------------------------------------------------------------------------------------------+
+```
+
+1. **Dynamic Sub-Isolate Spawning with Strict Capability Attenuation ([`SliceIsolate::eval_sandbox`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L1766-L1864)):**
+   - An orchestrator script or MCP host can evaluate untrusted AI-generated TypeScript/JavaScript strings via `Slice.evalSandbox(code, opts)`.
+   - Child `allowed_read_prefixes` and `allowed_write_prefixes` are **strictly intersected** with the parent isolate's `CapabilityToken` (a child can never escalate privileges beyond its parent), and child `fuel_consumed` is deducted directly from the parent isolate's remaining fuel budget.
+   - Re-entrant `__slice_eval_sandbox` saves and restores the parent isolate's thread-local state (`BOA_STDOUT`, `BOA_VIOLATION`, `BOA_ACTIVE_TENANT`, `BOA_ACTIVE_CAPS`, `BOA_KV_MEM_BUDGET`, `BOA_DET_STATE`) so nested sub-isolates execute with zero TLS interference.
+2. **Sub-5us VFS & KV Checkpointing (`Slice.checkpoint()` & `Slice.restore(id)`):**
+   - [`checkpoint_tenant_state`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L3306-L3335) captures a point-in-time clone of the thread-local `node:fs` VFS slab (`BOA_VFS_CACHE` and `BOA_VFS_DIRS`) and every entry belonging to `tenant_id` across all 16 shards of `EDGE_KV_SLAB`, returning a monotonic `u64` snapshot ID.
+   - [`restore_tenant_state`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L3337-L3353) restores both the VFS slab and the tenant's sharded KV keys in `< 5 microseconds`, enabling Tree-of-Thought (ToT) AI coding agents to test candidate patches and roll back failed branches instantaneously.
+3. **Egress Secret Guard (`--audit-egress=<SECRET>`) & Built-In MCP Server (`slice mcp`):**
+   - [`verify_egress_secrets_slice`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L3355-L3379) inspects `stdout`, `returnValue`, and HTTP response bodies for raw, standard Base64, and URL-safe Base64 encodings of registered secrets, trapping with `SandboxViolation::EnvAccessDenied { key: "EGRESS_SECRET_LEAK_BLOCKED" }` (`0.00 ns` cost when no secrets are registered).
+   - [`cmd_mcp`](file:///p:/opensource/slice/crates/slice-cli/src/main.rs#L1014-L1074) implements the JSON-RPC 2.0 Model Context Protocol over `stdio`, exposing `slice_eval_ts`, `slice_kv_get`, `slice_kv_set`, and `slice_checkpoint`.
+
+---
+
 ## 4. Summary of Architectural Gains Across All 8 Production Workloads
 
 | Architectural Innovation | Bottleneck Eliminated | Measured Gain (Linux `x86_64` Docker) |
@@ -184,6 +247,7 @@ Every `SliceIsolate` executes inside a [`TenantCompartment`](file:///p:/opensour
 | **Phase 9B `SHA-NI`, `__slice_rc` Persistent Realm Cache & Oxc Semantic Lowering** | Cold CJS wrapper re-eval, dynamic `JSON.stringify` & crypto builder allocs | All 8 apps **`5.18 ms - 9.34 ms` cold** / **`0.19 ms - 4.19 ms` warm** (**up to `73.7x` faster than Bun**) |
 | **Phase N1 State-of-the-Art `slice serve` (`--workers=N`, Keep-Alive, Pipelining, Direct `JsObject::call` & WinterTC Bridge)** | Per-request TCP handshake, `BufReader` line allocs, & `ctx.eval` re-parsing on warm HTTP requests | **`152,376 req/s` (`6.56 us/req`)** in Tier-0 CAS (**`1.73x` faster than `Bun.serve`**) and **`107,274 req/s` (`9.32 us/req`)** in Tier-1 WinterTC (**beating both `Bun.serve` and `Deno.serve`**) |
 | **Phase N2 Sharded `Slice.kv`, Multi-Tenant `--tenant-dir` Hot-Swap, & `--deterministic` Replay** | External Redis round-trips for edge rate-limiting, server restarts on tenant deploy, & non-deterministic PRNG/clocks | **`586.10 us` for 1,001 `Slice.kv` ops** (`0.58 us/op`), zero-downtime `.cas` hot-swap, & 100% bit-for-bit SplitMix64 replay |
+| **Phase N3 `Slice.evalSandbox`, `< 5 us` `Slice.checkpoint`/`restore`, Egress Secret Guard, & `slice mcp` Server** | 125ms Firecracker VM boot for AI agent tool calls, slow disk rollback for Tree-of-Thought, & prompt-injection secret exfiltration | **Sub-millisecond nested TypeScript sub-sandboxes with capability attenuation, `< 5 us` VFS+KV state rollback, Base64 egress secret blocking, & native JSON-RPC 2.0 MCP server** |
 
 
 

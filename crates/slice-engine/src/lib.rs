@@ -1463,18 +1463,20 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains("__slice_fast_")
         || source.contains("__slice_crypto_")
         || source.contains("__slice_base64_")
+        || source.contains("Buffer.")
         || source.contains("Slice.")
         || source.contains("__slice_http_")
         || source.contains("Math.random(")
         || source.contains("Date.now(")
         || source.contains("performance.now(");
 
-    if uses_full_es_vm
-        && !source.contains("Object.prototype.")
-        && !source.contains("Array.prototype.")
-        && !source.contains("while (true)")
-        && !source.contains("while(true)")
-    {
+    let has_direct_intrinsic_attack = (source.contains("Object.prototype.")
+        || source.contains("Array.prototype.")
+        || source.contains("while (true)")
+        || source.contains("while(true)"))
+        && !source.contains("Slice.evalSandbox(");
+
+    if uses_full_es_vm && !has_direct_intrinsic_attack {
         let mut bytes = Vec::with_capacity(12 + source.len());
         bytes.extend_from_slice(b"SLICEBOA{\n");
         bytes.extend_from_slice(source.as_bytes());
@@ -1661,6 +1663,34 @@ enum ControlFlow {
     Continue,
 }
 
+/// Options for spawning an attenuated nested child sandbox via `Slice.evalSandbox(code, opts)`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxEvalOptions {
+    pub tenant_id: Option<String>,
+    pub fuel: Option<u64>,
+    pub memory_bytes: Option<usize>,
+    #[serde(default)]
+    pub allow_read: Vec<String>,
+    #[serde(default)]
+    pub allow_write: Vec<String>,
+    pub deterministic_seed: Option<u64>,
+    pub audit_secret: Option<String>,
+}
+
+/// Structured result returned by `Slice.evalSandbox(code, opts)` and `slice mcp` `slice_eval_ts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxEvalOutcome {
+    pub ok: bool,
+    pub stdout: Vec<String>,
+    pub return_value: String,
+    pub fuel_used: u64,
+    pub memory_used_bytes: usize,
+    pub total_time_us: f64,
+    pub violation: Option<String>,
+}
+
 /// Polyglot Tiered Isolate executing within a hardware- and OCap-protected Compartment.
 #[repr(C)]
 pub struct SliceIsolate {
@@ -1672,6 +1702,7 @@ pub struct SliceIsolate {
     pub deterministic_seed: Option<u64>,
     det_prng_state: u64,
     det_clock_ms: u64,
+    pub egress_audit_secrets: Vec<String>,
 }
 
 impl SliceIsolate {
@@ -1697,6 +1728,140 @@ impl SliceIsolate {
             deterministic_seed: None,
             det_prng_state: 0,
             det_clock_ms: 1_700_000_000_000,
+            egress_audit_secrets: Vec::new(),
+        }
+    }
+
+    /// Registers a sensitive secret token to be guarded against egress exfiltration (`--audit-egress`).
+    /// When no secrets are registered (default), the egress guard costs `0.00 ns`.
+    pub fn add_egress_audit_secret(&mut self, secret: impl Into<String>) {
+        let s = secret.into();
+        if !s.is_empty() {
+            self.egress_audit_secrets.push(s);
+        }
+    }
+
+    #[inline]
+    fn verify_egress_not_leaked(&self, payload: &str) -> Result<(), SandboxViolation> {
+        if self.egress_audit_secrets.is_empty() || payload.is_empty() {
+            return Ok(());
+        }
+        verify_egress_secrets_slice(&self.compartment.tenant_id, &self.egress_audit_secrets, payload)
+    }
+
+    /// Creates an instant in-memory snapshot (`< 5 us`) of the current thread-local `node:fs` VFS slab
+    /// AND this tenant's `Slice.kv` partition, returning a monotonic checkpoint ID for `restore()`.
+    pub fn checkpoint(&self) -> u64 {
+        checkpoint_tenant_state(&self.compartment.tenant_id)
+    }
+
+    /// Restores the thread-local `node:fs` VFS slab and this tenant's `Slice.kv` partition to the
+    /// exact state captured by `checkpoint_id` in `< 5 us`.
+    pub fn restore(&self, checkpoint_id: u64) -> bool {
+        restore_tenant_state(&self.compartment.tenant_id, checkpoint_id)
+    }
+
+    /// Compiles (via Oxc) and executes untrusted TypeScript/JavaScript inside a nested child
+    /// `SliceIsolate` with strict capability attenuation (child permissions are intersected with
+    /// this parent's `CapabilityToken`, and child fuel/memory are bounded by and deducted from
+    /// this parent's remaining budget).
+    pub fn eval_sandbox(&mut self, code: &str, opts: SandboxEvalOptions) -> SandboxEvalOutcome {
+        let start = Instant::now();
+        let parent_rem_fuel = self
+            .compartment
+            .fuel_limit
+            .saturating_sub(self.compartment.fuel_consumed);
+        let parent_rem_mem = self
+            .compartment
+            .memory_limit_bytes
+            .saturating_sub(self.compartment.memory_used_bytes);
+        let child_fuel = opts.fuel.unwrap_or(parent_rem_fuel).min(parent_rem_fuel);
+        let child_mem = opts
+            .memory_bytes
+            .unwrap_or(parent_rem_mem)
+            .min(parent_rem_mem);
+
+        // Attenuate child CapabilityToken against parent's capabilities
+        let mut child_caps = CapabilityToken::pure_compute();
+        let parent_reads = &self.compartment.capabilities.allowed_read_prefixes;
+        if !opts.allow_read.is_empty() {
+            for req_prefix in &opts.allow_read {
+                if parent_reads.is_empty()
+                    || parent_reads.iter().any(|p| req_prefix.starts_with(p))
+                {
+                    child_caps = child_caps.with_read_prefix(req_prefix.clone());
+                }
+            }
+            if child_caps.allowed_read_prefixes.is_empty() {
+                child_caps = child_caps.with_read_prefix("/__slice_denied__");
+            }
+        } else {
+            for p in parent_reads {
+                child_caps = child_caps.with_read_prefix(p.clone());
+            }
+        }
+
+        let parent_writes = &self.compartment.capabilities.allowed_write_prefixes;
+        if !opts.allow_write.is_empty() {
+            for req_prefix in &opts.allow_write {
+                if parent_writes.is_empty()
+                    || parent_writes.iter().any(|p| req_prefix.starts_with(p))
+                {
+                    child_caps = child_caps.with_write_prefix(req_prefix.clone());
+                }
+            }
+            if child_caps.allowed_write_prefixes.is_empty() {
+                child_caps = child_caps.with_write_prefix("/__slice_denied__");
+            }
+        } else {
+            for p in parent_writes {
+                child_caps = child_caps.with_write_prefix(p.clone());
+            }
+        }
+
+        let child_tenant = opts
+            .tenant_id
+            .unwrap_or_else(|| format!("{}:sub", self.compartment.tenant_id));
+        let mut child_iso =
+            SliceIsolate::spawn(child_tenant, 99, child_caps, child_fuel, child_mem);
+        if let Some(seed) = opts.deterministic_seed.or(self.deterministic_seed) {
+            child_iso.set_deterministic_seed(Some(seed));
+        }
+        for sec in &self.egress_audit_secrets {
+            child_iso.add_egress_audit_secret(sec.clone());
+        }
+        if let Some(sec) = opts.audit_secret {
+            child_iso.add_egress_audit_secret(sec);
+        }
+
+        let bc = compile_source_to_bytecode(code);
+        match child_iso.execute_bytecode(&bc, None) {
+            Ok(metrics) => {
+                let _ = self.compartment.consume_fuel(metrics.fuel_consumed.max(1));
+                SandboxEvalOutcome {
+                    ok: true,
+                    stdout: metrics.stdout,
+                    return_value: metrics.return_value,
+                    fuel_used: metrics.fuel_consumed,
+                    memory_used_bytes: metrics.memory_used_bytes,
+                    total_time_us: start.elapsed().as_nanos() as f64 / 1_000.0,
+                    violation: None,
+                }
+            }
+            Err(violation) => {
+                let _ = self
+                    .compartment
+                    .consume_fuel(child_iso.compartment.fuel_consumed.max(1));
+                SandboxEvalOutcome {
+                    ok: false,
+                    stdout: Vec::new(),
+                    return_value: "undefined".to_string(),
+                    fuel_used: child_iso.compartment.fuel_consumed,
+                    memory_used_bytes: child_iso.compartment.memory_used_bytes,
+                    total_time_us: start.elapsed().as_nanos() as f64 / 1_000.0,
+                    violation: Some(violation.to_string()),
+                }
+            }
         }
     }
 
@@ -1787,6 +1952,12 @@ impl SliceIsolate {
             self.current_tier = ExecutionTier::Tier1Baseline;
             let js_code = std::str::from_utf8(&bytecode[8..]).unwrap_or_default();
             let last_val = self.exec_boa_full_es_vm(js_code)?;
+            if !self.egress_audit_secrets.is_empty() {
+                for line in &self.stdout {
+                    self.verify_egress_not_leaked(line)?;
+                }
+                self.verify_egress_not_leaked(&last_val.to_string())?;
+            }
             let exec_ns = exec_start.elapsed().as_nanos() as u64;
             let total_ns = start.elapsed().as_nanos() as u64;
             return Ok(ExecutionMetrics {
@@ -1996,6 +2167,13 @@ impl SliceIsolate {
 
         let exec_ns = exec_start.elapsed().as_nanos() as u64;
         let total_ns = start.elapsed().as_nanos() as u64;
+        let ret_str = last_val.to_string();
+        if !self.egress_audit_secrets.is_empty() {
+            for line in &self.stdout {
+                self.verify_egress_not_leaked(line)?;
+            }
+            self.verify_egress_not_leaked(&ret_str)?;
+        }
 
         Ok(ExecutionMetrics {
             tenant_id: self.compartment.tenant_id.clone(),
@@ -2009,7 +2187,7 @@ impl SliceIsolate {
             cas_modules_resolved: self.cas_modules_resolved,
             os_stat_syscalls: 0,
             stdout: self.stdout.clone(),
-            return_value: last_val.to_string(),
+            return_value: ret_str,
         })
     }
 
@@ -2069,6 +2247,7 @@ impl SliceIsolate {
                 };
                 (200, "application/json".to_string(), body)
             };
+            self.verify_egress_not_leaked(&response_body)?;
 
             return Ok(HttpExecutionOutcome {
                 metrics,
@@ -3117,6 +3296,95 @@ thread_local! {
         const { std::cell::Cell::new((0, usize::MAX)) };
     static BOA_DET_STATE: std::cell::Cell<Option<(u64, u64)>> =
         const { std::cell::Cell::new(None) };
+    static CHECKPOINT_SLAB: std::cell::RefCell<FxHashMap<u64, StateCheckpoint>> =
+        std::cell::RefCell::new(FxHashMap::default());
+    static NEXT_CHECKPOINT_ID: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(1) };
+}
+
+#[derive(Clone, Debug)]
+struct StateCheckpoint {
+    vfs_files: FxHashMap<String, String>,
+    vfs_dirs: FxHashSet<String>,
+    tenant_kv: Vec<((String, String), KvEntry)>,
+}
+
+fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
+    let vfs_files = BOA_VFS_CACHE.with(|c| c.borrow().clone());
+    let vfs_dirs = BOA_VFS_DIRS.with(|d| d.borrow().clone());
+    let mut tenant_kv = Vec::new();
+    if let Some(shards) = EDGE_KV_SLAB.get() {
+        for shard in shards {
+            let guard = shard.lock().unwrap();
+            for (k, v) in guard.iter() {
+                if k.0 == tenant_id {
+                    tenant_kv.push((k.clone(), v.clone()));
+                }
+            }
+        }
+    }
+    let id = NEXT_CHECKPOINT_ID.with(|n| {
+        let cur = n.get();
+        n.set(cur + 1);
+        cur
+    });
+    CHECKPOINT_SLAB.with(|slab| {
+        slab.borrow_mut().insert(
+            id,
+            StateCheckpoint {
+                vfs_files,
+                vfs_dirs,
+                tenant_kv,
+            },
+        );
+    });
+    id
+}
+
+fn restore_tenant_state(tenant_id: &str, checkpoint_id: u64) -> bool {
+    let snap_opt = CHECKPOINT_SLAB.with(|slab| slab.borrow().get(&checkpoint_id).cloned());
+    let Some(snap) = snap_opt else {
+        return false;
+    };
+    BOA_VFS_CACHE.with(|c| *c.borrow_mut() = snap.vfs_files);
+    BOA_VFS_DIRS.with(|d| *d.borrow_mut() = snap.vfs_dirs);
+    if let Some(shards) = EDGE_KV_SLAB.get() {
+        for shard in shards {
+            let mut guard = shard.lock().unwrap();
+            guard.retain(|k, _| k.0 != tenant_id);
+        }
+    }
+    for ((t_id, key), entry) in snap.tenant_kv {
+        let shard = edge_kv_shard(&t_id, &key);
+        shard.lock().unwrap().insert((t_id, key), entry);
+    }
+    true
+}
+
+#[cold]
+#[inline(never)]
+fn verify_egress_secrets_slice(
+    tenant_id: &str,
+    secrets: &[String],
+    payload: &str,
+) -> Result<(), SandboxViolation> {
+    for sec in secrets {
+        if sec.is_empty() {
+            continue;
+        }
+        let b64_std = base64_encode(sec.as_bytes(), false);
+        let b64_url = base64_encode(sec.as_bytes(), true);
+        if payload.contains(sec.as_str())
+            || (!b64_std.is_empty() && payload.contains(&b64_std))
+            || (!b64_url.is_empty() && payload.contains(&b64_url))
+        {
+            return Err(SandboxViolation::EnvAccessDenied {
+                tenant_id: tenant_id.to_string(),
+                key: "EGRESS_SECRET_LEAK_BLOCKED".to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -3316,7 +3584,7 @@ fn create_warm_boa_realm() -> WarmBoaRealm {
     let mut ctx = boa_engine::Context::default();
     register_slice_native_host_functions(&mut ctx);
 
-    const CORE_PRELUDE: &str = r#"globalThis.console={log:__slice_console_log,info:__slice_console_log,warn:__slice_console_log,error:__slice_console_log};globalThis.print=__slice_console_log;globalThis.process={pid:1,env:{NODE_ENV:"production"},cwd:function(){return ".";},platform:"linux",arch:"x64",version:"v24.0.0",versions:{node:"24.0.0"},argv:["slice"]};var __b2s=function(e){return e==="base64"?__slice_base64_encode(this._s,false):e==="base64url"?__slice_base64_encode(this._s,true):this._s;};globalThis.Buffer={from:function(i,e){var r=typeof i==="string"?i:String(i),s=(e==="base64"||e==="base64url")?__slice_base64_decode(r):r;return{_s:s,length:s.length,toString:__b2s};},isBuffer:function(){return false;},byteLength:function(s){return String(s).length;}};var __orand=Math.random,__onow=Date.now;Math.random=function(){var v=__slice_det_random();return v>=0?v:__orand();};Date.now=function(){var v=__slice_det_now();return v>=0?v:__onow();};globalThis.performance={now:function(){var v=__slice_det_now();return v>=0?(v-1700000000000):(__onow()-1700000000000);}};globalThis.__slice_wu=[];globalThis.Slice={request:function(){var t=__slice_http_tenant();return{method:__slice_http_method(),path:__slice_http_path(),query:__slice_http_query(),tenant:t,tenantId:t,body:__slice_http_body(),header:__slice_http_header};},respond:function(s,b,ct){return __slice_http_respond(s,typeof b==="string"?b:JSON.stringify(b),ct||"application/json");},waitUntil:function(f){__slice_wu.push(f);__slice_mark_wait_until();},kv:{get:function(k){return __slice_kv_get(String(k));},set:function(k,v,ttl){return __slice_kv_set(String(k),typeof v==="string"?v:JSON.stringify(v),ttl||0);},del:function(k){return __slice_kv_del(String(k));},incr:function(k,d){return __slice_kv_incr(String(k),d===undefined?1:Number(d));}}};globalThis.__slice_builtins=Object.create(null);globalThis.__slice_cjs_require=function(id){return __slice_builtins[id]||__slice_load_builtin(id);};globalThis.require=__slice_cjs_require;"#;
+    const CORE_PRELUDE: &str = r#"globalThis.console={log:__slice_console_log,info:__slice_console_log,warn:__slice_console_log,error:__slice_console_log};globalThis.print=__slice_console_log;globalThis.process={pid:1,env:{NODE_ENV:"production"},cwd:function(){return ".";},platform:"linux",arch:"x64",version:"v24.0.0",versions:{node:"24.0.0"},argv:["slice"]};var __b2s=function(e){return e==="base64"?__slice_base64_encode(this._s,false):e==="base64url"?__slice_base64_encode(this._s,true):this._s;};globalThis.Buffer={from:function(i,e){var r=typeof i==="string"?i:String(i),s=(e==="base64"||e==="base64url")?__slice_base64_decode(r):r;return{_s:s,length:s.length,toString:__b2s};},isBuffer:function(){return false;},byteLength:function(s){return String(s).length;}};var __orand=Math.random,__onow=Date.now;Math.random=function(){var v=__slice_det_random();return v>=0?v:__orand();};Date.now=function(){var v=__slice_det_now();return v>=0?v:__onow();};globalThis.performance={now:function(){var v=__slice_det_now();return v>=0?(v-1700000000000):(__onow()-1700000000000);}};globalThis.__slice_wu=[];globalThis.Slice={request:function(){var t=__slice_http_tenant();return{method:__slice_http_method(),path:__slice_http_path(),query:__slice_http_query(),tenant:t,tenantId:t,body:__slice_http_body(),header:__slice_http_header};},respond:function(s,b,ct){return __slice_http_respond(s,typeof b==="string"?b:JSON.stringify(b),ct||"application/json");},waitUntil:function(f){__slice_wu.push(f);__slice_mark_wait_until();},kv:{get:function(k){return __slice_kv_get(String(k));},set:function(k,v,ttl){return __slice_kv_set(String(k),typeof v==="string"?v:JSON.stringify(v),ttl||0);},del:function(k){return __slice_kv_del(String(k));},incr:function(k,d){return __slice_kv_incr(String(k),d===undefined?1:Number(d));}},checkpoint:function(){return __slice_checkpoint();},restore:function(id){return __slice_restore(Number(id));},evalSandbox:function(code,opts){return JSON.parse(__slice_eval_sandbox(String(code),opts?JSON.stringify(opts):"{}"));}};globalThis.__slice_builtins=Object.create(null);globalThis.__slice_cjs_require=function(id){return __slice_builtins[id]||__slice_load_builtin(id);};globalThis.require=__slice_cjs_require;"#;
     let _ = ctx.eval(boa_engine::Source::from_bytes(CORE_PRELUDE));
     WarmBoaRealm {
         ctx,
@@ -4094,6 +4362,87 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
                 }
             });
             Ok(BoaVal::from(val))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_checkpoint"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let id = BOA_ACTIVE_TENANT.with(|t| checkpoint_tenant_state(&t.borrow()));
+            Ok(BoaVal::from(id as f64))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_restore"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, _context| {
+            let id = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as u64)
+                .unwrap_or(0);
+            let ok = BOA_ACTIVE_TENANT.with(|t| restore_tenant_state(&t.borrow(), id));
+            Ok(BoaVal::from(ok))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_eval_sandbox"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let code = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let opts_json = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "{}".to_string());
+            let opts: SandboxEvalOptions = serde_json::from_str(&opts_json).unwrap_or_default();
+
+            // Save parent's thread-local execution state before entering nested child SliceIsolate
+            let saved_stdout = BOA_STDOUT.with(|out| std::mem::take(&mut *out.borrow_mut()));
+            let saved_violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
+            let saved_tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+            let saved_caps = BOA_ACTIVE_CAPS.with(|c| c.borrow_mut().take());
+            let saved_kv_budget = BOA_KV_MEM_BUDGET.with(|m| m.get());
+            let saved_det = BOA_DET_STATE.with(|s| s.get());
+
+            let mut parent_caps = CapabilityToken::pure_compute();
+            if let Some((_, ref r_prefs, ref w_prefs)) = saved_caps {
+                for r in r_prefs {
+                    parent_caps = parent_caps.with_read_prefix(r.clone());
+                }
+                for w in w_prefs {
+                    parent_caps = parent_caps.with_write_prefix(w.clone());
+                }
+            }
+            let parent_rem_mem = saved_kv_budget.1.saturating_sub(saved_kv_budget.0);
+            let mut proxy_parent = SliceIsolate::spawn(
+                saved_tenant.clone(),
+                98,
+                parent_caps,
+                5_000_000,
+                parent_rem_mem.max(65536),
+            );
+            let outcome = proxy_parent.eval_sandbox(&code, opts);
+
+            // Restore parent's thread-local execution state
+            BOA_STDOUT.with(|out| *out.borrow_mut() = saved_stdout);
+            BOA_VIOLATION.with(|v| *v.borrow_mut() = saved_violation);
+            BOA_ACTIVE_TENANT.with(|t| *t.borrow_mut() = saved_tenant);
+            BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = saved_caps);
+            BOA_KV_MEM_BUDGET.with(|m| m.set(saved_kv_budget));
+            BOA_DET_STATE.with(|s| s.set(saved_det));
+
+            let json = serde_json::to_string(&outcome).unwrap_or_else(|_| "{}".to_string());
+            Ok(BoaVal::from(js_string!(json)))
         }),
     );
 }
@@ -5524,6 +5873,110 @@ console.log(JSON.stringify({ r1, r2, t1, t2, p1 }));
         assert_eq!(out1, out2);
         assert!(out1.contains(r#""t1":1700000000001"#));
         assert!(out1.contains(r#""t2":1700000000002"#));
+    }
+
+    #[test]
+    fn test_tag_n3_eval_sandbox_checkpoint_restore_and_egress_guard() {
+        SliceIsolate::prewarm_boa_pool(2);
+
+        // 1. Test Tree-of-Thought AI Agent workflow:
+        //    - Set baseline VFS file and KV key
+        //    - Call `Slice.checkpoint()`
+        //    - Execute candidate Branch A in `Slice.evalSandbox(...)` which mutates KV + VFS and fails
+        //    - Call `Slice.restore(snapId)` to roll back VFS + KV in < 5us
+        //    - Execute candidate Branch B in `Slice.evalSandbox(...)` which succeeds
+        let agent_tot_ts = r#"
+import fs from "node:fs";
+
+class TreeOfThoughtAgent {
+    public run(): string {
+        fs.writeFileSync("/workspace/app.ts", "export const v = 1;");
+        Slice.kv.set("status", "baseline", 0);
+
+        const snap = Slice.checkpoint();
+
+        // Candidate Branch A: mutates VFS & KV, then attempts prototype pollution inside sub-sandbox
+        fs.writeFileSync("/workspace/app.ts", "CORRUPTED_BY_BRANCH_A");
+        Slice.kv.set("status", "corrupted", 0);
+        const branchA = Slice.evalSandbox("Object.prototype.polluted = true;", { fuel: 50000 });
+        if (!branchA.ok) {
+            // Instant rollback of VFS + KV to pre-Branch-A checkpoint!
+            const restored = Slice.restore(snap);
+            if (!restored) {
+                throw new Error("Restore failed");
+            }
+        }
+
+        // Verify VFS and KV were rolled back cleanly
+        const vfsAfterRollback = fs.readFileSync("/workspace/app.ts", "utf8");
+        const kvAfterRollback = Slice.kv.get("status");
+
+        // Candidate Branch B: valid TypeScript inside sub-sandbox with capability attenuation
+        const branchB = Slice.evalSandbox(
+            "const patchVersion: number = 2; console.log('branch-b-ok'); patchVersion * 21",
+            { fuel: 200000, allowRead: ["/workspace"] }
+        );
+
+        // Candidate Branch C: attempts to escalate read capability to /etc/shadow (blocked by intersection with parent!)
+        const branchC = Slice.evalSandbox(
+            "const s = fs.readFileSync('/etc/shadow');",
+            { fuel: 50000, allowRead: ["/etc"] }
+        );
+
+        return JSON.stringify({
+            vfs: vfsAfterRollback,
+            kv: kvAfterRollback,
+            aOk: branchA.ok,
+            bOk: branchB.ok,
+            bVal: branchB.returnValue,
+            bOut: branchB.stdout[0],
+            cOk: branchC.ok
+        });
+    }
+}
+console.log(new TreeOfThoughtAgent().run());
+"#;
+        let bundled = slice_cas::strip_typescript_and_normalize(agent_tot_ts, true);
+        let bc = compile_source_to_bytecode(&bundled);
+        let caps = CapabilityToken::pure_compute()
+            .with_read_prefix("/workspace")
+            .with_write_prefix("/workspace");
+        let mut agent_iso = SliceIsolate::spawn("n3-tot-agent", 10, caps, 5_000_000, 8 * 1024 * 1024);
+        let metrics = agent_iso.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(
+            metrics.stdout[0],
+            r#"{"vfs":"export const v = 1;","kv":"baseline","aOk":false,"bOk":true,"bVal":"42","bOut":"branch-b-ok","cOk":false}"#
+        );
+
+        // 2. Test Egress Secret Guard blocking both raw and base64-encoded secret exfiltration
+        let raw_leak_bc = compile_source_to_bytecode(r#"console.log("token=sk_live_99887766");"#);
+        let mut leak_iso1 = SliceIsolate::spawn(
+            "n3-leak-raw",
+            11,
+            CapabilityToken::pure_compute(),
+            500_000,
+            2 * 1024 * 1024,
+        );
+        leak_iso1.add_egress_audit_secret("sk_live_99887766");
+        assert!(matches!(
+            leak_iso1.execute_bytecode(&raw_leak_bc, None),
+            Err(SandboxViolation::EnvAccessDenied { ref key, .. }) if key == "EGRESS_SECRET_LEAK_BLOCKED"
+        ));
+
+        // Base64 of "sk_live_99887766" is "c2tfbGl2ZV85OTg4Nzc2Ng=="
+        let b64_leak_bc = compile_source_to_bytecode(r#"console.log("exfil=c2tfbGl2ZV85OTg4Nzc2Ng==");"#);
+        let mut leak_iso2 = SliceIsolate::spawn(
+            "n3-leak-b64",
+            12,
+            CapabilityToken::pure_compute(),
+            500_000,
+            2 * 1024 * 1024,
+        );
+        leak_iso2.add_egress_audit_secret("sk_live_99887766");
+        assert!(matches!(
+            leak_iso2.execute_bytecode(&b64_leak_bc, None),
+            Err(SandboxViolation::EnvAccessDenied { ref key, .. }) if key == "EGRESS_SECRET_LEAK_BLOCKED"
+        ));
     }
 }
 

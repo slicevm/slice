@@ -9,8 +9,9 @@ Slice `v0.2.0` provides a complete developer and production deployment workflow 
 3. **Standalone Single-Binary Compilation (`slice compile`)**
 4. **Bytecode & CAS Radix Disassembly (`slice inspect`)**
 5. **Multi-Tenant WinterTC HTTP MicroVM Hosting (`slice serve`)**
-6. **Interactive SES Compartment Shell (`slice repl`)**
-7. **Kernel & Security Readiness Auditing (`slice doctor`)**
+6. **AI Agent "Code Mode" Sandbox & Model Context Protocol Server (`slice mcp`, `Slice.evalSandbox`, `Slice.checkpoint`)**
+7. **Interactive SES Compartment Shell (`slice repl`)**
+8. **Kernel & Security Readiness Auditing (`slice doctor`)**
 
 ---
 
@@ -103,5 +104,47 @@ Before deploying to production edge nodes, run `slice doctor` and `slice info` t
 * **Pre-Warmed Boa ES2024 Pool:** Verifies that `BOA_CONTEXT_POOL` pre-warms and recycles ready ECMAScript realms for zero-init `SLICEBOA` execution (`slice run --warm`).
 * **Hardware Memory Protection Keys:** Reports the active `PKEY` slot and `PKRU` bitmask (`0xffffffcf`).
 * **Security Containment Audit:** Executes all 5 multi-tenant attack vectors (prototype pollution, unauthorized `/etc/shadow` read, outbound network exfiltration, secret `env` harvesting, and `while(true)` CPU DoS) and verifies 5/5 traps.
+
+---
+
+## 6. Workflow 5: AI Agent "Code Mode" Sandbox, VFS/KV Checkpoints, Egress Secret Guard, & Native MCP Server (`slice mcp`)
+
+### 6.1 Launching the Built-In Model Context Protocol Server (`slice mcp`)
+Connect Claude Code, Cursor, or any JSON-RPC 2.0 MCP client directly to Slice over `stdio`:
+```bash
+# Start MCP server with scoped VFS access and egress secret leak protection
+slice mcp --allow-read=/workspace --allow-write=/workspace --audit-egress=sk_live_secret
+
+# Or run the built-in JSON-RPC 2.0 smoke test
+slice mcp --smoke-test
+```
+
+Exposed MCP tools:
+* **`slice_eval_ts`**: Compiles (via Oxc) and executes untrusted TypeScript/JavaScript inside an attenuated child `SliceIsolate` in `~27 us` (`code`, `fuel`, `memory`, `allowRead`, `allowWrite`, `auditSecret`).
+* **`slice_kv_get` / `slice_kv_set`**: Reads and writes state in the tenant's 16-way sharded `Slice.kv` slab.
+* **`slice_checkpoint`**: Captures (`{"action": "checkpoint"}`) or rolls back (`{"action": "restore", "snapshot_id": 1}`) both the in-memory `node:fs` VFS slab and `Slice.kv` partition in `< 5 microseconds`.
+
+### 6.2 Tree-of-Thought (ToT) Branching inside TypeScript (`Slice.checkpoint`, `Slice.evalSandbox`, `Slice.restore`)
+```typescript
+import fs from "node:fs";
+
+fs.writeFileSync("/workspace/solution.ts", "export const v = 1;");
+Slice.kv.set("agent:state", "clean", 0);
+
+const snapId = Slice.checkpoint(); // < 5 us in-memory VFS + KV snapshot
+
+// Candidate LLM branch mutates state and runs in an attenuated sub-isolate
+fs.writeFileSync("/workspace/solution.ts", "UNTRUSTED_MUTATION");
+const res = Slice.evalSandbox("const x: number = 21 * 2; x", {
+    fuel: 100_000,
+    allowRead: ["/workspace"],
+    auditSecret: "sk_live_secret"
+});
+
+if (!res.ok) {
+    Slice.restore(snapId); // Instant < 5 us rollback of VFS + KV!
+}
+```
+
 
 

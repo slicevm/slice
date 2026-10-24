@@ -477,6 +477,86 @@ wait "$n2_srv_pid" 2>/dev/null || true
 rm -rf /tmp/n2_*
 fi
 
+if should_run_tag "n3"; then
+echo "========================================================================="
+echo "  [TAG: n3] PHASE N3 AI AGENT WORKFLOW, CHECKPOINT/RESTORE & MCP SERVER"
+echo "  Slice.evalSandbox + Slice.checkpoint/restore + Egress Guard + slice mcp"
+echo "========================================================================="
+
+# 1. Tree-of-Thought AI Agent Workflow (Checkpoint -> Candidate EvalSandbox -> Restore -> Commit)
+cat << 'EOF' > /tmp/n3_tot_agent.ts
+import fs from "node:fs";
+
+class TreeOfThoughtAgent {
+    public run(): string {
+        fs.writeFileSync("/workspace/model.ts", "export const weights = [1, 2, 3];");
+        Slice.kv.set("agent:step", "baseline", 0);
+
+        // Take a sub-5us in-memory VFS + KV checkpoint before exploring candidate LLM branches
+        const snapId = Slice.checkpoint();
+
+        // Candidate Branch 1: Mutates VFS + KV, then attempts prototype pollution inside sub-sandbox
+        fs.writeFileSync("/workspace/model.ts", "CORRUPTED_WEIGHTS");
+        Slice.kv.set("agent:step", "corrupted-branch-1", 0);
+        const branch1 = Slice.evalSandbox("Object.prototype.polluted = true;", { fuel: 50000 });
+        if (!branch1.ok) {
+            Slice.restore(snapId);
+        }
+
+        const vfsRestored = fs.readFileSync("/workspace/model.ts", "utf8");
+        const kvRestored = Slice.kv.get("agent:step");
+
+        // Candidate Branch 2: Attenuated child sandbox executing valid TypeScript patch
+        const branch2 = Slice.evalSandbox(
+            "const score: number = 48 * 2; console.log('candidate-2-pass'); score",
+            { fuel: 250000, allowRead: ["/workspace"] }
+        );
+
+        // Candidate Branch 3: Attempts unauthorized privilege escalation to /etc/shadow
+        const branch3 = Slice.evalSandbox(
+            "const s = fs.readFileSync('/etc/shadow');",
+            { fuel: 50000, allowRead: ["/etc"] }
+        );
+
+        return JSON.stringify({
+            vfsRestored,
+            kvRestored,
+            branch1Blocked: !branch1.ok,
+            branch2Ok: branch2.ok,
+            branch2Score: branch2.returnValue,
+            branch2TimeUs: branch2.totalTimeUs,
+            branch3Blocked: !branch3.ok
+        });
+    }
+}
+console.log(new TreeOfThoughtAgent().run());
+EOF
+
+"$SLICE_BIN" pack /tmp/n3_tot_agent.ts /tmp/n3_tot_agent.cas >/dev/null
+echo "  [1. Tree-of-Thought AI Agent (Slice.checkpoint + Slice.evalSandbox + Slice.restore)]"
+"$SLICE_BIN" run /tmp/n3_tot_agent.cas --allow-read=/workspace --allow-write=/workspace --warm --metrics
+
+# 2. Egress Secret Guard (--audit-egress) Blocking Base64 Exfiltration
+cat << 'EOF' > /tmp/n3_exfil.ts
+const encoded = Buffer.from("sk_live_99887766").toString("base64");
+console.log("exfil_payload=" + encoded);
+EOF
+"$SLICE_BIN" pack /tmp/n3_exfil.ts /tmp/n3_exfil.cas >/dev/null
+echo "  [2. Egress Secret Guard (--audit-egress=sk_live_99887766) Base64 Exfiltration Test]"
+if "$SLICE_BIN" run /tmp/n3_exfil.cas --audit-egress=sk_live_99887766 >/dev/null 2>&1; then
+    echo "    [FAIL] Base64 secret exfiltration was NOT blocked!"
+    exit 1
+else
+    echo "    [PASS] Base64-encoded secret exfiltration deterministically blocked (EGRESS_SECRET_LEAK_BLOCKED)!"
+fi
+
+# 3. Built-in Model Context Protocol (MCP) JSON-RPC 2.0 Server Smoke Test
+echo "  [3. Built-in Model Context Protocol Server (slice mcp --smoke-test)]"
+"$SLICE_BIN" mcp --smoke-test
+
+rm -rf /tmp/n3_*
+fi
+
 if should_run_tag "swarm"; then
 echo "========================================================================="
 echo "  [TAG: swarm] MICROVM SPEEDUP RETENTION CHECK (1,000 TENANT SWARM)"

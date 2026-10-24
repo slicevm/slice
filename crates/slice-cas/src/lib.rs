@@ -1067,6 +1067,7 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         && !raw.contains("export ")
         && !raw.contains("class ")
         && !raw.contains("Slice.")
+        && !raw.contains("Buffer.")
         && !raw.contains("Math.random(")
         && !raw.contains("Date.now(")
         && !raw.contains("performance.now(")

@@ -6,7 +6,8 @@
 //! - `slice pack <entry_or_dir> <output.cas> [--entry=./index.ts]`
 //! - `slice compile <entry_or_dir> -o <standalone_binary>`
 //! - `slice inspect <archive.cas|script.ts>`
-//! - `slice serve [archive.cas|script.ts] [--port=3000] [--smoke-test]`
+//! - `slice serve [archive.cas|script.ts] [--port=3000] [--workers=N] [--tenant-dir=<dir>] [--smoke-test]`
+//! - `slice mcp [--smoke-test] [--audit-egress=<secret>]`
 //! - `slice repl`
 //! - `slice doctor`
 //! - `slice microvm-bench [--tenants=1000] [--json]`
@@ -65,6 +66,7 @@ fn main() -> Result<()> {
         "compile" => cmd_compile(&args[2..]),
         "inspect" => cmd_inspect(&args[2..]),
         "serve" => cmd_serve(&args[2..]),
+        "mcp" => cmd_mcp(&args[2..]),
         "repl" => cmd_repl(),
         "doctor" => cmd_doctor(),
         "microvm-bench" => cmd_microvm_bench(&args[2..]),
@@ -126,6 +128,7 @@ fn print_usage() {
     println!("  slice pack <input> <output.cas>                Pack a file or folder app into a Zero-Stat BLAKE3 .cas archive");
     println!("  slice compile <input> -o <binary>              Compile a script, folder app, or .cas into a standalone binary");
     println!("  slice inspect <bundle.cas|script.ts|dir>       Disassemble SLICESNP/SLICEBOA bytecode and inspect CAS Radix table");
+    println!("  slice mcp [--smoke-test] [--audit-egress=SEC]  Start built-in Model Context Protocol (MCP) JSON-RPC 2.0 server");
     println!("  slice repl                                     Start interactive SES-locked TypeScript/JS shell");
     println!("  slice doctor                                   Audit host OS kernel io_uring/IOCP, MPK, Warm Pool, and OCap");
     println!("  slice microvm-bench [--tenants=1000] [--json]  Run 1,000-tenant MicroVM cold-start & density benchmark");
@@ -219,6 +222,7 @@ fn cmd_run(args: &[String]) -> Result<()> {
     let mut print_metrics = false;
     let mut prewarm_pool = false;
     let mut deterministic_seed: Option<u64> = None;
+    let mut audit_secrets: Vec<String> = Vec::new();
     let mut target_opt: Option<String> = None;
 
     for arg in args {
@@ -231,6 +235,10 @@ fn cmd_run(args: &[String]) -> Result<()> {
         } else if let Some(kv) = arg.strip_prefix("--allow-env=") {
             if let Some((k, v)) = kv.split_once('=') {
                 caps = caps.with_env(k, v);
+            }
+        } else if let Some(sec) = arg.strip_prefix("--audit-egress=") {
+            if !sec.is_empty() {
+                audit_secrets.push(sec.to_string());
             }
         } else if let Some(f) = arg.strip_prefix("--fuel=") {
             fuel_limit = f.parse().unwrap_or(fuel_limit);
@@ -277,6 +285,9 @@ fn cmd_run(args: &[String]) -> Result<()> {
         }
         let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps, fuel_limit, mem_limit);
         isolate.set_deterministic_seed(deterministic_seed);
+        for sec in &audit_secrets {
+            isolate.add_egress_audit_secret(sec.clone());
+        }
         isolate.execute_bytecode(bytecode, Some(&archive))?
     } else {
         let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
@@ -287,6 +298,9 @@ fn cmd_run(args: &[String]) -> Result<()> {
         }
         let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps, fuel_limit, mem_limit);
         isolate.set_deterministic_seed(deterministic_seed);
+        for sec in &audit_secrets {
+            isolate.add_egress_audit_secret(sec.clone());
+        }
         isolate.execute_bytecode(&bytecode, None)?
     };
 
@@ -997,6 +1011,269 @@ fn cmd_repl() -> Result<()> {
     Ok(())
 }
 
+fn cmd_mcp(args: &[String]) -> Result<()> {
+    let (mut caps, fuel_limit, mem_limit) = load_manifest_or_default();
+    let mut smoke_test = false;
+    let mut audit_secrets: Vec<String> = Vec::new();
+
+    for arg in args {
+        if arg == "--smoke-test" {
+            smoke_test = true;
+        } else if let Some(sec) = arg.strip_prefix("--audit-egress=") {
+            if !sec.is_empty() {
+                audit_secrets.push(sec.to_string());
+            }
+        } else if let Some(prefix) = arg.strip_prefix("--allow-read=") {
+            caps = caps.with_read_prefix(prefix);
+        } else if let Some(prefix) = arg.strip_prefix("--allow-write=") {
+            caps = caps.with_write_prefix(prefix);
+        } else if let Some(host) = arg.strip_prefix("--allow-net=") {
+            caps = caps.with_net_host(host);
+        }
+    }
+
+    SliceIsolate::prewarm_boa_pool(2);
+    let mut isolate = SliceIsolate::spawn("mcp-agent-host", 100, caps, fuel_limit, mem_limit);
+    for sec in &audit_secrets {
+        isolate.add_egress_audit_secret(sec.clone());
+    }
+
+    if smoke_test {
+        let requests = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","clientInfo":{"name":"slice-smoke","version":"0.2.0"}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"const x: number = 21 * 2; console.log('mcp-eval=' + x); x","fuel":500000}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"slice_kv_set","arguments":{"key":"agent_state","value":"ready"}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"slice_kv_get","arguments":{"key":"agent_state"}}}"#,
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"slice_checkpoint","arguments":{"action":"checkpoint"}}}"#,
+        ];
+        println!("=========================================================================");
+        println!("  SLICE (NEXUS-JS) MODEL CONTEXT PROTOCOL (MCP) JSON-RPC 2.0 SMOKE TEST");
+        println!("=========================================================================");
+        for req in requests {
+            if let Some(resp) = handle_mcp_jsonrpc_line(req, &mut isolate) {
+                println!("  -> {}", resp);
+            }
+        }
+        println!("=========================================================================");
+        return Ok(());
+    }
+
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let mut line = String::new();
+    while stdin.read_line(&mut line)? > 0 {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            if let Some(resp_json) = handle_mcp_jsonrpc_line(trimmed, &mut isolate) {
+                writeln!(stdout, "{}", resp_json)?;
+                stdout.flush()?;
+            }
+        }
+        line.clear();
+    }
+    Ok(())
+}
+
+fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) -> Option<String> {
+    let parsed: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(e) => {
+            return Some(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": { "code": -32700, "message": format!("Parse error: {}", e) }
+                })
+                .to_string(),
+            );
+        }
+    };
+
+    let id = parsed.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let method = parsed.get("method").and_then(|m| m.as_str()).unwrap_or("");
+
+    // Notifications (such as `notifications/initialized`) do not expect a response
+    if method.starts_with("notifications/") {
+        return None;
+    }
+
+    let result = match method {
+        "initialize" => serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {
+                "name": "slice-nexusjs-mcp",
+                "version": "0.2.0"
+            },
+            "capabilities": {
+                "tools": {}
+            }
+        }),
+        "ping" => serde_json::json!({}),
+        "tools/list" => serde_json::json!({
+            "tools": [
+                {
+                    "name": "slice_eval_ts",
+                    "description": "Execute untrusted TypeScript/JavaScript inside a sub-microsecond OCap/SES Slice MicroVM sandbox",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "code": { "type": "string", "description": "TypeScript or JavaScript source code to evaluate" },
+                            "fuel": { "type": "integer", "description": "Maximum CPU instruction fuel budget" },
+                            "memory": { "type": "integer", "description": "Maximum memory ceiling in bytes" },
+                            "allowRead": { "type": "string", "description": "Optional allowed VFS read prefix" },
+                            "allowNet": { "type": "string", "description": "Optional allowed network host" },
+                            "auditSecret": { "type": "string", "description": "Optional secret to guard against egress leakage" }
+                        },
+                        "required": ["code"]
+                    }
+                },
+                {
+                    "name": "slice_kv_get",
+                    "description": "Read a key from the zero-copy sharded Slice.kv store",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "key": { "type": "string" }
+                        },
+                        "required": ["key"]
+                    }
+                },
+                {
+                    "name": "slice_kv_set",
+                    "description": "Write a key-value pair to the zero-copy sharded Slice.kv store",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "key": { "type": "string" },
+                            "value": { "type": "string" }
+                        },
+                        "required": ["key", "value"]
+                    }
+                },
+                {
+                    "name": "slice_checkpoint",
+                    "description": "Create or restore an in-memory VFS + KV state snapshot for Tree-of-Thought branching",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": { "type": "string", "enum": ["checkpoint", "restore"] },
+                            "snapshot_id": { "type": "integer" }
+                        },
+                        "required": ["action"]
+                    }
+                }
+            ]
+        }),
+        "tools/call" => {
+            let params = parsed.get("params").cloned().unwrap_or(serde_json::Value::Null);
+            let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let args = params.get("arguments").cloned().unwrap_or(serde_json::Value::Null);
+
+            match tool_name {
+                "slice_eval_ts" => {
+                    let code = args.get("code").and_then(|c| c.as_str()).unwrap_or("");
+                    let mut opts = slice_engine::SandboxEvalOptions::default();
+                    if let Some(f) = args.get("fuel").and_then(|v| v.as_u64()) {
+                        opts.fuel = Some(f);
+                    }
+                    if let Some(m) = args.get("memory").and_then(|v| v.as_u64()) {
+                        opts.memory_bytes = Some(m as usize);
+                    }
+                    if let Some(r) = args.get("allowRead").and_then(|v| v.as_str()) {
+                        opts.allow_read.push(r.to_string());
+                    }
+                    if let Some(w) = args.get("allowWrite").and_then(|v| v.as_str()) {
+                        opts.allow_write.push(w.to_string());
+                    }
+                    if let Some(s) = args.get("auditSecret").and_then(|v| v.as_str()) {
+                        opts.audit_secret = Some(s.to_string());
+                    }
+                    let outcome = isolate.eval_sandbox(code, opts);
+                    let payload = serde_json::json!({
+                        "ok": outcome.ok,
+                        "value": outcome.return_value,
+                        "stdout": outcome.stdout,
+                        "fuelUsed": outcome.fuel_used,
+                        "timeUs": outcome.total_time_us,
+                        "violation": outcome.violation
+                    });
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": payload.to_string() }],
+                        "isError": !outcome.ok
+                    })
+                }
+                "slice_kv_set" => {
+                    let key = args.get("key").and_then(|k| k.as_str()).unwrap_or("");
+                    let val = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                    let ok = isolate.kv_set(key, val, 0).is_ok();
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": serde_json::json!({"ok": ok, "key": key}).to_string() }],
+                        "isError": !ok
+                    })
+                }
+                "slice_kv_get" => {
+                    let key = args.get("key").and_then(|k| k.as_str()).unwrap_or("");
+                    let val = isolate.kv_get(key);
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": serde_json::json!({"key": key, "value": val}).to_string() }],
+                        "isError": false
+                    })
+                }
+                "slice_checkpoint" => {
+                    let action = args
+                        .get("action")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("checkpoint");
+                    if action == "restore" {
+                        let snap_id = args.get("snapshot_id").and_then(|s| s.as_u64()).unwrap_or(0);
+                        let restored = isolate.restore(snap_id);
+                        serde_json::json!({
+                            "content": [{ "type": "text", "text": serde_json::json!({"action": "restore", "snapshot_id": snap_id, "restored": restored}).to_string() }],
+                            "isError": !restored
+                        })
+                    } else {
+                        let snap_id = isolate.checkpoint();
+                        serde_json::json!({
+                            "content": [{ "type": "text", "text": serde_json::json!({"action": "checkpoint", "snapshot_id": snap_id}).to_string() }],
+                            "isError": false
+                        })
+                    }
+                }
+                _ => {
+                    return Some(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": { "code": -32601, "message": format!("Unknown MCP tool: {}", tool_name) }
+                        })
+                        .to_string(),
+                    );
+                }
+            }
+        }
+        _ => {
+            return Some(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32601, "message": format!("Method not found: {}", method) }
+                })
+                .to_string(),
+            );
+        }
+    };
+
+    Some(
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result
+        })
+        .to_string(),
+    )
+}
+
 fn cmd_doctor() -> Result<()> {
     let io_engine = CompletionRingEngine::new(128, true)?;
     let pkey_domain = HardwareProtectionDomain::allocate(1);
@@ -1459,6 +1736,89 @@ new PipelinedEdge().run();
         assert_ne!(bc_alpha_v1.as_slice(), bc_alpha_v2.as_slice());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_tag_n3_mcp_jsonrpc_server_and_tools() {
+        SliceIsolate::prewarm_boa_pool(2);
+        let mut isolate = SliceIsolate::spawn(
+            "mcp-test-tenant",
+            77,
+            CapabilityToken::pure_compute(),
+            2_000_000,
+            4 * 1024 * 1024,
+        );
+        isolate.add_egress_audit_secret("sk_live_top_secret_99");
+
+        // 1. initialize
+        let init_resp = handle_mcp_jsonrpc_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            &mut isolate,
+        )
+        .unwrap();
+        assert!(init_resp.contains("slice-nexusjs-mcp"));
+
+        // 2. tools/list
+        let list_resp = handle_mcp_jsonrpc_line(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            &mut isolate,
+        )
+        .unwrap();
+        assert!(list_resp.contains("slice_eval_ts"));
+        assert!(list_resp.contains("slice_checkpoint"));
+
+        // 3. tools/call slice_eval_ts (valid TypeScript)
+        let eval_resp = handle_mcp_jsonrpc_line(
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"const a: number = 12; const b: number = 30; a + b","fuel":200000}}}"#,
+            &mut isolate,
+        )
+        .unwrap();
+        assert!(eval_resp.contains(r#"\"ok\":true"#));
+        assert!(eval_resp.contains("42"));
+
+        // 4. tools/call slice_eval_ts (secret leak blocked by egress guard!)
+        let leak_resp = handle_mcp_jsonrpc_line(
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"console.log('leaking sk_live_top_secret_99'); 1","fuel":200000}}}"#,
+            &mut isolate,
+        )
+        .unwrap();
+        assert!(leak_resp.contains("EGRESS_SECRET_LEAK_BLOCKED"));
+        assert!(leak_resp.contains(r#""isError":true"#));
+
+        // 5. tools/call slice_kv_set + slice_checkpoint + overwrite + restore + slice_kv_get
+        let _ = handle_mcp_jsonrpc_line(
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"slice_kv_set","arguments":{"key":"branch","value":"alpha"}}}"#,
+            &mut isolate,
+        );
+        let snap_resp = handle_mcp_jsonrpc_line(
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"slice_checkpoint","arguments":{"action":"checkpoint"}}}"#,
+            &mut isolate,
+        )
+        .unwrap();
+        assert!(snap_resp.contains("snapshot_id"));
+        // Extract snapshot_id from response
+        let v: serde_json::Value = serde_json::from_str(&snap_resp).unwrap();
+        let inner_txt = v["result"]["content"][0]["text"].as_str().unwrap();
+        let inner_json: serde_json::Value = serde_json::from_str(inner_txt).unwrap();
+        let snap_id = inner_json["snapshot_id"].as_u64().unwrap();
+
+        let _ = handle_mcp_jsonrpc_line(
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"slice_kv_set","arguments":{"key":"branch","value":"corrupted-beta"}}}"#,
+            &mut isolate,
+        );
+        let restore_req = format!(
+            r#"{{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{{"name":"slice_checkpoint","arguments":{{"action":"restore","snapshot_id":{}}}}}}}"#,
+            snap_id
+        );
+        let restore_resp = handle_mcp_jsonrpc_line(&restore_req, &mut isolate).unwrap();
+        assert!(restore_resp.contains(r#"\"restored\":true"#));
+
+        let get_resp = handle_mcp_jsonrpc_line(
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"slice_kv_get","arguments":{"key":"branch"}}}"#,
+            &mut isolate,
+        )
+        .unwrap();
+        assert!(get_resp.contains("alpha"));
     }
 }
 

@@ -106,16 +106,32 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
 
 ---
 
-## Running the Benchmark Suite
+## Running the Benchmark Suite (Tagged Filtering via `SLICE_BENCH_TAGS`)
+
+[`run_real_stack_benchmarks.sh`](file:///p:/opensource/slice/docker-tests/run_real_stack_benchmarks.sh) supports filtering benchmark suites via the `SLICE_BENCH_TAGS` environment variable (`all`, `apps`, `n1`, `n2`, `n3`, `serve`, `swarm`):
+
+| Tag | Suite Executed | Verified Linux Docker (`x86_64`) Highlight |
+| :--- | :--- | :--- |
+| `apps` | All 8 folder-based TypeScript + `node_modules` apps (`01`..`08`) | **`5.29 ms - 9.00 ms` cold** / **`0.27 ms - 4.00 ms` warm** (`10.38 MB` Max RSS) |
+| `n1` / `serve` | Phase N1 `slice serve` (`--workers=8`, HTTP/1.1 Keep-Alive + Pipelining + WinterTC) | **`152,376 req/s` (`6.56 us/req`) Tier-0 CAS** / **`107,274 req/s` (`9.32 us/req`) Tier-1 WinterTC** |
+| `n2` | Phase N2 Sharded `Slice.kv` (`1,001` ops), `--tenant-dir` hot-swap, & `--deterministic` replay | **`586.10 us` for 1,001 `Slice.kv` ops**, zero-downtime `.cas` hot-swap, & 100% deterministic replay |
+| `n3` | Phase N3 Tree-of-Thought AI Agent (`Slice.checkpoint` + `Slice.evalSandbox` + `Slice.restore`), `--audit-egress`, & `slice mcp` | **`232.78 us` for 3 nested sandboxes + VFS/KV rollback (`27.44 us/sandbox`)**, Base64 leak blocked, & JSON-RPC 2.0 MCP tools |
+| `swarm` | 1,000-Tenant MicroVM Cold-Start & Density Benchmark (`slice microvm-bench --tenants=1000`) | **`1.00 us` min / `1.42 ms` total 1,000-tenant swarm (`9.93 MB` process RSS, 5/5 security vectors blocked)** |
 
 ```powershell
-# Build and run the Linux Docker benchmark container
-docker build -f docker-tests/Dockerfile -t slice-real-stack-bench .
-docker run --rm slice-real-stack-bench
+# Build the Linux Docker benchmark container
+docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
+
+# Run all suites (default: SLICE_BENCH_TAGS=all)
+docker run --rm slice-realworld-bench
+
+# Or run only specific tagged suites (e.g. Phase N1, N2, N3, and 1,000-tenant swarm)
+docker run --rm -e SLICE_BENCH_TAGS=n1,n2,n3,swarm slice-realworld-bench
 
 # Or run any of the 8 folder apps directly on Windows or Linux with Slice
 .\target\release\slice.exe run .\docker-tests\apps\01-fintech-checkout --warm --metrics
 .\target\release\slice.exe run .\docker-tests\apps\02-npm-ecosystem-suite --warm --metrics
 .\target\release\slice.exe run .\docker-tests\apps\05-jwt-oauth-session-guard --warm --metrics
 .\target\release\slice.exe run .\docker-tests\apps\07-graphql-ast-validator --warm --metrics
+```
 ```

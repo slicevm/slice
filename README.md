@@ -98,7 +98,7 @@ slice compile ./docker-tests/apps/01-fintech-checkout -o my-edge-app
 
 ### 5. Launch the State-of-the-Art Multi-Tenant WinterTC HTTP Server (`slice serve`)
 
-`slice serve` runs a shared-nothing **Thread-Per-Core (`--workers=N`)** HTTP/1.1 `Keep-Alive` & pipelined server that executes every incoming HTTP request inside a fresh, hardware- and OCap-isolated `SliceIsolate` in microseconds (`152,376 req/s` in Tier-0 CAS mode, `96,287 req/s` in Tier-1 WinterTC mode):
+`slice serve` runs a shared-nothing **Thread-Per-Core (`--workers=N`)** HTTP/1.1 `Keep-Alive` & pipelined server that executes every incoming HTTP request inside a fresh, hardware- and OCap-isolated `SliceIsolate` in microseconds (`152,376 req/s` in Tier-0 CAS mode, `107,274 req/s` in Tier-1 WinterTC mode):
 
 ```bash
 # Start multi-worker Keep-Alive server on port 3000 with 8 shared-nothing worker threads
@@ -134,7 +134,42 @@ X-Slice-Total-Us: 8
 X-Slice-Fuel-Used: 25
 ```
 
-### 6. Inspect Bytecode & CAS Archives (`slice inspect`)
+### 6. AI Agent "Code Mode" Sandbox (`Slice.evalSandbox`), VFS/KV Checkpoints (`Slice.checkpoint`), & Native MCP Server (`slice mcp`)
+
+Slice provides first-class primitives for AI coding agents, Tree-of-Thought (ToT) code exploration, and Model Context Protocol (MCP) tool servers:
+
+```bash
+# Start the built-in JSON-RPC 2.0 Model Context Protocol (MCP) server over stdio
+slice mcp --allow-read=/workspace --allow-write=/workspace --audit-egress=sk_live_secret
+
+# Or run the built-in MCP JSON-RPC 2.0 self-test
+slice mcp --smoke-test
+
+# Execute a script with deterministic PRNG/clock replay and egress secret exfiltration protection
+slice run ./agent.ts --deterministic=20261019 --audit-egress=sk_live_secret
+```
+
+Inside an orchestrator script, spawn nested sub-sandboxes with capability attenuation (`Slice.evalSandbox`) and snapshot/rollback both `node:fs` VFS files and `Slice.kv` state in `< 5 microseconds` (`Slice.checkpoint()` / `Slice.restore(id)`):
+```typescript
+import fs from "node:fs";
+
+fs.writeFileSync("/workspace/model.ts", "export const v = 1;");
+Slice.kv.set("branch", "baseline", 0);
+const snapId = Slice.checkpoint(); // < 5 us in-memory VFS + KV snapshot
+
+// Evaluate untrusted LLM-generated TypeScript in an attenuated child isolate
+const candidate = Slice.evalSandbox("const x: number = 21 * 2; x", {
+    fuel: 200_000,
+    memoryBytes: 1024 * 1024,
+    allowRead: ["/workspace"],
+    auditSecret: "sk_live_secret"
+});
+if (!candidate.ok) {
+    Slice.restore(snapId); // Instant < 5 us rollback of VFS + KV!
+}
+```
+
+### 7. Inspect Bytecode & CAS Archives (`slice inspect`)
 
 Disassemble `SLICESNP` bytecode and inspect the BLAKE3 Radix resolution table:
 
@@ -184,10 +219,11 @@ SERVICE_STAGE = "production"
 | Command | Description |
 | :--- | :--- |
 | `slice init [dir]` | Scaffold a new TypeScript Edge project with `slice.toml` and `src/index.ts`. |
-| `slice run [target] [flags]` | Execute a `.ts`/`.js` script, `.cas` archive, or `slice.toml` project. |
+| `slice run [target] [flags]` | Execute a `.ts`/`.js` script, `.cas` archive, or `slice.toml` project (`--warm`, `--deterministic=SEED`, `--audit-egress=SECRET`). |
 | `slice pack <in> <out.cas>` | Flatten and pre-compile a module tree into a 64-byte aligned BLAKE3 `.cas` archive. |
 | `slice compile <in> -o <bin>` | Produce a zero-dependency standalone executable (`SLICEEXE`). |
-| `slice serve [target] [--port=N]` | Run the multi-tenant WinterTC HTTP MicroVM server (one fresh isolate per request). |
+| `slice serve [target] [flags]` | Run the multi-tenant WinterTC HTTP MicroVM server (`--port=N`, `--workers=N`, `--tenant-dir=DIR`). |
+| `slice mcp [flags]` | Launch the built-in JSON-RPC 2.0 Model Context Protocol (MCP) server over `stdio` (`--smoke-test`, `--audit-egress=SECRET`). |
 | `slice inspect <target>` | Disassemble `SLICESNP` bytecode and inspect BLAKE3 CAS offsets. |
 | `slice repl` | Interactive SES-locked TypeScript/JavaScript compartment shell. |
 | `slice doctor` | Audit host kernel `io_uring`/`IOCP`, MPK protection keys, RSS, and 5 security vectors. |
@@ -211,20 +247,21 @@ In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensourc
 | **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **10.25 MB (`10,496 KB`)** | 29.88 MB (`30,592 KB`) | 46.30 MB (`47,416 KB`) | 71.15 MB (`72,860 KB`) |
 | **Peak Memory Footprint: Telemetry + Flatted App (Max RSS)** | **10.50 MB (`10,752 KB`)** | 31.00 MB (`31,744 KB`) | 50.23 MB (`51,432 KB`) | 72.27 MB (`74,008 KB`) |
 | **`slice serve` HTTP/1.1 Keep-Alive (Tier-0 CAS, `--workers=8`)** | **152,376 req/s (`6.56 us/req`)** | 88,132 req/s (`11.35 us`) | 102,481 req/s (`9.76 us`) | 55,810 req/s (`17.92 us`) |
-| **`slice serve` HTTP/1.1 Keep-Alive (Tier-1 WinterTC, `--workers=8`)** | **96,287 req/s (`10.39 us/req`)** | 88,132 req/s (`11.35 us`) | 102,481 req/s (`9.76 us`) | 55,810 req/s (`17.92 us`) |
+| **`slice serve` HTTP/1.1 Keep-Alive (Tier-1 WinterTC, `--workers=8`)** | **107,274 req/s (`9.32 us/req`)** | 88,132 req/s (`11.35 us`) | 102,481 req/s (`9.76 us`) | 55,810 req/s (`17.92 us`) |
 | **1,000-Tenant MicroVM Isolate Cold-Start (Min / Swarm)** | **1.00 us (`1.42 ms` / 1,000 tenants)** | N/A | N/A | N/A |
 
-Run the full Docker benchmark suite or filter by tags (`all`, `apps`, `n1`, `n2`, `serve`, `swarm`):
+Run the full Docker benchmark suite or filter by tags (`all`, `apps`, `n1`, `n2`, `n3`, `serve`, `swarm`):
 
 ```powershell
 docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
-# Run all benchmarks (8 folder apps + Phase N1 HTTP server + Phase N2 Serverless/KV + 1,000-tenant swarm)
+# Run all benchmarks (8 folder apps + Phase N1 HTTP server + Phase N2 Serverless/KV + Phase N3 AI Agent/MCP + 1,000-tenant swarm)
 docker run --rm slice-realworld-bench
-# Or run only a specific tagged subset (e.g. Phase N1 + Phase N2 + swarm)
-docker run --rm -e SLICE_BENCH_TAGS=n1,n2,swarm slice-realworld-bench
+# Or run only a specific tagged subset (e.g. Phase N1 + Phase N2 + Phase N3 + swarm)
+docker run --rm -e SLICE_BENCH_TAGS=n1,n2,n3,swarm slice-realworld-bench
 # Run tagged Rust unit tests
 cargo test tag_n1
 cargo test tag_n2
+cargo test tag_n3
 ```
 
 ---
