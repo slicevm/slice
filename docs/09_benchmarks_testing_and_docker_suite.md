@@ -7,7 +7,7 @@ This chapter explains how to run Slice's unit test suites, tagged feature tests 
 ## 1. Running Rust Workspace Tests & Tagged Feature Subsets
 
 ```powershell
-# Run all 23 unit tests across slice-cas, slice-io, slice-sandbox, slice-engine, and slice-cli
+# Run all 25 unit tests across slice-cas, slice-io, slice-sandbox, slice-engine, and slice-cli
 cargo test --workspace
 
 # Run strict clippy lint verification (zero warnings allowed)
@@ -17,6 +17,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test tag_n1   # Phase N1: HTTP/1.1 Keep-Alive, Pipelining, Multi-Worker, WinterTC & waitUntil
 cargo test tag_n2   # Phase N2: 16-Way Sharded Slice.kv, --tenant-dir Hot-Swap, & --deterministic Replay
 cargo test tag_n3   # Phase N3: Slice.evalSandbox, < 5 us Checkpoint/Restore, Egress Guard, & slice mcp
+cargo test tag_f1   # Phase F1: Standard WinterTC URL, URLSearchParams, Headers, Request, Response & export default { fetch }
 ```
 
 ---
@@ -29,11 +30,11 @@ The Docker suite in [`docker-tests/`](file:///p:/opensource/slice/docker-tests/R
 # Build the benchmark image
 docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
 
-# Run ALL suites (8 folder apps + Phase N1 HTTP server + Phase N2 KV/Hot-Swap + Phase N3 AI/MCP + 1,000-tenant swarm)
+# Run ALL suites (10 folder apps + Phase N1/F1 HTTP server + Phase N2 KV/Hot-Swap + Phase N3 AI/MCP + 1,000-tenant swarm)
 docker run --rm slice-realworld-bench
 
-# Or filter by comma-separated tags (apps, n1, n2, n3, serve, swarm):
-docker run --rm -e SLICE_BENCH_TAGS=n1,n2,n3,swarm slice-realworld-bench
+# Or filter by comma-separated tags (apps, n1, n2, n3, f1, serve, swarm):
+docker run --rm -e SLICE_BENCH_TAGS=n1,n2,n3,f1,swarm slice-realworld-bench
 docker run --rm -e SLICE_BENCH_TAGS=apps slice-realworld-bench
 ```
 
@@ -43,18 +44,20 @@ docker run --rm -e SLICE_BENCH_TAGS=apps slice-realworld-bench
 
 ### 3.1 Multi-Module TypeScript & Real `node_modules` Application Suite (`SLICE_BENCH_TAGS=apps`)
 
-All 4 runtimes produce **100% byte-for-byte identical JSON stdout** across all 8 applications:
+All 4 runtimes produce **100% byte-for-byte identical JSON stdout** across all 10 applications:
 
-| Production Application | Slice Cold `.cas` / Bin | Slice Warm (`--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v26.12.1` | Speedup vs Bun (Cold / Warm) |
+| Production Application | Slice Cold `.cas` / Bin | Slice Warm (`--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v26.12.1` | Speedup vs Bun / Deno / Node |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`01-fintech-checkout`** (Multi-File TS + SHA-256) | **5.297 ms** | **0.673 ms** (`0.08 us` init) | 12.729 ms | 34.766 ms | 63.778 ms | **2.40x / 18.90x faster** |
-| **`02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **6.766 ms** | **0.272 ms** (`0.07 us` init) | 20.048 ms | 54.156 ms | 75.895 ms | **2.96x / 73.70x faster** |
-| **`03-disk-io-log-pipeline`** (10 JSONL Shards Disk I/O) | **8.438 ms** | **3.593 ms** (`0.06 us` init) | 13.063 ms | 41.701 ms | 66.366 ms | **1.55x / 3.63x faster** |
-| **`04-edge-api-gateway`** (`fast-querystring` + `ms`) | **7.397 ms** | **1.238 ms** (`0.05 us` init) | 14.453 ms | 39.472 ms | 67.118 ms | **1.95x / 11.68x faster** |
-| **`05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC) | **9.000 ms** | **2.976 ms** (`0.07 us` init) | 13.754 ms | 42.949 ms | 66.296 ms | **1.53x / 4.62x faster** |
-| **`06-telemetry-metrics-pipeline`** (`bytes` + `flatted`) | **8.670 ms** | **3.898 ms** (`0.22 us` init) | 16.495 ms | 45.270 ms | 69.429 ms | **1.90x / 4.23x faster** |
-| **`07-graphql-ast-validator`** (`dlv` + `dset` + AST) | **8.304 ms** | **4.000 ms** (`0.14 us` init) | 12.645 ms | 39.097 ms | 65.467 ms | **1.52x / 3.16x faster** |
-| **`08-event-driven-state-journal`** (`mitt` + `ms` + WAL) | **7.251 ms** | **2.122 ms** (`0.08 us` init) | 15.417 ms | 44.038 ms | 68.177 ms | **2.13x / 7.27x faster** |
+| **`01-fintech-checkout`** (Multi-File TS + SHA-256) | **5.297 ms** | **0.673 ms** (`0.08 us` init) | 12.729 ms | 34.766 ms | 63.778 ms | **2.40x Bun / 12.04x Node** |
+| **`02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **6.766 ms** | **0.272 ms** (`0.07 us` init) | 20.048 ms | 54.156 ms | 75.895 ms | **2.96x Bun / 11.22x Node** |
+| **`03-disk-io-log-pipeline`** (10 JSONL Shards Disk I/O) | **8.438 ms** | **3.593 ms** (`0.06 us` init) | 13.063 ms | 41.701 ms | 66.366 ms | **1.55x Bun / 7.86x Node** |
+| **`04-edge-api-gateway`** (`fast-querystring` + `ms`) | **7.397 ms** | **1.238 ms** (`0.05 us` init) | 14.453 ms | 39.472 ms | 67.118 ms | **1.95x Bun / 9.07x Node** |
+| **`05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC) | **9.000 ms** | **2.976 ms** (`0.07 us` init) | 13.754 ms | 42.949 ms | 66.296 ms | **1.53x Bun / 7.37x Node** |
+| **`06-telemetry-metrics-pipeline`** (`bytes` + `flatted`) | **8.670 ms** | **3.898 ms** (`0.22 us` init) | 16.495 ms | 45.270 ms | 69.429 ms | **1.90x Bun / 8.01x Node** |
+| **`07-graphql-ast-validator`** (`dlv` + `dset` + AST) | **8.304 ms** | **4.000 ms** (`0.14 us` init) | 12.645 ms | 39.097 ms | 65.467 ms | **1.52x Bun / 7.88x Node** |
+| **`08-event-driven-state-journal`** (`mitt` + `ms` + WAL) | **7.251 ms** | **2.122 ms** (`0.08 us` init) | 15.417 ms | 44.038 ms | 68.177 ms | **2.13x Bun / 9.40x Node** |
+| **`09-wintertc-web-router`** (`Request` + `Response` + `URL`, 80 reqs) | **17.737 ms** | **12.504 ms** (`0.17 us` init) | 11.491 ms | 43.752 ms | 88.912 ms | **2.47x Deno / 5.01x Node** |
+| **`10-fullstack-bff-microservice`** (`cookie` + `dlv` + `ms` + `ETag`, 60 reqs) | **7.291 ms** | **1.326 ms** (`0.16 us` init) | 13.575 ms | 44.900 ms | 88.523 ms | **1.86x Bun / 12.14x Node** |
 
 ### 3.2 `slice serve` Multi-Tenant HTTP/1.1 Keep-Alive & Pipelined Throughput (`SLICE_BENCH_TAGS=n1`)
 

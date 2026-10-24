@@ -1475,6 +1475,13 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains("Buffer.")
         || source.contains("Slice.")
         || source.contains("__slice_http_")
+        || source.contains("new URL(")
+        || source.contains("new URLSearchParams(")
+        || source.contains("new Headers(")
+        || source.contains("new Request(")
+        || source.contains("new Response(")
+        || source.contains("Response.json(")
+        || source.contains("Response.redirect(")
         || source.contains("Math.random(")
         || source.contains("Date.now(")
         || source.contains("performance.now(");
@@ -3067,6 +3074,7 @@ impl SliceIsolate {
                             realm.loaded_bundles.insert(rc_key_u64, obj.clone());
                         }
                     }
+                    let _ = realm.ctx.run_jobs();
                     let _ = realm
                         .ctx
                         .eval(boa_engine::Source::from_bytes(b"globalThis.__slice_wu.length=0;"));
@@ -3144,6 +3152,12 @@ impl SliceIsolate {
             let scoped_code = format!("{{\n{}\n}}", js_code);
             realm.ctx.eval(boa_engine::Source::from_bytes(scoped_code.as_bytes()))
         };
+
+        if !BOA_HTTP_REQ.with(|r| r.borrow().active)
+            || BOA_HTTP_RES.with(|res| res.borrow().is_none())
+        {
+            let _ = realm.ctx.run_jobs();
+        }
 
         if self.deterministic_seed.is_some() {
             BOA_DET_STATE.with(|s| s.set(None));
@@ -3593,7 +3607,7 @@ fn create_warm_boa_realm() -> WarmBoaRealm {
     let mut ctx = boa_engine::Context::default();
     register_slice_native_host_functions(&mut ctx);
 
-    const CORE_PRELUDE: &str = r#"globalThis.console={log:__slice_console_log,info:__slice_console_log,warn:__slice_console_log,error:__slice_console_log};globalThis.print=__slice_console_log;globalThis.process={pid:1,env:{NODE_ENV:"production"},cwd:function(){return ".";},platform:"linux",arch:"x64",version:"v24.0.0",versions:{node:"24.0.0"},argv:["slice"]};var __b2s=function(e){return e==="base64"?__slice_base64_encode(this._s,false):e==="base64url"?__slice_base64_encode(this._s,true):this._s;};globalThis.Buffer={from:function(i,e){var r=typeof i==="string"?i:String(i),s=(e==="base64"||e==="base64url")?__slice_base64_decode(r):r;return{_s:s,length:s.length,toString:__b2s};},isBuffer:function(){return false;},byteLength:function(s){return String(s).length;}};var __orand=Math.random,__onow=Date.now;Math.random=function(){var v=__slice_det_random();return v>=0?v:__orand();};Date.now=function(){var v=__slice_det_now();return v>=0?v:__onow();};globalThis.performance={now:function(){var v=__slice_det_now();return v>=0?(v-1700000000000):(__onow()-1700000000000);}};globalThis.__slice_wu=[];globalThis.Slice={request:function(){var t=__slice_http_tenant();return{method:__slice_http_method(),path:__slice_http_path(),query:__slice_http_query(),tenant:t,tenantId:t,body:__slice_http_body(),header:__slice_http_header};},respond:function(s,b,ct){return __slice_http_respond(s,typeof b==="string"?b:JSON.stringify(b),ct||"application/json");},waitUntil:function(f){__slice_wu.push(f);__slice_mark_wait_until();},kv:{get:function(k){return __slice_kv_get(String(k));},set:function(k,v,ttl){return __slice_kv_set(String(k),typeof v==="string"?v:JSON.stringify(v),ttl||0);},del:function(k){return __slice_kv_del(String(k));},incr:function(k,d){return __slice_kv_incr(String(k),d===undefined?1:Number(d));}},checkpoint:function(){return __slice_checkpoint();},restore:function(id){return __slice_restore(Number(id));},evalSandbox:function(code,opts){return JSON.parse(__slice_eval_sandbox(String(code),opts?JSON.stringify(opts):"{}"));}};globalThis.__slice_builtins=Object.create(null);globalThis.__slice_cjs_require=function(id){return __slice_builtins[id]||__slice_load_builtin(id);};globalThis.require=__slice_cjs_require;"#;
+    const CORE_PRELUDE: &str = r##"globalThis.console={log:__slice_console_log,info:__slice_console_log,warn:__slice_console_log,error:__slice_console_log};globalThis.print=__slice_console_log;globalThis.process={pid:1,env:{NODE_ENV:"production"},cwd:function(){return ".";},platform:"linux",arch:"x64",version:"v24.0.0",versions:{node:"24.0.0"},argv:["slice"]};var __b2s=function(e){return e==="base64"?__slice_base64_encode(this._s,false):e==="base64url"?__slice_base64_encode(this._s,true):this._s;};globalThis.Buffer={from:function(i,e){var r=typeof i==="string"?i:String(i),s=(e==="base64"||e==="base64url")?__slice_base64_decode(r):r;return{_s:s,length:s.length,toString:__b2s};},isBuffer:function(){return false;},byteLength:function(s){return String(s).length;}};var __orand=Math.random,__onow=Date.now;Math.random=function(){var v=__slice_det_random();return v>=0?v:__orand();};Date.now=function(){var v=__slice_det_now();return v>=0?v:__onow();};globalThis.performance={now:function(){var v=__slice_det_now();return v>=0?(v-1700000000000):(__onow()-1700000000000);}};globalThis.__slice_wu=[];globalThis.Slice={request:function(){var t=__slice_http_tenant();return{method:__slice_http_method(),path:__slice_http_path(),query:__slice_http_query(),tenant:t,tenantId:t,body:__slice_http_body(),header:__slice_http_header};},respond:function(s,b,ct){return __slice_http_respond(s,typeof b==="string"?b:JSON.stringify(b),ct||"application/json");},waitUntil:function(f){__slice_wu.push(f);__slice_mark_wait_until();},kv:{get:function(k){return __slice_kv_get(String(k));},set:function(k,v,ttl){return __slice_kv_set(String(k),typeof v==="string"?v:JSON.stringify(v),ttl||0);},del:function(k){return __slice_kv_del(String(k));},incr:function(k,d){return __slice_kv_incr(String(k),d===undefined?1:Number(d));}},checkpoint:function(){return __slice_checkpoint();},restore:function(id){return __slice_restore(Number(id));},evalSandbox:function(code,opts){return JSON.parse(__slice_eval_sandbox(String(code),opts?JSON.stringify(opts):"{}"));}};function __uspD(s){if(s.indexOf("+")===-1&&s.indexOf("%")===-1)return s;var r=s.indexOf("+")===-1?s:s.split("+").join(" ");if(r.indexOf("%")===-1)return r;try{return decodeURIComponent(r);}catch(_e){return r;}}function __uspE(s){var str=String(s),e=encodeURIComponent(str);return str.indexOf(" ")===-1?e:e.split("%20").join("+");}function URLSearchParams(init,u){this._p=[];this._u=u||null;if(!init)return;if(typeof init==="string"){var q=init.charCodeAt(0)===63?init.slice(1):init;if(q.length>0){var ps=q.split("&");for(var i=0;i<ps.length;i++){var sg=ps[i];if(!sg)continue;var eq=sg.indexOf("=");if(eq===-1)this._p.push([__uspD(sg),""]);else this._p.push([__uspD(sg.slice(0,eq)),__uspD(sg.slice(eq+1))]);}}}else if(Array.isArray(init)){for(var j=0;j<init.length;j++){var pr=init[j];if(pr&&pr.length>=2)this._p.push([String(pr[0]),String(pr[1])]);}}else if(typeof init==="object"){if(Array.isArray(init._p)){for(var m=0;m<init._p.length;m++)this._p.push([init._p[m][0],init._p[m][1]]);}else{var ks=Object.keys(init);for(var k=0;k<ks.length;k++)this._p.push([ks[k],String(init[ks[k]])]);}}}URLSearchParams.prototype._sync=function(){if(this._u)this._u._syncSearch();};URLSearchParams.prototype.get=function(n){var k=String(n);for(var i=0;i<this._p.length;i++)if(this._p[i][0]===k)return this._p[i][1];return null;};URLSearchParams.prototype.getAll=function(n){var k=String(n),r=[];for(var i=0;i<this._p.length;i++)if(this._p[i][0]===k)r.push(this._p[i][1]);return r;};URLSearchParams.prototype.has=function(n){var k=String(n);for(var i=0;i<this._p.length;i++)if(this._p[i][0]===k)return true;return false;};URLSearchParams.prototype.set=function(n,v){var k=String(n),s=String(v),p=this._p,len=p.length,fi=-1;for(var i=0;i<len;i++){if(p[i][0]===k){if(fi===-1){p[i][1]=s;fi=i;}else{p.splice(i,1);i--;len--;}}}if(fi===-1)p.push([k,s]);if(this._u)this._u._syncSearch();};URLSearchParams.prototype.append=function(n,v){this._p.push([String(n),String(v)]);if(this._u)this._u._syncSearch();};URLSearchParams.prototype.delete=function(n){var k=String(n),nx=[];for(var i=0;i<this._p.length;i++)if(this._p[i][0]!==k)nx.push(this._p[i]);this._p=nx;if(this._u)this._u._syncSearch();};URLSearchParams.prototype.sort=function(){this._p.sort(function(a,b){return a[0]<b[0]?-1:(a[0]>b[0]?1:0);});if(this._u)this._u._syncSearch();};URLSearchParams.prototype.forEach=function(cb,ta){for(var i=0;i<this._p.length;i++)cb.call(ta,this._p[i][1],this._p[i][0],this);};URLSearchParams.prototype.entries=function(){return this._p.slice();};URLSearchParams.prototype.keys=function(){var r=[];for(var i=0;i<this._p.length;i++)r.push(this._p[i][0]);return r;};URLSearchParams.prototype.values=function(){var r=[];for(var i=0;i<this._p.length;i++)r.push(this._p[i][1]);return r;};URLSearchParams.prototype.toString=function(){var len=this._p.length;if(len===0)return "";var s="";for(var i=0;i<len;i++){if(i>0)s+="&";s+=__uspE(this._p[i][0])+"="+__uspE(this._p[i][1]);}return s;};if(typeof Symbol!=="undefined"&&Symbol.iterator)URLSearchParams.prototype[Symbol.iterator]=function(){return this._p[Symbol.iterator]();};Object.defineProperty(URLSearchParams.prototype,"size",{get:function(){return this._p.length;}});function __normP(p){if(!p||p==="/")return "/";if(p.indexOf("/.")===-1&&p.indexOf("//")===-1)return p;var segs=p.split("/"),out=[];for(var i=0;i<segs.length;i++){var s=segs[i];if(!s||s===".")continue;if(s==="..")out.pop();else out.push(s);}return "/"+out.join("/")+(p.length>1&&p.charCodeAt(p.length-1)===47&&out.length>0?"/":"");}function URL(input,base){var raw=input instanceof URL?input.href:String(input).trim();if(base!==undefined&&raw.indexOf("https://")!==0&&raw.indexOf("http://")!==0&&raw.indexOf("://")===-1){var b=base instanceof URL?base:new URL(String(base));if(raw.indexOf("//")===0)raw=b.protocol+raw;else if(raw.charCodeAt(0)===47)raw=b.origin+raw;else if(raw.charCodeAt(0)===63)raw=b.origin+b.pathname+raw;else if(raw.charCodeAt(0)===35)raw=b.origin+b.pathname+b.search+raw;else{var dir=b.pathname.slice(0,b.pathname.lastIndexOf("/")+1)||"/";raw=b.origin+dir+raw;}}var hi=raw.indexOf("#"),hash="";if(hi!==-1){hash=raw.slice(hi);raw=raw.slice(0,hi);}var qi=raw.indexOf("?"),search="";if(qi!==-1){search=raw.slice(qi);raw=raw.slice(0,qi);}var si=raw.indexOf("://");if(si===-1)throw new TypeError("Invalid URL: "+input);this.protocol=raw.slice(0,si+1).toLowerCase();var rest=raw.slice(si+3),pi=rest.indexOf("/"),authHost=pi===-1?rest:rest.slice(0,pi),pathRaw=pi===-1?"/":rest.slice(pi);var ai=authHost.indexOf("@"),hostPort=authHost;this.username="";this.password="";if(ai!==-1){var up=authHost.slice(0,ai),ci=up.indexOf(":");this.username=ci===-1?up:up.slice(0,ci);this.password=ci===-1?"":up.slice(ci+1);hostPort=authHost.slice(ai+1);}var pci=hostPort.lastIndexOf(":");if(pci!==-1&&hostPort.indexOf("]")<pci){this.hostname=hostPort.slice(0,pci).toLowerCase();var prt=hostPort.slice(pci+1);if((this.protocol==="http:"&&prt==="80")||(this.protocol==="https:"&&prt==="443"))prt="";this.port=prt;}else{this.hostname=hostPort.toLowerCase();this.port="";}this.host=this.port?this.hostname+":"+this.port:this.hostname;this.origin=this.protocol+"//"+this.host;this.pathname=__normP(pathRaw);this.hash=hash==="#"?"":hash;this.searchParams=new URLSearchParams(search,this);this._syncSearch();}URL.prototype._syncSearch=function(){if(this.searchParams._p.length===0){this.search="";this.href=this.origin+this.pathname+this.hash;return;}var qs=this.searchParams.toString();this.search=qs?"?"+qs:"";this.href=this.origin+this.pathname+this.search+this.hash;};URL.prototype.toString=URL.prototype.toJSON=function(){return this.href;};function Headers(init){if(init==="__SLICE_LIVE_REQ__"){this._live=true;this._m=null;return;}this._live=false;this._m=Object.create(null);if(!init)return;if(init instanceof Headers){if(init._m){var ik=Object.keys(init._m);for(var n=0;n<ik.length;n++)this._m[ik[n]]=init._m[ik[n]];}else{var es=init.entries();for(var i=0;i<es.length;i++)this._m[es[i][0]]=es[i][1];}}else if(Array.isArray(init)){for(var j=0;j<init.length;j++)if(init[j]&&init[j].length>=2)this.append(init[j][0],init[j][1]);}else if(typeof init==="object"){var ks=Object.keys(init);for(var k=0;k<ks.length;k++)if(init[ks[k]]!==undefined)this._m[ks[k].toLowerCase()]=String(init[ks[k]]);}}Headers.prototype._ensure=function(){if(this._live&&!this._m){this._m=Object.create(null);var raw=JSON.parse(__slice_http_headers_all());for(var i=0;i<raw.length;i++){var k=raw[i][0].toLowerCase();this._m[k]=this._m[k]?this._m[k]+", "+raw[i][1]:raw[i][1];}this._live=false;}};Headers.prototype.get=function(n){var k=String(n).toLowerCase();if(this._m&&k in this._m)return this._m[k];if(this._live)return __slice_http_header(k);return null;};Headers.prototype.has=function(n){return this.get(n)!==null;};Headers.prototype.set=function(n,v){this._ensure();this._m[String(n).toLowerCase()]=String(v);};Headers.prototype.append=function(n,v){this._ensure();var k=String(n).toLowerCase(),s=String(v);this._m[k]=k in this._m?this._m[k]+", "+s:s;};Headers.prototype.delete=function(n){this._ensure();delete this._m[String(n).toLowerCase()];};Headers.prototype.entries=function(){this._ensure();var ks=Object.keys(this._m).sort(),r=[];for(var i=0;i<ks.length;i++)r.push([ks[i],this._m[ks[i]]]);return r;};Headers.prototype.keys=function(){this._ensure();return Object.keys(this._m).sort();};Headers.prototype.values=function(){var es=this.entries(),r=[];for(var i=0;i<es.length;i++)r.push(es[i][1]);return r;};Headers.prototype.forEach=function(cb,ta){var es=this.entries();for(var i=0;i<es.length;i++)cb.call(ta,es[i][1],es[i][0],this);};if(typeof Symbol!=="undefined"&&Symbol.iterator)Headers.prototype[Symbol.iterator]=function(){return this.entries()[Symbol.iterator]();};function Request(input,init){if(input==="__SLICE_LIVE_REQ__"){this.method=__slice_http_method()||"GET";var h=__slice_http_header("host")||"localhost",p=__slice_http_path()||"/",q=__slice_http_query();this.url="http://"+h+p+(q?"?"+q:"");this.headers=new Headers("__SLICE_LIVE_REQ__");this._body=__slice_http_body()||"";this.bodyUsed=false;return;}var o=init||{},isReq=input instanceof Request;this.url=isReq?input.url:(input instanceof URL?input.href:String(input));this.method=o.method?String(o.method).toUpperCase():(isReq?input.method:"GET");this.headers=o.headers instanceof Headers?o.headers:new Headers(o.headers||(isReq?input.headers:undefined));this._body=o.body!==undefined&&o.body!==null?(typeof o.body==="string"?o.body:JSON.stringify(o.body)):(isReq?input._body:"");this.bodyUsed=false;}Request.prototype.text=function(){this.bodyUsed=true;return Promise.resolve(this._body);};Request.prototype.json=function(){this.bodyUsed=true;try{return Promise.resolve(JSON.parse(this._body));}catch(e){return Promise.reject(e);}};Request.prototype.textSync=function(){this.bodyUsed=true;return this._body;};Request.prototype.jsonSync=function(){this.bodyUsed=true;return JSON.parse(this._body);};Request.prototype.clone=function(){return new Request(this.url,{method:this.method,headers:new Headers(this.headers),body:this._body});};function Response(body,init){var o=init||{};this.status=o.status!==undefined?Number(o.status):200;this.statusText=o.statusText!==undefined?String(o.statusText):(this.status===200?"OK":"");this.ok=this.status>=200&&this.status<300;this.headers=o.headers instanceof Headers?o.headers:new Headers(o.headers);this._data=undefined;this._body=body===undefined||body===null?"":(typeof body==="string"?body:JSON.stringify(body));this._ct=(this.headers._m&&this.headers._m["content-type"])||"text/plain;charset=UTF-8";this._isSliceRes=true;this.bodyUsed=false;}Response.prototype.text=function(){this.bodyUsed=true;if(this._data!==undefined&&!this._body)this._body=JSON.stringify(this._data);return Promise.resolve(this._body);};Response.prototype.json=function(){this.bodyUsed=true;if(this._data!==undefined)return Promise.resolve(this._data);try{return Promise.resolve(JSON.parse(this._body));}catch(e){return Promise.reject(e);}};Response.prototype.textSync=function(){this.bodyUsed=true;if(this._data!==undefined&&!this._body)this._body=JSON.stringify(this._data);return this._body;};Response.prototype.jsonSync=function(){this.bodyUsed=true;if(this._data!==undefined)return this._data;return JSON.parse(this._body);};Response.prototype.clone=function(){if(this._data!==undefined&&!this._body)this._body=JSON.stringify(this._data);return new Response(this._body,{status:this.status,statusText:this.statusText,headers:new Headers(this.headers)});};Response.json=function(data,init){var o=init?(typeof init==="number"?{status:init}:init):{},h=o.headers instanceof Headers?o.headers:new Headers(o.headers);if(!h._m["content-type"])h._m["content-type"]="application/json";var r=new Response(null,{status:o.status||200,statusText:o.statusText,headers:h});r._data=data;r._ct=h._m["content-type"];return r;};Response.redirect=function(url,status){var st=status||302;return new Response("",{status:st,headers:{location:String(url)}});};globalThis.URLSearchParams=URLSearchParams;globalThis.URL=URL;globalThis.Headers=Headers;globalThis.Request=Request;globalThis.Response=Response;var __slice_web_ctx={waitUntil:Slice.waitUntil,passThroughOnException:function(){}};globalThis.__slice_make_web_request=function(){return new Request("__SLICE_LIVE_REQ__");};globalThis.__slice_dispatch_fetch=function(h){if(!__slice_http_is_active())return;var fn=typeof h.fetch==="function"?h.fetch:(typeof h==="function"?h:null);if(!fn)return;var res=fn.call(h,new Request("__SLICE_LIVE_REQ__"),globalThis.process.env,__slice_web_ctx);if(res){if(res._isSliceRes){var b=res._body||(res._data!==undefined?JSON.stringify(res._data):"");__slice_http_respond(res.status,b,res._ct);}else if(typeof res.then==="function")res.then(function(r){if(r&&r._isSliceRes){var rb=r._body||(r._data!==undefined?JSON.stringify(r._data):"");__slice_http_respond(r.status,rb,r._ct);}});}};globalThis.__slice_builtins=Object.create(null);globalThis.__slice_cjs_require=function(id){return __slice_builtins[id]||__slice_load_builtin(id);};globalThis.require=__slice_cjs_require;"##;
     let _ = ctx.eval(boa_engine::Source::from_bytes(CORE_PRELUDE));
     WarmBoaRealm {
         ctx,
@@ -3653,6 +3667,7 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
                 "os" | "node:os" => br#"var m={tmpdir:function(){return __slice_os_tmpdir();},platform:function(){return "linux";},arch:function(){return "x64";},EOL:"\n"};m.default=m;m.__esModule=true;__slice_builtins["os"]=__slice_builtins["node:os"]=m;"#,
                 "util" | "node:util" => br#"var m={inspect:function(v){return typeof v==="object"?JSON.stringify(v):String(v);},deprecate:function(f){return f;},promisify:function(f){return f;}};m.default=m;__slice_builtins["util"]=__slice_builtins["node:util"]=m;"#,
                 "buffer" | "node:buffer" => br#"var m={Buffer:globalThis.Buffer,default:{Buffer:globalThis.Buffer}};__slice_builtins["buffer"]=__slice_builtins["node:buffer"]=m;"#,
+                "url" | "node:url" => br#"var m={URL:globalThis.URL,URLSearchParams:globalThis.URLSearchParams,default:{URL:globalThis.URL,URLSearchParams:globalThis.URLSearchParams}};m.__esModule=true;__slice_builtins["url"]=__slice_builtins["node:url"]=m;"#,
                 "process" | "node:process" => br#"__slice_builtins["process"]=__slice_builtins["node:process"]=globalThis.process;"#,
                 _ => return Ok(BoaVal::undefined()),
             };
@@ -4131,7 +4146,29 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
         }),
     );
 
-    // Phase N1.3: Zero-Copy WinterTC HTTP Request / Response & waitUntil Host Intrinsics
+    // Phase N1.3 + F1: Zero-Copy WinterTC HTTP Request / Response & waitUntil Host Intrinsics
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_is_active"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let active = BOA_HTTP_REQ.with(|r| r.borrow().active);
+            Ok(BoaVal::from(active))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_headers_all"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let json = BOA_HTTP_REQ.with(|r| {
+                let borrow = r.borrow();
+                serde_json::to_string(&borrow.headers[..borrow.headers_len])
+                    .unwrap_or_else(|_| "[]".to_string())
+            });
+            Ok(BoaVal::from(js_string!(json)))
+        }),
+    );
+
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_http_method"),
         0,
@@ -5986,6 +6023,142 @@ console.log(new TreeOfThoughtAgent().run());
             leak_iso2.execute_bytecode(&b64_leak_bc, None),
             Err(SandboxViolation::EnvAccessDenied { ref key, .. }) if key == "EGRESS_SECRET_LEAK_BLOCKED"
         ));
+    }
+
+    #[test]
+    fn test_tag_f1_wintertc_url_headers_request_response_and_export_default_fetch() {
+        SliceIsolate::prewarm_boa_pool(2);
+
+        // 1. Test standard URL, URLSearchParams, Headers, Request, Response, Response.json, Response.redirect
+        let wintertc_std_ts = r#"
+const u = new URL("/v2/items/../orders?tag=gpu&limit=10#summary", "https://api.slice.dev:443/v1/base");
+u.searchParams.set("limit", "25");
+u.searchParams.append("tag", "edge");
+u.searchParams.sort();
+
+const h = new Headers({ "X-Tenant-Id": "acme-prod", "Content-Type": "application/json" });
+h.append("X-Trace", "t1");
+h.append("x-trace", "t2");
+
+const req = new Request(u, {
+    method: "post",
+    headers: h,
+    body: JSON.stringify({ sku: "H100", qty: 4 })
+});
+const parsedBody = req.jsonSync();
+
+const jsonRes = Response.json({ ok: true, sku: parsedBody.sku, qty: parsedBody.qty }, { status: 201 });
+const redirRes = Response.redirect("https://slice.dev/login", 307);
+
+console.log(JSON.stringify({
+    origin: u.origin,
+    pathname: u.pathname,
+    search: u.search,
+    tags: u.searchParams.getAll("tag"),
+    href: u.href,
+    method: req.method,
+    tenant: req.headers.get("x-tenant-id"),
+    trace: req.headers.get("X-TRACE"),
+    resStatus: jsonRes.status,
+    resOk: jsonRes.ok,
+    resCt: jsonRes.headers.get("content-type"),
+    resBody: jsonRes.jsonSync(),
+    redirStatus: redirRes.status,
+    redirLoc: redirRes.headers.get("Location")
+}));
+"#;
+        let bc_std = compile_source_to_bytecode(wintertc_std_ts);
+        let mut iso = SliceIsolate::spawn(
+            "f1-std-tenant",
+            1,
+            CapabilityToken::pure_compute(),
+            2_000_000,
+            8 * 1024 * 1024,
+        );
+        let metrics = iso.execute_bytecode(&bc_std, None).unwrap();
+        assert_eq!(
+            metrics.stdout[0],
+            r#"{"origin":"https://api.slice.dev","pathname":"/v2/orders","search":"?limit=25&tag=gpu&tag=edge","tags":["gpu","edge"],"href":"https://api.slice.dev/v2/orders?limit=25&tag=gpu&tag=edge#summary","method":"POST","tenant":"acme-prod","trace":"t1, t2","resStatus":201,"resOk":true,"resCt":"application/json","resBody":{"ok":true,"sku":"H100","qty":4},"redirStatus":307,"redirLoc":"https://slice.dev/login"}"#
+        );
+
+        // 2. Test `export default { fetch(req, env, ctx) }` handler with zero-copy Request & Headers
+        let export_default_ts = r#"
+let moduleInitCount = 0;
+moduleInitCount += 1;
+
+export default {
+    fetch(req: Request, env: any, ctx: any): Response {
+        const url = new URL(req.url);
+        const role = req.headers.get("x-role") || "guest";
+        const hits = Slice.kv.incr("f1_hits", 1);
+        ctx.waitUntil(() => {
+            Slice.kv.set("f1_last_path", url.pathname, 60000);
+        });
+        if (req.method === "POST") {
+            const payload = req.jsonSync();
+            return Response.json({
+                initCount: moduleInitCount,
+                path: url.pathname,
+                filter: url.searchParams.get("filter"),
+                role,
+                hits,
+                echo: payload.msg,
+                nodeEnv: env.NODE_ENV
+            }, { status: 201 });
+        }
+        return Response.json({ initCount: moduleInitCount, path: url.pathname, hits });
+    }
+};
+"#;
+        let fetch_bc = compile_source_to_bytecode(export_default_ts);
+        SliceIsolate::prewarm_boa_bundle(&fetch_bc);
+
+        let headers = [
+            ("Host", "edge.slice.local"),
+            ("X-Role", "admin"),
+            ("Content-Type", "application/json"),
+        ];
+        let req_ctx = HttpRequestContext {
+            method: "POST",
+            path: "/api/v1/deploy",
+            query: "filter=canary",
+            tenant_id: "f1-edge-tenant",
+            body: r#"{"msg":"ship-it"}"#,
+            headers: &headers,
+        };
+        iso.reset_for_request("f1-edge-tenant", 2, 2_000_000, 8 * 1024 * 1024);
+        let out1 = iso.execute_http_request(&fetch_bc, None, &req_ctx).unwrap();
+        assert_eq!(out1.status_code, 201);
+        assert_eq!(out1.content_type, "application/json");
+        assert_eq!(out1.wait_until_count, 1);
+        assert_eq!(
+            out1.response_body,
+            r#"{"initCount":1,"path":"/api/v1/deploy","filter":"canary","role":"admin","hits":1,"echo":"ship-it","nodeEnv":"production"}"#
+        );
+        let drained = iso.drain_wait_until_tasks().unwrap();
+        assert_eq!(drained, 1);
+        assert_eq!(
+            iso.kv_get("f1_last_path"),
+            Some("/api/v1/deploy".to_string())
+        );
+
+        // Second request on warm isolate must reuse `moduleInitCount === 1` without re-running module top-level!
+        let req_ctx2 = HttpRequestContext {
+            method: "GET",
+            path: "/api/v1/status",
+            query: "",
+            tenant_id: "f1-edge-tenant",
+            body: "",
+            headers: &headers,
+        };
+        iso.reset_for_request("f1-edge-tenant", 2, 2_000_000, 8 * 1024 * 1024);
+        let out2 = iso.execute_http_request(&fetch_bc, None, &req_ctx2).unwrap();
+        assert_eq!(out2.status_code, 200);
+        assert_eq!(
+            out2.response_body,
+            r#"{"initCount":1,"path":"/api/v1/status","hits":2}"#
+        );
+        let _ = iso.drain_wait_until_tasks().unwrap();
     }
 }
 

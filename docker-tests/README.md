@@ -1,19 +1,19 @@
 # Slice Docker-Based Folder Applications, External NPM Libraries & Disk I/O Benchmark Suite
 
-This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.3`)**, **Deno (`v2.9.7`)**, and **Node.js (`v26.12.0`)** across **8 folder-based production TypeScript applications** (`docker-tests/apps/`).
+This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v26.12.1`)** across **10 folder-based production TypeScript applications** (`docker-tests/apps/`).
 
 ---
 
 ## Latest Runtimes Installed in Docker ([`docker-tests/Dockerfile`](file:///p:/opensource/slice/docker-tests/Dockerfile))
 
-- **Slice (`v0.2.0`):** Hybrid architecture combining **Oxc** (`v0.152.0` production Rust TypeScript compiler + static barrel tree-shaker + transitive `node_modules` ESM/CJS bundler), **Boa (`boa_engine` v0.22)** full ECMAScript VM with zero-copy `SLICEBOA` binary payloads, thread-local pre-warmed context pool (`BOA_CONTEXT_POOL`), native Rust fast-path intrinsics (`SemVer`, `SHA-256`, `HMAC-SHA256`, `Base64URL`, in-memory `VFS` slab cache), and **Slice Zero-Stat CAS + Tier-0/Tier-2 fast paths**.
-- **Node.js (`v26.12.0` — Absolute Latest Release):** Dynamically resolved at container build time from `https://nodejs.org/dist/index.json` (`.[0].version`).
-- **Bun (`v1.4.3` — Absolute Latest Release):** Installed via official `https://bun.sh/install`.
-- **Deno (`v2.9.7` — Absolute Latest Release):** Installed via official `https://deno.land/install.sh`.
+- **Slice (`v0.2.0`):** Hybrid architecture combining **Oxc** (`v0.152.0` production Rust TypeScript compiler + static barrel tree-shaker + transitive `node_modules` ESM/CJS bundler), **Boa (`boa_engine` v0.22)** full ECMAScript VM with zero-copy `SLICEBOA` binary payloads, thread-local pre-warmed context pool (`BOA_CONTEXT_POOL`), native Rust fast-path intrinsics (`SemVer`, `SHA-256`, `HMAC-SHA256`, `Base64URL`, in-memory `VFS` slab cache, WinterTC `URL`/`URLSearchParams`/`Headers`/`Request`/`Response`), and **Slice Zero-Stat CAS + Tier-0/Tier-2 fast paths**.
+- **Node.js (`v26.12.1` — Absolute Latest Release):** Dynamically resolved at container build time from `https://nodejs.org/dist/index.json` (`.[0].version`).
+- **Bun (`v1.4.4` — Absolute Latest Release):** Installed via official `https://bun.sh/install`.
+- **Deno (`v2.9.8` — Absolute Latest Release):** Installed via official `https://deno.land/install.sh`.
 
 ---
 
-## 8 Folder-Based Production Test Applications (`docker-tests/apps/`)
+## 10 Folder-Based Production Test Applications (`docker-tests/apps/`)
 
 ### 1. [`apps/01-fintech-checkout/`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts) — Multi-Module TypeScript E-Commerce & SHA-256 Crypto Signing
 - **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/package.json), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/types.ts), [`src/audit_crypto.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/audit_crypto.ts), [`src/pricing_engine.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/pricing_engine.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts).
@@ -79,44 +79,63 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
   {"app":"08-event-driven-state-journal","libraries":["mitt@3.0.1","ms@2.1.3"],"eventsDispatched":75,"appliedCount":41,"rejectedCount":34,"replayedAggregateBalanceCents":95480,"journalDiskBytes":10699,"stateMatchVerified":true,"journalSha256":"4a603ab1b248253a"}
   ```
 
+### 9. [`apps/09-wintertc-web-router/`](file:///p:/opensource/slice/docker-tests/apps/09-wintertc-web-router/src/index.ts) — Standard WinterTC Web API (`Request`, `Response`, `Headers`, `URL`, `URLSearchParams`) Edge Router
+- **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/09-wintertc-web-router/package.json), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/09-wintertc-web-router/src/types.ts), [`src/catalog.ts`](file:///p:/opensource/slice/docker-tests/apps/09-wintertc-web-router/src/catalog.ts), [`src/router.ts`](file:///p:/opensource/slice/docker-tests/apps/09-wintertc-web-router/src/router.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/09-wintertc-web-router/src/index.ts).
+- **What it tests:** Standard WinterTC / WHATWG `new Request(url, { method, headers, body })`, `new URL(req.url)`, `url.searchParams.get` / `.getAll` / `.sort`, case-insensitive `Headers`, `Response.json(data, init)`, `Response.redirect(url, 308)`, `await res.json()`, and `node:crypto` HMAC-SHA256 webhook verification across 80 multi-tenant HTTP requests.
+- **Identical Output Across All 4 Runtimes:**
+  ```json
+  {"app":"09-wintertc-web-router","totalRequests":80,"ok200Count":30,"created201Count":16,"redirect308Count":10,"unauthorized401Count":10,"notFound404Count":14,"totalRevenueCents":5255850,"matchedCatalogItems":30,"canonicalQuerySample":"category=compute&minPrice=0&sort=asc&tag=pcie","finalStateHash":"bda3093620e333db"}
+  ```
+
+### 10. [`apps/10-fullstack-bff-microservice/`](file:///p:/opensource/slice/docker-tests/apps/10-fullstack-bff-microservice/src/index.ts) — Full-Stack Multi-Tenant BFF Microservice (`cookie@0.6.0`, `dlv@1.1.3`, `ms@2.1.3` + WinterTC Fetch APIs)
+- **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/10-fullstack-bff-microservice/package.json), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/10-fullstack-bff-microservice/src/types.ts), [`src/cors_etag.ts`](file:///p:/opensource/slice/docker-tests/apps/10-fullstack-bff-microservice/src/cors_etag.ts), [`src/bff_controller.ts`](file:///p:/opensource/slice/docker-tests/apps/10-fullstack-bff-microservice/src/bff_controller.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/10-fullstack-bff-microservice/src/index.ts).
+- **What it tests:** Combines standard WinterTC `Request`, `Response`, `Headers`, and `URL` with real external npm packages (`cookie.parse` / `cookie.serialize`, `dlv` deep property resolution, and `ms` cache TTL parsing), `OPTIONS` CORS preflight (`204`), SHA-256 `ETag` conditional `If-None-Match` (`304 Not Modified`), and JSON preference mutations (`201`) across 60 requests.
+- **Identical Output Across All 4 Runtimes:**
+  ```json
+  {"app":"10-fullstack-bff-microservice","totalRequests":60,"corsPreflight204Count":10,"notModified304Count":10,"dashboard200Count":20,"preferences201Count":10,"forbidden403Count":10,"totalWidgetsRendered":80,"totalCacheTtlSec":4200,"finalStateHash":"8b0bf90129dbcc3c"}
+  ```
+
 ---
 
-## Verified Linux Docker (`x86_64`) Benchmark Results Across All 8 Applications
+## Verified Linux Docker (`x86_64`) Benchmark Results Across All 10 Applications
 
-### Execution Latency Across All 8 Folder Applications (20-Run Min / Avg)
+### Execution Latency Across All 10 Folder Applications (20-Run Min / Avg)
 
-| Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.3` | Deno `v2.9.7` | Node.js `v26.12.0` | Slice Speedup vs Node.js | Slice Speedup vs Bun |
+| Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v26.12.1` | Slice Speedup vs Node.js | Slice Speedup vs Bun / Deno |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256) | **5.986 ms** (Avg 6.551 ms) | **3.638 ms / 1.609 ms** (`0.21 us` init) | 12.606 ms | 33.736 ms | 63.484 ms | **10.61x faster** | **2.11x faster** |
-| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **8.785 ms** (Avg 9.510 ms) | **6.158 ms / 4.264 ms** (`3.75 us` init) | 20.771 ms | 50.510 ms | 75.842 ms | **8.63x faster** | **2.36x faster** |
-| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk I/O) | **9.380 ms** (Avg 10.077 ms) | **6.641 ms / 5.112 ms** (`0.14 us` init) | 13.129 ms | 42.815 ms | 65.691 ms | **7.00x faster** | **1.40x faster** |
-| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms`) | **9.643 ms** (Avg 10.365 ms) | **6.997 ms / 5.329 ms** (`0.22 us` init) | 14.480 ms | 40.068 ms | 67.423 ms | **6.99x faster** | **1.50x faster** |
-| **App 5: `05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC) | **12.510 ms** (Avg 13.212 ms) | **9.523 ms / 7.534 ms** (`0.21 us` init) | 14.087 ms | 42.722 ms | 68.335 ms | **5.46x faster** | **1.13x faster** |
-| **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + WAL) | **13.676 ms** (Avg 14.229 ms) | **10.592 ms / 8.910 ms** (`0.21 us` init) | 16.117 ms | 44.566 ms | 70.108 ms | **5.13x faster** | **1.18x faster** |
-| **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost) | **9.054 ms** (Avg 9.542 ms) | **6.258 ms / 4.256 ms** (`0.24 us` init) | 12.678 ms | 18.756 ms | 66.880 ms | **7.39x faster** | **1.40x faster** |
-| **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay) | **11.917 ms** (Avg 12.684 ms) | **8.868 ms / 7.269 ms** (`0.20 us` init) | 15.262 ms | 44.417 ms | 67.596 ms | **5.67x faster** | **1.28x faster** |
+| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256) | **5.297 ms** | **3.638 ms / 0.673 ms** (`0.08 us` init) | 12.729 ms | 34.766 ms | 63.778 ms | **12.04x faster** | **2.40x faster than Bun** |
+| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **6.766 ms** | **6.158 ms / 0.272 ms** (`0.07 us` init) | 20.048 ms | 54.156 ms | 75.895 ms | **11.22x faster** | **2.96x faster than Bun** |
+| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk I/O) | **8.438 ms** | **6.641 ms / 3.593 ms** (`0.06 us` init) | 13.063 ms | 41.701 ms | 66.366 ms | **7.86x faster** | **1.55x faster than Bun** |
+| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms`) | **7.397 ms** | **6.997 ms / 1.238 ms** (`0.05 us` init) | 14.453 ms | 39.472 ms | 67.118 ms | **9.07x faster** | **1.95x faster than Bun** |
+| **App 5: `05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC) | **9.000 ms** | **9.523 ms / 2.976 ms** (`0.07 us` init) | 13.754 ms | 42.949 ms | 66.296 ms | **7.37x faster** | **1.53x faster than Bun** |
+| **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + WAL) | **8.670 ms** | **10.592 ms / 3.898 ms** (`0.22 us` init) | 16.495 ms | 45.270 ms | 69.429 ms | **8.01x faster** | **1.90x faster than Bun** |
+| **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost) | **8.304 ms** | **6.258 ms / 4.000 ms** (`0.14 us` init) | 12.645 ms | 39.097 ms | 65.467 ms | **7.88x faster** | **1.52x faster than Bun** |
+| **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay) | **7.251 ms** | **8.868 ms / 2.122 ms** (`0.08 us` init) | 15.417 ms | 44.038 ms | 68.177 ms | **9.40x faster** | **2.13x faster than Bun** |
+| **App 9: `09-wintertc-web-router`** (`Request` + `Response` + `URL`, 80 reqs) | **17.737 ms** | **15.814 ms / 12.504 ms** (`0.17 us` init) | 11.491 ms | 43.752 ms | 88.912 ms | **5.01x faster** | **2.47x faster than Deno** |
+| **App 10: `10-fullstack-bff-microservice`** (`cookie` + `dlv` + `ms` + `ETag`, 60 reqs) | **7.291 ms** | **4.661 ms / 1.326 ms** (`0.16 us` init) | 13.575 ms | 44.900 ms | 88.523 ms | **12.14x faster** | **1.86x faster than Bun** |
 
 ### Peak Memory Footprint (`Max RSS` via `/usr/bin/time -v`)
 
-| Workload | Slice (`v0.2.0`) | Bun (`v1.4.3`) | Deno (`v2.9.7`) | Node.js (`v26.12.0`) | Slice Memory Advantage |
+| Workload | Slice (`v0.2.0`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v26.12.1`) | Slice Memory Advantage |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **App 2 (`02-npm-ecosystem-suite`: `semver`+`ms`+`ini`)** | **11,008 KB (10.75 MB)** | 30,592 KB (29.88 MB) | 48,040 KB (46.91 MB) | 72,860 KB (71.15 MB) | **6.62x less than Node / 2.78x less than Bun** |
+| **App 2 (`02-npm-ecosystem-suite`: `semver`+`ms`+`ini`)** | **10,624 KB (10.38 MB)** | 29,952 KB (29.25 MB) | 46,684 KB (45.59 MB) | 72,040 KB (70.35 MB) | **6.78x less than Node / 2.82x less than Bun** |
 | **App 3 (`03-disk-io-log-pipeline`: Disk I/O 10 Shards)** | **11,776 KB (11.50 MB)** | 22,016 KB (21.50 MB) | 46,592 KB (45.50 MB) | 73,112 KB (71.40 MB) | **6.21x less than Node / 1.87x less than Bun** |
-| **App 6 (`06-telemetry-metrics-pipeline`: `bytes`+`flatted`)** | **12,160 KB (11.88 MB)** | 31,872 KB (31.12 MB) | 51,840 KB (50.62 MB) | 73,496 KB (71.77 MB) | **6.04x less than Node / 2.62x less than Bun** |
+| **App 6 (`06-telemetry-metrics-pipeline`: `bytes`+`flatted`)** | **11,136 KB (10.88 MB)** | 30,336 KB (29.62 MB) | 50,052 KB (48.88 MB) | 72,552 KB (70.85 MB) | **6.51x less than Node / 2.72x less than Bun** |
 
 ---
 
 ## Running the Benchmark Suite (Tagged Filtering via `SLICE_BENCH_TAGS`)
 
-[`run_real_stack_benchmarks.sh`](file:///p:/opensource/slice/docker-tests/run_real_stack_benchmarks.sh) supports filtering benchmark suites via the `SLICE_BENCH_TAGS` environment variable (`all`, `apps`, `n1`, `n2`, `n3`, `serve`, `swarm`):
+[`run_real_stack_benchmarks.sh`](file:///p:/opensource/slice/docker-tests/run_real_stack_benchmarks.sh) supports filtering benchmark suites via the `SLICE_BENCH_TAGS` environment variable (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `serve`, `swarm`):
 
 | Tag | Suite Executed | Verified Linux Docker (`x86_64`) Highlight |
 | :--- | :--- | :--- |
-| `apps` | All 8 folder-based TypeScript + `node_modules` apps (`01`..`08`) | **`5.29 ms - 9.00 ms` cold** / **`0.27 ms - 4.00 ms` warm** (`10.38 MB` Max RSS) |
+| `apps` | All 10 folder-based TypeScript + `node_modules` apps (`01`..`10`) | **`5.29 ms - 17.73 ms` cold** / **`0.27 ms - 12.50 ms` warm** (`10.38 MB` Max RSS) |
 | `n1` / `serve` | Phase N1 `slice serve` (`--workers=8`, HTTP/1.1 Keep-Alive + Pipelining + WinterTC) | **`152,376 req/s` (`6.56 us/req`) Tier-0 CAS** / **`107,274 req/s` (`9.32 us/req`) Tier-1 WinterTC** |
-| `n2` | Phase N2 Sharded `Slice.kv` (`1,001` ops), `--tenant-dir` hot-swap, & `--deterministic` replay | **`586.10 us` for 1,001 `Slice.kv` ops**, zero-downtime `.cas` hot-swap, & 100% deterministic replay |
-| `n3` | Phase N3 Tree-of-Thought AI Agent (`Slice.checkpoint` + `Slice.evalSandbox` + `Slice.restore`), `--audit-egress`, & `slice mcp` | **`232.78 us` for 3 nested sandboxes + VFS/KV rollback (`27.44 us/sandbox`)**, Base64 leak blocked, & JSON-RPC 2.0 MCP tools |
-| `swarm` | 1,000-Tenant MicroVM Cold-Start & Density Benchmark (`slice microvm-bench --tenants=1000`) | **`1.00 us` min / `1.42 ms` total 1,000-tenant swarm (`9.93 MB` process RSS, 5/5 security vectors blocked)** |
+| `n2` | Phase N2 Sharded `Slice.kv` (`1,001` ops), `--tenant-dir` hot-swap, & `--deterministic` replay | **`581.29 us` for 1,001 `Slice.kv` ops**, zero-downtime `.cas` hot-swap, & 100% deterministic replay |
+| `n3` | Phase N3 Tree-of-Thought AI Agent (`Slice.checkpoint` + `Slice.evalSandbox` + `Slice.restore`), `--audit-egress`, & `slice mcp` | **`155.58 us` for 3 nested sandboxes + VFS/KV rollback (`17.13 us/sandbox`)**, Base64 leak blocked, & JSON-RPC 2.0 MCP tools |
+| `f1` | Phase F1 `slice serve` with `export default { fetch(req, env, ctx) }` + App 9 & App 10 WinterTC parity | **`export default { fetch }` HTTP server + 100% 4-runtime parity on Apps 9 & 10 (`7.29 ms` on App 10 vs `13.58 ms` Bun)** |
+| `swarm` | 1,000-Tenant MicroVM Cold-Start & Density Benchmark (`slice microvm-bench --tenants=1000`) | **`0.98 us` min / `1.42 ms` total 1,000-tenant swarm (`9.93 MB` process RSS, 5/5 security vectors blocked)** |
 
 ```powershell
 # Build the Linux Docker benchmark container
@@ -125,13 +144,13 @@ docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
 # Run all suites (default: SLICE_BENCH_TAGS=all)
 docker run --rm slice-realworld-bench
 
-# Or run only specific tagged suites (e.g. Phase N1, N2, N3, and 1,000-tenant swarm)
-docker run --rm -e SLICE_BENCH_TAGS=n1,n2,n3,swarm slice-realworld-bench
+# Or run only specific tagged suites (e.g. Phase F1, N1, N2, N3, and 1,000-tenant swarm)
+docker run --rm -e SLICE_BENCH_TAGS=f1,n1,n2,n3,swarm slice-realworld-bench
 
-# Or run any of the 8 folder apps directly on Windows or Linux with Slice
+# Or run any of the 10 folder apps directly on Windows or Linux with Slice
 .\target\release\slice.exe run .\docker-tests\apps\01-fintech-checkout --warm --metrics
 .\target\release\slice.exe run .\docker-tests\apps\02-npm-ecosystem-suite --warm --metrics
-.\target\release\slice.exe run .\docker-tests\apps\05-jwt-oauth-session-guard --warm --metrics
-.\target\release\slice.exe run .\docker-tests\apps\07-graphql-ast-validator --warm --metrics
+.\target\release\slice.exe run .\docker-tests\apps\09-wintertc-web-router --warm --metrics
+.\target\release\slice.exe run .\docker-tests\apps\10-fullstack-bff-microservice --warm --metrics
 ```
 ```

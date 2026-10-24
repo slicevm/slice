@@ -1820,6 +1820,102 @@ new PipelinedEdge().run();
         .unwrap();
         assert!(get_resp.contains("alpha"));
     }
+
+    #[test]
+    fn test_tag_f1_wintertc_export_default_fetch_http_server() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+
+        let tmp_dir = env::temp_dir().join("slice_f1_wintertc_app_test");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(tmp_dir.join("src")).unwrap();
+
+        std::fs::write(
+            tmp_dir.join("src/router.ts"),
+            r#"
+export function routeRequest(req: Request): Response {
+    const url = new URL(req.url);
+    const tenant = req.headers.get("x-slice-tenant") || "default";
+    if (url.pathname === "/api/v1/items" && req.method === "GET") {
+        const category = url.searchParams.get("category") || "all";
+        return Response.json({ ok: true, tenant, category, count: 3 });
+    }
+    if (url.pathname === "/api/v1/items" && req.method === "POST") {
+        const payload = req.jsonSync();
+        return Response.json({ ok: true, tenant, created: payload.name }, { status: 201 });
+    }
+    return Response.json({ error: "not_found", path: url.pathname }, { status: 404 });
+}
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            tmp_dir.join("src/index.ts"),
+            r#"
+import { routeRequest } from "./router";
+
+export default {
+    fetch(req: Request): Response {
+        return routeRequest(req);
+    }
+};
+"#,
+        )
+        .unwrap();
+
+        let bundled = slice_cas::bundle_entrypoint_with_deps(&tmp_dir.join("src/index.ts")).unwrap();
+        let bytecode = Arc::new(compile_source_to_bytecode(&bundled));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let bc_server = Arc::clone(&bytecode);
+        let counter_server = Arc::clone(&counter);
+
+        let server_handle = std::thread::spawn(move || {
+            SliceIsolate::prewarm_boa_pool(1);
+            SliceIsolate::prewarm_boa_bundle(&bc_server);
+            let mut read_buf = vec![0u8; 65536];
+            let mut write_buf = Vec::with_capacity(4096);
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = serve_connection_keep_alive(
+                    stream,
+                    0,
+                    &bc_server,
+                    None,
+                    None,
+                    &CapabilityToken::pure_compute(),
+                    2_000_000,
+                    4 * 1024 * 1024,
+                    &mut read_buf,
+                    &mut write_buf,
+                    Some((&counter_server, 0)),
+                );
+            }
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        let pipelined_payload = concat!(
+            "GET /api/v1/items?category=gpu HTTP/1.1\r\nHost: edge.slice.local\r\nX-Slice-Tenant: acme-ai\r\n\r\n",
+            "POST /api/v1/items HTTP/1.1\r\nHost: edge.slice.local\r\nX-Slice-Tenant: acme-ai\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"name\":\"B200\"}"
+        );
+        client.write_all(pipelined_payload.as_bytes()).unwrap();
+        client.flush().unwrap();
+
+        let mut response_str = String::new();
+        client.read_to_string(&mut response_str).unwrap();
+        server_handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert!(response_str.contains("HTTP/1.1 200 OK"));
+        assert!(response_str.contains(r#"{"ok":true,"tenant":"acme-ai","category":"gpu","count":3}"#));
+        assert!(response_str.contains("HTTP/1.1 201 Created"));
+        assert!(response_str.contains(r#"{"ok":true,"tenant":"acme-ai","created":"B200"}"#));
+    }
 }
 
 

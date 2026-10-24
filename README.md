@@ -38,6 +38,8 @@
 | `06-telemetry-metrics-pipeline` (`bytes` + `flatted`) | `69.429 ms` | `45.270 ms` | `16.495 ms` | **`8.670 ms`** (`1.90x` Bun) | **`3.90 ms`** (`4.23x` Bun) |
 | `07-graphql-ast-validator` (`dlv` + `dset` + AST) | `65.467 ms` | `39.097 ms` | `12.645 ms` | **`8.304 ms`** (`1.52x` Bun) | **`4.00 ms`** (`3.16x` Bun) |
 | `08-event-driven-state-journal` (`mitt` + `ms` + WAL) | `68.177 ms` | `44.038 ms` | `15.417 ms` | **`7.251 ms`** (`2.13x` Bun) | **`2.12 ms`** (`7.27x` Bun) |
+| `09-wintertc-web-router` (`Request` + `Response` + `URL`) | `88.912 ms` | `43.752 ms` | `11.491 ms` | **`17.737 ms`** (`2.47x` Deno) | **`12.50 ms`** (`3.50x` Deno) |
+| `10-fullstack-bff-microservice` (`cookie` + `dlv` + `ms` + `ETag`) | `88.523 ms` | `44.900 ms` | `13.575 ms` | **`7.291 ms`** (`1.86x` Bun) | **`1.33 ms`** (`10.2x` Bun) |
 
 ---
 
@@ -111,15 +113,25 @@ slice serve --port=3000 --workers=8 --tenant-dir=./tenants
 slice serve ./bundle.cas --smoke-test
 ```
 
-Inside TypeScript/JavaScript handlers, use the native **WinterTC Request/Response Bridge** (`Slice.request()`, `Slice.respond()`, post-response `Slice.waitUntil()`) and the **16-Way Sharded Edge KV & Atomic Counter Slab** (`Slice.kv`):
+Inside TypeScript/JavaScript handlers, you can use either the **Standard WinterTC / Cloudflare Workers / Bun / Deno `export default { fetch(req, env, ctx) }`** API (`Request`, `Response`, `Headers`, `URL`, `URLSearchParams`, `Response.json`, `Response.redirect`) or the zero-allocation **Slice Synchronous Bridge** (`Slice.request()`, `Slice.respond()`, `Slice.waitUntil()`), alongside the **16-Way Sharded Edge KV & Atomic Counter Slab** (`Slice.kv`):
 ```typescript
-const req = Slice.request(); // { method, path, query, tenant, tenantId, body, header(name) }
-const hits = Slice.kv.incr("rate:window", 1); // Tenant-isolated atomic counter (< 0.6 us)
-Slice.kv.set("session:last", req.path, 60_000); // Tenant-isolated KV with 60s TTL
-Slice.waitUntil(() => {
-    // Executed after HTTP response bytes are flushed to the client socket!
-});
-Slice.respond(200, { ok: true, method: req.method, path: req.path, tenant: req.tenant, hits }, "application/json");
+export default {
+    fetch(req: Request, env: Record<string, string>, ctx: { waitUntil(fn: () => void): void }): Response {
+        const url = new URL(req.url);
+        const hits = Slice.kv.incr("rate:window", 1); // Tenant-isolated atomic counter (< 0.6 us)
+        Slice.kv.set("session:last", url.pathname, 60_000); // Tenant-isolated KV with 60s TTL
+        ctx.waitUntil(() => {
+            // Executed after HTTP response bytes are flushed to the client socket!
+        });
+        return Response.json({
+            ok: true,
+            method: req.method,
+            path: url.pathname,
+            tenant: req.headers.get("x-slice-tenant"),
+            hits,
+        });
+    }
+};
 ```
 
 Every HTTP response includes real-time microVM execution headers:
@@ -232,36 +244,39 @@ SERVICE_STAGE = "production"
 
 ## Folder-Based Real-Life Production Applications, External NPM Libraries & Disk I/O Benchmarks (`docker-tests/apps/`)
 
-In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) runs **8 folder-based multi-module production TypeScript applications** (with real external `node_modules/` packages `semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`, `cookie@0.6.0`, `bytes@3.1.2`, `flatted@3.3.1`, `dlv@1.1.3`, `dset@3.1.3`, `mitt@3.0.1`, FIPS-180-4 SHA-256 & RFC-2104 HMAC-SHA256 `node:crypto`, and `node:fs` disk I/O) and verifies **100% byte-for-byte identical JSON output** against the **absolute latest releases** of Bun (`v1.4.3`), Deno (`v2.9.7`), and Node.js (`v26.12.0`):
+In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) runs **10 folder-based multi-module production TypeScript applications** (with standard WinterTC `Request`/`Response`/`Headers`/`URL`/`URLSearchParams` APIs, real external `node_modules/` packages `semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`, `cookie@0.6.0`, `bytes@3.1.2`, `flatted@3.3.1`, `dlv@1.1.3`, `dset@3.1.3`, `mitt@3.0.1`, FIPS-180-4 SHA-256 & RFC-2104 HMAC-SHA256 `node:crypto`, and `node:fs` disk I/O) and verifies **100% byte-for-byte identical JSON output** against the **absolute latest releases** of Bun (`v1.4.4`), Deno (`v2.9.8`), and Node.js (`v26.12.1`):
 
-| Folder-Based Production App (Linux Docker `x86_64`) | Slice (`v0.2.0`) | Bun (`v1.4.3`) | Deno (`v2.9.7`) | Node.js (`v26.12.0`) |
+| Folder-Based Production App (Linux Docker `x86_64`) | Slice (`v0.2.0`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v26.12.1`) |
 | :--- | :--- | :--- | :--- | :--- |
-| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256, 50 orders) | **5.515 ms** (`0.81 ms` warm isolate) | 12.919 ms | 33.361 ms | 61.822 ms |
-| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini` from `node_modules`) | **7.250 ms** (`0.18 ms` warm isolate) | 20.455 ms | 51.123 ms | 76.037 ms |
-| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk Write/Scan/Read/Unlink) | **9.191 ms** (`4.31 ms` warm isolate) | 13.253 ms | 40.269 ms | 65.978 ms |
-| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms` + Auth, 100 reqs) | **7.756 ms** (`1.24 ms` warm isolate) | 14.698 ms | 39.734 ms | 66.566 ms |
-| **App 5: `05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC-SHA256, 50 sessions) | **9.871 ms** (`4.02 ms` warm isolate) | 13.863 ms | 42.037 ms | 66.375 ms |
-| **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + Circular WAL) | **9.080 ms** (`4.33 ms` warm isolate) | 16.569 ms | 44.576 ms | 67.716 ms |
-| **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost Guard, 60 queries) | **8.263 ms** (`3.30 ms` warm isolate) | 12.572 ms | 39.122 ms | 65.346 ms |
-| **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay, 75 events) | **8.151 ms** (`2.84 ms` warm isolate) | 15.346 ms | 43.437 ms | 68.120 ms |
-| **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **10.25 MB (`10,496 KB`)** | 29.88 MB (`30,592 KB`) | 46.30 MB (`47,416 KB`) | 71.15 MB (`72,860 KB`) |
-| **Peak Memory Footprint: Telemetry + Flatted App (Max RSS)** | **10.50 MB (`10,752 KB`)** | 31.00 MB (`31,744 KB`) | 50.23 MB (`51,432 KB`) | 72.27 MB (`74,008 KB`) |
+| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256, 50 orders) | **5.297 ms** (`0.67 ms` warm isolate) | 12.729 ms | 34.766 ms | 63.778 ms |
+| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini` from `node_modules`) | **6.766 ms** (`0.27 ms` warm isolate) | 20.048 ms | 54.156 ms | 75.895 ms |
+| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk Write/Scan/Read/Unlink) | **8.438 ms** (`3.59 ms` warm isolate) | 13.063 ms | 41.701 ms | 66.366 ms |
+| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms` + Auth, 100 reqs) | **7.397 ms** (`1.24 ms` warm isolate) | 14.453 ms | 39.472 ms | 67.118 ms |
+| **App 5: `05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC-SHA256, 50 sessions) | **9.000 ms** (`2.98 ms` warm isolate) | 13.754 ms | 42.949 ms | 66.296 ms |
+| **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + Circular WAL) | **8.670 ms** (`3.90 ms` warm isolate) | 16.495 ms | 45.270 ms | 69.429 ms |
+| **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost Guard, 60 queries) | **8.304 ms** (`4.00 ms` warm isolate) | 12.645 ms | 39.097 ms | 65.467 ms |
+| **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay, 75 events) | **7.251 ms** (`2.12 ms` warm isolate) | 15.417 ms | 44.038 ms | 68.177 ms |
+| **App 9: `09-wintertc-web-router`** (`Request` + `Response` + `URL` + HMAC, 80 reqs) | **17.737 ms** (`12.50 ms` warm isolate) | 11.491 ms | 43.752 ms | 88.912 ms |
+| **App 10: `10-fullstack-bff-microservice`** (`cookie` + `dlv` + `ms` + `ETag`, 60 reqs) | **7.291 ms** (`1.33 ms` warm isolate) | 13.575 ms | 44.900 ms | 88.523 ms |
+| **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **10.38 MB (`10,624 KB`)** | 29.25 MB (`29,952 KB`) | 45.59 MB (`46,684 KB`) | 70.35 MB (`72,040 KB`) |
+| **Peak Memory Footprint: Telemetry + Flatted App (Max RSS)** | **10.88 MB (`11,136 KB`)** | 29.62 MB (`30,336 KB`) | 48.88 MB (`50,052 KB`) | 70.85 MB (`72,552 KB`) |
 | **`slice serve` HTTP/1.1 Keep-Alive (Tier-0 CAS, `--workers=8`)** | **152,376 req/s (`6.56 us/req`)** | 88,132 req/s (`11.35 us`) | 102,481 req/s (`9.76 us`) | 55,810 req/s (`17.92 us`) |
 | **`slice serve` HTTP/1.1 Keep-Alive (Tier-1 WinterTC, `--workers=8`)** | **107,274 req/s (`9.32 us/req`)** | 88,132 req/s (`11.35 us`) | 102,481 req/s (`9.76 us`) | 55,810 req/s (`17.92 us`) |
-| **1,000-Tenant MicroVM Isolate Cold-Start (Min / Swarm)** | **1.00 us (`1.42 ms` / 1,000 tenants)** | N/A | N/A | N/A |
+| **1,000-Tenant MicroVM Isolate Cold-Start (Min / Swarm)** | **0.98 us (`1.42 ms` / 1,000 tenants)** | N/A | N/A | N/A |
 
-Run the full Docker benchmark suite or filter by tags (`all`, `apps`, `n1`, `n2`, `n3`, `serve`, `swarm`):
+Run the full Docker benchmark suite or filter by tags (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `serve`, `swarm`):
 
 ```powershell
 docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
-# Run all benchmarks (8 folder apps + Phase N1 HTTP server + Phase N2 Serverless/KV + Phase N3 AI Agent/MCP + 1,000-tenant swarm)
+# Run all benchmarks (10 folder apps + Phase N1/F1 HTTP server + Phase N2 Serverless/KV + Phase N3 AI Agent/MCP + 1,000-tenant swarm)
 docker run --rm slice-realworld-bench
-# Or run only a specific tagged subset (e.g. Phase N1 + Phase N2 + Phase N3 + swarm)
-docker run --rm -e SLICE_BENCH_TAGS=n1,n2,n3,swarm slice-realworld-bench
+# Or run only a specific tagged subset (e.g. Phase F1 + Phase N1 + Phase N2 + Phase N3 + swarm)
+docker run --rm -e SLICE_BENCH_TAGS=f1,n1,n2,n3,swarm slice-realworld-bench
 # Run tagged Rust unit tests
 cargo test tag_n1
 cargo test tag_n2
 cargo test tag_n3
+cargo test tag_f1
 ```
 
 ---

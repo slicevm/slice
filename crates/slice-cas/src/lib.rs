@@ -329,9 +329,23 @@ fn strip_js_comments(source: &str) -> String {
 
 pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
     let mut js_code = strip_typescript_raw(source, is_ts);
-    if js_code.contains("import ") && js_code.contains("node:") && !js_code.contains("var __slice_modules =") {
+    if ((js_code.contains("import ") && js_code.contains("node:"))
+        || js_code.contains("export default "))
+        && !js_code.contains("var __slice_modules =")
+    {
         let mut dummy_deps = Vec::new();
         js_code = transform_module_to_cjs(&js_code, Path::new("."), &mut dummy_deps);
+        if js_code.contains("exports.default = __slice_default;") {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = rustc_hash::FxHasher::default();
+            js_code.hash(&mut hasher);
+            let rc_key = format!("{:016x}", hasher.finish());
+            let direct_body = rewrite_cjs_require(&js_code);
+            return format!(
+                "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{}\"] = function() {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n__h = exports.default || module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n",
+                rc_key, rc_key, rc_key, direct_body
+            );
+        }
     }
     rewrite_cjs_require(&js_code)
 }
@@ -1066,6 +1080,13 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         && !raw.contains("class ")
         && !raw.contains("Slice.")
         && !raw.contains("Buffer.")
+        && !raw.contains("new URL(")
+        && !raw.contains("new URLSearchParams(")
+        && !raw.contains("new Headers(")
+        && !raw.contains("new Request(")
+        && !raw.contains("new Response(")
+        && !raw.contains("Response.json(")
+        && !raw.contains("Response.redirect(")
         && !raw.contains("Math.random(")
         && !raw.contains("Date.now(")
         && !raw.contains("performance.now(")
@@ -1170,11 +1191,18 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         let (_, entry_body) = visited_order.pop().unwrap();
         let direct_body = entry_body.replace("require(", "__slice_cjs_require(");
         let rc_key = compute_bundle_rc_key(&direct_body);
-        let mut bundle = String::with_capacity(direct_body.len() + 256);
-        bundle.push_str(&format!(
-            "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"] || (__rc[\"{}\"] = function() {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n}});\n__run();\n",
-            rc_key, rc_key, rc_key, direct_body
-        ));
+        let mut bundle = String::with_capacity(direct_body.len() + 384);
+        if direct_body.contains("exports.default = __slice_default;") {
+            bundle.push_str(&format!(
+                "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{}\"] = function() {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n__h = exports.default || module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n",
+                rc_key, rc_key, rc_key, direct_body
+            ));
+        } else {
+            bundle.push_str(&format!(
+                "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"] || (__rc[\"{}\"] = function() {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n}});\n__run();\n",
+                rc_key, rc_key, rc_key, direct_body
+            ));
+        }
         return Ok(bundle);
     }
 
@@ -1234,10 +1262,18 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     bundle.push_str("    return m.exports;\n");
     bundle.push_str("}\n");
     bundle.push_str(&modules_code);
-    bundle.push_str(&format!("__run = __rc[\"{}\"] = function() {{\n", rc_key));
-    bundle.push_str("var require = __slice_require, exports = {}, module = { exports: exports };\n");
-    bundle.push_str(&entry_body);
-    bundle.push_str("\n};\n}\n__run();\n");
+    if entry_body.contains("exports.default = __slice_default;") {
+        bundle.push_str("var __h = null;\n");
+        bundle.push_str(&format!("__run = __rc[\"{}\"] = function() {{\n", rc_key));
+        bundle.push_str("if (!__h) {\nvar require = __slice_require, exports = {}, module = { exports: exports };\n");
+        bundle.push_str(&entry_body);
+        bundle.push_str("\n__h = exports.default || module.exports;\n}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n};\n}\n__run();\n");
+    } else {
+        bundle.push_str(&format!("__run = __rc[\"{}\"] = function() {{\n", rc_key));
+        bundle.push_str("var require = __slice_require, exports = {}, module = { exports: exports };\n");
+        bundle.push_str(&entry_body);
+        bundle.push_str("\n};\n}\n__run();\n");
+    }
     Ok(bundle)
 }
 

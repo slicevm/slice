@@ -17,7 +17,60 @@ Implemented in [`crates/slice-cli/src/main.rs`](file:///p:/opensource/slice/crat
 
 ---
 
-## 2. WinterTC Request, Response & Post-Response `waitUntil` API
+## 2. WinterTC Web Standards (`export default { fetch }`, `Request`, `Response`, `Headers`, `URL`, `URLSearchParams`) & Native `Slice` API
+
+Slice supports **both** the standard WinterTC / Cloudflare Workers / Bun / Deno `export default { fetch(req, env, ctx) }` handler contract **and** the low-level `Slice.request()` / `Slice.respond()` API:
+
+### Standard WinterTC Web APIs (Phase F1)
+- **`export default { fetch(req, env, ctx) }`**:
+  - Top-level module state is initialized **once** per worker realm (including during `prewarm_boa_bundle`) and cached in the `__slice_rc` closure.
+  - Every incoming HTTP request invokes `handler.fetch(req, env, ctx)` with:
+    - `req: Request`: Zero-copy `Request` instance backed by a lazy live `Headers` view (`__SLICE_LIVE_REQ__`) over the worker's stack HTTP buffer (`req.headers.get(name)` reads directly from Rust without allocating a JS header map!).
+    - `env`: `globalThis.process.env`.
+    - `ctx`: `{ waitUntil(fn), passThroughOnException() }`.
+  - Supports both synchronous `fetch(req): Response` (zero Promise allocation overhead) and `async fetch(req): Promise<Response>`.
+- **`URL` & `URLSearchParams`** (also available via `import { URL, URLSearchParams } from "node:url"`):
+  - Full relative URL resolution (`new URL("/v2/items/../orders?tag=gpu#top", "https://api.slice.dev")`), path dot-segment normalization, default port stripping (`:80` / `:443`), and live two-way `url.searchParams` synchronization (`.get()`, `.getAll()`, `.has()`, `.set()`, `.append()`, `.delete()`, `.sort()`, `.entries()`, `.size`, `Symbol.iterator`).
+- **`Headers`**:
+  - Case-insensitive HTTP header map supporting object, `[key, value][]`, or `Headers` initialization, `.get()`, `.set()`, `.append()`, `.has()`, `.delete()`, `.entries()`, `.forEach()`, and `Symbol.iterator`.
+- **`Request` & `Response`**:
+  - `new Request(input, init)` and `new Response(body, init)` with `.status`, `.statusText`, `.ok`, `.headers`, `.json()`, `.text()`, `.jsonSync()`, `.textSync()`, `.clone()`, `Response.json(data, init)`, and `Response.redirect(url, status)`.
+
+### Runnable Standard `export default { fetch }` Example
+
+Create `wintertc_worker.ts`:
+```typescript
+export default {
+    fetch(req: Request, env: Record<string, string>, ctx: { waitUntil(fn: () => void): void }): Response {
+        const url = new URL(req.url);
+        const tenant = req.headers.get("x-slice-tenant") || "default";
+        const hits = Slice.kv.incr("worker:hits", 1);
+
+        ctx.waitUntil(() => {
+            Slice.kv.set("worker:last_path", url.pathname, 60_000);
+        });
+
+        if (url.pathname === "/legacy") {
+            return Response.redirect(new URL("/v2/catalog?migrated=1", url.origin).href, 308);
+        }
+
+        return Response.json(
+            {
+                ok: true,
+                method: req.method,
+                path: url.pathname,
+                category: url.searchParams.get("category") || "all",
+                tenant,
+                hits,
+                nodeEnv: env.NODE_ENV
+            },
+            { status: 200, headers: { "x-powered-by": "Slice-NexusJS" } }
+        );
+    }
+};
+```
+
+### Low-Level Zero-Allocation `Slice.request()` & `Slice.respond()` API
 
 Inside any TypeScript/JavaScript handler served by `slice serve`:
 

@@ -8,7 +8,7 @@
 #   - Deno (V8)
 #   - Node.js (V8 native TypeScript execution)
 #
-# 8 Folder-Based Production Test Applications (`docker-tests/apps/`):
+# 10 Folder-Based Production Test Applications (`docker-tests/apps/`):
 #   1. `01-fintech-checkout`:
 #      Multi-module TypeScript OOP/Functional checkout engine + `node:crypto` SHA-256
 #   2. `02-npm-ecosystem-suite`:
@@ -26,6 +26,10 @@
 #      GraphQL AST Depth/Complexity Cost Guard + Deep Schema Resolver (`dlv@1.1.3`, `dset@3.1.3`)
 #   8. `08-event-driven-state-journal`:
 #      CQRS Event-Sourced Ledger Bus + Append-Only JSONL WAL Replay (`mitt@3.0.1`, `ms@2.1.3`)
+#   9. `09-wintertc-web-router`:
+#      Full WinterTC Web Standards Router (`Request`, `Response`, `Response.json`, `Response.redirect`, `Headers`, `URL`, `URLSearchParams`, `export default { fetch }`)
+#  10. `10-fullstack-bff-microservice`:
+#      Multi-Tenant BFF API Aggregator (`Request`, `Response`, `Headers`, `URL`, `cookie@0.6.0`, `dlv@1.1.3`, `ms@2.1.3`, CORS preflight & ETag `304`)
 # =============================================================================
 set -euo pipefail
 
@@ -52,6 +56,8 @@ APP5_DIR="$APPS_DIR/05-jwt-oauth-session-guard"
 APP6_DIR="$APPS_DIR/06-telemetry-metrics-pipeline"
 APP7_DIR="$APPS_DIR/07-graphql-ast-validator"
 APP8_DIR="$APPS_DIR/08-event-driven-state-journal"
+APP9_DIR="$APPS_DIR/09-wintertc-web-router"
+APP10_DIR="$APPS_DIR/10-fullstack-bff-microservice"
 
 echo "========================================================================="
 echo "  RUNTIME VERSIONS (LINUX DOCKER x86_64 - LATEST RELEASES)"
@@ -64,9 +70,9 @@ echo "  Deno    : $(deno -V)"
 
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  [TAG: apps] PACKING & COMPILING ALL 8 FOLDER-BASED APPS (OXC + CAS)"
+echo "  [TAG: apps] PACKING & COMPILING ALL 10 FOLDER-BASED APPS (OXC + CAS)"
 echo "========================================================================="
-for i in 1 2 3 4 5 6 7 8; do
+for i in 1 2 3 4 5 6 7 8 9 10; do
     eval "dir=\$APP${i}_DIR"
     "$SLICE_BIN" pack "$dir" "/tmp/app${i}.cas"
     "$SLICE_BIN" compile "/tmp/app${i}.cas" -o "/tmp/app${i}_bin"
@@ -108,7 +114,7 @@ verify_app_parity() {
 
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  1. VERIFYING 100% OUTPUT PARITY ACROSS ALL 8 FOLDER APPS & 4 RUNTIMES"
+echo "  1. VERIFYING 100% OUTPUT PARITY ACROSS ALL 10 FOLDER APPS & 4 RUNTIMES"
 echo "========================================================================="
 verify_app_parity "App 1: 01-fintech-checkout (Multi-File TS + SHA-256)" "$APP1_DIR" "/tmp/app1.cas" ""
 verify_app_parity "App 2: 02-npm-ecosystem-suite (semver + ms + ini)" "$APP2_DIR" "/tmp/app2.cas" "-A"
@@ -118,6 +124,8 @@ verify_app_parity "App 5: 05-jwt-oauth-session-guard (cookie + ms + HMAC-SHA256)
 verify_app_parity "App 6: 06-telemetry-metrics-pipeline (bytes + flatted + WAL)" "$APP6_DIR" "/tmp/app6.cas" "-A"
 verify_app_parity "App 7: 07-graphql-ast-validator (dlv + dset + AST Cost Guard)" "$APP7_DIR" "/tmp/app7.cas" "-A"
 verify_app_parity "App 8: 08-event-driven-state-journal (mitt + ms + JSONL Replay)" "$APP8_DIR" "/tmp/app8.cas" "-A"
+verify_app_parity "App 9: 09-wintertc-web-router (Request/Response/URL/Headers)" "$APP9_DIR" "/tmp/app9.cas" "-A"
+verify_app_parity "App 10: 10-fullstack-bff-microservice (CORS/ETag/Cookie/dlv)" "$APP10_DIR" "/tmp/app10.cas" "-A"
 fi
 
 measure_ms() {
@@ -182,6 +190,8 @@ bench_app 5 "05-JWT-OAUTH-SESSION-GUARD (cookie + ms + HMAC)" "$APP5_DIR" "-A"
 bench_app 6 "06-TELEMETRY-METRICS-PIPELINE (bytes + flatted)" "$APP6_DIR" "-A"
 bench_app 7 "07-GRAPHQL-AST-VALIDATOR (dlv + dset + AST)" "$APP7_DIR" "-A"
 bench_app 8 "08-EVENT-DRIVEN-STATE-JOURNAL (mitt + ms + WAL)" "$APP8_DIR" "-A"
+bench_app 9 "09-WINTERTC-WEB-ROUTER (Request/Response/URL/Headers)" "$APP9_DIR" "-A"
+bench_app 10 "10-FULLSTACK-BFF-MICROSERVICE (CORS/ETag/Cookie/dlv)" "$APP10_DIR" "-A"
 
 echo "========================================================================="
 echo "  PEAK MEMORY FOOTPRINT (MAX RSS) ACROSS REPRESENTATIVE APPS"
@@ -197,14 +207,14 @@ measure_rss_kb "Deno (App 6: Telemetry + Flatted)"  deno run -A "$APP6_DIR/src/i
 measure_rss_kb "Node (App 6: Telemetry + Flatted)"  node "$APP6_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 8 APPS (COLD VS WARM POOL)"
+echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 10 APPS (COLD VS WARM POOL)"
 echo "========================================================================="
 echo "  --- Cold Realm Telemetry ---"
-for i in 1 2 3 4 5 6 7 8; do
+for i in 1 2 3 4 5 6 7 8 9 10; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --quiet --metrics
 done
 echo "  --- Pre-Warmed Boa Pool Telemetry (--warm) ---"
-for i in 1 2 3 4 5 6 7 8; do
+for i in 1 2 3 4 5 6 7 8 9 10; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --warm --quiet --metrics
 done
 fi
@@ -555,6 +565,62 @@ echo "  [3. Built-in Model Context Protocol Server (slice mcp --smoke-test)]"
 "$SLICE_BIN" mcp --smoke-test
 
 rm -rf /tmp/n3_*
+fi
+
+if should_run_tag "f1"; then
+echo "========================================================================="
+echo "  [TAG: f1] PHASE F1 WINTERTC WEB STANDARDS & EXPORT DEFAULT FETCH"
+echo "  1. Zero-Copy Request/Response/Headers/URL/URLSearchParams Server"
+echo "  2. App 9 (09-wintertc-web-router) & App 10 (10-fullstack-bff-microservice)"
+echo "========================================================================="
+
+"$SLICE_BIN" pack "$APP9_DIR" "/tmp/f1_app9.cas" >/dev/null
+"$SLICE_BIN" pack "$APP10_DIR" "/tmp/f1_app10.cas" >/dev/null
+verify_app_parity "Phase F1 App 9: 09-wintertc-web-router" "$APP9_DIR" "/tmp/f1_app9.cas" "-A"
+verify_app_parity "Phase F1 App 10: 10-fullstack-bff-microservice" "$APP10_DIR" "/tmp/f1_app10.cas" "-A"
+
+cat << 'EOF' > /tmp/f1_fetch_server.ts
+export default {
+    fetch(req: Request, env: any, ctx: any): Response {
+        const url = new URL(req.url);
+        const tenant = req.headers.get("x-slice-tenant") || "default";
+        const hits = Slice.kv.incr("f1_req_count", 1);
+        ctx.waitUntil(() => {
+            Slice.kv.set("f1_last_url", url.pathname, 60000);
+        });
+        return Response.json({
+            ok: true,
+            method: req.method,
+            path: url.pathname,
+            sku: url.searchParams.get("sku"),
+            tenant,
+            hits,
+            env: env.NODE_ENV
+        });
+    }
+};
+EOF
+"$SLICE_BIN" pack /tmp/f1_fetch_server.ts /tmp/f1_fetch_server.cas >/dev/null
+
+"$SLICE_BIN" serve /tmp/f1_fetch_server.cas --port=18091 --workers=4 --max-requests=4 >/dev/null 2>&1 &
+F1_SRV_PID=$!
+sleep 0.3
+
+F1_RESP1=$(curl -fsSL -H "X-Slice-Tenant: tenant-f1" "http://127.0.0.1:18091/v2/catalog?sku=B200")
+F1_RESP2=$(curl -fsSL -H "X-Slice-Tenant: tenant-f1" "http://127.0.0.1:18091/v2/catalog?sku=H100")
+kill "$F1_SRV_PID" 2>/dev/null || true
+wait "$F1_SRV_PID" 2>/dev/null || true
+
+echo "  [Live slice serve on export default { fetch(req, env, ctx) }]"
+echo "    Req 1 : $F1_RESP1"
+echo "    Req 2 : $F1_RESP2"
+if [[ "$F1_RESP1" == *'"sku":"B200"'* ]] && [[ "$F1_RESP2" == *'"hits":2'* ]]; then
+    echo "    [PASS] WinterTC export default { fetch(req, env, ctx) } + URL + Headers + Response.json verified!"
+else
+    echo "    [FAIL] Unexpected response from F1 fetch server!"
+    exit 1
+fi
+rm -f /tmp/f1_*
 fi
 
 if should_run_tag "swarm"; then
