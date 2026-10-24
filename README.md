@@ -266,13 +266,24 @@ cargo test tag_n3
 
 ---
 
-## Documentation & Benchmarks
+## Documentation (`docs/`) & System Engineering Specs (`sys-docs/`)
 
-* [Next-Gen Nuclear Plan (`NUC_PLAN.md`)](file:///p:/opensource/slice/NUC_PLAN.md)
-* [Master Plan (`BIG_PLAN.md`)](file:///p:/opensource/slice/BIG_PLAN.md)
-* [Architectural Blueprint (`reimagining_next_gen_node_runtime.md`)](file:///p:/opensource/slice/reimagining_next_gen_node_runtime.md)
-* [Docker Real-Stack Production Benchmarks (`docker-tests/README.md`)](file:///p:/opensource/slice/docker-tests/README.md)
-* [Cutting-Edge 2026 Research Deep Dive (`docs/research_deep_dive.md`)](file:///p:/opensource/slice/docs/research_deep_dive.md)
-* [Internal Architecture Specification (`docs/architecture.md`)](file:///p:/opensource/slice/docs/architecture.md)
-* [Empirical Benchmarks & Comparisons (`docs/benchmarks_and_comparisons.md`)](file:///p:/opensource/slice/docs/benchmarks_and_comparisons.md)
-* [Production Tooling & Deployment Guide (`docs/production_tooling_guide.md`)](file:///p:/opensource/slice/docs/production_tooling_guide.md)
+### User & Developer Manual by Chapter (`docs/`)
+* **[Chapter 00: Master Documentation Index](file:///p:/opensource/slice/docs/00_index.md)**
+* **[Chapter 01: Getting Started, `slice.toml` & Complete CLI Reference](file:///p:/opensource/slice/docs/01_getting_started_and_cli.md)**
+* **[Chapter 02: Hybrid Three-Tier Execution Engine (`slice-engine`)](file:///p:/opensource/slice/docs/02_execution_engine_and_tiers.md)**
+* **[Chapter 03: Zero-Stat CAS Archive, Oxc Bundler & Standalone Binaries (`slice-cas`)](file:///p:/opensource/slice/docs/03_cas_bundler_and_standalone_binaries.md)**
+* **[Chapter 04: Security Architecture — OCap, SES Lockdown, Fuel Cage & Hardware MPK (`slice-sandbox`)](file:///p:/opensource/slice/docs/04_security_ocap_ses_and_hardware_mpk.md)**
+* **[Chapter 05: Multi-Tenant HTTP/1.1 Server, WinterTC Bridge & Sharded Edge KV (`slice serve`)](file:///p:/opensource/slice/docs/05_http_server_wintertc_and_edge_kv.md)**
+* **[Chapter 06: AI Agent "Code Mode" Sandbox, `< 5 us` Checkpoints & Native MCP Server (`slice mcp`)](file:///p:/opensource/slice/docs/06_ai_agent_sandbox_checkpoints_and_mcp.md)**
+* **[Chapter 07: Node.js Compatibility (`node:*`), Native Intrinsics & External NPM Packages](file:///p:/opensource/slice/docs/07_node_compat_intrinsics_and_npm.md)**
+* **[Chapter 08: Kernel Completion Rings (`slice-io`) & Embedding Slice in Rust](file:///p:/opensource/slice/docs/08_kernel_io_rings_and_rust_embedding.md)**
+* **[Chapter 09: Benchmarks, Tagged Testing & Docker Verification Suite](file:///p:/opensource/slice/docs/09_benchmarks_testing_and_docker_suite.md)**
+
+### System Engineering Specifications (`sys-docs/` & `docker-tests/`)
+* **[Internal Architecture Specification (`sys-docs/architecture.md`)](file:///p:/opensource/slice/sys-docs/architecture.md)**
+* **[Empirical Benchmarks & Comparisons (`sys-docs/benchmarks_and_comparisons.md`)](file:///p:/opensource/slice/sys-docs/benchmarks_and_comparisons.md)**
+* **[Production Tooling & Deployment Guide (`sys-docs/production_tooling_guide.md`)](file:///p:/opensource/slice/sys-docs/production_tooling_guide.md)**
+* **[Cutting-Edge 2026 Research Deep Dive (`sys-docs/research_deep_dive.md`)](file:///p:/opensource/slice/sys-docs/research_deep_dive.md)**
+* **[Docker Real-Stack Production Benchmarks (`docker-tests/README.md`)](file:///p:/opensource/slice/docker-tests/README.md)**
+

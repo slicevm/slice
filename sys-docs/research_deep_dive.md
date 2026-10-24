@@ -2,7 +2,7 @@
 
 ## 1. Executive Overview
 
-This research document synthesizes the architectural blueprint from `reimagining_next_gen_node_runtime.md` with the 2025-2026 state-of-the-art in server-side JavaScript engines, microVM isolation, completion-based kernel I/O, and zero-stat content-addressable storage.
+This research document synthesizes the Slice (Nexus-JS) architectural blueprint with the 2025-2026 state-of-the-art in server-side JavaScript engines, microVM isolation, completion-based kernel I/O, and zero-stat content-addressable storage.
 
 Our goal is to engineer **Slice (Nexus-JS)**: a microVM-grade, multi-tenant JavaScript/TypeScript edge runtime in Rust that achieves:
 1. **Cold Start Latency:** `< 100 microseconds` (0.1 ms) in-process isolate instantiation; `< 2 ms` full CLI process execution.

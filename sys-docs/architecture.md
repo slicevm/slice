@@ -2,7 +2,7 @@
 
 ## 1. Executive Architectural Overview
 
-**Slice (Nexus-JS)** (`v0.2.0`) is a ground-up realization of the architectural blueprint specified in [`reimagining_next_gen_node_runtime.md`](file:///p:/opensource/slice/reimagining_next_gen_node_runtime.md). Engineered in pure Rust (`edition = 2021`, `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`), Slice replaces the legacy POSIX + monolithic V8/JSC assumptions of Node.js, Deno, and Bun with four orthogonal, tightly integrated subsystems:
+**Slice (Nexus-JS)** (`v0.2.0`) is a ground-up realization of the architectural blueprint specified in [`sys-docs/research_deep_dive.md`](file:///p:/opensource/slice/sys-docs/research_deep_dive.md). Engineered in pure Rust (`edition = 2021`, `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`), Slice replaces the legacy POSIX + monolithic V8/JSC assumptions of Node.js, Deno, and Bun with four orthogonal, tightly integrated subsystems:
 
 1. **[`slice-cas`](file:///p:/opensource/slice/crates/slice-cas/src/lib.rs) (Zero-Stat Content-Addressed Storage, Oxc AOT TypeScript Compiler, & Static Barrel Tree-Shaker)**
 2. **[`slice-io`](file:///p:/opensource/slice/crates/slice-io/src/lib.rs) (Direct Kernel Completion Ring Engine: Linux `io_uring` SQPOLL + Windows NT `IOCP` + Fixed Slab Buffers)**

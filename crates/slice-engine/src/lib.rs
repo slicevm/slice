@@ -473,6 +473,15 @@ fn tokenize_js(input: &str) -> Vec<Token> {
             {
                 i += 1;
             }
+            if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+                i += 1;
+                if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+                    i += 1;
+                }
+                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'_') {
+                    i += 1;
+                }
+            }
             let num_str: String = input[start..i].chars().filter(|&c| c != '_').collect();
             let val = num_str.parse::<f64>().unwrap_or(0.0);
             tokens.push(Token::Num(val));

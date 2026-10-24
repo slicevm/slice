@@ -4,4 +4,7 @@
 *.cas
 *.snap
 .git
+/.archive
+/archive
+
 

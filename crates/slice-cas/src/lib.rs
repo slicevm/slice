@@ -1058,8 +1058,6 @@ fn transform_module_to_cjs(
 pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     let raw = std::fs::read_to_string(entry_path)
         .with_context(|| format!("Failed to read entrypoint {}", entry_path.display()))?;
-    let ext = entry_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let is_ts = matches!(ext, "ts" | "tsx");
 
     // Fast path for single-file scripts with no imports/exports/requires/classes/WinterTC bridge
     if !raw.contains("import ")
@@ -1072,7 +1070,7 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         && !raw.contains("Date.now(")
         && !raw.contains("performance.now(")
     {
-        return Ok(strip_typescript_and_normalize(&raw, is_ts));
+        return Ok(raw);
     }
 
     let mut visited_order: Vec<(String, String)> = Vec::new();
