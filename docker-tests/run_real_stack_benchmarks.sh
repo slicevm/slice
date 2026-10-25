@@ -62,6 +62,8 @@ APP11_DIR="$APPS_DIR/11-static-asset-cdn-edge"
 APP12_DIR="$APPS_DIR/12-ai-sse-token-streamer"
 APP13_DIR="$APPS_DIR/13-webhook-orchestrator-ssrf"
 APP14_DIR="$APPS_DIR/14-federated-api-mesh-dlp"
+APP15_DIR="$APPS_DIR/15-time-travel-test-suite"
+APP16_DIR="$APPS_DIR/16-dotenv-dlp-config-vault"
 
 UPSTREAM_F3_PID=""
 cleanup_upstream_f3() {
@@ -115,9 +117,9 @@ echo "  Deno    : $(deno -V)"
 
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  [TAG: apps] PACKING & COMPILING ALL 14 FOLDER-BASED APPS (OXC + CAS)"
+echo "  [TAG: apps] PACKING & COMPILING ALL 16 FOLDER-BASED APPS (OXC + CAS)"
 echo "========================================================================="
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     eval "dir=\$APP${i}_DIR"
     "$SLICE_BIN" pack "$dir" "/tmp/app${i}.cas"
     "$SLICE_BIN" compile "/tmp/app${i}.cas" -o "/tmp/app${i}_bin"
@@ -175,6 +177,8 @@ verify_app_parity "App 11: 11-static-asset-cdn-edge (Static ETag/304/bytes/ms)" 
 verify_app_parity "App 12: 12-ai-sse-token-streamer (SSE/ReadableStream/mitt/DLP)" "$APP12_DIR" "/tmp/app12.cas" "-A"
 verify_app_parity "App 13: 13-webhook-orchestrator-ssrf (Outbound fetch/SSRF/HMAC)" "$APP13_DIR" "/tmp/app13.cas" "-A"
 verify_app_parity "App 14: 14-federated-api-mesh-dlp (Outbound fetch/dlv/dset/DLP)" "$APP14_DIR" "/tmp/app14.cas" "-A"
+verify_app_parity "App 15: 15-time-travel-test-suite (Time-Travel VFS+KV/semver/dlv)" "$APP15_DIR" "/tmp/app15.cas" "-A"
+verify_app_parity "App 16: 16-dotenv-dlp-config-vault (Auto-DLP .env/ini/cookie/bytes)" "$APP16_DIR" "/tmp/app16.cas" "-A"
 fi
 
 measure_ms() {
@@ -245,6 +249,8 @@ bench_app 11 "11-STATIC-ASSET-CDN-EDGE (Static ETag/304/bytes/ms)" "$APP11_DIR" 
 bench_app 12 "12-AI-SSE-TOKEN-STREAMER (SSE/ReadableStream/mitt/DLP)" "$APP12_DIR" "-A"
 bench_app 13 "13-WEBHOOK-ORCHESTRATOR-SSRF (Outbound fetch/SSRF/HMAC)" "$APP13_DIR" "-A"
 bench_app 14 "14-FEDERATED-API-MESH-DLP (Outbound fetch/dlv/dset/DLP)" "$APP14_DIR" "-A"
+bench_app 15 "15-TIME-TRAVEL-TEST-SUITE (Time-Travel VFS+KV/semver/dlv)" "$APP15_DIR" "-A"
+bench_app 16 "16-DOTENV-DLP-CONFIG-VAULT (Auto-DLP .env/ini/cookie/bytes)" "$APP16_DIR" "-A"
 
 echo "========================================================================="
 echo "  PEAK MEMORY FOOTPRINT (MAX RSS) ACROSS REPRESENTATIVE APPS"
@@ -260,14 +266,14 @@ measure_rss_kb "Deno (App 6: Telemetry + Flatted)"  deno run -A "$APP6_DIR/src/i
 measure_rss_kb "Node (App 6: Telemetry + Flatted)"  node "$APP6_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 14 APPS (COLD VS WARM POOL)"
+echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 16 APPS (COLD VS WARM POOL)"
 echo "========================================================================="
 echo "  --- Cold Realm Telemetry ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --quiet --metrics
 done
 echo "  --- Pre-Warmed Boa Pool Telemetry (--warm) ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --warm --quiet --metrics
 done
 fi
@@ -787,6 +793,42 @@ else
     exit 1
 fi
 rm -f /tmp/f3_ssrf_dlp_check.ts
+fi
+
+if should_run_tag "f4"; then
+echo "========================================================================="
+echo "  [TAG: f4] PHASE F4 TIME-TRAVEL SLICE TEST, < 3MS --WATCH & AUTO-DLP .ENV"
+echo "  1. Built-In Time-Travel Test Runner (slice test) with < 5us VFS+KV Rollbacks"
+echo "  2. Auto-DLP .env Loader (--env-file) & < 3ms Live Dev Watcher (--watch-once)"
+echo "  3. App 15 (15-time-travel-test-suite) & App 16 (16-dotenv-dlp-config-vault)"
+echo "========================================================================="
+
+"$SLICE_BIN" pack "$APP15_DIR" "/tmp/app15.cas" >/dev/null
+"$SLICE_BIN" compile "/tmp/app15.cas" -o "/tmp/app15_bin" >/dev/null
+"$SLICE_BIN" pack "$APP16_DIR" "/tmp/app16.cas" >/dev/null
+"$SLICE_BIN" compile "/tmp/app16.cas" -o "/tmp/app16_bin" >/dev/null
+
+verify_app_parity "Phase F4 App 15: 15-time-travel-test-suite" "$APP15_DIR" "/tmp/app15.cas" "-A"
+verify_app_parity "Phase F4 App 16: 16-dotenv-dlp-config-vault" "$APP16_DIR" "/tmp/app16.cas" "-A"
+
+bench_app 15 "15-TIME-TRAVEL-TEST-SUITE (Time-Travel VFS+KV/semver/dlv)" "$APP15_DIR" "-A"
+bench_app 16 "16-DOTENV-DLP-CONFIG-VAULT (Auto-DLP .env/ini/cookie/bytes)" "$APP16_DIR" "-A"
+
+echo "  --- Phase F4 Cold vs Warm Isolate Telemetry ---"
+"$SLICE_BIN" run "/tmp/app15.cas" --quiet --metrics
+"$SLICE_BIN" run "/tmp/app15.cas" --warm --quiet --metrics
+"$SLICE_BIN" run "/tmp/app16.cas" --quiet --metrics
+"$SLICE_BIN" run "/tmp/app16.cas" --warm --quiet --metrics
+
+echo "  [Live slice test Time-Travel Runner Verification on App 15]"
+"$SLICE_BIN" test "$APP15_DIR"
+F4_TEST_JSON=$("$SLICE_BIN" test "$APP15_DIR" --json)
+if echo "$F4_TEST_JSON" | grep -q '"passed":3' && echo "$F4_TEST_JSON" | grep -q '"checkpointsRestored":3'; then
+    echo "    [PASS] slice test Time-Travel Runner verified (3/3 passed, 3/3 VFS+KV rollbacks)!"
+else
+    echo "    [FAIL] Unexpected slice test JSON output: $F4_TEST_JSON"
+    exit 1
+fi
 fi
 
 if should_run_tag "swarm"; then

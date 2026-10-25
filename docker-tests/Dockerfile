@@ -52,6 +52,8 @@ RUN bun install --cwd /app/docker-tests/apps/02-npm-ecosystem-suite \
     && bun install --cwd /app/docker-tests/apps/12-ai-sse-token-streamer \
     && bun install --cwd /app/docker-tests/apps/13-webhook-orchestrator-ssrf \
     && bun install --cwd /app/docker-tests/apps/14-federated-api-mesh-dlp \
+    && bun install --cwd /app/docker-tests/apps/15-time-travel-test-suite \
+    && bun install --cwd /app/docker-tests/apps/16-dotenv-dlp-config-vault \
     && sed -i 's/\r$//' /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh \
     && chmod +x /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh
 

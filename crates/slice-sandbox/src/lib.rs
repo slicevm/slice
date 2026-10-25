@@ -479,6 +479,7 @@ pub struct SliceManifest {
     pub entrypoint: String,
     pub fuel_limit: u64,
     pub memory_limit_kb: usize,
+    pub env_file: Option<String>,
     pub capabilities: CapabilityToken,
 }
 
@@ -490,6 +491,7 @@ impl Default for SliceManifest {
             entrypoint: "./src/index.ts".to_string(),
             fuel_limit: 50_000_000,
             memory_limit_kb: 4096,
+            env_file: None,
             capabilities: CapabilityToken::pure_compute(),
         }
     }
@@ -550,6 +552,12 @@ impl SliceManifest {
                             manifest.capabilities.allowed_net_hosts.insert(item);
                         }
                     }
+                    ("capabilities", "env_file") => {
+                        let ef = val.trim_matches('"').trim_matches('\'').trim().to_string();
+                        if !ef.is_empty() {
+                            manifest.env_file = Some(ef);
+                        }
+                    }
                     ("capabilities.env", _) => {
                         let env_val = val.trim_matches('"').trim_matches('\'').to_string();
                         manifest
@@ -602,6 +610,67 @@ fn parse_toml_string_array(raw: &str) -> Vec<String> {
         .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Returns `true` if `key` matches sensitive credential naming patterns (`*_SECRET*`, `*_TOKEN*`,
+/// `*_KEY*`, `*_PASSWORD*`, `*_PRIVATE*`, `*_CREDENTIAL*`) and is not a public/publishable key.
+#[inline]
+pub fn is_sensitive_env_key(key: &str) -> bool {
+    let upper = key.trim().to_ascii_uppercase();
+    if upper.contains("PUBLIC_KEY") || upper.contains("PUBLISHABLE_KEY") {
+        return false;
+    }
+    upper.contains("SECRET")
+        || upper.contains("TOKEN")
+        || upper.contains("KEY")
+        || upper.contains("PASSWORD")
+        || upper.contains("PRIVATE")
+        || upper.contains("CREDENTIAL")
+}
+
+/// Parses `.env` file content into `(env_pairs, auto_dlp_secrets)`.
+/// Automatically classifies values of keys matching [`is_sensitive_env_key`] (with length >= 6)
+/// as outbound Egress DLP secrets so they cannot be exfiltrated via `stdout`, HTTP responses, SSE, or `fetch()`.
+pub fn parse_dotenv_content(content: &str) -> (Vec<(String, String)>, Vec<String>) {
+    let mut pairs = Vec::new();
+    let mut secrets = Vec::new();
+
+    for raw_line in content.lines() {
+        let mut line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(stripped) = line.strip_prefix("export ") {
+            line = stripped.trim();
+        }
+        let Some((raw_k, raw_v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = raw_k.trim().to_string();
+        if key.is_empty() {
+            continue;
+        }
+        let mut val_part = raw_v.trim();
+        let val = if (val_part.starts_with('"') && val_part.ends_with('"') && val_part.len() >= 2)
+            || (val_part.starts_with('\'') && val_part.ends_with('\'') && val_part.len() >= 2)
+        {
+            val_part[1..val_part.len() - 1]
+                .replace("\\n", "\n")
+                .replace("\\\"", "\"")
+        } else {
+            if let Some(hash_idx) = val_part.find(" #") {
+                val_part = val_part[..hash_idx].trim();
+            }
+            val_part.to_string()
+        };
+
+        if val.len() >= 6 && is_sensitive_env_key(&key) && !secrets.contains(&val) {
+            secrets.push(val.clone());
+        }
+        pairs.push((key, val));
+    }
+
+    (pairs, secrets)
 }
 
 #[cfg(test)]
@@ -779,6 +848,70 @@ NODE_ENV = "production"
         assert!(local_tenant.verify_net_connect("127.0.0.1:18091").is_ok());
         assert!(local_tenant.verify_net_connect("127.0.0.1:6379").is_err());
         assert!(local_tenant.verify_net_connect("169.254.169.254:80").is_err());
+    }
+
+    #[test]
+    fn test_tag_f4_dotenv_parser_and_auto_dlp_secret_classification() {
+        let dotenv_raw = r#"
+# Production Vault Configuration
+SERVICE_REGION=us-east-1
+PUBLIC_KEY_ID="pk_live_public_identifier_123"
+export STRIPE_SECRET_KEY="sk_live_f4_stripe_vault_998877"
+OPENAI_API_TOKEN=tok_openai_f4_secret_665544 # inline comment
+DB_PASSWORD='pg_super_secret_pw_f4'
+"#;
+        let (pairs, secrets) = parse_dotenv_content(dotenv_raw);
+        assert_eq!(pairs.len(), 5);
+        assert_eq!(pairs[0], ("SERVICE_REGION".to_string(), "us-east-1".to_string()));
+        assert_eq!(
+            pairs[1],
+            (
+                "PUBLIC_KEY_ID".to_string(),
+                "pk_live_public_identifier_123".to_string()
+            )
+        );
+        assert_eq!(
+            pairs[2],
+            (
+                "STRIPE_SECRET_KEY".to_string(),
+                "sk_live_f4_stripe_vault_998877".to_string()
+            )
+        );
+        assert_eq!(
+            pairs[3],
+            (
+                "OPENAI_API_TOKEN".to_string(),
+                "tok_openai_f4_secret_665544".to_string()
+            )
+        );
+        assert_eq!(
+            pairs[4],
+            (
+                "DB_PASSWORD".to_string(),
+                "pg_super_secret_pw_f4".to_string()
+            )
+        );
+
+        // Only the 3 sensitive keys (excluding SERVICE_REGION and PUBLIC_KEY_ID) should be auto-registered for DLP
+        assert_eq!(
+            secrets,
+            vec![
+                "sk_live_f4_stripe_vault_998877".to_string(),
+                "tok_openai_f4_secret_665544".to_string(),
+                "pg_super_secret_pw_f4".to_string(),
+            ]
+        );
+
+        let toml_with_env_file = r#"
+[package]
+name = "f4-app"
+entrypoint = "./src/index.ts"
+
+[capabilities]
+env_file = ".env.production"
+"#;
+        let m = SliceManifest::parse_toml(toml_with_env_file);
+        assert_eq!(m.env_file.as_deref(), Some(".env.production"));
     }
 }
 

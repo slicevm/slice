@@ -44,6 +44,8 @@
 | `12-ai-sse-token-streamer` (`mitt` + `ms` + SSE + DLP) | `91.210 ms` | `46.510 ms` | `15.840 ms` | **`17.774 ms`** (`2.62x` Deno) | **`8.70 ms`** (`1.82x` Bun) |
 | `13-webhook-orchestrator-ssrf` (`fast-querystring` + `ms` + Live `fetch`) | `120.337 ms` | `52.886 ms` | `19.153 ms` | **`16.856 ms`** (`1.14x` Bun) | **`5.96 ms`** (`3.21x` Bun) |
 | `14-federated-api-mesh-dlp` (`bytes` + `dlv` + `dset` + Live `fetch`) | `117.459 ms` | `37.976 ms` | `21.159 ms` | **`20.275 ms`** (`1.04x` Bun) | **`10.51 ms`** (`2.01x` Bun) |
+| `15-time-travel-test-suite` (`semver` + `ms` + `dlv` + `dset` + 24 VFS/KV Rollbacks) | `92.606 ms` | `66.678 ms` | `23.599 ms` | **`13.059 ms`** (`1.81x` Bun) | **`1.86 ms`** (`12.7x` Bun) |
+| `16-dotenv-dlp-config-vault` (`ini` + `cookie` + `bytes` + `.env` Auto-DLP) | `72.424 ms` | `46.431 ms` | `14.325 ms` | **`12.394 ms`** (`1.16x` Bun) | **`0.81 ms`** (`17.7x` Bun) |
 
 ---
 

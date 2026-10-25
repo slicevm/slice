@@ -1,6 +1,6 @@
 # Chapter 01: Getting Started, Project Configuration & Complete CLI Reference
 
-This chapter covers building and installing **Slice (Nexus-JS)** from source, scaffolding your first TypeScript edge service, configuring declarative capabilities in `slice.toml`, and using all 12 CLI subcommands.
+This chapter covers building and installing **Slice (Nexus-JS)** from source, scaffolding your first TypeScript edge service, configuring declarative capabilities in `slice.toml`, and using all 13 CLI subcommands.
 
 ---
 
@@ -95,6 +95,8 @@ allow_read = ["/app/public", "/app/config"]
 allow_write = ["/tmp/staging"]
 # Allowed outbound network host:port endpoints
 allow_net = ["api.internal:443", "edge.slice.local:80"]
+# Optional .env file automatically loaded into capabilities.env with Auto-DLP secret registration
+env_file = ".env"
 
 [capabilities.env]
 # Explicit environment variables injected into the tenant compartment
@@ -120,13 +122,29 @@ Executes a single `.ts`/`.js` script, a folder application (containing `package.
 | `--allow-write=<prefix>` | Grant write/append/mkdir/unlink access to paths starting with `<prefix>`. |
 | `--allow-net=<host:port>` | Grant outbound network access to `<host:port>`. |
 | `--allow-env=<KEY=VAL>` | Inject an explicit `KEY=VAL` environment variable into the isolate. |
+| `--env-file=<path>` | Load `KEY=VALUE` pairs from a `.env` file into `process.env` / `env()` and automatically register sensitive keys (`*_SECRET*`, `*_TOKEN*`, `*_KEY*`, `*_PASSWORD*`, `*_PRIVATE*`) into the Egress DLP guard. |
+| `--watch` / `--watch-once` | Poll source files (`mtime` + size) and live-reload via Oxc in `< 3 ms` when a `.ts`/`.js`/`slice.toml`/`.env` file changes (`--watch-once` exits after 1 reload). |
 | `--fuel=<u64>` | Override the maximum CPU instruction fuel budget (default: `50,000,000`). |
 | `--memory=<bytes>` | Override the maximum per-isolate memory ceiling in bytes (default: `16,777,216`). |
 | `--warm` | Pre-warm the thread-local `BOA_CONTEXT_POOL` and `__slice_rc` bundle closure before measurement. |
 | `--deterministic[=<seed>]` | Enable deterministic replay mode (`Math.random()`, `Date.now()`, `performance.now()`) using SplitMix64 with `<seed>` (default: `42`). |
-| `--audit-egress=<secret>` | Inspect `stdout` and `returnValue` for raw, Base64, or Base64URL leaks of `<secret>` and trap on match. |
+| `--audit-egress=<secret>` | Inspect `stdout`, `returnValue`, and outbound `fetch()` for raw, Base64, or Base64URL leaks of `<secret>` and trap on match. |
 | `--metrics` | Print microsecond instantiation, execution, total time, tier, memory bytes, and `stat` syscall count. |
 | `--quiet` / `-q` | Suppress script `stdout` output (useful when benchmarking with `--metrics`). |
+
+### 4.3 `slice test [target] [flags]`
+Runs the built-in Time-Travel Test Runner (`"slice:test"` / `"node:test"` / `"bun:test"`), discovering `*.test.ts`, `*.spec.ts`, `*.test.js`, and `*.spec.js` files across `[target]` (or running a single test file). Before every `test(...)` / `it(...)` block, Slice automatically takes a `< 5 us` VFS (`node:fs`) and `Slice.kv` state checkpoint (`Slice.checkpoint()`) and restores it (`Slice.restore(snap)`) in `finally`, guaranteeing 100% clean state isolation between tests.
+
+| Flag | Description |
+| :--- | :--- |
+| `--filter=<substring>` | Only execute tests whose `"Suite > Test Name"` matches `<substring>`. |
+| `--deterministic[=<seed>]` | Run all tests with a deterministic SplitMix64 PRNG and monotonic clock (default seed: `20261024`). |
+| `--env-file=<path>` | Load `.env` variables and auto-register sensitive keys into the Egress DLP guard. |
+| `--json` | Emit structured JSON test results (`files`, `total`, `passed`, `failed`, `skipped`, `checkpointsRestored`). |
+
+Supported assertions on `expect(actual)`:
+- Standard matchers: `.toBe(v)`, `.toEqual(v)`, `.toContain(sub)`, `.toBeTruthy()`, `.toBeFalsy()`, `.toBeNull()`, `.toBeDefined()`, `.toBeUndefined()`, `.toBeGreaterThan(n)`, `.toBeGreaterThanOrEqual(n)`, `.toBeLessThan(n)`, `.toBeLessThanOrEqual(n)`, `.toHaveLength(n)`, `.toHaveProperty(k, v?)`, `.toThrow(sub?)`, and `.not.*`.
+- Slice OCap & Resource matchers (on `Slice.evalSandbox(...)` outcomes or thunks): `.toViolate(kindOrSubstring?)`, `.toStayWithinFuel(maxFuel)`, and `.toStayWithinMemory(maxBytes)`.
 
 ### 4.3 `slice pack <input_file_or_dir> <output.cas> [--entry=./index.ts]`
 Compiles TypeScript via Oxc, bundles transitive ESM/CommonJS/JSON dependencies from `src/` and `node_modules/`, tree-shakes unused barrel submodules, hashes blobs with BLAKE3-256, and writes a 64-byte cache-line aligned `.cas` archive.

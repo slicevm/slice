@@ -1,0 +1,12 @@
+{
+  "name": "15-time-travel-test-suite",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "dlv": "1.1.3",
+    "dset": "3.1.3",
+    "ms": "2.1.3",
+    "semver": "7.6.3"
+  }
+}
+

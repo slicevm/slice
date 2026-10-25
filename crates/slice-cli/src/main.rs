@@ -62,6 +62,7 @@ fn main() -> Result<()> {
     match args[1].as_str() {
         "init" => cmd_init(&args[2..]),
         "run" => cmd_run(&args[2..]),
+        "test" => cmd_test(&args[2..]),
         "pack" => cmd_pack(&args[2..]),
         "compile" => cmd_compile(&args[2..]),
         "inspect" => cmd_inspect(&args[2..]),
@@ -126,7 +127,8 @@ fn print_usage() {
     println!();
     println!("Core Commands:");
     println!("  slice init [dir]                               Scaffold a new TypeScript Edge project with slice.toml");
-    println!("  slice run [target] [--warm] [--metrics]        Execute a script, folder app, .cas bundle, or slice.toml");
+    println!("  slice run [target] [--warm] [--watch]          Execute a script, folder app, .cas bundle, or slice.toml");
+    println!("  slice test [target] [--filter=PAT] [--json]    Run Time-Travel Test Suite (< 5us VFS+KV rollback per test)");
     println!("  slice serve [target] [--port=N] [--smoke-test] Launch multi-tenant WinterTC HTTP MicroVM server");
     println!("  slice pack <input> <output.cas>                Pack a file or folder app into a Zero-Stat BLAKE3 .cas archive");
     println!("  slice compile <input> -o <binary>              Compile a script, folder app, or .cas into a standalone binary");
@@ -170,6 +172,16 @@ fn load_manifest_or_default() -> (CapabilityToken, u64, usize) {
 }
 
 fn merge_manifest_toml_into_caps(raw_toml: &str, caps: &mut CapabilityToken) {
+    let mut dummy_secrets = Vec::new();
+    merge_manifest_toml_into_caps_and_dlp(raw_toml, None, caps, &mut dummy_secrets);
+}
+
+fn merge_manifest_toml_into_caps_and_dlp(
+    raw_toml: &str,
+    base_dir: Option<&Path>,
+    caps: &mut CapabilityToken,
+    audit_secrets: &mut Vec<String>,
+) {
     let m = SliceManifest::parse_toml(raw_toml);
     for r in m.capabilities.allowed_read_prefixes {
         if !caps.allowed_read_prefixes.contains(&r) {
@@ -185,8 +197,87 @@ fn merge_manifest_toml_into_caps(raw_toml: &str, caps: &mut CapabilityToken) {
         caps.allowed_net_hosts.insert(nh);
     }
     for (k, v) in m.capabilities.allowed_env_keys {
+        if v.len() >= 6
+            && slice_sandbox::is_sensitive_env_key(&k)
+            && !audit_secrets.contains(&v)
+        {
+            audit_secrets.push(v.clone());
+        }
         caps.allowed_env_keys.entry(k).or_insert(v);
     }
+    if let Some(env_file_rel) = m.env_file {
+        let env_path = match base_dir {
+            Some(dir) => dir.join(&env_file_rel),
+            None => PathBuf::from(&env_file_rel),
+        };
+        let _ = apply_dotenv_file_to_caps_and_dlp(&env_path, caps, audit_secrets);
+    }
+}
+
+fn apply_dotenv_file_to_caps_and_dlp(
+    dotenv_path: &Path,
+    caps: &mut CapabilityToken,
+    audit_secrets: &mut Vec<String>,
+) -> Result<usize> {
+    let raw = std::fs::read_to_string(dotenv_path)
+        .with_context(|| format!("Failed to read --env-file {}", dotenv_path.display()))?;
+    let (pairs, secrets) = slice_sandbox::parse_dotenv_content(&raw);
+    for (k, v) in pairs {
+        caps.allowed_env_keys.insert(k, v);
+    }
+    let count = secrets.len();
+    for sec in secrets {
+        if !audit_secrets.contains(&sec) {
+            audit_secrets.push(sec);
+        }
+    }
+    Ok(count)
+}
+
+fn collect_watch_fingerprint(target: &Path) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    fn visit_watch(dir: &Path, hasher: &mut DefaultHasher) {
+        if dir.is_file() {
+            if let Ok(meta) = std::fs::metadata(dir) {
+                dir.to_string_lossy().hash(hasher);
+                meta.len().hash(hasher);
+                if let Ok(m) = meta.modified() {
+                    if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
+                        d.as_nanos().hash(hasher);
+                    }
+                }
+            }
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for p in entries {
+            let name = p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if matches!(name, "node_modules" | "target" | ".git" | ".archive") {
+                continue;
+            }
+            if p.is_dir() {
+                visit_watch(&p, hasher);
+            } else {
+                let ext = p.extension().and_then(|s| s.to_str()).unwrap_or_default();
+                if matches!(ext, "ts" | "js" | "mjs" | "cjs" | "json" | "toml" | "env")
+                    || name.starts_with(".env")
+                {
+                    visit_watch(&p, hasher);
+                }
+            }
+        }
+    }
+    visit_watch(target, &mut hasher);
+    hasher.finish()
 }
 
 fn find_project_manifest_path(input_path: &Path) -> Option<PathBuf> {
@@ -267,6 +358,9 @@ fn cmd_run(args: &[String]) -> Result<()> {
     let mut prewarm_pool = false;
     let mut deterministic_seed: Option<u64> = None;
     let mut audit_secrets: Vec<String> = Vec::new();
+    let mut env_files: Vec<PathBuf> = Vec::new();
+    let mut watch_mode = false;
+    let mut watch_once = false;
     let mut target_opt: Option<String> = None;
 
     for arg in args {
@@ -281,6 +375,10 @@ fn cmd_run(args: &[String]) -> Result<()> {
         } else if let Some(kv) = arg.strip_prefix("--allow-env=") {
             if let Some((k, v)) = kv.split_once('=') {
                 caps = caps.with_env(k, v);
+            }
+        } else if let Some(ef) = arg.strip_prefix("--env-file=") {
+            if !ef.is_empty() {
+                env_files.push(PathBuf::from(ef));
             }
         } else if let Some(sec) = arg.strip_prefix("--audit-egress=") {
             if !sec.is_empty() {
@@ -300,9 +398,18 @@ fn cmd_run(args: &[String]) -> Result<()> {
             print_metrics = true;
         } else if arg == "--warm" {
             prewarm_pool = true;
+        } else if arg == "--watch" {
+            watch_mode = true;
+        } else if arg == "--watch-once" {
+            watch_mode = true;
+            watch_once = true;
         } else if !arg.starts_with('-') && target_opt.is_none() {
             target_opt = Some(arg.clone());
         }
+    }
+
+    for ef in &env_files {
+        apply_dotenv_file_to_caps_and_dlp(ef, &mut caps, &mut audit_secrets)?;
     }
 
     let target = match target_opt {
@@ -320,10 +427,16 @@ fn cmd_run(args: &[String]) -> Result<()> {
     };
 
     let path = Path::new(&target);
+    let mut bundled_for_sourcemap: Option<String> = None;
     let metrics = if target.ends_with(".cas") {
         let archive = MappedCasArchive::open(path)?;
         if let Some(toml_str) = archive.get_manifest_toml() {
-            merge_manifest_toml_into_caps(toml_str, &mut caps);
+            merge_manifest_toml_into_caps_and_dlp(
+                toml_str,
+                path.parent(),
+                &mut caps,
+                &mut audit_secrets,
+            );
         }
         let entry = archive
             .entrypoint_blob()
@@ -332,7 +445,7 @@ fn cmd_run(args: &[String]) -> Result<()> {
         if prewarm_pool {
             SliceIsolate::prewarm_boa_bundle(bytecode);
         }
-        let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps, fuel_limit, mem_limit);
+        let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps.clone(), fuel_limit, mem_limit);
         isolate.set_deterministic_seed(deterministic_seed);
         for sec in &audit_secrets {
             isolate.add_egress_audit_secret(sec.clone());
@@ -341,22 +454,36 @@ fn cmd_run(args: &[String]) -> Result<()> {
     } else {
         if let Some(manifest_file) = find_project_manifest_path(path) {
             if let Ok(raw) = std::fs::read_to_string(&manifest_file) {
-                merge_manifest_toml_into_caps(&raw, &mut caps);
+                merge_manifest_toml_into_caps_and_dlp(
+                    &raw,
+                    manifest_file.parent(),
+                    &mut caps,
+                    &mut audit_secrets,
+                );
             }
         }
         let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
         let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
         let bytecode = compile_source_to_bytecode(&bundled_source);
+        bundled_for_sourcemap = Some(bundled_source);
         if prewarm_pool {
             SliceIsolate::prewarm_boa_bundle(&bytecode);
         }
-        let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps, fuel_limit, mem_limit);
+        let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps.clone(), fuel_limit, mem_limit);
         isolate.set_deterministic_seed(deterministic_seed);
         for sec in &audit_secrets {
             isolate.add_egress_audit_secret(sec.clone());
         }
         isolate.execute_bytecode(&bytecode, None)?
     };
+
+    if metrics.return_value.starts_with("Uncaught ") {
+        let mapped = match bundled_for_sourcemap.as_deref() {
+            Some(b) => slice_cas::map_bundled_error_location(b, &metrics.return_value),
+            None => metrics.return_value.clone(),
+        };
+        bail!("{}", mapped);
+    }
 
     if !quiet {
         for line in &metrics.stdout {
@@ -376,6 +503,246 @@ fn cmd_run(args: &[String]) -> Result<()> {
         );
     }
 
+    if watch_mode && !target.ends_with(".cas") {
+        let mut prev_fp = collect_watch_fingerprint(path);
+        let wait_start = Instant::now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            let cur_fp = collect_watch_fingerprint(path);
+            if cur_fp != prev_fp || (watch_once && wait_start.elapsed().as_millis() >= 250) {
+                prev_fp = cur_fp;
+                let reload_start = Instant::now();
+                let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
+                let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
+                let bytecode = compile_source_to_bytecode(&bundled_source);
+                let mut isolate =
+                    SliceIsolate::spawn("tenant-cli-watch", 1, caps.clone(), fuel_limit, mem_limit);
+                isolate.set_deterministic_seed(deterministic_seed);
+                for sec in &audit_secrets {
+                    isolate.add_egress_audit_secret(sec.clone());
+                }
+                let reload_metrics = isolate.execute_bytecode(&bytecode, None)?;
+                let reload_ms = reload_start.elapsed().as_secs_f64() * 1_000.0;
+                if !quiet {
+                    for line in &reload_metrics.stdout {
+                        println!("{}", line);
+                    }
+                    println!("[Slice Watch] Reloaded in {:.2} ms", reload_ms);
+                }
+                if watch_once {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>> {
+    if target.is_file() {
+        return Ok(vec![target.to_path_buf()]);
+    }
+    let mut found = Vec::new();
+    fn walk_tests(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for p in entries {
+            let name = p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if matches!(name, "node_modules" | "target" | ".git" | ".archive") {
+                continue;
+            }
+            if p.is_dir() {
+                walk_tests(&p, out);
+            } else if name.ends_with(".test.ts")
+                || name.ends_with(".spec.ts")
+                || name.ends_with("_test.ts")
+                || name.ends_with(".test.js")
+                || name.ends_with(".spec.js")
+                || name.ends_with("_test.js")
+            {
+                out.push(p);
+            }
+        }
+    }
+    walk_tests(target, &mut found);
+    Ok(found)
+}
+
+fn cmd_test(args: &[String]) -> Result<()> {
+    let (mut caps, mut fuel_limit, mut mem_limit) = load_manifest_or_default();
+    let mut filter_opt: Option<String> = None;
+    let mut deterministic_seed: Option<u64> = Some(20261024);
+    let mut audit_secrets: Vec<String> = Vec::new();
+    let mut env_files: Vec<PathBuf> = Vec::new();
+    let mut json_output = false;
+    let mut target_opt: Option<String> = None;
+
+    for arg in args {
+        if let Some(f) = arg.strip_prefix("--filter=") {
+            filter_opt = Some(f.to_string());
+        } else if let Some(prefix) = arg.strip_prefix("--allow-read=") {
+            caps = caps.with_read_prefix(prefix);
+        } else if let Some(prefix) = arg.strip_prefix("--allow-write=") {
+            caps = caps.with_write_prefix(prefix);
+        } else if let Some(host) = arg.strip_prefix("--allow-net=") {
+            for h in host.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                caps = caps.with_net_host(h);
+            }
+        } else if let Some(kv) = arg.strip_prefix("--allow-env=") {
+            if let Some((k, v)) = kv.split_once('=') {
+                caps = caps.with_env(k, v);
+            }
+        } else if let Some(ef) = arg.strip_prefix("--env-file=") {
+            if !ef.is_empty() {
+                env_files.push(PathBuf::from(ef));
+            }
+        } else if let Some(sec) = arg.strip_prefix("--audit-egress=") {
+            if !sec.is_empty() {
+                audit_secrets.push(sec.to_string());
+            }
+        } else if let Some(f) = arg.strip_prefix("--fuel=") {
+            fuel_limit = f.parse().unwrap_or(fuel_limit);
+        } else if let Some(m) = arg.strip_prefix("--memory=") {
+            mem_limit = m.parse().unwrap_or(mem_limit);
+        } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
+            deterministic_seed = Some(seed_str.parse().unwrap_or(20261024));
+        } else if arg == "--no-deterministic" {
+            deterministic_seed = None;
+        } else if arg == "--json" {
+            json_output = true;
+        } else if !arg.starts_with('-') && target_opt.is_none() {
+            target_opt = Some(arg.clone());
+        }
+    }
+
+    for ef in &env_files {
+        apply_dotenv_file_to_caps_and_dlp(ef, &mut caps, &mut audit_secrets)?;
+    }
+
+    let target_str = target_opt.unwrap_or_else(|| ".".to_string());
+    let target_path = Path::new(&target_str);
+    if let Some(manifest_file) = find_project_manifest_path(target_path) {
+        if let Ok(raw) = std::fs::read_to_string(&manifest_file) {
+            merge_manifest_toml_into_caps_and_dlp(
+                &raw,
+                manifest_file.parent(),
+                &mut caps,
+                &mut audit_secrets,
+            );
+        }
+    }
+
+    let test_files = discover_test_files(target_path)?;
+    if test_files.is_empty() {
+        bail!("No test files (*.test.ts, *.spec.ts, *_test.ts) found in {}", target_path.display());
+    }
+
+    let suite_start = Instant::now();
+    let mut total_passed = 0usize;
+    let mut total_failed = 0usize;
+    let mut total_skipped = 0usize;
+    let mut total_rollbacks = 0usize;
+    let mut all_results: Vec<serde_json::Value> = Vec::new();
+
+    for test_file in &test_files {
+        let bundled = slice_cas::bundle_entrypoint_with_deps(test_file)?;
+        let filter_js = match &filter_opt {
+            Some(flt) => format!(
+                "globalThis.__slice_test_filter = {};",
+                serde_json::to_string(flt).unwrap_or_else(|_| "\"\"".to_string())
+            ),
+            None => "globalThis.__slice_test_filter = \"\";".to_string(),
+        };
+        let wrapped_js = format!(
+            "{}\nSlice.resetTests();\n{}\nconsole.log(\"__SLICE_TEST_REPORT__:\" + JSON.stringify(Slice.testSummary()));\n",
+            filter_js, bundled
+        );
+        let bytecode = compile_source_to_bytecode(&wrapped_js);
+
+        let mut isolate =
+            SliceIsolate::spawn("slice-test-runner", 1, caps.clone(), fuel_limit, mem_limit);
+        isolate.set_deterministic_seed(deterministic_seed);
+        for sec in &audit_secrets {
+            isolate.add_egress_audit_secret(sec.clone());
+        }
+        let metrics = isolate.execute_bytecode(&bytecode, None)?;
+        if metrics.return_value.starts_with("Uncaught ") {
+            let mapped = slice_cas::map_bundled_error_location(&bundled, &metrics.return_value);
+            bail!("Uncaught error in {}: {}", test_file.display(), mapped);
+        }
+
+        for line in &metrics.stdout {
+            if let Some(report_json) = line.strip_prefix("__SLICE_TEST_REPORT__:") {
+                let parsed: serde_json::Value = serde_json::from_str(report_json)?;
+                let p = parsed["passed"].as_u64().unwrap_or(0) as usize;
+                let f = parsed["failed"].as_u64().unwrap_or(0) as usize;
+                let s = parsed["skipped"].as_u64().unwrap_or(0) as usize;
+                let rb = parsed["checkpointsRestored"].as_u64().unwrap_or(0) as usize;
+                total_passed += p;
+                total_failed += f;
+                total_skipped += s;
+                total_rollbacks += rb;
+                if let Some(arr) = parsed["results"].as_array() {
+                    for r in arr {
+                        if !json_output {
+                            let status = if r["passed"].as_bool().unwrap_or(false) {
+                                "PASS"
+                            } else {
+                                "FAIL"
+                            };
+                            let full_name = r["fullName"].as_str().unwrap_or("test");
+                            let dur_us = r["durationUs"].as_u64().unwrap_or(1);
+                            let snap_id = r["checkpointId"].as_u64().unwrap_or(0);
+                            println!(
+                                "  [{}] {} ({} us, VFS+KV Rollback #{})",
+                                status, full_name, dur_us, snap_id
+                            );
+                            if let Some(err_str) = r["error"].as_str() {
+                                let mapped_err =
+                                    slice_cas::map_bundled_error_location(&bundled, err_str);
+                                println!("         -> {}", mapped_err);
+                            }
+                        }
+                        all_results.push(r.clone());
+                    }
+                }
+            } else if !json_output {
+                println!("{}", line);
+            }
+        }
+    }
+
+    let elapsed_ms = suite_start.elapsed().as_secs_f64() * 1_000.0;
+    if json_output {
+        let out = serde_json::json!({
+            "files": test_files.len(),
+            "total": total_passed + total_failed + total_skipped,
+            "passed": total_passed,
+            "failed": total_failed,
+            "skipped": total_skipped,
+            "checkpointsRestored": total_rollbacks,
+            "deterministicSeed": deterministic_seed,
+            "elapsedMs": elapsed_ms,
+            "results": all_results,
+        });
+        println!("{}", serde_json::to_string(&out)?);
+    } else {
+        println!(
+            "Slice Time-Travel Test Suite: {} passed, {} failed, {} skipped ({} VFS+KV rollbacks in {:.2} ms, seed={:?})",
+            total_passed, total_failed, total_skipped, total_rollbacks, elapsed_ms, deterministic_seed
+        );
+    }
+
+    if total_failed > 0 {
+        bail!("{} test(s) failed", total_failed);
+    }
     Ok(())
 }
 
@@ -2313,6 +2680,90 @@ console.log(res.textSync());
         assert_eq!(metrics.stdout[0], r#"{"status":"upstream_ok","tier":"f3"}"#);
 
         upstream_handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_tag_f4_cli_slice_test_runner_env_file_and_watch_reload() {
+        let tmp_dir = std::env::temp_dir().join("slice_f4_cli_suite_test");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let src_dir = tmp_dir.join("src");
+        let tests_dir = tmp_dir.join("tests");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        // 1. Write `.env` with both public config and a sensitive secret key
+        let env_path = tmp_dir.join(".env");
+        std::fs::write(
+            &env_path,
+            "APP_TIER=enterprise\nVAULT_MASTER_SECRET=sk_live_f4_cli_vault_991122\n",
+        )
+        .unwrap();
+
+        // 2. Write `src/ledger.ts` and `tests/ledger.test.ts`
+        std::fs::write(
+            src_dir.join("ledger.ts"),
+            r#"export function applyTransfer(balance: number, delta: number): number {
+    if (balance + delta < 0) throw new Error("Insufficient ledger funds");
+    return balance + delta;
+}
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            tests_dir.join("ledger.test.ts"),
+            r#"import { describe, test, expect } from "slice:test";
+import { applyTransfer } from "../src/ledger.ts";
+import * as fs from "node:fs";
+
+Slice.kv.set("acct:root", "500", 0);
+fs.writeFileSync("/tmp/f4_cli_ledger.json", "{\"v\":1}");
+
+describe("Ledger Time-Travel Suite", () => {
+    test("applies valid transfer and mutates VFS+KV", () => {
+        expect(applyTransfer(500, -200)).toBe(300);
+        expect(process.env.APP_TIER).toBe("enterprise");
+        Slice.kv.set("acct:root", "0", 0);
+        fs.writeFileSync("/tmp/f4_cli_ledger.json", "{\"v\":999}");
+    });
+
+    test("automatically rolls back VFS and KV state before second test", () => {
+        expect(Slice.kv.get("acct:root")).toBe("500");
+        expect(fs.readFileSync("/tmp/f4_cli_ledger.json")).toBe("{\"v\":1}");
+        expect(() => applyTransfer(100, -250)).toThrow("Insufficient ledger funds");
+    });
+
+    test("verifies OCap & Egress DLP via .toViolate", () => {
+        const leakAttempt = Slice.evalSandbox(
+            `console.log("${process.env.VAULT_MASTER_SECRET}");`,
+            { fuel: 100_000 }
+        );
+        expect(leakAttempt).toViolate("EGRESS_SECRET_LEAK_BLOCKED");
+    });
+});
+"#,
+        )
+        .unwrap();
+
+        // 3. Execute `cmd_test` against `tmp_dir` with `--env-file` and `--json`
+        let test_args = vec![
+            tmp_dir.to_string_lossy().to_string(),
+            format!("--env-file={}", env_path.to_string_lossy()),
+            "--json".to_string(),
+        ];
+        cmd_test(&test_args).expect("Expected `slice test` to pass all 3 specs");
+
+        // 4. Execute `cmd_run` with `--watch-once` to verify sub-3ms live reload
+        let watch_script = src_dir.join("watch_entry.ts");
+        std::fs::write(&watch_script, "console.log(\"watch-v1\");\n").unwrap();
+        let run_args = vec![
+            watch_script.to_string_lossy().to_string(),
+            "--watch-once".to_string(),
+            "--quiet".to_string(),
+        ];
+        cmd_run(&run_args).expect("Expected `slice run --watch-once` to complete cleanly");
+
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

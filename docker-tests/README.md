@@ -1,19 +1,19 @@
 # Slice Docker-Based Folder Applications, External NPM Libraries & Disk I/O Benchmark Suite
 
-This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v26.12.1`)** across **14 folder-based production TypeScript applications** (`docker-tests/apps/`).
+This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v26.12.1`)** across **16 folder-based production TypeScript applications** (`docker-tests/apps/`).
 
 ---
 
 ## Latest Runtimes Installed in Docker ([`docker-tests/Dockerfile`](file:///p:/opensource/slice/docker-tests/Dockerfile))
 
-- **Slice (`v0.2.0`):** Hybrid architecture combining **Oxc** (`v0.152.0` production Rust TypeScript compiler + static barrel tree-shaker + transitive `node_modules` ESM/CJS bundler), **Boa (`boa_engine` v0.22)** full ECMAScript VM with zero-copy `SLICEBOA` binary payloads, thread-local pre-warmed context pool (`BOA_CONTEXT_POOL`), native Rust fast-path intrinsics (`SemVer`, `SHA-256`, `HMAC-SHA256`, `Base64URL`, in-memory `VFS` slab cache, WinterTC `URL`/`URLSearchParams`/`Headers`/`Request`/`Response`/`ReadableStream`, `Slice.streamSSE` / `Response.sse`, OCap-guarded outbound `fetch()` with Cloud Metadata SSRF Shield and Egress DLP), and **Slice Zero-Stat CAS + `--static` BLAKE3 `ETag` Static Server + Tier-0/Tier-2 fast paths**.
+- **Slice (`v0.2.0`):** Hybrid architecture combining **Oxc** (`v0.152.0` production Rust TypeScript compiler + static barrel tree-shaker + transitive `node_modules` ESM/CJS bundler), **Boa (`boa_engine` v0.22)** full ECMAScript VM with zero-copy `SLICEBOA` binary payloads, thread-local pre-warmed context pool (`BOA_CONTEXT_POOL`), native Rust fast-path intrinsics (`SemVer`, `SHA-256`, `HMAC-SHA256`, `Base64URL`, in-memory `VFS` slab cache, WinterTC `URL`/`URLSearchParams`/`Headers`/`Request`/`Response`/`ReadableStream`, `Slice.streamSSE` / `Response.sse`, OCap-guarded outbound `fetch()` with Cloud Metadata SSRF Shield and Egress DLP, built-in Time-Travel `slice test` runner, `< 3 ms` `--watch`, and Auto-DLP `.env`), and **Slice Zero-Stat CAS + `--static` BLAKE3 `ETag` Static Server + Tier-0/Tier-2 fast paths**.
 - **Node.js (`v26.12.1` — Absolute Latest Release):** Dynamically resolved at container build time from `https://nodejs.org/dist/index.json` (`.[0].version`).
 - **Bun (`v1.4.4` — Absolute Latest Release):** Installed via official `https://bun.sh/install`.
 - **Deno (`v2.9.8` — Absolute Latest Release):** Installed via official `https://deno.land/install.sh`.
 
 ---
 
-## 14 Folder-Based Production Test Applications (`docker-tests/apps/`)
+## 16 Folder-Based Production Test Applications (`docker-tests/apps/`)
 
 ### 1. [`apps/01-fintech-checkout/`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts) — Multi-Module TypeScript E-Commerce & SHA-256 Crypto Signing
 - **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/package.json), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/types.ts), [`src/audit_crypto.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/audit_crypto.ts), [`src/pricing_engine.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/pricing_engine.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts).
@@ -127,11 +127,27 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
   {"app":"14-federated-api-mesh-dlp","libraries":["bytes@3.1.2","dlv@1.1.3","dset@3.1.3"],"queriesExecuted":25,"subgraphFetchesCompleted":25,"dlpExfiltrationsBlocked":5,"cleanAuditForwards":20,"totalAggregatedBytes":"3.2KB","meshStateHash":"973215696f65c8cd"}
   ```
 
+### 15. [`apps/15-time-travel-test-suite/`](file:///p:/opensource/slice/docker-tests/apps/15-time-travel-test-suite/src/index.ts) — Time-Travel VFS + KV Rollback Verification Suite (`semver@7.6.3`, `ms@2.1.3`, `dlv@1.1.3`, `dset@3.1.3` + `slice test`)
+- **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/15-time-travel-test-suite/package.json), [`slice.toml`](file:///p:/opensource/slice/docker-tests/apps/15-time-travel-test-suite/slice.toml), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/15-time-travel-test-suite/src/types.ts), [`src/state_machine.ts`](file:///p:/opensource/slice/docker-tests/apps/15-time-travel-test-suite/src/state_machine.ts), [`src/time_travel_harness.ts`](file:///p:/opensource/slice/docker-tests/apps/15-time-travel-test-suite/src/time_travel_harness.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/15-time-travel-test-suite/src/index.ts), [`tests/state_machine.test.ts`](file:///p:/opensource/slice/docker-tests/apps/15-time-travel-test-suite/tests/state_machine.test.ts).
+- **What it tests:** Executes 24 state-mutating specifications across 4 suites (`semver.satisfies`, `ms`, `dlv`, `dset`, `node:fs` VFS mutations, and `Slice.kv` balance/version mutations), taking a `< 5 us` `Slice.checkpoint()` before each spec and restoring it via `Slice.restore(snapId)` in `finally` to verify 24/24 zero-leakage VFS and KV state rollbacks. Also includes a native [`tests/state_machine.test.ts`](file:///p:/opensource/slice/docker-tests/apps/15-time-travel-test-suite/tests/state_machine.test.ts) verified via `slice test`.
+- **Identical Output Across All 4 Runtimes:**
+  ```json
+  {"app":"15-time-travel-test-suite","libraries":["dlv@1.1.3","dset@3.1.3","ms@2.1.3","semver@7.6.3"],"suitesExecuted":4,"specsExecuted":24,"specsPassed":24,"vfsRollbacksVerified":24,"kvRollbacksVerified":24,"totalRetentionMs":29462400000,"suiteAuditHash":"c624c2019b5c44fd"}
+  ```
+
+### 16. [`apps/16-dotenv-dlp-config-vault/`](file:///p:/opensource/slice/docker-tests/apps/16-dotenv-dlp-config-vault/src/index.ts) — Zero-Trust `.env` Config Vault & Auto-DLP Secret Exfiltration Auditor (`ini@4.1.3`, `cookie@0.6.0`, `bytes@3.1.2`)
+- **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/16-dotenv-dlp-config-vault/package.json), [`slice.toml`](file:///p:/opensource/slice/docker-tests/apps/16-dotenv-dlp-config-vault/slice.toml), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/16-dotenv-dlp-config-vault/src/types.ts), [`src/dotenv_vault.ts`](file:///p:/opensource/slice/docker-tests/apps/16-dotenv-dlp-config-vault/src/dotenv_vault.ts), [`src/auto_dlp_auditor.ts`](file:///p:/opensource/slice/docker-tests/apps/16-dotenv-dlp-config-vault/src/auto_dlp_auditor.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/16-dotenv-dlp-config-vault/src/index.ts).
+- **What it tests:** Parses `.env` configuration files (`KEY=VALUE`, `export KEY="VALUE"`, inline comments) alongside `ini` cluster limits, `bytes` payload budgets, and `cookie.serialize` headers, automatically classifying sensitive keys (`STRIPE_SECRET_KEY`, `OPENAI_API_TOKEN`, `DB_MASTER_PASSWORD`, `SIGNING_PRIVATE_KEY`) vs public keys (`PUBLIC_KEY_ID`, `PUBLISHABLE_KEY_WEB`) and auditing 50 outbound telemetry payloads against raw, Base64, and Base64URL secret exfiltration, signed with `node:crypto` HMAC-SHA256.
+- **Identical Output Across All 4 Runtimes:**
+  ```json
+  {"app":"16-dotenv-dlp-config-vault","libraries":["bytes@3.1.2","cookie@0.6.0","ini@4.1.3"],"dotenvEntriesLoaded":8,"publicKeysAllowed":4,"autoDlpSecretsRegistered":4,"payloadsAudited":50,"cleanPayloadsApproved":40,"plaintextLeaksBlocked":5,"base64LeaksBlocked":5,"totalApprovedCookieBytes":"9.55KB","vaultHmacSignature":"c19618e409a21e7a"}
+  ```
+
 ---
 
-## Verified Linux Docker (`x86_64`) Benchmark Results Across All 14 Applications
+## Verified Linux Docker (`x86_64`) Benchmark Results Across All 16 Applications
 
-### Execution Latency Across All 14 Folder Applications (20-Run Min / Avg)
+### Execution Latency Across All 16 Folder Applications (20-Run Min / Avg)
 
 | Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v26.12.1` | Slice Speedup vs Node.js | Slice Speedup vs Bun / Deno |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -149,6 +165,8 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
 | **App 12: `12-ai-sse-token-streamer`** (`mitt` + `ms` + SSE + DLP, 320 frames) | **17.774 ms** | **17.774 ms / 8.701 ms** (`0.06 us` init) | 15.840 ms | 46.510 ms | 91.210 ms | **5.13x faster** | **2.62x faster than Deno** |
 | **App 13: `13-webhook-orchestrator-ssrf`** (`fast-querystring` + `ms` + Live `fetch`) | **16.856 ms** | **14.379 ms / 5.964 ms** (`0.03 us` init) | 19.153 ms | 52.886 ms | 120.337 ms | **7.14x faster** | **1.14x faster than Bun** |
 | **App 14: `14-federated-api-mesh-dlp`** (`bytes` + `dlv` + `dset` + Live `fetch`) | **20.275 ms** | **18.926 ms / 10.509 ms** (`0.03 us` init) | 21.159 ms | 37.976 ms | 117.459 ms | **5.79x faster** | **1.04x faster than Bun** |
+| **App 15: `15-time-travel-test-suite`** (`semver` + `ms` + `dlv` + `dset` + 24 Rollbacks) | **13.059 ms** | **10.118 ms / 1.862 ms** (`0.02 us` init) | 23.599 ms | 66.678 ms | 92.606 ms | **7.09x faster** | **1.81x faster than Bun** |
+| **App 16: `16-dotenv-dlp-config-vault`** (`ini` + `cookie` + `bytes` + `.env` Auto-DLP) | **12.394 ms** | **9.843 ms / 0.810 ms** (`0.03 us` init) | 14.325 ms | 46.431 ms | 72.424 ms | **5.84x faster** | **1.16x faster than Bun** |
 
 ### Peak Memory Footprint (`Max RSS` via `/usr/bin/time -v`)
 
@@ -162,17 +180,18 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
 
 ## Running the Benchmark Suite (Tagged Filtering via `SLICE_BENCH_TAGS`)
 
-[`run_real_stack_benchmarks.sh`](file:///p:/opensource/slice/docker-tests/run_real_stack_benchmarks.sh) supports filtering benchmark suites via the `SLICE_BENCH_TAGS` environment variable (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `f2`, `f3`, `serve`, `swarm`):
+[`run_real_stack_benchmarks.sh`](file:///p:/opensource/slice/docker-tests/run_real_stack_benchmarks.sh) supports filtering benchmark suites via the `SLICE_BENCH_TAGS` environment variable (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `f2`, `f3`, `f4`, `serve`, `swarm`):
 
 | Tag | Suite Executed | Verified Linux Docker (`x86_64`) Highlight |
 | :--- | :--- | :--- |
-| `apps` | All 14 folder-based TypeScript + `node_modules` apps (`01`..`14`) | **`5.29 ms - 20.27 ms` cold** / **`0.27 ms - 12.50 ms` warm** (`10.38 MB` Max RSS) |
+| `apps` | All 16 folder-based TypeScript + `node_modules` apps (`01`..`16`) | **`5.29 ms - 20.27 ms` cold** / **`0.27 ms - 12.50 ms` warm** (`10.38 MB` Max RSS) |
 | `n1` / `serve` | Phase N1 `slice serve` (`--workers=8`, HTTP/1.1 Keep-Alive + Pipelining + WinterTC) | **`152,376 req/s` (`6.56 us/req`) Tier-0 CAS** / **`107,274 req/s` (`9.32 us/req`) Tier-1 WinterTC** |
 | `n2` | Phase N2 Sharded `Slice.kv` (`1,001` ops), `--tenant-dir` hot-swap, & `--deterministic` replay | **`581.29 us` for 1,001 `Slice.kv` ops**, zero-downtime `.cas` hot-swap, & 100% deterministic replay |
 | `n3` | Phase N3 Tree-of-Thought AI Agent (`Slice.checkpoint` + `Slice.evalSandbox` + `Slice.restore`), `--audit-egress`, & `slice mcp` | **`155.58 us` for 3 nested sandboxes + VFS/KV rollback (`17.13 us/sandbox`)**, Base64 leak blocked, & JSON-RPC 2.0 MCP tools |
 | `f1` | Phase F1 `slice serve` with `export default { fetch(req, env, ctx) }` + App 9 & App 10 WinterTC parity | **`export default { fetch }` HTTP server + 100% 4-runtime parity on Apps 9 & 10 (`7.29 ms` on App 10 vs `13.58 ms` Bun)** |
 | `f2` | Phase F2 `--static` Zero-Stat CAS Static Asset ETag (`HIT-200` + `HIT-304`) & `Response.sse` + Apps 11 & 12 | **`< 2 us` BLAKE3 `ETag` `304 Not Modified` + SSE token streaming + 100% 4-runtime parity on Apps 11 & 12** |
 | `f3` | Phase F3 OCap Outbound `fetch()`, Cloud Metadata SSRF Shield, & Outbound Egress DLP + Apps 13 & 14 | **Live TCP `fetch()` (`16.86 ms` App 13 vs `19.15 ms` Bun) + `169.254.169.254` SSRF & Base64 DLP blocked (`100%` 4-runtime parity)** |
+| `f4` | Phase F4 Time-Travel `slice test`, `< 3 ms` `--watch`, & Auto-DLP `.env` + Apps 15 & 16 | **Time-Travel `slice test` (`3/3 passed`, `3/3 VFS+KV rollbacks`) + `13.06 ms` App 15 (`1.81x` Bun) & `12.39 ms` App 16 (`1.16x` Bun) (`100%` 4-runtime parity)** |
 | `swarm` | 1,000-Tenant MicroVM Cold-Start & Density Benchmark (`slice microvm-bench --tenants=1000`) | **`0.98 us` min / `1.42 ms` total 1,000-tenant swarm (`9.93 MB` process RSS, 5/5 security vectors blocked)** |
 
 ```powershell

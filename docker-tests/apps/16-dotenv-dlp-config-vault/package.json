@@ -1,0 +1,11 @@
+{
+  "name": "16-dotenv-dlp-config-vault",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "bytes": "3.1.2",
+    "cookie": "0.6.0",
+    "ini": "4.1.3"
+  }
+}
+

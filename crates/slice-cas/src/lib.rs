@@ -329,7 +329,10 @@ fn strip_js_comments(source: &str) -> String {
 
 pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
     let mut js_code = strip_typescript_raw(source, is_ts);
-    if ((js_code.contains("import ") && js_code.contains("node:"))
+    if ((js_code.contains("import ")
+        && (js_code.contains("node:")
+            || js_code.contains("slice:")
+            || js_code.contains("bun:")))
         || js_code.contains("export default "))
         && !js_code.contains("var __slice_modules =")
     {
@@ -425,7 +428,7 @@ pub fn resolve_project_entrypoint(target: &Path, explicit_entry: Option<&str>) -
 }
 
 fn is_builtin_module(spec: &str) -> bool {
-    if spec.starts_with("node:") {
+    if spec.starts_with("node:") || spec.starts_with("slice:") || spec.starts_with("bun:") {
         return true;
     }
     matches!(
@@ -594,7 +597,10 @@ fn rewrite_cjs_requires_in_line(
                         if after_quote.starts_with(')') {
                             let spec = &trimmed_after[1..1 + end_q];
                             if is_builtin_module(spec) {
-                                let norm = if spec.starts_with("node:") {
+                                let norm = if spec.starts_with("node:")
+                                    || spec.starts_with("slice:")
+                                    || spec.starts_with("bun:")
+                                {
                                     spec.to_string()
                                 } else {
                                     format!("node:{}", spec)
@@ -624,7 +630,7 @@ fn rewrite_cjs_requires_in_line(
 
 fn resolve_spec_and_record(spec: &str, from_dir: &Path, deps_out: &mut Vec<PathBuf>) -> String {
     if is_builtin_module(spec) {
-        if spec.starts_with("node:") {
+        if spec.starts_with("node:") || spec.starts_with("slice:") || spec.starts_with("bun:") {
             spec.to_string()
         } else {
             format!("node:{}", spec)
@@ -888,7 +894,7 @@ fn transform_module_to_cjs(
         } else if clean_stmt == "function parse(val) {" || clean_stmt == "function parse (val) {" {
             rewritten_line = "function parse(val) { if (globalThis.__slice_fast_bytes_parse) { var __bp = globalThis.__slice_fast_bytes_parse(val); if (__bp !== undefined) return __bp; }".to_string();
         } else if clean_stmt == "function serialize(name, val, options) {" || clean_stmt == "function serialize (name, val, options) {" {
-            rewritten_line = "function serialize(name, val, options) { if (options && !options.domain && !options.expires && !options.priority && !options.encode && !options.partitioned) { var __cs = name + '=' + val; if (options.maxAge != null) __cs += '; Max-Age=' + Math.floor(options.maxAge); if (options.path) __cs += '; Path=' + options.path; if (options.httpOnly) __cs += '; HttpOnly'; if (options.secure) __cs += '; Secure'; if (options.sameSite === 'strict' || options.sameSite === true) __cs += '; SameSite=Strict'; else if (options.sameSite === 'lax') __cs += '; SameSite=Lax'; else if (options.sameSite === 'none') __cs += '; SameSite=None'; return __cs; }".to_string();
+            rewritten_line = "function serialize(name, val, options) { if (options && !options.domain && !options.expires && !options.priority && !options.encode && !options.partitioned && String(val).indexOf(':') === -1 && String(val).indexOf(' ') === -1) { var __cs = name + '=' + val; if (options.maxAge != null) __cs += '; Max-Age=' + Math.floor(options.maxAge); if (options.path) __cs += '; Path=' + options.path; if (options.httpOnly) __cs += '; HttpOnly'; if (options.secure) __cs += '; Secure'; if (options.sameSite === 'strict' || options.sameSite === true) __cs += '; SameSite=Strict'; else if (options.sameSite === 'lax') __cs += '; SameSite=Lax'; else if (options.sameSite === 'none') __cs += '; SameSite=None'; return __cs; }".to_string();
         } else if clean_stmt == "function parse(str, options) {" || clean_stmt == "function parse (str, options) {" {
             rewritten_line = "function parse(str, options) { if (!options && typeof str === 'string' && str.indexOf('%') === -1 && str.indexOf('\"') === -1) { var __co = {}, __cp = str.split(';'); for (var __ci = 0; __ci < __cp.length; __ci++) { var __s = __cp[__ci], __eq = __s.indexOf('='); if (__eq > 0) __co[__s.slice(0, __eq).trim()] = __s.slice(__eq + 1).trim(); } return __co; }".to_string();
         } else if clean_stmt == "const encodedHeader = this.toBase64Url(JSON.stringify(header))" {
@@ -1165,7 +1171,11 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         let js_stripped = strip_typescript_raw(&raw_src, is_ts);
         let from_dir = path.parent().unwrap_or_else(|| Path::new("."));
         let mut child_deps = Vec::new();
-        let cjs_body = transform_module_to_cjs(&js_stripped, from_dir, &mut child_deps);
+        let mut cjs_body = transform_module_to_cjs(&js_stripped, from_dir, &mut child_deps);
+        if !mod_id.contains("/node_modules/") {
+            let short_label = short_source_label(path);
+            cjs_body = format!("// #slice-source: {}|{}\n{}", short_label, mod_id, cjs_body);
+        }
 
         for dep_path in child_deps {
             let _ = visit_module(&dep_path, seen, visited_order)?;
@@ -1275,6 +1285,117 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         bundle.push_str("\n};\n}\n__run();\n");
     }
     Ok(bundle)
+}
+
+fn short_source_label(path: &Path) -> String {
+    let fname = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("module.ts");
+    if let Some(parent_name) = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+    {
+        if matches!(parent_name, "src" | "tests" | "test" | "lib" | "app") {
+            return format!("{}/{}", parent_name, fname);
+        }
+    }
+    fname.to_string()
+}
+
+/// Maps an uncaught JS error or bundled line reference back to its original TypeScript/JavaScript
+/// source file and 1-based line number (`<short_file>:<line>`) using `// #slice-source:` markers.
+pub fn map_bundled_error_location(bundled_js: &str, error_msg: &str) -> String {
+    let lines: Vec<&str> = bundled_js.lines().collect();
+
+    // 1. Check if `error_msg` contains an explicit `line N` or `:N:` bundled line reference
+    let mut explicit_line: Option<usize> = None;
+    if let Some(idx) = error_msg.find("line ") {
+        let digits: String = error_msg[idx + 5..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(n) = digits.parse::<usize>() {
+            explicit_line = Some(n);
+        }
+    }
+
+    if let Some(b_line) = explicit_line {
+        let mut active_short = "";
+        let mut active_full = "";
+        let mut marker_line_idx = 0usize;
+        for (idx, line) in lines.iter().enumerate() {
+            let line_1 = idx + 1;
+            if line_1 > b_line {
+                break;
+            }
+            if let Some(rest) = line.trim().strip_prefix("// #slice-source: ") {
+                let (s, f) = rest.split_once('|').unwrap_or((rest, rest));
+                active_short = s.trim();
+                active_full = f.trim();
+                marker_line_idx = line_1;
+            }
+        }
+        if !active_short.is_empty() && b_line > marker_line_idx {
+            let mut resolved_line = b_line - marker_line_idx;
+            if let Some(stmt_text) = lines.get(b_line - 1).map(|s| s.trim()) {
+                if !stmt_text.is_empty() {
+                    if let Ok(orig_src) = std::fs::read_to_string(active_full) {
+                        if let Some((orig_idx, _)) = orig_src
+                            .lines()
+                            .enumerate()
+                            .find(|(_, ol)| ol.contains(stmt_text))
+                        {
+                            resolved_line = orig_idx + 1;
+                        }
+                    }
+                }
+            }
+            return format!("{} ({}:{})", error_msg, active_short, resolved_line);
+        }
+    }
+
+    // 2. Otherwise extract the core error message literal and locate the originating module & line
+    let core_msg = error_msg
+        .trim()
+        .trim_start_matches("Uncaught ")
+        .trim_start_matches("Error: ")
+        .trim_start_matches("TypeError: ")
+        .trim_start_matches("RangeError: ")
+        .trim_matches('"')
+        .trim();
+
+    if !core_msg.is_empty() {
+        let mut active_short = "";
+        let mut active_full = "";
+        let mut marker_line_idx = 0usize;
+        for (idx, line) in lines.iter().enumerate() {
+            let line_1 = idx + 1;
+            if let Some(rest) = line.trim().strip_prefix("// #slice-source: ") {
+                let (s, f) = rest.split_once('|').unwrap_or((rest, rest));
+                active_short = s.trim();
+                active_full = f.trim();
+                marker_line_idx = line_1;
+                continue;
+            }
+            if !active_short.is_empty() && line.contains(core_msg) {
+                let mut resolved_line = line_1 - marker_line_idx;
+                if let Ok(orig_src) = std::fs::read_to_string(active_full) {
+                    if let Some((orig_idx, _)) = orig_src
+                        .lines()
+                        .enumerate()
+                        .find(|(_, ol)| ol.contains(core_msg))
+                    {
+                        resolved_line = orig_idx + 1;
+                    }
+                }
+                return format!("{} ({}:{})", error_msg, active_short, resolved_line);
+            }
+        }
+    }
+
+    error_msg.to_string()
 }
 
 /// Detects the canonical HTTP `Content-Type` header for a static web asset based on its file extension.
@@ -1941,5 +2062,45 @@ console.log(scale(addBase(4), cfg.multiplier));
         let _ = std::fs::remove_file(&fake_exe);
         let _ = std::fs::remove_file(&cas_path);
         let _ = std::fs::remove_file(&out_exe);
+    }
+
+    #[test]
+    fn test_tag_f4_source_line_error_mapping_across_multi_file_bundle() {
+        let test_dir = std::env::temp_dir().join("slice_tag_f4_sourcemap_test");
+        let _ = std::fs::remove_dir_all(&test_dir);
+        let src_dir = test_dir.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        // Line 6 of `src/pricing_validator.ts` throws an Error after a TypeScript interface
+        let validator_ts = r#"export interface OrderSpec {
+    id: string;
+    amountCents: number;
+}
+export function assertValidOrder(order: OrderSpec): number {
+    if (order.amountCents < 0) throw new Error("Negative order amount forbidden");
+    return order.amountCents;
+}
+"#;
+        let index_ts = r#"import { assertValidOrder } from "./pricing_validator.ts";
+console.log(assertValidOrder({ id: "ord-1", amountCents: -50 }));
+"#;
+        std::fs::write(src_dir.join("pricing_validator.ts"), validator_ts).unwrap();
+        std::fs::write(src_dir.join("index.ts"), index_ts).unwrap();
+
+        let bundled = bundle_entrypoint_with_deps(&src_dir.join("index.ts")).unwrap();
+        assert!(bundled.contains("// #slice-source: src/pricing_validator.ts|"));
+        assert!(bundled.contains("// #slice-source: src/index.ts|"));
+
+        let mapped = map_bundled_error_location(
+            &bundled,
+            r#"Uncaught Error: "Negative order amount forbidden""#,
+        );
+        assert!(
+            mapped.contains("(src/pricing_validator.ts:6)"),
+            "Expected mapped error location to point to (src/pricing_validator.ts:6), got: {}",
+            mapped
+        );
+
+        let _ = std::fs::remove_dir_all(&test_dir);
     }
 }

@@ -7,7 +7,7 @@ This chapter explains how to run Slice's unit test suites, tagged feature tests 
 ## 1. Running Rust Workspace Tests & Tagged Feature Subsets
 
 ```powershell
-# Run all 30 unit tests across slice-cas, slice-io, slice-sandbox, slice-engine, and slice-cli
+# Run all 34 unit tests across slice-cas, slice-io, slice-sandbox, slice-engine, and slice-cli
 cargo test --workspace
 
 # Run strict clippy lint verification (zero warnings allowed)
@@ -20,6 +20,7 @@ cargo test tag_n3   # Phase N3: Slice.evalSandbox, < 5 us Checkpoint/Restore, Eg
 cargo test tag_f1   # Phase F1: Standard WinterTC URL, URLSearchParams, Headers, Request, Response & export default { fetch }
 cargo test tag_f2   # Phase F2: Zero-Stat CAS Static Asset Server (--static), BLAKE3 ETag 304, & SSE Token Streaming
 cargo test tag_f3   # Phase F3: OCap Outbound fetch(), Cloud Metadata SSRF Shield, Outbound Egress DLP, & Cassette Replay
+cargo test tag_f4   # Phase F4: Time-Travel slice test Runner, < 3 ms --watch, Source-Line Mapping, & Auto-DLP .env
 ```
 
 ---
@@ -32,11 +33,11 @@ The Docker suite in [`docker-tests/`](file:///p:/opensource/slice/docker-tests/R
 # Build the benchmark image
 docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
 
-# Run ALL suites (14 folder apps + Phase N1/F1/F2/F3 HTTP & Outbound Fetch + Phase N2 KV/Hot-Swap + Phase N3 AI/MCP + 1,000-tenant swarm)
+# Run ALL suites (16 folder apps + Phase N1/F1/F2/F3/F4 HTTP, Outbound Fetch & Time-Travel Test + Phase N2 KV/Hot-Swap + Phase N3 AI/MCP + 1,000-tenant swarm)
 docker run --rm slice-realworld-bench
 
-# Or filter by comma-separated tags (apps, n1, n2, n3, f1, f2, f3, serve, swarm):
-docker run --rm -e SLICE_BENCH_TAGS=n1,n2,n3,f1,f2,f3,swarm slice-realworld-bench
+# Or filter by comma-separated tags (apps, n1, n2, n3, f1, f2, f3, f4, serve, swarm):
+docker run --rm -e SLICE_BENCH_TAGS=n1,n2,n3,f1,f2,f3,f4,swarm slice-realworld-bench
 docker run --rm -e SLICE_BENCH_TAGS=apps slice-realworld-bench
 ```
 
@@ -46,7 +47,7 @@ docker run --rm -e SLICE_BENCH_TAGS=apps slice-realworld-bench
 
 ### 3.1 Multi-Module TypeScript & Real `node_modules` Application Suite (`SLICE_BENCH_TAGS=apps`)
 
-All 4 runtimes produce **100% byte-for-byte identical JSON stdout** across all 14 applications:
+All 4 runtimes produce **100% byte-for-byte identical JSON stdout** across all 16 applications:
 
 | Production Application | Slice Cold `.cas` / Bin | Slice Warm (`--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v26.12.1` | Speedup vs Bun / Deno / Node |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -64,6 +65,8 @@ All 4 runtimes produce **100% byte-for-byte identical JSON stdout** across all 1
 | **`12-ai-sse-token-streamer`** (`mitt` + `ms` + SSE + DLP, 320 frames) | **17.774 ms** | **8.701 ms** (`0.06 us` init) | 15.840 ms | 46.510 ms | 91.210 ms | **2.62x Deno / 5.13x Node** |
 | **`13-webhook-orchestrator-ssrf`** (`fast-querystring` + `ms` + Live `fetch`) | **16.856 ms** | **5.964 ms** (`0.03 us` init) | 19.153 ms | 52.886 ms | 120.337 ms | **1.14x Bun / 7.14x Node** |
 | **`14-federated-api-mesh-dlp`** (`bytes` + `dlv` + `dset` + Live `fetch`) | **20.275 ms** | **10.509 ms** (`0.03 us` init) | 21.159 ms | 37.976 ms | 117.459 ms | **1.04x Bun / 5.79x Node** |
+| **`15-time-travel-test-suite`** (`semver` + `ms` + `dlv` + `dset` + 24 VFS/KV Rollbacks) | **13.059 ms** | **1.862 ms** (`0.02 us` init) | 23.599 ms | 66.678 ms | 92.606 ms | **1.81x Bun / 7.09x Node** |
+| **`16-dotenv-dlp-config-vault`** (`ini` + `cookie` + `bytes` + `.env` Auto-DLP) | **12.394 ms** | **0.810 ms** (`0.03 us` init) | 14.325 ms | 46.431 ms | 72.424 ms | **1.16x Bun / 5.84x Node** |
 
 ### 3.2 `slice serve` Multi-Tenant HTTP/1.1 Keep-Alive & Pipelined Throughput (`SLICE_BENCH_TAGS=n1`)
 
