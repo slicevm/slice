@@ -1510,6 +1510,18 @@ impl CasBuilder {
         Ok(count)
     }
 
+    /// Embeds a `slice.toml` declarative OCap manifest directly into the `.cas` archive under
+    /// `"manifest:/slice.toml"` so `.cas` archives and standalone `SLICEEXE` binaries enforce
+    /// their declared `allow_net`, `allow_read`, `allow_write`, and `[limits]` policies automatically.
+    pub fn embed_manifest_toml(&mut self, toml_content: &str) {
+        self.modules.push((
+            "manifest:/slice.toml".to_string(),
+            PathBuf::from("slice.toml"),
+            toml_content.to_string(),
+            toml_content.as_bytes().to_vec(),
+        ));
+    }
+
     /// Serializes the entire module graph into an immutable, 64-byte aligned `.cas` archive file.
     pub fn write_to_file(&self, output_path: &Path) -> Result<CasIndexHeader> {
         let mut radix_map = FxHashMap::default();
@@ -1519,7 +1531,8 @@ impl CasBuilder {
 
         for (specifier, _path, normalized_source, bytecode) in &self.modules {
             let is_static = specifier.starts_with("static:/");
-            let hash_hex = if is_static {
+            let is_manifest = specifier == "manifest:/slice.toml";
+            let hash_hex = if is_static || is_manifest {
                 blake3::hash(bytecode).to_hex().to_string()
             } else {
                 let mut hasher = blake3::Hasher::new();
@@ -1537,7 +1550,7 @@ impl CasBuilder {
                     radix_map.insert(dir_prefix.to_string(), hash_hex.clone());
                     radix_map.insert(format!("{}/", dir_prefix), hash_hex.clone());
                 }
-            } else {
+            } else if !is_manifest {
                 let stripped_ext = specifier
                     .trim_end_matches(".ts")
                     .trim_end_matches(".js")
@@ -1703,6 +1716,13 @@ impl MappedCasArchive {
     #[inline]
     pub fn entrypoint_blob(&self) -> Option<&CasBlobEntry> {
         self.header.blobs.get(&self.header.entrypoint_hash)
+    }
+
+    /// Returns the embedded `slice.toml` manifest string if one was packed into this `.cas` archive.
+    #[inline]
+    pub fn get_manifest_toml(&self) -> Option<&str> {
+        let entry = self.resolve_specifier("manifest:/slice.toml")?;
+        Some(self.get_source_slice(entry))
     }
 
     /// Opens a `.cas` archive embedded at `cas_offset` inside a larger file (such as a standalone executable).

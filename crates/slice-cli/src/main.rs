@@ -92,7 +92,10 @@ fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
         SliceIsolate::prewarm_boa_pool(1);
     }
 
-    let (caps, fuel_limit, mem_limit) = load_manifest_or_default();
+    let (mut caps, fuel_limit, mem_limit) = load_manifest_or_default();
+    if let Some(toml_str) = archive.get_manifest_toml() {
+        merge_manifest_toml_into_caps(toml_str, &mut caps);
+    }
     let mut isolate = SliceIsolate::spawn("standalone-exe", 1, caps, fuel_limit, mem_limit);
     let entry = archive
         .entrypoint_blob()
@@ -166,6 +169,47 @@ fn load_manifest_or_default() -> (CapabilityToken, u64, usize) {
     (CapabilityToken::pure_compute(), 50_000_000, 16 * 1024 * 1024)
 }
 
+fn merge_manifest_toml_into_caps(raw_toml: &str, caps: &mut CapabilityToken) {
+    let m = SliceManifest::parse_toml(raw_toml);
+    for r in m.capabilities.allowed_read_prefixes {
+        if !caps.allowed_read_prefixes.contains(&r) {
+            caps.allowed_read_prefixes.push(r);
+        }
+    }
+    for w in m.capabilities.allowed_write_prefixes {
+        if !caps.allowed_write_prefixes.contains(&w) {
+            caps.allowed_write_prefixes.push(w);
+        }
+    }
+    for nh in m.capabilities.allowed_net_hosts {
+        caps.allowed_net_hosts.insert(nh);
+    }
+    for (k, v) in m.capabilities.allowed_env_keys {
+        caps.allowed_env_keys.entry(k).or_insert(v);
+    }
+}
+
+fn find_project_manifest_path(input_path: &Path) -> Option<PathBuf> {
+    if input_path.is_dir() {
+        let candidate = input_path.join("slice.toml");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    } else if let Some(parent) = input_path.parent() {
+        let candidate = parent.join("slice.toml");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if let Some(grandparent) = parent.parent() {
+            let candidate2 = grandparent.join("slice.toml");
+            if candidate2.is_file() {
+                return Some(candidate2);
+            }
+        }
+    }
+    None
+}
+
 fn cmd_init(args: &[String]) -> Result<()> {
     let target_dir = if args.is_empty() {
         PathBuf::from(".")
@@ -231,7 +275,9 @@ fn cmd_run(args: &[String]) -> Result<()> {
         } else if let Some(prefix) = arg.strip_prefix("--allow-write=") {
             caps = caps.with_write_prefix(prefix);
         } else if let Some(host) = arg.strip_prefix("--allow-net=") {
-            caps = caps.with_net_host(host);
+            for h in host.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                caps = caps.with_net_host(h);
+            }
         } else if let Some(kv) = arg.strip_prefix("--allow-env=") {
             if let Some((k, v)) = kv.split_once('=') {
                 caps = caps.with_env(k, v);
@@ -276,6 +322,9 @@ fn cmd_run(args: &[String]) -> Result<()> {
     let path = Path::new(&target);
     let metrics = if target.ends_with(".cas") {
         let archive = MappedCasArchive::open(path)?;
+        if let Some(toml_str) = archive.get_manifest_toml() {
+            merge_manifest_toml_into_caps(toml_str, &mut caps);
+        }
         let entry = archive
             .entrypoint_blob()
             .context("CAS archive has no valid entrypoint blob")?;
@@ -290,6 +339,11 @@ fn cmd_run(args: &[String]) -> Result<()> {
         }
         isolate.execute_bytecode(bytecode, Some(&archive))?
     } else {
+        if let Some(manifest_file) = find_project_manifest_path(path) {
+            if let Ok(raw) = std::fs::read_to_string(&manifest_file) {
+                merge_manifest_toml_into_caps(&raw, &mut caps);
+            }
+        }
         let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
         let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
         let bytecode = compile_source_to_bytecode(&bundled_source);
@@ -367,6 +421,12 @@ fn build_cas_archive_with_static(
         b.ingest_directory(input_path, &compile_source_to_bytecode)?;
         b
     };
+
+    if let Some(manifest_file) = find_project_manifest_path(input_path) {
+        if let Ok(raw_toml) = std::fs::read_to_string(&manifest_file) {
+            builder.embed_manifest_toml(&raw_toml);
+        }
+    }
 
     if let Some(static_dir) = static_dir_opt {
         builder.ingest_static_directory(static_dir)?;
@@ -566,7 +626,18 @@ fn cmd_serve(args: &[String]) -> Result<()> {
         }
     }
 
-    let (caps, fuel_limit, mem_limit) = load_manifest_or_default();
+    let (mut caps, fuel_limit, mem_limit) = load_manifest_or_default();
+    for arg in args {
+        if let Some(host) = arg.strip_prefix("--allow-net=") {
+            for h in host.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                caps = caps.with_net_host(h);
+            }
+        } else if let Some(prefix) = arg.strip_prefix("--allow-read=") {
+            caps = caps.with_read_prefix(prefix);
+        } else if let Some(prefix) = arg.strip_prefix("--allow-write=") {
+            caps = caps.with_write_prefix(prefix);
+        }
+    }
 
     // Pre-compile or map handler bytecode and extract any embedded CAS static assets
     let default_handler_src = r#"
@@ -578,15 +649,26 @@ console.log(route_res);
         let p = Path::new(target);
         if target.ends_with(".cas") {
             let archive = MappedCasArchive::open(p)?;
+            if let Some(toml_str) = archive.get_manifest_toml() {
+                merge_manifest_toml_into_caps(toml_str, &mut caps);
+            }
             static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
             let entry = archive.entrypoint_blob().context("Missing CAS entrypoint")?;
             archive.get_bytecode_slice(entry).to_vec()
         } else {
+            if let Some(manifest_file) = find_project_manifest_path(p) {
+                if let Ok(raw) = std::fs::read_to_string(&manifest_file) {
+                    merge_manifest_toml_into_caps(&raw, &mut caps);
+                }
+            }
             let entry_file = slice_cas::resolve_project_entrypoint(p, None)?;
             let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
             compile_source_to_bytecode(&bundled)
         }
     } else if let Ok(Some(archive)) = MappedCasArchive::open_embedded_self() {
+        if let Some(toml_str) = archive.get_manifest_toml() {
+            merge_manifest_toml_into_caps(toml_str, &mut caps);
+        }
         static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
         if let Some(entry) = archive.entrypoint_blob() {
             archive.get_bytecode_slice(entry).to_vec()
@@ -2161,6 +2243,77 @@ export default {
         assert!(response_str.contains(css_content));
         assert!(response_str.contains("Content-Type: text/event-stream; charset=utf-8"));
         assert!(response_str.contains("id: 1\nevent: token\ndata: {\"chunk\":\"alpha\"}\n\n"));
+    }
+
+    #[test]
+    fn test_tag_f3_embedded_manifest_allow_net_and_live_upstream_proxy() {
+        let tmp_dir = std::env::temp_dir().join("slice_f3_manifest_proxy_test");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let src_dir = tmp_dir.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        // Spawn a local upstream HTTP/1.1 service
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        let upstream_host_port = format!("127.0.0.1:{}", upstream_port);
+
+        let upstream_handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = upstream_listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"status":"upstream_ok","tier":"f3"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let toml_content = format!(
+            r#"[package]
+name = "f3-proxy"
+version = "0.2.0"
+entrypoint = "./src/index.ts"
+
+[capabilities]
+allow_net = ["{}"]
+"#,
+            upstream_host_port
+        );
+        std::fs::write(tmp_dir.join("slice.toml"), &toml_content).unwrap();
+        std::fs::write(
+            src_dir.join("index.ts"),
+            format!(
+                r#"
+const res = Slice.fetchSync("http://{}/internal/health");
+console.log(res.textSync());
+"#,
+                upstream_host_port
+            ),
+        )
+        .unwrap();
+
+        let cas_out = tmp_dir.join("f3_app.cas");
+        build_cas_archive_with_static(&tmp_dir, &cas_out, "./src/index.ts", None).unwrap();
+
+        let archive = MappedCasArchive::open(&cas_out).unwrap();
+        let embedded_toml = archive.get_manifest_toml().expect("Missing embedded slice.toml");
+        assert!(embedded_toml.contains(&upstream_host_port));
+
+        let mut caps = CapabilityToken::pure_compute();
+        merge_manifest_toml_into_caps(embedded_toml, &mut caps);
+        let entry = archive.entrypoint_blob().unwrap();
+        let mut iso = SliceIsolate::spawn("f3-cli-tenant", 1, caps, 5_000_000, 8 * 1024 * 1024);
+        let metrics = iso
+            .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+            .unwrap();
+        assert_eq!(metrics.stdout[0], r#"{"status":"upstream_ok","tier":"f3"}"#);
+
+        upstream_handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }
 

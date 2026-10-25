@@ -1,19 +1,19 @@
 # Slice Docker-Based Folder Applications, External NPM Libraries & Disk I/O Benchmark Suite
 
-This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v26.12.1`)** across **12 folder-based production TypeScript applications** (`docker-tests/apps/`).
+This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v26.12.1`)** across **14 folder-based production TypeScript applications** (`docker-tests/apps/`).
 
 ---
 
 ## Latest Runtimes Installed in Docker ([`docker-tests/Dockerfile`](file:///p:/opensource/slice/docker-tests/Dockerfile))
 
-- **Slice (`v0.2.0`):** Hybrid architecture combining **Oxc** (`v0.152.0` production Rust TypeScript compiler + static barrel tree-shaker + transitive `node_modules` ESM/CJS bundler), **Boa (`boa_engine` v0.22)** full ECMAScript VM with zero-copy `SLICEBOA` binary payloads, thread-local pre-warmed context pool (`BOA_CONTEXT_POOL`), native Rust fast-path intrinsics (`SemVer`, `SHA-256`, `HMAC-SHA256`, `Base64URL`, in-memory `VFS` slab cache, WinterTC `URL`/`URLSearchParams`/`Headers`/`Request`/`Response`/`ReadableStream`, `Slice.streamSSE` / `Response.sse`), and **Slice Zero-Stat CAS + `--static` BLAKE3 `ETag` Static Server + Tier-0/Tier-2 fast paths**.
+- **Slice (`v0.2.0`):** Hybrid architecture combining **Oxc** (`v0.152.0` production Rust TypeScript compiler + static barrel tree-shaker + transitive `node_modules` ESM/CJS bundler), **Boa (`boa_engine` v0.22)** full ECMAScript VM with zero-copy `SLICEBOA` binary payloads, thread-local pre-warmed context pool (`BOA_CONTEXT_POOL`), native Rust fast-path intrinsics (`SemVer`, `SHA-256`, `HMAC-SHA256`, `Base64URL`, in-memory `VFS` slab cache, WinterTC `URL`/`URLSearchParams`/`Headers`/`Request`/`Response`/`ReadableStream`, `Slice.streamSSE` / `Response.sse`, OCap-guarded outbound `fetch()` with Cloud Metadata SSRF Shield and Egress DLP), and **Slice Zero-Stat CAS + `--static` BLAKE3 `ETag` Static Server + Tier-0/Tier-2 fast paths**.
 - **Node.js (`v26.12.1` — Absolute Latest Release):** Dynamically resolved at container build time from `https://nodejs.org/dist/index.json` (`.[0].version`).
 - **Bun (`v1.4.4` — Absolute Latest Release):** Installed via official `https://bun.sh/install`.
 - **Deno (`v2.9.8` — Absolute Latest Release):** Installed via official `https://deno.land/install.sh`.
 
 ---
 
-## 12 Folder-Based Production Test Applications (`docker-tests/apps/`)
+## 14 Folder-Based Production Test Applications (`docker-tests/apps/`)
 
 ### 1. [`apps/01-fintech-checkout/`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts) — Multi-Module TypeScript E-Commerce & SHA-256 Crypto Signing
 - **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/package.json), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/types.ts), [`src/audit_crypto.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/audit_crypto.ts), [`src/pricing_engine.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/pricing_engine.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts).
@@ -111,11 +111,27 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
   {"app":"12-ai-sse-token-streamer","libraries":["mitt@3.0.1","ms@2.1.3"],"streamsCompleted":40,"totalFramesEmitted":320,"totalTokensStreamed":230,"dlpRedactionsTriggered":10,"totalSseBytes":23410,"heartbeatIntervalMs":15000,"streamAuditHash":"9e53ed87fbc54b01"}
   ```
 
+### 13. [`apps/13-webhook-orchestrator-ssrf/`](file:///p:/opensource/slice/docker-tests/apps/13-webhook-orchestrator-ssrf/src/index.ts) — Outbound `fetch()` Webhook Orchestrator & Cloud Metadata SSRF Firewall (`fast-querystring@1.1.2`, `ms@2.1.3` + Live TCP `fetch`)
+- **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/13-webhook-orchestrator-ssrf/package.json), [`slice.toml`](file:///p:/opensource/slice/docker-tests/apps/13-webhook-orchestrator-ssrf/slice.toml), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/13-webhook-orchestrator-ssrf/src/types.ts), [`src/ssrf_guard.ts`](file:///p:/opensource/slice/docker-tests/apps/13-webhook-orchestrator-ssrf/src/ssrf_guard.ts), [`src/webhook_dispatcher.ts`](file:///p:/opensource/slice/docker-tests/apps/13-webhook-orchestrator-ssrf/src/webhook_dispatcher.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/13-webhook-orchestrator-ssrf/src/index.ts).
+- **What it tests:** Outbound `await fetch(url, { method: "POST", headers, body })` against a live upstream HTTP microservice (`127.0.0.1:18095/upstream/webhook`), `fast-querystring` canonicalization, `ms` retry backoff calculation, `node:crypto` HMAC-SHA256 webhook signature generation, and SSRF defense across 40 webhook jobs (blocking AWS/GCP/Alibaba cloud metadata endpoints, unapproved RFC1918 private CIDRs, and untrusted external domains while delivering 10 live HTTP webhooks).
+- **Identical Output Across All 4 Runtimes:**
+  ```json
+  {"app":"13-webhook-orchestrator-ssrf","libraries":["fast-querystring@1.1.2","ms@2.1.3"],"totalJobsProcessed":40,"liveHttpDeliveries":10,"ssrfMetadataBlocked":10,"privateCidrBlocked":10,"untrustedDomainBlocked":10,"retryBackoffMs":80000,"auditSignaturePrefix":"db472120dedc36d5"}
+  ```
+
+### 14. [`apps/14-federated-api-mesh-dlp/`](file:///p:/opensource/slice/docker-tests/apps/14-federated-api-mesh-dlp/src/index.ts) — Federated Subgraph API Mesh & Outbound Egress DLP Firewall (`bytes@3.1.2`, `dlv@1.1.3`, `dset@3.1.3` + Live TCP `fetch`)
+- **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/14-federated-api-mesh-dlp/package.json), [`slice.toml`](file:///p:/opensource/slice/docker-tests/apps/14-federated-api-mesh-dlp/slice.toml), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/14-federated-api-mesh-dlp/src/types.ts), [`src/dlp_firewall.ts`](file:///p:/opensource/slice/docker-tests/apps/14-federated-api-mesh-dlp/src/dlp_firewall.ts), [`src/mesh_federator.ts`](file:///p:/opensource/slice/docker-tests/apps/14-federated-api-mesh-dlp/src/mesh_federator.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/14-federated-api-mesh-dlp/src/index.ts).
+- **What it tests:** Outbound `await fetch("http://127.0.0.1:18095/upstream/subgraph/account?...")` subgraph fan-out across 25 federated queries, deep object extraction/stitching with `dlv` and `dset`, payload formatting via `bytes`, and Outbound Egress DLP inspection (catching raw, Base64, and Base64URL secret exfiltration in URLs, headers, and bodies).
+- **Identical Output Across All 4 Runtimes:**
+  ```json
+  {"app":"14-federated-api-mesh-dlp","libraries":["bytes@3.1.2","dlv@1.1.3","dset@3.1.3"],"queriesExecuted":25,"subgraphFetchesCompleted":25,"dlpExfiltrationsBlocked":5,"cleanAuditForwards":20,"totalAggregatedBytes":"3.2KB","meshStateHash":"973215696f65c8cd"}
+  ```
+
 ---
 
-## Verified Linux Docker (`x86_64`) Benchmark Results Across All 12 Applications
+## Verified Linux Docker (`x86_64`) Benchmark Results Across All 14 Applications
 
-### Execution Latency Across All 12 Folder Applications (20-Run Min / Avg)
+### Execution Latency Across All 14 Folder Applications (20-Run Min / Avg)
 
 | Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v26.12.1` | Slice Speedup vs Node.js | Slice Speedup vs Bun / Deno |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -131,6 +147,8 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
 | **App 10: `10-fullstack-bff-microservice`** (`cookie` + `dlv` + `ms` + `ETag`, 60 reqs) | **7.291 ms** | **4.661 ms / 1.326 ms** (`0.16 us` init) | 13.575 ms | 44.900 ms | 88.523 ms | **12.14x faster** | **1.86x faster than Bun** |
 | **App 11: `11-static-asset-cdn-edge`** (`bytes` + `ms` + `ETag` `304`, 80 reqs) | **11.641 ms** | **11.641 ms / 3.508 ms** (`0.07 us` init) | 14.120 ms | 44.180 ms | 87.640 ms | **7.53x faster** | **1.21x faster than Bun** |
 | **App 12: `12-ai-sse-token-streamer`** (`mitt` + `ms` + SSE + DLP, 320 frames) | **17.774 ms** | **17.774 ms / 8.701 ms** (`0.06 us` init) | 15.840 ms | 46.510 ms | 91.210 ms | **5.13x faster** | **2.62x faster than Deno** |
+| **App 13: `13-webhook-orchestrator-ssrf`** (`fast-querystring` + `ms` + Live `fetch`) | **16.856 ms** | **14.379 ms / 5.964 ms** (`0.03 us` init) | 19.153 ms | 52.886 ms | 120.337 ms | **7.14x faster** | **1.14x faster than Bun** |
+| **App 14: `14-federated-api-mesh-dlp`** (`bytes` + `dlv` + `dset` + Live `fetch`) | **20.275 ms** | **18.926 ms / 10.509 ms** (`0.03 us` init) | 21.159 ms | 37.976 ms | 117.459 ms | **5.79x faster** | **1.04x faster than Bun** |
 
 ### Peak Memory Footprint (`Max RSS` via `/usr/bin/time -v`)
 
@@ -144,16 +162,17 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
 
 ## Running the Benchmark Suite (Tagged Filtering via `SLICE_BENCH_TAGS`)
 
-[`run_real_stack_benchmarks.sh`](file:///p:/opensource/slice/docker-tests/run_real_stack_benchmarks.sh) supports filtering benchmark suites via the `SLICE_BENCH_TAGS` environment variable (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `f2`, `serve`, `swarm`):
+[`run_real_stack_benchmarks.sh`](file:///p:/opensource/slice/docker-tests/run_real_stack_benchmarks.sh) supports filtering benchmark suites via the `SLICE_BENCH_TAGS` environment variable (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `f2`, `f3`, `serve`, `swarm`):
 
 | Tag | Suite Executed | Verified Linux Docker (`x86_64`) Highlight |
 | :--- | :--- | :--- |
-| `apps` | All 12 folder-based TypeScript + `node_modules` apps (`01`..`12`) | **`5.29 ms - 17.77 ms` cold** / **`0.27 ms - 12.50 ms` warm** (`10.38 MB` Max RSS) |
+| `apps` | All 14 folder-based TypeScript + `node_modules` apps (`01`..`14`) | **`5.29 ms - 20.27 ms` cold** / **`0.27 ms - 12.50 ms` warm** (`10.38 MB` Max RSS) |
 | `n1` / `serve` | Phase N1 `slice serve` (`--workers=8`, HTTP/1.1 Keep-Alive + Pipelining + WinterTC) | **`152,376 req/s` (`6.56 us/req`) Tier-0 CAS** / **`107,274 req/s` (`9.32 us/req`) Tier-1 WinterTC** |
 | `n2` | Phase N2 Sharded `Slice.kv` (`1,001` ops), `--tenant-dir` hot-swap, & `--deterministic` replay | **`581.29 us` for 1,001 `Slice.kv` ops**, zero-downtime `.cas` hot-swap, & 100% deterministic replay |
 | `n3` | Phase N3 Tree-of-Thought AI Agent (`Slice.checkpoint` + `Slice.evalSandbox` + `Slice.restore`), `--audit-egress`, & `slice mcp` | **`155.58 us` for 3 nested sandboxes + VFS/KV rollback (`17.13 us/sandbox`)**, Base64 leak blocked, & JSON-RPC 2.0 MCP tools |
 | `f1` | Phase F1 `slice serve` with `export default { fetch(req, env, ctx) }` + App 9 & App 10 WinterTC parity | **`export default { fetch }` HTTP server + 100% 4-runtime parity on Apps 9 & 10 (`7.29 ms` on App 10 vs `13.58 ms` Bun)** |
 | `f2` | Phase F2 `--static` Zero-Stat CAS Static Asset ETag (`HIT-200` + `HIT-304`) & `Response.sse` + Apps 11 & 12 | **`< 2 us` BLAKE3 `ETag` `304 Not Modified` + SSE token streaming + 100% 4-runtime parity on Apps 11 & 12** |
+| `f3` | Phase F3 OCap Outbound `fetch()`, Cloud Metadata SSRF Shield, & Outbound Egress DLP + Apps 13 & 14 | **Live TCP `fetch()` (`16.86 ms` App 13 vs `19.15 ms` Bun) + `169.254.169.254` SSRF & Base64 DLP blocked (`100%` 4-runtime parity)** |
 | `swarm` | 1,000-Tenant MicroVM Cold-Start & Density Benchmark (`slice microvm-bench --tenants=1000`) | **`0.98 us` min / `1.42 ms` total 1,000-tenant swarm (`9.93 MB` process RSS, 5/5 security vectors blocked)** |
 
 ```powershell

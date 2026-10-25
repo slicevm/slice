@@ -198,4 +198,28 @@ Implemented in [`StaticAssetTable`](file:///p:/opensource/slice/crates/slice-cas
   ```
 - Every SSE response is automatically scanned by `--audit-egress` (`verify_egress_secrets_slice`), blocking raw, Base64, or Base64URL secret exfiltration inside AI token streams before any bytes leave the host.
 
+---
+
+## 7. OCap-Guarded Outbound `fetch()`, Cloud Metadata SSRF Shield, Outbound Egress DLP & Deterministic Cassette Replay (`Phase F3`)
+
+Implemented in [`crates/slice-engine/src/lib.rs`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs) (`check_boa_outbound_fetch_ocap_and_dlp`, `execute_outbound_http11`, `__slice_fetch_sync`) and [`crates/slice-sandbox/src/lib.rs`](file:///p:/opensource/slice/crates/slice-sandbox/src/lib.rs#L162-L231):
+
+### 7.1 Standard `await fetch(url, init)` & `Slice.fetchSync(url, init)`
+- Supports `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, custom `Headers`, request bodies, chunked transfer decoding, and standard `Response` methods (`await res.json()`, `await res.text()`, `res.jsonSync()`, `res.textSync()`, `res.status`, `res.ok`, `res.headers.get(...)`).
+- By default (**Zero Ambient Authority**), any outbound `fetch()` call without an explicit `allow_net` capability traps immediately with `SandboxViolation::NetAccessDenied`.
+- Grant outbound network capabilities via `slice.toml` (`allow_net = ["api.stripe.com:443", "127.0.0.1:18095"]` — automatically embedded into `.cas` archives and standalone `SLICEEXE` binaries under `manifest:/slice.toml`), CLI `--allow-net=host1,host2`, or `Slice.evalSandbox(code, { allowNet: [...] })`.
+
+### 7.2 Built-In Cloud Metadata & Private CIDR SSRF Shield
+- **Unconditional Cloud Metadata Protection**: Even when wildcard `allow_net = ["*"]` (`--allow-net=*`) is granted, Slice unconditionally blocks Server-Side Request Forgery (SSRF) against cloud instance metadata endpoints (`169.254.169.254`, `169.254.170.2`, `100.100.100.200`, `fd00:ec2::254`, `metadata.google.internal`, `metadata.goog`).
+- **Loopback & RFC1918 Private Network Protection**: Under wildcard `allow_net = ["*"]`, private and loopback networks (`localhost`, `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) are blocked unless that exact `host:port` is explicitly allowlisted (e.g., `--allow-net=127.0.0.1:18095`).
+
+### 7.3 Outbound Egress Secret DLP (`--audit-egress` on `fetch()`)
+- Before any outbound `fetch(url, { headers, body })` packet is transmitted over TCP, Slice scans the URL query string, outbound request headers, and request body for any secret registered via `--audit-egress=<SECRET>` (in raw plaintext, standard Base64, or URL-safe Base64URL).
+- If a secret is detected, Slice aborts the socket connection before a single packet leaves the machine and traps with `SandboxViolation::EnvAccessDenied { key: "EGRESS_SECRET_LEAK_BLOCKED" }`.
+
+### 7.4 Deterministic `fetch()` Cassette Recording & Replay (`--deterministic=<seed>` & `Slice.mockFetch`)
+- When `--deterministic=<seed>` is active, live outbound `fetch()` responses are automatically recorded into the tenant's isolated `Slice.kv` partition under `fetch_cassette:<METHOD>:<URL>` and replayed in `< 1 us` on subsequent runs.
+- Unit tests can also register in-memory responses directly via `Slice.mockFetch(url, { status: 200, headers: { ... }, body: { ... } })`.
+
+
 

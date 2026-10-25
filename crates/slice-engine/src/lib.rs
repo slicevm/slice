@@ -1482,6 +1482,9 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains("new Response(")
         || source.contains("Response.json(")
         || source.contains("Response.redirect(")
+        || source.contains("await ")
+        || source.contains("async ")
+        || source.contains(".then(")
         || source.contains("Math.random(")
         || source.contains("Date.now(")
         || source.contains("performance.now(");
@@ -1690,6 +1693,8 @@ pub struct SandboxEvalOptions {
     pub allow_read: Vec<String>,
     #[serde(default)]
     pub allow_write: Vec<String>,
+    #[serde(default)]
+    pub allow_net: Vec<String>,
     pub deterministic_seed: Option<u64>,
     pub audit_secret: Option<String>,
 }
@@ -1832,6 +1837,22 @@ impl SliceIsolate {
         } else {
             for p in parent_writes {
                 child_caps = child_caps.with_write_prefix(p.clone());
+            }
+        }
+
+        let parent_nets = &self.compartment.capabilities.allowed_net_hosts;
+        if !opts.allow_net.is_empty() {
+            for req_host in &opts.allow_net {
+                if !slice_sandbox::is_cloud_metadata_ssrf_target(req_host)
+                    && (parent_nets.is_empty()
+                        || self.compartment.verify_net_connect(req_host).is_ok())
+                {
+                    child_caps = child_caps.with_net_host(req_host.clone());
+                }
+            }
+        } else {
+            for h in parent_nets {
+                child_caps = child_caps.with_net_host(h.clone());
             }
         }
 
@@ -2312,6 +2333,18 @@ impl SliceIsolate {
                 ));
             });
         }
+        let has_net_hosts = !self.compartment.capabilities.allowed_net_hosts.is_empty();
+        if has_net_hosts {
+            BOA_NET_HOSTS.with(|h| {
+                *h.borrow_mut() = self.compartment.capabilities.allowed_net_hosts.clone();
+            });
+        }
+        let has_egress_secrets = !self.egress_audit_secrets.is_empty();
+        if has_egress_secrets {
+            BOA_EGRESS_SECRETS.with(|s| {
+                *s.borrow_mut() = self.egress_audit_secrets.clone();
+            });
+        }
 
         let mut realm = acquire_warm_boa_realm();
         let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
@@ -2321,6 +2354,13 @@ impl SliceIsolate {
         if has_fs_restrictions {
             BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = None);
         }
+        if has_net_hosts {
+            BOA_NET_HOSTS.with(|h| h.borrow_mut().clear());
+        }
+        if has_egress_secrets {
+            BOA_EGRESS_SECRETS.with(|s| s.borrow_mut().clear());
+        }
+        BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
         if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
             let _ = realm
                 .ctx
@@ -2973,6 +3013,10 @@ impl SliceIsolate {
                         .trim_start_matches("http://");
                     let (host, path) = stripped.split_once('/').unwrap_or((stripped, ""));
                     self.compartment.verify_net_connect(host)?;
+                    self.verify_egress_not_leaked(&url)?;
+                    if let Some(arg2) = eval_args.get(1) {
+                        self.verify_egress_not_leaked(&arg2.to_string())?;
+                    }
                     return Ok(JsValue::str(format!("HTTP/2 200 OK from {}/{}", host, path)));
                 }
                 "env" => {
@@ -3126,6 +3170,18 @@ impl SliceIsolate {
                 ));
             });
         }
+        let has_net_hosts = !self.compartment.capabilities.allowed_net_hosts.is_empty();
+        if has_net_hosts {
+            BOA_NET_HOSTS.with(|h| {
+                *h.borrow_mut() = self.compartment.capabilities.allowed_net_hosts.clone();
+            });
+        }
+        let has_egress_secrets = !self.egress_audit_secrets.is_empty();
+        if has_egress_secrets {
+            BOA_EGRESS_SECRETS.with(|s| {
+                *s.borrow_mut() = self.egress_audit_secrets.clone();
+            });
+        }
 
         let mut realm = acquire_warm_boa_realm();
         let rc_key_opt = extract_slice_rc_key(js_code);
@@ -3168,6 +3224,13 @@ impl SliceIsolate {
         if has_fs_restrictions {
             BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = None);
         }
+        if has_net_hosts {
+            BOA_NET_HOSTS.with(|h| h.borrow_mut().clear());
+        }
+        if has_egress_secrets {
+            BOA_EGRESS_SECRETS.with(|s| s.borrow_mut().clear());
+        }
+        BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
         if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
             release_warm_boa_realm(realm);
             return Err(violation);
@@ -3322,10 +3385,287 @@ thread_local! {
         const { std::cell::Cell::new((0, usize::MAX)) };
     static BOA_DET_STATE: std::cell::Cell<Option<(u64, u64)>> =
         const { std::cell::Cell::new(None) };
+    static BOA_NET_HOSTS: std::cell::RefCell<FxHashSet<String>> =
+        std::cell::RefCell::new(FxHashSet::default());
+    static BOA_EGRESS_SECRETS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static BOA_FETCH_MOCKS: std::cell::RefCell<FxHashMap<String, String>> =
+        std::cell::RefCell::new(FxHashMap::default());
     static CHECKPOINT_SLAB: std::cell::RefCell<FxHashMap<u64, StateCheckpoint>> =
         std::cell::RefCell::new(FxHashMap::default());
     static NEXT_CHECKPOINT_ID: std::cell::Cell<u64> =
         const { std::cell::Cell::new(1) };
+}
+
+struct OutboundUrlParts {
+    hostname: String,
+    port: u16,
+    host_header: String,
+    host_port: String,
+    path_and_query: String,
+}
+
+fn parse_outbound_http_url(raw_url: &str) -> Option<OutboundUrlParts> {
+    let trimmed = raw_url.trim();
+    let without_hash = trimmed.split('#').next().unwrap_or(trimmed);
+    let (default_port, rest) = if let Some(r) = without_hash.strip_prefix("http://") {
+        (80u16, r)
+    } else if let Some(r) = without_hash.strip_prefix("https://") {
+        (443u16, r)
+    } else {
+        return None;
+    };
+    let (authority, path_and_query) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, "/"),
+    };
+    let host_port_raw = match authority.rfind('@') {
+        Some(idx) => &authority[idx + 1..],
+        None => authority,
+    };
+    let (hostname, port) = if let Some(ipv6_rest) = host_port_raw.strip_prefix('[') {
+        if let Some((ipv6, after_bracket)) = ipv6_rest.split_once(']') {
+            let p = after_bracket
+                .strip_prefix(':')
+                .and_then(|ps| ps.parse::<u16>().ok())
+                .unwrap_or(default_port);
+            (format!("[{}]", ipv6.to_ascii_lowercase()), p)
+        } else {
+            return None;
+        }
+    } else if let Some((h, p_str)) = host_port_raw.rsplit_once(':') {
+        let p = p_str.parse::<u16>().ok()?;
+        (h.to_ascii_lowercase(), p)
+    } else {
+        (host_port_raw.to_ascii_lowercase(), default_port)
+    };
+    if hostname.is_empty() {
+        return None;
+    }
+    let clean_host = slice_sandbox::extract_clean_hostname(&hostname);
+    let host_port = format!("{}:{}", clean_host, port);
+    let host_header = if port == default_port {
+        hostname
+    } else {
+        format!("{}:{}", hostname, port)
+    };
+    Some(OutboundUrlParts {
+        hostname: clean_host,
+        port,
+        host_header,
+        host_port,
+        path_and_query: path_and_query.to_string(),
+    })
+}
+
+fn check_boa_outbound_fetch_ocap_and_dlp(
+    parts: &OutboundUrlParts,
+    raw_url: &str,
+    headers_json: &str,
+    body: &str,
+) -> Result<(), String> {
+    let tenant_id = BOA_ACTIVE_TENANT.with(|t| {
+        let b = t.borrow();
+        if b.is_empty() {
+            "boa-tenant".to_string()
+        } else {
+            b.clone()
+        }
+    });
+
+    // 1. SSRF Cloud Metadata Shield (blocks 169.254.169.254, metadata.google.internal, etc. unconditionally)
+    if slice_sandbox::is_cloud_metadata_ssrf_target(&parts.hostname) {
+        BOA_VIOLATION.with(|v| {
+            *v.borrow_mut() = Some(SandboxViolation::NetAccessDenied {
+                tenant_id,
+                host: format!("SSRF_METADATA_BLOCKED:{}", parts.host_port),
+            });
+        });
+        return Err("NetAccessDenied: SSRF Cloud Metadata Endpoint Blocked".to_string());
+    }
+
+    // 2. OCap Network Host Allowlist Verification
+    let permitted = BOA_NET_HOSTS.with(|hosts_cell| {
+        let hosts = hosts_cell.borrow();
+        if hosts.contains(&parts.host_port)
+            || hosts.contains(&parts.hostname)
+            || hosts.contains(&format!("{}:443", parts.hostname))
+            || hosts.contains(&format!("{}:80", parts.hostname))
+        {
+            return true;
+        }
+        if hosts.contains("*") && !slice_sandbox::is_private_or_loopback_ssrf_target(&parts.hostname)
+        {
+            return true;
+        }
+        false
+    });
+
+    if !permitted {
+        BOA_VIOLATION.with(|v| {
+            *v.borrow_mut() = Some(SandboxViolation::NetAccessDenied {
+                tenant_id,
+                host: parts.host_port.clone(),
+            });
+        });
+        return Err(format!("NetAccessDenied: {}", parts.host_port));
+    }
+
+    // 3. Outbound Egress Secret DLP Inspection (scans URL query, outbound headers, and body for raw/Base64/Base64URL secrets)
+    let dlp_err = BOA_EGRESS_SECRETS.with(|sec_cell| {
+        let secrets = sec_cell.borrow();
+        if secrets.is_empty() {
+            return None;
+        }
+        verify_egress_secrets_slice(&tenant_id, &secrets, raw_url)
+            .and_then(|()| verify_egress_secrets_slice(&tenant_id, &secrets, headers_json))
+            .and_then(|()| verify_egress_secrets_slice(&tenant_id, &secrets, body))
+            .err()
+    });
+
+    if let Some(violation) = dlp_err {
+        BOA_VIOLATION.with(|v| *v.borrow_mut() = Some(violation));
+        return Err("EnvAccessDenied: EGRESS_SECRET_LEAK_BLOCKED".to_string());
+    }
+
+    Ok(())
+}
+
+fn decode_chunked_http_body(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut pos = 0;
+    while pos < raw.len() {
+        let Some(rel_end) = raw[pos..].windows(2).position(|w| w == b"\r\n") else {
+            break;
+        };
+        let size_line = std::str::from_utf8(&raw[pos..pos + rel_end]).unwrap_or("");
+        let size_hex = size_line.split(';').next().unwrap_or("").trim();
+        let Ok(chunk_len) = usize::from_str_radix(size_hex, 16) else {
+            break;
+        };
+        pos += rel_end + 2;
+        if chunk_len == 0 {
+            break;
+        }
+        let end = (pos + chunk_len).min(raw.len());
+        out.extend_from_slice(&raw[pos..end]);
+        pos = (end + 2).min(raw.len());
+    }
+    out
+}
+
+fn execute_outbound_http11(
+    parts: &OutboundUrlParts,
+    method: &str,
+    req_headers: &[(String, String)],
+    body: &str,
+) -> Result<String, String> {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+
+    let addr = (parts.hostname.as_str(), parts.port)
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolution failed for {}: {}", parts.host_port, e))?
+        .next()
+        .ok_or_else(|| format!("No socket address resolved for {}", parts.host_port))?;
+
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        .map_err(|e| format!("TCP connect failed to {}: {}", parts.host_port, e))?;
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+
+    let mut req_buf = Vec::with_capacity(256 + body.len());
+    let _ = write!(
+        &mut req_buf,
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Slice-NexusJS/0.2.0\r\nConnection: close\r\n",
+        method, parts.path_and_query, parts.host_header
+    );
+    for (k, v) in req_headers {
+        if !k.eq_ignore_ascii_case("host")
+            && !k.eq_ignore_ascii_case("connection")
+            && !k.eq_ignore_ascii_case("content-length")
+        {
+            let _ = write!(&mut req_buf, "{}: {}\r\n", k, v);
+        }
+    }
+    if !body.is_empty() || matches!(method, "POST" | "PUT" | "PATCH") {
+        let _ = write!(&mut req_buf, "Content-Length: {}\r\n\r\n", body.len());
+        req_buf.extend_from_slice(body.as_bytes());
+    } else {
+        req_buf.extend_from_slice(b"\r\n");
+    }
+
+    stream
+        .write_all(&req_buf)
+        .map_err(|e| format!("HTTP request write failed: {}", e))?;
+    let _ = stream.flush();
+
+    let mut raw_resp = Vec::with_capacity(4096);
+    stream
+        .read_to_end(&mut raw_resp)
+        .map_err(|e| format!("HTTP response read failed: {}", e))?;
+
+    let (hdr_end, body_start) = raw_resp
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| (i, i + 4))
+        .or_else(|| {
+            raw_resp
+                .windows(2)
+                .position(|w| w == b"\n\n")
+                .map(|i| (i, i + 2))
+        })
+        .unwrap_or((raw_resp.len(), raw_resp.len()));
+
+    let header_str = std::str::from_utf8(&raw_resp[..hdr_end]).unwrap_or("");
+    let mut lines = header_str.lines();
+    let status_line = lines.next().unwrap_or("HTTP/1.1 200 OK");
+    let mut status_parts = status_line.splitn(3, ' ');
+    let _http_ver = status_parts.next();
+    let status_code: u16 = status_parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
+    let status_text = status_parts.next().unwrap_or("OK").trim().to_string();
+
+    let mut resp_headers: Vec<(String, String)> = Vec::new();
+    let mut is_chunked = false;
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            let key = k.trim().to_ascii_lowercase();
+            let val = v.trim().to_string();
+            if key == "transfer-encoding" && val.to_ascii_lowercase().contains("chunked") {
+                is_chunked = true;
+            }
+            resp_headers.push((key, val));
+        }
+    }
+
+    let raw_body_slice = &raw_resp[body_start..];
+    let decoded_body = if is_chunked {
+        String::from_utf8_lossy(&decode_chunked_http_body(raw_body_slice)).into_owned()
+    } else {
+        String::from_utf8_lossy(raw_body_slice).into_owned()
+    };
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WireFetchResponse {
+        status: u16,
+        status_text: String,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    serde_json::to_string(&WireFetchResponse {
+        status: status_code,
+        status_text,
+        headers: resp_headers,
+        body: decoded_body,
+    })
+    .map_err(|e| e.to_string())
 }
 
 #[derive(Clone, Debug)]
@@ -3610,7 +3950,7 @@ fn create_warm_boa_realm() -> WarmBoaRealm {
     let mut ctx = boa_engine::Context::default();
     register_slice_native_host_functions(&mut ctx);
 
-    const CORE_PRELUDE: &str = r##"globalThis.console={log:__slice_console_log,info:__slice_console_log,warn:__slice_console_log,error:__slice_console_log};globalThis.print=__slice_console_log;globalThis.process={pid:1,env:{NODE_ENV:"production"},cwd:function(){return ".";},platform:"linux",arch:"x64",version:"v24.0.0",versions:{node:"24.0.0"},argv:["slice"]};var __b2s=function(e){return e==="base64"?__slice_base64_encode(this._s,false):e==="base64url"?__slice_base64_encode(this._s,true):this._s;};globalThis.Buffer={from:function(i,e){var r=typeof i==="string"?i:String(i),s=(e==="base64"||e==="base64url")?__slice_base64_decode(r):r;return{_s:s,length:s.length,toString:__b2s};},isBuffer:function(){return false;},byteLength:function(s){return String(s).length;}};var __orand=Math.random,__onow=Date.now;Math.random=function(){var v=__slice_det_random();return v>=0?v:__orand();};Date.now=function(){var v=__slice_det_now();return v>=0?v:__onow();};globalThis.performance={now:function(){var v=__slice_det_now();return v>=0?(v-1700000000000):(__onow()-1700000000000);}};function __fmtSse(ev){if(ev===undefined||ev===null)return "";if(typeof ev==="string"){if(ev.indexOf("\n")===-1)return "data: "+ev+"\n\n";var ls=ev.split("\n"),o="";for(var i=0;i<ls.length;i++)o+="data: "+ls[i]+"\n";return o+"\n";}var s="";if(ev.id!==undefined&&ev.id!==null)s+="id: "+String(ev.id)+"\n";if(ev.event!==undefined&&ev.event!==null)s+="event: "+String(ev.event)+"\n";if(ev.retry!==undefined&&ev.retry!==null)s+="retry: "+Number(ev.retry)+"\n";var d=ev.data!==undefined?(typeof ev.data==="string"?ev.data:JSON.stringify(ev.data)):JSON.stringify(ev);if(d.indexOf("\n")===-1)return s+"data: "+d+"\n\n";var dl=d.split("\n");for(var j=0;j<dl.length;j++)s+="data: "+dl[j]+"\n";return s+"\n";}function __colSse(src){var out="";if(Array.isArray(src)){for(var i=0;i<src.length;i++)out+=__fmtSse(src[i]);}else if(typeof src==="function"){var r=src(function(ev){out+=__fmtSse(ev);});if(r&&typeof r.next==="function"){var st=r.next();while(!st.done){out+=__fmtSse(st.value);st=r.next();}}else if(Array.isArray(r)){for(var j=0;j<r.length;j++)out+=__fmtSse(r[j]);}}else if(src&&typeof src.next==="function"){var s2=src.next();while(!s2.done){out+=__fmtSse(s2.value);s2=src.next();}}else if(src!==undefined&&src!==null){out+=__fmtSse(src);}return out;}function ReadableStream(src){var chunks=[],closed=false;this._chunks=chunks;if(src&&typeof src.start==="function"){src.start({enqueue:function(c){if(!closed)chunks.push(typeof c==="string"?c:String(c));},close:function(){closed=true;}});}}ReadableStream.prototype._toText=function(){return this._chunks.join("");};ReadableStream.prototype.getReader=function(){var cs=this._chunks,idx=0;return{read:function(){if(idx<cs.length)return Promise.resolve({value:cs[idx++],done:false});return Promise.resolve({value:undefined,done:true});},releaseLock:function(){}};};globalThis.ReadableStream=ReadableStream;globalThis.__slice_wu=[];globalThis.Slice={request:function(){var t=__slice_http_tenant();return{method:__slice_http_method(),path:__slice_http_path(),query:__slice_http_query(),tenant:t,tenantId:t,body:__slice_http_body(),header:__slice_http_header};},respond:function(s,b,ct){return __slice_http_respond(s,typeof b==="string"?b:JSON.stringify(b),ct||"application/json");},streamSSE:function(src,init){var r=Response.sse(src,init);__slice_http_respond(r.status,r._body,r._ct);return r;},waitUntil:function(f){__slice_wu.push(f);__slice_mark_wait_until();},kv:{get:function(k){return __slice_kv_get(String(k));},set:function(k,v,ttl){return __slice_kv_set(String(k),typeof v==="string"?v:JSON.stringify(v),ttl||0);},del:function(k){return __slice_kv_del(String(k));},incr:function(k,d){return __slice_kv_incr(String(k),d===undefined?1:Number(d));}},checkpoint:function(){return __slice_checkpoint();},restore:function(id){return __slice_restore(Number(id));},evalSandbox:function(code,opts){return JSON.parse(__slice_eval_sandbox(String(code),opts?JSON.stringify(opts):"{}"));}};function __uspD(s){if(s.indexOf("+")===-1&&s.indexOf("%")===-1)return s;var r=s.indexOf("+")===-1?s:s.split("+").join(" ");if(r.indexOf("%")===-1)return r;try{return decodeURIComponent(r);}catch(_e){return r;}}function __uspE(s){var str=String(s),e=encodeURIComponent(str);return str.indexOf(" ")===-1?e:e.split("%20").join("+");}function URLSearchParams(init,u){this._p=[];this._u=u||null;if(!init)return;if(typeof init==="string"){var q=init.charCodeAt(0)===63?init.slice(1):init;if(q.length>0){var ps=q.split("&");for(var i=0;i<ps.length;i++){var sg=ps[i];if(!sg)continue;var eq=sg.indexOf("=");if(eq===-1)this._p.push([__uspD(sg),""]);else this._p.push([__uspD(sg.slice(0,eq)),__uspD(sg.slice(eq+1))]);}}}else if(Array.isArray(init)){for(var j=0;j<init.length;j++){var pr=init[j];if(pr&&pr.length>=2)this._p.push([String(pr[0]),String(pr[1])]);}}else if(typeof init==="object"){if(Array.isArray(init._p)){for(var m=0;m<init._p.length;m++)this._p.push([init._p[m][0],init._p[m][1]]);}else{var ks=Object.keys(init);for(var k=0;k<ks.length;k++)this._p.push([ks[k],String(init[ks[k]])]);}}}URLSearchParams.prototype._sync=function(){if(this._u)this._u._syncSearch();};URLSearchParams.prototype.get=function(n){var k=String(n);for(var i=0;i<this._p.length;i++)if(this._p[i][0]===k)return this._p[i][1];return null;};URLSearchParams.prototype.getAll=function(n){var k=String(n),r=[];for(var i=0;i<this._p.length;i++)if(this._p[i][0]===k)r.push(this._p[i][1]);return r;};URLSearchParams.prototype.has=function(n){var k=String(n);for(var i=0;i<this._p.length;i++)if(this._p[i][0]===k)return true;return false;};URLSearchParams.prototype.set=function(n,v){var k=String(n),s=String(v),p=this._p,len=p.length,fi=-1;for(var i=0;i<len;i++){if(p[i][0]===k){if(fi===-1){p[i][1]=s;fi=i;}else{p.splice(i,1);i--;len--;}}}if(fi===-1)p.push([k,s]);if(this._u)this._u._syncSearch();};URLSearchParams.prototype.append=function(n,v){this._p.push([String(n),String(v)]);if(this._u)this._u._syncSearch();};URLSearchParams.prototype.delete=function(n){var k=String(n),nx=[];for(var i=0;i<this._p.length;i++)if(this._p[i][0]!==k)nx.push(this._p[i]);this._p=nx;if(this._u)this._u._syncSearch();};URLSearchParams.prototype.sort=function(){this._p.sort(function(a,b){return a[0]<b[0]?-1:(a[0]>b[0]?1:0);});if(this._u)this._u._syncSearch();};URLSearchParams.prototype.forEach=function(cb,ta){for(var i=0;i<this._p.length;i++)cb.call(ta,this._p[i][1],this._p[i][0],this);};URLSearchParams.prototype.entries=function(){return this._p.slice();};URLSearchParams.prototype.keys=function(){var r=[];for(var i=0;i<this._p.length;i++)r.push(this._p[i][0]);return r;};URLSearchParams.prototype.values=function(){var r=[];for(var i=0;i<this._p.length;i++)r.push(this._p[i][1]);return r;};URLSearchParams.prototype.toString=function(){var len=this._p.length;if(len===0)return "";var s="";for(var i=0;i<len;i++){if(i>0)s+="&";s+=__uspE(this._p[i][0])+"="+__uspE(this._p[i][1]);}return s;};if(typeof Symbol!=="undefined"&&Symbol.iterator)URLSearchParams.prototype[Symbol.iterator]=function(){return this._p[Symbol.iterator]();};Object.defineProperty(URLSearchParams.prototype,"size",{get:function(){return this._p.length;}});function __normP(p){if(!p||p==="/")return "/";if(p.indexOf("/.")===-1&&p.indexOf("//")===-1)return p;var segs=p.split("/"),out=[];for(var i=0;i<segs.length;i++){var s=segs[i];if(!s||s===".")continue;if(s==="..")out.pop();else out.push(s);}return "/"+out.join("/")+(p.length>1&&p.charCodeAt(p.length-1)===47&&out.length>0?"/":"");}function URL(input,base){var raw=input instanceof URL?input.href:String(input).trim();if(base!==undefined&&raw.indexOf("https://")!==0&&raw.indexOf("http://")!==0&&raw.indexOf("://")===-1){var b=base instanceof URL?base:new URL(String(base));if(raw.indexOf("//")===0)raw=b.protocol+raw;else if(raw.charCodeAt(0)===47)raw=b.origin+raw;else if(raw.charCodeAt(0)===63)raw=b.origin+b.pathname+raw;else if(raw.charCodeAt(0)===35)raw=b.origin+b.pathname+b.search+raw;else{var dir=b.pathname.slice(0,b.pathname.lastIndexOf("/")+1)||"/";raw=b.origin+dir+raw;}}var hi=raw.indexOf("#"),hash="";if(hi!==-1){hash=raw.slice(hi);raw=raw.slice(0,hi);}var qi=raw.indexOf("?"),search="";if(qi!==-1){search=raw.slice(qi);raw=raw.slice(0,qi);}var si=raw.indexOf("://");if(si===-1)throw new TypeError("Invalid URL: "+input);this.protocol=raw.slice(0,si+1).toLowerCase();var rest=raw.slice(si+3),pi=rest.indexOf("/"),authHost=pi===-1?rest:rest.slice(0,pi),pathRaw=pi===-1?"/":rest.slice(pi);var ai=authHost.indexOf("@"),hostPort=authHost;this.username="";this.password="";if(ai!==-1){var up=authHost.slice(0,ai),ci=up.indexOf(":");this.username=ci===-1?up:up.slice(0,ci);this.password=ci===-1?"":up.slice(ci+1);hostPort=authHost.slice(ai+1);}var pci=hostPort.lastIndexOf(":");if(pci!==-1&&hostPort.indexOf("]")<pci){this.hostname=hostPort.slice(0,pci).toLowerCase();var prt=hostPort.slice(pci+1);if((this.protocol==="http:"&&prt==="80")||(this.protocol==="https:"&&prt==="443"))prt="";this.port=prt;}else{this.hostname=hostPort.toLowerCase();this.port="";}this.host=this.port?this.hostname+":"+this.port:this.hostname;this.origin=this.protocol+"//"+this.host;this.pathname=__normP(pathRaw);this.hash=hash==="#"?"":hash;this.searchParams=new URLSearchParams(search,this);this._syncSearch();}URL.prototype._syncSearch=function(){if(this.searchParams._p.length===0){this.search="";this.href=this.origin+this.pathname+this.hash;return;}var qs=this.searchParams.toString();this.search=qs?"?"+qs:"";this.href=this.origin+this.pathname+this.search+this.hash;};URL.prototype.toString=URL.prototype.toJSON=function(){return this.href;};function Headers(init){if(init==="__SLICE_LIVE_REQ__"){this._live=true;this._m=null;return;}this._live=false;this._m=Object.create(null);if(!init)return;if(init instanceof Headers){if(init._m){var ik=Object.keys(init._m);for(var n=0;n<ik.length;n++)this._m[ik[n]]=init._m[ik[n]];}else{var es=init.entries();for(var i=0;i<es.length;i++)this._m[es[i][0]]=es[i][1];}}else if(Array.isArray(init)){for(var j=0;j<init.length;j++)if(init[j]&&init[j].length>=2)this.append(init[j][0],init[j][1]);}else if(typeof init==="object"){var ks=Object.keys(init);for(var k=0;k<ks.length;k++)if(init[ks[k]]!==undefined)this._m[ks[k].toLowerCase()]=String(init[ks[k]]);}}Headers.prototype._ensure=function(){if(this._live&&!this._m){this._m=Object.create(null);var raw=JSON.parse(__slice_http_headers_all());for(var i=0;i<raw.length;i++){var k=raw[i][0].toLowerCase();this._m[k]=this._m[k]?this._m[k]+", "+raw[i][1]:raw[i][1];}this._live=false;}};Headers.prototype.get=function(n){var k=String(n).toLowerCase();if(this._m&&k in this._m)return this._m[k];if(this._live)return __slice_http_header(k);return null;};Headers.prototype.has=function(n){return this.get(n)!==null;};Headers.prototype.set=function(n,v){this._ensure();this._m[String(n).toLowerCase()]=String(v);};Headers.prototype.append=function(n,v){this._ensure();var k=String(n).toLowerCase(),s=String(v);this._m[k]=k in this._m?this._m[k]+", "+s:s;};Headers.prototype.delete=function(n){this._ensure();delete this._m[String(n).toLowerCase()];};Headers.prototype.entries=function(){this._ensure();var ks=Object.keys(this._m).sort(),r=[];for(var i=0;i<ks.length;i++)r.push([ks[i],this._m[ks[i]]]);return r;};Headers.prototype.keys=function(){this._ensure();return Object.keys(this._m).sort();};Headers.prototype.values=function(){var es=this.entries(),r=[];for(var i=0;i<es.length;i++)r.push(es[i][1]);return r;};Headers.prototype.forEach=function(cb,ta){var es=this.entries();for(var i=0;i<es.length;i++)cb.call(ta,es[i][1],es[i][0],this);};if(typeof Symbol!=="undefined"&&Symbol.iterator)Headers.prototype[Symbol.iterator]=function(){return this.entries()[Symbol.iterator]();};function Request(input,init){if(input==="__SLICE_LIVE_REQ__"){this.method=__slice_http_method()||"GET";var h=__slice_http_header("host")||"localhost",p=__slice_http_path()||"/",q=__slice_http_query();this.url="http://"+h+p+(q?"?"+q:"");this.headers=new Headers("__SLICE_LIVE_REQ__");this._body=__slice_http_body()||"";this.bodyUsed=false;return;}var o=init||{},isReq=input instanceof Request;this.url=isReq?input.url:(input instanceof URL?input.href:String(input));this.method=o.method?String(o.method).toUpperCase():(isReq?input.method:"GET");this.headers=o.headers instanceof Headers?o.headers:new Headers(o.headers||(isReq?input.headers:undefined));this._body=o.body!==undefined&&o.body!==null?(typeof o.body==="string"?o.body:JSON.stringify(o.body)):(isReq?input._body:"");this.bodyUsed=false;}Request.prototype.text=function(){this.bodyUsed=true;return Promise.resolve(this._body);};Request.prototype.json=function(){this.bodyUsed=true;try{return Promise.resolve(JSON.parse(this._body));}catch(e){return Promise.reject(e);}};Request.prototype.textSync=function(){this.bodyUsed=true;return this._body;};Request.prototype.jsonSync=function(){this.bodyUsed=true;return JSON.parse(this._body);};Request.prototype.clone=function(){return new Request(this.url,{method:this.method,headers:new Headers(this.headers),body:this._body});};function Response(body,init){var o=init||{};this.status=o.status!==undefined?Number(o.status):200;this.statusText=o.statusText!==undefined?String(o.statusText):(this.status===200?"OK":"");this.ok=this.status>=200&&this.status<300;this.headers=o.headers instanceof Headers?o.headers:new Headers(o.headers);this._data=undefined;this._body=body===undefined||body===null?"":(body instanceof ReadableStream?body._toText():(typeof body==="string"?body:JSON.stringify(body)));this._ct=(this.headers._m&&this.headers._m["content-type"])||"text/plain;charset=UTF-8";this._isSliceRes=true;this.bodyUsed=false;}Response.prototype.text=function(){this.bodyUsed=true;if(this._data!==undefined&&!this._body)this._body=JSON.stringify(this._data);return Promise.resolve(this._body);};Response.prototype.json=function(){this.bodyUsed=true;if(this._data!==undefined)return Promise.resolve(this._data);try{return Promise.resolve(JSON.parse(this._body));}catch(e){return Promise.reject(e);}};Response.prototype.textSync=function(){this.bodyUsed=true;if(this._data!==undefined&&!this._body)this._body=JSON.stringify(this._data);return this._body;};Response.prototype.jsonSync=function(){this.bodyUsed=true;if(this._data!==undefined)return this._data;return JSON.parse(this._body);};Response.prototype.clone=function(){if(this._data!==undefined&&!this._body)this._body=JSON.stringify(this._data);return new Response(this._body,{status:this.status,statusText:this.statusText,headers:new Headers(this.headers)});};Response.json=function(data,init){var o=init?(typeof init==="number"?{status:init}:init):{},h=o.headers instanceof Headers?o.headers:new Headers(o.headers);if(!h._m["content-type"])h._m["content-type"]="application/json";var r=new Response(null,{status:o.status||200,statusText:o.statusText,headers:h});r._data=data;r._ct=h._m["content-type"];return r;};Response.sse=function(src,init){var o=init?(typeof init==="number"?{status:init}:init):{},h=o.headers instanceof Headers?o.headers:new Headers(o.headers);if(!h._m["content-type"])h._m["content-type"]="text/event-stream; charset=utf-8";if(!h._m["cache-control"])h._m["cache-control"]="no-cache";var r=new Response(__colSse(src),{status:o.status||200,statusText:o.statusText,headers:h});r._ct=h._m["content-type"];return r;};Response.redirect=function(url,status){var st=status||302;return new Response("",{status:st,headers:{location:String(url)}});};globalThis.URLSearchParams=URLSearchParams;globalThis.URL=URL;globalThis.Headers=Headers;globalThis.Request=Request;globalThis.Response=Response;var __slice_web_ctx={waitUntil:Slice.waitUntil,passThroughOnException:function(){}};globalThis.__slice_make_web_request=function(){return new Request("__SLICE_LIVE_REQ__");};globalThis.__slice_dispatch_fetch=function(h){if(!__slice_http_is_active())return;var fn=typeof h.fetch==="function"?h.fetch:(typeof h==="function"?h:null);if(!fn)return;var res=fn.call(h,new Request("__SLICE_LIVE_REQ__"),globalThis.process.env,__slice_web_ctx);if(res){if(res._isSliceRes){var b=res._body||(res._data!==undefined?JSON.stringify(res._data):"");__slice_http_respond(res.status,b,res._ct);}else if(typeof res.then==="function")res.then(function(r){if(r&&r._isSliceRes){var rb=r._body||(r._data!==undefined?JSON.stringify(r._data):"");__slice_http_respond(r.status,rb,r._ct);}});}};globalThis.__slice_builtins=Object.create(null);globalThis.__slice_cjs_require=function(id){return __slice_builtins[id]||__slice_load_builtin(id);};globalThis.require=__slice_cjs_require;"##;
+    const CORE_PRELUDE: &str = r##"globalThis.console={log:__slice_console_log,info:__slice_console_log,warn:__slice_console_log,error:__slice_console_log};globalThis.print=__slice_console_log;globalThis.process={pid:1,env:{NODE_ENV:"production"},cwd:function(){return ".";},platform:"linux",arch:"x64",version:"v24.0.0",versions:{node:"24.0.0"},argv:["slice"]};var __b2s=function(e){return e==="base64"?__slice_base64_encode(this._s,false):e==="base64url"?__slice_base64_encode(this._s,true):this._s;};globalThis.Buffer={from:function(i,e){var r=typeof i==="string"?i:String(i),s=(e==="base64"||e==="base64url")?__slice_base64_decode(r):r;return{_s:s,length:s.length,toString:__b2s};},isBuffer:function(){return false;},byteLength:function(s){return String(s).length;}};var __orand=Math.random,__onow=Date.now;Math.random=function(){var v=__slice_det_random();return v>=0?v:__orand();};Date.now=function(){var v=__slice_det_now();return v>=0?v:__onow();};globalThis.performance={now:function(){var v=__slice_det_now();return v>=0?(v-1700000000000):(__onow()-1700000000000);}};function __fmtSse(ev){if(ev===undefined||ev===null)return "";if(typeof ev==="string"){if(ev.indexOf("\n")===-1)return "data: "+ev+"\n\n";var ls=ev.split("\n"),o="";for(var i=0;i<ls.length;i++)o+="data: "+ls[i]+"\n";return o+"\n";}var s="";if(ev.id!==undefined&&ev.id!==null)s+="id: "+String(ev.id)+"\n";if(ev.event!==undefined&&ev.event!==null)s+="event: "+String(ev.event)+"\n";if(ev.retry!==undefined&&ev.retry!==null)s+="retry: "+Number(ev.retry)+"\n";var d=ev.data!==undefined?(typeof ev.data==="string"?ev.data:JSON.stringify(ev.data)):JSON.stringify(ev);if(d.indexOf("\n")===-1)return s+"data: "+d+"\n\n";var dl=d.split("\n");for(var j=0;j<dl.length;j++)s+="data: "+dl[j]+"\n";return s+"\n";}function __colSse(src){var out="";if(Array.isArray(src)){for(var i=0;i<src.length;i++)out+=__fmtSse(src[i]);}else if(typeof src==="function"){var r=src(function(ev){out+=__fmtSse(ev);});if(r&&typeof r.next==="function"){var st=r.next();while(!st.done){out+=__fmtSse(st.value);st=r.next();}}else if(Array.isArray(r)){for(var j=0;j<r.length;j++)out+=__fmtSse(r[j]);}}else if(src&&typeof src.next==="function"){var s2=src.next();while(!s2.done){out+=__fmtSse(s2.value);s2=src.next();}}else if(src!==undefined&&src!==null){out+=__fmtSse(src);}return out;}function ReadableStream(src){var chunks=[],closed=false;this._chunks=chunks;if(src&&typeof src.start==="function"){src.start({enqueue:function(c){if(!closed)chunks.push(typeof c==="string"?c:String(c));},close:function(){closed=true;}});}}ReadableStream.prototype._toText=function(){return this._chunks.join("");};ReadableStream.prototype.getReader=function(){var cs=this._chunks,idx=0;return{read:function(){if(idx<cs.length)return Promise.resolve({value:cs[idx++],done:false});return Promise.resolve({value:undefined,done:true});},releaseLock:function(){}};};globalThis.ReadableStream=ReadableStream;function __doFetch(input,init){var req=new Request(input,init),raw=JSON.parse(__slice_fetch_sync(req.url,req.method,JSON.stringify(req.headers.entries()),req._body));if(raw.__error)throw new Error(raw.__error);var r=new Response(raw.body,{status:raw.status,statusText:raw.statusText,headers:raw.headers});r.url=req.url;return r;}globalThis.fetch=function(input,init){try{return Promise.resolve(__doFetch(input,init));}catch(e){return Promise.reject(e);}};globalThis.__slice_wu=[];globalThis.Slice={request:function(){var t=__slice_http_tenant();return{method:__slice_http_method(),path:__slice_http_path(),query:__slice_http_query(),tenant:t,tenantId:t,body:__slice_http_body(),header:__slice_http_header};},respond:function(s,b,ct){return __slice_http_respond(s,typeof b==="string"?b:JSON.stringify(b),ct||"application/json");},streamSSE:function(src,init){var r=Response.sse(src,init);__slice_http_respond(r.status,r._body,r._ct);return r;},fetchSync:__doFetch,mockFetch:function(a,b,c){var m="*",u=String(a),o=b||{};if(c!==undefined){m=String(a).toUpperCase();u=String(b);o=c||{};}var h=new Headers(o.headers),bd=o.body===undefined||o.body===null?"":(typeof o.body==="string"?o.body:JSON.stringify(o.body));if(typeof o.body==="object"&&o.body!==null&&!h._m["content-type"])h._m["content-type"]="application/json";__slice_mock_fetch(m==="*"?u:(m+" "+u),JSON.stringify({status:o.status||200,statusText:o.statusText||"OK",headers:h.entries(),body:bd}));},waitUntil:function(f){__slice_wu.push(f);__slice_mark_wait_until();},kv:{get:function(k){return __slice_kv_get(String(k));},set:function(k,v,ttl){return __slice_kv_set(String(k),typeof v==="string"?v:JSON.stringify(v),ttl||0);},del:function(k){return __slice_kv_del(String(k));},incr:function(k,d){return __slice_kv_incr(String(k),d===undefined?1:Number(d));}},checkpoint:function(){return __slice_checkpoint();},restore:function(id){return __slice_restore(Number(id));},evalSandbox:function(code,opts){return JSON.parse(__slice_eval_sandbox(String(code),opts?JSON.stringify(opts):"{}"));}};function __uspD(s){if(s.indexOf("+")===-1&&s.indexOf("%")===-1)return s;var r=s.indexOf("+")===-1?s:s.split("+").join(" ");if(r.indexOf("%")===-1)return r;try{return decodeURIComponent(r);}catch(_e){return r;}}function __uspE(s){var str=String(s),e=encodeURIComponent(str);return str.indexOf(" ")===-1?e:e.split("%20").join("+");}function URLSearchParams(init,u){this._p=[];this._u=u||null;if(!init)return;if(typeof init==="string"){var q=init.charCodeAt(0)===63?init.slice(1):init;if(q.length>0){var ps=q.split("&");for(var i=0;i<ps.length;i++){var sg=ps[i];if(!sg)continue;var eq=sg.indexOf("=");if(eq===-1)this._p.push([__uspD(sg),""]);else this._p.push([__uspD(sg.slice(0,eq)),__uspD(sg.slice(eq+1))]);}}}else if(Array.isArray(init)){for(var j=0;j<init.length;j++){var pr=init[j];if(pr&&pr.length>=2)this._p.push([String(pr[0]),String(pr[1])]);}}else if(typeof init==="object"){if(Array.isArray(init._p)){for(var m=0;m<init._p.length;m++)this._p.push([init._p[m][0],init._p[m][1]]);}else{var ks=Object.keys(init);for(var k=0;k<ks.length;k++)this._p.push([ks[k],String(init[ks[k]])]);}}}URLSearchParams.prototype._sync=function(){if(this._u)this._u._syncSearch();};URLSearchParams.prototype.get=function(n){var k=String(n);for(var i=0;i<this._p.length;i++)if(this._p[i][0]===k)return this._p[i][1];return null;};URLSearchParams.prototype.getAll=function(n){var k=String(n),r=[];for(var i=0;i<this._p.length;i++)if(this._p[i][0]===k)r.push(this._p[i][1]);return r;};URLSearchParams.prototype.has=function(n){var k=String(n);for(var i=0;i<this._p.length;i++)if(this._p[i][0]===k)return true;return false;};URLSearchParams.prototype.set=function(n,v){var k=String(n),s=String(v),p=this._p,len=p.length,fi=-1;for(var i=0;i<len;i++){if(p[i][0]===k){if(fi===-1){p[i][1]=s;fi=i;}else{p.splice(i,1);i--;len--;}}}if(fi===-1)p.push([k,s]);if(this._u)this._u._syncSearch();};URLSearchParams.prototype.append=function(n,v){this._p.push([String(n),String(v)]);if(this._u)this._u._syncSearch();};URLSearchParams.prototype.delete=function(n){var k=String(n),nx=[];for(var i=0;i<this._p.length;i++)if(this._p[i][0]!==k)nx.push(this._p[i]);this._p=nx;if(this._u)this._u._syncSearch();};URLSearchParams.prototype.sort=function(){this._p.sort(function(a,b){return a[0]<b[0]?-1:(a[0]>b[0]?1:0);});if(this._u)this._u._syncSearch();};URLSearchParams.prototype.forEach=function(cb,ta){for(var i=0;i<this._p.length;i++)cb.call(ta,this._p[i][1],this._p[i][0],this);};URLSearchParams.prototype.entries=function(){return this._p.slice();};URLSearchParams.prototype.keys=function(){var r=[];for(var i=0;i<this._p.length;i++)r.push(this._p[i][0]);return r;};URLSearchParams.prototype.values=function(){var r=[];for(var i=0;i<this._p.length;i++)r.push(this._p[i][1]);return r;};URLSearchParams.prototype.toString=function(){var len=this._p.length;if(len===0)return "";var s="";for(var i=0;i<len;i++){if(i>0)s+="&";s+=__uspE(this._p[i][0])+"="+__uspE(this._p[i][1]);}return s;};if(typeof Symbol!=="undefined"&&Symbol.iterator)URLSearchParams.prototype[Symbol.iterator]=function(){return this._p[Symbol.iterator]();};Object.defineProperty(URLSearchParams.prototype,"size",{get:function(){return this._p.length;}});function __normP(p){if(!p||p==="/")return "/";if(p.indexOf("/.")===-1&&p.indexOf("//")===-1)return p;var segs=p.split("/"),out=[];for(var i=0;i<segs.length;i++){var s=segs[i];if(!s||s===".")continue;if(s==="..")out.pop();else out.push(s);}return "/"+out.join("/")+(p.length>1&&p.charCodeAt(p.length-1)===47&&out.length>0?"/":"");}function URL(input,base){var raw=input instanceof URL?input.href:String(input).trim();if(base!==undefined&&raw.indexOf("https://")!==0&&raw.indexOf("http://")!==0&&raw.indexOf("://")===-1){var b=base instanceof URL?base:new URL(String(base));if(raw.indexOf("//")===0)raw=b.protocol+raw;else if(raw.charCodeAt(0)===47)raw=b.origin+raw;else if(raw.charCodeAt(0)===63)raw=b.origin+b.pathname+raw;else if(raw.charCodeAt(0)===35)raw=b.origin+b.pathname+b.search+raw;else{var dir=b.pathname.slice(0,b.pathname.lastIndexOf("/")+1)||"/";raw=b.origin+dir+raw;}}var hi=raw.indexOf("#"),hash="";if(hi!==-1){hash=raw.slice(hi);raw=raw.slice(0,hi);}var qi=raw.indexOf("?"),search="";if(qi!==-1){search=raw.slice(qi);raw=raw.slice(0,qi);}var si=raw.indexOf("://");if(si===-1)throw new TypeError("Invalid URL: "+input);this.protocol=raw.slice(0,si+1).toLowerCase();var rest=raw.slice(si+3),pi=rest.indexOf("/"),authHost=pi===-1?rest:rest.slice(0,pi),pathRaw=pi===-1?"/":rest.slice(pi);var ai=authHost.indexOf("@"),hostPort=authHost;this.username="";this.password="";if(ai!==-1){var up=authHost.slice(0,ai),ci=up.indexOf(":");this.username=ci===-1?up:up.slice(0,ci);this.password=ci===-1?"":up.slice(ci+1);hostPort=authHost.slice(ai+1);}var pci=hostPort.lastIndexOf(":");if(pci!==-1&&hostPort.indexOf("]")<pci){this.hostname=hostPort.slice(0,pci).toLowerCase();var prt=hostPort.slice(pci+1);if((this.protocol==="http:"&&prt==="80")||(this.protocol==="https:"&&prt==="443"))prt="";this.port=prt;}else{this.hostname=hostPort.toLowerCase();this.port="";}this.host=this.port?this.hostname+":"+this.port:this.hostname;this.origin=this.protocol+"//"+this.host;this.pathname=__normP(pathRaw);this.hash=hash==="#"?"":hash;this.searchParams=new URLSearchParams(search,this);this._syncSearch();}URL.prototype._syncSearch=function(){if(this.searchParams._p.length===0){this.search="";this.href=this.origin+this.pathname+this.hash;return;}var qs=this.searchParams.toString();this.search=qs?"?"+qs:"";this.href=this.origin+this.pathname+this.search+this.hash;};URL.prototype.toString=URL.prototype.toJSON=function(){return this.href;};function Headers(init){if(init==="__SLICE_LIVE_REQ__"){this._live=true;this._m=null;return;}this._live=false;this._m=Object.create(null);if(!init)return;if(init instanceof Headers){if(init._m){var ik=Object.keys(init._m);for(var n=0;n<ik.length;n++)this._m[ik[n]]=init._m[ik[n]];}else{var es=init.entries();for(var i=0;i<es.length;i++)this._m[es[i][0]]=es[i][1];}}else if(Array.isArray(init)){for(var j=0;j<init.length;j++)if(init[j]&&init[j].length>=2)this.append(init[j][0],init[j][1]);}else if(typeof init==="object"){var ks=Object.keys(init);for(var k=0;k<ks.length;k++)if(init[ks[k]]!==undefined)this._m[ks[k].toLowerCase()]=String(init[ks[k]]);}}Headers.prototype._ensure=function(){if(this._live&&!this._m){this._m=Object.create(null);var raw=JSON.parse(__slice_http_headers_all());for(var i=0;i<raw.length;i++){var k=raw[i][0].toLowerCase();this._m[k]=this._m[k]?this._m[k]+", "+raw[i][1]:raw[i][1];}this._live=false;}};Headers.prototype.get=function(n){var k=String(n).toLowerCase();if(this._m&&k in this._m)return this._m[k];if(this._live)return __slice_http_header(k);return null;};Headers.prototype.has=function(n){return this.get(n)!==null;};Headers.prototype.set=function(n,v){this._ensure();this._m[String(n).toLowerCase()]=String(v);};Headers.prototype.append=function(n,v){this._ensure();var k=String(n).toLowerCase(),s=String(v);this._m[k]=k in this._m?this._m[k]+", "+s:s;};Headers.prototype.delete=function(n){this._ensure();delete this._m[String(n).toLowerCase()];};Headers.prototype.entries=function(){this._ensure();var ks=Object.keys(this._m).sort(),r=[];for(var i=0;i<ks.length;i++)r.push([ks[i],this._m[ks[i]]]);return r;};Headers.prototype.keys=function(){this._ensure();return Object.keys(this._m).sort();};Headers.prototype.values=function(){var es=this.entries(),r=[];for(var i=0;i<es.length;i++)r.push(es[i][1]);return r;};Headers.prototype.forEach=function(cb,ta){var es=this.entries();for(var i=0;i<es.length;i++)cb.call(ta,es[i][1],es[i][0],this);};if(typeof Symbol!=="undefined"&&Symbol.iterator)Headers.prototype[Symbol.iterator]=function(){return this.entries()[Symbol.iterator]();};function Request(input,init){if(input==="__SLICE_LIVE_REQ__"){this.method=__slice_http_method()||"GET";var h=__slice_http_header("host")||"localhost",p=__slice_http_path()||"/",q=__slice_http_query();this.url="http://"+h+p+(q?"?"+q:"");this.headers=new Headers("__SLICE_LIVE_REQ__");this._body=__slice_http_body()||"";this.bodyUsed=false;return;}var o=init||{},isReq=input instanceof Request;this.url=isReq?input.url:(input instanceof URL?input.href:String(input));this.method=o.method?String(o.method).toUpperCase():(isReq?input.method:"GET");this.headers=o.headers instanceof Headers?o.headers:new Headers(o.headers||(isReq?input.headers:undefined));this._body=o.body!==undefined&&o.body!==null?(typeof o.body==="string"?o.body:JSON.stringify(o.body)):(isReq?input._body:"");this.bodyUsed=false;}Request.prototype.text=function(){this.bodyUsed=true;return Promise.resolve(this._body);};Request.prototype.json=function(){this.bodyUsed=true;try{return Promise.resolve(JSON.parse(this._body));}catch(e){return Promise.reject(e);}};Request.prototype.textSync=function(){this.bodyUsed=true;return this._body;};Request.prototype.jsonSync=function(){this.bodyUsed=true;return JSON.parse(this._body);};Request.prototype.clone=function(){return new Request(this.url,{method:this.method,headers:new Headers(this.headers),body:this._body});};function Response(body,init){var o=init||{};this.status=o.status!==undefined?Number(o.status):200;this.statusText=o.statusText!==undefined?String(o.statusText):(this.status===200?"OK":"");this.ok=this.status>=200&&this.status<300;this.headers=o.headers instanceof Headers?o.headers:new Headers(o.headers);this._data=undefined;this._body=body===undefined||body===null?"":(body instanceof ReadableStream?body._toText():(typeof body==="string"?body:JSON.stringify(body)));this._ct=(this.headers._m&&this.headers._m["content-type"])||"text/plain;charset=UTF-8";this._isSliceRes=true;this.bodyUsed=false;}Response.prototype.text=function(){this.bodyUsed=true;if(this._data!==undefined&&!this._body)this._body=JSON.stringify(this._data);return Promise.resolve(this._body);};Response.prototype.json=function(){this.bodyUsed=true;if(this._data!==undefined)return Promise.resolve(this._data);try{return Promise.resolve(JSON.parse(this._body));}catch(e){return Promise.reject(e);}};Response.prototype.textSync=function(){this.bodyUsed=true;if(this._data!==undefined&&!this._body)this._body=JSON.stringify(this._data);return this._body;};Response.prototype.jsonSync=function(){this.bodyUsed=true;if(this._data!==undefined)return this._data;return JSON.parse(this._body);};Response.prototype.clone=function(){if(this._data!==undefined&&!this._body)this._body=JSON.stringify(this._data);return new Response(this._body,{status:this.status,statusText:this.statusText,headers:new Headers(this.headers)});};Response.json=function(data,init){var o=init?(typeof init==="number"?{status:init}:init):{},h=o.headers instanceof Headers?o.headers:new Headers(o.headers);if(!h._m["content-type"])h._m["content-type"]="application/json";var r=new Response(null,{status:o.status||200,statusText:o.statusText,headers:h});r._data=data;r._ct=h._m["content-type"];return r;};Response.sse=function(src,init){var o=init?(typeof init==="number"?{status:init}:init):{},h=o.headers instanceof Headers?o.headers:new Headers(o.headers);if(!h._m["content-type"])h._m["content-type"]="text/event-stream; charset=utf-8";if(!h._m["cache-control"])h._m["cache-control"]="no-cache";var r=new Response(__colSse(src),{status:o.status||200,statusText:o.statusText,headers:h});r._ct=h._m["content-type"];return r;};Response.redirect=function(url,status){var st=status||302;return new Response("",{status:st,headers:{location:String(url)}});};globalThis.URLSearchParams=URLSearchParams;globalThis.URL=URL;globalThis.Headers=Headers;globalThis.Request=Request;globalThis.Response=Response;var __slice_web_ctx={waitUntil:Slice.waitUntil,passThroughOnException:function(){}};globalThis.__slice_make_web_request=function(){return new Request("__SLICE_LIVE_REQ__");};globalThis.__slice_dispatch_fetch=function(h){if(!__slice_http_is_active())return;var fn=typeof h.fetch==="function"?h.fetch:(typeof h==="function"?h:null);if(!fn)return;var res=fn.call(h,new Request("__SLICE_LIVE_REQ__"),globalThis.process.env,__slice_web_ctx);if(res){if(res._isSliceRes){var b=res._body||(res._data!==undefined?JSON.stringify(res._data):"");__slice_http_respond(res.status,b,res._ct);}else if(typeof res.then==="function")res.then(function(r){if(r&&r._isSliceRes){var rb=r._body||(r._data!==undefined?JSON.stringify(r._data):"");__slice_http_respond(r.status,rb,r._ct);}});}};globalThis.__slice_builtins=Object.create(null);globalThis.__slice_cjs_require=function(id){return __slice_builtins[id]||__slice_load_builtin(id);};globalThis.require=__slice_cjs_require;"##;
     let _ = ctx.eval(boa_engine::Source::from_bytes(CORE_PRELUDE));
     WarmBoaRealm {
         ctx,
@@ -4460,6 +4800,10 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
             let saved_violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
             let saved_tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
             let saved_caps = BOA_ACTIVE_CAPS.with(|c| c.borrow_mut().take());
+            let saved_net_hosts = BOA_NET_HOSTS.with(|h| std::mem::take(&mut *h.borrow_mut()));
+            let saved_egress_secrets =
+                BOA_EGRESS_SECRETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
+            let saved_fetch_mocks = BOA_FETCH_MOCKS.with(|m| m.borrow().clone());
             let saved_kv_budget = BOA_KV_MEM_BUDGET.with(|m| m.get());
             let saved_det = BOA_DET_STATE.with(|s| s.get());
 
@@ -4472,6 +4816,9 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
                     parent_caps = parent_caps.with_write_prefix(w.clone());
                 }
             }
+            for nh in &saved_net_hosts {
+                parent_caps = parent_caps.with_net_host(nh.clone());
+            }
             let parent_rem_mem = saved_kv_budget.1.saturating_sub(saved_kv_budget.0);
             let mut proxy_parent = SliceIsolate::spawn(
                 saved_tenant.clone(),
@@ -4480,6 +4827,9 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
                 5_000_000,
                 parent_rem_mem.max(65536),
             );
+            for sec in &saved_egress_secrets {
+                proxy_parent.add_egress_audit_secret(sec.clone());
+            }
             let outcome = proxy_parent.eval_sandbox(&code, opts);
 
             // Restore parent's thread-local execution state
@@ -4487,11 +4837,116 @@ fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
             BOA_VIOLATION.with(|v| *v.borrow_mut() = saved_violation);
             BOA_ACTIVE_TENANT.with(|t| *t.borrow_mut() = saved_tenant);
             BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = saved_caps);
+            BOA_NET_HOSTS.with(|h| *h.borrow_mut() = saved_net_hosts);
+            BOA_EGRESS_SECRETS.with(|s| *s.borrow_mut() = saved_egress_secrets);
+            BOA_FETCH_MOCKS.with(|m| *m.borrow_mut() = saved_fetch_mocks);
             BOA_KV_MEM_BUDGET.with(|m| m.set(saved_kv_budget));
             BOA_DET_STATE.with(|s| s.set(saved_det));
 
             let json = serde_json::to_string(&outcome).unwrap_or_else(|_| "{}".to_string());
             Ok(BoaVal::from(js_string!(json)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_mock_fetch"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let key = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let payload = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !key.is_empty() && !payload.is_empty() {
+                BOA_FETCH_MOCKS.with(|m| {
+                    m.borrow_mut().insert(key, payload);
+                });
+            }
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fetch_sync"),
+        4,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let url = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let method = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped().to_ascii_uppercase())
+                .unwrap_or_else(|| "GET".to_string());
+            let headers_json = args
+                .get(2)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "[]".to_string());
+            let body = args
+                .get(3)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            let Some(parts) = parse_outbound_http_url(&url) else {
+                let err_json = serde_json::json!({ "__error": format!("Invalid outbound URL: {}", url) }).to_string();
+                return Ok(BoaVal::from(js_string!(err_json)));
+            };
+
+            if let Err(err_msg) =
+                check_boa_outbound_fetch_ocap_and_dlp(&parts, &url, &headers_json, &body)
+            {
+                let err_json = serde_json::json!({ "__error": err_msg }).to_string();
+                return Ok(BoaVal::from(js_string!(err_json)));
+            }
+
+            // 1. Check in-memory mock cassette (`Slice.mockFetch(...)`)
+            let method_url_key = format!("{} {}", method, url);
+            if let Some(mock_json) = BOA_FETCH_MOCKS.with(|m| {
+                let map = m.borrow();
+                map.get(&method_url_key)
+                    .or_else(|| map.get(&url))
+                    .cloned()
+            }) {
+                return Ok(BoaVal::from(js_string!(mock_json)));
+            }
+
+            // 2. Check deterministic KV cassette (`fetch_cassette:<METHOD>:<URL>`)
+            let cassette_key = format!("fetch_cassette:{}:{}", method, url);
+            let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+            if let Some(cassette_json) = edge_kv_get(&tenant_id, &cassette_key) {
+                return Ok(BoaVal::from(js_string!(cassette_json)));
+            }
+
+            // 3. Execute real outbound HTTP/1.1 request over TCP
+            let req_headers: Vec<(String, String)> =
+                serde_json::from_str(&headers_json).unwrap_or_default();
+            match execute_outbound_http11(&parts, &method, &req_headers, &body) {
+                Ok(resp_json) => {
+                    if BOA_DET_STATE.with(|s| s.get().is_some()) {
+                        edge_kv_set(&tenant_id, &cassette_key, &resp_json, 0);
+                    }
+                    Ok(BoaVal::from(js_string!(resp_json)))
+                }
+                Err(err_msg) => {
+                    let err_json = serde_json::json!({ "__error": err_msg }).to_string();
+                    Ok(BoaVal::from(js_string!(err_json)))
+                }
+            }
         }),
     );
 }
@@ -6249,6 +6704,138 @@ Slice.streamSSE([
         let leak_res = iso.execute_http_request(&leak_bc, None, &req1);
         assert!(leak_res.is_err());
         assert!(leak_res
+            .unwrap_err()
+            .to_string()
+            .contains("EGRESS_SECRET_LEAK_BLOCKED"));
+    }
+
+    #[test]
+    fn test_tag_f3_outbound_fetch_ocap_ssrf_egress_dlp_and_cassette() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // Spawn a lightweight local HTTP/1.1 upstream server for real socket fetch testing
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let host_port = format!("127.0.0.1:{}", port);
+
+        let upstream_thread = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req_str = String::from_utf8_lossy(&buf[..n]);
+                let body_part = req_str.split("\r\n\r\n").nth(1).unwrap_or("{}");
+                let resp_body = format!(r#"{{"received":{},"upstream":"slice-f3"}}"#, body_part);
+                let resp = format!(
+                    "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nX-Upstream-Ack: ok-f3\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        // 1. Authorized outbound `fetch()` over real TCP + deterministic cassette recording in `Slice.kv`
+        let ts_fetch_ok = format!(
+            r#"
+async function main() {{
+    const res = await fetch("http://{}/v1/webhook", {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/json", "X-Trace": "trace-99" }},
+        body: JSON.stringify({{ orderId: "ORD-77", total: 1500 }})
+    }});
+    const data = await res.json();
+    console.log(JSON.stringify({{
+        status: res.status,
+        ok: res.ok,
+        ack: res.headers.get("x-upstream-ack"),
+        orderId: data.received.orderId,
+        upstream: data.upstream
+    }}));
+}}
+main();
+"#,
+            host_port
+        );
+        let bc_ok = compile_source_to_bytecode(&ts_fetch_ok);
+        let mut iso_ok = SliceIsolate::spawn(
+            "f3-fetch-tenant",
+            1,
+            CapabilityToken::pure_compute().with_net_host(&host_port),
+            5_000_000,
+            8 * 1024 * 1024,
+        );
+        iso_ok.set_deterministic_seed(Some(2026));
+        let metrics_ok = iso_ok.execute_bytecode(&bc_ok, None).unwrap();
+        assert_eq!(
+            metrics_ok.stdout[0],
+            r#"{"status":201,"ok":true,"ack":"ok-f3","orderId":"ORD-77","upstream":"slice-f3"}"#
+        );
+        let _ = upstream_thread.join();
+
+        // Verify deterministic cassette replay (`fetch_cassette:POST:http://...`) works with 0 network calls!
+        let cassette_key = format!("fetch_cassette:POST:http://{}/v1/webhook", host_port);
+        assert!(iso_ok.kv_get(&cassette_key).is_some());
+        let mut iso_replay = SliceIsolate::spawn(
+            "f3-fetch-tenant",
+            2,
+            CapabilityToken::pure_compute().with_net_host(&host_port),
+            5_000_000,
+            8 * 1024 * 1024,
+        );
+        let metrics_replay = iso_replay.execute_bytecode(&bc_ok, None).unwrap();
+        assert_eq!(metrics_replay.stdout[0], metrics_ok.stdout[0]);
+
+        // 2. Cloud Metadata SSRF Shield (`169.254.169.254`) blocked even under wildcard `allow_net = ["*"]`
+        let ts_ssrf = r#"
+async function attack() {
+    const r = await fetch("http://169.254.169.254/latest/meta-data/iam/security-credentials/");
+    console.log(r.status);
+}
+attack();
+"#;
+        let bc_ssrf = compile_source_to_bytecode(ts_ssrf);
+        let mut iso_ssrf = SliceIsolate::spawn(
+            "f3-ssrf-tenant",
+            3,
+            CapabilityToken::pure_compute().with_net_host("*"),
+            5_000_000,
+            8 * 1024 * 1024,
+        );
+        let ssrf_res = iso_ssrf.execute_bytecode(&bc_ssrf, None);
+        assert!(matches!(
+            ssrf_res,
+            Err(SandboxViolation::NetAccessDenied { .. })
+        ));
+
+        // 3. Outbound Egress Secret DLP blocks Base64-encoded secret in outbound `fetch()` body/headers to an allowed host
+        let ts_dlp = format!(
+            r#"
+async function exfil() {{
+    const encoded = Buffer.from("sk_live_TOP_SECRET_777").toString("base64");
+    await fetch("http://{}/v1/webhook", {{
+        method: "POST",
+        headers: {{ "X-Leak": encoded }},
+        body: "benign"
+    }});
+}}
+exfil();
+"#,
+            host_port
+        );
+        let bc_dlp = compile_source_to_bytecode(&ts_dlp);
+        let mut iso_dlp = SliceIsolate::spawn(
+            "f3-dlp-tenant",
+            4,
+            CapabilityToken::pure_compute().with_net_host(&host_port),
+            5_000_000,
+            8 * 1024 * 1024,
+        );
+        iso_dlp.add_egress_audit_secret("sk_live_TOP_SECRET_777");
+        let dlp_res = iso_dlp.execute_bytecode(&bc_dlp, None);
+        assert!(dlp_res.is_err());
+        assert!(dlp_res
             .unwrap_err()
             .to_string()
             .contains("EGRESS_SECRET_LEAK_BLOCKED"));

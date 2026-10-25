@@ -60,6 +60,49 @@ APP9_DIR="$APPS_DIR/09-wintertc-web-router"
 APP10_DIR="$APPS_DIR/10-fullstack-bff-microservice"
 APP11_DIR="$APPS_DIR/11-static-asset-cdn-edge"
 APP12_DIR="$APPS_DIR/12-ai-sse-token-streamer"
+APP13_DIR="$APPS_DIR/13-webhook-orchestrator-ssrf"
+APP14_DIR="$APPS_DIR/14-federated-api-mesh-dlp"
+
+UPSTREAM_F3_PID=""
+cleanup_upstream_f3() {
+    if [ -n "$UPSTREAM_F3_PID" ]; then
+        kill "$UPSTREAM_F3_PID" 2>/dev/null || true
+        wait "$UPSTREAM_F3_PID" 2>/dev/null || true
+    fi
+    rm -f /tmp/f3_upstream_*
+}
+trap cleanup_upstream_f3 EXIT
+
+if should_run_tag "apps" || should_run_tag "f3"; then
+cat << 'EOF' > /tmp/f3_upstream_server.ts
+export default {
+    fetch(req: Request): Response {
+        const url = new URL(req.url);
+        if (url.pathname === "/upstream/webhook") {
+            const body = req.jsonSync() as { eventId?: string };
+            return Response.json({
+                ackId: "ack-" + (body.eventId || "0"),
+                status: "accepted"
+            });
+        }
+        if (url.pathname === "/upstream/subgraph/account") {
+            const accountId = url.searchParams.get("account") || "acct-0";
+            return Response.json({
+                accountId,
+                tier: "enterprise",
+                balanceCents: 14500,
+                region: "us-east-1"
+            });
+        }
+        return Response.json({ ok: true });
+    }
+};
+EOF
+"$SLICE_BIN" pack /tmp/f3_upstream_server.ts /tmp/f3_upstream_server.cas >/dev/null
+"$SLICE_BIN" serve /tmp/f3_upstream_server.cas --port=18095 --workers=4 >/dev/null 2>&1 &
+UPSTREAM_F3_PID=$!
+sleep 0.3
+fi
 
 echo "========================================================================="
 echo "  RUNTIME VERSIONS (LINUX DOCKER x86_64 - LATEST RELEASES)"
@@ -72,9 +115,9 @@ echo "  Deno    : $(deno -V)"
 
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  [TAG: apps] PACKING & COMPILING ALL 12 FOLDER-BASED APPS (OXC + CAS)"
+echo "  [TAG: apps] PACKING & COMPILING ALL 14 FOLDER-BASED APPS (OXC + CAS)"
 echo "========================================================================="
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
     eval "dir=\$APP${i}_DIR"
     "$SLICE_BIN" pack "$dir" "/tmp/app${i}.cas"
     "$SLICE_BIN" compile "/tmp/app${i}.cas" -o "/tmp/app${i}_bin"
@@ -130,6 +173,8 @@ verify_app_parity "App 9: 09-wintertc-web-router (Request/Response/URL/Headers)"
 verify_app_parity "App 10: 10-fullstack-bff-microservice (CORS/ETag/Cookie/dlv)" "$APP10_DIR" "/tmp/app10.cas" "-A"
 verify_app_parity "App 11: 11-static-asset-cdn-edge (Static ETag/304/bytes/ms)" "$APP11_DIR" "/tmp/app11.cas" "-A"
 verify_app_parity "App 12: 12-ai-sse-token-streamer (SSE/ReadableStream/mitt/DLP)" "$APP12_DIR" "/tmp/app12.cas" "-A"
+verify_app_parity "App 13: 13-webhook-orchestrator-ssrf (Outbound fetch/SSRF/HMAC)" "$APP13_DIR" "/tmp/app13.cas" "-A"
+verify_app_parity "App 14: 14-federated-api-mesh-dlp (Outbound fetch/dlv/dset/DLP)" "$APP14_DIR" "/tmp/app14.cas" "-A"
 fi
 
 measure_ms() {
@@ -198,6 +243,8 @@ bench_app 9 "09-WINTERTC-WEB-ROUTER (Request/Response/URL/Headers)" "$APP9_DIR" 
 bench_app 10 "10-FULLSTACK-BFF-MICROSERVICE (CORS/ETag/Cookie/dlv)" "$APP10_DIR" "-A"
 bench_app 11 "11-STATIC-ASSET-CDN-EDGE (Static ETag/304/bytes/ms)" "$APP11_DIR" "-A"
 bench_app 12 "12-AI-SSE-TOKEN-STREAMER (SSE/ReadableStream/mitt/DLP)" "$APP12_DIR" "-A"
+bench_app 13 "13-WEBHOOK-ORCHESTRATOR-SSRF (Outbound fetch/SSRF/HMAC)" "$APP13_DIR" "-A"
+bench_app 14 "14-FEDERATED-API-MESH-DLP (Outbound fetch/dlv/dset/DLP)" "$APP14_DIR" "-A"
 
 echo "========================================================================="
 echo "  PEAK MEMORY FOOTPRINT (MAX RSS) ACROSS REPRESENTATIVE APPS"
@@ -213,14 +260,14 @@ measure_rss_kb "Deno (App 6: Telemetry + Flatted)"  deno run -A "$APP6_DIR/src/i
 measure_rss_kb "Node (App 6: Telemetry + Flatted)"  node "$APP6_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 12 APPS (COLD VS WARM POOL)"
+echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 14 APPS (COLD VS WARM POOL)"
 echo "========================================================================="
 echo "  --- Cold Realm Telemetry ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --quiet --metrics
 done
 echo "  --- Pre-Warmed Boa Pool Telemetry (--warm) ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --warm --quiet --metrics
 done
 fi
@@ -689,6 +736,57 @@ else
     exit 1
 fi
 rm -rf /tmp/f2_*
+fi
+
+if should_run_tag "f3"; then
+echo "========================================================================="
+echo "  [TAG: f3] PHASE F3 OCAP OUTBOUND FETCH(), SSRF SHIELD & OUTBOUND EGRESS DLP"
+echo "  1. Real Outbound HTTP/1.1 fetch() with Embedded slice.toml allow_net"
+echo "  2. Cloud Metadata (169.254.169.254) SSRF Shield & Outbound Egress DLP"
+echo "  3. App 13 (13-webhook-orchestrator-ssrf) & App 14 (14-federated-api-mesh-dlp)"
+echo "========================================================================="
+
+"$SLICE_BIN" pack "$APP13_DIR" "/tmp/app13.cas" >/dev/null
+"$SLICE_BIN" compile "/tmp/app13.cas" -o "/tmp/app13_bin" >/dev/null
+"$SLICE_BIN" pack "$APP14_DIR" "/tmp/app14.cas" >/dev/null
+"$SLICE_BIN" compile "/tmp/app14.cas" -o "/tmp/app14_bin" >/dev/null
+
+verify_app_parity "Phase F3 App 13: 13-webhook-orchestrator-ssrf" "$APP13_DIR" "/tmp/app13.cas" "-A"
+verify_app_parity "Phase F3 App 14: 14-federated-api-mesh-dlp" "$APP14_DIR" "/tmp/app14.cas" "-A"
+
+bench_app 13 "13-WEBHOOK-ORCHESTRATOR-SSRF (Outbound fetch/SSRF/HMAC)" "$APP13_DIR" "-A"
+bench_app 14 "14-FEDERATED-API-MESH-DLP (Outbound fetch/dlv/dset/DLP)" "$APP14_DIR" "-A"
+
+echo "  --- Phase F3 Cold vs Warm Isolate Telemetry ---"
+"$SLICE_BIN" run "/tmp/app13.cas" --quiet --metrics
+"$SLICE_BIN" run "/tmp/app13.cas" --warm --quiet --metrics
+"$SLICE_BIN" run "/tmp/app14.cas" --quiet --metrics
+"$SLICE_BIN" run "/tmp/app14.cas" --warm --quiet --metrics
+
+cat << 'EOF' > /tmp/f3_ssrf_dlp_check.ts
+const ssrfAttempt = Slice.evalSandbox(
+    "async function run() { await fetch('http://169.254.169.254/latest/meta-data/iam'); } run();",
+    { allowNet: ["*"] }
+);
+const dlpAttempt = Slice.evalSandbox(
+    "async function run() { const b64 = Buffer.from('sk_live_F3_GUARD_999').toString('base64'); await fetch('http://127.0.0.1:18095/upstream/webhook', { method: 'POST', headers: { 'X-Exfil': b64 }, body: '{}' }); } run();",
+    { allowNet: ["127.0.0.1:18095"], auditSecret: "sk_live_F3_GUARD_999" }
+);
+console.log(JSON.stringify({
+    ssrfBlocked: !ssrfAttempt.ok && String(ssrfAttempt.violation).indexOf("SSRF_METADATA_BLOCKED") !== -1,
+    dlpBlocked: !dlpAttempt.ok && String(dlpAttempt.violation).indexOf("EGRESS_SECRET_LEAK_BLOCKED") !== -1
+}));
+EOF
+F3_SEC_OUT=$("$SLICE_BIN" run /tmp/f3_ssrf_dlp_check.ts --allow-net=127.0.0.1:18095)
+echo "  [Live SSRF Shield & Outbound Egress DLP Verification]"
+echo "    Result : $F3_SEC_OUT"
+if [[ "$F3_SEC_OUT" == '{"ssrfBlocked":true,"dlpBlocked":true}' ]]; then
+    echo "    [PASS] Cloud Metadata SSRF Shield (169.254.169.254) & Outbound Egress Secret DLP verified!"
+else
+    echo "    [FAIL] Unexpected F3 security check output!"
+    exit 1
+fi
+rm -f /tmp/f3_ssrf_dlp_check.ts
 fi
 
 if should_run_tag "swarm"; then

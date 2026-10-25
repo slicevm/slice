@@ -50,6 +50,8 @@ RUN bun install --cwd /app/docker-tests/apps/02-npm-ecosystem-suite \
     && bun install --cwd /app/docker-tests/apps/10-fullstack-bff-microservice \
     && bun install --cwd /app/docker-tests/apps/11-static-asset-cdn-edge \
     && bun install --cwd /app/docker-tests/apps/12-ai-sse-token-streamer \
+    && bun install --cwd /app/docker-tests/apps/13-webhook-orchestrator-ssrf \
+    && bun install --cwd /app/docker-tests/apps/14-federated-api-mesh-dlp \
     && sed -i 's/\r$//' /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh \
     && chmod +x /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh
 

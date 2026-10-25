@@ -1,0 +1,10 @@
+{
+  "name": "13-webhook-orchestrator-ssrf",
+  "version": "1.0.0",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "fast-querystring": "1.1.2",
+    "ms": "2.1.3"
+  }
+}
+

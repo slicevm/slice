@@ -1,0 +1,11 @@
+[package]
+name = "14-federated-api-mesh-dlp"
+version = "1.0.0"
+entrypoint = "./src/index.ts"
+
+[limits]
+fuel = 50_000_000
+memory_kb = 16384
+
+[capabilities]
+allow_net = ["127.0.0.1:18095"]

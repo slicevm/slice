@@ -159,6 +159,76 @@ impl HardwareProtectionDomain {
     }
 }
 
+/// Extracts the lowercase hostname (without `:port` or IPv6 brackets) from a `host` or `host:port` string.
+#[inline]
+pub fn extract_clean_hostname(host: &str) -> String {
+    let trimmed = host.trim();
+    let without_port = if let Some(rest) = trimmed.strip_prefix('[') {
+        if let Some((ipv6, _)) = rest.split_once(']') {
+            ipv6
+        } else {
+            trimmed
+        }
+    } else if let Some((h, port_part)) = trimmed.rsplit_once(':') {
+        if !h.contains(':') && port_part.bytes().all(|b| b.is_ascii_digit()) {
+            h
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    without_port.to_ascii_lowercase()
+}
+
+/// Returns `true` if `host` resolves to a cloud instance metadata endpoint
+/// (AWS/GCP/Azure/DigitalOcean `169.254.169.254`, AWS ECS `169.254.170.2`,
+/// Alibaba `100.100.100.200`, AWS IPv6 `fd00:ec2::254`, or GCP `metadata.google.internal`).
+/// These endpoints are unconditionally blocked by the Slice SSRF shield.
+#[inline]
+pub fn is_cloud_metadata_ssrf_target(host: &str) -> bool {
+    let h = extract_clean_hostname(host);
+    matches!(
+        h.as_str(),
+        "169.254.169.254"
+            | "169.254.170.2"
+            | "100.100.100.200"
+            | "fd00:ec2::254"
+            | "metadata.google.internal"
+            | "metadata.goog"
+            | "instance-data"
+    )
+}
+
+/// Returns `true` if `host` is a cloud metadata endpoint, loopback address (`localhost`, `127.0.0.0/8`, `::1`),
+/// link-local (`169.254.0.0/16`), or RFC1918 private network (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`).
+/// Wildcard `allow_net = ["*"]` never grants access to these targets; they require explicit host allowlisting.
+#[inline]
+pub fn is_private_or_loopback_ssrf_target(host: &str) -> bool {
+    if is_cloud_metadata_ssrf_target(host) {
+        return true;
+    }
+    let h = extract_clean_hostname(host);
+    if matches!(h.as_str(), "localhost" | "0.0.0.0" | "::1" | "0:0:0:0:0:0:0:1")
+        || h.starts_with("127.")
+        || h.starts_with("10.")
+        || h.starts_with("192.168.")
+        || h.starts_with("169.254.")
+    {
+        return true;
+    }
+    if let Some(rest) = h.strip_prefix("172.") {
+        if let Some((second_octet_str, _)) = rest.split_once('.') {
+            if let Ok(octet) = second_octet_str.parse::<u8>() {
+                if (16..=31).contains(&octet) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Zero-allocation static check for SES frozen intrinsics.
 #[inline(always)]
 pub fn is_frozen_intrinsic(target: &str) -> bool {
@@ -354,11 +424,30 @@ impl TenantCompartment {
         Err(self.trap_fs_write(path))
     }
 
-    /// Verifies attenuated outbound network capability for `host`.
+    /// Verifies attenuated outbound network capability for `host`, enforcing the SSRF shield
+    /// against cloud instance metadata endpoints (`169.254.169.254`, `metadata.google.internal`, etc.)
+    /// and blocking private/loopback CIDRs under wildcard `allow_net = ["*"]`.
     #[inline]
     pub fn verify_net_connect(&self, host: &str) -> Result<(), SandboxViolation> {
+        if is_cloud_metadata_ssrf_target(host) {
+            return Err(self.trap_net_access(host));
+        }
+        let clean_host = extract_clean_hostname(host);
         if self.capabilities.allowed_net_hosts.contains(host)
-            || self.capabilities.allowed_net_hosts.contains("*")
+            || self.capabilities.allowed_net_hosts.contains(&clean_host)
+            || self
+                .capabilities
+                .allowed_net_hosts
+                .contains(&format!("{}:443", clean_host))
+            || self
+                .capabilities
+                .allowed_net_hosts
+                .contains(&format!("{}:80", clean_host))
+        {
+            return Ok(());
+        }
+        if self.capabilities.allowed_net_hosts.contains("*")
+            && !is_private_or_loopback_ssrf_target(host)
         {
             return Ok(());
         }
@@ -628,6 +717,68 @@ NODE_ENV = "production"
         let tenant = TenantCompartment::new("tenant-9a", 3, caps, 10_000, 65536);
         assert!(tenant.verify_fs_read(r"\app\data\file.json").is_ok());
         assert!(tenant.verify_fs_write(r"\tmp/out\result.txt").is_ok());
+    }
+
+    #[test]
+    fn test_tag_f3_ssrf_shield_and_wildcard_private_network_blocking() {
+        // 1. Wildcard `allow_net = ["*"]` allows public internet hosts, but blocks cloud metadata and RFC1918/loopback
+        let wildcard_caps = CapabilityToken::pure_compute().with_net_host("*");
+        let wildcard_tenant =
+            TenantCompartment::new("tenant-wildcard", 4, wildcard_caps, 10_000, 65536);
+
+        assert!(wildcard_tenant.verify_net_connect("api.openai.com:443").is_ok());
+        assert!(wildcard_tenant.verify_net_connect("api.stripe.com").is_ok());
+
+        // Cloud instance metadata endpoints must be unconditionally blocked even under `*`
+        for metadata_host in [
+            "169.254.169.254",
+            "169.254.169.254:80",
+            "169.254.170.2:80",
+            "100.100.100.200:80",
+            "[fd00:ec2::254]:80",
+            "metadata.google.internal",
+            "metadata.google.internal:80",
+            "metadata.goog:80",
+        ] {
+            assert!(
+                matches!(
+                    wildcard_tenant.verify_net_connect(metadata_host),
+                    Err(SandboxViolation::NetAccessDenied { .. })
+                ),
+                "Expected SSRF block for metadata endpoint {}",
+                metadata_host
+            );
+        }
+
+        // Loopback and RFC1918 private networks must be blocked under `*`
+        for private_host in [
+            "localhost:8080",
+            "127.0.0.1:6379",
+            "0.0.0.0:3000",
+            "[::1]:8080",
+            "10.0.0.42:5432",
+            "172.16.0.10:8080",
+            "172.31.255.1:8080",
+            "192.168.1.100:9000",
+        ] {
+            assert!(
+                matches!(
+                    wildcard_tenant.verify_net_connect(private_host),
+                    Err(SandboxViolation::NetAccessDenied { .. })
+                ),
+                "Expected SSRF block for private/loopback host {}",
+                private_host
+            );
+        }
+        // Public 172.32.x.x is outside 172.16.0.0/12 and should be permitted under `*`
+        assert!(wildcard_tenant.verify_net_connect("172.32.0.1:443").is_ok());
+
+        // 2. Explicit local microservice allowlisting permits only that exact host:port
+        let local_caps = CapabilityToken::pure_compute().with_net_host("127.0.0.1:18091");
+        let local_tenant = TenantCompartment::new("tenant-local", 5, local_caps, 10_000, 65536);
+        assert!(local_tenant.verify_net_connect("127.0.0.1:18091").is_ok());
+        assert!(local_tenant.verify_net_connect("127.0.0.1:6379").is_err());
+        assert!(local_tenant.verify_net_connect("169.254.169.254:80").is_err());
     }
 }
 
