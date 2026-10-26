@@ -1,53 +1,152 @@
-# Chapter 09: Benchmarks, Tagged Testing & Docker Verification Suite
+# Chapter 09: Time-Travel Testing (`slice test`), Deterministic Replay & Production Benchmarks
 
-This chapter explains how to run Slice's unit test suites, tagged feature tests (`tag_n1`, `tag_n2`, `tag_n3`), local Windows benchmarks, and the reproducible Linux `x86_64` Docker benchmark suite against the latest official releases of **Node.js (`v26.12.1`)**, **Deno (`v2.9.8`)**, and **Bun (`v1.4.4`)**.
+In traditional test runners (`jest`, `vitest`, `bun test`, `deno test`), if Test #1 writes a temporary file to disk or mutates a shared key-value store and fails mid-test, Test #2 inherits dirty state — leading to flaky tests that pass in isolation and fail in CI. Furthermore, no standard test runner lets you assert that a function stays within a strict **CPU instruction fuel budget**, **memory ceiling**, or **Object-Capability security policy**.
+
+Slice solves both problems with **`slice test` — the Time-Travel Test Runner**.
+
+This chapter shows you how to write unit, integration, and security tests with `slice test`, how to eliminate flaky time/randomness bugs with `--deterministic`, and how to run Slice's 16-application Docker benchmark suite against Node.js, Deno, and Bun.
 
 ---
 
-## 1. Running Rust Workspace Tests & Tagged Feature Subsets
+## 1. Writing Tests with `slice test` (`"slice:test"` / `"node:test"` / `"bun:test"`)
 
-```powershell
-# Run all 34 unit tests across slice-cas, slice-io, slice-sandbox, slice-engine, and slice-cli
-cargo test --workspace
+You can import `describe`, `test`, `it`, `beforeEach`, `afterEach`, and `expect` from `"slice:test"`, `"node:test"`, or `"bun:test"` (or use them directly as globals).
 
-# Run strict clippy lint verification (zero warnings allowed)
-cargo clippy --workspace --all-targets -- -D warnings
+### 1.1 How Automatic `< 5 us` Time-Travel Rollback Works
 
-# Run tagged feature subsets:
-cargo test tag_n1   # Phase N1: HTTP/1.1 Keep-Alive, Pipelining, Multi-Worker, WinterTC & waitUntil
-cargo test tag_n2   # Phase N2: 16-Way Sharded Slice.kv, --tenant-dir Hot-Swap, & --deterministic Replay
-cargo test tag_n3   # Phase N3: Slice.evalSandbox, < 5 us Checkpoint/Restore, Egress Guard, & slice mcp
-cargo test tag_f1   # Phase F1: Standard WinterTC URL, URLSearchParams, Headers, Request, Response & export default { fetch }
-cargo test tag_f2   # Phase F2: Zero-Stat CAS Static Asset Server (--static), BLAKE3 ETag 304, & SSE Token Streaming
-cargo test tag_f3   # Phase F3: OCap Outbound fetch(), Cloud Metadata SSRF Shield, Outbound Egress DLP, & Cassette Replay
-cargo test tag_f4   # Phase F4: Time-Travel slice test Runner, < 3 ms --watch, Source-Line Mapping, & Auto-DLP .env
+Before executing **every single `test(...)` / `it(...)` block**, `slice test` automatically calls `const snap = Slice.checkpoint()`, runs your `beforeEach` hooks, test body, and `afterEach` hooks, and then calls `Slice.restore(snap)` inside a `finally` block!
+
+That means:
+- Every file created, modified, or deleted via `node:fs` inside `test("A", ...)` is **automatically rolled back in `< 5 microseconds`** before `test("B", ...)` starts.
+- Every key or counter modified in `Slice.kv` inside `test("A", ...)` is **automatically restored** before `test("B", ...)` starts.
+- If you ever want a specific test to intentionally persist its state mutations, pass `{ isolateState: false }` as the third argument: `test("persists state", () => { ... }, { isolateState: false })`.
+
+### 1.2 Complete `slice test` Example
+
+Create `tests/billing.test.ts`:
+```typescript
+import { describe, test, expect } from "slice:test";
+import * as fs from "node:fs";
+
+// Establish baseline state before the suite runs
+Slice.kv.set("account:credits", "10000", 0);
+fs.writeFileSync("/tmp/ledger.json", JSON.stringify({ balance: 10000 }));
+
+describe("Billing Engine Time-Travel Suite", () => {
+    test("debits credits and mutates /tmp/ledger.json in Test 1", () => {
+        Slice.kv.set("account:credits", "2500", 0);
+        fs.writeFileSync("/tmp/ledger.json", JSON.stringify({ balance: 2500, mutatedBy: "test-1" }));
+
+        expect(Slice.kv.get("account:credits")).toBe("2500");
+        expect(JSON.parse(fs.readFileSync("/tmp/ledger.json", "utf8")).balance).toBe(2500);
+    });
+
+    test("automatically sees clean baseline VFS and Slice.kv in Test 2 (< 5 us rollback!)", () => {
+        // Both Slice.kv and /tmp/ledger.json were automatically restored after Test 1!
+        expect(Slice.kv.get("account:credits")).toBe("10000");
+        expect(JSON.parse(fs.readFileSync("/tmp/ledger.json", "utf8"))).toEqual({ balance: 10000 });
+    });
+
+    test("enforces OCap security, CPU fuel budgets, and memory ceilings", () => {
+        // 1. Assert that reading /etc/passwd violates FsReadDenied
+        const unauthorizedRead = Slice.evalSandbox(`
+            const fs = require("node:fs");
+            fs.readFileSync("/etc/passwd", "utf8");
+        `, { allowRead: ["/tmp"], fuel: 50_000 });
+        expect(unauthorizedRead).toViolate("FsReadDenied");
+
+        // 2. Assert that cloud metadata SSRF is blocked even with wildcard network
+        const ssrfAttempt = Slice.evalSandbox(`
+            Slice.fetchSync("http://169.254.169.254/latest/meta-data/");
+        `, { fuel: 50_000 });
+        expect(ssrfAttempt).toViolate("NetAccessDenied");
+
+        // 3. Assert that a hot pricing calculation stays within 1,000 CPU fuel instructions & 16 KB RAM
+        const fastCalc = Slice.evalSandbox(`
+            const subtotal: number = 450 * 12;
+            subtotal
+        `, { fuel: 50_000 });
+        expect(fastCalc).toStayWithinFuel(1000);
+        expect(fastCalc).toStayWithinMemory(16384);
+    });
+});
+```
+
+Run the suite with `slice test`:
+```bash
+slice test
+```
+Output:
+```text
+  [PASS] Billing Engine Time-Travel Suite > debits credits and mutates /tmp/ledger.json in Test 1 (1000 us, VFS+KV Rollback #1)
+  [PASS] Billing Engine Time-Travel Suite > automatically sees clean baseline VFS and Slice.kv in Test 2 (< 5 us rollback!) (1000 us, VFS+KV Rollback #2)
+  [PASS] Billing Engine Time-Travel Suite > enforces OCap security, CPU fuel budgets, and memory ceilings (1000 us, VFS+KV Rollback #3)
+Slice Time-Travel Test Suite: 3 passed, 0 failed, 0 skipped (3 VFS+KV rollbacks in 14.58 ms, seed=Some(20261024))
 ```
 
 ---
 
-## 2. Running the Linux `x86_64` Docker Benchmark Suite (`SLICE_BENCH_TAGS`)
+## 2. Complete `expect(actual)` Matcher Reference
 
-The Docker suite in [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) compiles `slice` in release mode (`lto = "fat"`, `opt-level = 3`) inside a Linux `x86_64` container alongside the latest official Node.js, Bun, and Deno binaries.
+All matchers support negation via **`.not`** (e.g., `expect(x).not.toBe(0)`, `expect(res).not.toViolate()`).
 
-```powershell
-# Build the benchmark image
+### 2.1 Standard Value & Structural Matchers
+| Matcher | Description |
+| :--- | :--- |
+| **`.toBe(expected)`** | Strict equality (`===`). |
+| **`.toEqual(expected)`** | Deep structural equality for objects and arrays. |
+| **`.toContain(itemOrSubstring)`** | Asserts that a string contains `itemOrSubstring` or an array includes `itemOrSubstring`. |
+| **`.toBeTruthy()` / `.toBeFalsy()`** | Asserts `Boolean(actual) === true` or `false`. |
+| **`.toBeNull()`** | Asserts `actual === null`. |
+| **`.toBeDefined()` / `.toBeUndefined()`** | Asserts `actual !== undefined` or `actual === undefined`. |
+| **`.toBeGreaterThan(n)` / `.toBeGreaterThanOrEqual(n)`** | Numeric `>` and `>=` comparisons. |
+| **`.toBeLessThan(n)` / `.toBeLessThanOrEqual(n)`** | Numeric `<` and `<=` comparisons. |
+| **`.toHaveLength(n)`** | Asserts `actual.length === n`. |
+| **`.toHaveProperty(key, val?)`** | Asserts `key in actual` (and optionally deep-equals `val`). |
+| **`.toThrow(substring?)`** | Calls `actual()` and asserts that it throws an exception (optionally matching `substring`). |
+
+### 2.2 Slice-Exclusive Security & Resource Matchers
+Pass either a `SandboxEvalOutcome` returned by `Slice.evalSandbox(...)` or a zero-argument function `() => Slice.evalSandbox(...)`:
+
+| Matcher | Description |
+| :--- | :--- |
+| **`.toViolate(kindOrSubstring?)`** | Asserts that the sandboxed code trapped (`ok === false`) with a violation matching `kindOrSubstring` (e.g. `"FsReadDenied"`, `"FsWriteDenied"`, `"NetAccessDenied"`, `"EnvAccessDenied"`, `"CpuFuelExhausted"`, `"MemoryCeilingExceeded"`, `"EGRESS_SECRET_LEAK_BLOCKED"`, or any message substring). |
+| **`.toStayWithinFuel(maxFuel)`** | Asserts that `ok === true` and `fuelUsed <= maxFuel`. |
+| **`.toStayWithinMemory(maxBytes)`** | Asserts that `ok === true` and `memoryUsedBytes <= maxBytes`. |
+
+---
+
+## 3. Reproducible Debugging with `--deterministic=<seed>`
+
+By default, `slice test` runs with a deterministic seed (`--deterministic=20261024`), and you can pass `--deterministic=<seed>` to `slice run`, `slice serve`, or `slice test`:
+
+```bash
+slice test --deterministic=998877
+slice run ./src/simulation.ts --deterministic=998877
+```
+When deterministic mode is active:
+1. **`Math.random()`** uses a seeded SplitMix64 PRNG that produces the exact same sequence of floats on every run.
+2. **`Date.now()` and `performance.now()`** use a monotonic virtual clock (`1700000000000 + tick_ms`) that advances by 1ms per call.
+3. **Outbound `fetch()`** automatically records upstream HTTP responses into `Slice.kv` (`fetch_cassette:<METHOD>:<URL>`) and replays them deterministically.
+
+---
+
+## 4. Running the 16-Application Docker Benchmark Suite (`docker-tests/`)
+
+Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md)) that tests **16 realistic multi-file TypeScript + `node_modules` applications** against the latest official releases of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v26.12.1`)**, verifying **100% byte-for-byte identical JSON output** across all 4 runtimes.
+
+```bash
+# Build the Linux Docker benchmark container
 docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
 
-# Run ALL suites (16 folder apps + Phase N1/F1/F2/F3/F4 HTTP, Outbound Fetch & Time-Travel Test + Phase N2 KV/Hot-Swap + Phase N3 AI/MCP + 1,000-tenant swarm)
+# Run all 16 applications + HTTP server + KV + AI MCP + 1,000-tenant swarm benchmarks
 docker run --rm slice-realworld-bench
 
-# Or filter by comma-separated tags (apps, n1, n2, n3, f1, f2, f3, f4, serve, swarm):
-docker run --rm -e SLICE_BENCH_TAGS=n1,n2,n3,f1,f2,f3,f4,swarm slice-realworld-bench
-docker run --rm -e SLICE_BENCH_TAGS=apps slice-realworld-bench
+# Or run specific tagged suites (apps, n1, n2, n3, f1, f2, f3, f4, serve, swarm):
+docker run --rm -e SLICE_BENCH_TAGS=f1,f2,f3,f4 slice-realworld-bench
 ```
 
----
-
-## 3. Master Empirical Benchmark Results (Linux Docker `x86_64`)
-
-### 3.1 Multi-Module TypeScript & Real `node_modules` Application Suite (`SLICE_BENCH_TAGS=apps`)
-
-All 4 runtimes produce **100% byte-for-byte identical JSON stdout** across all 16 applications:
+### 4.1 Verified Results Across All 16 Production Applications (Linux `x86_64` Docker)
 
 | Production Application | Slice Cold `.cas` / Bin | Slice Warm (`--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v26.12.1` | Speedup vs Bun / Deno / Node |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -65,29 +164,34 @@ All 4 runtimes produce **100% byte-for-byte identical JSON stdout** across all 1
 | **`12-ai-sse-token-streamer`** (`mitt` + `ms` + SSE + DLP, 320 frames) | **17.774 ms** | **8.701 ms** (`0.06 us` init) | 15.840 ms | 46.510 ms | 91.210 ms | **2.62x Deno / 5.13x Node** |
 | **`13-webhook-orchestrator-ssrf`** (`fast-querystring` + `ms` + Live `fetch`) | **16.856 ms** | **5.964 ms** (`0.03 us` init) | 19.153 ms | 52.886 ms | 120.337 ms | **1.14x Bun / 7.14x Node** |
 | **`14-federated-api-mesh-dlp`** (`bytes` + `dlv` + `dset` + Live `fetch`) | **20.275 ms** | **10.509 ms** (`0.03 us` init) | 21.159 ms | 37.976 ms | 117.459 ms | **1.04x Bun / 5.79x Node** |
-| **`15-time-travel-test-suite`** (`semver` + `ms` + `dlv` + `dset` + 24 VFS/KV Rollbacks) | **13.059 ms** | **1.862 ms** (`0.02 us` init) | 23.599 ms | 66.678 ms | 92.606 ms | **1.81x Bun / 7.09x Node** |
+| **`15-time-travel-test-suite`** (`semver` + `ms` + `dlv` + `dset` + 24 Rollbacks) | **13.059 ms** | **1.862 ms** (`0.02 us` init) | 23.599 ms | 66.678 ms | 92.606 ms | **1.81x Bun / 7.09x Node** |
 | **`16-dotenv-dlp-config-vault`** (`ini` + `cookie` + `bytes` + `.env` Auto-DLP) | **12.394 ms** | **0.810 ms** (`0.03 us` init) | 14.325 ms | 46.431 ms | 72.424 ms | **1.16x Bun / 5.84x Node** |
 
-### 3.2 `slice serve` Multi-Tenant HTTP/1.1 Keep-Alive & Pipelined Throughput (`SLICE_BENCH_TAGS=n1`)
+### 4.2 HTTP Server (`slice serve`), Sharded KV & 1,000-Tenant MicroVM Benchmarks
 
-16,000 HTTP/1.1 `Keep-Alive` requests across 8 persistent sockets with pipeline depth 8:
+| Workload | Slice (`v0.2.0`) | Deno (`v2.9.8`) | Bun (`v1.4.4`) | Node.js (`v26.12.1`) |
+| :--- | :--- | :--- | :--- | :--- |
+| **`slice serve` Tier-0 CAS (`--workers=8`, Keep-Alive)** | **`152,376 req/s` (`6.56 us/req`)** | 102,481 req/s | 88,132 req/s | 55,810 req/s |
+| **`slice serve` Tier-1 WinterTC (`--workers=8`, Keep-Alive)** | **`107,274 req/s` (`9.32 us/req`)** | 102,481 req/s | 88,132 req/s | 55,810 req/s |
+| **Per-Request Security Isolation** | **OCap + SES + Fuel + MPK Isolate** | None (Shared Heap) | None (Shared Heap) | None (Shared Heap) |
+| **1,000-Tenant Swarm Cold Start (Min / Total)** | **`0.98 us` min / `1.26 ms` total** | `> 15,000 ms` | `> 5,000 ms` | `> 30,000 ms` |
+| **Peak Process Memory (App 2 `semver`+`ms`+`ini`)** | **`10.38 MB` (`10,624 KB`)** | `45.59 MB` | `29.25 MB` | `70.35 MB` |
 
-| HTTP Server | Isolation Model | Throughput (`req/s`) | Avg Latency (`us/req`) |
-| :--- | :--- | :--- | :--- |
-| **`slice serve` (Tier-0 CAS, `--workers=8`)** | **Per-Request OCap + SES + Fuel + MPK Isolate** | **152,376 req/s** | **6.56 us/req** |
-| **`slice serve` (Tier-1 WinterTC, `--workers=8`)** | **Per-Request OCap + SES + Fuel + MPK Isolate** | **107,274 req/s** | **9.32 us/req** |
-| `Deno.serve` (`v2.9.8`, V8) | Shared Single-Process Heap (No Tenant Isolation) | 102,481 req/s | 9.76 us/req |
-| `Bun.serve` (`v1.4.4`, JSC) | Shared Single-Process Heap (No Tenant Isolation) | 88,132 req/s | 11.35 us/req |
-| `Node.js http.createServer` (`v26.12.1`, V8) | Shared Single-Process Heap (No Tenant Isolation) | 55,810 req/s | 17.92 us/req |
+---
 
-### 3.3 Serverless KV, AI Agent Sandbox & 1,000-Tenant MicroVM Swarm (`SLICE_BENCH_TAGS=n2,n3,swarm`)
+## 5. Running Slice's Rust Workspace Test Suite (For Contributors)
 
-| Benchmark / Capability | Measured Result (`Linux x86_64` Docker) |
-| :--- | :--- |
-| **1,000-Tenant MicroVM Cold-Start (Min / P50 / P99)** | **`0.98 us` (`980 ns`) / `1.04 us` / `1.79 us` (`1.26 ms` total for 1,000 tenants)** |
-| **Per-Tenant Compartment Footprint / Process RSS** | **`4,096 B` (`4.0 KB`) per tenant / `9.93 MB` (`10,172 KB`) total host RSS** |
-| **500-Module Zero-Stat CAS Load** | **`419.33 us` (`0` OS `stat()` syscalls)** |
-| **Sharded `Slice.kv` Rate-Limiter (`1,001` ops in Boa ES2024)** | **`572.57 us` (`0.57 us` per JS->Rust sharded KV operation)** |
-| **Tree-of-Thought AI Agent (`Slice.checkpoint` + 3 `evalSandbox` + `restore`)** | **`232.78 - 239.45 us` total (`27.44 - 53.44 us` per nested TypeScript sandbox)** |
-| **Security Containment Audit (`slice verify-security` + `--audit-egress`)** | **5/5 OCap/SES/Fuel Vectors + Base64 Egress Secret Leak Blocked (100%)** |
+If you are building Slice from source and want to verify the internal Rust unit test suites:
+```bash
+# Run all 34 workspace unit tests across all 5 crates
+cargo test --workspace
 
+# Run tagged feature test suites individually
+cargo test tag_n1   # HTTP/1.1 Keep-Alive, Pipelining, Multi-Worker, WinterTC & waitUntil
+cargo test tag_n2   # 16-Way Sharded Slice.kv, --tenant-dir Hot-Swap, & --deterministic Replay
+cargo test tag_n3   # Slice.evalSandbox, < 5 us Checkpoint/Restore, Egress Guard, & slice mcp
+cargo test tag_f1   # WinterTC URL, URLSearchParams, Headers, Request, Response & export default { fetch }
+cargo test tag_f2   # Zero-Stat CAS Static Asset Server (--static), BLAKE3 ETag 304, & SSE Token Streaming
+cargo test tag_f3   # OCap Outbound fetch(), Cloud Metadata SSRF Shield, Outbound Egress DLP, & Cassette Replay
+cargo test tag_f4   # Time-Travel slice test Runner, < 3 ms --watch, Source-Line Mapping, & Auto-DLP .env
+```

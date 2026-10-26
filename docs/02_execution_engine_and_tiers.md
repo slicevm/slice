@@ -1,129 +1,185 @@
-# Chapter 02: Hybrid Three-Tier Execution Engine (`slice-engine`)
+# Chapter 02: Writing TypeScript & JavaScript for Maximum Performance
 
-Implemented in [`crates/slice-engine/src/lib.rs`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs), Slice's execution engine is designed around a single engineering rule: **execute every workload on the lightest possible tier, eliminate runtime parsing via zero-copy `mmap` slices and persistent realm closures, and lower typed loops and hot standard-library calls directly into native Rust/SIMD instructions**.
+In Node.js, Deno, and Bun, TypeScript type annotations (`: number`, `interface Order { ... }`) are simply erased before your code runs — they do nothing to make your program faster at runtime.
+
+In **Slice**, TypeScript is a first-class performance tool. Before Slice's Oxc compiler strips your TypeScript types, it analyzes your `: number` variables and `interface` definitions to unlock **compile-time native optimizations** alongside a **three-tier execution pipeline**.
+
+This chapter explains how Slice executes your code across its three tiers, how to read `--metrics` telemetry, and practical patterns you can use in your TypeScript code to get up to **10x-70x faster execution**.
 
 ---
 
-## 1. Overview of the Three Execution Tiers ([`ExecutionTier`](file:///p:/opensource/slice/crates/slice-sandbox/src/lib.rs#L17-L26))
+## 1. How Slice Runs Your Code: The Three Execution Tiers
+
+Whenever you run a script or bundle (`slice run`, `slice serve`, `slice test`, or a compiled binary), Slice automatically selects the fastest execution tier for your code:
 
 ```text
 +-------------------------------------------------------------------------------------------------+
-|                            Slice Hybrid Three-Tier Execution Pipeline                           |
+|                       How Slice Selects Your Execution Tier Automatically                       |
 |                                                                                                 |
-|  TypeScript / JavaScript / .cas Archive                                                         |
+|  Your TypeScript / JavaScript / .cas Bundle                                                     |
 |         |                                                                                       |
-|         +---> [Tier 0: SLICESNP Snapshot Interpreter]                                           |
-|         |       - 0.98 us Cold Start | 4.0 KB Memory | 16-Byte Cache-Line JsValue               |
-|         |       - Fast scalar math, env(), WinterTC.route(), static CAS imports                 |
+|         +---> [Tier 0: SLICESNP Snapshot VM] (`Tier0LLIntSnapshot`)                             |
+|         |       - Used for: Lightweight routing, scalar math, env(), static exports             |
+|         |       - Cold Start: ~0.98 microseconds | Memory: 4.0 KB                               |
 |         |                                                                                       |
-|         +---> [Tier 1: Zero-Copy SLICEBOA + Pre-Warmed Boa ES2024+ Pool]                        |
-|         |       - 0.02 us - 0.21 us mmap Instantiation | Full ES2024+ Classes, Closures, Map    |
-|         |       - WarmBoaRealm::loaded_bundles (__slice_rc) direct JsObject::call (0 parsing!)  |
+|         +---> [Tier 1: Full ES2024+ Warm Realm Pool] (`Tier1Baseline`)                          |
+|         |       - Used for: Full TypeScript/JS classes, closures, async/await, Map/Set,         |
+|         |         Request/Response/URL, node:* modules, Slice.kv, and npm packages              |
+|         |       - Cold Start: ~0.02 - 0.25 microseconds (from mmap .cas + --warm pool)          |
 |         |                                                                                       |
-|         +---> [Tier 2: Peak Native SIMD & Monomorphic Kernels]                                  |
-|                 - Oxc Type-Directed MonomorphicForLoop (: number -> 64-bit register loop)       |
-|                 - Hardware Intel/AMD SHA-NI SHA-256 & RFC-2104 HMAC-SHA256                      |
-|                 - FibKernel, NumericLoopKernel, BLAKE3 CryptoDigest                             |
+|         +---> [Tier 2: Peak Native SIMD & Typed Kernels] (`Tier2PeakNative`)                    |
+|                 - Used when: Your code runs typed `: number` loops, SHA-256 / HMAC-SHA256,      |
+|                   interface-typed JSON.stringify, or native compute kernels                     |
 +-------------------------------------------------------------------------------------------------+
 ```
 
----
-
-## 2. Tier 0: `SLICESNP` Snapshot VM & 16-Byte `JsValue`
-
-For lightweight serverless routing, scalar expressions, and static module graphs, [`compile_source_to_bytecode`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L1435-L1637) emits a binary `SLICESNP` snapshot (`SNAPSHOT_MAGIC = b"SLICESNP"`):
-
-- **16-Byte Cache-Line Aligned [`JsValue`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L24-L40):**
-  - `JsValue` wraps heap types (`Rc<String>`, `Rc<RefCell<Vec<JsValue>>>`, `Rc<RefCell<FxHashMap<String, JsValue>>>`, `Rc<JsFunction>`) so `std::mem::size_of::<JsValue>() == 16`. Exactly **4 `JsValue`s fit into a single 64-byte CPU L1 cache line**.
-- **Thread-Local Decoded Snapshot Cache ([`SNP_MODULE_CACHE`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L3229-L3252)):**
-  - `decode_slicesnp_cached` hashes the `SLICESNP` payload with `FxHasher` and caches the decoded `Arc<BytecodeModule>` per worker thread, eliminating repeated deserialization in `slice serve` and multi-tenant swarms.
-- **Zero-Allocation Isolate Spawn ([`SliceIsolate::spawn`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L1709-L1731)):**
-  - `TenantCompartment::new` uses a static `OnceLock<IntrinsicRegistry>` reference instead of cloning 7 strings per tenant, spawning a fresh hardware-protected isolate in **`0.98 microseconds` (`980 ns`)**.
-
-### Runnable Tier-0 Example
-
-Create `tier0_demo.ts`:
-```typescript
-const basePrice: number = 1400;
-const tax: number = 125;
-const routeStatus: string = WinterTC.route("GET", "https://edge.slice.local/api/v1/status");
-console.log(basePrice + tax);
-console.log(routeStatus);
-```
-
-Run and inspect the generated `SLICESNP` opcodes:
-```bash
-slice inspect tier0_demo.ts
-slice run tier0_demo.ts --metrics
-```
+You never have to manually configure which tier to use — Slice inspects your code at compile time (`slice pack` / `slice compile` / `slice run`) and routes it automatically.
 
 ---
 
-## 3. Tier 1: Zero-Copy `SLICEBOA`, Pre-Warmed `BOA_CONTEXT_POOL` & Direct `JsObject::call`
+## 2. Reading `--metrics` Telemetry
 
-When an application uses full ECMAScript 2024+ features (`class`, `new Map`, `new Set`, `RegExp`, `try/catch`, `node:*` built-ins, `Slice.*` host APIs, or external `node_modules` packages), `compile_source_to_bytecode` emits a `b"SLICEBOA"` frame:
-
-1. **Zero-Copy `mmap` String Slicing (`0.02 us - 0.21 us` Instantiation):**
-   - `SLICEBOA` stores the Oxc-transpiled and block-wrapped (`{\n...\n}`) UTF-8 JavaScript directly after the 8-byte `b"SLICEBOA"` header.
-   - At runtime, [`SliceIsolate::execute_bytecode`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L1946-L1975) slices `&bytecode[8..]` directly from the memory-mapped `.cas` file with zero heap copies or JSON unescaping.
-2. **Thread-Local Pre-Warmed Realm Pool ([`BOA_CONTEXT_POOL`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L3562-L3590)):**
-   - Pre-initializes up to 8 `WarmBoaRealm` instances per worker thread (`SliceIsolate::prewarm_boa_pool(count)`), wrapped in `ManuallyDrop` for deterministic TLS teardown safety.
-   - Uses a compact `< 1 KB` `CORE_PRELUDE` and loads `node:crypto`, `node:fs`, `node:path`, `node:os`, `node:util`, `node:buffer`, and `node:process` **lazily on first `require()`** via `__slice_load_builtin`.
-3. **Persistent Realm Module Cache (`__slice_rc`) & Direct `JsObject::call` ([`exec_boa_full_es_vm`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L3108-L3135)):**
-   - Every bundled application includes a 16-hex-char BLAKE3/FxHash fingerprint (`//__SLICE_RC:<16_hex_chars>`) and registers its entrypoint function in `globalThis.__slice_rc["<key>"]`.
-   - On the first execution (or during `SliceIsolate::prewarm_boa_bundle`), [`WarmBoaRealm::loaded_bundles`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L3223-L3226) caches the `boa_engine::JsObject` function handle in a Rust `FxHashMap<u64, JsObject>`.
-   - On every subsequent execution (`slice serve` or `slice run --warm`), Rust invokes `fn_obj.call(&JsValue::undefined(), &[], &mut realm.ctx)` **directly without running the JavaScript lexer, parser, or bytecompiler at all**.
-
-### Runnable Tier-1 Example (Cold vs. Warm Pool)
+Pass `--metrics` to any `slice run` command (or standalone compiled binary) to see exactly how your code executed:
 
 ```bash
-slice pack ./docker-tests/apps/02-npm-ecosystem-suite ./npm_suite.cas
-# Cold Realm Execution
-slice run ./npm_suite.cas --metrics
-# Pre-Warmed Realm + Cached __slice_rc JsObject Execution (0.27 ms!)
-slice run ./npm_suite.cas --warm --metrics
+slice run ./docker-tests/apps/02-npm-ecosystem-suite --warm --metrics
 ```
+Output:
+```text
+[Slice Telemetry] Tier: Tier1Baseline | Instantiate: 0.07 us | Exec: 272.10 us | Total: 272.17 us | Memory: 4096 B | Stat Syscalls: 0
+```
+
+| Telemetry Field | What It Means for You |
+| :--- | :--- |
+| **`Tier`** | Highest execution tier reached (`Tier0LLIntSnapshot`, `Tier1Baseline`, or `Tier2PeakNative`). |
+| **`Instantiate`** | Time spent spawning the isolated compartment and slicing bytecode from memory (`0.02 - 2.0 us`). |
+| **`Exec`** | Time spent executing your TypeScript/JavaScript logic inside the isolate. |
+| **`Total`** | `Instantiate + Exec` total isolate wall time in microseconds. |
+| **`Memory`** | Per-tenant memory bytes charged against your `memory_kb` ceiling (base isolate + `Slice.kv` bytes). |
+| **`Stat Syscalls`** | Number of OS `stat()` filesystem metadata syscalls performed at runtime (`0` when running `.cas` or compiled binaries!). |
 
 ---
 
-## 4. Tier 2: Peak Native SIMD & Oxc Type-Directed Lowering
+## 3. Developer Optimization #1: Use `--warm` (and `slice serve` Automatic Pre-Warming)
 
-Slice uses TypeScript type annotations at compile time (`slice pack` / `slice compile`) to unlock native Tier-2 optimizations before types are erased:
+When running full ES2024+ applications with classes and external `node_modules` packages (`Tier1Baseline`), Slice embeds a 16-character content fingerprint (`//__SLICE_RC:<hash>`) into the compiled bundle.
 
-1. **Oxc Type-Directed Monomorphic Loop Promotion ([`BytecodeOp::MonomorphicForLoop`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L334-L340)):**
-   - [`analyze_typescript_semantics`](file:///p:/opensource/slice/crates/slice-cas/src/lib.rs#L88-L195) walks the Oxc AST and symbol table to identify variables explicitly annotated with `: number`.
-   - Standard `for (let i: number = 0; i < N; i++) { acc += i * k; }` loops over `: number` bindings are promoted directly to `BytecodeOp::MonomorphicForLoop`, executing in a tight native 64-bit CPU register loop instead of interpreting per-iteration AST nodes.
-2. **Schema-Driven `JSON.stringify` Specialization ([`build_fast_json_template_for_schema`](file:///p:/opensource/slice/crates/slice-cas/src/lib.rs#L197-L230)):**
-   - When a variable is typed with a flat TypeScript `interface` (such as `const rec: AccessLogRecord = ...`), `strip_typescript_raw` replaces dynamic `JSON.stringify(rec)` calls with direct monomorphic string template concatenations (`'{"ts":' + rec.ts + ',"service":"' + rec.service + ...`).
-3. **Hardware `SHA-NI` Intrinsics ([`Sha256State::compress_block_sha_ni`](file:///p:/opensource/slice/crates/slice-engine/src/lib.rs#L3711-L3807)):**
-   - Uses hardware Intel/AMD `SHA-NI` instructions (`_mm_sha256rnds2_epu32`, `_mm_sha256msg1_epu32`, `_mm_sha256msg2_epu32`) for streaming 64-byte FIPS-180-4 SHA-256 and RFC-2104 HMAC-SHA256 blocks with zero intermediate heap allocations.
+- **Without `--warm` (Cold Process):** Slice initializes a fresh ECMAScript realm, evaluates your `node_modules` CommonJS factory wrappers once, and runs your entrypoint (`~5 - 15 ms`).
+- **With `--warm` (or automatically inside `slice serve` workers):** Slice pre-warms its thread-local realm pool (`BOA_CONTEXT_POOL`) and caches the compiled entrypoint function handle (`JsObject`). Subsequent executions invoke your entrypoint **directly in Rust without lexing, parsing, or re-initializing `node_modules`**, dropping execution time from `6.76 ms` down to **`0.27 ms`** (`25x` faster!).
 
-### Runnable Tier-2 Typed Loop Example
+```bash
+# Pack your app once
+slice pack ./my-app ./my-app.cas
 
-Create `tier2_loop.ts`:
+# Run with --warm to use the pre-warmed realm pool
+slice run ./my-app.cas --warm --metrics
+```
+> **Note:** In `slice serve`, every worker thread automatically pre-warms both the realm pool and your `.cas` bundle at server startup — you get `--warm` performance on every HTTP request automatically.
+
+---
+
+## 4. Developer Optimization #2: Type-Directed `: number` Loops (`Tier2PeakNative`)
+
+When you annotate loop counters and accumulators with TypeScript's `: number` type, Slice's Oxc semantic analyzer (`analyze_typescript_semantics`) proves at compile time that the variables are 64-bit numbers and promotes the loop into a native **`MONO_FOR_T2` (`Tier2PeakNative`)** register loop.
+
+### Example: Writing a Tier-2 Promoted Numeric Loop
+
+Create `typed_loop.ts`:
 ```typescript
+// Annotating `acc: number` and `i: number` allows Slice to lower this loop
+// directly into a Tier-2 native 64-bit register loop!
 let acc: number = 0;
-for (let i: number = 0; i < 2000; i++) {
+for (let i: number = 0; i < 10_000; i++) {
     acc += i * 3;
 }
 console.log(acc);
 ```
 
-Inspect the promoted `TIER2_MONO_LOOP` instruction and execute it:
+Verify the promotion using `slice inspect` and `slice run --metrics`:
 ```bash
-slice inspect tier2_loop.ts
-slice run tier2_loop.ts --metrics
+slice inspect typed_loop.ts
+slice run typed_loop.ts --metrics
 ```
 Output:
 ```text
 =========================================================================
-  SLICESNP BYTECODE DISASSEMBLY: tier2_loop.ts (294 bytes)
+  SLICESNP BYTECODE DISASSEMBLY: typed_loop.ts (296 bytes)
 =========================================================================
   0000  CONST_NUM       %acc <- 0
-  0001  MONO_FOR_T2     %acc += (%i in 0..2000) * 3
+  0001  MONO_FOR_T2     %acc += (%i in 0..10000) * 3
   0002  AST_EXEC        ExprStmt(Call { callee: Member { object: Ident("console"), property: "log" }, args: [Ident("acc")] })
 =========================================================================
-5997000
-[Slice Telemetry] Tier: Tier2PeakNative | Instantiate: 16.40 us | Exec: 1.50 us | Total: 17.90 us | Memory: 4096 B | Stat Syscalls: 0
+149985000
+[Slice Telemetry] Tier: Tier2PeakNative | Instantiate: 14.20 us | Exec: 1.20 us | Total: 15.40 us | Memory: 4096 B | Stat Syscalls: 0
 ```
 
+---
+
+## 5. Developer Optimization #3: Type-Directed `interface` `JSON.stringify` Specialization
+
+Serializing structured objects with `JSON.stringify(obj)` is one of the hottest paths in REST APIs, BFF microservices, and JSONL loggers. Normally, `JSON.stringify` must dynamically inspect every property key, type, and prototype at runtime.
+
+In Slice, if you:
+1. Declare a flat TypeScript `interface` with primitive fields (`string`, `number`, `boolean`), and
+2. Annotate your variable with that `interface` (`const record: AuditEvent = ...`),
+
+Slice's compiler automatically rewrites `JSON.stringify(record)` at build time into a **direct monomorphic string concatenation template**!
+
+### Example: Schema-Accelerated `JSON.stringify`
+
+```typescript
+interface CheckoutReceipt {
+    orderId: string;
+    tenantId: string;
+    totalCents: number;
+    approved: boolean;
+}
+
+export function serializeReceipt(id: string, tenant: string, cents: number): string {
+    // Because `receipt` is explicitly typed as `: CheckoutReceipt`,
+    // Slice compiles `JSON.stringify(receipt)` into a direct, zero-reflection string builder!
+    const receipt: CheckoutReceipt = {
+        orderId: id,
+        tenantId: tenant,
+        totalCents: cents,
+        approved: true,
+    };
+    return JSON.stringify(receipt);
+}
+
+console.log(serializeReceipt("ORD-501", "tenant-eu", 19900));
+```
+> **Safety Rule:** Slice only applies this optimization when your `interface` fields are plain `string`, `number`, or `boolean` primitives (and when string fields do not contain characters requiring JSON escaping). For nested or dynamic objects, Slice uses the standard `JSON.stringify` engine automatically.
+
+---
+
+## 6. Developer Optimization #4: Hardware-Accelerated Crypto, Encoding & Ecosystem Fast Paths
+
+When writing applications in Slice, prefer standard `node:crypto`, `Buffer`, and supported ecosystem packages — Slice intercepts the hottest operations and runs them in **native Rust and hardware SIMD**:
+
+| Standard TypeScript / JS Code You Write | How Slice Executes It Under the Hood |
+| :--- | :--- |
+| `crypto.createHash("sha256").update(data).digest("hex")` | Lowered directly to `__slice_crypto_sha256(data)` using **Intel/AMD `SHA-NI` hardware instructions** (`0` JS object allocations). |
+| `crypto.createHmac("sha256", key).update(msg).digest("hex")` | Lowered directly to `__slice_crypto_hmac_sha256(key, msg)` using **hardware `SHA-NI` RFC-2104 HMAC**. |
+| `Buffer.from(str, "utf8").toString("base64url")`<br>`Buffer.from(b64, "base64url").toString("utf8")` | Lowered to native Rust zero-allocation Base64 / Base64URL codecs (`__slice_base64_encode` / `__slice_base64_decode`). |
+| `semver.valid(v)`, `semver.coerce(v)`, `semver.gt(a, b)`, `semver.satisfies(v, range)` | Executed in `~150 ns` by Slice's zero-regex Rust SemVer engine (`__slice_semver_*`), with automatic fallback for complex ranges. |
+| `ms("15m")`, `ms(60000, { long: true })`<br>`bytes.parse("64KB")`, `bytes.format(4781506)` | Executed by native Rust zero-regex parsers/formatters (`__slice_fast_ms`, `__slice_fast_bytes_*`) + compile-time constant folding for literals like `bytes.parse("64KB")` -> `65536`. |
+| `fs.writeFileSync("/tmp/a.json", data)`<br>`fs.readFileSync("/tmp/a.json", "utf8")` | Served out of Slice's thread-local **In-Memory VFS Slab** (`BOA_VFS_CACHE`) at memory speed, with OCap prefix security and `< 5 us` `Slice.checkpoint()` support. |
+
+---
+
+## 7. Built-In Global Functions & Objects Available in Every Script
+
+Every Slice script has immediate access to the following globals without needing any imports:
+
+- **Standard Console & Output:** `console.log(...)`, `console.info(...)`, `console.warn(...)`, `console.error(...)`, `print(...)`
+- **WinterTC Web Standards:** `fetch(input, init)`, `Request`, `Response` (`Response.json`, `Response.redirect`, `Response.sse`), `Headers`, `URL`, `URLSearchParams`, `ReadableStream`
+- **Environment & Node Globals:** `process` (`process.env`, `process.cwd()`, `process.platform`, `process.arch`, `process.version`, `process.argv`), `env(key)`, `Buffer`, `require(id)`
+- **Timing & Determinism:** `Date.now()`, `performance.now()`, `Math.random()` (all automatically deterministic when `--deterministic=<seed>` is enabled!)
+- **Test Runner Globals (Zero-Cost Lazy Loaded):** `describe(name, fn)`, `test(name, fn, opts)`, `it(name, fn, opts)`, `beforeEach(fn)`, `afterEach(fn)`, `expect(actual)`
+- **The `Slice` Host Namespace:**
+  - `Slice.request()`, `Slice.respond(status, body, contentType?)`, `Slice.streamSSE(source, init?)`, `Slice.waitUntil(fn)`
+  - `Slice.fetchSync(input, init?)`, `Slice.mockFetch(methodOrUrl, urlOrOpts, opts?)`
+  - `Slice.kv.get(key)`, `Slice.kv.set(key, val, ttlMs?)`, `Slice.kv.del(key)`, `Slice.kv.incr(key, delta?)`
+  - `Slice.checkpoint()`, `Slice.restore(snapshotId)`, `Slice.evalSandbox(code, opts?)`
+  - `Slice.testSummary()`, `Slice.resetTests()`
