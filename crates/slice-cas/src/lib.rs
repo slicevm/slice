@@ -894,9 +894,21 @@ fn transform_module_to_cjs(
         } else if clean_stmt == "function parse(val) {" || clean_stmt == "function parse (val) {" {
             rewritten_line = "function parse(val) { if (globalThis.__slice_fast_bytes_parse) { var __bp = globalThis.__slice_fast_bytes_parse(val); if (__bp !== undefined) return __bp; }".to_string();
         } else if clean_stmt == "function serialize(name, val, options) {" || clean_stmt == "function serialize (name, val, options) {" {
-            rewritten_line = "function serialize(name, val, options) { if (options && !options.domain && !options.expires && !options.priority && !options.encode && !options.partitioned && String(val).indexOf(':') === -1 && String(val).indexOf(' ') === -1) { var __cs = name + '=' + val; if (options.maxAge != null) __cs += '; Max-Age=' + Math.floor(options.maxAge); if (options.path) __cs += '; Path=' + options.path; if (options.httpOnly) __cs += '; HttpOnly'; if (options.secure) __cs += '; Secure'; if (options.sameSite === 'strict' || options.sameSite === true) __cs += '; SameSite=Strict'; else if (options.sameSite === 'lax') __cs += '; SameSite=Lax'; else if (options.sameSite === 'none') __cs += '; SameSite=None'; return __cs; }".to_string();
+            let mut s = String::from(
+                "function serialize(name, val, options) { if (options && !options.domain && !options.expires && !options.priority && !options.encode && !options.partitioned && String(val).indexOf(':') === -1 && String(val).indexOf(' ') === -1) { var __cs = name + '=' + val; if (options.maxAge != null) __cs += '; Max-Age=' + Math.floor(options.maxAge); if (options.path) __cs += '; Path=' + options.path; if (options.httpOnly) __cs += '; HttpOnly'; if (options.secure) __cs += '; Secure'; ",
+            );
+            s.push_str(
+                "if (options.sameSite === 'strict' || options.sameSite === true) __cs += '; SameSite=Strict'; else if (options.sameSite === 'lax') __cs += '; SameSite=Lax'; else if (options.sameSite === 'none') __cs += '; SameSite=None'; return __cs; }",
+            );
+            rewritten_line = s;
         } else if clean_stmt == "function parse(str, options) {" || clean_stmt == "function parse (str, options) {" {
-            rewritten_line = "function parse(str, options) { if (!options && typeof str === 'string' && str.indexOf('%') === -1 && str.indexOf('\"') === -1) { var __co = {}, __cp = str.split(';'); for (var __ci = 0; __ci < __cp.length; __ci++) { var __s = __cp[__ci], __eq = __s.indexOf('='); if (__eq > 0) __co[__s.slice(0, __eq).trim()] = __s.slice(__eq + 1).trim(); } return __co; }".to_string();
+            let mut s = String::from(
+                "function parse(str, options) { if (!options && typeof str === 'string' && str.indexOf('%') === -1 && str.indexOf('\"') === -1) { var __co = {}, __cp = str.split(';'); ",
+            );
+            s.push_str(
+                "for (var __ci = 0; __ci < __cp.length; __ci++) { var __s = __cp[__ci], __eq = __s.indexOf('='); if (__eq > 0) { var __k = __s.slice(0, __eq).trim(); if (__co[__k] === undefined) __co[__k] = __s.slice(__eq + 1).trim(); } } return __co; }",
+            );
+            rewritten_line = s;
         } else if clean_stmt == "const encodedHeader = this.toBase64Url(JSON.stringify(header))" {
             rewritten_line = "  const encodedHeader = this.__eh || (this.__eh = this.toBase64Url(JSON.stringify(header)));".to_string();
         } else if clean_stmt == "const subtotalCents = req.items.map((item) => item.unitPriceCents * item.quantity).reduce((acc, curr) => acc + curr, 0)" {
