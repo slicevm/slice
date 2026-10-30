@@ -18,7 +18,7 @@ The repository includes automated installer scripts in [`scripts/install.ps1`](f
 
 **Windows (PowerShell):**
 ```powershell
-git clone https://github.com/slice-runtime/slice.git
+git clone https://github.com/siktec-lab/slice.git
 cd slice
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
@@ -29,7 +29,7 @@ Add `$HOME\.slice\bin` to your user `PATH` if it is not already present:
 
 **Linux & macOS (Bash / Zsh):**
 ```bash
-git clone https://github.com/slice-runtime/slice.git
+git clone https://github.com/siktec-lab/slice.git
 cd slice
 ./scripts/install.sh
 export PATH="$HOME/.slice/bin:$PATH"
