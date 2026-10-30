@@ -47,6 +47,17 @@ struct MicroVmBenchReport {
 }
 
 fn main() -> Result<()> {
+    let builder = std::thread::Builder::new()
+        .name("slice-main".to_string())
+        .stack_size(16 * 1024 * 1024);
+    let handle = builder.spawn(cli_entrypoint)?;
+    match handle.join() {
+        Ok(res) => res,
+        Err(_) => bail!("Slice main thread panicked"),
+    }
+}
+
+fn cli_entrypoint() -> Result<()> {
     // 1. Check if this binary is a self-contained `SLICEEXE` compiled application (`slice compile`)
     if let Ok(Some(embedded_cas)) = MappedCasArchive::open_embedded_self() {
         return run_embedded_standalone(embedded_cas);
@@ -65,7 +76,7 @@ fn main() -> Result<()> {
         "test" => cmd_test(&args[2..]),
         "pack" => cmd_pack(&args[2..]),
         "compile" => cmd_compile(&args[2..]),
-        "inspect" => cmd_inspect(&args[2..]),
+        "inspect" | "check" => cmd_inspect(&args[2..]),
         "serve" => cmd_serve(&args[2..]),
         "mcp" => cmd_mcp(&args[2..]),
         "repl" => cmd_repl(),

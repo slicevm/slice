@@ -62,23 +62,24 @@ jobs:
       - name: Build Slice CLI binary
         run: cargo build --bin slice
 
-      - name: Verify Slice info and doctor diagnostics
+      - name: Verify Slice info, doctor, and 5-vector security containment
         run: |
           ./target/debug/slice info
           ./target/debug/slice doctor
+          ./target/debug/slice verify-security
 
       - name: Verify TypeScript static check and CAS packing
         run: |
-          ./target/debug/slice check ./docker-tests/apps/01-fintech-checkout/src/index.ts
+          ./target/debug/slice inspect ./docker-tests/apps/01-fintech-checkout/src/index.ts
           ./target/debug/slice pack ./docker-tests/apps/01-fintech-checkout /tmp/fintech.cas
           ./target/debug/slice inspect /tmp/fintech.cas
           ./target/debug/slice run /tmp/fintech.cas --metrics
 
       - name: Verify WinterTC HTTP edge server smoke test
         run: |
-          ./target/debug/slice serve ./docker-tests/apps/09-wintertc-web-router/src/index.ts --port 18080 --smoke-test
+          ./target/debug/slice serve ./docker-tests/apps/09-wintertc-web-router --port=18080 --smoke-test
 
       - name: Verify time-travel deterministic test runner
         run: |
-          ./target/debug/slice test ./docker-tests/apps/15-time-travel-test-suite/tests/state_machine.test.ts
+          ./target/debug/slice test ./docker-tests/apps/15-time-travel-test-suite
 
