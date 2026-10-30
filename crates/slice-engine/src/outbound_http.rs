@@ -18,10 +18,9 @@ pub(crate) fn parse_outbound_http_url(raw_url: &str) -> Option<OutboundUrlParts>
     let without_hash = trimmed.split('#').next().unwrap_or(trimmed);
     let (default_port, rest) = if let Some(r) = without_hash.strip_prefix("http://") {
         (80u16, r)
-    } else if let Some(r) = without_hash.strip_prefix("https://") {
-        (443u16, r)
     } else {
-        return None;
+        let r = without_hash.strip_prefix("https://")?;
+        (443u16, r)
     };
     let (authority, path_and_query) = match rest.find('/') {
         Some(idx) => (&rest[..idx], &rest[idx..]),
@@ -32,15 +31,12 @@ pub(crate) fn parse_outbound_http_url(raw_url: &str) -> Option<OutboundUrlParts>
         None => authority,
     };
     let (hostname, port) = if let Some(ipv6_rest) = host_port_raw.strip_prefix('[') {
-        if let Some((ipv6, after_bracket)) = ipv6_rest.split_once(']') {
-            let p = after_bracket
-                .strip_prefix(':')
-                .and_then(|ps| ps.parse::<u16>().ok())
-                .unwrap_or(default_port);
-            (format!("[{}]", ipv6.to_ascii_lowercase()), p)
-        } else {
-            return None;
-        }
+        let (ipv6, after_bracket) = ipv6_rest.split_once(']')?;
+        let p = after_bracket
+            .strip_prefix(':')
+            .and_then(|ps| ps.parse::<u16>().ok())
+            .unwrap_or(default_port);
+        (format!("[{}]", ipv6.to_ascii_lowercase()), p)
     } else if let Some((h, p_str)) = host_port_raw.rsplit_once(':') {
         let p = p_str.parse::<u16>().ok()?;
         (h.to_ascii_lowercase(), p)

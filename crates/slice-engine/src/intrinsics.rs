@@ -555,12 +555,11 @@ impl Sha256State {
             data = &data[need..];
         }
 
-        let mut chunks = data.chunks_exact(64);
-        for chunk in &mut chunks {
+        let (chunks, rem) = data.as_chunks::<64>();
+        for chunk in chunks {
             Self::compress_block(&mut self.h, chunk);
         }
 
-        let rem = chunks.remainder();
         if !rem.is_empty() {
             self.buf[..rem.len()].copy_from_slice(rem);
             self.buf_len = rem.len();
