@@ -1509,7 +1509,7 @@ fn serve_connection_keep_alive(
                 };
                 let _ = write!(
                     write_buf,
-                    "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}Content-Length: {}\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Isolate-Us: {}\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: {}\r\n\r\n",
+                    "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}Content-Length: {}\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Isolate-Us: {}\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: {}\r\n",
                     outcome.status_code,
                     http_status_reason(outcome.status_code),
                     outcome.content_type,
@@ -1521,6 +1521,10 @@ fn serve_connection_keep_alive(
                     total_us,
                     outcome.metrics.fuel_consumed,
                 );
+                for (hk, hv) in &outcome.response_headers {
+                    let _ = write!(write_buf, "{}: {}\r\n", hk, hv);
+                }
+                write_buf.extend_from_slice(b"\r\n");
                 write_buf.extend_from_slice(outcome.response_body.as_bytes());
                 if !has_more_pipelined || write_buf.len() >= 32768 {
                     stream.write_all(write_buf)?;
@@ -2930,5 +2934,160 @@ describe("Ledger Time-Travel Suite", () => {
         cmd_run(&run_args).expect("Expected `slice run --watch-once` to complete cleanly");
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_phase_n1_wintertc_redirect_keepalive_and_ssrf_mesh_roundtrip() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let bound_port = listener.local_addr().unwrap().port();
+        let host_port = format!("127.0.0.1:{}", bound_port);
+
+        let upstream_ts = r#"
+export default {
+    fetch(req: Request): Response {
+        const url = new URL(req.url);
+        if (url.pathname === "/upstream/subgraph/account") {
+            const accountId = url.searchParams.get("account") || "acct-0";
+            return Response.json({
+                accountId,
+                tier: "enterprise",
+                balanceCents: 14500,
+                region: "us-east-1"
+            });
+        }
+        if (url.pathname === "/upstream/redirect-307") {
+            return Response.redirect("/upstream/subgraph/account?" + url.searchParams.toString(), 307);
+        }
+        if (url.pathname === "/upstream/redirect-302") {
+            const accountId = url.searchParams.get("account") || "acct-0";
+            return Response.redirect("https://partner-gateway.example.com/upstream/subgraph/account?account=" + accountId, 302);
+        }
+        return Response.json({ ok: true });
+    }
+};
+"#;
+        let upstream_bundled = slice_cas::strip_typescript_and_normalize(upstream_ts, true);
+        let upstream_bc = std::sync::Arc::new(compile_source_to_bytecode(&upstream_bundled));
+        let bc_clone = std::sync::Arc::clone(&upstream_bc);
+
+        // Serve ALL 20 requests over a SINGLE accepted Keep-Alive TCP stream!
+        let srv_handle = std::thread::spawn(move || {
+            SliceIsolate::prewarm_boa_bundle(&bc_clone);
+            let mut read_buf = vec![0u8; 65536];
+            let mut write_buf = Vec::with_capacity(4096);
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = serve_connection_keep_alive(
+                    stream,
+                    1,
+                    &bc_clone,
+                    None,
+                    None,
+                    None,
+                    &CapabilityToken::pure_compute(),
+                    10_000_000,
+                    8 * 1024 * 1024,
+                    &mut read_buf,
+                    &mut write_buf,
+                    None,
+                );
+            }
+        });
+
+        // Copy App 17 (`docker-tests/apps/17-zero-trust-redirect-keepalive-mesh`) into a temp dir bound to `bound_port`
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let app17_src = repo_root
+            .join("docker-tests")
+            .join("apps")
+            .join("17-zero-trust-redirect-keepalive-mesh")
+            .join("src");
+        let tmp_dir = std::env::temp_dir().join("slice_n1_app17_roundtrip");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let dst_src = tmp_dir.join("src");
+        std::fs::create_dir_all(&dst_src).unwrap();
+
+        for file_name in [
+            "types.ts",
+            "redirect_security_guard.ts",
+            "keepalive_mesh_client.ts",
+            "index.ts",
+        ] {
+            let content = std::fs::read_to_string(app17_src.join(file_name)).unwrap();
+            let patched = content.replace("127.0.0.1:18095", &host_port);
+            std::fs::write(dst_src.join(file_name), patched).unwrap();
+        }
+        std::fs::write(
+            tmp_dir.join("package.json"),
+            r#"{"name":"17-zero-trust-redirect-keepalive-mesh","version":"1.0.0","main":"./src/index.ts"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp_dir.join("slice.toml"),
+            format!(
+                "[package]\nname = \"17-zero-trust-redirect-keepalive-mesh\"\nentrypoint = \"./src/index.ts\"\n[capabilities]\nallow_net = [\"{}\"]\n",
+                host_port
+            ),
+        )
+        .unwrap();
+
+        // Populate node_modules in `tmp_dir` so CI works without external `bun install`
+        let nm = tmp_dir.join("node_modules");
+        for (pkg, code) in [
+            (
+                "bytes",
+                "module.exports = { format: function(n) { return n < 1024 ? n + 'B' : (n / 1024).toFixed(2) + 'KB'; } };",
+            ),
+            (
+                "cookie",
+                "module.exports = { serialize: function(k, v) { return k + '=' + v + '; Path=/; HttpOnly'; }, parse: function(s) { var o = {}; String(s).split(';').forEach(function(p) { var kv = p.trim().split('='); if (kv.length === 2) o[kv[0]] = kv[1]; }); return o; } };",
+            ),
+            (
+                "fast-querystring",
+                "module.exports = { parse: function(q) { var o = {}; String(q).split('&').forEach(function(p) { var kv = p.split('='); if (kv[0]) o[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1] || ''); }); return o; } };",
+            ),
+            (
+                "ms",
+                "module.exports = function(s) { var str = String(s); if (str.endsWith('ms')) return Number(str.slice(0, -2)); if (str.endsWith('s')) return Number(str.slice(0, -1)) * 1000; return Number(str); };",
+            ),
+        ] {
+            let pkg_dir = nm.join(pkg);
+            std::fs::create_dir_all(&pkg_dir).unwrap();
+            std::fs::write(pkg_dir.join("index.js"), code).unwrap();
+        }
+
+        let cas_out = tmp_dir.join("app17.cas");
+        build_cas_archive_with_static(&tmp_dir, &cas_out, "./src/index.ts", None).unwrap();
+
+        let archive = MappedCasArchive::open(&cas_out).unwrap();
+        let mut caps = CapabilityToken::pure_compute();
+        if let Some(manifest_toml) = archive.get_manifest_toml() {
+            merge_manifest_toml_into_caps(manifest_toml, &mut caps);
+        }
+        let entry = archive.entrypoint_blob().unwrap();
+        slice_engine::clear_outbound_conn_pool();
+        let reuse_before = slice_engine::outbound_pool_reuse_count();
+        let mut iso = SliceIsolate::spawn("app17-tenant", 1, caps, 50_000_000, 16 * 1024 * 1024);
+        let metrics = iso
+            .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+            .unwrap();
+        let reuse_after = slice_engine::outbound_pool_reuse_count();
+
+        // Drop pooled connection so `srv_handle` sees EOF and exits cleanly
+        slice_engine::clear_outbound_conn_pool();
+        let _ = srv_handle.join();
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        assert_eq!(
+            metrics.stdout[0],
+            r#"{"app":"17-zero-trust-redirect-keepalive-mesh","libraries":["bytes@3.1.2","cookie@0.6.0","fast-querystring@1.1.2","ms@2.1.3"],"tasksProcessed":30,"keepAliveSubgraphHits":5,"redirectFollow307Completed":5,"redirectManual302Inspected":5,"ssrfRedirectMetadataBlocked":5,"dnsRebindPrivateIpBlocked":5,"dlpExfiltrationBlocked":5,"crossOriginAuthStrippedCount":15,"totalTimeoutBudgetMs":50000,"formattedPayloadVolume":"860B","meshAuditHmac":"90f5a8253a5d07de"}"#
+        );
+        assert!(
+            reuse_after >= reuse_before + 19,
+            "Expected at least 19 Keep-Alive socket reuses across 20 HTTP hops, got {}",
+            reuse_after - reuse_before
+        );
     }
 }

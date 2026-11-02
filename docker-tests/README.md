@@ -143,6 +143,14 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
   {"app":"16-dotenv-dlp-config-vault","libraries":["bytes@3.1.2","cookie@0.6.0","ini@4.1.3"],"dotenvEntriesLoaded":8,"publicKeysAllowed":4,"autoDlpSecretsRegistered":4,"payloadsAudited":50,"cleanPayloadsApproved":40,"plaintextLeaksBlocked":5,"base64LeaksBlocked":5,"totalApprovedCookieBytes":"9.55KB","vaultHmacSignature":"c19618e409a21e7a"}
   ```
 
+### 17. [`apps/17-zero-trust-redirect-keepalive-mesh/`](file:///p:/opensource/slice/docker-tests/apps/17-zero-trust-redirect-keepalive-mesh/src/index.ts) — Zero-Trust Hop-by-Hop Redirect Guard, Keep-Alive Connection Pooling & DNS-Rebinding SSRF Firewall (`bytes@3.1.2`, `cookie@0.6.0`, `fast-querystring@1.1.2`, `ms@2.1.3`)
+- **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/17-zero-trust-redirect-keepalive-mesh/package.json), [`slice.toml`](file:///p:/opensource/slice/docker-tests/apps/17-zero-trust-redirect-keepalive-mesh/slice.toml), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/17-zero-trust-redirect-keepalive-mesh/src/types.ts), [`src/redirect_security_guard.ts`](file:///p:/opensource/slice/docker-tests/apps/17-zero-trust-redirect-keepalive-mesh/src/redirect_security_guard.ts), [`src/keepalive_mesh_client.ts`](file:///p:/opensource/slice/docker-tests/apps/17-zero-trust-redirect-keepalive-mesh/src/keepalive_mesh_client.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/17-zero-trust-redirect-keepalive-mesh/src/index.ts).
+- **What it tests:** Executes 30 zero-trust API mesh tasks against a live HTTP/1.1 Keep-Alive upstream server (`127.0.0.1:18095`), exercising thread-local Keep-Alive connection reuse (`OUTBOUND_CONN_POOL`), `307 Temporary Redirect` hop-by-hop following (`res.redirected === true`, `res.url` tracking), `302 Found` manual redirect inspection (`redirect: "manual"`), cross-origin `Authorization` / `Cookie` stripping, Cloud Metadata (`169.254.169.254`, `fd00:ec2::254`) & DNS-rebinding private IP (`100.64.0.15`) redirect blocking, and Outbound Egress DLP, signed with `node:crypto` HMAC-SHA256.
+- **Identical Output Across All 4 Runtimes:**
+  ```json
+  {"app":"17-zero-trust-redirect-keepalive-mesh","libraries":["bytes@3.1.2","cookie@0.6.0","fast-querystring@1.1.2","ms@2.1.3"],"tasksProcessed":30,"keepAliveSubgraphHits":5,"redirectFollow307Completed":5,"redirectManual302Inspected":5,"ssrfRedirectMetadataBlocked":5,"dnsRebindPrivateIpBlocked":5,"dlpExfiltrationBlocked":5,"crossOriginAuthStrippedCount":15,"totalTimeoutBudgetMs":50000,"formattedPayloadVolume":"860B","meshAuditHmac":"90f5a8253a5d07de"}
+  ```
+
 ---
 
 ## Verified Linux Docker (`x86_64`) Benchmark Results Across All 16 Applications

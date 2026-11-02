@@ -64,6 +64,7 @@ APP13_DIR="$APPS_DIR/13-webhook-orchestrator-ssrf"
 APP14_DIR="$APPS_DIR/14-federated-api-mesh-dlp"
 APP15_DIR="$APPS_DIR/15-time-travel-test-suite"
 APP16_DIR="$APPS_DIR/16-dotenv-dlp-config-vault"
+APP17_DIR="$APPS_DIR/17-zero-trust-redirect-keepalive-mesh"
 
 UPSTREAM_F3_PID=""
 cleanup_upstream_f3() {
@@ -96,6 +97,13 @@ export default {
                 region: "us-east-1"
             });
         }
+        if (url.pathname === "/upstream/redirect-307") {
+            return Response.redirect("/upstream/subgraph/account?" + url.searchParams.toString(), 307);
+        }
+        if (url.pathname === "/upstream/redirect-302") {
+            const accountId = url.searchParams.get("account") || "acct-0";
+            return Response.redirect("https://partner-gateway.example.com/upstream/subgraph/account?account=" + accountId, 302);
+        }
         return Response.json({ ok: true });
     }
 };
@@ -117,9 +125,9 @@ echo "  Deno    : $(deno -V)"
 
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  [TAG: apps] PACKING & COMPILING ALL 16 FOLDER-BASED APPS (OXC + CAS)"
+echo "  [TAG: apps] PACKING & COMPILING ALL 17 FOLDER-BASED APPS (OXC + CAS)"
 echo "========================================================================="
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
     eval "dir=\$APP${i}_DIR"
     "$SLICE_BIN" pack "$dir" "/tmp/app${i}.cas"
     "$SLICE_BIN" compile "/tmp/app${i}.cas" -o "/tmp/app${i}_bin"
@@ -179,6 +187,7 @@ verify_app_parity "App 13: 13-webhook-orchestrator-ssrf (Outbound fetch/SSRF/HMA
 verify_app_parity "App 14: 14-federated-api-mesh-dlp (Outbound fetch/dlv/dset/DLP)" "$APP14_DIR" "/tmp/app14.cas" "-A"
 verify_app_parity "App 15: 15-time-travel-test-suite (Time-Travel VFS+KV/semver/dlv)" "$APP15_DIR" "/tmp/app15.cas" "-A"
 verify_app_parity "App 16: 16-dotenv-dlp-config-vault (Auto-DLP .env/ini/cookie/bytes)" "$APP16_DIR" "/tmp/app16.cas" "-A"
+verify_app_parity "App 17: 17-zero-trust-redirect-keepalive-mesh (Keep-Alive/307/SSRF/DLP)" "$APP17_DIR" "/tmp/app17.cas" "-A"
 fi
 
 measure_ms() {
@@ -251,6 +260,7 @@ bench_app 13 "13-WEBHOOK-ORCHESTRATOR-SSRF (Outbound fetch/SSRF/HMAC)" "$APP13_D
 bench_app 14 "14-FEDERATED-API-MESH-DLP (Outbound fetch/dlv/dset/DLP)" "$APP14_DIR" "-A"
 bench_app 15 "15-TIME-TRAVEL-TEST-SUITE (Time-Travel VFS+KV/semver/dlv)" "$APP15_DIR" "-A"
 bench_app 16 "16-DOTENV-DLP-CONFIG-VAULT (Auto-DLP .env/ini/cookie/bytes)" "$APP16_DIR" "-A"
+bench_app 17 "17-ZERO-TRUST-REDIRECT-KEEPALIVE-MESH (Keep-Alive/307/SSRF/DLP)" "$APP17_DIR" "-A"
 
 echo "========================================================================="
 echo "  PEAK MEMORY FOOTPRINT (MAX RSS) ACROSS REPRESENTATIVE APPS"
@@ -266,14 +276,14 @@ measure_rss_kb "Deno (App 6: Telemetry + Flatted)"  deno run -A "$APP6_DIR/src/i
 measure_rss_kb "Node (App 6: Telemetry + Flatted)"  node "$APP6_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 16 APPS (COLD VS WARM POOL)"
+echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 17 APPS (COLD VS WARM POOL)"
 echo "========================================================================="
 echo "  --- Cold Realm Telemetry ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --quiet --metrics
 done
 echo "  --- Pre-Warmed Boa Pool Telemetry (--warm) ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --warm --quiet --metrics
 done
 fi

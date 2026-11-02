@@ -1,0 +1,12 @@
+{
+  "name": "17-zero-trust-redirect-keepalive-mesh",
+  "version": "1.0.0",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "bytes": "3.1.2",
+    "cookie": "0.6.0",
+    "fast-querystring": "1.1.2",
+    "ms": "2.1.3"
+  }
+}
+
