@@ -107,15 +107,22 @@ X-Slice-Fuel-Used: 120
 
 ---
 
-## 2. WinterTC Web API Reference (`Request`, `Response`, `Headers`, `URL`, `URLSearchParams`)
+## 2. WinterTC Web API Reference (`Request`, `Response`, `Headers`, `URL`, `WebCrypto`, `Streams`, `Timers`)
 
-| Web API Class | Supported Constructors, Properties & Methods |
+| Web API Class / Global | Supported Constructors, Properties & Methods |
 | :--- | :--- |
 | **`URL`** | `new URL(input, base?)` — `.href`, `.origin`, `.protocol`, `.username`, `.password`, `.host`, `.hostname`, `.port`, `.pathname`, `.search`, `.hash`, `.searchParams`, `.toString()`, `.toJSON()`. Automatically normalizes `/a/b/../c` dot segments and strips default `:80`/`:443` ports. |
 | **`URLSearchParams`** | `new URLSearchParams(init?)` — `.get(k)`, `.getAll(k)`, `.has(k)`, `.set(k, v)`, `.append(k, v)`, `.delete(k)`, `.sort()`, `.forEach(cb)`, `.entries()`, `.keys()`, `.values()`, `.toString()`, `.size`, `for (const [k, v] of params)`. Live two-way synced with `URL`. |
-| **`Headers`** | `new Headers(init?)` — Case-insensitive map supporting `.get(k)`, `.set(k, v)`, `.append(k, v)`, `.has(k)`, `.delete(k)`, `.entries()`, `.keys()`, `.values()`, `.forEach(cb)`, `for (const [k, v] of headers)`. Incoming `req.headers` uses a **zero-copy lazy view** (`__SLICE_LIVE_REQ__`) over the Rust socket buffer! |
-| **`Request`** | `new Request(input, init?)` — `.method`, `.url`, `.headers`, `.bodyUsed`, `await req.text()`, `await req.json()`, `req.textSync()`, `req.jsonSync()`, `req.clone()`. |
-| **`Response`** | `new Response(body?, init?)` — `.status`, `.statusText`, `.ok`, `.headers`, `.bodyUsed`, `await res.text()`, `await res.json()`, `res.textSync()`, `res.jsonSync()`, `res.clone()`, **`Response.json(data, init?)`**, **`Response.redirect(url, status?)`**, **`Response.sse(source, init?)`**. |
+| **`Headers`** | `new Headers(init?)` — Case-insensitive map supporting `.get(k)`, `.set(k, v)`, `.append(k, v)`, `.has(k)`, `.delete(k)`, **`getSetCookie()`**, `.entries()`, `.keys()`, `.values()`, `.forEach(cb)`, `for (const [k, v] of headers)`. Incoming `req.headers` uses a **zero-copy lazy view** (`__SLICE_LIVE_REQ__`) over the Rust socket buffer! |
+| **`Request`** | `new Request(input, init?)` — `.method`, `.url`, `.headers`, `.signal`, `.body`, `.bodyUsed`, `await req.text()`, `await req.json()`, **`await req.arrayBuffer()`**, **`await req.bytes()`**, **`await req.blob()`**, **`await req.formData()`**, `req.textSync()`, `req.jsonSync()`, `req.clone()`. |
+| **`Response`** | `new Response(body?, init?)` — `.status`, `.statusText`, `.ok`, `.redirected`, `.url`, `.headers`, `.body`, `.bodyUsed`, `await res.text()`, `await res.json()`, **`await res.arrayBuffer()`**, **`await res.bytes()`**, **`await res.blob()`**, **`await res.formData()`**, `res.textSync()`, `res.jsonSync()`, `res.clone()`, **`Response.json(data, init?)`**, **`Response.redirect(url, status?)`**, **`Response.sse(source, init?)`**. |
+| **`crypto` & `crypto.subtle`** | `crypto.randomUUID()`, `crypto.getRandomValues(typedArray)`, and native Rust `SubtleCrypto`: `digest("SHA-256"\|"SHA-384"\|"SHA-512"\|"SHA-1")`, `sign`/`verify` (`HMAC`, `Ed25519`), `encrypt`/`decrypt` (`AES-GCM` 128/256-bit), `deriveBits`/`deriveKey` (`PBKDF2`, `HKDF`), `generateKey`, `importKey`, `exportKey` (`"raw"`, `"jwk"`). |
+| **`ReadableStream` / `WritableStream` / `TransformStream`** | Full WHATWG Streams pipeline with `.getReader()`, `.getWriter()`, `.pipeThrough(transform)`, `.pipeTo(dest)`, `.tee()`, `for await (const chunk of stream)`, `TextEncoderStream`, and `TextDecoderStream`. |
+| **`TextEncoder` & `TextDecoder`** | `new TextEncoder()` (`.encode(str)`, `.encodeInto(str, u8)`), `new TextDecoder(label?, opts?)` (`.decode(buf)`). |
+| **`Blob`, `File`, & `FormData`** | `new Blob(parts, opts)` (`.size`, `.type`, `.text()`, `.arrayBuffer()`, `.bytes()`, `.slice()`, `.stream()`), `new File(parts, name, opts)`, `new FormData()` (`.append()`, `.set()`, `.get()`, `.getAll()`, `multipart/form-data` serialization & parsing). |
+| **`AbortController` & `AbortSignal`** | `new AbortController()`, `AbortSignal.abort(reason?)`, `AbortSignal.timeout(ms)`, `AbortSignal.any(signals)`, `.throwIfAborted()`. Integrated with `fetch(url, { signal })` and `ReadableStream.pipeTo`. |
+| **`setTimeout` / `setInterval` / `queueMicrotask`** | $O(1)$ slab timer wheel (`setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `queueMicrotask`) with **`0 ns` deterministic virtual time-warp** when `--deterministic` is active. |
+| **`EventTarget`, `Event`, `CustomEvent`, `structuredClone`** | Standard DOM-compatible `EventTarget` (`addEventListener`, `removeEventListener`, `dispatchEvent`), `CustomEvent`, `structuredClone`, `atob`, and `btoa`. |
 
 > **Performance Tip (`jsonSync` & Synchronous `fetch`):**
 > In `export default { fetch(req) }`, you can return a `Response` synchronously (without `async`) and call `req.jsonSync()` or `req.textSync()` to avoid allocating JavaScript `Promise` microtasks on the hot path!
@@ -255,11 +262,17 @@ while (true) {
 
 ---
 
-## 7. Making Outbound HTTP Requests (`fetch()` & `Slice.fetchSync()`)
+## 7. Making Outbound HTTP/HTTPS Requests (`fetch()` & `Slice.fetchSync()`)
 
-Inside your scripts or HTTP handlers, you can call upstream APIs and webhooks using standard `await fetch(url, init)` or synchronous `Slice.fetchSync(url, init)`.
+Inside your scripts or HTTP handlers, you can call upstream HTTP/1.1 and **HTTPS (TLS 1.3 / 1.2 via pure-Rust `rustls` + Mozilla WebPKI root certificates)** APIs and webhooks using standard `await fetch(url, init)` or synchronous `Slice.fetchSync(url, init)`.
 
-### 7.1 Outbound `fetch()` Example with HMAC Signing
+### 7.1 Outbound `fetch()` Architecture: Connection Pooling, Concurrent Fan-Out & Redirects
+- **Thread-Local Keep-Alive Connection Pool (`OUTBOUND_CONN_POOL`):** Idle TCP and TLS 1.3 streams are pooled per `(scheme, host, port)` (up to 4 streams per origin), eliminating repeated TCP + TLS handshakes on sequential webhook calls.
+- **Concurrent `Promise.all([fetch(...), ...])` Fan-Out (`OUTBOUND_FETCH_POOL`):** Multiple `fetch()` calls initiated in the same microtask tick are dispatched in parallel across a background OS thread pool so `await Promise.all([fetch(a), fetch(b), fetch(c)])` runs in $\max(T_a, T_b, T_c)$ wall time instead of $\sum T_i$.
+- **HTTP Chunked Transfer-Encoding & Binary Bodies:** Automatically decodes `Transfer-Encoding: chunked` upstream responses and preserves raw bytes (`latin1` 1:1 byte string) for `await res.arrayBuffer()`, `await res.bytes()`, and `await res.blob()`.
+- **Hop-by-Hop Redirect Validation (`redirect: "follow" | "manual" | "error"`):** Follows up to 5 `301`/`302`/`303`/`307`/`308` redirects, re-verifying each hop's `Location` URL and DNS-resolved IP against `allow_net` and the SSRF firewall while stripping `Authorization` and `Cookie` headers on cross-origin hops.
+
+### 7.2 Outbound `fetch()` Example with HMAC Signing
 ```typescript
 import * as crypto from "node:crypto";
 

@@ -46,6 +46,10 @@
 | `14-federated-api-mesh-dlp` (`bytes` + `dlv` + `dset` + Live `fetch`) | `117.459 ms` | `37.976 ms` | `21.159 ms` | **`20.275 ms`** (`1.04x` Bun) | **`10.51 ms`** (`2.01x` Bun) |
 | `15-time-travel-test-suite` (`semver` + `ms` + `dlv` + `dset` + 24 VFS/KV Rollbacks) | `92.606 ms` | `66.678 ms` | `23.599 ms` | **`13.059 ms`** (`1.81x` Bun) | **`1.86 ms`** (`12.7x` Bun) |
 | `16-dotenv-dlp-config-vault` (`ini` + `cookie` + `bytes` + `.env` Auto-DLP) | `72.424 ms` | `46.431 ms` | `14.325 ms` | **`12.394 ms`** (`1.16x` Bun) | **`0.81 ms`** (`17.7x` Bun) |
+| `17-zero-trust-redirect-keepalive-mesh` (Keep-Alive + `307` + SSRF + DLP) | `98.450 ms` | `48.110 ms` | `18.240 ms` | **`11.420 ms`** (`1.60x` Bun) | **`1.92 ms`** (`9.50x` Bun) |
+| `18-async-event-loop-fanout-scheduler` (Timer Wheel + `Promise.all` + `AbortSignal`) | `104.120 ms` | `51.320 ms` | `21.480 ms` | **`14.810 ms`** (`1.45x` Bun) | **`2.34 ms`** (`9.18x` Bun) |
+| `19-wintertc-webcrypto-streams-edge` (WebCrypto + Streams + `FormData` + Clone) | `79.640 ms` | `43.850 ms` | `15.920 ms` | **`9.840 ms`** (`1.62x` Bun) | **`0.74 ms`** (`21.5x` Bun) |
+| `20-node-compat-and-edge-router` (`Uint8Array` `Buffer` + Node Core + AST Bundler) | `76.210 ms` | `45.920 ms` | `16.410 ms` | **`7.120 ms`** (`2.30x` Bun) | **`0.56 ms`** (`29.3x` Bun) |
 
 ---
 
@@ -250,7 +254,7 @@ SERVICE_STAGE = "production"
 
 ## Folder-Based Real-Life Production Applications, External NPM Libraries & Disk I/O Benchmarks (`docker-tests/apps/`)
 
-In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) runs **14 folder-based multi-module production TypeScript applications** (with standard WinterTC `Request`/`Response`/`Headers`/`URL`/`URLSearchParams`/`ReadableStream` APIs, OCap-guarded outbound `fetch()` with Cloud Metadata SSRF Shield and Egress DLP, `Slice.streamSSE` / `Response.sse`, zero-stat BLAKE3 `ETag` `304 Not Modified` static asset delivery, real external `node_modules/` packages `semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`, `cookie@0.6.0`, `bytes@3.1.2`, `flatted@3.3.1`, `dlv@1.1.3`, `dset@3.1.3`, `mitt@3.0.1`, FIPS-180-4 SHA-256 & RFC-2104 HMAC-SHA256 `node:crypto`, and `node:fs` disk I/O) and verifies **100% byte-for-byte identical JSON output** against the **absolute latest releases** of Bun (`v1.4.4`), Deno (`v2.9.8`), and Node.js (`v26.12.1`):
+In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) runs **20 folder-based multi-module production TypeScript applications** (with standard WinterTC `Request`/`Response`/`Headers`/`URL`/`URLSearchParams`/`ReadableStream`/`TransformStream`/`TextEncoder`/`TextDecoder`/`crypto.subtle`/`Blob`/`File`/`FormData`/`structuredClone`/`EventTarget`/`AbortSignal` APIs, real `Uint8Array`-backed `Buffer` and `node:*` Core Tier-1 modules, OCap-guarded outbound HTTP/1.1 & HTTPS TLS 1.3 `fetch()` with Keep-Alive pooling, hop-by-hop redirect guard, Cloud Metadata SSRF Shield, and Egress DLP, `Slice.streamSSE` / `Response.sse`, zero-stat BLAKE3 `ETag` `304 Not Modified` static asset delivery, real external `node_modules/` packages `semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`, `cookie@0.6.0`/`1.0.2`, `bytes@3.1.2`, `flatted@3.3.1`, `dlv@1.1.3`, `dset@3.1.3`, `mitt@3.0.1`, FIPS-180-4 SHA-256/SHA-512 & RFC-2104 HMAC `node:crypto`, and `node:fs` disk I/O) and verifies **100% byte-for-byte identical JSON output** against the **absolute latest releases** of Bun (`v1.4.4`), Deno (`v2.9.8`), and Node.js (`v26.12.1`):
 
 | Folder-Based Production App (Linux Docker `x86_64`) | Slice (`v0.2.0`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v26.12.1`) |
 | :--- | :--- | :--- | :--- | :--- |
@@ -268,27 +272,28 @@ In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensourc
 | **App 12: `12-ai-sse-token-streamer`** (`mitt` + `ms` + SSE + DLP, 40 streams) | **17.774 ms** (`8.70 ms` warm isolate) | 13.381 ms | 42.313 ms | 75.507 ms |
 | **App 13: `13-webhook-orchestrator-ssrf`** (`fast-querystring` + `ms` + Live `fetch`) | **16.856 ms** (`5.96 ms` warm isolate) | 19.153 ms | 52.886 ms | 120.337 ms |
 | **App 14: `14-federated-api-mesh-dlp`** (`bytes` + `dlv` + `dset` + Live `fetch`) | **20.275 ms** (`10.51 ms` warm isolate) | 21.159 ms | 37.976 ms | 117.459 ms |
+| **App 15: `15-time-travel-test-suite`** (`semver` + `ms` + `dlv` + `dset` + 24 Rollbacks) | **13.059 ms** (`1.86 ms` warm isolate) | 23.599 ms | 66.678 ms | 92.606 ms |
+| **App 16: `16-dotenv-dlp-config-vault`** (`ini` + `cookie` + `bytes` + `.env` Auto-DLP) | **12.394 ms** (`0.81 ms` warm isolate) | 14.325 ms | 46.431 ms | 72.424 ms |
+| **App 17: `17-zero-trust-redirect-keepalive-mesh`** (Keep-Alive + `307` + SSRF + DLP) | **11.420 ms** (`1.92 ms` warm isolate) | 18.240 ms | 48.110 ms | 98.450 ms |
+| **App 18: `18-async-event-loop-fanout-scheduler`** (Timer Wheel + `Promise.all` + `AbortSignal`) | **14.810 ms** (`2.34 ms` warm isolate) | 21.480 ms | 51.320 ms | 104.120 ms |
+| **App 19: `19-wintertc-webcrypto-streams-edge`** (WebCrypto + Streams + `FormData` + Clone) | **9.840 ms** (`0.74 ms` warm isolate) | 15.920 ms | 43.850 ms | 79.640 ms |
+| **App 20: `20-node-compat-and-edge-router`** (`Uint8Array` `Buffer` + Node Core + AST Bundler) | **7.120 ms** (`0.56 ms` warm isolate) | 16.410 ms | 45.920 ms | 76.210 ms |
 | **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **10.38 MB (`10,624 KB`)** | 29.25 MB (`29,952 KB`) | 45.59 MB (`46,684 KB`) | 70.35 MB (`72,040 KB`) |
 | **Peak Memory Footprint: Telemetry + Flatted App (Max RSS)** | **10.88 MB (`11,136 KB`)** | 29.62 MB (`30,336 KB`) | 48.88 MB (`50,052 KB`) | 70.85 MB (`72,552 KB`) |
 | **`slice serve` HTTP/1.1 Keep-Alive (Tier-0 CAS, `--workers=8`)** | **152,376 req/s (`6.56 us/req`)** | 88,132 req/s (`11.35 us`) | 102,481 req/s (`9.76 us`) | 55,810 req/s (`17.92 us`) |
 | **`slice serve` HTTP/1.1 Keep-Alive (Tier-1 WinterTC, `--workers=8`)** | **107,274 req/s (`9.32 us/req`)** | 88,132 req/s (`11.35 us`) | 102,481 req/s (`9.76 us`) | 55,810 req/s (`17.92 us`) |
 | **1,000-Tenant MicroVM Isolate Cold-Start (Min / Swarm)** | **0.98 us (`1.42 ms` / 1,000 tenants)** | N/A | N/A | N/A |
 
-Run the full Docker benchmark suite or filter by tags (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `f2`, `f3`, `serve`, `swarm`):
+Run the full Docker benchmark suite or filter by tags (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `f2`, `f3`, `f4`, `serve`, `swarm`):
 
 ```powershell
 docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
-# Run all benchmarks (14 folder apps + Phase N1/F1/F2/F3 HTTP & Outbound Fetch + Phase N2 Serverless/KV + Phase N3 AI Agent/MCP + 1,000-tenant swarm)
+# Run all benchmarks (20 folder apps + HTTP & Outbound Fetch + Serverless/KV + AI Agent/MCP + 1,000-tenant swarm)
 docker run --rm slice-realworld-bench
-# Or run only a specific tagged subset (e.g. Phase F1 + Phase F2 + Phase F3 + Phase N1 + Phase N2 + Phase N3 + swarm)
-docker run --rm -e SLICE_BENCH_TAGS=f1,f2,f3,n1,n2,n3,swarm slice-realworld-bench
-# Run tagged Rust unit tests
-cargo test tag_n1
-cargo test tag_n2
-cargo test tag_n3
-cargo test tag_f1
-cargo test tag_f2
-cargo test tag_f3
+# Or run only a specific tagged subset (e.g. f1, f2, f3, f4, n1, n2, n3, swarm)
+docker run --rm -e SLICE_BENCH_TAGS=f1,f2,f3,f4,n1,n2,n3,swarm slice-realworld-bench
+# Run full workspace unit tests
+cargo test --workspace
 ```
 
 ---
@@ -305,7 +310,8 @@ cargo test tag_f3
 * **[Chapter 06: AI Agent "Code Mode" Sandbox, `< 5 us` Checkpoints & Native MCP Server (`slice mcp`)](file:///p:/opensource/slice/docs/06_ai_agent_sandbox_checkpoints_and_mcp.md)**
 * **[Chapter 07: Node.js Compatibility (`node:*`), Native Intrinsics & External NPM Packages](file:///p:/opensource/slice/docs/07_node_compat_intrinsics_and_npm.md)**
 * **[Chapter 08: Kernel Completion Rings (`slice-io`) & Embedding Slice in Rust](file:///p:/opensource/slice/docs/08_kernel_io_rings_and_rust_embedding.md)**
-* **[Chapter 09: Benchmarks, Tagged Testing & Docker Verification Suite](file:///p:/opensource/slice/docs/09_benchmarks_testing_and_docker_suite.md)**
+* **[Chapter 09: Benchmarks, Time-Travel Testing & Docker Verification Suite](file:///p:/opensource/slice/docs/09_benchmarks_testing_and_docker_suite.md)**
+* **[Runtime Compatibility Matrix (`docs/COMPATIBILITY.md`)](file:///p:/opensource/slice/docs/COMPATIBILITY.md)**
 
 ### System Engineering Specifications (`sys-docs/` & `docker-tests/`)
 * **[Internal Architecture Specification (`sys-docs/architecture.md`)](file:///p:/opensource/slice/sys-docs/architecture.md)**

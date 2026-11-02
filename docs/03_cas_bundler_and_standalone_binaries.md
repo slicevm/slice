@@ -37,7 +37,14 @@ Inside your project, you can freely mix and match:
   import config from "./config/default.json";
   ```
 - **Node & Slice Built-Ins:**
-  - `"node:crypto"`, `"node:fs"`, `"node:path"`, `"node:os"`, `"node:buffer"`, `"node:url"`, `"node:util"`, `"node:process"`, `"node:test"`, `"slice:test"`, `"bun:test"`
+  - `"node:crypto"`, `"node:fs"`, `"node:fs/promises"`, `"node:path"`, `"node:os"`, `"node:buffer"`, `"node:events"`, `"node:url"`, `"node:util"`, `"node:util/types"`, `"node:assert"`, `"node:assert/strict"`, `"node:process"`, `"node:test"`, `"slice:test"`, `"bun:test"`
+
+### Modern ESM NPM Packages & Conditional `"exports"` Resolution
+Slice's zero-stat bundler ([`crates/slice-cas/src/lib.rs`](file:///p:/opensource/slice/crates/slice-cas/src/lib.rs)) includes a full **Oxc AST-driven ESM-to-CJS module linker** (`try_transform_esm_to_cjs_ast`) and **Node.js `package.json` `"exports"` resolver** (`resolve_package_exports_value`):
+- **Conditional `"exports"` Priority:** Evaluates nested condition maps in edge-first priority order: `"workerd"` -> `"worker"` -> `"edge-light"` -> `"browser"` -> `"import"` -> `"require"` -> `"node"` -> `"default"` (automatically skipping `.d.ts` type declarations).
+- **Subpath & Wildcard `"exports"`:** Resolves exact subpaths (such as `import { jwtVerify } from "jose/jwt/verify"` or `import { createRouter } from "radix3"`) as well as wildcard patterns (`"./*": "./dist/*.mjs"`).
+- **TypeScript `.js` -> `.ts` Specifier Resolution:** Supports standard TypeScript ESM imports written with `.js` extensions (`import { x } from "./foo.js"` automatically resolves `./foo.ts` when `./foo.js` is not on disk).
+- **Full ES2024 Import/Export Lowering:** Rewrites multi-line `import { a, b as c } from "..."`, namespace imports (`import * as ns`), default + named imports, live-getter re-exports (`export { x } from "./sub"`, `export * from "./sub"`, `export * as ns from "./sub"`), and exported declarations (`export class`, `export async function`, `export const { a, b } = ...`) via Oxc AST span analysis without fragile regexes.
 
 ---
 

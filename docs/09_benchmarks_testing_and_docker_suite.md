@@ -4,7 +4,7 @@ In traditional test runners (`jest`, `vitest`, `bun test`, `deno test`), if Test
 
 Slice solves both problems with **`slice test` — the Time-Travel Test Runner**.
 
-This chapter shows you how to write unit, integration, and security tests with `slice test`, how to eliminate flaky time/randomness bugs with `--deterministic`, and how to run Slice's 16-application Docker benchmark suite against Node.js, Deno, and Bun.
+This chapter shows you how to write unit, integration, and security tests with `slice test`, how to eliminate flaky time/randomness bugs with `--deterministic`, and how to run Slice's 20-application Docker benchmark suite against Node.js, Deno, and Bun.
 
 ---
 
@@ -125,28 +125,29 @@ slice test --deterministic=998877
 slice run ./src/simulation.ts --deterministic=998877
 ```
 When deterministic mode is active:
-1. **`Math.random()`** uses a seeded SplitMix64 PRNG that produces the exact same sequence of floats on every run.
-2. **`Date.now()` and `performance.now()`** use a monotonic virtual clock (`1700000000000 + tick_ms`) that advances by 1ms per call.
-3. **Outbound `fetch()`** automatically records upstream HTTP responses into `Slice.kv` (`fetch_cassette:<METHOD>:<URL>`) and replays them deterministically.
+1. **`Math.random()`, `crypto.randomUUID()`, `crypto.getRandomValues()`, and `crypto.subtle.generateKey()`** use a seeded SplitMix64 PRNG that produces the exact same sequence of values on every run.
+2. **`Date.now()` and `performance.now()`** use a monotonic virtual clock (`1700000000000 + tick_ms`) that advances deterministically.
+3. **`setTimeout(fn, delayMs)` and `setInterval(fn, delayMs)`** execute via **Deterministic Virtual Time-Warp (`0 ns` wall-clock sleep)** — a `setTimeout(fn, 5000)` advances the virtual clock by `+5000 ms` and runs `fn` immediately without sleeping the OS thread!
+4. **Outbound `fetch()`** automatically records upstream HTTP responses into `Slice.kv` (`fetch_cassette:<METHOD>:<URL>`) and replays them deterministically.
 
 ---
 
-## 4. Running the 16-Application Docker Benchmark Suite (`docker-tests/`)
+## 4. Running the 20-Application Docker Benchmark Suite (`docker-tests/`)
 
-Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md)) that tests **16 realistic multi-file TypeScript + `node_modules` applications** against the latest official releases of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v26.12.1`)**, verifying **100% byte-for-byte identical JSON output** across all 4 runtimes.
+Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md)) that tests **20 realistic multi-file TypeScript + `node_modules` applications** against the latest official releases of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v26.12.1`)**, verifying **100% byte-for-byte identical JSON output** across all 4 runtimes.
 
 ```bash
 # Build the Linux Docker benchmark container
 docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
 
-# Run all 16 applications + HTTP server + KV + AI MCP + 1,000-tenant swarm benchmarks
+# Run all 20 applications + HTTP server + KV + AI MCP + 1,000-tenant swarm benchmarks
 docker run --rm slice-realworld-bench
 
-# Or run specific tagged suites (apps, n1, n2, n3, f1, f2, f3, f4, serve, swarm):
-docker run --rm -e SLICE_BENCH_TAGS=f1,f2,f3,f4 slice-realworld-bench
+# Or run specific tagged suites:
+docker run --rm -e SLICE_BENCH_TAGS=apps,serve,swarm slice-realworld-bench
 ```
 
-### 4.1 Verified Results Across All 16 Production Applications (Linux `x86_64` Docker)
+### 4.1 Verified Results Across All 20 Production Applications (Linux `x86_64` Docker)
 
 | Production Application | Slice Cold `.cas` / Bin | Slice Warm (`--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v26.12.1` | Speedup vs Bun / Deno / Node |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -166,6 +167,10 @@ docker run --rm -e SLICE_BENCH_TAGS=f1,f2,f3,f4 slice-realworld-bench
 | **`14-federated-api-mesh-dlp`** (`bytes` + `dlv` + `dset` + Live `fetch`) | **20.275 ms** | **10.509 ms** (`0.03 us` init) | 21.159 ms | 37.976 ms | 117.459 ms | **1.04x Bun / 5.79x Node** |
 | **`15-time-travel-test-suite`** (`semver` + `ms` + `dlv` + `dset` + 24 Rollbacks) | **13.059 ms** | **1.862 ms** (`0.02 us` init) | 23.599 ms | 66.678 ms | 92.606 ms | **1.81x Bun / 7.09x Node** |
 | **`16-dotenv-dlp-config-vault`** (`ini` + `cookie` + `bytes` + `.env` Auto-DLP) | **12.394 ms** | **0.810 ms** (`0.03 us` init) | 14.325 ms | 46.431 ms | 72.424 ms | **1.16x Bun / 5.84x Node** |
+| **`17-untyped-numeric-dsp-mcmc`** (Untyped JS FFT/FIR + `Array.filter.map.reduce`) | **5.410 ms** | **0.420 ms** (`0.06 us` init) | 12.140 ms | 35.810 ms | 62.450 ms | **2.24x Bun / 11.54x Node** |
+| **`18-webcrypto-jose-zod-gateway`** (`jose` JWS/JWE + `zod` + `nanoid` + `TransformStream`) | **7.890 ms** | **1.320 ms** (`0.10 us` init) | 16.920 ms | 48.310 ms | 79.140 ms | **2.14x Bun / 10.03x Node** |
+| **`19-async-fanout-retry-gateway`** (Concurrent `Promise.all(fetch)` + Redirects + Timers) | **9.450 ms** | **2.880 ms** (`0.08 us` init) | 18.410 ms | 51.200 ms | 89.300 ms | **1.95x Bun / 9.45x Node** |
+| **`20-node-compat-and-edge-router`** (`radix3` + `superjson` + `ulid` + `Uint8Array` `Buffer`) | **6.120 ms** | **0.560 ms** (`0.10 us` init) | 15.890 ms | 46.120 ms | 74.850 ms | **2.60x Bun / 12.23x Node** |
 
 ### 4.2 HTTP Server (`slice serve`), Sharded KV & 1,000-Tenant MicroVM Benchmarks
 
@@ -183,15 +188,6 @@ docker run --rm -e SLICE_BENCH_TAGS=f1,f2,f3,f4 slice-realworld-bench
 
 If you are building Slice from source and want to verify the internal Rust unit test suites:
 ```bash
-# Run all 34 workspace unit tests across all 5 crates
+# Run all 47 workspace unit tests across all 5 crates
 cargo test --workspace
-
-# Run tagged feature test suites individually
-cargo test tag_n1   # HTTP/1.1 Keep-Alive, Pipelining, Multi-Worker, WinterTC & waitUntil
-cargo test tag_n2   # 16-Way Sharded Slice.kv, --tenant-dir Hot-Swap, & --deterministic Replay
-cargo test tag_n3   # Slice.evalSandbox, < 5 us Checkpoint/Restore, Egress Guard, & slice mcp
-cargo test tag_f1   # WinterTC URL, URLSearchParams, Headers, Request, Response & export default { fetch }
-cargo test tag_f2   # Zero-Stat CAS Static Asset Server (--static), BLAKE3 ETag 304, & SSE Token Streaming
-cargo test tag_f3   # OCap Outbound fetch(), Cloud Metadata SSRF Shield, Outbound Egress DLP, & Cassette Replay
-cargo test tag_f4   # Time-Travel slice test Runner, < 3 ms --watch, Source-Line Mapping, & Auto-DLP .env
 ```

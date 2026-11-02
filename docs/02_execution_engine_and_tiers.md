@@ -153,28 +153,42 @@ console.log(serializeReceipt("ORD-501", "tenant-eu", 19900));
 
 ---
 
-## 6. Developer Optimization #4: Hardware-Accelerated Crypto, Encoding & Ecosystem Fast Paths
+## 6. Developer Optimization #4: Unboxed 64-Bit Numeric Register VM & Oxc AST Array Pipeline Fusion
 
-When writing applications in Slice, prefer standard `node:crypto`, `Buffer`, and supported ecosystem packages — Slice intercepts the hottest operations and runs them in **native Rust and hardware SIMD**:
+Beyond explicit `: number` loop annotations, Slice includes two general-purpose ahead-of-time compiler optimizations that accelerate standard JavaScript and TypeScript functions without requiring any special annotations:
+
+1. **Unboxed 64-Bit Numeric Register VM ([`numeric_vm.rs`](file:///p:/opensource/slice/crates/slice-engine/src/numeric_vm.rs)):**
+   - Any pure numeric JS/TS function (`function fn(a, b) { ... }`) using arithmetic (`+`, `-`, `*`, `/`, `%`, `**`), bitwise operators (`|`, `&`, `^`, `<<`, `>>`, `>>>`), `while`/`for` loops, `if`/`else` branches, `Math.*` intrinsics (`Math.abs`, `Math.min`, `Math.max`, `Math.floor`, `Math.ceil`, `Math.round`, `Math.trunc`, `Math.sqrt`, `Math.imul`), or recursive calls is automatically compiled into unboxed 64-bit register instructions (`NumericOp`) on a 32-register stack file (`[f64; 32]`).
+   - 2-term linear recurrences (`return f(n - 1) + f(n - 2)`) are automatically recognized and lowered to $O(n)$ register accumulation while charging deterministic CPU fuel per step.
+2. **Oxc AST Array Pipeline Fusion ([`fuse_array_pipelines_ast`](file:///p:/opensource/slice/crates/slice-cas/src/lib.rs#L231-L575)):**
+   - During `slice pack` and `slice compile`, Slice's Oxc AST pass detects chained functional array pipelines (such as `arr.filter(...).map(...).reduce(...)`, `arr.map(...).reduce(...)`, `arr.some(...)`, and `arr.every(...)`) on any arbitrary receiver expression and fuses them into a single-pass, zero-allocation `for` loop IIFE — eliminating intermediate array allocations on hot paths.
+
+---
+
+## 7. Developer Optimization #5: Hardware-Accelerated Crypto, Encoding & Ecosystem Fast Paths
+
+When writing applications in Slice, prefer standard `node:crypto`, WebCrypto (`crypto.subtle`), `Buffer`, and supported ecosystem packages — Slice intercepts the hottest operations and runs them in **native Rust and hardware SIMD**:
 
 | Standard TypeScript / JS Code You Write | How Slice Executes It Under the Hood |
 | :--- | :--- |
-| `crypto.createHash("sha256").update(data).digest("hex")` | Lowered directly to `__slice_crypto_sha256(data)` using **Intel/AMD `SHA-NI` hardware instructions** (`0` JS object allocations). |
-| `crypto.createHmac("sha256", key).update(msg).digest("hex")` | Lowered directly to `__slice_crypto_hmac_sha256(key, msg)` using **hardware `SHA-NI` RFC-2104 HMAC**. |
-| `Buffer.from(str, "utf8").toString("base64url")`<br>`Buffer.from(b64, "base64url").toString("utf8")` | Lowered to native Rust zero-allocation Base64 / Base64URL codecs (`__slice_base64_encode` / `__slice_base64_decode`). |
+| `crypto.createHash("sha256" \| "sha384" \| "sha512" \| "sha1").update(data).digest("hex")` | Lowered directly to native Rust cryptographic intrinsics (`__slice_crypto_hash`) using **Intel/AMD `SHA-NI` hardware instructions** for SHA-256 and pure-Rust `sha2`/`sha1` for SHA-384/SHA-512/SHA-1 (`Buffer` or string output). |
+| `crypto.createHmac("sha256" \| "sha384" \| "sha512" \| "sha1", key).update(msg).digest("hex")` | Lowered directly to native Rust RFC-2104 HMAC (`__slice_crypto_hmac` / `__slice_crypto_hmac_sha256`). |
+| `await crypto.subtle.encrypt("AES-GCM", key, data)`<br>`await crypto.subtle.sign("Ed25519", key, data)` | Executed in native Rust (`aes-gcm`, `ed25519-dalek`, `pbkdf2`, `hkdf`, `sha2`) with zero OpenSSL dependency. |
+| `Buffer.from(str, "utf8").toString("base64url")`<br>`buf.readUInt32BE(0)` / `buf.writeBigUInt64BE(val, 0)` | Backed by a real `Uint8Array` instance (`Object.setPrototypeOf(u8, Buffer.prototype)`) with native Rust Base64/Base64URL/Hex codecs and full big/little-endian wire-protocol readers/writers. |
 | `semver.valid(v)`, `semver.coerce(v)`, `semver.gt(a, b)`, `semver.satisfies(v, range)` | Executed in `~150 ns` by Slice's zero-regex Rust SemVer engine (`__slice_semver_*`), with automatic fallback for complex ranges. |
 | `ms("15m")`, `ms(60000, { long: true })`<br>`bytes.parse("64KB")`, `bytes.format(4781506)` | Executed by native Rust zero-regex parsers/formatters (`__slice_fast_ms`, `__slice_fast_bytes_*`) + compile-time constant folding for literals like `bytes.parse("64KB")` -> `65536`. |
 | `fs.writeFileSync("/tmp/a.json", data)`<br>`fs.readFileSync("/tmp/a.json", "utf8")` | Served out of Slice's thread-local **In-Memory VFS Slab** (`BOA_VFS_CACHE`) at memory speed, with OCap prefix security and `< 5 us` `Slice.checkpoint()` support. |
 
 ---
 
-## 7. Built-In Global Functions & Objects Available in Every Script
+## 8. Built-In Global Functions & Objects Available in Every Script
 
 Every Slice script has immediate access to the following globals without needing any imports:
 
 - **Standard Console & Output:** `console.log(...)`, `console.info(...)`, `console.warn(...)`, `console.error(...)`, `print(...)`
-- **WinterTC Web Standards:** `fetch(input, init)`, `Request`, `Response` (`Response.json`, `Response.redirect`, `Response.sse`), `Headers`, `URL`, `URLSearchParams`, `ReadableStream`
-- **Environment & Node Globals:** `process` (`process.env`, `process.cwd()`, `process.platform`, `process.arch`, `process.version`, `process.argv`), `env(key)`, `Buffer`, `require(id)`
+- **WinterTC Web Standards:** `fetch(input, init)`, `Request`, `Response` (`Response.json`, `Response.redirect`, `Response.sse`), `Headers`, `URL`, `URLSearchParams`, `ReadableStream`, `WritableStream`, `TransformStream`, `TextEncoder`, `TextDecoder`, `TextEncoderStream`, `TextDecoderStream`, `Blob`, `File`, `FormData`, `Event`, `CustomEvent`, `EventTarget`, `AbortController`, `AbortSignal` (`AbortSignal.abort`, `AbortSignal.timeout`, `AbortSignal.any`), `structuredClone`, `atob`, `btoa`, `crypto` (`crypto.randomUUID()`, `crypto.getRandomValues(typedArray)`, `crypto.subtle`)
+- **Timers & Microtasks:** `setTimeout(fn, delayMs, ...args)`, `clearTimeout(id)`, `setInterval(fn, delayMs, ...args)`, `clearInterval(id)`, `queueMicrotask(fn)` (powered by a $O(1)$ slab timer wheel with `0 ns` virtual time-warp in `--deterministic` mode)
+- **Environment & Node Globals:** `process` (`process.env`, `process.cwd()`, `process.platform`, `process.arch`, `process.version`, `process.argv`, `process.hrtime.bigint()`, `process.nextTick()`), `env(key)`, `Buffer` (real `Uint8Array` subclass), `require(id)`
 - **Timing & Determinism:** `Date.now()`, `performance.now()`, `Math.random()` (all automatically deterministic when `--deterministic=<seed>` is enabled!)
 - **Test Runner Globals (Zero-Cost Lazy Loaded):** `describe(name, fn)`, `test(name, fn, opts)`, `it(name, fn, opts)`, `beforeEach(fn)`, `afterEach(fn)`, `expect(actual)`
 - **The `Slice` Host Namespace:**

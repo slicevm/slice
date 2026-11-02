@@ -81,16 +81,21 @@ What if you are building a webhook delivery worker or an AI browsing agent that 
 
 In Node.js, Bun, or Deno (`deno run --allow-net`), if a user passes `http://169.254.169.254/latest/meta-data/iam/security-credentials/` or `http://10.0.0.15:6379/`, your server will happily fetch your cloud instance's IAM credentials or internal Redis server (Server-Side Request Forgery / SSRF).
 
-**In Slice, the SSRF Shield is always active:**
+**In Slice, the SSRF Shield is always active across every DNS resolution and redirect hop:**
 1. **Cloud Metadata Endpoints Are Unconditionally Blocked (Even Under `--allow-net=*`):**
    - `169.254.169.254` (AWS EC2 / GCP / Azure IMDS)
    - `169.254.170.2` (AWS ECS Task Metadata)
    - `100.100.100.200` (Alibaba Cloud Metadata)
    - `[fd00:ec2::254]` (IPv6 AWS IMDS)
    - `metadata.google.internal` & `metadata.goog` (GCP Metadata DNS)
-2. **Loopback & RFC1918 Private Networks Are Blocked Under Wildcard `--allow-net=*`:**
-   - When `allow_net = ["*"]` is used, Slice permits public internet domains (`https://example.com`) but **blocks** `localhost`, `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, and `0.0.0.0`.
+2. **Pre-Connect DNS Resolved-IP Firewall (`resolve_and_verify_socket_addrs`):**
+   - Before opening any TCP or TLS socket, Slice resolves the hostname and inspects **every returned `SocketAddr` (both IPv4 and IPv6, including IPv4-mapped IPv6 addresses like `::ffff:127.0.0.1` and `::ffff:169.254.169.254`)**.
+   - Even if an attacker configures a public DNS domain (`evil.example.com`) with an `A` or `AAAA` record pointing to `127.0.0.1`, `10.0.0.1`, or `169.254.169.254` (DNS rebinding), Slice blocks the connection before `connect()` and traps with `SSRF_DNS_REBIND_BLOCKED` / `SSRF_METADATA_IP_BLOCKED`.
    - Internal/private endpoints can **only** be reached if you explicitly name that exact `host:port` in `allow_net` (e.g., `--allow-net=*,127.0.0.1:18095`).
+3. **Zero-Trust Hop-by-Hop Redirect Guard (`301` / `302` / `303` / `307` / `308`):**
+   - When an allowed upstream server returns a `30x` redirect (`redirect: "follow"`), Slice re-verifies the target `Location` URL's host, port, and DNS-resolved IP against `allow_net` and the SSRF firewall **before following the hop** (up to 5 hops).
+   - If a redirect crosses origins (different scheme, host, or port), Slice automatically strips sensitive `Authorization`, `Cookie`, and `Proxy-Authorization` headers so credentials are never leaked to a redirect target.
+   - Support `redirect: "follow"` (default), `redirect: "manual"` (returns the `30x` response with its `location` header), and `redirect: "error"`.
 
 ---
 

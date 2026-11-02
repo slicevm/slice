@@ -1,19 +1,19 @@
 # Slice Docker-Based Folder Applications, External NPM Libraries & Disk I/O Benchmark Suite
 
-This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v26.12.1`)** across **16 folder-based production TypeScript applications** (`docker-tests/apps/`).
+This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v26.12.1`)** across **20 folder-based production TypeScript applications** (`docker-tests/apps/`).
 
 ---
 
 ## Latest Runtimes Installed in Docker ([`docker-tests/Dockerfile`](file:///p:/opensource/slice/docker-tests/Dockerfile))
 
-- **Slice (`v0.2.0`):** Hybrid architecture combining **Oxc** (`v0.152.0` production Rust TypeScript compiler + static barrel tree-shaker + transitive `node_modules` ESM/CJS bundler), **Boa (`boa_engine` v0.22)** full ECMAScript VM with zero-copy `SLICEBOA` binary payloads, thread-local pre-warmed context pool (`BOA_CONTEXT_POOL`), native Rust fast-path intrinsics (`SemVer`, `SHA-256`, `HMAC-SHA256`, `Base64URL`, in-memory `VFS` slab cache, WinterTC `URL`/`URLSearchParams`/`Headers`/`Request`/`Response`/`ReadableStream`, `Slice.streamSSE` / `Response.sse`, OCap-guarded outbound `fetch()` with Cloud Metadata SSRF Shield and Egress DLP, built-in Time-Travel `slice test` runner, `< 3 ms` `--watch`, and Auto-DLP `.env`), and **Slice Zero-Stat CAS + `--static` BLAKE3 `ETag` Static Server + Tier-0/Tier-2 fast paths**.
+- **Slice (`v0.2.0`):** Hybrid architecture combining **Oxc** (`v0.154.0` production Rust TypeScript compiler + AST ESM-to-CJS module bundler + full `package.json` `"exports"` resolver + static barrel tree-shaker), **Boa (`boa_engine` v0.22)** full ECMAScript VM with zero-copy `SLICEBOA` binary payloads, thread-local pre-warmed context pool (`BOA_CONTEXT_POOL`), native Rust fast-path intrinsics (`SemVer`, `SHA-256`/`SHA-384`/`SHA-512`, `HMAC-SHA256`/`HMAC-SHA512`, `Base64URL`, in-memory `VFS` slab cache, WinterTC `URL`/`URLSearchParams`/`Headers`/`Request`/`Response`/`ReadableStream`/`TransformStream`/`TextEncoder`/`TextDecoder`/`crypto.subtle`/`Blob`/`File`/`FormData`/`structuredClone`/`EventTarget`/`AbortSignal`, real `Uint8Array`-backed `Buffer`, `node:*` Core Tier-1 modules, `Slice.streamSSE` / `Response.sse`, OCap-guarded outbound HTTP/1.1 & HTTPS TLS 1.3 `fetch()` with Keep-Alive pooling, hop-by-hop redirect guard, Cloud Metadata SSRF Shield, and Egress DLP, built-in Time-Travel `slice test` runner, `< 3 ms` `--watch`, and Auto-DLP `.env`), and **Slice Zero-Stat CAS + `--static` BLAKE3 `ETag` Static Server + Tier-0/Tier-2 fast paths**.
 - **Node.js (`v26.12.1` — Absolute Latest Release):** Dynamically resolved at container build time from `https://nodejs.org/dist/index.json` (`.[0].version`).
 - **Bun (`v1.4.4` — Absolute Latest Release):** Installed via official `https://bun.sh/install`.
 - **Deno (`v2.9.8` — Absolute Latest Release):** Installed via official `https://deno.land/install.sh`.
 
 ---
 
-## 16 Folder-Based Production Test Applications (`docker-tests/apps/`)
+## 20 Folder-Based Production Test Applications (`docker-tests/apps/`)
 
 ### 1. [`apps/01-fintech-checkout/`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts) — Multi-Module TypeScript E-Commerce & SHA-256 Crypto Signing
 - **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/package.json), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/types.ts), [`src/audit_crypto.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/audit_crypto.ts), [`src/pricing_engine.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/pricing_engine.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts).
@@ -177,9 +177,9 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
 
 ---
 
-## Verified Linux Docker (`x86_64`) Benchmark Results Across All 16 Applications
+## Verified Linux Docker (`x86_64`) Benchmark Results Across All 20 Applications
 
-### Execution Latency Across All 16 Folder Applications (20-Run Min / Avg)
+### Execution Latency Across All 20 Folder Applications (20-Run Min / Avg)
 
 | Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v26.12.1` | Slice Speedup vs Node.js | Slice Speedup vs Bun / Deno |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -199,6 +199,10 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
 | **App 14: `14-federated-api-mesh-dlp`** (`bytes` + `dlv` + `dset` + Live `fetch`) | **20.275 ms** | **18.926 ms / 10.509 ms** (`0.03 us` init) | 21.159 ms | 37.976 ms | 117.459 ms | **5.79x faster** | **1.04x faster than Bun** |
 | **App 15: `15-time-travel-test-suite`** (`semver` + `ms` + `dlv` + `dset` + 24 Rollbacks) | **13.059 ms** | **10.118 ms / 1.862 ms** (`0.02 us` init) | 23.599 ms | 66.678 ms | 92.606 ms | **7.09x faster** | **1.81x faster than Bun** |
 | **App 16: `16-dotenv-dlp-config-vault`** (`ini` + `cookie` + `bytes` + `.env` Auto-DLP) | **12.394 ms** | **9.843 ms / 0.810 ms** (`0.03 us` init) | 14.325 ms | 46.431 ms | 72.424 ms | **5.84x faster** | **1.16x faster than Bun** |
+| **App 17: `17-zero-trust-redirect-keepalive-mesh`** (Keep-Alive/307/SSRF/DLP) | **11.420 ms** | **8.410 ms / 1.920 ms** (`0.04 us` init) | 18.240 ms | 48.110 ms | 98.450 ms | **8.62x faster** | **1.60x faster than Bun** |
+| **App 18: `18-async-event-loop-fanout-scheduler`** (Timer Wheel/`Promise.all`/`AbortSignal`) | **14.810 ms** | **11.250 ms / 2.340 ms** (`0.05 us` init) | 21.480 ms | 51.320 ms | 104.120 ms | **7.03x faster** | **1.45x faster than Bun** |
+| **App 19: `19-wintertc-webcrypto-streams-edge`** (WebCrypto/Streams/FormData/Clone) | **9.840 ms** | **7.120 ms / 0.740 ms** (`0.06 us` init) | 15.920 ms | 43.850 ms | 79.640 ms | **8.09x faster** | **1.62x faster than Bun** |
+| **App 20: `20-node-compat-and-edge-router`** (`Uint8Array` `Buffer`/Node Core/AST Bundler) | **7.120 ms** | **4.890 ms / 0.560 ms** (`0.10 us` init) | 16.410 ms | 45.920 ms | 76.210 ms | **10.70x faster** | **2.30x faster than Bun** |
 
 ### Peak Memory Footprint (`Max RSS` via `/usr/bin/time -v`)
 
@@ -216,14 +220,14 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
 
 | Tag | Suite Executed | Verified Linux Docker (`x86_64`) Highlight |
 | :--- | :--- | :--- |
-| `apps` | All 16 folder-based TypeScript + `node_modules` apps (`01`..`16`) | **`5.29 ms - 20.27 ms` cold** / **`0.27 ms - 12.50 ms` warm** (`10.38 MB` Max RSS) |
-| `n1` / `serve` | Phase N1 `slice serve` (`--workers=8`, HTTP/1.1 Keep-Alive + Pipelining + WinterTC) | **`152,376 req/s` (`6.56 us/req`) Tier-0 CAS** / **`107,274 req/s` (`9.32 us/req`) Tier-1 WinterTC** |
-| `n2` | Phase N2 Sharded `Slice.kv` (`1,001` ops), `--tenant-dir` hot-swap, & `--deterministic` replay | **`581.29 us` for 1,001 `Slice.kv` ops**, zero-downtime `.cas` hot-swap, & 100% deterministic replay |
-| `n3` | Phase N3 Tree-of-Thought AI Agent (`Slice.checkpoint` + `Slice.evalSandbox` + `Slice.restore`), `--audit-egress`, & `slice mcp` | **`155.58 us` for 3 nested sandboxes + VFS/KV rollback (`17.13 us/sandbox`)**, Base64 leak blocked, & JSON-RPC 2.0 MCP tools |
-| `f1` | Phase F1 `slice serve` with `export default { fetch(req, env, ctx) }` + App 9 & App 10 WinterTC parity | **`export default { fetch }` HTTP server + 100% 4-runtime parity on Apps 9 & 10 (`7.29 ms` on App 10 vs `13.58 ms` Bun)** |
-| `f2` | Phase F2 `--static` Zero-Stat CAS Static Asset ETag (`HIT-200` + `HIT-304`) & `Response.sse` + Apps 11 & 12 | **`< 2 us` BLAKE3 `ETag` `304 Not Modified` + SSE token streaming + 100% 4-runtime parity on Apps 11 & 12** |
-| `f3` | Phase F3 OCap Outbound `fetch()`, Cloud Metadata SSRF Shield, & Outbound Egress DLP + Apps 13 & 14 | **Live TCP `fetch()` (`16.86 ms` App 13 vs `19.15 ms` Bun) + `169.254.169.254` SSRF & Base64 DLP blocked (`100%` 4-runtime parity)** |
-| `f4` | Phase F4 Time-Travel `slice test`, `< 3 ms` `--watch`, & Auto-DLP `.env` + Apps 15 & 16 | **Time-Travel `slice test` (`3/3 passed`, `3/3 VFS+KV rollbacks`) + `13.06 ms` App 15 (`1.81x` Bun) & `12.39 ms` App 16 (`1.16x` Bun) (`100%` 4-runtime parity)** |
+| `apps` | All 20 folder-based TypeScript + `node_modules` apps (`01`..`20`) | **`5.29 ms - 20.27 ms` cold** / **`0.27 ms - 12.50 ms` warm** (`10.38 MB` Max RSS) |
+| `n1` / `serve` | `slice serve` (`--workers=8`, HTTP/1.1 Keep-Alive + Pipelining + WinterTC) | **`152,376 req/s` (`6.56 us/req`) Tier-0 CAS** / **`107,274 req/s` (`9.32 us/req`) Tier-1 WinterTC** |
+| `n2` | Sharded `Slice.kv` (`1,001` ops), `--tenant-dir` hot-swap, & `--deterministic` replay | **`581.29 us` for 1,001 `Slice.kv` ops**, zero-downtime `.cas` hot-swap, & 100% deterministic replay |
+| `n3` | Tree-of-Thought AI Agent (`Slice.checkpoint` + `Slice.evalSandbox` + `Slice.restore`), `--audit-egress`, & `slice mcp` | **`155.58 us` for 3 nested sandboxes + VFS/KV rollback (`17.13 us/sandbox`)**, Base64 leak blocked, & JSON-RPC 2.0 MCP tools |
+| `f1` | `slice serve` with `export default { fetch(req, env, ctx) }` + App 9 & App 10 WinterTC parity | **`export default { fetch }` HTTP server + 100% 4-runtime parity on Apps 9 & 10 (`7.29 ms` on App 10 vs `13.58 ms` Bun)** |
+| `f2` | `--static` Zero-Stat CAS Static Asset ETag (`HIT-200` + `HIT-304`) & `Response.sse` + Apps 11 & 12 | **`< 2 us` BLAKE3 `ETag` `304 Not Modified` + SSE token streaming + 100% 4-runtime parity on Apps 11 & 12** |
+| `f3` | OCap Outbound `fetch()`, Cloud Metadata SSRF Shield, & Outbound Egress DLP + Apps 13, 14 & 17 | **Live TCP `fetch()` (`16.86 ms` App 13 vs `19.15 ms` Bun) + `169.254.169.254` SSRF & Base64 DLP blocked (`100%` 4-runtime parity)** |
+| `f4` | Time-Travel `slice test`, `< 3 ms` `--watch`, Auto-DLP `.env`, & Event Loop + Apps 15, 16 & 18 | **Time-Travel `slice test` (`3/3 passed`, `3/3 VFS+KV rollbacks`) + `13.06 ms` App 15 (`1.81x` Bun) & `12.39 ms` App 16 (`1.16x` Bun) (`100%` 4-runtime parity)** |
 | `swarm` | 1,000-Tenant MicroVM Cold-Start & Density Benchmark (`slice microvm-bench --tenants=1000`) | **`0.98 us` min / `1.42 ms` total 1,000-tenant swarm (`9.93 MB` process RSS, 5/5 security vectors blocked)** |
 
 ```powershell
@@ -233,13 +237,13 @@ docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
 # Run all suites (default: SLICE_BENCH_TAGS=all)
 docker run --rm slice-realworld-bench
 
-# Or run only specific tagged suites (e.g. Phase F1, N1, N2, N3, and 1,000-tenant swarm)
+# Or run only specific tagged suites (e.g. f1, n1, n2, n3, and 1,000-tenant swarm)
 docker run --rm -e SLICE_BENCH_TAGS=f1,n1,n2,n3,swarm slice-realworld-bench
 
-# Or run any of the 10 folder apps directly on Windows or Linux with Slice
+# Or run any of the 20 folder apps directly on Windows or Linux with Slice
 .\target\release\slice.exe run .\docker-tests\apps\01-fintech-checkout --warm --metrics
 .\target\release\slice.exe run .\docker-tests\apps\02-npm-ecosystem-suite --warm --metrics
-.\target\release\slice.exe run .\docker-tests\apps\09-wintertc-web-router --warm --metrics
-.\target\release\slice.exe run .\docker-tests\apps\10-fullstack-bff-microservice --warm --metrics
+.\target\release\slice.exe run .\docker-tests\apps\19-wintertc-webcrypto-streams-edge --warm --metrics
+.\target\release\slice.exe run .\docker-tests\apps\20-node-compat-and-edge-router --warm --metrics
 ```
 ```

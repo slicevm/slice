@@ -10,76 +10,105 @@ This chapter provides the complete API reference for every built-in `node:*` mod
 
 All built-in modules can be imported with or without the `node:` prefix (`import * as fs from "node:fs"` or `import * as fs from "fs"`, as well as CommonJS `require("node:fs")` or `require("fs")`). They are loaded lazily on first use (`0.00 ns` cost if unused).
 
-### 1.1 `node:fs` / `fs` (OCap-Guarded In-Memory VFS Slab + OS Disk Fallback)
-Every `node:fs` operation checks your `allow_read` / `allow_write` prefixes, blocks `..` traversal, serves hot files from Slice's in-memory VFS slab (`BOA_VFS_CACHE`), and automatically snapshots/restores during `Slice.checkpoint()` / `Slice.restore()` and `slice test`!
+### 1.1 `node:fs` / `fs` & `node:fs/promises` (OCap-Guarded In-Memory VFS Slab + OS Disk Fallback)
+Every `node:fs` and `node:fs/promises` operation checks your `allow_read` / `allow_write` prefixes, blocks `..` traversal, serves hot files from Slice's in-memory VFS slab (`BOA_VFS_CACHE`), and automatically snapshots/restores during `Slice.checkpoint()` / `Slice.restore()` and `slice test`!
 
 ```typescript
 import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 
-// Write & append files (requires allow_write prefix)
+// Write, append, copy, and rename files (requires allow_write prefix)
 fs.writeFileSync("/tmp/report.json", JSON.stringify({ ok: true }));
 fs.appendFileSync("/tmp/access.log", "2026-10-25 GET /api/v1\n");
+fs.copyFileSync("/tmp/report.json", "/tmp/report.backup.json");
+fs.renameSync("/tmp/report.backup.json", "/tmp/report.v2.json");
 
-// Read files & check existence (requires allow_read prefix)
+// Read files (as UTF-8 string or Uint8Array Buffer) & check existence (requires allow_read prefix)
 const exists: boolean = fs.existsSync("/tmp/report.json");
 const content: string = fs.readFileSync("/tmp/report.json", "utf8");
+const rawBuf: Buffer = fs.readFileSync("/tmp/report.json");
 
 // Directories, metadata & cleanup
-fs.mkdirSync("/tmp/shards");
+fs.mkdirSync("/tmp/shards", { recursive: true });
 const files: string[] = fs.readdirSync("/tmp");
-const stats: { size: number } = fs.statSync("/tmp/report.json");
-fs.unlinkSync("/tmp/report.json");
-fs.rmSync("/tmp/shards");
+const stats = fs.statSync("/tmp/report.json"); // { size, isFile(), isDirectory(), mtimeMs, mtime }
+fs.unlinkSync("/tmp/report.v2.json");
+fs.rmSync("/tmp/shards", { recursive: true, force: true });
+
+// Promise-based API (node:fs/promises or fs.promises)
+await fsp.writeFile("/tmp/async.txt", "hello");
+const asyncText = await fsp.readFile("/tmp/async.txt", "utf8");
 ```
 
-### 1.2 `node:crypto` / `crypto` (Hardware Intel/AMD `SHA-NI` Accelerated)
+### 1.2 `node:crypto` / `crypto` (Hardware Intel/AMD `SHA-NI` Accelerated + Multi-Chunk Streaming)
 ```typescript
 import * as crypto from "node:crypto";
 
-// FIPS-180-4 SHA-256 hex digest
+// Multi-chunk streaming Hash ("sha256", "sha384", "sha512", "sha1", "md5")
+// Calling .digest() without encoding returns a real Uint8Array-backed Buffer!
 const sha256Hex: string = crypto
     .createHash("sha256")
-    .update("order-payload-1001")
+    .update("order-payload-")
+    .update("1001")
     .digest("hex");
 
-// RFC-2104 HMAC-SHA256 hex signature
-const hmacHex: string = crypto
-    .createHmac("sha256", "whsec_signing_key")
-    .update("webhook-body")
-    .digest("hex");
+// Multi-chunk RFC-2104 HMAC ("sha256", "sha384", "sha512", "sha1")
+const hmacBuf: Buffer = crypto
+    .createHmac("sha512", "whsec_signing_key")
+    .update("header.")
+    .update("payload")
+    .digest();
+
+// Cryptographic random generation & constant-time comparison
+const nonce: Buffer = crypto.randomBytes(32);
+const id: string = crypto.randomUUID();
+const match: boolean = crypto.timingSafeEqual(hmacBuf, hmacBuf);
 ```
 
-### 1.3 `node:path` / `path`
+### 1.3 `node:path` / `path` (and `path.posix` / `path.win32`)
 ```typescript
 import * as path from "node:path";
 
 const fullPath = path.join("/workspace", "tenants", "alpha", "config.json");
-const resolved = path.resolve("/workspace", "src/index.ts");
-const dir = path.dirname(fullPath);              // "/workspace/tenants/alpha"
-const base = path.basename(fullPath);            // "config.json"
-const nameOnly = path.basename(fullPath, ".json"); // "config"
-const ext = path.extname(fullPath);              // ".json"
-const sep = path.sep;                            // "/"
+const norm = path.normalize("/workspace/tenants/../tenants/./alpha/config.json");
+const rel = path.relative("/workspace/tenants", fullPath); // "alpha/config.json"
+const parsed = path.parse(fullPath); // { root: "/", dir: "/workspace/tenants/alpha", base: "config.json", ext: ".json", name: "config" }
+const formatted = path.format(parsed);
+const isAbs = path.isAbsolute(fullPath); // true
 ```
 
-### 1.4 `node:buffer` / `buffer` (and Global `Buffer`)
+### 1.4 `node:buffer` / `buffer` (Real `Uint8Array`-Backed `Buffer`)
+In Slice, every `Buffer` is a real **`Uint8Array` instance** (`buf instanceof Uint8Array === true`, `ArrayBuffer.isView(buf) === true`, `Buffer.isBuffer(buf) === true`) with direct zero-copy `buffer.subarray()` views over `ArrayBuffer` memory and full big/little-endian wire-protocol integer readers and writers:
 ```typescript
 import { Buffer } from "node:buffer";
 
-// UTF-8 -> Base64 and Base64URL encoding
-const b64: string = Buffer.from("hello:world", "utf8").toString("base64");
+// Allocation & encoding ("utf8", "hex", "base64", "base64url", "latin1", "ascii")
 const b64Url: string = Buffer.from("{\"alg\":\"HS256\"}", "utf8").toString("base64url");
-
-// Base64 / Base64URL -> UTF-8 decoding
 const decoded: string = Buffer.from(b64Url, "base64url").toString("utf8");
 
-// Byte length calculation
-const bytes: number = Buffer.byteLength("Slice MicroVM");
+// Binary wire-protocol packing (PostgreSQL / Redis / JWT / Protobuf)
+const packet = Buffer.alloc(16);
+packet.writeUInt32BE(0xdeadbeef, 0);
+packet.writeInt32LE(-42000, 4);
+packet.writeBigUInt64BE(0x0102030405060708n, 8);
+
+console.log(packet.readUInt32BE(0) === 0xdeadbeef); // true
+console.log(packet.subarray(0, 4).toString("hex")); // "deadbeef"
 ```
 
-### 1.5 `node:url` / `url` (and Global `URL` & `URLSearchParams`)
+### 1.5 `node:events` / `events` (`EventEmitter`)
 ```typescript
-import { URL, URLSearchParams } from "node:url";
+import { EventEmitter } from "node:events";
+
+const bus = new EventEmitter();
+bus.on("order", (id: string, cents: number) => console.log(id, cents));
+bus.once("init", () => console.log("initialized"));
+bus.emit("order", "ORD-1", 4900);
+```
+
+### 1.6 `node:url` / `url` (and Global `URL` & `URLSearchParams`)
+```typescript
+import { URL, URLSearchParams, fileURLToPath, pathToFileURL } from "node:url";
 
 const u = new URL("/v2/search?q=slice&tag=edge", "https://api.slice.dev");
 u.searchParams.append("tag", "rust");
@@ -87,21 +116,20 @@ u.searchParams.sort();
 console.log(u.href); // "https://api.slice.dev/v2/search?q=slice&tag=edge&tag=rust"
 ```
 
-### 1.6 `node:os` / `os`, `node:util` / `util`, & `node:process` / `process`
+### 1.7 `node:util`, `node:util/types`, `node:assert`, `node:os`, & `node:process`
 ```typescript
 import * as os from "node:os";
 import * as util from "node:util";
+import * as assert from "node:assert/strict";
 import process from "node:process";
 
-const tmp: string = os.tmpdir();      // e.g. "/tmp"
-const plat: string = os.platform();   // "linux"
-const arch: string = os.arch();       // "x64"
-
-const str: string = util.inspect({ a: 1, b: [2, 3] });
+const msg: string = util.format("Tenant %s processed %d items: %j", "alpha", 42, { ok: true });
+assert.strictEqual(util.types.isUint8Array(Buffer.alloc(4)), true);
+assert.deepStrictEqual({ a: [1, 2] }, { a: [1, 2] });
 const stage: string = process.env.NODE_ENV || "production";
 ```
 
-### 1.7 `slice:test` / `node:test` / `bun:test`
+### 1.8 `slice:test` / `node:test` / `bun:test`
 ```typescript
 import { describe, test, it, beforeEach, afterEach, expect } from "slice:test";
 // Also works with:
@@ -113,19 +141,24 @@ import { describe, test, it, beforeEach, afterEach, expect } from "slice:test";
 
 ## 2. Using External `npm` Packages (`node_modules/`)
 
-You can install packages into your project folder using `npm install`, `pnpm add`, or `bun install`, and then run or bundle your project with `slice run`, `slice pack`, or `slice compile`.
+You can install both CommonJS and modern ESM packages (including packages with complex conditional `package.json` `"exports"` maps and subpath exports) into your project folder using `npm install`, `pnpm add`, or `bun install`, and then run or bundle your project with `slice run`, `slice pack`, or `slice compile`.
 
 ```bash
 npm init -y
-npm install semver ms ini cookie bytes dlv dset mitt fast-querystring flatted
+npm install jose zod nanoid radix3 superjson ulid semver ms ini cookie bytes dlv dset mitt fast-querystring flatted
 slice run . --warm --metrics
 ```
 
-### Verified Production NPM Packages in Slice's 16-App Suite
-All 16 production applications in [`docker-tests/apps/`](file:///p:/opensource/slice/docker-tests/README.md) bundle and execute real third-party `node_modules` libraries and verify **100% byte-for-byte identical output** against Node.js, Deno, and Bun:
+### Verified Production NPM Packages in Slice's 20-App Suite
+All 20 production applications in [`docker-tests/apps/`](file:///p:/opensource/slice/docker-tests/README.md) bundle and execute real third-party `node_modules` libraries and verify **100% byte-for-byte identical output** against Node.js, Deno, and Bun:
 
-| NPM Package | Common Use Case | Slice Optimization Applied |
+| NPM Package | Common Use Case | Slice Optimization / Compatibility Applied |
 | :--- | :--- | :--- |
+| **`jose`** (`@5.9.6`) | Edge JWS (`HS256`), JWE (`A256GCM`), & JWKS cryptography | Conditional `"exports"` subpath resolution (`jose/jwt/sign`, `jose/flattened/encrypt`) + Native Rust `crypto.subtle` |
+| **`zod`** (`@3.23.8`) | TypeScript-first schema validation & transformation | Oxc AST ESM-to-CJS bundling + warm realm closure caching |
+| **`radix3`** (`@1.1.2`) | High-speed Radix-tree HTTP route matching (`UnJS` / `Nitro`) | Conditional `"exports"` ESM entry resolution + Oxc AST ESM-to-CJS transformation |
+| **`superjson`** (`@2.2.1`) | Rich TypeScript serialization (`Date`, `Map`, `Set`, `BigInt`, `RegExp`) | Transitive ESM graph resolution (`superjson` + `copy-anything` + `is-what`) |
+| **`nanoid`** (`@5.0.7`) & **`ulid`** (`@2.3.0`) | Collision-resistant URL-safe IDs & lexicographically sortable ULIDs | Pure ESM bundling + `crypto.getRandomValues` hardware CSPRNG |
 | **`semver`** (`@7.6.3`) | Semantic version parsing, coercion & range matching | Barrel tree-shaking (prunes 30+ unused files) + Native Rust `__slice_semver_*` fast path (`0.27 ms` warm!) |
 | **`ms`** (`@2.1.3`) | Human-readable time window parsing/formatting (`"14d"`, `"2h"`) | Native Rust `__slice_fast_ms` zero-regex fast path |
 | **`bytes`** (`@3.1.2`) | Byte unit parsing/formatting (`"64KB"`, `"4.56MB"`) | Native Rust `__slice_fast_bytes_*` + compile-time constant folding |
@@ -135,6 +168,8 @@ All 16 production applications in [`docker-tests/apps/`](file:///p:/opensource/s
 | **`flatted`** (`@3.3.1`) | Circular object graph serialization (OpenTelemetry spans) | Map-indexed single-pass cycle serializer/deserializer |
 | **`dlv`** (`@1.1.3`) & **`dset`** (`@3.1.3`) | Deep nested object property lookup and mutation | Direct CommonJS/ESM bundling |
 | **`mitt`** (`@3.0.1`) | Event emitter & CQRS pub/sub bus | Direct CommonJS/ESM bundling |
+
+> For the complete API matrix of supported WinterTC globals, `Buffer` methods, and `node:*` modules, see [`docs/COMPATIBILITY.md`](file:///p:/opensource/slice/docs/COMPATIBILITY.md).
 
 ---
 
