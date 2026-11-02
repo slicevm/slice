@@ -792,16 +792,21 @@ fn is_builtin_module(spec: &str) -> bool {
     }
     matches!(
         spec,
-        "fs" | "path"
+        "fs" | "fs/promises"
+            | "path"
+            | "path/posix"
+            | "path/win32"
             | "crypto"
             | "os"
             | "util"
+            | "util/types"
             | "events"
             | "buffer"
             | "process"
             | "url"
             | "stream"
             | "assert"
+            | "assert/strict"
     )
 }
 
@@ -816,6 +821,30 @@ fn try_file_with_extensions(base: &Path) -> Option<PathBuf> {
     if base.is_file() {
         return Some(base.to_path_buf());
     }
+    // TypeScript ESM convention: `import { x } from "./foo.js"` where `./foo.ts` exists on disk
+    if let Some(ext) = base.extension().and_then(|e| e.to_str()) {
+        match ext {
+            "js" => {
+                let ts_cand = base.with_extension("ts");
+                if ts_cand.is_file() {
+                    return Some(ts_cand);
+                }
+            }
+            "mjs" => {
+                let mts_cand = base.with_extension("mts");
+                if mts_cand.is_file() {
+                    return Some(mts_cand);
+                }
+            }
+            "cjs" => {
+                let cts_cand = base.with_extension("cts");
+                if cts_cand.is_file() {
+                    return Some(cts_cand);
+                }
+            }
+            _ => {}
+        }
+    }
     for ext in ["ts", "js", "mjs", "cjs", "json"] {
         let with_ext = base.with_extension(ext);
         if with_ext.is_file() {
@@ -827,6 +856,11 @@ fn try_file_with_extensions(base: &Path) -> Option<PathBuf> {
         if pkg_json.is_file() {
             if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if let Some(exports) = val.get("exports") {
+                        if let Some(found) = resolve_package_exports(base, exports, ".") {
+                            return Some(found);
+                        }
+                    }
                     if let Some(main_str) = val.get("main").and_then(|v| v.as_str()) {
                         if let Some(found) = try_file_with_extensions(&base.join(main_str)) {
                             return Some(found);
@@ -835,28 +869,6 @@ fn try_file_with_extensions(base: &Path) -> Option<PathBuf> {
                     if let Some(mod_str) = val.get("module").and_then(|v| v.as_str()) {
                         if let Some(found) = try_file_with_extensions(&base.join(mod_str)) {
                             return Some(found);
-                        }
-                    }
-                    if let Some(exports) = val.get("exports") {
-                        if let Some(s) = exports.as_str() {
-                            if let Some(found) = try_file_with_extensions(&base.join(s)) {
-                                return Some(found);
-                            }
-                        } else if let Some(dot) = exports.get(".") {
-                            if let Some(s) = dot.as_str() {
-                                if let Some(found) = try_file_with_extensions(&base.join(s)) {
-                                    return Some(found);
-                                }
-                            } else {
-                                for key in ["require", "default", "import"] {
-                                    if let Some(s) = dot.get(key).and_then(|v| v.as_str()) {
-                                        if let Some(found) = try_file_with_extensions(&base.join(s))
-                                        {
-                                            return Some(found);
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -872,14 +884,148 @@ fn try_file_with_extensions(base: &Path) -> Option<PathBuf> {
     None
 }
 
+fn resolve_exports_target(
+    pkg_dir: &Path,
+    target: &serde_json::Value,
+    wildcard_sub: Option<&str>,
+) -> Option<PathBuf> {
+    match target {
+        serde_json::Value::String(s) => {
+            let expanded = if let Some(sub) = wildcard_sub {
+                s.replace('*', sub)
+            } else {
+                s.clone()
+            };
+            let rel = expanded.strip_prefix("./").unwrap_or(&expanded);
+            try_file_with_extensions(&pkg_dir.join(rel))
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                if let Some(found) = resolve_exports_target(pkg_dir, item, wildcard_sub) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        serde_json::Value::Object(map) => {
+            const CONDITIONS: &[&str] = &[
+                "workerd",
+                "worker",
+                "edge-light",
+                "require",
+                "import",
+                "module",
+                "node",
+                "default",
+            ];
+            for &cond in CONDITIONS {
+                if let Some(v) = map.get(cond) {
+                    if let Some(found) = resolve_exports_target(pkg_dir, v, wildcard_sub) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn resolve_package_exports(
+    pkg_dir: &Path,
+    exports: &serde_json::Value,
+    subpath: &str,
+) -> Option<PathBuf> {
+    match exports {
+        serde_json::Value::String(_) | serde_json::Value::Array(_) => {
+            if subpath == "." {
+                resolve_exports_target(pkg_dir, exports, None)
+            } else {
+                None
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let has_dot_keys = map.keys().any(|k| k.starts_with('.'));
+            if !has_dot_keys {
+                if subpath == "." {
+                    return resolve_exports_target(pkg_dir, exports, None);
+                }
+                return None;
+            }
+            if let Some(exact) = map.get(subpath) {
+                if let Some(found) = resolve_exports_target(pkg_dir, exact, None) {
+                    return Some(found);
+                }
+            }
+            // Check wildcard subpath patterns (e.g. `"./*"` or `"./features/*"`) sorted by longest prefix
+            let mut pattern_keys: Vec<(&String, &serde_json::Value)> =
+                map.iter().filter(|(k, _)| k.contains('*')).collect();
+            pattern_keys.sort_by_key(|(b, _)| std::cmp::Reverse(b.len()));
+            for (pat_key, target_val) in pattern_keys {
+                if let Some((prefix, suffix)) = pat_key.split_once('*') {
+                    if subpath.starts_with(prefix)
+                        && subpath.ends_with(suffix)
+                        && subpath.len() >= prefix.len() + suffix.len()
+                    {
+                        let matched = &subpath[prefix.len()..subpath.len() - suffix.len()];
+                        if let Some(found) =
+                            resolve_exports_target(pkg_dir, target_val, Some(matched))
+                        {
+                            return Some(found);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn split_bare_package_specifier(spec: &str) -> (&str, String) {
+    if let Some(after_at) = spec.strip_prefix('@') {
+        if let Some(first_slash) = after_at.find('/') {
+            let rest = &after_at[first_slash + 1..];
+            if let Some(second_slash) = rest.find('/') {
+                let pkg_len = 1 + first_slash + 1 + second_slash;
+                return (&spec[..pkg_len], format!(".{}", &spec[pkg_len..]));
+            }
+        }
+        (spec, ".".to_string())
+    } else if let Some(slash) = spec.find('/') {
+        (&spec[..slash], format!(".{}", &spec[slash..]))
+    } else {
+        (spec, ".".to_string())
+    }
+}
+
 fn resolve_module_specifier(from_dir: &Path, spec: &str) -> Option<PathBuf> {
     if spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/') {
         return try_file_with_extensions(&from_dir.join(spec));
     }
 
-    // Walk up directory tree searching `node_modules/<spec>`
+    let (pkg_name, subpath) = split_bare_package_specifier(spec);
+
+    // Walk up directory tree searching `node_modules/<pkg_name>`
     let mut curr = Some(from_dir);
     while let Some(dir) = curr {
+        let pkg_dir = dir.join("node_modules").join(pkg_name);
+        if pkg_dir.is_dir() {
+            let pkg_json = pkg_dir.join("package.json");
+            if pkg_json.is_file() {
+                if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if let Some(exports) = val.get("exports") {
+                            if let Some(found) =
+                                resolve_package_exports(&pkg_dir, exports, &subpath)
+                            {
+                                return Some(found);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let nm_candidate = dir.join("node_modules").join(spec);
         if let Some(found) = try_file_with_extensions(&nm_candidate) {
             return Some(found);
@@ -1018,7 +1164,375 @@ fn resolve_spec_and_record(spec: &str, from_dir: &Path, deps_out: &mut Vec<PathB
     }
 }
 
+fn collect_binding_pattern_names(
+    pat: &oxc::ast::ast::BindingPattern<'_>,
+    out: &mut Vec<(String, String)>,
+) {
+    use oxc::ast::ast::BindingPattern;
+    match pat {
+        BindingPattern::BindingIdentifier(ident) => {
+            let n = ident.name.to_string();
+            out.push((n.clone(), n));
+        }
+        BindingPattern::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_binding_pattern_names(&prop.value, out);
+            }
+            if let Some(rest) = &obj.rest {
+                collect_binding_pattern_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            for elem in arr.elements.iter().flatten() {
+                collect_binding_pattern_names(elem, out);
+            }
+            if let Some(rest) = &arr.rest {
+                collect_binding_pattern_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::AssignmentPattern(assign) => {
+            collect_binding_pattern_names(&assign.left, out);
+        }
+    }
+}
+
+fn rewrite_cjs_requires_and_crypto(
+    snippet: &str,
+    from_dir: &Path,
+    deps_out: &mut Vec<PathBuf>,
+) -> String {
+    let mut rewritten = rewrite_cjs_requires_in_line(snippet, from_dir, deps_out);
+    if rewritten.contains("crypto.createHash(\"sha256\").update(")
+        && rewritten.contains(").digest(\"hex\")")
+    {
+        rewritten = rewritten
+            .replace(
+                "crypto.createHash(\"sha256\").update(",
+                "globalThis.__slice_crypto_sha256(",
+            )
+            .replace(").digest(\"hex\")", ")");
+    }
+    if rewritten.contains("crypto.createHmac(\"sha256\", ")
+        && rewritten.contains(").digest(\"hex\")")
+    {
+        rewritten = rewritten
+            .replace(
+                "crypto.createHmac(\"sha256\", ",
+                "globalThis.__slice_crypto_hmac_sha256(",
+            )
+            .replace(").update(", ", ")
+            .replace(").digest(\"hex\")", ")");
+    }
+    rewritten
+}
+
+fn try_transform_esm_to_cjs_ast(
+    js_code: &str,
+    from_dir: &Path,
+    deps_out: &mut Vec<PathBuf>,
+) -> Option<String> {
+    use oxc::ast::ast::{
+        Declaration, ExportDefaultDeclarationKind, ImportDeclarationSpecifier, Statement,
+    };
+    use oxc::span::GetSpan;
+
+    let allocator = oxc::allocator::Allocator::default();
+    let source_type = oxc::span::SourceType::ts().with_module(true);
+    let parser_ret = oxc::parser::Parser::new(&allocator, js_code, source_type).parse();
+    if !parser_ret.diagnostics.is_empty() {
+        return None;
+    }
+
+    let has_esm_stmt = parser_ret.program.body.iter().any(|stmt| {
+        matches!(
+            stmt,
+            Statement::ImportDeclaration(_)
+                | Statement::ExportDeclaration(_)
+                | Statement::ExportNamedDeclaration(_)
+                | Statement::ExportFromDeclaration(_)
+                | Statement::ExportDefaultDeclaration(_)
+                | Statement::ExportAllDeclaration(_)
+        )
+    });
+    if !has_esm_stmt {
+        return None;
+    }
+
+    let mut body_lines = Vec::with_capacity(parser_ret.program.body.len() + 4);
+    let mut deferred_exports: Vec<(String, String)> = Vec::new();
+    let mut has_default_export = false;
+    let mut req_counter = 0usize;
+
+    for stmt in &parser_ret.program.body {
+        match stmt {
+            Statement::ImportDeclaration(imp) => {
+                if imp.import_kind.is_type() {
+                    continue;
+                }
+                let spec = imp.source.value.as_str();
+                let resolved_id = resolve_spec_and_record(spec, from_dir, deps_out);
+                let Some(specs) = &imp.specifiers else {
+                    body_lines.push(format!("require({:?});", resolved_id));
+                    continue;
+                };
+                if specs.is_empty() {
+                    body_lines.push(format!("require({:?});", resolved_id));
+                    continue;
+                }
+                let mut default_ident: Option<&str> = None;
+                let mut namespace_ident: Option<&str> = None;
+                let mut named_specs: Vec<(String, String)> = Vec::new();
+
+                for s in specs {
+                    match s {
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(def) => {
+                            default_ident = Some(def.local.name.as_str());
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(ns) => {
+                            namespace_ident = Some(ns.local.name.as_str());
+                        }
+                        ImportDeclarationSpecifier::ImportSpecifier(named) => {
+                            if named.import_kind.is_type() {
+                                continue;
+                            }
+                            named_specs.push((
+                                named.imported.name().to_string(),
+                                named.local.name.to_string(),
+                            ));
+                        }
+                    }
+                }
+
+                if default_ident.is_none() && namespace_ident.is_none() && named_specs.is_empty() {
+                    continue;
+                }
+
+                if let Some(ns) = namespace_ident {
+                    body_lines.push(format!("const {} = require({:?});", ns, resolved_id));
+                }
+                if let Some(def_name) = default_ident {
+                    req_counter += 1;
+                    let tmp_var = format!("__imp_{}", req_counter);
+                    if !named_specs.is_empty() {
+                        let fields: Vec<String> = named_specs
+                            .iter()
+                            .map(|(imp_n, loc_n)| {
+                                if imp_n == loc_n {
+                                    imp_n.clone()
+                                } else {
+                                    format!("{}: {}", imp_n, loc_n)
+                                }
+                            })
+                            .collect();
+                        body_lines.push(format!(
+                            "const {tmp} = require({id:?}); const {def} = ({tmp} && {tmp}.__esModule && {tmp}.default !== undefined) ? {tmp}.default : ({tmp} && {tmp}.default !== undefined ? {tmp}.default : {tmp}); const {{ {destr} }} = {tmp};",
+                            tmp = tmp_var,
+                            id = resolved_id,
+                            def = def_name,
+                            destr = fields.join(", ")
+                        ));
+                    } else {
+                        body_lines.push(format!(
+                            "const {tmp} = require({id:?}); const {def} = ({tmp} && {tmp}.__esModule && {tmp}.default !== undefined) ? {tmp}.default : ({tmp} && {tmp}.default !== undefined ? {tmp}.default : {tmp});",
+                            tmp = tmp_var,
+                            id = resolved_id,
+                            def = def_name
+                        ));
+                    }
+                } else if !named_specs.is_empty() {
+                    let fields: Vec<String> = named_specs
+                        .iter()
+                        .map(|(imp_n, loc_n)| {
+                            if imp_n == loc_n {
+                                imp_n.clone()
+                            } else {
+                                format!("{}: {}", imp_n, loc_n)
+                            }
+                        })
+                        .collect();
+                    body_lines.push(format!(
+                        "const {{ {} }} = require({:?});",
+                        fields.join(", "),
+                        resolved_id
+                    ));
+                }
+            }
+            Statement::ExportAllDeclaration(exp_all) => {
+                if exp_all.export_kind.is_type() {
+                    continue;
+                }
+                let spec = exp_all.source.value.as_str();
+                let resolved_id = resolve_spec_and_record(spec, from_dir, deps_out);
+                if let Some(exported) = &exp_all.exported {
+                    body_lines.push(format!(
+                        "exports.{} = require({:?});",
+                        exported.name(),
+                        resolved_id
+                    ));
+                } else {
+                    body_lines.push(format!(
+                        "Object.assign(exports, require({:?}));",
+                        resolved_id
+                    ));
+                }
+            }
+            Statement::ExportDefaultDeclaration(exp_def) => {
+                has_default_export = true;
+                match &exp_def.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                        let fn_src = rewrite_cjs_requires_and_crypto(
+                            &js_code[func.span.start as usize..func.span.end as usize],
+                            from_dir,
+                            deps_out,
+                        );
+                        if let Some(id) = &func.id {
+                            body_lines.push(fn_src);
+                            body_lines.push(format!("const __slice_default = {};", id.name));
+                        } else {
+                            body_lines.push(format!("const __slice_default = {};", fn_src));
+                        }
+                    }
+                    ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
+                        let cls_src = rewrite_cjs_requires_and_crypto(
+                            &js_code[cls.span.start as usize..cls.span.end as usize],
+                            from_dir,
+                            deps_out,
+                        );
+                        if let Some(id) = &cls.id {
+                            body_lines.push(cls_src);
+                            body_lines.push(format!("const __slice_default = {};", id.name));
+                        } else {
+                            body_lines.push(format!("const __slice_default = {};", cls_src));
+                        }
+                    }
+                    ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
+                        has_default_export = false;
+                    }
+                    expr => {
+                        let sp = expr.span();
+                        let expr_src = rewrite_cjs_requires_and_crypto(
+                            &js_code[sp.start as usize..sp.end as usize],
+                            from_dir,
+                            deps_out,
+                        );
+                        body_lines.push(format!("const __slice_default = {};", expr_src));
+                    }
+                }
+            }
+            Statement::ExportDeclaration(exp_decl) => {
+                let decl = &exp_decl.declaration;
+                let sp = decl.span();
+                let decl_src = rewrite_cjs_requires_and_crypto(
+                    &js_code[sp.start as usize..sp.end as usize],
+                    from_dir,
+                    deps_out,
+                );
+                match decl {
+                    Declaration::VariableDeclaration(vd) => {
+                        body_lines.push(decl_src);
+                        for d in &vd.declarations {
+                            collect_binding_pattern_names(&d.id, &mut deferred_exports);
+                        }
+                    }
+                    Declaration::FunctionDeclaration(fd) => {
+                        body_lines.push(decl_src);
+                        if let Some(id) = &fd.id {
+                            deferred_exports.push((id.name.to_string(), id.name.to_string()));
+                        }
+                    }
+                    Declaration::ClassDeclaration(cd) => {
+                        body_lines.push(decl_src);
+                        if let Some(id) = &cd.id {
+                            deferred_exports.push((id.name.to_string(), id.name.to_string()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Statement::ExportFromDeclaration(exp_from) => {
+                if exp_from.export_kind.is_type() {
+                    continue;
+                }
+                let resolved_id =
+                    resolve_spec_and_record(exp_from.source.value.as_str(), from_dir, deps_out);
+                req_counter += 1;
+                let tmp_var = format!("__reexp_{}", req_counter);
+                body_lines.push(format!("const {} = require({:?});", tmp_var, resolved_id));
+                for spec in &exp_from.specifiers {
+                    if spec.export_kind.is_type() {
+                        continue;
+                    }
+                    let orig = spec.local.name();
+                    let alias = spec.exported.name();
+                    if orig == "default" {
+                        body_lines.push(format!(
+                            "exports.{alias} = ({tmp} && {tmp}.__esModule && {tmp}.default !== undefined) ? {tmp}.default : ({tmp} && {tmp}.default !== undefined ? {tmp}.default : {tmp});",
+                            alias = alias,
+                            tmp = tmp_var
+                        ));
+                    } else {
+                        body_lines.push(format!("exports.{} = {}.{};", alias, tmp_var, orig));
+                    }
+                }
+            }
+            Statement::ExportNamedDeclaration(exp_named) => {
+                if exp_named.export_kind.is_type() {
+                    continue;
+                }
+                for spec in &exp_named.specifiers {
+                    if spec.export_kind.is_type() {
+                        continue;
+                    }
+                    let orig = spec.local.name();
+                    let alias = spec.exported.name();
+                    if alias == "default" {
+                        has_default_export = true;
+                        body_lines.push(format!("const __slice_default = {};", orig));
+                    } else {
+                        deferred_exports.push((alias.to_string(), orig.to_string()));
+                    }
+                }
+            }
+            other_stmt => {
+                let sp = other_stmt.span();
+                let stmt_src = rewrite_cjs_requires_and_crypto(
+                    &js_code[sp.start as usize..sp.end as usize],
+                    from_dir,
+                    deps_out,
+                );
+                body_lines.push(stmt_src);
+            }
+        }
+    }
+
+    let uses_crypto_obj = body_lines.iter().any(|l| l.contains("crypto."));
+    if !uses_crypto_obj {
+        body_lines.retain(|l| l.trim() != "const crypto = require(\"node:crypto\");");
+    }
+
+    if has_default_export || !deferred_exports.is_empty() {
+        body_lines.push("exports.__esModule = true;".to_string());
+    }
+    for (export_name, local_name) in &deferred_exports {
+        body_lines.push(format!("exports.{} = {};", export_name, local_name));
+    }
+    if has_default_export {
+        body_lines.push("exports.default = __slice_default;".to_string());
+        if deferred_exports.is_empty() {
+            body_lines.push(
+                "module.exports = __slice_default; if (typeof module.exports === 'object' && module.exports !== null || typeof module.exports === 'function') { module.exports.default = __slice_default; module.exports.__esModule = true; }"
+                    .to_string(),
+            );
+        }
+    }
+
+    Some(body_lines.join("\n"))
+}
+
 fn transform_module_to_cjs(js_code: &str, from_dir: &Path, deps_out: &mut Vec<PathBuf>) -> String {
+    if let Some(ast_transformed) = try_transform_esm_to_cjs_ast(js_code, from_dir, deps_out) {
+        return ast_transformed;
+    }
     let collapsed = collapse_multiline_imports_exports(js_code);
     let mut body_lines = Vec::new();
     let mut deferred_exports: Vec<(String, String)> = Vec::new();
@@ -2378,6 +2892,101 @@ const allPositive = orders.every((entry) => entry.qty > 0);
         assert!(
             bundled.contains("customMsFromDisk") && bundled.contains("disk-ms:"),
             "Expected bundler to preserve actual node_modules/ms/index.js source from disk, got:\n{}",
+            bundled
+        );
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_phase_n4_oxc_ast_cjs_transform_and_package_exports() {
+        let test_dir = std::env::temp_dir().join("slice_phase_n4_exports_and_ast_test");
+        let _ = std::fs::remove_dir_all(&test_dir);
+        let src_dir = test_dir.join("src");
+        let scoped_pkg_dir = test_dir
+            .join("node_modules")
+            .join("@edge")
+            .join("kit");
+        let wildcard_pkg_dir = test_dir.join("node_modules").join("mini-hono");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(scoped_pkg_dir.join("dist")).unwrap();
+        std::fs::create_dir_all(wildcard_pkg_dir.join("dist").join("middleware")).unwrap();
+
+        // 1. Scoped package `@edge/kit` using nested `"workerd"` / `"import"` / `"default"` conditions
+        std::fs::write(
+            scoped_pkg_dir.join("package.json"),
+            r#"{
+  "name": "@edge/kit",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "workerd": {
+        "import": "./dist/edge-workerd.js",
+        "default": "./dist/edge-workerd.js"
+      },
+      "default": "./dist/fallback.js"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            scoped_pkg_dir.join("dist").join("edge-workerd.js"),
+            r#"export const RUNTIME_TARGET = "workerd-edge"; export default function kitVersion() { return "kit@4.0"; }"#,
+        )
+        .unwrap();
+
+        // 2. Wildcard subpath exports `"./*"` -> `"./dist/middleware/*.js"`
+        std::fs::write(
+            wildcard_pkg_dir.join("package.json"),
+            r#"{
+  "name": "mini-hono",
+  "exports": {
+    ".": "./dist/index.js",
+    "./*": {
+      "import": "./dist/middleware/*.js",
+      "default": "./dist/middleware/*.js"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            wildcard_pkg_dir
+                .join("dist")
+                .join("middleware")
+                .join("jwt.js"),
+            r#"export const { ALG_HS256, ALG_HS512 } = { ALG_HS256: "HS256", ALG_HS512: "HS512" };"#,
+        )
+        .unwrap();
+
+        // 3. Local TypeScript helper imported via `.js` extension (`./helper.js` -> `./helper.ts`)
+        std::fs::write(
+            src_dir.join("helper.ts"),
+            r#"export function normalizeRoute(p: string): string { return p.trim().toLowerCase(); }"#,
+        )
+        .unwrap();
+
+        let entry_ts = src_dir.join("index.ts");
+        std::fs::write(
+            &entry_ts,
+            r#"import kitVersion, {
+    RUNTIME_TARGET as targetName
+} from "@edge/kit";
+import { ALG_HS256 } from "mini-hono/jwt";
+import { normalizeRoute } from "./helper.js";
+
+export const summary = `${kitVersion()}:${targetName}:${ALG_HS256}:${normalizeRoute(" /API/V1 ")}`;
+"#,
+        )
+        .unwrap();
+
+        let bundled = bundle_entrypoint_with_deps(&entry_ts).unwrap();
+        assert!(
+            bundled.contains("workerd-edge")
+                && bundled.contains("ALG_HS256")
+                && bundled.contains("normalizeRoute"),
+            "Expected bundled output to resolve nested workerd exports, wildcard subpaths, and .js->.ts imports:\n{}",
             bundled
         );
 
