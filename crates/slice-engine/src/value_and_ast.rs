@@ -24,6 +24,8 @@ pub struct JsFunction {
     pub name: String,
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
+    #[serde(default)]
+    pub compiled_numeric: Option<crate::numeric_vm::NumericFunc>,
 }
 
 /// Dynamic ECMAScript Value inside a `SliceIsolate` compartment.
@@ -296,21 +298,68 @@ pub enum Expr {
 /// Fast-path Bytecode instruction for the Tier-0/Tier-2 Snapshot Engine (`SLICESNP`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BytecodeOp {
-    ConstNum { dst: String, val: f64 },
-    ConstStr { dst: String, val: String },
-    ImportCas { dst: String, specifier: String },
-    AddNum { dst: String, lhs: String, rhs: String },
-    NumericLoopKernel { dst: String, iterations: u64 },
-    FibKernel { dst: String, n: u64 },
-    CryptoDigest { dst: String, payload: String, rounds: u64 },
-    JsonTransform { dst: String, json_payload: String, iterations: u64 },
-    WinterTcRoute { dst: String, method: String, url: String },
-    MutateIntrinsic { target: String },
-    VfsRead { dst: String, path: String },
-    NetFetch { dst: String, host: String, path: String },
-    EnvGet { dst: String, key: String },
-    ConsoleLog { expr: String },
-    ReturnVar { var: String },
+    ConstNum {
+        dst: String,
+        val: f64,
+    },
+    ConstStr {
+        dst: String,
+        val: String,
+    },
+    ImportCas {
+        dst: String,
+        specifier: String,
+    },
+    AddNum {
+        dst: String,
+        lhs: String,
+        rhs: String,
+    },
+    NumericLoopKernel {
+        dst: String,
+        iterations: u64,
+    },
+    FibKernel {
+        dst: String,
+        n: u64,
+    },
+    CryptoDigest {
+        dst: String,
+        payload: String,
+        rounds: u64,
+    },
+    JsonTransform {
+        dst: String,
+        json_payload: String,
+        iterations: u64,
+    },
+    WinterTcRoute {
+        dst: String,
+        method: String,
+        url: String,
+    },
+    MutateIntrinsic {
+        target: String,
+    },
+    VfsRead {
+        dst: String,
+        path: String,
+    },
+    NetFetch {
+        dst: String,
+        host: String,
+        path: String,
+    },
+    EnvGet {
+        dst: String,
+        key: String,
+    },
+    ConsoleLog {
+        expr: String,
+    },
+    ReturnVar {
+        var: String,
+    },
     /// Phase 9B Priority 3: Monomorphic Tier-2 Register Loop promoted from Oxc `: number` type hints
     MonomorphicForLoop {
         acc_var: String,
@@ -322,7 +371,9 @@ pub enum BytecodeOp {
     /// General ECMAScript AST/Bytecode Statement for fast Tier-0 JS/TS execution
     EvalStmt(Stmt),
     /// Tier-1 Full-Spec Production ECMAScript VM (`boa_engine` + Oxc transpiled JS)
-    BoaFullEsVm { js_code: String },
+    BoaFullEsVm {
+        js_code: String,
+    },
 }
 
 /// Pre-compiled binary bytecode snapshot module (`SLICESNP`).
@@ -389,4 +440,3 @@ pub(crate) fn serde_json_to_js_value(v: &serde_json::Value) -> JsValue {
         }
     }
 }
-

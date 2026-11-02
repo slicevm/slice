@@ -27,6 +27,7 @@
 pub mod boa_realm;
 pub mod intrinsics;
 pub mod isolate;
+pub mod numeric_vm;
 pub mod outbound_http;
 pub mod parser_and_compiler;
 pub mod state_and_kv;
