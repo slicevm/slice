@@ -743,6 +743,31 @@ pub(crate) fn hmac_sha256_bytes(key: &[u8], message: &[u8]) -> [u8; 32] {
     outer.finalize()
 }
 
+/// Decodes a hexadecimal string into raw bytes (stopping at the first non-hex byte pair,
+/// matching Node.js `Buffer.from(str, 'hex')` semantics).
+#[inline]
+pub(crate) fn hex_decode_bytes(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let pairs = bytes.len() / 2;
+    let mut out = Vec::with_capacity(pairs);
+    for i in 0..pairs {
+        let hi = match bytes[i * 2] {
+            b'0'..=b'9' => bytes[i * 2] - b'0',
+            b'a'..=b'f' => bytes[i * 2] - b'a' + 10,
+            b'A'..=b'F' => bytes[i * 2] - b'A' + 10,
+            _ => break,
+        };
+        let lo = match bytes[i * 2 + 1] {
+            b'0'..=b'9' => bytes[i * 2 + 1] - b'0',
+            b'a'..=b'f' => bytes[i * 2 + 1] - b'a' + 10,
+            b'A'..=b'F' => bytes[i * 2 + 1] - b'A' + 10,
+            _ => break,
+        };
+        out.push((hi << 4) | lo);
+    }
+    out
+}
+
 /// Zero-allocation FIPS 180-4 SHA-1 state machine (for WebCrypto `"SHA-1"` and WebSocket handshakes).
 pub(crate) struct Sha1State {
     h: [u32; 5],

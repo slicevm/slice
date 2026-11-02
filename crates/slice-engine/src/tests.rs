@@ -2258,3 +2258,165 @@ fn test_phase_n3_wintertc_encoding_webcrypto_streams_and_cloning() {
     assert_eq!(out["clonePreservedCycle"], true);
     assert_eq!(out["streamJoined"], "ALPHA-BETA-GAMMA");
 }
+
+#[test]
+fn test_phase_n4_uint8array_buffer_and_node_core_tier1() {
+    let script = r#"
+import { EventEmitter } from "node:events";
+import * as path from "node:path";
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
+import assert from "node:assert";
+import * as util from "node:util";
+
+async function main() {
+    // 1. Real Uint8Array-backed Buffer & binary wire-protocol methods
+    const b1 = Buffer.from("Slice\u20ac", "utf8");
+    assert.strictEqual(Buffer.isBuffer(b1), true);
+    assert.strictEqual(b1 instanceof Uint8Array, true);
+    assert.strictEqual(b1 instanceof Buffer, true);
+    assert.strictEqual(b1.length, 8);
+    assert.strictEqual(Buffer.byteLength("Slice\u20ac", "utf8"), 8);
+
+    const hexStr = b1.toString("hex");
+    const bFromHex = Buffer.from(hexStr, "hex");
+    assert.strictEqual(b1.equals(bFromHex), true);
+    assert.strictEqual(bFromHex.toString("utf8"), "Slice\u20ac");
+
+    const b64u = b1.toString("base64url");
+    assert.strictEqual(Buffer.from(b64u, "base64url").toString("utf8"), "Slice\u20ac");
+
+    // Shared memory view on slice / subarray & binary integer readers/writers
+    const wire = Buffer.alloc(16);
+    wire.writeUInt32BE(0xdeadbeef, 0);
+    wire.writeUInt32LE(0x12345678, 4);
+    wire.writeBigUInt64BE(0x0102030405060708n, 8);
+    assert.strictEqual(wire.readUInt32BE(0), 0xdeadbeef);
+    assert.strictEqual(wire.readUInt32LE(4), 0x12345678);
+    assert.strictEqual(wire.readBigUInt64BE(8), 0x0102030405060708n);
+
+    const sub = wire.slice(0, 4);
+    sub[0] = 0xca;
+    assert.strictEqual(wire[0], 0xca);
+
+    const cat = Buffer.concat([Buffer.from("AB"), Buffer.from("CD")]);
+    assert.strictEqual(cat.toString("utf8"), "ABCD");
+
+    // 2. node:events EventEmitter
+    const bus = new EventEmitter();
+    const evLog: string[] = [];
+    bus.on("packet", (id: number) => evLog.push(`on:${id}`));
+    bus.once("packet", (id: number) => evLog.push(`once:${id}`));
+    bus.prependListener("packet", (id: number) => evLog.push(`pre:${id}`));
+    bus.emit("packet", 1);
+    bus.emit("packet", 2);
+    assert.deepStrictEqual(evLog, ["pre:1", "on:1", "once:1", "pre:2", "on:2"]);
+
+    // 3. node:path
+    const norm = path.normalize("/a/b/../c/./d//file.tar.gz");
+    const rel = path.relative("/a/c/x", "/a/c/d/file.tar.gz");
+    const parsed = path.parse(norm);
+    const formatted = path.format(parsed);
+    assert.strictEqual(norm, "/a/c/d/file.tar.gz");
+    assert.strictEqual(rel, "../d/file.tar.gz");
+    assert.strictEqual(parsed.base, "file.tar.gz");
+    assert.strictEqual(parsed.name, "file.tar");
+    assert.strictEqual(parsed.ext, ".gz");
+    assert.strictEqual(formatted, "/a/c/d/file.tar.gz");
+
+    // 4. node:crypto streaming multi-chunk Hash/HMAC + randomBytes
+    const rb = crypto.randomBytes(12);
+    assert.strictEqual(Buffer.isBuffer(rb), true);
+    assert.strictEqual(rb.length, 12);
+
+    const h512 = crypto.createHash("sha512")
+        .update(Buffer.from("ab"))
+        .update("c")
+        .digest();
+    assert.strictEqual(Buffer.isBuffer(h512), true);
+    assert.strictEqual(h512.length, 64);
+    assert.strictEqual(h512.toString("hex").slice(0, 16), "ddaf35a193617aba");
+
+    const hmacBuf = crypto.createHmac("sha256", Buffer.from("secret-key"))
+        .update("part1:")
+        .update(Buffer.from("part2"))
+        .digest();
+    assert.strictEqual(Buffer.isBuffer(hmacBuf), true);
+    assert.strictEqual(hmacBuf.length, 32);
+
+    // 5. node:fs & node:fs/promises + Time-Travel VFS checkpoint
+    const snap = Slice.checkpoint();
+    await fsp.mkdir("/tmp/n4_dir");
+    await fsp.writeFile("/tmp/n4_dir/a.txt", Buffer.from("payload-v1"));
+    fs.copyFileSync("/tmp/n4_dir/a.txt", "/tmp/n4_dir/b.txt");
+    fs.renameSync("/tmp/n4_dir/b.txt", "/tmp/n4_dir/c.txt");
+    const stFile = await fsp.stat("/tmp/n4_dir/c.txt");
+    const stDir = await fsp.stat("/tmp/n4_dir");
+    const rawBuf = await fsp.readFile("/tmp/n4_dir/c.txt", null);
+    assert.strictEqual(Buffer.isBuffer(rawBuf), true);
+    assert.strictEqual(rawBuf.toString("utf8"), "payload-v1");
+    assert.strictEqual(stFile.isFile(), true);
+    assert.strictEqual(stDir.isDirectory(), true);
+    Slice.restore(snap);
+    assert.strictEqual(fs.existsSync("/tmp/n4_dir/c.txt"), false);
+
+    // 6. node:util & node:assert
+    const formattedMsg = util.format("route=%s code=%d ok=%j %%", "/api", 200, { v: 1 });
+    assert.strictEqual(formattedMsg, "route=/api code=200 ok={\"v\":1} %");
+    assert.strictEqual(util.types.isBuffer(b1), true);
+    assert.strictEqual(util.types.isUint8Array(b1), true);
+
+    const asyncAdd = util.promisify((x: number, y: number, cb: (err: any, r?: number) => void) => {
+        cb(null, x + y);
+    });
+    const sum = await asyncAdd(19, 23);
+    assert.strictEqual(sum, 42);
+
+    assert.throws(() => {
+        throw new RangeError("out of bounds");
+    }, /out of bounds/);
+
+    console.log(JSON.stringify({
+        ok: true,
+        hexStr,
+        randHex: rb.toString("hex"),
+        sha512Prefix: h512.toString("hex").slice(0, 16),
+        hmacHex: hmacBuf.toString("hex").slice(0, 16),
+        rel,
+        sum
+    }));
+}
+main();
+"#;
+
+    let bc = compile_source_to_bytecode(script);
+    let mut iso1 = SliceIsolate::spawn(
+        "phase-n4-tenant-1",
+        1,
+        CapabilityToken::pure_compute(),
+        25_000_000,
+        8 * 1024 * 1024,
+    );
+    iso1.set_deterministic_seed(Some(20261104));
+    let m1 = iso1.execute_bytecode(&bc, None).unwrap();
+
+    let mut iso2 = SliceIsolate::spawn(
+        "phase-n4-tenant-2",
+        2,
+        CapabilityToken::pure_compute(),
+        25_000_000,
+        8 * 1024 * 1024,
+    );
+    iso2.set_deterministic_seed(Some(20261104));
+    let m2 = iso2.execute_bytecode(&bc, None).unwrap();
+
+    assert_eq!(m1.stdout[0], m2.stdout[0]);
+    let out: serde_json::Value =
+        serde_json::from_str(&m1.stdout[0]).expect(&m1.stdout[0]);
+    assert_eq!(out["ok"], true);
+    assert_eq!(out["hexStr"], "536c696365e282ac");
+    assert_eq!(out["sha512Prefix"], "ddaf35a193617aba");
+    assert_eq!(out["rel"], "../d/file.tar.gz");
+    assert_eq!(out["sum"], 42);
+}

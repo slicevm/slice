@@ -8,9 +8,9 @@ use crate::event_loop::{
 use crate::intrinsics::{
     base64_decode, base64_encode, bytes_to_hex, constant_time_eq, fast_format_bytes,
     fast_format_ms, fast_parse_bytes, fast_parse_ms, fill_random_bytes, generate_uuid_v4,
-    hmac_sha1_bytes, hmac_sha256_bytes, hmac_sha256_hex, hmac_sha384_bytes, hmac_sha512_bytes,
-    semver_coerce_xyz, semver_parse_strict_xyz, semver_satisfies_xyz, sha1_bytes, sha256_bytes,
-    sha256_hex, sha384_bytes, sha512_bytes, whatwg_atob, whatwg_btoa,
+    hex_decode_bytes, hmac_sha1_bytes, hmac_sha256_bytes, hmac_sha256_hex, hmac_sha384_bytes,
+    hmac_sha512_bytes, semver_coerce_xyz, semver_parse_strict_xyz, semver_satisfies_xyz,
+    sha1_bytes, sha256_bytes, sha256_hex, sha384_bytes, sha512_bytes, whatwg_atob, whatwg_btoa,
 };
 use crate::isolate::{SandboxEvalOptions, SliceIsolate};
 use crate::outbound_http::{
@@ -1143,6 +1143,372 @@ globalThis.structuredClone = function(value) {
   if (arguments.length === 0) throw new TypeError("structuredClone requires at least 1 argument");
   return __cloneDeep(value, [], []);
 };
+
+var __U8 = globalThis.Uint8Array;
+var __u8Proto = __U8.prototype;
+
+function __wrapBuf(u8) {
+  Object.setPrototypeOf(u8, Buffer.prototype);
+  return u8;
+}
+
+function __utf8ByteLen(str) {
+  var s = String(str), len = s.length, bytes = 0;
+  for (var i = 0; i < len; i++) {
+    var c = s.charCodeAt(i);
+    if (c < 0x80) bytes += 1;
+    else if (c < 0x800) bytes += 2;
+    else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < len) {
+      var c2 = s.charCodeAt(i + 1);
+      if (c2 >= 0xDC00 && c2 <= 0xDFFF) { bytes += 4; i++; }
+      else bytes += 3;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+function Buffer(arg, encOrOffset, length) {
+  if (typeof arg === "number") return Buffer.alloc(arg);
+  return Buffer.from(arg, encOrOffset, length);
+}
+Object.setPrototypeOf(Buffer.prototype, __u8Proto);
+Object.setPrototypeOf(Buffer, __U8);
+Buffer.prototype._isBuffer = true;
+Buffer.poolSize = 8192;
+
+Buffer.isBuffer = function(obj) {
+  return Boolean(obj && obj._isBuffer === true);
+};
+
+Buffer.isEncoding = function(enc) {
+  if (typeof enc !== "string") return false;
+  var e = enc.toLowerCase();
+  return e === "utf8" || e === "utf-8" || e === "hex" || e === "base64" || e === "base64url" ||
+         e === "latin1" || e === "binary" || e === "ascii" || e === "ucs2" || e === "ucs-2" ||
+         e === "utf16le" || e === "utf-16le";
+};
+
+Buffer.from = function(value, encOrOffset, length) {
+  if (typeof value === "string") {
+    var e = encOrOffset ? String(encOrOffset).toLowerCase() : "utf8";
+    if (e === "base64" || e === "base64url") {
+      return __wrapBuf(__slice_base64_decode_bytes(value));
+    }
+    if (e === "hex") {
+      return __wrapBuf(__slice_hex_decode(value));
+    }
+    if (e === "latin1" || e === "binary" || e === "ascii") {
+      var n = value.length, u = new __U8(n);
+      var mask = e === "ascii" ? 0x7f : 0xff;
+      for (var i = 0; i < n; i++) u[i] = value.charCodeAt(i) & mask;
+      return __wrapBuf(u);
+    }
+    return __wrapBuf(__slice_text_encode(value));
+  }
+  if (value instanceof ArrayBuffer) {
+    var off = encOrOffset !== undefined ? Math.max(0, Number(encOrOffset) | 0) : 0;
+    var maxLen = Math.max(0, value.byteLength - off);
+    var len2 = length !== undefined ? Math.min(maxLen, Math.max(0, Number(length) | 0)) : maxLen;
+    return __wrapBuf(new __U8(value, off, len2));
+  }
+  if (value instanceof __U8) {
+    return __wrapBuf(new __U8(value));
+  }
+  if (value && ArrayBuffer.isView(value)) {
+    return __wrapBuf(new __U8(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength)));
+  }
+  if (Array.isArray(value) || (value && typeof value.length === "number")) {
+    return __wrapBuf(new __U8(value));
+  }
+  if (value && value.type === "Buffer" && Array.isArray(value.data)) {
+    return __wrapBuf(new __U8(value.data));
+  }
+  throw new TypeError("The first argument must be of type string, Buffer, ArrayBuffer, Array, or Array-like Object");
+};
+
+Buffer.alloc = function(size, fill, encoding) {
+  var n = Math.max(0, Number(size) | 0);
+  var b = __wrapBuf(new __U8(n));
+  if (fill !== undefined && fill !== 0 && n > 0) {
+    b.fill(fill, 0, n, encoding);
+  }
+  return b;
+};
+
+Buffer.allocUnsafe = function(size) {
+  return Buffer.alloc(size);
+};
+
+Buffer.allocUnsafeSlow = function(size) {
+  return Buffer.alloc(size);
+};
+
+Buffer.byteLength = function(input, encoding) {
+  if (typeof input !== "string") {
+    if (input && typeof input.byteLength === "number") return input.byteLength;
+    if (input && typeof input.length === "number") return input.length;
+    input = String(input);
+  }
+  var e = encoding ? String(encoding).toLowerCase() : "utf8";
+  if (e === "utf8" || e === "utf-8") return __utf8ByteLen(input);
+  if (e === "hex") return input.length >>> 1;
+  if (e === "base64" || e === "base64url") return __slice_base64_decode_bytes(input).byteLength;
+  if (e === "latin1" || e === "binary" || e === "ascii") return input.length;
+  return __utf8ByteLen(input);
+};
+
+Buffer.concat = function(list, totalLength) {
+  if (!Array.isArray(list)) throw new TypeError("The \"list\" argument must be an instance of Array");
+  if (list.length === 0) return Buffer.alloc(0);
+  var total = 0;
+  if (totalLength !== undefined) {
+    total = Math.max(0, Number(totalLength) | 0);
+  } else {
+    for (var i = 0; i < list.length; i++) total += list[i].length;
+  }
+  var out = Buffer.alloc(total);
+  var pos = 0;
+  for (var j = 0; j < list.length; j++) {
+    var chunk = list[j];
+    if (!chunk || chunk.length === 0) continue;
+    var rem = total - pos;
+    if (rem <= 0) break;
+    if (chunk.length <= rem) {
+      out.set(chunk, pos);
+      pos += chunk.length;
+    } else {
+      out.set(__u8Proto.subarray.call(chunk, 0, rem), pos);
+      pos += rem;
+    }
+  }
+  return out;
+};
+
+Buffer.compare = function(a, b) {
+  if (!(a instanceof __U8) || !(b instanceof __U8)) {
+    throw new TypeError("The \"buf1\", \"buf2\" arguments must be Uint8Array or Buffer");
+  }
+  var len = Math.min(a.length, b.length);
+  for (var i = 0; i < len; i++) {
+    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  }
+  return a.length === b.length ? 0 : (a.length < b.length ? -1 : 1);
+};
+
+Buffer.prototype.toString = function(encoding, start, end) {
+  var len = this.length;
+  if (len === 0) return "";
+  var s = start === undefined ? 0 : Math.max(0, Number(start) | 0);
+  var e = end === undefined ? len : Math.min(len, Number(end) | 0);
+  if (s >= e) return "";
+  var view = (s === 0 && e === len) ? this : __u8Proto.subarray.call(this, s, e);
+  var enc = encoding ? String(encoding).toLowerCase() : "utf8";
+  if (enc === "hex") return __slice_bytes_to_hex(view);
+  if (enc === "base64") return __slice_base64_encode_bytes(view, false);
+  if (enc === "base64url") return __slice_base64_encode_bytes(view, true);
+  if (enc === "latin1" || enc === "binary") return __slice_text_decode(view, "latin1", false, true);
+  if (enc === "ascii") {
+    var out = "";
+    for (var i = 0; i < view.length; i++) out += String.fromCharCode(view[i] & 0x7f);
+    return out;
+  }
+  return __slice_text_decode(view, "utf-8", false, true);
+};
+
+Buffer.prototype.subarray = function(start, end) {
+  return __wrapBuf(__u8Proto.subarray.call(this, start, end));
+};
+
+Buffer.prototype.slice = function(start, end) {
+  return __wrapBuf(__u8Proto.subarray.call(this, start, end));
+};
+
+Buffer.prototype.equals = function(other) {
+  if (!(other instanceof __U8)) throw new TypeError("The \"otherBuffer\" argument must be an instance of Buffer or Uint8Array");
+  return Buffer.compare(this, other) === 0;
+};
+
+Buffer.prototype.compare = function(target, targetStart, targetEnd, sourceStart, sourceEnd) {
+  if (!(target instanceof __U8)) throw new TypeError("The \"target\" argument must be an instance of Buffer or Uint8Array");
+  var ts = targetStart === undefined ? 0 : Math.max(0, Number(targetStart) | 0);
+  var te = targetEnd === undefined ? target.length : Math.min(target.length, Number(targetEnd) | 0);
+  var ss = sourceStart === undefined ? 0 : Math.max(0, Number(sourceStart) | 0);
+  var se = sourceEnd === undefined ? this.length : Math.min(this.length, Number(sourceEnd) | 0);
+  var a = (ss === 0 && se === this.length) ? this : __u8Proto.subarray.call(this, ss, se);
+  var b = (ts === 0 && te === target.length) ? target : __u8Proto.subarray.call(target, ts, te);
+  return Buffer.compare(a, b);
+};
+
+Buffer.prototype.copy = function(target, targetStart, sourceStart, sourceEnd) {
+  if (!(target instanceof __U8)) throw new TypeError("The \"target\" argument must be a Buffer or Uint8Array");
+  var ts = targetStart === undefined ? 0 : Math.max(0, Number(targetStart) | 0);
+  var ss = sourceStart === undefined ? 0 : Math.max(0, Number(sourceStart) | 0);
+  var se = sourceEnd === undefined ? this.length : Math.min(this.length, Number(sourceEnd) | 0);
+  if (ss >= se || ts >= target.length) return 0;
+  var count = Math.min(se - ss, target.length - ts);
+  target.set(__u8Proto.subarray.call(this, ss, ss + count), ts);
+  return count;
+};
+
+Buffer.prototype.fill = function(val, offset, end, encoding) {
+  var s = offset === undefined ? 0 : Math.max(0, Number(offset) | 0);
+  var e = end === undefined ? this.length : Math.min(this.length, Number(end) | 0);
+  if (s >= e) return this;
+  if (typeof val === "number") {
+    __u8Proto.fill.call(this, val & 0xff, s, e);
+    return this;
+  }
+  var pat = typeof val === "string" ? Buffer.from(val, encoding) : (val instanceof __U8 ? val : Buffer.from([Number(val) & 0xff]));
+  if (pat.length === 0) {
+    __u8Proto.fill.call(this, 0, s, e);
+    return this;
+  }
+  for (var i = s; i < e; i++) {
+    this[i] = pat[(i - s) % pat.length];
+  }
+  return this;
+};
+
+Buffer.prototype.write = function(str, offset, length, encoding) {
+  var off = 0, len = this.length, enc = "utf8";
+  if (typeof offset === "string") {
+    enc = offset;
+  } else if (typeof offset === "number") {
+    off = offset | 0;
+    if (typeof length === "string") enc = length;
+    else if (typeof length === "number") {
+      len = length | 0;
+      if (typeof encoding === "string") enc = encoding;
+    }
+  }
+  var maxAvail = Math.max(0, this.length - off);
+  var maxWrite = Math.min(maxAvail, Math.max(0, len));
+  if (maxWrite === 0) return 0;
+  var src = Buffer.from(String(str), enc);
+  var count = Math.min(src.length, maxWrite);
+  this.set(__u8Proto.subarray.call(src, 0, count), off);
+  return count;
+};
+
+Buffer.prototype.toJSON = function() {
+  var d = new Array(this.length);
+  for (var i = 0; i < this.length; i++) d[i] = this[i];
+  return { type: "Buffer", data: d };
+};
+
+Buffer.prototype.readUInt8 = function(offset) {
+  var o = (offset | 0);
+  if (o < 0 || o >= this.length) throw new RangeError("Index out of range");
+  return this[o];
+};
+Buffer.prototype.readInt8 = function(offset) {
+  var v = this.readUInt8(offset);
+  return (v & 0x80) ? v - 0x100 : v;
+};
+Buffer.prototype.readUInt16BE = function(offset) {
+  var o = (offset | 0);
+  if (o < 0 || o + 2 > this.length) throw new RangeError("Index out of range");
+  return (this[o] << 8) | this[o + 1];
+};
+Buffer.prototype.readUInt16LE = function(offset) {
+  var o = (offset | 0);
+  if (o < 0 || o + 2 > this.length) throw new RangeError("Index out of range");
+  return this[o] | (this[o + 1] << 8);
+};
+Buffer.prototype.readInt16BE = function(offset) {
+  var v = this.readUInt16BE(offset);
+  return (v & 0x8000) ? v - 0x10000 : v;
+};
+Buffer.prototype.readInt16LE = function(offset) {
+  var v = this.readUInt16LE(offset);
+  return (v & 0x8000) ? v - 0x10000 : v;
+};
+Buffer.prototype.readUInt32BE = function(offset) {
+  var o = (offset | 0);
+  if (o < 0 || o + 4 > this.length) throw new RangeError("Index out of range");
+  return (this[o] * 0x1000000) + ((this[o + 1] << 16) | (this[o + 2] << 8) | this[o + 3]);
+};
+Buffer.prototype.readUInt32LE = function(offset) {
+  var o = (offset | 0);
+  if (o < 0 || o + 4 > this.length) throw new RangeError("Index out of range");
+  return ((this[o] | (this[o + 1] << 8) | (this[o + 2] << 16)) + (this[o + 3] * 0x1000000));
+};
+Buffer.prototype.readInt32BE = function(offset) {
+  var o = (offset | 0);
+  if (o < 0 || o + 4 > this.length) throw new RangeError("Index out of range");
+  return (this[o] << 24) | (this[o + 1] << 16) | (this[o + 2] << 8) | this[o + 3];
+};
+Buffer.prototype.readInt32LE = function(offset) {
+  var o = (offset | 0);
+  if (o < 0 || o + 4 > this.length) throw new RangeError("Index out of range");
+  return this[o] | (this[o + 1] << 8) | (this[o + 2] << 16) | (this[o + 3] << 24);
+};
+Buffer.prototype.readBigUInt64BE = function(offset) {
+  var hi = BigInt(this.readUInt32BE(offset));
+  var lo = BigInt(this.readUInt32BE((offset | 0) + 4));
+  return (hi << 32n) | lo;
+};
+Buffer.prototype.readBigUInt64LE = function(offset) {
+  var lo = BigInt(this.readUInt32LE(offset));
+  var hi = BigInt(this.readUInt32LE((offset | 0) + 4));
+  return (hi << 32n) | lo;
+};
+Buffer.prototype.writeUInt8 = function(value, offset) {
+  var o = (offset | 0);
+  if (o < 0 || o >= this.length) throw new RangeError("Index out of range");
+  this[o] = Number(value) & 0xff;
+  return o + 1;
+};
+Buffer.prototype.writeInt8 = Buffer.prototype.writeUInt8;
+Buffer.prototype.writeUInt16BE = function(value, offset) {
+  var o = (offset | 0), v = Number(value) & 0xffff;
+  if (o < 0 || o + 2 > this.length) throw new RangeError("Index out of range");
+  this[o] = (v >>> 8) & 0xff;
+  this[o + 1] = v & 0xff;
+  return o + 2;
+};
+Buffer.prototype.writeUInt16LE = function(value, offset) {
+  var o = (offset | 0), v = Number(value) & 0xffff;
+  if (o < 0 || o + 2 > this.length) throw new RangeError("Index out of range");
+  this[o] = v & 0xff;
+  this[o + 1] = (v >>> 8) & 0xff;
+  return o + 2;
+};
+Buffer.prototype.writeInt16BE = Buffer.prototype.writeUInt16BE;
+Buffer.prototype.writeInt16LE = Buffer.prototype.writeUInt16LE;
+Buffer.prototype.writeUInt32BE = function(value, offset) {
+  var o = (offset | 0), v = Number(value) >>> 0;
+  if (o < 0 || o + 4 > this.length) throw new RangeError("Index out of range");
+  this[o] = (v >>> 24) & 0xff;
+  this[o + 1] = (v >>> 16) & 0xff;
+  this[o + 2] = (v >>> 8) & 0xff;
+  this[o + 3] = v & 0xff;
+  return o + 4;
+};
+Buffer.prototype.writeUInt32LE = function(value, offset) {
+  var o = (offset | 0), v = Number(value) >>> 0;
+  if (o < 0 || o + 4 > this.length) throw new RangeError("Index out of range");
+  this[o] = v & 0xff;
+  this[o + 1] = (v >>> 8) & 0xff;
+  this[o + 2] = (v >>> 16) & 0xff;
+  this[o + 3] = (v >>> 24) & 0xff;
+  return o + 4;
+};
+Buffer.prototype.writeInt32BE = Buffer.prototype.writeUInt32BE;
+Buffer.prototype.writeInt32LE = Buffer.prototype.writeUInt32LE;
+Buffer.prototype.writeBigUInt64BE = function(value, offset) {
+  var o = (offset | 0), v = BigInt(value);
+  this.writeUInt32BE(Number((v >> 32n) & 0xffffffffn), o);
+  this.writeUInt32BE(Number(v & 0xffffffffn), o + 4);
+  return o + 8;
+};
+Buffer.prototype.writeBigUInt64LE = function(value, offset) {
+  var o = (offset | 0), v = BigInt(value);
+  this.writeUInt32LE(Number(v & 0xffffffffn), o);
+  this.writeUInt32LE(Number((v >> 32n) & 0xffffffffn), o + 4);
+  return o + 8;
+};
+globalThis.Buffer = Buffer;
 })();"##;
 
 pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
@@ -1191,13 +1557,17 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             let snippet: &[u8] = match id.as_str() {
-                "crypto" | "node:crypto" => br#"var __h={_c:"",_b:false,update:function(d){this._c+=String(d);return this;},digest:function(){var r=__slice_crypto_sha256(this._c);this._c="";this._b=false;return r;}},__m={_k:"",_c:"",_b:false,update:function(d){this._c+=String(d);return this;},digest:function(){var r=__slice_crypto_hmac_sha256(this._k,this._c);this._c="";this._b=false;return r;}},m={createHash:function(){if(!__h._b){__h._c="";__h._b=true;return __h;}return{_c:"",update:function(d){this._c+=String(d);return this;},digest:function(){return __slice_crypto_sha256(this._c);}};},createHmac:function(_a,s){var k=String(s);if(!__m._b){__m._k=k;__m._c="";__m._b=true;return __m;}return{_c:"",update:function(d){this._c+=String(d);return this;},digest:function(){return __slice_crypto_hmac_sha256(k,this._c);}};},randomUUID:function(){return __slice_crypto_random_uuid();},getRandomValues:function(ta){return __slice_crypto_get_random_values(ta);},timingSafeEqual:function(a,b){return __slice_crypto_timing_safe_equal(a,b);},subtle:globalThis.crypto.subtle,webcrypto:globalThis.crypto};m.default=m;m.__esModule=true;__slice_builtins["crypto"]=__slice_builtins["node:crypto"]=m;"#,
-                "fs" | "node:fs" => br#"var m={readFileSync:function(p){return __slice_fs_read_file_sync(String(p));},writeFileSync:function(p,d){return __slice_fs_write_file_sync(String(p),String(d));},appendFileSync:function(p,d){return __slice_fs_append_file_sync(String(p),String(d));},existsSync:function(p){return Boolean(__slice_fs_exists_sync(String(p)));},mkdirSync:function(p){return __slice_fs_mkdir_sync(String(p));},readdirSync:function(p){return JSON.parse(__slice_fs_readdir_sync(String(p)));},statSync:function(p){return{size:__slice_fs_stat_sync(String(p))};},unlinkSync:function(p){return __slice_fs_rm_sync(String(p));},rmSync:function(p){return __slice_fs_rm_sync(String(p));}};m.default=m;m.__esModule=true;__slice_builtins["fs"]=__slice_builtins["node:fs"]=m;"#,
-                "path" | "node:path" => br#"var m={sep:"/",join:function(){return __slice_path_join.apply(null,arguments);},resolve:function(){return __slice_path_join.apply(null,arguments);},basename:function(p,ext){var s=String(p).replace(/\\/g,"/").replace(/\/+$/,""),i=s.lastIndexOf("/"),b=i>=0?s.slice(i+1):s;return(ext&&b.endsWith(ext))?b.slice(0,b.length-ext.length):b;},dirname:function(p){var s=String(p).replace(/\\/g,"/").replace(/\/+$/,""),i=s.lastIndexOf("/");return i>0?s.slice(0,i):(i===0?"/":".");},extname:function(p){var b=m.basename(p),i=b.lastIndexOf(".");return i>0?b.slice(i):"";}};m.default=m;m.__esModule=true;__slice_builtins["path"]=__slice_builtins["node:path"]=m;"#,
-                "os" | "node:os" => br#"var m={tmpdir:function(){return __slice_os_tmpdir();},platform:function(){return __slice_os_platform();},arch:function(){return __slice_os_arch();},EOL:"\n"};m.default=m;m.__esModule=true;__slice_builtins["os"]=__slice_builtins["node:os"]=m;"#,
-                "util" | "node:util" => br#"var m={inspect:function(v){return typeof v==="object"?JSON.stringify(v):String(v);},deprecate:function(f){return f;},promisify:function(f){return f;}};m.default=m;__slice_builtins["util"]=__slice_builtins["node:util"]=m;"#,
-                "buffer" | "node:buffer" => br#"var m={Buffer:globalThis.Buffer,default:{Buffer:globalThis.Buffer}};__slice_builtins["buffer"]=__slice_builtins["node:buffer"]=m;"#,
-                "url" | "node:url" => br#"var m={URL:globalThis.URL,URLSearchParams:globalThis.URLSearchParams,default:{URL:globalThis.URL,URLSearchParams:globalThis.URLSearchParams}};m.__esModule=true;__slice_builtins["url"]=__slice_builtins["node:url"]=m;"#,
+                "crypto" | "node:crypto" => br#"(function(){var __U8=globalThis.Uint8Array;function __toBytes(d,enc){if(d instanceof __U8)return d;if(d instanceof ArrayBuffer)return new __U8(d);if(d&&d.buffer instanceof ArrayBuffer)return new __U8(d.buffer,d.byteOffset||0,d.byteLength);return Buffer.from(String(d),enc||"utf8");}function __catBytes(chunks){if(chunks.length===0)return new __U8(0);if(chunks.length===1)return chunks[0];return Buffer.concat(chunks);}var m={createHash:function(alg){var a=String(alg||"sha256").toLowerCase(),chunks=[],strFast=(a==="sha256"||a==="sha-256"),sBuf="";return{update:function(d,enc){if(strFast&&typeof d==="string"&&(!enc||enc==="utf8"||enc==="utf-8")&&chunks.length===0){sBuf+=d;}else{if(sBuf.length>0){chunks.push(Buffer.from(sBuf,"utf8"));sBuf="";}strFast=false;chunks.push(__toBytes(d,enc));}return this;},digest:function(enc){if(strFast&&chunks.length===0&&enc==="hex"){var h=__slice_crypto_sha256(sBuf);sBuf="";return h;}if(sBuf.length>0){chunks.push(Buffer.from(sBuf,"utf8"));sBuf="";}var raw=Buffer.from(__slice_crypto_digest_bytes(a,__catBytes(chunks)));chunks=[];return(!enc||enc==="buffer")?raw:raw.toString(enc);}};},createHmac:function(alg,key){var a=String(alg||"sha256").toLowerCase(),kBytes=__toBytes(key),chunks=[],strFast=(a==="sha256"||a==="sha-256")&&typeof key==="string",kStr=typeof key==="string"?key:"",sBuf="";return{update:function(d,enc){if(strFast&&typeof d==="string"&&(!enc||enc==="utf8"||enc==="utf-8")&&chunks.length===0){sBuf+=d;}else{if(sBuf.length>0){chunks.push(Buffer.from(sBuf,"utf8"));sBuf="";}strFast=false;chunks.push(__toBytes(d,enc));}return this;},digest:function(enc){if(strFast&&chunks.length===0&&enc==="hex"){var h=__slice_crypto_hmac_sha256(kStr,sBuf);sBuf="";return h;}if(sBuf.length>0){chunks.push(Buffer.from(sBuf,"utf8"));sBuf="";}var raw=Buffer.from(__slice_crypto_hmac_bytes(a,kBytes,__catBytes(chunks)));chunks=[];return(!enc||enc==="buffer")?raw:raw.toString(enc);}};},randomBytes:function(size,cb){var b=Buffer.from(__slice_crypto_random_bytes(Number(size)||0));if(typeof cb==="function"){cb(null,b);return;}return b;},randomUUID:function(){return __slice_crypto_random_uuid();},getRandomValues:function(ta){return __slice_crypto_get_random_values(ta);},timingSafeEqual:function(a,b){return __slice_crypto_timing_safe_equal(a,b);},subtle:globalThis.crypto.subtle,webcrypto:globalThis.crypto};m.default=m;m.__esModule=true;return __slice_builtins["crypto"]=__slice_builtins["node:crypto"]=m;})()"#,
+                "fs" | "node:fs" => br#"(function(){function __fsStr(d){if(typeof d==="string")return d;if(d instanceof Uint8Array||Buffer.isBuffer(d))return Buffer.from(d).toString("utf8");return String(d);}var m={readFileSync:function(p,opts){var s=__slice_fs_read_file_sync(String(p));if(opts===null||opts==="buffer"||(opts&&typeof opts==="object"&&(opts.encoding===null||opts.encoding==="buffer")))return Buffer.from(s,"utf8");var enc=typeof opts==="string"?opts:(opts&&opts.encoding?opts.encoding:"utf8");if(enc&&enc!=="utf8"&&enc!=="utf-8")return Buffer.from(s,"utf8").toString(enc);return s;},writeFileSync:function(p,d){return __slice_fs_write_file_sync(String(p),__fsStr(d));},appendFileSync:function(p,d){return __slice_fs_append_file_sync(String(p),__fsStr(d));},existsSync:function(p){return Boolean(__slice_fs_exists_sync(String(p)));},mkdirSync:function(p){return __slice_fs_mkdir_sync(String(p));},readdirSync:function(p){return JSON.parse(__slice_fs_readdir_sync(String(p)));},statSync:function(p){var sz=__slice_fs_stat_sync(String(p)),isDir=Boolean(__slice_fs_is_dir_sync(String(p)));return{size:sz,mtimeMs:1700000000000,ctimeMs:1700000000000,birthtimeMs:1700000000000,mode:isDir?16877:33188,isFile:function(){return !isDir;},isDirectory:function(){return isDir;},isSymbolicLink:function(){return false;}};},unlinkSync:function(p){return __slice_fs_rm_sync(String(p));},rmSync:function(p){return __slice_fs_rm_sync(String(p));},copyFileSync:function(s,d){return __slice_fs_copy_file_sync(String(s),String(d));},renameSync:function(o,n){return __slice_fs_rename_sync(String(o),String(n));}};var fp={readFile:function(p,o){return Promise.resolve().then(function(){return m.readFileSync(p,o);});},writeFile:function(p,d){return Promise.resolve().then(function(){return m.writeFileSync(p,d);});},appendFile:function(p,d){return Promise.resolve().then(function(){return m.appendFileSync(p,d);});},stat:function(p){return Promise.resolve().then(function(){return m.statSync(p);});},mkdir:function(p){return Promise.resolve().then(function(){return m.mkdirSync(p);});},readdir:function(p){return Promise.resolve().then(function(){return m.readdirSync(p);});},rm:function(p){return Promise.resolve().then(function(){return m.rmSync(p);});},unlink:function(p){return Promise.resolve().then(function(){return m.unlinkSync(p);});},copyFile:function(s,d){return Promise.resolve().then(function(){return m.copyFileSync(s,d);});},rename:function(o,n){return Promise.resolve().then(function(){return m.renameSync(o,n);});},access:function(p){return Promise.resolve().then(function(){if(!m.existsSync(p))throw new Error("ENOENT: no such file or directory, access '"+p+"'");});}};fp.default=fp;fp.__esModule=true;m.promises=fp;m.default=m;m.__esModule=true;__slice_builtins["fs/promises"]=__slice_builtins["node:fs/promises"]=fp;return __slice_builtins["fs"]=__slice_builtins["node:fs"]=m;})()"#,
+                "fs/promises" | "node:fs/promises" => br#"(__slice_builtins["node:fs"]||__slice_load_builtin("node:fs")).promises"#,
+                "path" | "node:path" | "path/posix" | "node:path/posix" | "path/win32" | "node:path/win32" => br#"(function(){function __normPath(p){var s=String(p||"").replace(/\\/g,"/");if(s.length===0)return ".";var isAbs=s.charCodeAt(0)===47,trailing=s.length>1&&s.charCodeAt(s.length-1)===47,parts=s.split("/"),out=[];for(var i=0;i<parts.length;i++){var seg=parts[i];if(!seg||seg===".")continue;if(seg===".."){if(out.length>0&&out[out.length-1]!=="..")out.pop();else if(!isAbs)out.push("..");}else out.push(seg);}var res=(isAbs?"/":"")+out.join("/");if(!res)res=isAbs?"/":".";if(trailing&&res!=="/")res+="/";return res;}var m={sep:"/",delimiter:":",normalize:__normPath,isAbsolute:function(p){var s=String(p||"");return s.length>0&&(s.charCodeAt(0)===47||s.charCodeAt(0)===92||(s.length>2&&s.charCodeAt(1)===58));},join:function(){var parts=[];for(var i=0;i<arguments.length;i++){var a=String(arguments[i]||"");if(a)parts.push(a);}return parts.length===0?".":__normPath(parts.join("/"));},resolve:function(){var resolved="",resolvedAbs=false;for(var i=arguments.length-1;i>=-1&&!resolvedAbs;i--){var p=i>=0?String(arguments[i]||""):"/";if(!p)continue;p=p.replace(/\\/g,"/");resolved=p+"/"+resolved;resolvedAbs=p.charCodeAt(0)===47;}var norm=__normPath(resolved);return(norm.length>1&&norm.charCodeAt(norm.length-1)===47)?norm.slice(0,-1):norm;},dirname:function(p){var s=String(p||"").replace(/\\/g,"/").replace(/\/+$/,"");if(!s)return ".";var i=s.lastIndexOf("/");return i>0?s.slice(0,i):(i===0?"/":".");},basename:function(p,ext){var s=String(p||"").replace(/\\/g,"/").replace(/\/+$/,""),i=s.lastIndexOf("/"),b=i>=0?s.slice(i+1):s;return(ext&&b.endsWith(ext))?b.slice(0,b.length-ext.length):b;},extname:function(p){var b=m.basename(p),i=b.lastIndexOf(".");return i>0?b.slice(i):"";},relative:function(from,to){var f=m.resolve(from),t=m.resolve(to);if(f===t)return "";var fs=f.split("/").filter(Boolean),ts=t.split("/").filter(Boolean),len=Math.min(fs.length,ts.length),same=len;for(var i=0;i<len;i++){if(fs[i]!==ts[i]){same=i;break;}}var out=[];for(var j=same;j<fs.length;j++)out.push("..");for(var k=same;k<ts.length;k++)out.push(ts[k]);return out.join("/");},parse:function(p){var s=String(p||"").replace(/\\/g,"/"),root=s.charCodeAt(0)===47?"/":"",dir=m.dirname(s),base=m.basename(s),ext=m.extname(s),name=ext?base.slice(0,base.length-ext.length):base;if(dir==="."&&!s.includes("/"))dir="";return{root:root,dir:dir,base:base,ext:ext,name:name};},format:function(o){if(!o||typeof o!=="object")return "";var dir=o.dir||o.root||"",base=o.base||((o.name||"")+(o.ext||""));if(!dir)return base;return dir===o.root?dir+base:dir+"/"+base;}};m.posix=m;m.win32=m;m.default=m;m.__esModule=true;return __slice_builtins["path"]=__slice_builtins["node:path"]=__slice_builtins["path/posix"]=__slice_builtins["node:path/posix"]=__slice_builtins["path/win32"]=__slice_builtins["node:path/win32"]=m;})()"#,
+                "events" | "node:events" => br#"(function(){function EventEmitter(){this._events=Object.create(null);this._maxListeners=EventEmitter.defaultMaxListeners;}EventEmitter.defaultMaxListeners=10;EventEmitter.prototype._ev=function(){return this._events||(this._events=Object.create(null));};EventEmitter.prototype.setMaxListeners=function(n){this._maxListeners=Number(n);return this;};EventEmitter.prototype.getMaxListeners=function(){return this._maxListeners!==undefined?this._maxListeners:EventEmitter.defaultMaxListeners;};EventEmitter.prototype.on=EventEmitter.prototype.addListener=function(t,fn){if(typeof fn!=="function")throw new TypeError("listener must be a function");var ev=this._ev(),k=String(t);(ev[k]||(ev[k]=[])).push(fn);return this;};EventEmitter.prototype.prependListener=function(t,fn){if(typeof fn!=="function")throw new TypeError("listener must be a function");var ev=this._ev(),k=String(t);(ev[k]||(ev[k]=[])).unshift(fn);return this;};EventEmitter.prototype.once=function(t,fn){if(typeof fn!=="function")throw new TypeError("listener must be a function");var self=this;function g(){self.removeListener(t,g);fn.apply(this,arguments);}g.listener=fn;return this.on(t,g);};EventEmitter.prototype.prependOnceListener=function(t,fn){if(typeof fn!=="function")throw new TypeError("listener must be a function");var self=this;function g(){self.removeListener(t,g);fn.apply(this,arguments);}g.listener=fn;return this.prependListener(t,g);};EventEmitter.prototype.off=EventEmitter.prototype.removeListener=function(t,fn){var ev=this._ev(),k=String(t),list=ev[k];if(!list)return this;var nx=[];for(var i=0;i<list.length;i++){if(list[i]!==fn&&list[i].listener!==fn)nx.push(list[i]);}if(nx.length>0)ev[k]=nx;else delete ev[k];return this;};EventEmitter.prototype.removeAllListeners=function(t){if(arguments.length===0){this._events=Object.create(null);}else if(this._events){delete this._events[String(t)];}return this;};EventEmitter.prototype.emit=function(t){var ev=this._ev(),k=String(t),list=ev[k];if(!list||list.length===0){if(k==="error"){var err=arguments[1];throw(err instanceof Error?err:new Error(String(err||"Unhandled error event")));}return false;}var snap=list.slice(),args=[];for(var i=1;i<arguments.length;i++)args.push(arguments[i]);for(var j=0;j<snap.length;j++)snap[j].apply(this,args);return true;};EventEmitter.prototype.listeners=function(t){var ev=this._ev(),list=ev[String(t)];if(!list)return [];var out=[];for(var i=0;i<list.length;i++)out.push(list[i].listener||list[i]);return out;};EventEmitter.prototype.rawListeners=function(t){var ev=this._ev(),list=ev[String(t)];return list?list.slice():[];};EventEmitter.prototype.listenerCount=function(t){var ev=this._ev(),list=ev[String(t)];return list?list.length:0;};EventEmitter.prototype.eventNames=function(){return Object.keys(this._ev());};EventEmitter.once=function(em,name,opts){return new Promise(function(res,rej){var sig=opts&&opts.signal;if(sig&&sig.aborted){rej(sig.reason||new Error("AbortError"));return;}function onEv(){if(em.removeListener)em.removeListener("error",onErr);var a=[];for(var i=0;i<arguments.length;i++)a.push(arguments[i]);res(a);}function onErr(e){if(em.removeListener)em.removeListener(name,onEv);rej(e);}if(typeof em.once==="function"){em.once(name,onEv);if(name!=="error")em.once("error",onErr);}else if(typeof em.addEventListener==="function"){em.addEventListener(name,function(ev){res([ev]);},{once:true});}if(sig&&typeof sig.addEventListener==="function"){sig.addEventListener("abort",function(){if(em.removeListener){em.removeListener(name,onEv);em.removeListener("error",onErr);}rej(sig.reason||new Error("AbortError"));});}});};EventEmitter.EventEmitter=EventEmitter;EventEmitter.default=EventEmitter;EventEmitter.__esModule=true;return __slice_builtins["events"]=__slice_builtins["node:events"]=EventEmitter;})()"#,
+                "os" | "node:os" => br#"(function(){var m={tmpdir:function(){return __slice_os_tmpdir();},platform:function(){return __slice_os_platform();},arch:function(){return __slice_os_arch();},EOL:"\n"};m.default=m;m.__esModule=true;return __slice_builtins["os"]=__slice_builtins["node:os"]=m;})()"#,
+                "util" | "node:util" => br#"(function(){var __U8=globalThis.Uint8Array;function __insp(v,seen){if(v===null)return "null";if(v===undefined)return "undefined";var t=typeof v;if(t==="string")return "'"+v+"'";if(t!=="object")return String(v);if(v instanceof Error)return v.name+": "+v.message;if(v instanceof Date)return v.toISOString();if(v instanceof RegExp)return v.toString();if(Buffer.isBuffer(v))return "<Buffer "+v.toString("hex")+">";if(v instanceof __U8)return "Uint8Array("+v.length+") ["+Array.from(v).join(", ")+"]";seen=seen||[];if(seen.indexOf(v)!==-1)return "[Circular]";seen.push(v);if(Array.isArray(v)){var a=[];for(var i=0;i<v.length;i++)a.push(__insp(v[i],seen));return "["+a.join(", ")+"]";}var ks=Object.keys(v),p=[];for(var j=0;j<ks.length;j++){var k=ks[j];p.push(k+": "+__insp(v[k],seen));}return p.length===0?"{}":"{ "+p.join(", ")+" }";}function __fmt(f){if(typeof f!=="string"){var p=[];for(var i=0;i<arguments.length;i++)p.push(__insp(arguments[i]));return p.join(" ");}var idx=1,argLen=arguments.length,str="",last=0;for(var j=0;j<f.length;j++){if(f.charCodeAt(j)===37&&j+1<f.length){var nx=f.charCodeAt(j+1);if(nx===37){str+=f.slice(last,j)+"%";j++;last=j+1;continue;}if(idx<argLen){var val=arguments[idx];if(nx===115){str+=f.slice(last,j)+String(val);idx++;j++;last=j+1;}else if(nx===100||nx===105){str+=f.slice(last,j)+(nx===105?parseInt(val,10):Number(val));idx++;j++;last=j+1;}else if(nx===102){str+=f.slice(last,j)+parseFloat(val);idx++;j++;last=j+1;}else if(nx===106){var jv="";try{jv=JSON.stringify(val);}catch(_e){jv="[Circular]";}str+=f.slice(last,j)+jv;idx++;j++;last=j+1;}else if(nx===111||nx===79){str+=f.slice(last,j)+__insp(val);idx++;j++;last=j+1;}}}}str+=f.slice(last);while(idx<argLen){var x=arguments[idx++];str+=" "+(typeof x==="string"?x:__insp(x));}return str;}var types={isUint8Array:function(v){return v instanceof __U8;},isArrayBuffer:function(v){return v instanceof ArrayBuffer;},isTypedArray:function(v){return ArrayBuffer.isView(v)&&!(v instanceof DataView);},isBuffer:function(v){return Buffer.isBuffer(v);},isPromise:function(v){return Boolean(v&&typeof v.then==="function");},isDate:function(v){return v instanceof Date;},isRegExp:function(v){return v instanceof RegExp;},isNativeError:function(v){return v instanceof Error;},isMap:function(v){return v instanceof Map;},isSet:function(v){return v instanceof Set;}};var customSym=Symbol("util.promisify.custom");function promisify(orig){if(typeof orig!=="function")throw new TypeError("The \"original\" argument must be of type Function");if(orig[customSym])return orig[customSym];return function(){var self=this,args=[];for(var i=0;i<arguments.length;i++)args.push(arguments[i]);return new Promise(function(res,rej){args.push(function(err,val){if(err)rej(err);else res(val);});orig.apply(self,args);});};}promisify.custom=customSym;function callbackify(orig){if(typeof orig!=="function")throw new TypeError("The \"original\" argument must be of type Function");return function(){var self=this,args=[];for(var i=0;i<arguments.length-1;i++)args.push(arguments[i]);var cb=arguments[arguments.length-1];Promise.resolve().then(function(){return orig.apply(self,args);}).then(function(r){cb(null,r);},function(e){cb(e||new Error("Rejected"));});};}var m={format:__fmt,inspect:__insp,deprecate:function(f){return f;},promisify:promisify,callbackify:callbackify,types:types,TextEncoder:globalThis.TextEncoder,TextDecoder:globalThis.TextDecoder,inherits:function(c,s){c.super_=s;Object.setPrototypeOf(c.prototype,s.prototype);}};m.default=m;m.__esModule=true;__slice_builtins["util/types"]=__slice_builtins["node:util/types"]=types;return __slice_builtins["util"]=__slice_builtins["node:util"]=m;})()"#,
+                "util/types" | "node:util/types" => br#"(__slice_builtins["node:util"]||__slice_load_builtin("node:util")).types"#,
+                "assert" | "node:assert" | "assert/strict" | "node:assert/strict" => br#"(function(){function AssertionError(opts){var o=opts||{};var msg=o.message||("Expected "+JSON.stringify(o.actual)+" "+o.operator+" "+JSON.stringify(o.expected));var err=new Error(msg);err.name="AssertionError";err.code="ERR_ASSERTION";err.actual=o.actual;err.expected=o.expected;err.operator=o.operator||"==";Object.setPrototypeOf(err,AssertionError.prototype);return err;}Object.setPrototypeOf(AssertionError.prototype,Error.prototype);function __deepEq(a,b,strict){if(a===b)return true;if(Number.isNaN(a)&&Number.isNaN(b))return true;if(!strict&&a==b)return true;if(a===null||b===null||typeof a!=="object"||typeof b!=="object")return false;if(a instanceof Date&&b instanceof Date)return a.getTime()===b.getTime();if(a instanceof RegExp&&b instanceof RegExp)return a.source===b.source&&a.flags===b.flags;if(a instanceof Uint8Array&&b instanceof Uint8Array){if(a.length!==b.length)return false;for(var i=0;i<a.length;i++)if(a[i]!==b[i])return false;return true;}if(Array.isArray(a)!==Array.isArray(b))return false;if(Array.isArray(a)){if(a.length!==b.length)return false;for(var j=0;j<a.length;j++)if(!__deepEq(a[j],b[j],strict))return false;return true;}var ka=Object.keys(a),kb=Object.keys(b);if(ka.length!==kb.length)return false;for(var k=0;k<ka.length;k++){var key=ka[k];if(!Object.prototype.hasOwnProperty.call(b,key)||!__deepEq(a[key],b[key],strict))return false;}return true;}function __matchErr(err,matcher){if(!matcher)return true;if(matcher instanceof RegExp)return matcher.test(String(err&&err.message||err));if(typeof matcher==="function"){if(matcher.prototype instanceof Error||matcher===Error){return err instanceof matcher;}return Boolean(matcher(err));}if(typeof matcher==="object"){var ks=Object.keys(matcher);for(var i=0;i<ks.length;i++){var k=ks[i];if(matcher[k] instanceof RegExp){if(!matcher[k].test(String(err[k])))return false;}else if(err[k]!==matcher[k])return false;}return true;}return true;}function assert(val,msg){if(!val)throw new AssertionError({actual:val,expected:true,operator:"==",message:msg});}assert.ok=assert;assert.fail=function(msg){throw new AssertionError({message:msg||"Failed",operator:"fail"});};assert.equal=function(a,b,msg){if(a!=b)throw new AssertionError({actual:a,expected:b,operator:"==",message:msg});};assert.notEqual=function(a,b,msg){if(a==b)throw new AssertionError({actual:a,expected:b,operator:"!=",message:msg});};assert.strictEqual=function(a,b,msg){if(!Object.is(a,b))throw new AssertionError({actual:a,expected:b,operator:"===",message:msg});};assert.notStrictEqual=function(a,b,msg){if(Object.is(a,b))throw new AssertionError({actual:a,expected:b,operator:"!==",message:msg});};assert.deepEqual=function(a,b,msg){if(!__deepEq(a,b,false))throw new AssertionError({actual:a,expected:b,operator:"deepEqual",message:msg});};assert.notDeepEqual=function(a,b,msg){if(__deepEq(a,b,false))throw new AssertionError({actual:a,expected:b,operator:"notDeepEqual",message:msg});};assert.deepStrictEqual=function(a,b,msg){if(!__deepEq(a,b,true))throw new AssertionError({actual:a,expected:b,operator:"deepStrictEqual",message:msg});};assert.notDeepStrictEqual=function(a,b,msg){if(__deepEq(a,b,true))throw new AssertionError({actual:a,expected:b,operator:"notDeepStrictEqual",message:msg});};assert.throws=function(fn,matcher,msg){var threw=false,err=null;if(typeof matcher==="string"&&msg===undefined){msg=matcher;matcher=undefined;}try{fn();}catch(e){threw=true;err=e;}if(!threw)throw new AssertionError({message:msg||"Missing expected exception",operator:"throws"});if(!__matchErr(err,matcher))throw new AssertionError({actual:err,expected:matcher,message:msg||"Exception did not match expected criteria",operator:"throws"});};assert.doesNotThrow=function(fn,msg){try{fn();}catch(e){throw new AssertionError({actual:e,message:msg||("Got unwanted exception: "+(e&&e.message||e)),operator:"doesNotThrow"});}};assert.rejects=function(fnOrP,matcher,msg){if(typeof matcher==="string"&&msg===undefined){msg=matcher;matcher=undefined;}var p=typeof fnOrP==="function"?Promise.resolve().then(fnOrP):Promise.resolve(fnOrP);return p.then(function(){throw new AssertionError({message:msg||"Missing expected rejection",operator:"rejects"});},function(err){if(err&&err.code==="ERR_ASSERTION"&&err.operator==="rejects")throw err;if(!__matchErr(err,matcher))throw new AssertionError({actual:err,expected:matcher,message:msg||"Rejection did not match expected criteria",operator:"rejects"});});};assert.match=function(str,re,msg){if(!(re instanceof RegExp)||!re.test(String(str)))throw new AssertionError({actual:str,expected:re,operator:"match",message:msg});};assert.doesNotMatch=function(str,re,msg){if(re instanceof RegExp&&re.test(String(str)))throw new AssertionError({actual:str,expected:re,operator:"doesNotMatch",message:msg});};assert.AssertionError=AssertionError;assert.strict=assert;assert.default=assert;assert.__esModule=true;return __slice_builtins["assert"]=__slice_builtins["node:assert"]=__slice_builtins["assert/strict"]=__slice_builtins["node:assert/strict"]=assert;})()"#,
+                "buffer" | "node:buffer" => br#"(function(){var m={Buffer:globalThis.Buffer,Blob:globalThis.Blob,File:globalThis.File,atob:globalThis.atob,btoa:globalThis.btoa,kMaxLength:2147483647};m.default=m;m.__esModule=true;return __slice_builtins["buffer"]=__slice_builtins["node:buffer"]=m;})()"#,
+                "url" | "node:url" => br#"(function(){var m={URL:globalThis.URL,URLSearchParams:globalThis.URLSearchParams,default:{URL:globalThis.URL,URLSearchParams:globalThis.URLSearchParams}};m.__esModule=true;return __slice_builtins["url"]=__slice_builtins["node:url"]=m;})()"#,
                 "process" | "node:process" => br#"__slice_builtins["process"]=__slice_builtins["node:process"]=globalThis.process;"#,
                 "slice:semver" => br#"var m={valid:function(v){return __slice_semver_valid(v);},coerce:function(v){var c=__slice_semver_coerce(v);return c?{version:c,toString:function(){return c;}}:null;},gt:function(a,b){return Boolean(__slice_semver_gt(a,b));},satisfies:function(v,r){return __slice_semver_satisfies(v,r)===1;}};m.default=m;m.__esModule=true;__slice_builtins["slice:semver"]=m;"#,
                 "slice:ms" => br#"var m=function(v,o){return __slice_fast_ms(v,Boolean(o&&o.long));};m.default=m;__slice_builtins["slice:ms"]=m;"#,
@@ -1340,6 +1710,9 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&path) {
+                return Ok(BoaVal::from(false));
+            }
             let norm = norm_vfs_path(&path);
             let exists = BOA_VFS_CACHE.with(|c| c.borrow().contains_key(&norm))
                 || BOA_VFS_DIRS.with(|d| d.borrow().contains(&norm))
@@ -1358,6 +1731,9 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            if !check_boa_fs_write_ocap(&path) {
+                return Ok(BoaVal::undefined());
+            }
             let norm = norm_vfs_path(&path);
             BOA_VFS_DIRS.with(|d| {
                 d.borrow_mut().insert(norm);
@@ -1376,6 +1752,9 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&path) {
+                return Ok(BoaVal::from(js_string!("[]")));
+            }
             let norm_dir = norm_vfs_path(&path);
             let prefix = format!("{}/", norm_dir);
             let mut entries_set = std::collections::BTreeSet::new();
@@ -1409,11 +1788,110 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&path) {
+                return Ok(BoaVal::from(0));
+            }
             let norm = norm_vfs_path(&path);
             let size = BOA_VFS_CACHE
                 .with(|c| c.borrow().get(&norm).map(|v| v.len() as u64))
                 .unwrap_or_else(|| std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0));
             Ok(BoaVal::from(size as f64))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_is_dir_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&path) {
+                return Ok(BoaVal::from(false));
+            }
+            let norm = norm_vfs_path(&path);
+            let prefix = format!("{}/", norm);
+            let is_dir = BOA_VFS_DIRS.with(|d| d.borrow().contains(&norm))
+                || BOA_VFS_CACHE.with(|c| c.borrow().keys().any(|k| k.starts_with(&prefix)))
+                || std::path::Path::new(&path).is_dir();
+            Ok(BoaVal::from(is_dir))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_copy_file_sync"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let src = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let dest = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&src) || !check_boa_fs_write_ocap(&dest) {
+                return Ok(BoaVal::undefined());
+            }
+            let norm_src = norm_vfs_path(&src);
+            let norm_dest = norm_vfs_path(&dest);
+            let content = BOA_VFS_CACHE
+                .with(|c| c.borrow().get(&norm_src).cloned())
+                .unwrap_or_else(|| std::fs::read_to_string(&src).unwrap_or_default());
+            if let Some(idx) = norm_dest.rfind('/') {
+                let parent = &norm_dest[..idx];
+                BOA_VFS_DIRS.with(|d| {
+                    d.borrow_mut().insert(parent.to_string());
+                });
+            }
+            BOA_VFS_CACHE.with(|c| {
+                c.borrow_mut().insert(norm_dest, content);
+            });
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_rename_sync"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let old_p = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let new_p = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&old_p) || !check_boa_fs_write_ocap(&new_p) {
+                return Ok(BoaVal::undefined());
+            }
+            let norm_old = norm_vfs_path(&old_p);
+            let norm_new = norm_vfs_path(&new_p);
+            let content = BOA_VFS_CACHE
+                .with(|c| c.borrow_mut().remove(&norm_old))
+                .unwrap_or_else(|| std::fs::read_to_string(&old_p).unwrap_or_default());
+            if let Some(idx) = norm_new.rfind('/') {
+                let parent = &norm_new[..idx];
+                BOA_VFS_DIRS.with(|d| {
+                    d.borrow_mut().insert(parent.to_string());
+                });
+            }
+            BOA_VFS_CACHE.with(|c| {
+                c.borrow_mut().insert(norm_new, content);
+            });
+            Ok(BoaVal::undefined())
         }),
     );
 
@@ -1427,6 +1905,9 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            if !check_boa_fs_write_ocap(&path) {
+                return Ok(BoaVal::undefined());
+            }
             let norm = norm_vfs_path(&path);
             let prefix = format!("{}/", norm);
             BOA_VFS_CACHE.with(|c| {
@@ -2990,6 +3471,104 @@ fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Context) {
             let url_safe = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(false);
             let bytes = extract_buffer_source_bytes(first, context)?;
             Ok(BoaVal::from(js_string!(base64_encode(&bytes, url_safe))))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_hex_decode"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let s = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|js| js.to_std_string_escaped())
+                .unwrap_or_default();
+            let decoded = hex_decode_bytes(&s);
+            bytes_to_js_uint8_array(&decoded, context)
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_random_bytes"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let size = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n.max(0.0) as usize)
+                .unwrap_or(0);
+            if size > 1_048_576 {
+                return Err(JsNativeError::range()
+                    .with_message("crypto.randomBytes size exceeds 1MB sandbox limit")
+                    .into());
+            }
+            let mut buf = vec![0u8; size];
+            BOA_DET_STATE.with(|s| {
+                if let Some((mut prng, clk)) = s.get() {
+                    fill_random_bytes(&mut buf, Some(&mut prng));
+                    s.set(Some((prng, clk)));
+                } else {
+                    fill_random_bytes(&mut buf, None);
+                }
+            });
+            bytes_to_js_uint8_array(&buf, context)
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_digest_bytes"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let algo = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "sha256".to_string());
+            let Some(data_arg) = args.get(1) else {
+                return bytes_to_js_uint8_array(&[], context);
+            };
+            let bytes = extract_buffer_source_bytes(data_arg, context)?;
+            let digest: Vec<u8> = match normalize_webcrypto_hash_name(&algo) {
+                Some("SHA-1") => sha1_bytes(&bytes).to_vec(),
+                Some("SHA-256") => sha256_bytes(&bytes).to_vec(),
+                Some("SHA-384") => sha384_bytes(&bytes).to_vec(),
+                Some("SHA-512") => sha512_bytes(&bytes).to_vec(),
+                _ => {
+                    return Err(JsNativeError::error()
+                        .with_message(format!("Unsupported hash algorithm '{}'", algo))
+                        .into())
+                }
+            };
+            bytes_to_js_uint8_array(&digest, context)
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_hmac_bytes"),
+        3,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let algo = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "sha256".to_string());
+            let Some(key_arg) = args.get(1) else {
+                return bytes_to_js_uint8_array(&[], context);
+            };
+            let Some(data_arg) = args.get(2) else {
+                return bytes_to_js_uint8_array(&[], context);
+            };
+            let key_bytes = extract_buffer_source_bytes(key_arg, context)?;
+            let data_bytes = extract_buffer_source_bytes(data_arg, context)?;
+            let Some(mac) = compute_webcrypto_hmac(&algo, &key_bytes, &data_bytes) else {
+                return Err(JsNativeError::error()
+                    .with_message(format!("Unsupported HMAC algorithm '{}'", algo))
+                    .into());
+            };
+            bytes_to_js_uint8_array(&mac, context)
         }),
     );
 }
