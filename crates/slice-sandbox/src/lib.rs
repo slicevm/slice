@@ -229,6 +229,59 @@ pub fn is_private_or_loopback_ssrf_target(host: &str) -> bool {
     false
 }
 
+/// Returns `true` if `ip` is a cloud instance metadata IP address (`169.254.169.254`,
+/// `169.254.170.2`, `100.100.100.200`, `fd00:ec2::254`, or their IPv4-mapped IPv6 equivalents).
+#[inline]
+pub fn is_cloud_metadata_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octs = v4.octets();
+            octs == [169, 254, 169, 254]
+                || octs == [169, 254, 170, 2]
+                || octs == [100, 100, 100, 200]
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped_v4) = v6.to_ipv4_mapped() {
+                return is_cloud_metadata_ip(std::net::IpAddr::V4(mapped_v4));
+            }
+            let segs = v6.segments();
+            segs == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254]
+        }
+    }
+}
+
+/// Returns `true` if `ip` is a cloud metadata IP, loopback (`127.0.0.0/8`, `::1`),
+/// unspecified (`0.0.0.0`, `::`), link-local (`169.254.0.0/16`, `fe80::/10`),
+/// RFC 1918 private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`),
+/// CGNAT (`100.64.0.0/10`), unique local (`fc00::/7`), or IPv4-mapped IPv6 equivalent.
+#[inline]
+pub fn is_private_or_loopback_ip(ip: std::net::IpAddr) -> bool {
+    if is_cloud_metadata_ip(ip) {
+        return true;
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octs = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || (octs[0] == 100 && (octs[1] & 0b1100_0000) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped_v4) = v6.to_ipv4_mapped() {
+                return is_private_or_loopback_ip(std::net::IpAddr::V4(mapped_v4));
+            }
+            let segs = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (segs[0] & 0xfe00) == 0xfc00
+                || (segs[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
 /// Zero-allocation static check for SES frozen intrinsics.
 #[inline(always)]
 pub fn is_frozen_intrinsic(target: &str) -> bool {
@@ -913,7 +966,69 @@ env_file = ".env.production"
         let m = SliceManifest::parse_toml(toml_with_env_file);
         assert_eq!(m.env_file.as_deref(), Some(".env.production"));
     }
+
+    #[test]
+    fn test_phase_n1_resolved_ip_ssrf_and_ipv4_mapped_ipv6_blocking() {
+        use std::net::IpAddr;
+
+        for meta_ip in [
+            "169.254.169.254",
+            "169.254.170.2",
+            "100.100.100.200",
+            "::ffff:169.254.169.254",
+            "::ffff:100.100.100.200",
+            "fd00:ec2::254",
+        ] {
+            let parsed: IpAddr = meta_ip.parse().unwrap();
+            assert!(
+                is_cloud_metadata_ip(parsed),
+                "Expected cloud metadata classification for {}",
+                meta_ip
+            );
+        }
+
+        for priv_ip in [
+            "127.0.0.1",
+            "0.0.0.0",
+            "10.0.0.42",
+            "172.16.0.1",
+            "172.31.255.254",
+            "192.168.1.50",
+            "100.64.0.1",
+            "100.127.255.254",
+            "169.254.1.10",
+            "::1",
+            "::",
+            "fe80::1",
+            "fc00::1",
+            "fd12:3456:789a::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:192.168.1.1",
+        ] {
+            let parsed: IpAddr = priv_ip.parse().unwrap();
+            assert!(
+                is_private_or_loopback_ip(parsed),
+                "Expected private/loopback classification for {}",
+                priv_ip
+            );
+        }
+
+        for pub_ip in [
+            "93.184.216.34",
+            "1.1.1.1",
+            "8.8.8.8",
+            "172.32.0.1",
+            "100.128.0.1",
+            "2606:2800:220:1:248:1893:25c8:1946",
+        ] {
+            let parsed: IpAddr = pub_ip.parse().unwrap();
+            assert!(!is_cloud_metadata_ip(parsed));
+            assert!(!is_private_or_loopback_ip(parsed));
+        }
+    }
 }
+
 
 
 
