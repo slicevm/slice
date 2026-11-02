@@ -1169,7 +1169,7 @@ fn transform_module_to_cjs(js_code: &str, from_dir: &Path, deps_out: &mut Vec<Pa
             {
                 continue;
             }
-            for kw in ["function ", "class "] {
+            for kw in ["async function ", "function ", "class "] {
                 if let Some(decl_rest) = after_export.strip_prefix(kw) {
                     if let Some(ident) = decl_rest
                         .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
@@ -1187,7 +1187,10 @@ fn transform_module_to_cjs(js_code: &str, from_dir: &Path, deps_out: &mut Vec<Pa
                     break;
                 }
             }
-            if after_export.starts_with("function ") || after_export.starts_with("class ") {
+            if after_export.starts_with("async function ")
+                || after_export.starts_with("function ")
+                || after_export.starts_with("class ")
+            {
                 continue;
             }
         }
