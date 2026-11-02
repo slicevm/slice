@@ -1,0 +1,14 @@
+{
+  "name": "19-wintertc-webcrypto-streams-edge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Phase N-3 WinterTC Minimum Common Web API: WebCrypto (subtle HMAC/SHA/JWK), TextEncoder/TextDecoder, WhatWG Streams (TransformStream/TextEncoderStream), EventTarget, AbortSignal.any, Blob/File/FormData, and structuredClone",
+  "dependencies": {
+    "bytes": "3.1.2",
+    "cookie": "1.0.2",
+    "flatted": "3.3.1",
+    "ms": "2.1.3"
+  }
+}
+

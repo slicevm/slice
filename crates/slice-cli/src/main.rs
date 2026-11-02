@@ -3276,4 +3276,116 @@ export default {
         let _ = srv_handle.join();
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
+
+    #[test]
+    fn test_phase_n3_wintertc_webcrypto_streams_cloning_and_http_roundtrip() {
+        let tmp_dir = std::env::temp_dir().join("slice_phase_n3_wintertc_test");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let src_dir = tmp_dir.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        let manifest_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docker-tests/apps/19-wintertc-webcrypto-streams-edge");
+        std::fs::copy(
+            manifest_src.join("package.json"),
+            tmp_dir.join("package.json"),
+        )
+        .unwrap();
+        std::fs::copy(manifest_src.join("slice.toml"), tmp_dir.join("slice.toml")).unwrap();
+        for f in [
+            "types.ts",
+            "webcrypto_jwt_verifier.ts",
+            "streams_and_formdata_pipeline.ts",
+            "index.ts",
+        ] {
+            std::fs::copy(manifest_src.join("src").join(f), src_dir.join(f)).unwrap();
+        }
+
+        // Stub minimal CJS modules for cookie, ms, bytes, and flatted in node_modules
+        let nm = tmp_dir.join("node_modules");
+        std::fs::create_dir_all(nm.join("ms")).unwrap();
+        std::fs::write(
+            nm.join("ms/package.json"),
+            r#"{"name":"ms","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            nm.join("ms/index.js"),
+            r#"module.exports = function(v, o) { return __slice_fast_ms(v, Boolean(o && o.long)); };"#,
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(nm.join("bytes")).unwrap();
+        std::fs::write(
+            nm.join("bytes/package.json"),
+            r#"{"name":"bytes","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            nm.join("bytes/index.js"),
+            r#"module.exports = { parse: function(v){ return __slice_fast_bytes_parse(v); }, format: function(v){ return __slice_fast_bytes_format(v); } };"#,
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(nm.join("cookie")).unwrap();
+        std::fs::write(
+            nm.join("cookie/package.json"),
+            r#"{"name":"cookie","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            nm.join("cookie/index.js"),
+            r#"exports.parse = function(str) {
+  var out = {};
+  var parts = String(str || "").split(";");
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i].trim();
+    var eq = p.indexOf("=");
+    if (eq !== -1) out[p.slice(0, eq).trim()] = p.slice(eq + 1).trim();
+  }
+  return out;
+};"#,
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(nm.join("flatted")).unwrap();
+        std::fs::write(
+            nm.join("flatted/package.json"),
+            r#"{"name":"flatted","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            nm.join("flatted/index.js"),
+            r#"exports.stringify = function(obj) {
+  var copy = Object.assign({}, obj);
+  delete copy.root;
+  return JSON.stringify(copy);
+};
+exports.parse = function(str) {
+  var obj = JSON.parse(str);
+  obj.root = obj;
+  return obj;
+};"#,
+        )
+        .unwrap();
+
+        let cas_path = tmp_dir.join("app19.cas");
+        build_cas_archive_with_static(&tmp_dir, &cas_path, "./src/index.ts", None).unwrap();
+        let archive = MappedCasArchive::open(&cas_path).unwrap();
+        let entry = archive.entrypoint_blob().unwrap();
+
+        let mut caps = CapabilityToken::pure_compute();
+        if let Some(manifest_toml) = archive.get_manifest_toml() {
+            merge_manifest_toml_into_caps(manifest_toml, &mut caps);
+        }
+        let mut iso = SliceIsolate::spawn("app19-tenant", 1, caps, 50_000_000, 16 * 1024 * 1024);
+        let metrics = iso
+            .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+            .unwrap();
+
+        let expected_output = r#"{"app":"19-wintertc-webcrypto-streams-edge","libraries":["bytes@3.1.2","cookie@1.0.2","flatted@3.3.1","ms@2.1.3"],"hs256TokenValid":true,"hs256TamperedRejected":true,"hs512WebhookValid":true,"jwkAlg":"HS256","encodeIntoRead":8,"encodeIntoWritten":10,"transformedPayload":"ROUTE:API  |AUTH:JWT  |STREAM:OK::EOF","totalTransformedBytes":37,"formFieldsCount":3,"uploadedFileName":"bundle-manifest.bin","uploadedFileSize":38,"slicedHeaderText":"SLICE-EDGE","cyclicCloneVerified":true,"dispatchedEvents":["once:init","live:init","live:transform"],"anySignalAbortedBy":"secondary-deadline-exceeded","formattedWireVolume":"75B","auditDigest":"7319225b3dc10146"}"#;
+        assert_eq!(metrics.stdout[0], expected_output);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
 }

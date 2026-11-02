@@ -66,6 +66,7 @@ APP15_DIR="$APPS_DIR/15-time-travel-test-suite"
 APP16_DIR="$APPS_DIR/16-dotenv-dlp-config-vault"
 APP17_DIR="$APPS_DIR/17-zero-trust-redirect-keepalive-mesh"
 APP18_DIR="$APPS_DIR/18-async-event-loop-fanout-scheduler"
+APP19_DIR="$APPS_DIR/19-wintertc-webcrypto-streams-edge"
 
 UPSTREAM_F3_PID=""
 cleanup_upstream_f3() {
@@ -126,9 +127,9 @@ echo "  Deno    : $(deno -V)"
 
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  [TAG: apps] PACKING & COMPILING ALL 17 FOLDER-BASED APPS (OXC + CAS)"
+echo "  [TAG: apps] PACKING & COMPILING ALL 19 FOLDER-BASED APPS (OXC + CAS)"
 echo "========================================================================="
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
     eval "dir=\$APP${i}_DIR"
     "$SLICE_BIN" pack "$dir" "/tmp/app${i}.cas"
     "$SLICE_BIN" compile "/tmp/app${i}.cas" -o "/tmp/app${i}_bin"
@@ -189,6 +190,8 @@ verify_app_parity "App 14: 14-federated-api-mesh-dlp (Outbound fetch/dlv/dset/DL
 verify_app_parity "App 15: 15-time-travel-test-suite (Time-Travel VFS+KV/semver/dlv)" "$APP15_DIR" "/tmp/app15.cas" "-A"
 verify_app_parity "App 16: 16-dotenv-dlp-config-vault (Auto-DLP .env/ini/cookie/bytes)" "$APP16_DIR" "/tmp/app16.cas" "-A"
 verify_app_parity "App 17: 17-zero-trust-redirect-keepalive-mesh (Keep-Alive/307/SSRF/DLP)" "$APP17_DIR" "/tmp/app17.cas" "-A"
+verify_app_parity "App 18: 18-async-event-loop-fanout-scheduler (Timers/Microtasks/Fan-Out)" "$APP18_DIR" "/tmp/app18.cas" "-A"
+verify_app_parity "App 19: 19-wintertc-webcrypto-streams-edge (WebCrypto/Streams/FormData/Clone)" "$APP19_DIR" "/tmp/app19.cas" "-A"
 fi
 
 measure_ms() {
