@@ -1,0 +1,13 @@
+{
+  "name": "18-async-event-loop-fanout-scheduler",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Phase N-2 Async Event Loop, Timer Wheel, Microtask Queue, AbortSignal Timeout, and Concurrent Promise.all Fetch Fan-Out Scheduler",
+  "dependencies": {
+    "bytes": "3.1.2",
+    "flatted": "3.3.1",
+    "mitt": "3.0.1",
+    "ms": "2.1.3"
+  }
+}

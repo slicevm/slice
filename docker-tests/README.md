@@ -151,6 +151,14 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
   {"app":"17-zero-trust-redirect-keepalive-mesh","libraries":["bytes@3.1.2","cookie@0.6.0","fast-querystring@1.1.2","ms@2.1.3"],"tasksProcessed":30,"keepAliveSubgraphHits":5,"redirectFollow307Completed":5,"redirectManual302Inspected":5,"ssrfRedirectMetadataBlocked":5,"dnsRebindPrivateIpBlocked":5,"dlpExfiltrationBlocked":5,"crossOriginAuthStrippedCount":15,"totalTimeoutBudgetMs":50000,"formattedPayloadVolume":"860B","meshAuditHmac":"90f5a8253a5d07de"}
   ```
 
+### 18. [`apps/18-async-event-loop-fanout-scheduler/`](file:///p:/opensource/slice/docker-tests/apps/18-async-event-loop-fanout-scheduler/src/index.ts) — Deterministic Time-Travel Event Loop, Timer Wheel, Microtask Queue, `AbortSignal`, & Concurrent `Promise.all` Fetch Fan-Out (`bytes@3.1.2`, `flatted@3.3.1`, `mitt@3.0.1`, `ms@2.1.3`)
+- **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/18-async-event-loop-fanout-scheduler/package.json), [`slice.toml`](file:///p:/opensource/slice/docker-tests/apps/18-async-event-loop-fanout-scheduler/slice.toml), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/18-async-event-loop-fanout-scheduler/src/types.ts), [`src/timer_retry_scheduler.ts`](file:///p:/opensource/slice/docker-tests/apps/18-async-event-loop-fanout-scheduler/src/timer_retry_scheduler.ts), [`src/concurrent_fanout_client.ts`](file:///p:/opensource/slice/docker-tests/apps/18-async-event-loop-fanout-scheduler/src/concurrent_fanout_client.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/18-async-event-loop-fanout-scheduler/src/index.ts).
+- **What it tests:** Verifies deterministic microtask/macrotask priority ordering (`Promise.then`, `queueMicrotask`, `setTimeout` with extra arguments, `clearTimeout`, `setInterval`, `clearInterval`), exponential backoff retry scheduling with `ms`, 5 rounds of 5-shard concurrent `Promise.all([fetch(...), ...])` fan-out with `flatted` + `bytes` + `mitt` event bus, `AbortController` / `AbortSignal` task cancellation, and sandbox timer-bomb containment (`MAX_ACTIVE_TIMERS`), signed with `node:crypto` HMAC-SHA256.
+- **Identical Output Across All 4 Runtimes:**
+  ```json
+  {"app":"18-async-event-loop-fanout-scheduler","libraries":["bytes@3.1.2","flatted@3.3.1","mitt@3.0.1","ms@2.1.3"],"scheduleOrder":"promise-micro-1>queue-micro-1>timer-stage-a:p1>micro-inside-timer>heartbeat:1>heartbeat:2>heartbeat:3","intervalTicks":3,"cancelledTimerFired":false,"totalRetryBackoffMs":50,"totalShardsExecuted":25,"totalRecordsProcessed":1250,"totalAbortedTasks":5,"totalRetryAttempts":30,"busEventsDispatched":5,"timerBombContained":true,"formattedWireVolume":"1.92KB","auditDigest":"0b76cd366dc934f2"}
+  ```
+
 ---
 
 ## Verified Linux Docker (`x86_64`) Benchmark Results Across All 16 Applications

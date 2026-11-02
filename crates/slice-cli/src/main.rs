@@ -3090,4 +3090,190 @@ export default {
             reuse_after - reuse_before
         );
     }
+
+    #[test]
+    fn test_phase_n2_wintertc_async_event_loop_fanout_and_time_travel_roundtrip() {
+        // 1. Spawn a real WinterTC shard upstream server (`serve_connection_keep_alive`)
+        //    that handles concurrent `POST /v1/shards/0..3` fan-out requests.
+        let shard_gateway_ts = r#"
+export default {
+    fetch(req: Request): Response {
+        const url = new URL(req.url);
+        if (url.pathname.startsWith("/v1/shards/")) {
+            const shardId = Number(url.pathname.split("/").pop() || "0");
+            return Response.json(
+                { shardId, records: (shardId + 1) * 25, status: "synced" },
+                { status: 200, headers: { "x-shard-ack": "ack-" + shardId } }
+            );
+        }
+        return new Response("Not Found", { status: 404 });
+    }
+};
+"#;
+        let gw_bundled = slice_cas::strip_typescript_and_normalize(shard_gateway_ts, true);
+        let gw_bc: std::sync::Arc<[u8]> =
+            std::sync::Arc::from(compile_source_to_bytecode(&gw_bundled).into_boxed_slice());
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let host_port = format!("127.0.0.1:{}", port);
+
+        let stop_srv = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_clone = std::sync::Arc::clone(&stop_srv);
+        let gw_bc_clone = std::sync::Arc::clone(&gw_bc);
+        let srv_handle = std::thread::spawn(move || {
+            let _ = listener.set_nonblocking(true);
+            let mut conn_threads = Vec::new();
+            let mut slot = 1u32;
+            while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let bc = std::sync::Arc::clone(&gw_bc_clone);
+                        let s = slot;
+                        slot += 1;
+                        conn_threads.push(std::thread::spawn(move || {
+                            let mut read_buf = vec![0u8; 65536];
+                            let mut write_buf = Vec::with_capacity(65536);
+                            let _ = serve_connection_keep_alive(
+                                stream,
+                                s,
+                                &bc,
+                                None,
+                                None,
+                                None,
+                                &CapabilityToken::pure_compute(),
+                                15_000_000,
+                                16 * 1024 * 1024,
+                                &mut read_buf,
+                                &mut write_buf,
+                                None,
+                            );
+                        }));
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Err(_) => break,
+                }
+            }
+            for ct in conn_threads {
+                let _ = ct.join();
+            }
+        });
+
+        // 2. Bundle App 18 (`18-async-event-loop-fanout-scheduler`) into a CAS archive
+        let app18_src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("docker-tests/apps/18-async-event-loop-fanout-scheduler");
+        let tmp_dir = std::env::temp_dir().join(format!("slice_n2_app18_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(tmp_dir.join("src")).unwrap();
+
+        for file in [
+            "types.ts",
+            "timer_retry_scheduler.ts",
+            "concurrent_fanout_client.ts",
+            "index.ts",
+        ] {
+            let content = std::fs::read_to_string(app18_src.join("src").join(file)).unwrap();
+            std::fs::write(tmp_dir.join("src").join(file), content).unwrap();
+        }
+        std::fs::copy(app18_src.join("package.json"), tmp_dir.join("package.json")).unwrap();
+        std::fs::write(
+            tmp_dir.join("slice.toml"),
+            format!(
+                "[package]\nname = \"18-async-event-loop-fanout-scheduler\"\nentrypoint = \"./src/index.ts\"\n[capabilities]\nallow_net = [\"api.fanout.slice.local\", \"{}\"]\nallow_env = [\"NODE_ENV\", \"SLICE_FANOUT_UPSTREAM_BASE\"]\n",
+                host_port
+            ),
+        )
+        .unwrap();
+
+        let nm = tmp_dir.join("node_modules");
+        for (pkg, code) in [
+            (
+                "bytes",
+                "module.exports = { parse: function(s) { var str = String(s).toUpperCase(); if (str.endsWith('KB')) return Number(str.slice(0, -2)) * 1024; return Number(str); }, format: function(n) { return n < 1024 ? n + 'B' : (n / 1024).toFixed(2) + 'KB'; } };",
+            ),
+            (
+                "flatted",
+                "module.exports = { stringify: function(v) { return JSON.stringify([v]); }, parse: function(s) { return JSON.parse(s)[0]; } };",
+            ),
+            (
+                "mitt",
+                "module.exports = function() { var m = {}; return { on: function(t, f) { (m[t] = m[t] || []).push(f); }, emit: function(t, e) { (m[t] || []).forEach(function(f) { f(e); }); } }; };",
+            ),
+            (
+                "ms",
+                "module.exports = function(s) { var str = String(s); if (str.endsWith('ms')) return Number(str.slice(0, -2)); if (str.endsWith('s')) return Number(str.slice(0, -1)) * 1000; return Number(str); };",
+            ),
+        ] {
+            let pkg_dir = nm.join(pkg);
+            std::fs::create_dir_all(&pkg_dir).unwrap();
+            std::fs::write(pkg_dir.join("index.js"), code).unwrap();
+        }
+
+        let cas_out = tmp_dir.join("app18.cas");
+        build_cas_archive_with_static(&tmp_dir, &cas_out, "./src/index.ts", None).unwrap();
+
+        let archive = MappedCasArchive::open(&cas_out).unwrap();
+        let entry = archive.entrypoint_blob().unwrap();
+
+        // 3A. Run in Deterministic Virtual Time-Warp mode (`mockFetch` + 0ns timer warp)
+        let mut caps_det = CapabilityToken::pure_compute();
+        if let Some(manifest_toml) = archive.get_manifest_toml() {
+            merge_manifest_toml_into_caps(manifest_toml, &mut caps_det);
+        }
+        slice_engine::reset_virtual_time_warped_ms();
+        let mut iso_det =
+            SliceIsolate::spawn("app18-det-tenant", 1, caps_det, 50_000_000, 16 * 1024 * 1024);
+        iso_det.set_deterministic_seed(Some(20261102));
+        let metrics_det = iso_det
+            .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+            .unwrap();
+        let warped_ms = slice_engine::virtual_time_warped_ms();
+        assert!(
+            warped_ms >= 10,
+            "Expected deterministic virtual time warp >= 10ms, got {}ms",
+            warped_ms
+        );
+
+        let expected_output = r#"{"app":"18-async-event-loop-fanout-scheduler","libraries":["bytes@3.1.2","flatted@3.3.1","mitt@3.0.1","ms@2.1.3"],"scheduleOrder":"promise-micro-1>queue-micro-1>timer-stage-a:p1>micro-inside-timer>heartbeat:1>heartbeat:2>heartbeat:3","intervalTicks":3,"cancelledTimerFired":false,"totalRetryBackoffMs":50,"totalShardsExecuted":25,"totalRecordsProcessed":1250,"totalAbortedTasks":5,"totalRetryAttempts":30,"busEventsDispatched":5,"timerBombContained":true,"formattedWireVolume":"1.92KB","auditDigest":"0b76cd366dc934f2"}"#;
+        assert_eq!(metrics_det.stdout[0], expected_output);
+
+        // 3B. Run in Live Concurrent Socket Fan-Out mode against the 4-worker WinterTC server
+        slice_engine::clear_outbound_conn_pool();
+        let reuse_before = slice_engine::outbound_pool_reuse_count();
+        let mut caps_live = CapabilityToken::pure_compute()
+            .with_env("SLICE_FANOUT_UPSTREAM_BASE", format!("http://{}", host_port));
+        if let Some(manifest_toml) = archive.get_manifest_toml() {
+            merge_manifest_toml_into_caps(manifest_toml, &mut caps_live);
+        }
+        let mut iso_live = SliceIsolate::spawn(
+            "app18-live-tenant",
+            2,
+            caps_live,
+            50_000_000,
+            16 * 1024 * 1024,
+        );
+        let metrics_live = iso_live
+            .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+            .unwrap();
+        let reuse_after = slice_engine::outbound_pool_reuse_count();
+
+        assert_eq!(metrics_live.stdout[0], expected_output);
+        assert!(
+            reuse_after >= reuse_before + 15,
+            "Expected >= 15 Keep-Alive socket reuses across 5 rounds of 4-shard concurrent fan-out, got {}",
+            reuse_after - reuse_before
+        );
+
+        stop_srv.store(true, std::sync::atomic::Ordering::Relaxed);
+        slice_engine::clear_outbound_conn_pool();
+        let _ = srv_handle.join();
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
 }

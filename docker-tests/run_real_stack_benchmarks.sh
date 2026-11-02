@@ -65,6 +65,7 @@ APP14_DIR="$APPS_DIR/14-federated-api-mesh-dlp"
 APP15_DIR="$APPS_DIR/15-time-travel-test-suite"
 APP16_DIR="$APPS_DIR/16-dotenv-dlp-config-vault"
 APP17_DIR="$APPS_DIR/17-zero-trust-redirect-keepalive-mesh"
+APP18_DIR="$APPS_DIR/18-async-event-loop-fanout-scheduler"
 
 UPSTREAM_F3_PID=""
 cleanup_upstream_f3() {
@@ -817,18 +818,24 @@ echo "========================================================================="
 "$SLICE_BIN" compile "/tmp/app15.cas" -o "/tmp/app15_bin" >/dev/null
 "$SLICE_BIN" pack "$APP16_DIR" "/tmp/app16.cas" >/dev/null
 "$SLICE_BIN" compile "/tmp/app16.cas" -o "/tmp/app16_bin" >/dev/null
+"$SLICE_BIN" pack "$APP18_DIR" "/tmp/app18.cas" >/dev/null
+"$SLICE_BIN" compile "/tmp/app18.cas" -o "/tmp/app18_bin" >/dev/null
 
 verify_app_parity "Phase F4 App 15: 15-time-travel-test-suite" "$APP15_DIR" "/tmp/app15.cas" "-A"
 verify_app_parity "Phase F4 App 16: 16-dotenv-dlp-config-vault" "$APP16_DIR" "/tmp/app16.cas" "-A"
+verify_app_parity "Phase N2 App 18: 18-async-event-loop-fanout-scheduler" "$APP18_DIR" "/tmp/app18.cas" "-A"
 
 bench_app 15 "15-TIME-TRAVEL-TEST-SUITE (Time-Travel VFS+KV/semver/dlv)" "$APP15_DIR" "-A"
 bench_app 16 "16-DOTENV-DLP-CONFIG-VAULT (Auto-DLP .env/ini/cookie/bytes)" "$APP16_DIR" "-A"
+bench_app 18 "18-ASYNC-EVENT-LOOP-FANOUT-SCHEDULER (Timer Wheel/Promise.all/AbortSignal)" "$APP18_DIR" "-A"
 
-echo "  --- Phase F4 Cold vs Warm Isolate Telemetry ---"
+echo "  --- Phase F4 & Phase N-2 Cold vs Warm Isolate Telemetry ---"
 "$SLICE_BIN" run "/tmp/app15.cas" --quiet --metrics
 "$SLICE_BIN" run "/tmp/app15.cas" --warm --quiet --metrics
 "$SLICE_BIN" run "/tmp/app16.cas" --quiet --metrics
 "$SLICE_BIN" run "/tmp/app16.cas" --warm --quiet --metrics
+"$SLICE_BIN" run "/tmp/app18.cas" --quiet --metrics
+"$SLICE_BIN" run "/tmp/app18.cas" --warm --quiet --metrics
 
 echo "  [Live slice test Time-Travel Runner Verification on App 15]"
 "$SLICE_BIN" test "$APP15_DIR"
