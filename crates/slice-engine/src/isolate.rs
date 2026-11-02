@@ -105,8 +105,13 @@ impl SliceIsolate {
         fuel_limit: u64,
         memory_limit_bytes: usize,
     ) -> Self {
-        let compartment =
-            TenantCompartment::new(tenant_id, slot_id, capabilities, fuel_limit, memory_limit_bytes);
+        let compartment = TenantCompartment::new(
+            tenant_id,
+            slot_id,
+            capabilities,
+            fuel_limit,
+            memory_limit_bytes,
+        );
         compartment.pkey_domain.enter_domain();
 
         Self {
@@ -152,7 +157,11 @@ impl SliceIsolate {
         if self.egress_audit_secrets.is_empty() || payload.is_empty() {
             return Ok(());
         }
-        verify_egress_secrets_slice(&self.compartment.tenant_id, &self.egress_audit_secrets, payload)
+        verify_egress_secrets_slice(
+            &self.compartment.tenant_id,
+            &self.egress_audit_secrets,
+            payload,
+        )
     }
 
     /// Creates an instant in-memory snapshot (`< 5 us`) of the current thread-local `node:fs` VFS slab
@@ -192,8 +201,7 @@ impl SliceIsolate {
         let parent_reads = &self.compartment.capabilities.allowed_read_prefixes;
         if !opts.allow_read.is_empty() {
             for req_prefix in &opts.allow_read {
-                if parent_reads.is_empty()
-                    || parent_reads.iter().any(|p| req_prefix.starts_with(p))
+                if parent_reads.is_empty() || parent_reads.iter().any(|p| req_prefix.starts_with(p))
                 {
                     child_caps = child_caps.with_read_prefix(req_prefix.clone());
                 }
@@ -340,8 +348,7 @@ impl SliceIsolate {
             self.compartment.tenant_id.clear();
             self.compartment.tenant_id.push_str(tenant_id);
         }
-        self.compartment.pkey_domain =
-            slice_sandbox::HardwareProtectionDomain::allocate(slot_id);
+        self.compartment.pkey_domain = slice_sandbox::HardwareProtectionDomain::allocate(slot_id);
         self.compartment.pkey_domain.enter_domain();
         self.compartment.fuel_limit = fuel_limit;
         self.compartment.fuel_consumed = 0;
@@ -436,7 +443,8 @@ impl SliceIsolate {
                                     if let Some((_, first_v)) =
                                         child_mod.static_exports.iter().next()
                                     {
-                                        self.env_vars.insert(dst.clone(), JsValue::Number(*first_v));
+                                        self.env_vars
+                                            .insert(dst.clone(), JsValue::Number(*first_v));
                                     }
                                 }
                             }
@@ -662,16 +670,17 @@ impl SliceIsolate {
             let custom_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
             let wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.get());
 
-            let (status_code, content_type, response_body) = if let Some((st, body, ct)) = custom_res {
-                (st, ct, body)
-            } else {
-                let body = if !metrics.stdout.is_empty() {
-                    metrics.stdout.join("\n")
+            let (status_code, content_type, response_body) =
+                if let Some((st, body, ct)) = custom_res {
+                    (st, ct, body)
                 } else {
-                    metrics.return_value.clone()
+                    let body = if !metrics.stdout.is_empty() {
+                        metrics.stdout.join("\n")
+                    } else {
+                        metrics.return_value.clone()
+                    };
+                    (200, "application/json".to_string(), body)
                 };
-                (200, "application/json".to_string(), body)
-            };
             self.verify_egress_not_leaked(&response_body)?;
 
             return Ok(HttpExecutionOutcome {
@@ -707,8 +716,16 @@ impl SliceIsolate {
             return Ok(0);
         }
         self.compartment.consume_fuel((count as u64) * 5)?;
-        let has_fs_restrictions = !self.compartment.capabilities.allowed_read_prefixes.is_empty()
-            || !self.compartment.capabilities.allowed_write_prefixes.is_empty();
+        let has_fs_restrictions = !self
+            .compartment
+            .capabilities
+            .allowed_read_prefixes
+            .is_empty()
+            || !self
+                .compartment
+                .capabilities
+                .allowed_write_prefixes
+                .is_empty();
         if has_fs_restrictions {
             BOA_ACTIVE_CAPS.with(|c| {
                 *c.borrow_mut() = Some((
@@ -747,9 +764,9 @@ impl SliceIsolate {
         }
         BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
         if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
-            let _ = realm
-                .ctx
-                .eval(boa_engine::Source::from_bytes(b"globalThis.__slice_wu.length=0;"));
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"globalThis.__slice_wu.length=0;",
+            ));
             release_warm_boa_realm(realm);
             return Err(violation);
         }
@@ -803,7 +820,9 @@ impl SliceIsolate {
         for _ in 1..effective_rounds {
             current = *blake3::hash(&current).as_bytes();
         }
-        Ok(JsValue::str(blake3::Hash::from(current).to_hex().to_string()))
+        Ok(JsValue::str(
+            blake3::Hash::from(current).to_hex().to_string(),
+        ))
     }
 
     fn exec_wintertc_route(
@@ -833,11 +852,14 @@ impl SliceIsolate {
             }
             Stmt::ImportCas { .. } => Ok(ControlFlow::None(JsValue::Undefined)),
             Stmt::FuncDecl { name, params, body } => {
-                let func = JsValue::Function(Box::new(JsFunction {
+                let mut js_fn = JsFunction {
                     name: name.clone(),
                     params: params.clone(),
                     body: body.clone(),
-                }));
+                    compiled_numeric: None,
+                };
+                js_fn.compiled_numeric = crate::numeric_vm::try_compile_numeric_func(&js_fn);
+                let func = JsValue::Function(Box::new(js_fn));
                 self.env_vars.insert(name.clone(), func.clone());
                 Ok(ControlFlow::None(func))
             }
@@ -991,15 +1013,15 @@ impl SliceIsolate {
                     BinOp::Lte => Ok(JsValue::Bool(l.to_number() <= r.to_number())),
                     BinOp::Gt => Ok(JsValue::Bool(l.to_number() > r.to_number())),
                     BinOp::Gte => Ok(JsValue::Bool(l.to_number() >= r.to_number())),
-                    BinOp::BitAnd => {
-                        Ok(JsValue::Number(((l.to_number() as i64) & (r.to_number() as i64)) as f64))
-                    }
-                    BinOp::BitOr => {
-                        Ok(JsValue::Number(((l.to_number() as i64) | (r.to_number() as i64)) as f64))
-                    }
-                    BinOp::BitXor => {
-                        Ok(JsValue::Number(((l.to_number() as i64) ^ (r.to_number() as i64)) as f64))
-                    }
+                    BinOp::BitAnd => Ok(JsValue::Number(
+                        ((l.to_number() as i64) & (r.to_number() as i64)) as f64,
+                    )),
+                    BinOp::BitOr => Ok(JsValue::Number(
+                        ((l.to_number() as i64) | (r.to_number() as i64)) as f64,
+                    )),
+                    BinOp::BitXor => Ok(JsValue::Number(
+                        ((l.to_number() as i64) ^ (r.to_number() as i64)) as f64,
+                    )),
                     BinOp::Shl => Ok(JsValue::Number(
                         ((l.to_number() as i64) << ((r.to_number() as u32) & 31)) as f64,
                     )),
@@ -1108,11 +1130,16 @@ impl SliceIsolate {
                 self.compartment.alloc_memory(map.len() * 32)?;
                 Ok(JsValue::Object(Box::new(map)))
             }
-            Expr::ArrowFunc { params, body } => Ok(JsValue::Function(Box::new(JsFunction {
-                name: String::new(),
-                params: params.clone(),
-                body: body.clone(),
-            }))),
+            Expr::ArrowFunc { params, body } => {
+                let mut js_fn = JsFunction {
+                    name: String::new(),
+                    params: params.clone(),
+                    body: body.clone(),
+                    compiled_numeric: None,
+                };
+                js_fn.compiled_numeric = crate::numeric_vm::try_compile_numeric_func(&js_fn);
+                Ok(JsValue::Function(Box::new(js_fn)))
+            }
             Expr::Member { object, property } => {
                 if let Expr::Ident(obj_name) = &**object {
                     if obj_name == "Math" {
@@ -1128,9 +1155,7 @@ impl SliceIsolate {
                     JsValue::Array(a) if property == "length" => {
                         Ok(JsValue::Number(a.len() as f64))
                     }
-                    JsValue::Str(s) if property == "length" => {
-                        Ok(JsValue::Number(s.len() as f64))
-                    }
+                    JsValue::Str(s) if property == "length" => Ok(JsValue::Number(s.len() as f64)),
                     JsValue::Object(map) => {
                         Ok(map.get(property).cloned().unwrap_or(JsValue::Undefined))
                     }
@@ -1152,9 +1177,10 @@ impl SliceIsolate {
                             .map(|c| JsValue::str(c.to_string()))
                             .unwrap_or(JsValue::Undefined))
                     }
-                    JsValue::Object(map) => {
-                        Ok(map.get(&idx.to_string()).cloned().unwrap_or(JsValue::Undefined))
-                    }
+                    JsValue::Object(map) => Ok(map
+                        .get(&idx.to_string())
+                        .cloned()
+                        .unwrap_or(JsValue::Undefined)),
                     _ => Ok(JsValue::Undefined),
                 }
             }
@@ -1232,10 +1258,7 @@ impl SliceIsolate {
                     )));
                 }
                 ("fs", "readFileSync" | "read") => {
-                    let path = eval_args
-                        .first()
-                        .map(|v| v.to_string())
-                        .unwrap_or_default();
+                    let path = eval_args.first().map(|v| v.to_string()).unwrap_or_default();
                     self.compartment.verify_fs_read(&path)?;
                     return Ok(JsValue::str(format!("CAS_VIRTUAL_FILE[{}]", path)));
                 }
@@ -1299,10 +1322,9 @@ impl SliceIsolate {
                     if let Some(cb) = eval_args.first() {
                         let mut out = Vec::with_capacity(items.len());
                         for (idx, item) in items.into_iter().enumerate() {
-                            out.push(self.invoke_function_val(
-                                cb,
-                                &[item, JsValue::Number(idx as f64)],
-                            )?);
+                            out.push(
+                                self.invoke_function_val(cb, &[item, JsValue::Number(idx as f64)])?,
+                            );
                         }
                         return Ok(JsValue::array(out));
                     }
@@ -1351,45 +1373,20 @@ impl SliceIsolate {
             }
         }
 
-        // 2. Handle direct function calls (`print(...)`, `fib(...)`, `numericLoop(...)`, `fetch(...)`, `env(...)`, or user-defined functions)
+        // 2. Handle direct built-in function calls (`print(...)`, `fetch(...)`, `env(...)`, or user-defined functions)
         if let Expr::Ident(fn_name) = callee {
+            // If the user explicitly defined a function with this name in `self.env_vars`,
+            // invoke the user-defined function first instead of any built-in fallback!
+            if let Some(user_fn @ JsValue::Function(_)) = self.env_vars.get(fn_name).cloned() {
+                return self.invoke_function_val(&user_fn, &eval_args);
+            }
+
             match fn_name.as_str() {
                 "print" => {
                     let formatted: Vec<String> = eval_args.iter().map(|v| v.to_string()).collect();
                     let line = formatted.join(" ");
                     self.stdout.push(line);
                     return Ok(JsValue::Undefined);
-                }
-                "fib" => {
-                    // Use Tier-2 native kernel for immediate speed
-                    let n = eval_args.first().map(|v| v.to_number() as u64).unwrap_or(0);
-                    return self.exec_fib_kernel(n);
-                }
-                "numericLoop" => {
-                    let n = eval_args.first().map(|v| v.to_number() as u64).unwrap_or(0);
-                    return self.exec_numeric_loop_kernel(n);
-                }
-                "cryptoDigest" => {
-                    let payload = eval_args
-                        .first()
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "nexus-js-wintertc-payload-2026".to_string());
-                    let rounds = eval_args
-                        .get(1)
-                        .map(|v| v.to_number() as u64)
-                        .unwrap_or(10_000);
-                    return self.exec_crypto_digest(&payload, rounds);
-                }
-                "jsonTransform" => {
-                    let rounds = eval_args
-                        .first()
-                        .map(|v| v.to_number() as u64)
-                        .unwrap_or(10_000);
-                    self.compartment.consume_fuel(rounds)?;
-                    self.current_tier = ExecutionTier::Tier2PeakNative;
-                    return Ok(JsValue::str(
-                        r#"{"runtime":"slice","version":2,"ok":true}"#.to_string(),
-                    ));
                 }
                 "fetch" => {
                     let url = eval_args.first().map(|v| v.to_string()).unwrap_or_default();
@@ -1402,7 +1399,10 @@ impl SliceIsolate {
                     if let Some(arg2) = eval_args.get(1) {
                         self.verify_egress_not_leaked(&arg2.to_string())?;
                     }
-                    return Ok(JsValue::str(format!("HTTP/2 200 OK from {}/{}", host, path)));
+                    return Ok(JsValue::str(format!(
+                        "HTTP/2 200 OK from {}/{}",
+                        host, path
+                    )));
                 }
                 "env" => {
                     let key = eval_args.first().map(|v| v.to_string()).unwrap_or_default();
@@ -1410,10 +1410,7 @@ impl SliceIsolate {
                     return Ok(JsValue::str(val));
                 }
                 "Number" | "parseFloat" => {
-                    let n = eval_args
-                        .first()
-                        .map(|v| v.to_number())
-                        .unwrap_or(0.0);
+                    let n = eval_args.first().map(|v| v.to_number()).unwrap_or(0.0);
                     return Ok(JsValue::Number(n));
                 }
                 "parseInt" => {
@@ -1424,10 +1421,7 @@ impl SliceIsolate {
                     return Ok(JsValue::Number(n));
                 }
                 "String" => {
-                    let s = eval_args
-                        .first()
-                        .map(|v| v.to_string())
-                        .unwrap_or_default();
+                    let s = eval_args.first().map(|v| v.to_string()).unwrap_or_default();
                     return Ok(JsValue::str(s));
                 }
                 "Boolean" => {
@@ -1448,6 +1442,36 @@ impl SliceIsolate {
         args: &[JsValue],
     ) -> Result<JsValue, SandboxViolation> {
         if let JsValue::Function(func) = func_val {
+            // Innovation 1: If this function is a pure numeric kernel compiled into `NumericOp`
+            // and all arguments are numbers/booleans, execute directly on the unboxed 64-bit register VM!
+            if let Some(ref num_ir) = func.compiled_numeric {
+                if args
+                    .iter()
+                    .all(|a| matches!(a, JsValue::Number(_) | JsValue::Bool(_)))
+                {
+                    let mut unboxed_args = [0.0f64; 6];
+                    for (idx, a) in args.iter().take(6).enumerate() {
+                        unboxed_args[idx] = a.to_number();
+                    }
+                    let remaining_fuel = self
+                        .compartment
+                        .fuel_limit
+                        .saturating_sub(self.compartment.fuel_consumed);
+                    let mut steps: u64 = 0;
+                    let res = num_ir.execute(
+                        &unboxed_args[..args.len().min(6)],
+                        &mut steps,
+                        remaining_fuel,
+                        0,
+                        &self.compartment.tenant_id,
+                    )?;
+                    let fuel_cost = (steps / 64).max(1);
+                    self.compartment.consume_fuel(fuel_cost)?;
+                    self.current_tier = ExecutionTier::Tier2PeakNative;
+                    return Ok(JsValue::Number(res));
+                }
+            }
+
             self.compartment.consume_fuel(2)?;
             // Save shadowed bindings
             let mut saved = Vec::with_capacity(func.params.len());
@@ -1498,7 +1522,9 @@ impl SliceIsolate {
             if let Some((rc_key_u64, hex_bytes)) = extract_slice_rc_key(js_code) {
                 let mut realm = acquire_warm_boa_realm();
                 if !realm.loaded_bundles.contains_key(&rc_key_u64) {
-                    let _ = realm.ctx.eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
+                    let _ = realm
+                        .ctx
+                        .eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
                     let mut lookup_buf = *b"__slice_rc[\"0000000000000000\"]";
                     lookup_buf[12..28].copy_from_slice(hex_bytes);
                     if let Ok(val) = realm.ctx.eval(boa_engine::Source::from_bytes(&lookup_buf)) {
@@ -1507,9 +1533,9 @@ impl SliceIsolate {
                         }
                     }
                     let _ = realm.ctx.run_jobs();
-                    let _ = realm
-                        .ctx
-                        .eval(boa_engine::Source::from_bytes(b"globalThis.__slice_wu.length=0;"));
+                    let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                        b"globalThis.__slice_wu.length=0;",
+                    ));
                     BOA_STDOUT.with(|out| out.borrow_mut().clear());
                     BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
                     BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
@@ -1544,8 +1570,16 @@ impl SliceIsolate {
             BOA_DET_STATE.with(|s| s.set(Some((seed ^ 0x9E37_79B9_7F4A_7C15, 1_700_000_000_000))));
         }
 
-        let has_fs_restrictions = !self.compartment.capabilities.allowed_read_prefixes.is_empty()
-            || !self.compartment.capabilities.allowed_write_prefixes.is_empty();
+        let has_fs_restrictions = !self
+            .compartment
+            .capabilities
+            .allowed_read_prefixes
+            .is_empty()
+            || !self
+                .compartment
+                .capabilities
+                .allowed_write_prefixes
+                .is_empty();
         if has_fs_restrictions {
             BOA_ACTIVE_CAPS.with(|c| {
                 *c.borrow_mut() = Some((
@@ -1575,12 +1609,24 @@ impl SliceIsolate {
         }
 
         let mut realm = acquire_warm_boa_realm();
+        let remaining_fuel = self
+            .compartment
+            .fuel_limit
+            .saturating_sub(self.compartment.fuel_consumed)
+            .max(1);
+        realm
+            .ctx
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(remaining_fuel);
+        realm.ctx.runtime_limits_mut().set_recursion_limit(512);
+
         if has_env_keys {
-            let _ = realm
-                .ctx
-                .eval(boa_engine::Source::from_bytes(b"__slice_sync_process_env(true);"));
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_sync_process_env(true);",
+            ));
         }
         let rc_key_opt = extract_slice_rc_key(js_code);
+        let mut should_check_ses = rc_key_opt.is_none();
         // Phase 9B Priority 2 + Phase N1 Direct JsObject Invocation (`__slice_rc`):
         // When a warm `boa_engine::Context` has already evaluated this bundle's `node_modules` CJS factories
         // and cached its entrypoint `JsObject` function handle in `realm.loaded_bundles[key]`, invoke
@@ -1589,7 +1635,10 @@ impl SliceIsolate {
             if let Some(fn_obj) = realm.loaded_bundles.get(&rc_key_u64).cloned() {
                 fn_obj.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
             } else {
-                let res = realm.ctx.eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
+                should_check_ses = true;
+                let res = realm
+                    .ctx
+                    .eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
                 if res.is_ok() && BOA_VIOLATION.with(|v| v.borrow().is_none()) {
                     let mut lookup_buf = *b"__slice_rc[\"0000000000000000\"]";
                     lookup_buf[12..28].copy_from_slice(hex_bytes);
@@ -1602,16 +1651,40 @@ impl SliceIsolate {
                 res
             }
         } else if js_code.starts_with('{') {
-            realm.ctx.eval(boa_engine::Source::from_bytes(js_code.as_bytes()))
+            realm
+                .ctx
+                .eval(boa_engine::Source::from_bytes(js_code.as_bytes()))
         } else {
             let scoped_code = format!("{{\n{}\n}}", js_code);
-            realm.ctx.eval(boa_engine::Source::from_bytes(scoped_code.as_bytes()))
+            realm
+                .ctx
+                .eval(boa_engine::Source::from_bytes(scoped_code.as_bytes()))
         };
 
         if !BOA_HTTP_REQ.with(|r| r.borrow().active)
             || BOA_HTTP_RES.with(|res| res.borrow().is_none())
         {
             let _ = realm.ctx.run_jobs();
+        }
+
+        realm
+            .ctx
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(u64::MAX);
+
+        let mut ses_mutated_target = String::new();
+        if should_check_ses {
+            if let Some(ref check_fn) = realm.ses_check_fn {
+                if let Ok(v) = check_fn.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
+                {
+                    if let Some(s) = v.as_string() {
+                        let st = s.to_std_string_escaped();
+                        if !st.is_empty() {
+                            ses_mutated_target = st;
+                        }
+                    }
+                }
+            }
         }
 
         if self.deterministic_seed.is_some() {
@@ -1627,15 +1700,35 @@ impl SliceIsolate {
             BOA_EGRESS_SECRETS.with(|s| s.borrow_mut().clear());
         }
         if has_env_keys {
-            let _ = realm
-                .ctx
-                .eval(boa_engine::Source::from_bytes(b"__slice_sync_process_env(false);"));
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_sync_process_env(false);",
+            ));
             BOA_ENV_MAP.with(|m| m.borrow_mut().clear());
         }
         BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
         if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
             release_warm_boa_realm(realm);
             return Err(violation);
+        }
+        if !ses_mutated_target.is_empty() {
+            release_warm_boa_realm(realm);
+            return Err(SandboxViolation::IntrinsicMutationBlocked {
+                tenant_id: self.compartment.tenant_id.clone(),
+                intrinsic: ses_mutated_target,
+            });
+        }
+        if let Err(ref err) = eval_res {
+            let msg = err.to_string();
+            if msg.contains("loop iteration limit")
+                || msg.contains("Maximum call stack")
+                || msg.contains("recursion limit")
+            {
+                release_warm_boa_realm(realm);
+                return Err(SandboxViolation::CpuFuelExhausted {
+                    tenant_id: self.compartment.tenant_id.clone(),
+                    limit: self.compartment.fuel_limit,
+                });
+            }
         }
         let kv_used = BOA_KV_MEM_BUDGET.with(|m| m.get().0);
         if kv_used > 0 {
@@ -1710,10 +1803,10 @@ pub fn run_source_isolated(
     memory_limit_bytes: usize,
 ) -> Result<ExecutionMetrics> {
     let bytecode = compile_source_to_bytecode(raw_source);
-    let mut isolate = SliceIsolate::spawn(tenant_id, 1, capabilities, fuel_limit, memory_limit_bytes);
+    let mut isolate =
+        SliceIsolate::spawn(tenant_id, 1, capabilities, fuel_limit, memory_limit_bytes);
     match isolate.execute_bytecode(&bytecode, None) {
         Ok(metrics) => Ok(metrics),
         Err(violation) => bail!(violation),
     }
 }
-

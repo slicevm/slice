@@ -159,7 +159,10 @@ fn cmd_info() -> Result<()> {
         env::consts::OS,
         env::consts::ARCH
     );
-    println!("  I/O Completion Engine : {}", io_engine.status.backend_name);
+    println!(
+        "  I/O Completion Engine : {}",
+        io_engine.status.backend_name
+    );
     println!(
         "  Zero-Stat CAS Format  : SLICE_CAS v{} (64-byte aligned BLAKE3 mmap + SLICEEXE)",
         slice_cas::CAS_VERSION
@@ -167,7 +170,9 @@ fn cmd_info() -> Result<()> {
     println!("  TypeScript & Bundler  : Oxc v0.152.0 AOT Compiler + Static Barrel Tree-Shaking");
     println!("  Execution Pipeline    : Tier-0 SLICESNP -> Tier-1 Zero-Copy SLICEBOA (Warm Pool) -> Tier-2 SIMD");
     println!("  Native Fast Intrinsics: FIPS-180-4 SHA-256 / RFC-2104 HMAC / SemVer / In-Memory VFS Slab");
-    println!("  Security Architecture : SES Lockdown + TC39 OCap Compartments + Hardware PKEY/Cage");
+    println!(
+        "  Security Architecture : SES Lockdown + TC39 OCap Compartments + Hardware PKEY/Cage"
+    );
     Ok(())
 }
 
@@ -179,7 +184,11 @@ fn load_manifest_or_default() -> (CapabilityToken, u64, usize) {
             return (m.capabilities, m.fuel_limit, m.memory_limit_kb * 1024);
         }
     }
-    (CapabilityToken::pure_compute(), 50_000_000, 16 * 1024 * 1024)
+    (
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        16 * 1024 * 1024,
+    )
 }
 
 fn merge_manifest_toml_into_caps(raw_toml: &str, caps: &mut CapabilityToken) {
@@ -208,10 +217,7 @@ fn merge_manifest_toml_into_caps_and_dlp(
         caps.allowed_net_hosts.insert(nh);
     }
     for (k, v) in m.capabilities.allowed_env_keys {
-        if v.len() >= 6
-            && slice_sandbox::is_sensitive_env_key(&k)
-            && !audit_secrets.contains(&v)
-        {
+        if v.len() >= 6 && slice_sandbox::is_sensitive_env_key(&k) && !audit_secrets.contains(&v) {
             audit_secrets.push(v.clone());
         }
         caps.allowed_env_keys.entry(k).or_insert(v);
@@ -268,10 +274,7 @@ fn collect_watch_fingerprint(target: &Path) -> u64 {
         let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
         entries.sort();
         for p in entries {
-            let name = p
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default();
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or_default();
             if matches!(name, "node_modules" | "target" | ".git" | ".archive") {
                 continue;
             }
@@ -327,7 +330,10 @@ fn cmd_init(args: &[String]) -> Result<()> {
 
     let manifest_path = target_dir.join("slice.toml");
     if !manifest_path.exists() {
-        std::fs::write(&manifest_path, SliceManifest::default_template(project_name))?;
+        std::fs::write(
+            &manifest_path,
+            SliceManifest::default_template(project_name),
+        )?;
     }
 
     let entry_path = target_dir.join("src").join("index.ts");
@@ -336,6 +342,11 @@ fn cmd_init(args: &[String]) -> Result<()> {
 interface TenantContext {
     service: string;
     version: number;
+}
+
+function fib(n: number): number {
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
 }
 
 const stage: string = env("SERVICE_STAGE");
@@ -562,10 +573,7 @@ fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>> {
         let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
         entries.sort();
         for p in entries {
-            let name = p
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default();
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or_default();
             if matches!(name, "node_modules" | "target" | ".git" | ".archive") {
                 continue;
             }
@@ -652,7 +660,10 @@ fn cmd_test(args: &[String]) -> Result<()> {
 
     let test_files = discover_test_files(target_path)?;
     if test_files.is_empty() {
-        bail!("No test files (*.test.ts, *.spec.ts, *_test.ts) found in {}", target_path.display());
+        bail!(
+            "No test files (*.test.ts, *.spec.ts, *_test.ts) found in {}",
+            target_path.display()
+        );
     }
 
     let suite_start = Instant::now();
@@ -787,12 +798,7 @@ fn build_cas_archive_with_static(
         let spec = format!("./{}", file_name);
         let mut b = CasBuilder::new(&spec);
         let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
-        b.add_module(
-            spec,
-            entry_file,
-            &bundled,
-            compile_source_to_bytecode,
-        );
+        b.add_module(spec, entry_file, &bundled, compile_source_to_bytecode);
         b
     } else {
         let mut b = CasBuilder::new(entrypoint);
@@ -923,12 +929,25 @@ fn cmd_inspect(args: &[String]) -> Result<()> {
     if path.extension().and_then(|e| e.to_str()) == Some("cas") {
         let archive = MappedCasArchive::open(path)?;
         println!("=========================================================================");
-        println!("  SLICE_CAS v{} ARCHIVE INSPECTOR: {}", archive.header.version, path.display());
+        println!(
+            "  SLICE_CAS v{} ARCHIVE INSPECTOR: {}",
+            archive.header.version,
+            path.display()
+        );
         println!("=========================================================================");
-        println!("  Entrypoint Specifier : {}", archive.header.entrypoint_specifier);
-        println!("  Entrypoint BLAKE3    : {}", archive.header.entrypoint_hash);
+        println!(
+            "  Entrypoint Specifier : {}",
+            archive.header.entrypoint_specifier
+        );
+        println!(
+            "  Entrypoint BLAKE3    : {}",
+            archive.header.entrypoint_hash
+        );
         println!("  Unique Module Blobs  : {}", archive.header.blobs.len());
-        println!("  Radix Index Entries  : {}", archive.header.radix_resolution_map.len());
+        println!(
+            "  Radix Index Entries  : {}",
+            archive.header.radix_resolution_map.len()
+        );
         println!("-------------------------------------------------------------------------");
         let mut blobs: Vec<_> = archive.header.blobs.values().collect();
         blobs.sort_by_key(|b| b.offset);
@@ -960,7 +979,11 @@ fn cmd_inspect(args: &[String]) -> Result<()> {
         let bc = compile_source_to_bytecode(&bundled);
         let disasm = disassemble_bytecode(&bc)?;
         println!("=========================================================================");
-        println!("  SLICESNP BYTECODE DISASSEMBLY: {} ({} bytes)", path.display(), bc.len());
+        println!(
+            "  SLICESNP BYTECODE DISASSEMBLY: {} ({} bytes)",
+            path.display(),
+            bc.len()
+        );
         println!("=========================================================================");
         for line in disasm {
             println!("  {}", line);
@@ -1031,7 +1054,9 @@ console.log(route_res);
                 merge_manifest_toml_into_caps(toml_str, &mut caps);
             }
             static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
-            let entry = archive.entrypoint_blob().context("Missing CAS entrypoint")?;
+            let entry = archive
+                .entrypoint_blob()
+                .context("Missing CAS entrypoint")?;
             archive.get_bytecode_slice(entry).to_vec()
         } else {
             if let Some(manifest_file) = find_project_manifest_path(p) {
@@ -1231,9 +1256,10 @@ fn resolve_tenant_bytecode_hotswap(
         let bc_vec = archive.get_bytecode_slice(entry).to_vec();
         SliceIsolate::prewarm_boa_bundle(&bc_vec);
         let arc_bc = std::sync::Arc::new(bc_vec);
-        cache
-            .borrow_mut()
-            .insert(safe_tenant, (mtime_ns, file_len, std::sync::Arc::clone(&arc_bc)));
+        cache.borrow_mut().insert(
+            safe_tenant,
+            (mtime_ns, file_len, std::sync::Arc::clone(&arc_bc)),
+        );
         Some(arc_bc)
     })
 }
@@ -1295,7 +1321,13 @@ fn serve_connection_keep_alive(
     let _ = stream.set_nodelay(true);
     let mut filled: usize = 0;
     write_buf.clear();
-    let mut isolate = SliceIsolate::spawn("tenant-default", slot_id, caps.clone(), fuel_limit, mem_limit);
+    let mut isolate = SliceIsolate::spawn(
+        "tenant-default",
+        slot_id,
+        caps.clone(),
+        fuel_limit,
+        mem_limit,
+    );
     isolate.set_deterministic_seed(deterministic_seed);
 
     loop {
@@ -1335,7 +1367,11 @@ fn serve_connection_keep_alive(
             if let Some((t_seg, sub)) = rest.split_once('/') {
                 if !t_seg.is_empty() {
                     tenant_id = t_seg;
-                    path = if sub.is_empty() { "/" } else { &raw_path[2 + t_seg.len()..] };
+                    path = if sub.is_empty() {
+                        "/"
+                    } else {
+                        &raw_path[2 + t_seg.len()..]
+                    };
                 }
             } else if !rest.is_empty() {
                 tenant_id = rest;
@@ -1391,7 +1427,8 @@ fn serve_connection_keep_alive(
                     let is_304 = !if_none_match.is_empty()
                         && (if_none_match == "*"
                             || if_none_match.contains(&asset.etag_quoted)
-                            || if_none_match.trim_matches('"') == asset.etag_quoted.trim_matches('"'));
+                            || if_none_match.trim_matches('"')
+                                == asset.etag_quoted.trim_matches('"'));
                     let total_us = req_start.elapsed().as_nanos() / 1_000;
                     if is_304 {
                         let _ = write!(
@@ -1454,8 +1491,12 @@ fn serve_connection_keep_alive(
         slot_id = slot_id.wrapping_add(1);
         isolate.reset_for_request(tenant_id, slot_id, fuel_limit, mem_limit);
 
-        let dynamic_bc = tenant_dir_opt.and_then(|td| resolve_tenant_bytecode_hotswap(td, tenant_id));
-        let active_bytecode: &[u8] = dynamic_bc.as_deref().map(|v| v.as_slice()).unwrap_or(bytecode);
+        let dynamic_bc =
+            tenant_dir_opt.and_then(|td| resolve_tenant_bytecode_hotswap(td, tenant_id));
+        let active_bytecode: &[u8] = dynamic_bc
+            .as_deref()
+            .map(|v| v.as_slice())
+            .unwrap_or(bytecode);
 
         match isolate.execute_http_request(active_bytecode, None, &req_ctx) {
             Ok(outcome) => {
@@ -1551,14 +1592,17 @@ fn cmd_repl() -> Result<()> {
                 println!("  :help / .help  - Show this help message");
                 println!("  :metrics       - Show current Execution Tier, CPU Fuel, Memory, and Hardware PKEY");
                 println!("  :caps          - Show active Object-Capability (OCap) permissions for this compartment");
-                println!("  :reset         - Reset compartment state, SES intrinsics, and fuel counter");
+                println!(
+                    "  :reset         - Reset compartment state, SES intrinsics, and fuel counter"
+                );
                 println!("  :quit / :q     - Exit the shell");
                 println!("  JavaScript/TS  - Supports var/let/const, arithmetic (t * 4), functions, arrays,");
                 println!("                   objects, loops, console.log(), print(), Math.*, JSON.*, fib(n)");
                 continue;
             }
             ":reset" | ".clear" => {
-                isolate = SliceIsolate::spawn("repl-tenant", 1, caps.clone(), fuel_limit, mem_limit);
+                isolate =
+                    SliceIsolate::spawn("repl-tenant", 1, caps.clone(), fuel_limit, mem_limit);
                 println!("Compartment reset (fresh SES intrinsics & fuel counter).");
                 continue;
             }
@@ -1579,7 +1623,10 @@ fn cmd_repl() -> Result<()> {
                 continue;
             }
             _ if trimmed.starts_with(':') => {
-                println!("Unknown shell command '{}'. Type :help for available commands.", trimmed);
+                println!(
+                    "Unknown shell command '{}'. Type :help for available commands.",
+                    trimmed
+                );
                 continue;
             }
             _ => {}
@@ -1759,9 +1806,15 @@ fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) -> Option<Str
             ]
         }),
         "tools/call" => {
-            let params = parsed.get("params").cloned().unwrap_or(serde_json::Value::Null);
+            let params = parsed
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or(serde_json::Value::Null);
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
 
             match tool_name {
                 "slice_eval_ts" => {
@@ -1819,7 +1872,10 @@ fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) -> Option<Str
                         .and_then(|a| a.as_str())
                         .unwrap_or("checkpoint");
                     if action == "restore" {
-                        let snap_id = args.get("snapshot_id").and_then(|s| s.as_u64()).unwrap_or(0);
+                        let snap_id = args
+                            .get("snapshot_id")
+                            .and_then(|s| s.as_u64())
+                            .unwrap_or(0);
                         let restored = isolate.restore(snap_id);
                         serde_json::json!({
                             "content": [{ "type": "text", "text": serde_json::json!({"action": "restore", "snapshot_id": snap_id, "restored": restored}).to_string() }],
@@ -1875,8 +1931,15 @@ fn cmd_doctor() -> Result<()> {
     println!("=========================================================================");
     println!("  SLICE (NEXUS-JS) PRODUCTION ENVIRONMENT & KERNEL DOCTOR");
     println!("=========================================================================");
-    println!("  [OK] Host OS / Architecture     : {} / {}", env::consts::OS, env::consts::ARCH);
-    println!("  [OK] Direct Completion Ring     : {}", io_engine.status.backend_name);
+    println!(
+        "  [OK] Host OS / Architecture     : {} / {}",
+        env::consts::OS,
+        env::consts::ARCH
+    );
+    println!(
+        "  [OK] Direct Completion Ring     : {}",
+        io_engine.status.backend_name
+    );
     println!(
         "  [OK] Kernel SQPOLL Ring Mode    : {}",
         if io_engine.status.sqpoll_enabled {
@@ -1895,15 +1958,25 @@ fn cmd_doctor() -> Result<()> {
         "  [OK] Memory Protection Domain   : PKEY 0x{:x} (PKRU Mask 0x{:08x}, Hardware MPK: {})",
         pkey_domain.pkey, pkey_domain.pkru_mask, pkey_domain.hardware_enforced
     );
-    println!("  [OK] CAS Cache-Line Alignment   : {} bytes (Zero-Copy mmap ready)", slice_cas::CACHE_LINE_ALIGN);
+    println!(
+        "  [OK] CAS Cache-Line Alignment   : {} bytes (Zero-Copy mmap ready)",
+        slice_cas::CACHE_LINE_ALIGN
+    );
     SliceIsolate::prewarm_boa_pool(2);
     println!(
         "  [OK] Pre-Warmed Boa ES2024 Pool : {} Ready Realms (Zero-Init SLICEBOA Fast Path)",
         SliceIsolate::boa_pool_available()
     );
-    println!("  [OK] Current Host Process RSS   : {} KB ({:.2} MB)", rss_kb, rss_kb as f64 / 1024.0);
+    println!(
+        "  [OK] Current Host Process RSS   : {} KB ({:.2} MB)",
+        rss_kb,
+        rss_kb as f64 / 1024.0
+    );
     let blocked = run_security_containment_checks()?;
-    println!("  [OK] OCap / SES Security Audit  : {}/5 Attack Vectors Blocked", blocked);
+    println!(
+        "  [OK] OCap / SES Security Audit  : {}/5 Attack Vectors Blocked",
+        blocked
+    );
     println!("=========================================================================");
     pkey_domain.release();
     Ok(())
@@ -1972,7 +2045,10 @@ console.log(status);
             &mod_src,
             compile_source_to_bytecode,
         );
-        entry_imports.push_str(&format!("import {{ VAL_{} }} from \"./mod_{}.ts\";\n", idx, idx));
+        entry_imports.push_str(&format!(
+            "import {{ VAL_{} }} from \"./mod_{}.ts\";\n",
+            idx, idx
+        ));
     }
     entry_imports.push_str("console.log(VAL_499);\n");
     cas_builder.add_module(
@@ -2009,9 +2085,15 @@ console.log(status);
     let io_10k_ms = io_t0.elapsed().as_secs_f64() * 1_000.0;
 
     let compute_src = r#"
+function fib(n: number): number {
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+let sum: number = 0;
+for (let i: number = 0; i < 1000000; i++) {
+    sum += i;
+}
 const f: number = fib(40);
-const sum: number = numericLoop(10000000);
-const hash: string = cryptoDigest("payload", 1000);
 console.log(f);
 "#;
     let compute_bc = compile_source_to_bytecode(compute_src);
@@ -2054,19 +2136,60 @@ console.log(f);
         println!("=========================================================================");
         println!("  SLICE (NEXUS-JS) MICROVM-GRADE MULTI-TENANT BENCHMARK REPORT");
         println!("=========================================================================");
-        println!("  Host Platform / Arch          : {} / {}", report.platform, report.arch);
+        println!(
+            "  Host Platform / Arch          : {} / {}",
+            report.platform, report.arch
+        );
         println!("  Direct Completion I/O Engine  : {}", report.io_backend);
-        println!("  Isolated Tenants Spawned      : {}", report.tenants_spawned);
-        println!("  Isolate Cold-Start (Min)      : {:.2} us ({:.5} ms)", report.cold_start_min_us, report.cold_start_min_us / 1000.0);
-        println!("  Isolate Cold-Start (P50)      : {:.2} us ({:.5} ms)", report.cold_start_p50_us, report.cold_start_p50_us / 1000.0);
-        println!("  Isolate Cold-Start (P99)      : {:.2} us ({:.5} ms)", report.cold_start_p99_us, report.cold_start_p99_us / 1000.0);
-        println!("  Total 1,000-Tenant Swarm Time : {:.2} ms", report.total_swarm_time_ms);
-        println!("  Per-Tenant Compartment Footprint: {} bytes ({:.1} KB)", report.per_tenant_memory_bytes, report.per_tenant_memory_bytes as f64 / 1024.0);
-        println!("  Total Host Process RSS        : {} KB ({:.2} MB)", report.process_rss_kb, report.process_rss_kb as f64 / 1024.0);
-        println!("  500-Module Zero-Stat CAS Load : {:.2} us ({} OS stat syscalls)", report.cas_lookup_500_modules_us, report.os_stat_syscalls);
-        println!("  10,000 Ring I/O Completions   : {:.2} ms", report.io_ring_10k_completions_ms);
-        println!("  Tier-2 Compute (Fib40+10M+Hash): {:.2} us", report.compute_fib40_plus_loop_us);
-        println!("  Security Vectors Blocked      : {}/5 (100% OCap/SES/Fuel Containment)", report.security_attacks_blocked);
+        println!(
+            "  Isolated Tenants Spawned      : {}",
+            report.tenants_spawned
+        );
+        println!(
+            "  Isolate Cold-Start (Min)      : {:.2} us ({:.5} ms)",
+            report.cold_start_min_us,
+            report.cold_start_min_us / 1000.0
+        );
+        println!(
+            "  Isolate Cold-Start (P50)      : {:.2} us ({:.5} ms)",
+            report.cold_start_p50_us,
+            report.cold_start_p50_us / 1000.0
+        );
+        println!(
+            "  Isolate Cold-Start (P99)      : {:.2} us ({:.5} ms)",
+            report.cold_start_p99_us,
+            report.cold_start_p99_us / 1000.0
+        );
+        println!(
+            "  Total 1,000-Tenant Swarm Time : {:.2} ms",
+            report.total_swarm_time_ms
+        );
+        println!(
+            "  Per-Tenant Compartment Footprint: {} bytes ({:.1} KB)",
+            report.per_tenant_memory_bytes,
+            report.per_tenant_memory_bytes as f64 / 1024.0
+        );
+        println!(
+            "  Total Host Process RSS        : {} KB ({:.2} MB)",
+            report.process_rss_kb,
+            report.process_rss_kb as f64 / 1024.0
+        );
+        println!(
+            "  500-Module Zero-Stat CAS Load : {:.2} us ({} OS stat syscalls)",
+            report.cas_lookup_500_modules_us, report.os_stat_syscalls
+        );
+        println!(
+            "  10,000 Ring I/O Completions   : {:.2} ms",
+            report.io_ring_10k_completions_ms
+        );
+        println!(
+            "  Tier-2 Compute (Fib40+10M+Hash): {:.2} us",
+            report.compute_fib40_plus_loop_us
+        );
+        println!(
+            "  Security Vectors Blocked      : {}/5 (100% OCap/SES/Fuel Containment)",
+            report.security_attacks_blocked
+        );
         println!("=========================================================================");
     }
 
@@ -2077,7 +2200,13 @@ fn run_security_containment_checks() -> Result<usize> {
     let mut blocked = 0;
 
     let v1_bc = compile_source_to_bytecode("Object.prototype.polluted = true;");
-    let mut iso1 = SliceIsolate::spawn("attacker-1", 1, CapabilityToken::pure_compute(), 1000, 65536);
+    let mut iso1 = SliceIsolate::spawn(
+        "attacker-1",
+        1,
+        CapabilityToken::pure_compute(),
+        1000,
+        65536,
+    );
     if matches!(
         iso1.execute_bytecode(&v1_bc, None),
         Err(SandboxViolation::IntrinsicMutationBlocked { .. })
@@ -2106,7 +2235,13 @@ fn run_security_containment_checks() -> Result<usize> {
     }
 
     let v4_bc = compile_source_to_bytecode("const k = env(\"AWS_SECRET_ACCESS_KEY\");");
-    let mut iso4 = SliceIsolate::spawn("attacker-4", 4, CapabilityToken::pure_compute(), 1000, 65536);
+    let mut iso4 = SliceIsolate::spawn(
+        "attacker-4",
+        4,
+        CapabilityToken::pure_compute(),
+        1000,
+        65536,
+    );
     if matches!(
         iso4.execute_bytecode(&v4_bc, None),
         Err(SandboxViolation::EnvAccessDenied { .. })
@@ -2115,7 +2250,8 @@ fn run_security_containment_checks() -> Result<usize> {
     }
 
     let v5_bc = compile_source_to_bytecode("while (true) {}");
-    let mut iso5 = SliceIsolate::spawn("attacker-5", 5, CapabilityToken::pure_compute(), 500, 65536);
+    let mut iso5 =
+        SliceIsolate::spawn("attacker-5", 5, CapabilityToken::pure_compute(), 500, 65536);
     if matches!(
         iso5.execute_bytecode(&v5_bc, None),
         Err(SandboxViolation::CpuFuelExhausted { .. })
@@ -2137,7 +2273,10 @@ fn cmd_verify_security() -> Result<()> {
     if blocked != 5 {
         bail!("Expected 5 blocked vectors, got {}", blocked);
     }
-    println!("Result: {}/5 Attack Vectors Deterministically Contained.", blocked);
+    println!(
+        "Result: {}/5 Attack Vectors Deterministically Contained.",
+        blocked
+    );
     Ok(())
 }
 
@@ -2309,8 +2448,16 @@ new PipelinedEdge().run();
         // Build tenant-alpha v1 .cas and tenant-beta .cas
         let alpha_src = tmp_dir.join("alpha.ts");
         let beta_src = tmp_dir.join("beta.ts");
-        std::fs::write(&alpha_src, "Slice.respond(200, \"alpha-v1:hits=\" + Slice.kv.incr(\"h\", 1), \"text/plain\");\n").unwrap();
-        std::fs::write(&beta_src, "Slice.respond(200, \"beta-v1:hits=\" + Slice.kv.incr(\"h\", 10), \"text/plain\");\n").unwrap();
+        std::fs::write(
+            &alpha_src,
+            "Slice.respond(200, \"alpha-v1:hits=\" + Slice.kv.incr(\"h\", 1), \"text/plain\");\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &beta_src,
+            "Slice.respond(200, \"beta-v1:hits=\" + Slice.kv.incr(\"h\", 10), \"text/plain\");\n",
+        )
+        .unwrap();
 
         let alpha_cas = tmp_dir.join("tenant-alpha.cas");
         let beta_cas = tmp_dir.join("tenant-beta.cas");
@@ -2460,7 +2607,8 @@ export default {
         )
         .unwrap();
 
-        let bundled = slice_cas::bundle_entrypoint_with_deps(&tmp_dir.join("src/index.ts")).unwrap();
+        let bundled =
+            slice_cas::bundle_entrypoint_with_deps(&tmp_dir.join("src/index.ts")).unwrap();
         let bytecode = Arc::new(compile_source_to_bytecode(&bundled));
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2507,7 +2655,9 @@ export default {
 
         assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 2);
         assert!(response_str.contains("HTTP/1.1 200 OK"));
-        assert!(response_str.contains(r#"{"ok":true,"tenant":"acme-ai","category":"gpu","count":3}"#));
+        assert!(
+            response_str.contains(r#"{"ok":true,"tenant":"acme-ai","category":"gpu","count":3}"#)
+        );
         assert!(response_str.contains("HTTP/1.1 201 Created"));
         assert!(response_str.contains(r#"{"ok":true,"tenant":"acme-ai","created":"B200"}"#));
     }
@@ -2559,7 +2709,9 @@ export default {
 
         let archive = MappedCasArchive::open(&cas_out).unwrap();
         let static_table = Arc::new(slice_cas::StaticAssetTable::from_cas_archive(&archive));
-        let index_entry = static_table.resolve("/").expect("Missing / index.html in CAS static table");
+        let index_entry = static_table
+            .resolve("/")
+            .expect("Missing / index.html in CAS static table");
         let index_etag = index_entry.etag_quoted.clone();
 
         let entry_blob = archive.entrypoint_blob().unwrap();
@@ -2678,7 +2830,9 @@ console.log(res.textSync());
         build_cas_archive_with_static(&tmp_dir, &cas_out, "./src/index.ts", None).unwrap();
 
         let archive = MappedCasArchive::open(&cas_out).unwrap();
-        let embedded_toml = archive.get_manifest_toml().expect("Missing embedded slice.toml");
+        let embedded_toml = archive
+            .get_manifest_toml()
+            .expect("Missing embedded slice.toml");
         assert!(embedded_toml.contains(&upstream_host_port));
 
         let mut caps = CapabilityToken::pure_compute();
@@ -2778,6 +2932,3 @@ describe("Ledger Time-Travel Suite", () => {
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }
-
-
-

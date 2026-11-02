@@ -701,8 +701,6 @@ impl Parser {
                 Token::Amp => BinOp::BitAnd,
                 Token::Pipe => BinOp::BitOr,
                 Token::Caret => BinOp::BitXor,
-                Token::Shl => BinOp::Shl,
-                Token::Shr => BinOp::Shr,
                 _ => break,
             };
             self.next();
@@ -738,13 +736,32 @@ impl Parser {
     }
 
     fn parse_relational(&mut self) -> Expr {
-        let mut left = self.parse_additive();
+        let mut left = self.parse_shift();
         loop {
             let op = match self.peek() {
                 Token::Lt => BinOp::Lt,
                 Token::Lte => BinOp::Lte,
                 Token::Gt => BinOp::Gt,
                 Token::Gte => BinOp::Gte,
+                _ => break,
+            };
+            self.next();
+            let right = self.parse_shift();
+            left = Expr::Binary {
+                op,
+                lhs: Box::new(left),
+                rhs: Box::new(right),
+            };
+        }
+        left
+    }
+
+    fn parse_shift(&mut self) -> Expr {
+        let mut left = self.parse_additive();
+        loop {
+            let op = match self.peek() {
+                Token::Shl => BinOp::Shl,
+                Token::Shr => BinOp::Shr,
                 _ => break,
             };
             self.next();
@@ -973,11 +990,14 @@ impl Parser {
                     }
                     self.skip_optional_ts_type();
                     let body = self.parse_block();
-                    Expr::Literal(JsValue::Function(Box::new(JsFunction {
+                    let mut js_fn = JsFunction {
                         name: fn_name,
                         params,
                         body,
-                    })))
+                        compiled_numeric: None,
+                    };
+                    js_fn.compiled_numeric = crate::numeric_vm::try_compile_numeric_func(&js_fn);
+                    Expr::Literal(JsValue::Function(Box::new(js_fn)))
                 }
                 _ => {
                     // Check single-param arrow function `x => expr`
@@ -1192,11 +1212,12 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
             }
             Stmt::For {
                 init: Some(init_stmt),
-                cond: Some(Expr::Binary {
-                    op: BinOp::Lt,
-                    lhs: cond_lhs,
-                    rhs: cond_rhs,
-                }),
+                cond:
+                    Some(Expr::Binary {
+                        op: BinOp::Lt,
+                        lhs: cond_lhs,
+                        rhs: cond_rhs,
+                    }),
                 step: Some(step_expr),
                 body,
             } if body.len() == 1 => {
@@ -1271,19 +1292,21 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
                 bindings,
                 specifier,
             } => {
-                let dst = bindings.first().cloned().unwrap_or_else(|| specifier.clone());
+                let dst = bindings
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| specifier.clone());
                 ops.push(BytecodeOp::ImportCas {
                     dst,
                     specifier: specifier.clone(),
                 });
                 continue;
             }
-            Stmt::ExprStmt(Expr::PropAssign {
-                target_chain, ..
-            }) if target_chain == "Object.prototype"
-                || target_chain == "Array.prototype"
-                || target_chain == "Function.prototype"
-                || target_chain == "String.prototype" =>
+            Stmt::ExprStmt(Expr::PropAssign { target_chain, .. })
+                if target_chain == "Object.prototype"
+                    || target_chain == "Array.prototype"
+                    || target_chain == "Function.prototype"
+                    || target_chain == "String.prototype" =>
             {
                 ops.push(BytecodeOp::MutateIntrinsic {
                     target: target_chain.clone(),
@@ -1338,7 +1361,9 @@ pub(crate) fn decode_slicesnp_cached(bytecode: &[u8]) -> std::sync::Arc<Bytecode
             static_exports: FxHashMap::default(),
         });
         let arc_mod = std::sync::Arc::new(parsed);
-        cache.borrow_mut().insert(key, std::sync::Arc::clone(&arc_mod));
+        cache
+            .borrow_mut()
+            .insert(key, std::sync::Arc::clone(&arc_mod));
         arc_mod
     })
 }
@@ -1372,16 +1397,29 @@ pub fn disassemble_bytecode(bytecode: &[u8]) -> Result<Vec<String>> {
     let mut lines = Vec::with_capacity(module.ops.len() + 2);
     for (idx, op) in module.ops.iter().enumerate() {
         let formatted = match op {
-            BytecodeOp::ConstNum { dst, val } => format!("{:04}  CONST_NUM       %{} <- {}", idx, dst, val),
-            BytecodeOp::ConstStr { dst, val } => format!("{:04}  CONST_STR       %{} <- {:?}", idx, dst, val),
+            BytecodeOp::ConstNum { dst, val } => {
+                format!("{:04}  CONST_NUM       %{} <- {}", idx, dst, val)
+            }
+            BytecodeOp::ConstStr { dst, val } => {
+                format!("{:04}  CONST_STR       %{} <- {:?}", idx, dst, val)
+            }
             BytecodeOp::ImportCas { dst, specifier } => {
-                format!("{:04}  IMPORT_CAS      %{} <- cas_resolve({:?})", idx, dst, specifier)
+                format!(
+                    "{:04}  IMPORT_CAS      %{} <- cas_resolve({:?})",
+                    idx, dst, specifier
+                )
             }
             BytecodeOp::AddNum { dst, lhs, rhs } => {
-                format!("{:04}  ADD_F64         %{} <- %{} + %{}", idx, dst, lhs, rhs)
+                format!(
+                    "{:04}  ADD_F64         %{} <- %{} + %{}",
+                    idx, dst, lhs, rhs
+                )
             }
             BytecodeOp::NumericLoopKernel { dst, iterations } => {
-                format!("{:04}  LOOP_SIMD_T2    %{} <- sum(0..{})", idx, dst, iterations)
+                format!(
+                    "{:04}  LOOP_SIMD_T2    %{} <- sum(0..{})",
+                    idx, dst, iterations
+                )
             }
             BytecodeOp::FibKernel { dst, n } => {
                 format!("{:04}  FIB_NATIVE_T2   %{} <- fib({})", idx, dst, n)
@@ -1394,8 +1432,13 @@ pub fn disassemble_bytecode(bytecode: &[u8]) -> Result<Vec<String>> {
                 "{:04}  BLAKE3_SIMD_T2  %{} <- digest({:?}, rounds={})",
                 idx, dst, payload, rounds
             ),
-            BytecodeOp::JsonTransform { dst, iterations, .. } => {
-                format!("{:04}  JSON_XFORM_T2   %{} <- parse_stringify(iters={})", idx, dst, iterations)
+            BytecodeOp::JsonTransform {
+                dst, iterations, ..
+            } => {
+                format!(
+                    "{:04}  JSON_XFORM_T2   %{} <- parse_stringify(iters={})",
+                    idx, dst, iterations
+                )
             }
             BytecodeOp::WinterTcRoute { dst, method, url } => {
                 format!("{:04}  WINTERTC_ROUTE  %{} <- {} {}", idx, dst, method, url)
@@ -1404,10 +1447,16 @@ pub fn disassemble_bytecode(bytecode: &[u8]) -> Result<Vec<String>> {
                 format!("{:04}  SES_CHECK_MUT   trap_if_frozen({:?})", idx, target)
             }
             BytecodeOp::VfsRead { dst, path } => {
-                format!("{:04}  OCAP_VFS_READ   %{} <- vfs_read({:?})", idx, dst, path)
+                format!(
+                    "{:04}  OCAP_VFS_READ   %{} <- vfs_read({:?})",
+                    idx, dst, path
+                )
             }
             BytecodeOp::NetFetch { dst, host, path } => {
-                format!("{:04}  OCAP_NET_FETCH  %{} <- https://{}{}", idx, dst, host, path)
+                format!(
+                    "{:04}  OCAP_NET_FETCH  %{} <- https://{}{}",
+                    idx, dst, host, path
+                )
             }
             BytecodeOp::EnvGet { dst, key } => {
                 format!("{:04}  OCAP_ENV_GET    %{} <- env({:?})", idx, dst, key)
@@ -1430,11 +1479,14 @@ pub fn disassemble_bytecode(bytecode: &[u8]) -> Result<Vec<String>> {
             ),
             BytecodeOp::EvalStmt(stmt) => format!("{:04}  AST_EXEC        {:?}", idx, stmt),
             BytecodeOp::BoaFullEsVm { js_code } => {
-                format!("{:04}  BOA_ES2024_VM   [Oxc Transpiled JS: {} bytes]", idx, js_code.len())
+                format!(
+                    "{:04}  BOA_ES2024_VM   [Oxc Transpiled JS: {} bytes]",
+                    idx,
+                    js_code.len()
+                )
             }
         };
         lines.push(formatted);
     }
     Ok(lines)
 }
-
