@@ -5,7 +5,7 @@ use crate::boa_realm::{BOA_ACTIVE_TENANT, BOA_EGRESS_SECRETS, BOA_NET_HOSTS, BOA
 use crate::state_and_kv::verify_egress_secrets_slice;
 use serde::Serialize;
 use slice_sandbox::SandboxViolation;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const MAX_REDIRECT_HOPS: usize = 5;
-const MAX_IDLE_CONNS_PER_WORKER: usize = 8;
+const MAX_IDLE_CONNS_GLOBAL: usize = 32;
 const IDLE_CONN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -106,27 +106,38 @@ struct PooledOutboundConn {
     last_used: Instant,
 }
 
+static SHARED_OUTBOUND_CONN_POOL: OnceLock<Mutex<Vec<PooledOutboundConn>>> = OnceLock::new();
+
 thread_local! {
-    static OUTBOUND_CONN_POOL: RefCell<Vec<PooledOutboundConn>> =
-        RefCell::new(Vec::with_capacity(MAX_IDLE_CONNS_PER_WORKER));
     static OUTBOUND_POOL_REUSE_COUNT: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Returns the number of times the current worker thread reused a warm Keep-Alive TCP/TLS stream
-/// from `OUTBOUND_CONN_POOL` instead of performing a new TCP + TLS handshake.
+fn shared_conn_pool() -> &'static Mutex<Vec<PooledOutboundConn>> {
+    SHARED_OUTBOUND_CONN_POOL.get_or_init(|| Mutex::new(Vec::with_capacity(MAX_IDLE_CONNS_GLOBAL)))
+}
+
+/// Returns the number of times the current isolate/worker reused a warm Keep-Alive TCP/TLS stream
+/// from `SHARED_OUTBOUND_CONN_POOL` instead of performing a new TCP + TLS handshake.
 pub fn outbound_pool_reuse_count() -> u64 {
     OUTBOUND_POOL_REUSE_COUNT.with(|c| c.get())
 }
 
-/// Clears all idle connections in the current worker thread's outbound Keep-Alive pool.
+pub(crate) fn record_outbound_pool_reuses(delta: u64) {
+    if delta > 0 {
+        OUTBOUND_POOL_REUSE_COUNT.with(|c| c.set(c.get() + delta));
+    }
+}
+
+/// Clears all idle connections in the outbound Keep-Alive pool.
 pub fn clear_outbound_conn_pool() {
-    OUTBOUND_CONN_POOL.with(|pool| pool.borrow_mut().clear());
+    if let Ok(mut vec) = shared_conn_pool().lock() {
+        vec.clear();
+    }
 }
 
 fn take_pooled_stream(is_https: bool, host_port: &str) -> Option<OutboundStream> {
     let now = Instant::now();
-    OUTBOUND_CONN_POOL.with(|pool| {
-        let mut vec = pool.borrow_mut();
+    if let Ok(mut vec) = shared_conn_pool().lock() {
         vec.retain(|entry| now.duration_since(entry.last_used) < IDLE_CONN_TIMEOUT);
         if let Some(pos) = vec
             .iter()
@@ -135,16 +146,15 @@ fn take_pooled_stream(is_https: bool, host_port: &str) -> Option<OutboundStream>
             let entry = vec.swap_remove(pos);
             return Some(entry.stream);
         }
-        None
-    })
+    }
+    None
 }
 
 fn return_pooled_stream(is_https: bool, host_port: String, stream: OutboundStream) {
     let now = Instant::now();
-    OUTBOUND_CONN_POOL.with(|pool| {
-        let mut vec = pool.borrow_mut();
+    if let Ok(mut vec) = shared_conn_pool().lock() {
         vec.retain(|entry| now.duration_since(entry.last_used) < IDLE_CONN_TIMEOUT);
-        if vec.len() >= MAX_IDLE_CONNS_PER_WORKER {
+        if vec.len() >= MAX_IDLE_CONNS_GLOBAL {
             vec.remove(0);
         }
         vec.push(PooledOutboundConn {
@@ -153,7 +163,7 @@ fn return_pooled_stream(is_https: bool, host_port: String, stream: OutboundStrea
             stream,
             last_used: now,
         });
-    });
+    }
 }
 
 pub(crate) fn parse_outbound_http_url(raw_url: &str) -> Option<OutboundUrlParts> {

@@ -1755,3 +1755,263 @@ attack();
     let _ = handle_b.join();
 }
 
+#[test]
+fn test_phase_n2_deterministic_time_travel_event_loop_concurrent_fetch_and_abort_signal() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    SliceIsolate::prewarm_boa_pool(2);
+
+    // 1. Deterministic Time-Travel Event Loop + Microtask/Macrotask Ordering + Async `slice:test` Rollback:
+    //    Schedules 66,000 ms (66 seconds!) of exponential backoff timers + `setInterval` + `queueMicrotask`
+    //    and verifies that Virtual Time-Warp completes the entire 66-second schedule in < 50ms of wall time!
+    crate::reset_virtual_time_warped_ms();
+    let start_wall = Instant::now();
+    let det_event_loop_ts = r#"
+import { describe, test, expect } from "slice:test";
+
+Slice.resetTests();
+Slice.kv.set("workflow:state", "initial", 0);
+
+describe("Phase N-2 Deterministic Time-Travel & Event Loop Suite", () => {
+    test("orders queueMicrotask, Promise.then, setTimeout, clearTimeout, and setInterval", async () => {
+        const events: string[] = [];
+        const t0 = Date.now();
+
+        const cancelledId = setTimeout(() => {
+            events.push("cancelled-should-not-run");
+        }, 5);
+        clearTimeout(cancelledId);
+
+        setTimeout((label: string, code: number) => {
+            events.push(`${label}:${code}`);
+        }, 20, "timer20", 200);
+
+        setTimeout(() => {
+            events.push("timer10");
+            queueMicrotask(() => events.push("micro-after-timer10"));
+        }, 10);
+
+        let ticks = 0;
+        const iv = setInterval(() => {
+            ticks += 1;
+            events.push(`tick:${ticks}`);
+            if (ticks >= 3) {
+                clearInterval(iv);
+            }
+        }, 15);
+
+        Promise.resolve().then(() => events.push("promise-1"));
+        queueMicrotask(() => events.push("micro-1"));
+        events.push("sync-end");
+
+        // Wait 66,000 ms (66 seconds) via exponential backoff timers (warped in 0ns!)
+        await new Promise((r) => setTimeout(r, 1000));
+        await new Promise((r) => setTimeout(r, 5000));
+        await new Promise((r) => setTimeout(r, 60000));
+
+        const elapsedVirtualMs = Date.now() - t0;
+        expect(elapsedVirtualMs).toBeGreaterThanOrEqual(66000);
+        expect(events.join(",")).toBe(
+            "sync-end,promise-1,micro-1,timer10,micro-after-timer10,tick:1,timer20:200,tick:2,tick:3"
+        );
+
+        // Mutate KV after async await to verify `slice:test` waits for async completion before rollback
+        Slice.kv.set("workflow:state", "mutated-after-66s-await", 0);
+        expect(Slice.kv.get("workflow:state")).toBe("mutated-after-66s-await");
+    });
+
+    test("sees clean KV state after async test rollback and tests AbortController", async () => {
+        expect(Slice.kv.get("workflow:state")).toBe("initial");
+
+        let ctrl = new AbortController();
+        let abortEventFired = false;
+        ctrl.signal.addEventListener("abort", () => {
+            abortEventFired = true;
+        });
+        setTimeout(() => ctrl.abort(new Error("CustomCancelReason")), 50);
+
+        let caughtMsg = "";
+        try {
+            await new Promise((_res, rej) => {
+                ctrl.signal.addEventListener("abort", () => rej(ctrl.signal.reason));
+            });
+        } catch (err: any) {
+            caughtMsg = String(err.message || err);
+        }
+        expect(abortEventFired).toBe(true);
+        expect(ctrl.signal.aborted).toBe(true);
+        expect(caughtMsg).toContain("CustomCancelReason");
+
+        // Also verify pre-aborted AbortSignal.abort() rejects fetch immediately without network I/O
+        let preAbortedMsg = "";
+        try {
+            await fetch("https://example.com/never-dialed", {
+                signal: AbortSignal.abort(new Error("PreAbortedSignal"))
+            });
+        } catch (err2: any) {
+            preAbortedMsg = String(err2.message || err2);
+        }
+        expect(preAbortedMsg).toContain("PreAbortedSignal");
+    });
+});
+
+console.log(JSON.stringify(Slice.testSummary()));
+"#;
+    let bundled_det = slice_cas::strip_typescript_and_normalize(det_event_loop_ts, true);
+    let bc_det = compile_source_to_bytecode(&bundled_det);
+    let mut iso_det = SliceIsolate::spawn(
+        "n2-det-event-loop",
+        1,
+        CapabilityToken::pure_compute().with_net_host("example.com"),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    iso_det.set_deterministic_seed(Some(20261102));
+    let det_metrics = iso_det.execute_bytecode(&bc_det, None).unwrap();
+    let wall_elapsed = start_wall.elapsed();
+    let warped_ms = crate::virtual_time_warped_ms();
+
+    let summary: serde_json::Value = serde_json::from_str(&det_metrics.stdout[0]).unwrap();
+    assert_eq!(summary["total"], 2);
+    assert_eq!(summary["passed"], 2);
+    assert_eq!(summary["failed"], 0, "Test summary: {}", summary);
+    assert_eq!(summary["checkpointsRestored"], 2);
+    assert!(
+        warped_ms >= 66_000,
+        "Expected >= 66,000ms of virtual time warp, got {}ms",
+        warped_ms
+    );
+    assert!(
+        wall_elapsed < Duration::from_millis(100),
+        "66-second deterministic timer suite should finish in < 100ms, took {:?}",
+        wall_elapsed
+    );
+
+    // 2. True Concurrent `Promise.all([fetch(u1), fetch(u2), fetch(u3), fetch(u4)])` + `AbortSignal.timeout(ms)`:
+    //    4 upstream servers each sleep 60ms before responding; sequential execution would take >= 240ms.
+    //    A 5th upstream sleeps 350ms and is raced against `AbortSignal.timeout(40)`.
+    let mut ports = Vec::new();
+    let mut handles = Vec::new();
+    for idx in 0..4 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        ports.push(port);
+        handles.push(std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                std::thread::sleep(Duration::from_millis(60));
+                let body = format!(r#"{{"shard":{},"ok":true}}"#, idx);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        }));
+    }
+
+    let slow_listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let slow_port = slow_listener.local_addr().unwrap().port();
+    handles.push(std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = slow_listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            std::thread::sleep(Duration::from_millis(350));
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"slow\":true}",
+            );
+        }
+    }));
+
+    let mut caps = CapabilityToken::pure_compute();
+    for &p in &ports {
+        caps = caps.with_net_host(format!("127.0.0.1:{}", p));
+    }
+    caps = caps.with_net_host(format!("127.0.0.1:{}", slow_port));
+
+    let fanout_js = format!(
+        r#"
+async function runFanout() {{
+    const responses = await Promise.all([
+        fetch("http://127.0.0.1:{}/shard"),
+        fetch("http://127.0.0.1:{}/shard"),
+        fetch("http://127.0.0.1:{}/shard"),
+        fetch("http://127.0.0.1:{}/shard"),
+    ]);
+    const payloads = await Promise.all(responses.map((r) => r.json()));
+    const shards = payloads.map((p) => p.shard);
+
+    let timeoutAborted = false;
+    let timeoutError = "";
+    try {{
+        await fetch("http://127.0.0.1:{}/slow", {{
+            signal: AbortSignal.timeout(35)
+        }});
+    }} catch (err) {{
+        timeoutAborted = true;
+        timeoutError = String(err && err.message || err);
+    }}
+
+    console.log(JSON.stringify({{
+        shards,
+        timeoutAborted,
+        isTimeoutErr: timeoutError.indexOf("TimeoutError") !== -1
+    }}));
+}}
+runFanout();
+"#,
+        ports[0], ports[1], ports[2], ports[3], slow_port
+    );
+
+    let fanout_start = Instant::now();
+    let fanout_metrics = run_source_isolated(
+        "n2-fanout-tenant",
+        &fanout_js,
+        caps,
+        5_000_000,
+        8 * 1024 * 1024,
+    )
+    .unwrap();
+    let fanout_elapsed = fanout_start.elapsed();
+    let fanout_out: serde_json::Value = serde_json::from_str(&fanout_metrics.stdout[0]).unwrap();
+    assert_eq!(fanout_out["shards"], serde_json::json!([0, 1, 2, 3]));
+    assert_eq!(fanout_out["timeoutAborted"], true);
+    assert_eq!(fanout_out["isTimeoutErr"], true);
+    assert!(
+        fanout_elapsed < Duration::from_millis(220),
+        "Expected 4x60ms parallel fan-out + 35ms timeout to complete in < 220ms, took {:?}",
+        fanout_elapsed
+    );
+
+    // 3. Verify un-cleared infinite `setInterval` is bounded and trapped by `MAX_EVENT_LOOP_TICKS`
+    let runaway_interval_js = r#"
+setInterval(() => {
+    // Runaway interval that never calls clearInterval
+}, 1);
+"#;
+    let mut iso_runaway = SliceIsolate::spawn(
+        "n2-runaway-interval",
+        2,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        4 * 1024 * 1024,
+    );
+    iso_runaway.set_deterministic_seed(Some(99));
+    let runaway_bc = compile_source_to_bytecode(runaway_interval_js);
+    let runaway_res = iso_runaway.execute_bytecode(&runaway_bc, None);
+    assert!(matches!(
+        runaway_res,
+        Err(SandboxViolation::CpuFuelExhausted { .. })
+    ));
+
+    for h in handles {
+        let _ = h.join();
+    }
+}
+
+

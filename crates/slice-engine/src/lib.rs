@@ -25,6 +25,7 @@
 //! - [`outbound_http`]: Outbound `fetch()` HTTP/1.1 socket engine, OCap host allowlist, and Cloud Metadata SSRF shield.
 
 pub mod boa_realm;
+pub mod event_loop;
 pub mod intrinsics;
 pub mod isolate;
 pub mod numeric_vm;
@@ -36,6 +37,7 @@ pub mod value_and_ast;
 #[cfg(test)]
 mod tests;
 
+pub use event_loop::{reset_virtual_time_warped_ms, virtual_time_warped_ms};
 pub use isolate::{
     run_source_isolated, ExecutionMetrics, HttpExecutionOutcome, HttpRequestContext,
     SandboxEvalOptions, SandboxEvalOutcome, SliceIsolate,

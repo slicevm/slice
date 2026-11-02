@@ -7,6 +7,9 @@ use crate::boa_realm::{
     BOA_FETCH_MOCKS, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_STDOUT,
     BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
 };
+use crate::event_loop::{
+    clear_event_loop_state, drive_event_loop_to_completion, has_pending_event_loop_work,
+};
 use crate::parser_and_compiler::{
     compile_source_to_bytecode, decode_slicesnp_cached, expr_to_dotted_chain, extract_slice_rc_key,
 };
@@ -759,6 +762,8 @@ impl SliceIsolate {
         let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
             b"while(globalThis.__slice_wu.length>0){var __f=globalThis.__slice_wu.shift();if(typeof __f===\"function\")__f();}",
         ));
+        drive_event_loop_to_completion(&mut realm.ctx);
+        clear_event_loop_state();
 
         if has_fs_restrictions {
             BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = None);
@@ -1670,9 +1675,11 @@ impl SliceIsolate {
 
         if !BOA_HTTP_REQ.with(|r| r.borrow().active)
             || BOA_HTTP_RES.with(|res| res.borrow().is_none())
+            || has_pending_event_loop_work()
         {
-            let _ = realm.ctx.run_jobs();
+            drive_event_loop_to_completion(&mut realm.ctx);
         }
+        clear_event_loop_state();
 
         realm
             .ctx
