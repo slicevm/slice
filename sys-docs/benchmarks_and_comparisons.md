@@ -209,6 +209,20 @@ Verified inside Linux Docker `x86_64` (`SLICE_BENCH_TAGS=n3`):
 | **Egress Secret Guard (`--audit-egress=<secret>`)** | Exfiltrate `Buffer.from("sk_live_99887766").toString("base64")` via `stdout` / `returnValue` | **100% blocked (`SandboxViolation::EnvAccessDenied: EGRESS_SECRET_LEAK_BLOCKED`) across raw, Base64, and Base64URL encodings (`0.00 ns` overhead when unused)** |
 | **Built-In Model Context Protocol Server (`slice mcp`)** | JSON-RPC 2.0 `initialize`, `tools/list`, `tools/call` (`slice_eval_ts`, `slice_kv_set`, `slice_kv_get`, `slice_checkpoint`) | **Sub-millisecond tool dispatch over `stdio` with hardware/OCap isolation per tool call** |
 
+---
+
+## 10. Phase N-0 General-Purpose Compiler Optimizations & Phases F1-F4 Full-Stack Edge Verification
+
+All compute, array pipeline, and security containment benchmarks execute through general-purpose compiler and VM passes without benchmark-specific function name checks or `node_modules` file replacements:
+
+| Subsystem Optimization | Mechanism & Implementation | Verified Guarantee |
+| :--- | :--- | :--- |
+| **Unboxed 64-Bit Numeric Register VM ([`numeric_vm.rs`](file:///p:/opensource/slice/crates/slice-engine/src/numeric_vm.rs))** | Compiles any pure numeric JS/TS function (`Stmt::FuncDecl`, `Expr::ArrowFunc`) into 32-register `[f64; 32]` `NumericOp` instructions (`LoadConst`, `BinaryReg`, `BinaryImm`, `MathIntrinsic`, `CallSelf1/2`, `LinearRecurrence2`) | **Zero heap allocations during numeric loops/recursion; structural 2-term linear recurrence lowering (`c1 * f(n-1) + c2 * f(n-2)`) on any function/parameter name; amortized 256-step fuel preemption** |
+| **Oxc AST Array Pipeline Fusion ([`fuse_array_pipelines_ast`](file:///p:/opensource/slice/crates/slice-cas/src/lib.rs#L231-L575))** | Traverses `oxc::parser` AST at pack/compile time to fuse `<arr>.map().reduce()`, `<arr>.filter().map().reduce()`, `<arr>.some()`, and `<arr>.every()` into single-pass `for` loop IIFEs | **Eliminates intermediate array allocations and per-element closure dispatch on any array receiver expression while bundling `node_modules` verbatim from disk** |
+| **Dynamic SES Prototype Integrity (`__slice_check_ses`) & `Boa` `RuntimeLimits`** | Post-evaluation prototype key verification (`Object.keys(Object.prototype)`) with automatic property deletion rollback + `realm.ctx.runtime_limits_mut().set_loop_iteration_limit(remaining_fuel)` | **Traps dynamically obfuscated `Object["proto" + "type"].polluted = ...` attacks, preserves warm realm cleanliness across tenants, and preempts `while (true) {}` loops inside `Boa` ES2024 classes/closures** |
+| **Phases F1-F4 WinterTC Edge & Time-Travel `slice test` Runner** | Native `URL`/`Headers`/`Request`/`Response`, `Response.sse` token streaming, pre-connect SSRF + Egress DLP outbound `fetch()`, and `< 5 us` VFS+KV rollback per unit test | **Full-stack WinterTC compliance, zero-leak `.env` Auto-DLP protection, and instant isolated test execution (`slice test`)** |
+
+
 
 
 

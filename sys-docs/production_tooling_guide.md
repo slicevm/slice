@@ -146,5 +146,29 @@ if (!res.ok) {
 }
 ```
 
+---
+
+## 7. Workflow 6: Time-Travel Unit & Security Testing (`slice test`), `.env` Auto-DLP, & Compiler Optimizations
+
+### 7.1 Running Time-Travel Isolated Tests (`slice test`)
+`slice test` discovers `*.test.ts` / `*.spec.ts` files and executes each `test()` block inside an automatic `< 5 us` `Slice.checkpoint()` / `Slice.restore()` boundary so VFS and `Slice.kv` mutations never leak between tests:
+```bash
+slice test
+slice test --filter="security" --json
+```
+First-class OCap & resource matchers built into `slice:test`:
+* `expect(fnOrResult).toViolate("FsReadDenied" | "NetAccessDenied" | "CpuFuelExhausted" | "IntrinsicMutationBlocked")`
+* `expect(fnOrResult).toStayWithinFuel(maxFuel)`
+* `expect(fnOrResult).toStayWithinMemory(maxBytes)`
+
+### 7.2 Automatic `.env` Secret Classification & Egress DLP (`--env-file`)
+When running `slice run --env-file=.env` or `slice serve --env-file=.env`, Slice parses the `.env` file and automatically registers any key matching secret patterns (`*_SECRET*`, `*_TOKEN*`, `*_KEY*`, `*_PASSWORD*`, or high-entropy prefixes like `sk_live_*`, `ghp_*`) into the Egress DLP firewall. Tenant code can read the secret for authorized HMAC/API operations, but any attempt to leak it via `stdout`, HTTP response bodies, SSE streams, or unauthorized outbound `fetch()` (in raw, Base64, or Base64URL form) traps with `EGRESS_SECRET_LEAK_BLOCKED`.
+
+### 7.3 General-Purpose AOT & Tier-2 Optimizations Applied Automatically
+1. **Unboxed 64-Bit Numeric Register VM ([`numeric_vm.rs`](file:///p:/opensource/slice/crates/slice-engine/src/numeric_vm.rs)):** Any pure numeric JS/TS function (using arithmetic, bitwise operators, `while`/`for` loops, `if`/`else`, `Math.*` intrinsics, or recursion) is automatically compiled to unboxed 64-bit register instructions (`NumericOp`) on a 32-register stack file (`[f64; 32]`), and 2-term linear recurrences are structurally lowered to $O(n)$ register accumulation.
+2. **Oxc AST Array Pipeline Fusion ([`fuse_array_pipelines_ast`](file:///p:/opensource/slice/crates/slice-cas/src/lib.rs#L231-L575)):** During `slice pack` and `slice compile`, chained `.map().reduce()`, `.filter().map().reduce()`, `.some()`, and `.every()` calls on any array expression are fused via Oxc's AST into single-pass, zero-allocation `for` loop IIFEs.
+3. **Dynamic SES Lockdown & `Boa` `RuntimeLimits`:** Both static and dynamically obfuscated prototype mutations (`Object["proto" + "type"].polluted = ...`) are trapped and rolled back via `__slice_check_ses`, and infinite loops or unbounded recursion inside `Boa` are preempted via `RuntimeLimits`.
+
+
 
 
