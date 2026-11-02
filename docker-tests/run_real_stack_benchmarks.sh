@@ -67,6 +67,7 @@ APP16_DIR="$APPS_DIR/16-dotenv-dlp-config-vault"
 APP17_DIR="$APPS_DIR/17-zero-trust-redirect-keepalive-mesh"
 APP18_DIR="$APPS_DIR/18-async-event-loop-fanout-scheduler"
 APP19_DIR="$APPS_DIR/19-wintertc-webcrypto-streams-edge"
+APP20_DIR="$APPS_DIR/20-node-compat-and-edge-router"
 
 UPSTREAM_F3_PID=""
 cleanup_upstream_f3() {
@@ -127,9 +128,9 @@ echo "  Deno    : $(deno -V)"
 
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  [TAG: apps] PACKING & COMPILING ALL 19 FOLDER-BASED APPS (OXC + CAS)"
+echo "  [TAG: apps] PACKING & COMPILING ALL 20 FOLDER-BASED APPS (OXC + CAS)"
 echo "========================================================================="
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     eval "dir=\$APP${i}_DIR"
     "$SLICE_BIN" pack "$dir" "/tmp/app${i}.cas"
     "$SLICE_BIN" compile "/tmp/app${i}.cas" -o "/tmp/app${i}_bin"
@@ -192,6 +193,7 @@ verify_app_parity "App 16: 16-dotenv-dlp-config-vault (Auto-DLP .env/ini/cookie/
 verify_app_parity "App 17: 17-zero-trust-redirect-keepalive-mesh (Keep-Alive/307/SSRF/DLP)" "$APP17_DIR" "/tmp/app17.cas" "-A"
 verify_app_parity "App 18: 18-async-event-loop-fanout-scheduler (Timers/Microtasks/Fan-Out)" "$APP18_DIR" "/tmp/app18.cas" "-A"
 verify_app_parity "App 19: 19-wintertc-webcrypto-streams-edge (WebCrypto/Streams/FormData/Clone)" "$APP19_DIR" "/tmp/app19.cas" "-A"
+verify_app_parity "App 20: 20-node-compat-and-edge-router (Uint8Array Buffer/Node Core/AST Bundler)" "$APP20_DIR" "/tmp/app20.cas" "-A"
 fi
 
 measure_ms() {
@@ -265,6 +267,9 @@ bench_app 14 "14-FEDERATED-API-MESH-DLP (Outbound fetch/dlv/dset/DLP)" "$APP14_D
 bench_app 15 "15-TIME-TRAVEL-TEST-SUITE (Time-Travel VFS+KV/semver/dlv)" "$APP15_DIR" "-A"
 bench_app 16 "16-DOTENV-DLP-CONFIG-VAULT (Auto-DLP .env/ini/cookie/bytes)" "$APP16_DIR" "-A"
 bench_app 17 "17-ZERO-TRUST-REDIRECT-KEEPALIVE-MESH (Keep-Alive/307/SSRF/DLP)" "$APP17_DIR" "-A"
+bench_app 18 "18-ASYNC-EVENT-LOOP-FANOUT-SCHEDULER (Timers/Microtasks/Fan-Out)" "$APP18_DIR" "-A"
+bench_app 19 "19-WINTERTC-WEBCRYPTO-STREAMS-EDGE (WebCrypto/Streams/FormData/Clone)" "$APP19_DIR" "-A"
+bench_app 20 "20-NODE-COMPAT-AND-EDGE-ROUTER (Uint8Array Buffer/Node Core/AST Bundler)" "$APP20_DIR" "-A"
 
 echo "========================================================================="
 echo "  PEAK MEMORY FOOTPRINT (MAX RSS) ACROSS REPRESENTATIVE APPS"

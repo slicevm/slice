@@ -1,0 +1,14 @@
+{
+  "name": "20-node-compat-and-edge-router",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Phase N-4 Real Uint8Array-backed Buffer, Node Core Tier-1 (node:events, node:path, node:crypto, node:assert, node:util), and Oxc AST multi-file ESM/CJS bundler with .js->.ts specifier resolution",
+  "dependencies": {
+    "bytes": "3.1.2",
+    "cookie": "1.0.2",
+    "ms": "2.1.3",
+    "semver": "7.6.3"
+  }
+}
+

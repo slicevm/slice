@@ -3388,4 +3388,110 @@ exports.parse = function(str) {
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
+
+    #[test]
+    fn test_phase_n4_buffer_node_core_and_ast_bundler_roundtrip() {
+        let tmp_dir = std::env::temp_dir().join("slice_phase_n4_compat_test");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let src_dir = tmp_dir.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+
+        let manifest_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docker-tests/apps/20-node-compat-and-edge-router");
+        std::fs::copy(
+            manifest_src.join("package.json"),
+            tmp_dir.join("package.json"),
+        )
+        .unwrap();
+        std::fs::copy(manifest_src.join("slice.toml"), tmp_dir.join("slice.toml")).unwrap();
+        for f in [
+            "types.ts",
+            "binary_wire_codec.ts",
+            "router_and_events_bus.ts",
+            "index.ts",
+        ] {
+            std::fs::copy(manifest_src.join("src").join(f), src_dir.join(f)).unwrap();
+        }
+
+        // Stub minimal CJS modules for cookie, ms, bytes, and semver in node_modules
+        let nm = tmp_dir.join("node_modules");
+        std::fs::create_dir_all(nm.join("ms")).unwrap();
+        std::fs::write(
+            nm.join("ms/package.json"),
+            r#"{"name":"ms","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            nm.join("ms/index.js"),
+            r#"module.exports = function(v, o) { return __slice_fast_ms(v, Boolean(o && o.long)); };"#,
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(nm.join("bytes")).unwrap();
+        std::fs::write(
+            nm.join("bytes/package.json"),
+            r#"{"name":"bytes","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            nm.join("bytes/index.js"),
+            r#"var fn = function(v){ return typeof v === "number" ? __slice_fast_bytes_format(v) : __slice_fast_bytes_parse(v); };
+fn.parse = function(v){ return __slice_fast_bytes_parse(v); };
+fn.format = function(v){ return __slice_fast_bytes_format(v); };
+module.exports = fn;"#,
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(nm.join("cookie")).unwrap();
+        std::fs::write(
+            nm.join("cookie/package.json"),
+            r#"{"name":"cookie","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            nm.join("cookie/index.js"),
+            r#"exports.parse = function(str) {
+  var out = {};
+  var parts = String(str || "").split(";");
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i].trim();
+    var eq = p.indexOf("=");
+    if (eq !== -1) out[p.slice(0, eq).trim()] = p.slice(eq + 1).trim();
+  }
+  return out;
+};"#,
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(nm.join("semver")).unwrap();
+        std::fs::write(
+            nm.join("semver/package.json"),
+            r#"{"name":"semver","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            nm.join("semver/index.js"),
+            r#"module.exports = { satisfies: function(v, r){ return __slice_semver_satisfies(String(v), String(r)); } };"#,
+        )
+        .unwrap();
+
+        let cas_path = tmp_dir.join("app20.cas");
+        build_cas_archive_with_static(&tmp_dir, &cas_path, "./src/index.ts", None).unwrap();
+        let archive = MappedCasArchive::open(&cas_path).unwrap();
+        let entry = archive.entrypoint_blob().unwrap();
+
+        let mut caps = CapabilityToken::pure_compute();
+        if let Some(manifest_toml) = archive.get_manifest_toml() {
+            merge_manifest_toml_into_caps(manifest_toml, &mut caps);
+        }
+        let mut iso = SliceIsolate::spawn("app20-tenant", 1, caps, 50_000_000, 16 * 1024 * 1024);
+        let metrics = iso
+            .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+            .unwrap();
+
+        let expected_output = r#"{"suite":"20-node-compat-and-edge-router","wireFrame":{"magicHex":"534c4334","version":4,"flags":258,"sequenceId":"9007199254740993","payloadUtf8":"{\"rpc\":\"edge.dispatch\",\"region\":\"iad-01\",\"currency\":\"€\"}","payloadBase64Url":"eyJycGMiOiJlZGdlLmRpc3BhdGNoIiwicmVnaW9uIjoiaWFkLTAxIiwiY3VycmVuY3kiOiLigqwifQ","sha512DigestPrefix":"06c23b3b4132558f8dd7b430","hmacSha256Hex":"fda684d490d2bd86c7023653983dab877506c69edf9bb254675a7305e9d91c6c","isValidBufferInstance":true},"routeSummary":{"normalizedRoute":"/api/v2/ tenants/dispatch/invoke","relativeAssetPath":"edge/assets/bundles/client.v4.mjs","parsedBase":"client.v4.mjs","sessionTenant":"acme-fintech-eu","ttlMs":900000,"maxBodyBytes":65536,"engineSemverSatisfied":true,"formattedAuditLine":"tenant=acme-fintech-eu route=/api/v2/ tenants/dispatch/invoke status=200 asset=client.v4.mjs","eventSequence":["prepend:/api/v2/ tenants/dispatch/invoke","on:/api/v2/ tenants/dispatch/invoke","auth-once:acme-fintech-eu","done:200"]}}"#;
+        assert_eq!(metrics.stdout[0], expected_output);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
 }
