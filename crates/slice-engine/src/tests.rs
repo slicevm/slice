@@ -2015,3 +2015,246 @@ setInterval(() => {
 }
 
 
+#[test]
+fn test_phase_n3_wintertc_encoding_webcrypto_streams_and_cloning() {
+    let script = r#"
+(async function() {
+    // 1. TextEncoder / TextDecoder / btoa / atob
+    const enc = new TextEncoder();
+    const dec = new TextDecoder("utf-8", { fatal: true });
+    const bytes = enc.encode("Slice-UTF8-\u00e9-\u20ac");
+    const decoded = dec.decode(bytes);
+
+    // encodeInto with partial buffer capacity (multi-byte euro sign \u20ac is 3 UTF-8 bytes)
+    const dest = new Uint8Array(5);
+    const intoRes = enc.encodeInto("ab\u20accd", dest); // 'a' (1) + 'b' (1) + '\u20ac' (3) = 5 bytes, 3 UTF-16 units
+    const intoDecoded = dec.decode(dest.subarray(0, intoRes.written));
+
+    // Fatal UTF-8 decoder must throw TypeError on invalid 0xFF byte
+    let fatalThrew = false;
+    try {
+        dec.decode(new Uint8Array([0xff, 0xfe]));
+    } catch (e) {
+        fatalThrew = e instanceof TypeError;
+    }
+
+    // btoa / atob round-trip & InvalidCharacterError on non-Latin1
+    const b64 = btoa("WinterTC:Edge:2026");
+    const unb64 = atob(b64);
+    let btoaNonLatin1Threw = false;
+    try {
+        btoa("\u20ac");
+    } catch (_e) {
+        btoaNonLatin1Threw = true;
+    }
+
+    // 2. Deterministic WebCrypto: randomUUID, getRandomValues, digest, HMAC sign/verify, JWK
+    const uuid1 = crypto.randomUUID();
+    const rndBuf = new Uint8Array(16);
+    crypto.getRandomValues(rndBuf);
+    let quotaThrew = false;
+    try {
+        crypto.getRandomValues(new Uint8Array(65537));
+    } catch (e) {
+        quotaThrew = String(e.message || e).indexOf("QuotaExceededError") !== -1;
+    }
+
+    function bufToHex(ab) {
+        const u8 = new Uint8Array(ab);
+        let s = "";
+        for (let i = 0; i < u8.length; i++) {
+            const h = u8[i].toString(16);
+            s += h.length === 1 ? "0" + h : h;
+        }
+        return s;
+    }
+
+    const abcBytes = enc.encode("abc");
+    const sha1Hex = bufToHex(await crypto.subtle.digest("SHA-1", abcBytes));
+    const sha256Hex = bufToHex(await crypto.subtle.digest("SHA-256", abcBytes));
+    const sha384Hex = bufToHex(await crypto.subtle.digest("SHA-384", abcBytes));
+    const sha512Hex = bufToHex(await crypto.subtle.digest("SHA-512", abcBytes));
+
+    const hmacKey = await crypto.subtle.importKey(
+        "raw",
+        enc.encode("slice-wintertc-hmac-secret-key"),
+        { name: "HMAC", hash: "SHA-256" },
+        true,
+        ["sign", "verify"]
+    );
+    const jwkExported = await crypto.subtle.exportKey("jwk", hmacKey);
+    const jwkImported = await crypto.subtle.importKey(
+        "jwk",
+        jwkExported,
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["verify"]
+    );
+    const payloadBytes = enc.encode("header.payload.claims");
+    const sigBuf = await crypto.subtle.sign("HMAC", hmacKey, payloadBytes);
+    const verifiedOk = await crypto.subtle.verify("HMAC", jwkImported, sigBuf, payloadBytes);
+    const tamperedBytes = enc.encode("header.payload.tampered");
+    const verifiedTampered = await crypto.subtle.verify("HMAC", jwkImported, sigBuf, tamperedBytes);
+    const timingEq = crypto.subtle.timingSafeEqual(new Uint8Array(sigBuf), new Uint8Array(sigBuf));
+
+    // 3. Event, CustomEvent, EventTarget, and AbortSignal.any
+    const et = new EventTarget();
+    const eventsLog = [];
+    const acListener = new AbortController();
+    et.addEventListener("custom", (ev) => {
+        eventsLog.push("once:" + ev.detail.tag);
+    }, { once: true });
+    et.addEventListener("custom", (ev) => {
+        eventsLog.push("sig:" + ev.detail.tag);
+    }, { signal: acListener.signal });
+    et.dispatchEvent(new CustomEvent("custom", { detail: { tag: "first" } }));
+    acListener.abort("unsubscribed");
+    et.dispatchEvent(new CustomEvent("custom", { detail: { tag: "second" } }));
+
+    const ac1 = new AbortController();
+    const ac2 = new AbortController();
+    const combinedSig = AbortSignal.any([ac1.signal, ac2.signal]);
+    let combinedAbortedReason = "";
+    combinedSig.addEventListener("abort", () => {
+        combinedAbortedReason = String(combinedSig.reason);
+    });
+    ac2.abort("ac2-triggered");
+
+    // 4. Blob, File, FormData, Request/Response binary bodies, and structuredClone
+    const blob = new Blob(["Hello ", enc.encode("World")], { type: "text/plain" });
+    const file = new File([blob, "!"], "greeting.txt", { type: "text/plain", lastModified: 1700000000123 });
+    const fileText = await file.text();
+    const slicedBlobText = await file.slice(0, 5).text();
+
+    const fd = new FormData();
+    fd.append("project", "slice");
+    fd.append("artifact", file);
+    const reqBin = new Request("https://edge.slice.dev/upload", {
+        method: "POST",
+        body: new Uint8Array([10, 20, 30, 40])
+    });
+    const reqAb = await reqBin.arrayBuffer();
+    const reqU8 = new Uint8Array(reqAb);
+
+    const cyclic = { name: "root", tags: new Set(["a", "b"]), meta: new Map([["k", 42]]), buf: new Uint8Array([7, 8, 9]) };
+    cyclic.self = cyclic;
+    const cloned = structuredClone(cyclic);
+    cloned.buf[0] = 99;
+    const clonePreservedCycle = (cloned.self === cloned) && (cloned !== cyclic) && (cyclic.buf[0] === 7) && (cloned.meta.get("k") === 42);
+
+    // 5. ReadableStream, WritableStream, TransformStream, TextEncoderStream, TextDecoderStream
+    const upperTransform = new TransformStream({
+        transform(chunk, controller) {
+            controller.enqueue(String(chunk).toUpperCase());
+        }
+    });
+    const streamChunks = [];
+    const sink = new WritableStream({
+        write(chunk) {
+            streamChunks.push(chunk);
+        }
+    });
+    await ReadableStream.from(["alpha-", "beta-", "gamma"])
+        .pipeThrough(upperTransform)
+        .pipeThrough(new TextEncoderStream())
+        .pipeThrough(new TextDecoderStream())
+        .pipeTo(sink);
+
+    console.log(JSON.stringify({
+        decoded,
+        intoRead: intoRes.read,
+        intoWritten: intoRes.written,
+        intoDecoded,
+        fatalThrew,
+        unb64,
+        btoaNonLatin1Threw,
+        uuid1,
+        rndFirst4: [rndBuf[0], rndBuf[1], rndBuf[2], rndBuf[3]],
+        quotaThrew,
+        sha1Hex,
+        sha256Hex,
+        sha384Prefix: sha384Hex.slice(0, 16),
+        sha512Prefix: sha512Hex.slice(0, 16),
+        verifiedOk,
+        verifiedTampered,
+        timingEq,
+        eventsLog,
+        combinedAborted: combinedSig.aborted,
+        combinedAbortedReason,
+        fileSize: file.size,
+        fileName: file.name,
+        fileText,
+        slicedBlobText,
+        fdProject: fd.get("project"),
+        fdFileName: fd.get("artifact").name,
+        reqBytes: [reqU8[0], reqU8[1], reqU8[2], reqU8[3]],
+        clonePreservedCycle,
+        streamJoined: streamChunks.join("")
+    }));
+})();
+"#;
+
+    let bc = compile_source_to_bytecode(script);
+
+    // Execute twice in deterministic mode with identical seed to verify deterministic WebCrypto replay!
+    let mut iso1 = SliceIsolate::spawn(
+        "n3-tenant-1",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    iso1.set_deterministic_seed(Some(20261102));
+    let m1 = iso1.execute_bytecode(&bc, None).unwrap();
+
+    let mut iso2 = SliceIsolate::spawn(
+        "n3-tenant-2",
+        2,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    iso2.set_deterministic_seed(Some(20261102));
+    let m2 = iso2.execute_bytecode(&bc, None).unwrap();
+
+    assert_eq!(
+        m1.stdout[0], m2.stdout[0],
+        "Expected deterministic WebCrypto UUIDv4 and getRandomValues to replay identically"
+    );
+
+    let out: serde_json::Value = serde_json::from_str(&m1.stdout[0]).unwrap();
+    assert_eq!(out["decoded"], "Slice-UTF8-\u{00e9}-\u{20ac}");
+    assert_eq!(out["intoRead"], 3);
+    assert_eq!(out["intoWritten"], 5);
+    assert_eq!(out["intoDecoded"], "ab\u{20ac}");
+    assert_eq!(out["fatalThrew"], true);
+    assert_eq!(out["unb64"], "WinterTC:Edge:2026");
+    assert_eq!(out["btoaNonLatin1Threw"], true);
+    assert_eq!(out["quotaThrew"], true);
+    // NIST FIPS 180-4 test vectors for "abc"
+    assert_eq!(
+        out["sha1Hex"],
+        "a9993e364706816aba3e25717850c26c9cd0d89d"
+    );
+    assert_eq!(
+        out["sha256Hex"],
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(out["sha384Prefix"], "cb00753f45a35e8b");
+    assert_eq!(out["sha512Prefix"], "ddaf35a193617aba");
+    assert_eq!(out["verifiedOk"], true);
+    assert_eq!(out["verifiedTampered"], false);
+    assert_eq!(out["timingEq"], true);
+    assert_eq!(out["eventsLog"], serde_json::json!(["once:first", "sig:first"]));
+    assert_eq!(out["combinedAborted"], true);
+    assert_eq!(out["combinedAbortedReason"], "ac2-triggered");
+    assert_eq!(out["fileSize"], 12);
+    assert_eq!(out["fileName"], "greeting.txt");
+    assert_eq!(out["fileText"], "Hello World!");
+    assert_eq!(out["slicedBlobText"], "Hello");
+    assert_eq!(out["fdProject"], "slice");
+    assert_eq!(out["fdFileName"], "greeting.txt");
+    assert_eq!(out["reqBytes"], serde_json::json!([10, 20, 30, 40]));
+    assert_eq!(out["clonePreservedCycle"], true);
+    assert_eq!(out["streamJoined"], "ALPHA-BETA-GAMMA");
+}

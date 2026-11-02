@@ -701,3 +701,586 @@ pub(crate) fn base64_decode(input: &str) -> Vec<u8> {
     out
 }
 
+
+/// Fast Lookup-Table (`HEX_LUT`) hex encoder for arbitrary byte slices.
+#[inline]
+pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX_LUT: &[u8; 16] = b"0123456789abcdef";
+    let mut hex_bytes = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        hex_bytes.push(HEX_LUT[(b >> 4) as usize]);
+        hex_bytes.push(HEX_LUT[(b & 0x0f) as usize]);
+    }
+    unsafe { String::from_utf8_unchecked(hex_bytes) }
+}
+
+/// RFC 2104 HMAC-SHA256 raw 32-byte digest with zero heap allocation.
+#[inline]
+pub(crate) fn hmac_sha256_bytes(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut key_block = [0u8; 64];
+    if key.len() > 64 {
+        let hashed_key = sha256_bytes(key);
+        key_block[..32].copy_from_slice(&hashed_key);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+
+    let mut inner = Sha256State::new();
+    inner.update(&ipad);
+    inner.update(message);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256State::new();
+    outer.update(&opad);
+    outer.update(&inner_hash);
+    outer.finalize()
+}
+
+/// Zero-allocation FIPS 180-4 SHA-1 state machine (for WebCrypto `"SHA-1"` and WebSocket handshakes).
+pub(crate) struct Sha1State {
+    h: [u32; 5],
+    buf: [u8; 64],
+    buf_len: usize,
+    total_len: u64,
+}
+
+impl Sha1State {
+    #[inline]
+    pub(crate) fn new() -> Self {
+        Self {
+            h: [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0],
+            buf: [0u8; 64],
+            buf_len: 0,
+            total_len: 0,
+        }
+    }
+
+    #[inline]
+    fn compress_block(h: &mut [u32; 5], chunk: &[u8]) {
+        let mut w = [0u32; 80];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+
+        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
+        for (i, &wi) in w.iter().enumerate() {
+            let (f, k) = if i < 20 {
+                ((b & c) | ((!b) & d), 0x5a827999u32)
+            } else if i < 40 {
+                (b ^ c ^ d, 0x6ed9eba1u32)
+            } else if i < 60 {
+                ((b & c) | (b & d) | (c & d), 0x8f1bbcdcu32)
+            } else {
+                (b ^ c ^ d, 0xca62c1d6u32)
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(wi);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+    }
+
+    #[inline]
+    pub(crate) fn update(&mut self, mut data: &[u8]) {
+        self.total_len += data.len() as u64;
+        if self.buf_len > 0 {
+            let need = 64 - self.buf_len;
+            if data.len() < need {
+                self.buf[self.buf_len..self.buf_len + data.len()].copy_from_slice(data);
+                self.buf_len += data.len();
+                return;
+            }
+            self.buf[self.buf_len..64].copy_from_slice(&data[..need]);
+            Self::compress_block(&mut self.h, &self.buf);
+            self.buf_len = 0;
+            data = &data[need..];
+        }
+        let (chunks, rem) = data.as_chunks::<64>();
+        for chunk in chunks {
+            Self::compress_block(&mut self.h, chunk);
+        }
+        if !rem.is_empty() {
+            self.buf[..rem.len()].copy_from_slice(rem);
+            self.buf_len = rem.len();
+        }
+    }
+
+    #[inline]
+    pub(crate) fn finalize(mut self) -> [u8; 20] {
+        let bit_len = self.total_len * 8;
+        self.buf[self.buf_len] = 0x80;
+        self.buf_len += 1;
+        if self.buf_len > 56 {
+            self.buf[self.buf_len..64].fill(0);
+            Self::compress_block(&mut self.h, &self.buf);
+            self.buf.fill(0);
+        } else {
+            self.buf[self.buf_len..56].fill(0);
+        }
+        self.buf[56..64].copy_from_slice(&bit_len.to_be_bytes());
+        Self::compress_block(&mut self.h, &self.buf);
+        let mut out = [0u8; 20];
+        for (idx, word) in self.h.iter().enumerate() {
+            out[idx * 4..idx * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+}
+
+#[inline]
+pub(crate) fn sha1_bytes(data: &[u8]) -> [u8; 20] {
+    let mut st = Sha1State::new();
+    st.update(data);
+    st.finalize()
+}
+
+#[inline]
+pub(crate) fn hmac_sha1_bytes(key: &[u8], message: &[u8]) -> [u8; 20] {
+    let mut key_block = [0u8; 64];
+    if key.len() > 64 {
+        let hk = sha1_bytes(key);
+        key_block[..20].copy_from_slice(&hk);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+    let mut inner = Sha1State::new();
+    inner.update(&ipad);
+    inner.update(message);
+    let ih = inner.finalize();
+    let mut outer = Sha1State::new();
+    outer.update(&opad);
+    outer.update(&ih);
+    outer.finalize()
+}
+
+/// Zero-allocation FIPS 180-4 SHA-512 / SHA-384 state machine.
+pub(crate) struct Sha512State {
+    h: [u64; 8],
+    buf: [u8; 128],
+    buf_len: usize,
+    total_len: u128,
+}
+
+impl Sha512State {
+    #[inline]
+    pub(crate) fn new_512() -> Self {
+        Self {
+            h: [
+                0x6a09e667f3bcc908,
+                0xbb67ae8584caa73b,
+                0x3c6ef372fe94f82b,
+                0xa54ff53a5f1d36f1,
+                0x510e527fade682d1,
+                0x9b05688c2b3e6c1f,
+                0x1f83d9abfb41bd6b,
+                0x5be0cd19137e2179,
+            ],
+            buf: [0u8; 128],
+            buf_len: 0,
+            total_len: 0,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn new_384() -> Self {
+        Self {
+            h: [
+                0xcbbb9d5dc1059ed8,
+                0x629a292a367cd507,
+                0x9159015a3070dd17,
+                0x152fecd8f70e5939,
+                0x67332667ffc00b31,
+                0x8eb44a8768581511,
+                0xdb0c2e0d64f98fa7,
+                0x47b5481dbefa4fa4,
+            ],
+            buf: [0u8; 128],
+            buf_len: 0,
+            total_len: 0,
+        }
+    }
+
+    #[inline]
+    fn compress_block(h: &mut [u64; 8], chunk: &[u8]) {
+        const K: [u64; 80] = [
+            0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
+            0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
+            0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
+            0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694,
+            0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
+            0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5,
+            0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4,
+            0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70,
+            0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df,
+            0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
+            0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30,
+            0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8,
+            0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8,
+            0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3,
+            0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,
+            0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b,
+            0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178,
+            0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b,
+            0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c,
+            0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817,
+        ];
+
+        let mut w = [0u64; 80];
+        for (i, w_i) in w.iter_mut().enumerate().take(16) {
+            let off = i * 8;
+            *w_i = u64::from_be_bytes([
+                chunk[off],
+                chunk[off + 1],
+                chunk[off + 2],
+                chunk[off + 3],
+                chunk[off + 4],
+                chunk[off + 5],
+                chunk[off + 6],
+                chunk[off + 7],
+            ]);
+        }
+        for i in 16..80 {
+            let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
+            let s1 = w[i - 2].rotate_right(19) ^ w[i - 2].rotate_right(61) ^ (w[i - 2] >> 6);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+
+        for i in 0..80 {
+            let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    #[inline]
+    pub(crate) fn update(&mut self, mut data: &[u8]) {
+        self.total_len += data.len() as u128;
+        if self.buf_len > 0 {
+            let need = 128 - self.buf_len;
+            if data.len() < need {
+                self.buf[self.buf_len..self.buf_len + data.len()].copy_from_slice(data);
+                self.buf_len += data.len();
+                return;
+            }
+            self.buf[self.buf_len..128].copy_from_slice(&data[..need]);
+            Self::compress_block(&mut self.h, &self.buf);
+            self.buf_len = 0;
+            data = &data[need..];
+        }
+        let (chunks, rem) = data.as_chunks::<128>();
+        for chunk in chunks {
+            Self::compress_block(&mut self.h, chunk);
+        }
+        if !rem.is_empty() {
+            self.buf[..rem.len()].copy_from_slice(rem);
+            self.buf_len = rem.len();
+        }
+    }
+
+    #[inline]
+    pub(crate) fn finalize_512(mut self) -> [u8; 64] {
+        let bit_len = self.total_len * 8;
+        self.buf[self.buf_len] = 0x80;
+        self.buf_len += 1;
+        if self.buf_len > 112 {
+            self.buf[self.buf_len..128].fill(0);
+            Self::compress_block(&mut self.h, &self.buf);
+            self.buf.fill(0);
+        } else {
+            self.buf[self.buf_len..112].fill(0);
+        }
+        self.buf[112..128].copy_from_slice(&bit_len.to_be_bytes());
+        Self::compress_block(&mut self.h, &self.buf);
+        let mut out = [0u8; 64];
+        for (idx, word) in self.h.iter().enumerate() {
+            out[idx * 8..idx * 8 + 8].copy_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+
+    #[inline]
+    pub(crate) fn finalize_384(self) -> [u8; 48] {
+        let full = self.finalize_512();
+        let mut out = [0u8; 48];
+        out.copy_from_slice(&full[..48]);
+        out
+    }
+}
+
+#[inline]
+pub(crate) fn sha512_bytes(data: &[u8]) -> [u8; 64] {
+    let mut st = Sha512State::new_512();
+    st.update(data);
+    st.finalize_512()
+}
+
+#[inline]
+pub(crate) fn sha384_bytes(data: &[u8]) -> [u8; 48] {
+    let mut st = Sha512State::new_384();
+    st.update(data);
+    st.finalize_384()
+}
+
+#[inline]
+pub(crate) fn hmac_sha512_bytes(key: &[u8], message: &[u8]) -> [u8; 64] {
+    let mut key_block = [0u8; 128];
+    if key.len() > 128 {
+        let hk = sha512_bytes(key);
+        key_block[..64].copy_from_slice(&hk);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 128];
+    let mut opad = [0x5cu8; 128];
+    for i in 0..128 {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+    let mut inner = Sha512State::new_512();
+    inner.update(&ipad);
+    inner.update(message);
+    let ih = inner.finalize_512();
+    let mut outer = Sha512State::new_512();
+    outer.update(&opad);
+    outer.update(&ih);
+    outer.finalize_512()
+}
+
+#[inline]
+pub(crate) fn hmac_sha384_bytes(key: &[u8], message: &[u8]) -> [u8; 48] {
+    let mut key_block = [0u8; 128];
+    if key.len() > 128 {
+        let hk = sha384_bytes(key);
+        key_block[..48].copy_from_slice(&hk);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 128];
+    let mut opad = [0x5cu8; 128];
+    for i in 0..128 {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+    let mut inner = Sha512State::new_384();
+    inner.update(&ipad);
+    inner.update(message);
+    let ih = inner.finalize_384();
+    let mut outer = Sha512State::new_384();
+    outer.update(&opad);
+    outer.update(&ih);
+    outer.finalize_384()
+}
+
+/// Constant-time slice equality check for `crypto.subtle.verify` and `crypto.subtle.timingSafeEqual`.
+#[inline]
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Strict WhatWG `btoa`: encodes a Latin1 (`0x00..=0xFF`) string to standard Base64,
+/// returning `Err` if any code point exceeds `0xFF`.
+pub(crate) fn whatwg_btoa(input: &str) -> Result<String, &'static str> {
+    let mut bytes = Vec::with_capacity(input.len());
+    for ch in input.chars() {
+        let code = ch as u32;
+        if code > 0xFF {
+            return Err("InvalidCharacterError: The string to be encoded contains characters outside of the Latin1 range.");
+        }
+        bytes.push(code as u8);
+    }
+    Ok(base64_encode(&bytes, false))
+}
+
+/// Strict WhatWG `atob`: strips ASCII whitespace, validates Base64 alphabet and padding,
+/// and returns decoded Latin1 bytes (mapped 1:1 to `0x00..=0xFF` code points).
+pub(crate) fn whatwg_atob(input: &str) -> Result<String, &'static str> {
+    let cleaned: Vec<u8> = input
+        .bytes()
+        .filter(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c))
+        .collect();
+    if cleaned.len() % 4 == 1 {
+        return Err("InvalidCharacterError: The string to be decoded is not correctly encoded.");
+    }
+    let mut out_chars = String::with_capacity((cleaned.len() * 3) / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    let mut pad_count = 0usize;
+    for (idx, &b) in cleaned.iter().enumerate() {
+        if b == b'=' {
+            pad_count += 1;
+            if pad_count > 2 || (idx + 1 < cleaned.len() && cleaned[idx + 1] != b'=') {
+                return Err("InvalidCharacterError: Invalid padding in base64 string.");
+            }
+            continue;
+        }
+        if pad_count > 0 {
+            return Err("InvalidCharacterError: Characters found after base64 padding.");
+        }
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => {
+                return Err(
+                    "InvalidCharacterError: The string to be decoded contains invalid characters.",
+                )
+            }
+        };
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            let byte = ((buf >> bits) & 0xff) as u8;
+            out_chars.push(byte as char);
+        }
+    }
+    Ok(out_chars)
+}
+
+#[inline]
+pub(crate) fn splitmix64_next_u64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+thread_local! {
+    static HOST_CSPRNG_STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn next_host_entropy_u64() -> u64 {
+    HOST_CSPRNG_STATE.with(|cell| {
+        let mut s = cell.get();
+        if s == 0 {
+            use std::hash::{BuildHasher, Hasher};
+            let rs = std::collections::hash_map::RandomState::new();
+            let mut h = rs.build_hasher();
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0xA5A5_5A5A_F0F0_0F0F);
+            h.write_u64(nanos);
+            h.write_usize(cell as *const _ as usize);
+            s = h.finish() | 1;
+        }
+        let next = splitmix64_next_u64(&mut s);
+        cell.set(s);
+        next
+    })
+}
+
+/// Fills `dest` with random bytes from either the deterministic SplitMix64 seed (`--deterministic`)
+/// or the host entropy generator.
+pub(crate) fn fill_random_bytes(dest: &mut [u8], mut det_prng: Option<&mut u64>) {
+    let mut offset = 0;
+    while offset < dest.len() {
+        let word = match det_prng.as_deref_mut() {
+            Some(state) => splitmix64_next_u64(state),
+            None => next_host_entropy_u64(),
+        };
+        let bytes = word.to_le_bytes();
+        let take = (dest.len() - offset).min(8);
+        dest[offset..offset + take].copy_from_slice(&bytes[..take]);
+        offset += take;
+    }
+}
+
+/// Generates an RFC 4122 UUIDv4 string (`xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`),
+/// using deterministic PRNG state when active.
+pub(crate) fn generate_uuid_v4(det_prng: Option<&mut u64>) -> String {
+    let mut b = [0u8; 16];
+    fill_random_bytes(&mut b, det_prng);
+    // Set version 4 (0b0100_xxxx) and RFC 4122 variant (0b10xx_xxxx)
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = [0u8; 36];
+    let mut j = 0;
+    for (i, &byte) in b.iter().enumerate() {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+            out[j] = b'-';
+            j += 1;
+        }
+        out[j] = HEX[(byte >> 4) as usize];
+        out[j + 1] = HEX[(byte & 0x0f) as usize];
+        j += 2;
+    }
+    unsafe { String::from_utf8_unchecked(out.to_vec()) }
+}
