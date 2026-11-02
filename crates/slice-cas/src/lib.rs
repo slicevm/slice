@@ -221,6 +221,359 @@ fn build_fast_json_template_for_schema(var_name: &str, fields: &[(String, String
     parts.join(" + ")
 }
 
+/// General-Purpose Oxc AST Array Pipeline Fusion Pass:
+/// Inspects the Oxc AST of `code` and fuses chained higher-order array expressions on **any**
+/// receiver `<arr_expr>` into a single allocation-free `for` loop IIFE:
+/// - `<arr_expr>.map((<x>) => <map_body>).reduce((<acc>, <curr>) => <red_body>, <init>)`
+/// - `<arr_expr>.filter((<x>) => <pred>).map((<y>) => <map_body>).reduce((<acc>, <curr>) => <red_body>, <init>)`
+/// - `<arr_expr>.some((<x>) => <pred>)`
+/// - `<arr_expr>.every((<x>) => <pred>)`
+pub fn fuse_array_pipelines_ast(code: &str) -> String {
+    if !code.contains(".reduce(") && !code.contains(".some(") && !code.contains(".every(") {
+        return code.to_string();
+    }
+
+    let allocator = oxc::allocator::Allocator::default();
+    let source_type = oxc::span::SourceType::mjs();
+    let parser_ret = oxc::parser::Parser::new(&allocator, code, source_type).parse();
+    if !parser_ret.diagnostics.is_empty() {
+        return code.to_string();
+    }
+
+    use oxc::ast::ast::{Argument, BindingPattern, Expression, Statement};
+    use oxc::span::GetSpan;
+
+    struct Replacement {
+        start: usize,
+        end: usize,
+        text: String,
+    }
+
+    fn extract_single_param_arrow<'a>(
+        arg: &'a Argument<'a>,
+        src: &'a str,
+    ) -> Option<(&'a str, &'a str)> {
+        let expr = arg.as_expression()?;
+        let Expression::ArrowFunctionExpression(arrow) = expr.without_parentheses() else {
+            return None;
+        };
+        if arrow.r#async || arrow.params.items.len() != 1 || arrow.params.rest.is_some() {
+            return None;
+        }
+        let BindingPattern::BindingIdentifier(ident) = &arrow.params.items[0].pattern else {
+            return None;
+        };
+        let param_name = ident.name.as_str();
+        let sp = arrow.body.span();
+        let body_src = src.get(sp.start as usize..sp.end as usize)?.trim();
+        if !body_src.starts_with('{') && !body_src.is_empty() {
+            return Some((param_name, body_src));
+        }
+        None
+    }
+
+    fn extract_two_param_arrow<'a>(
+        arg: &'a Argument<'a>,
+        src: &'a str,
+    ) -> Option<(&'a str, &'a str, &'a str)> {
+        let expr = arg.as_expression()?;
+        let Expression::ArrowFunctionExpression(arrow) = expr.without_parentheses() else {
+            return None;
+        };
+        if arrow.r#async || arrow.params.items.len() != 2 || arrow.params.rest.is_some() {
+            return None;
+        }
+        let BindingPattern::BindingIdentifier(id0) = &arrow.params.items[0].pattern else {
+            return None;
+        };
+        let BindingPattern::BindingIdentifier(id1) = &arrow.params.items[1].pattern else {
+            return None;
+        };
+        let sp = arrow.body.span();
+        let body_src = src.get(sp.start as usize..sp.end as usize)?.trim();
+        if !body_src.starts_with('{') && !body_src.is_empty() {
+            return Some((id0.name.as_str(), id1.name.as_str(), body_src));
+        }
+        None
+    }
+
+    fn try_fuse_call<'a>(
+        call: &'a oxc::ast::ast::CallExpression<'a>,
+        src: &'a str,
+        counter: &mut usize,
+    ) -> Option<Replacement> {
+        let Expression::StaticMemberExpression(outer_mem) = call.callee.without_parentheses()
+        else {
+            return None;
+        };
+        let outer_method = outer_mem.property.name.as_str();
+
+        // Case 1: `<arr>.some((x) => <pred>)` or `<arr>.every((x) => <pred>)`
+        if (outer_method == "some" || outer_method == "every") && call.arguments.len() == 1 {
+            let (param, pred_src) = extract_single_param_arrow(&call.arguments[0], src)?;
+            let arr_sp = outer_mem.object.span();
+            let arr_src = &src[arr_sp.start as usize..arr_sp.end as usize];
+            *counter += 1;
+            let id = *counter;
+            let fused = if outer_method == "some" {
+                format!(
+                    "(() => {{ const __sl_a{id} = {arr}; for (let __sl_i{id} = 0; __sl_i{id} < __sl_a{id}.length; __sl_i{id}++) {{ const {param} = __sl_a{id}[__sl_i{id}]; if ({pred}) return true; }} return false; }})()",
+                    id = id,
+                    arr = arr_src,
+                    param = param,
+                    pred = pred_src
+                )
+            } else {
+                format!(
+                    "(() => {{ const __sl_a{id} = {arr}; for (let __sl_i{id} = 0; __sl_i{id} < __sl_a{id}.length; __sl_i{id}++) {{ const {param} = __sl_a{id}[__sl_i{id}]; if (!({pred})) return false; }} return true; }})()",
+                    id = id,
+                    arr = arr_src,
+                    param = param,
+                    pred = pred_src
+                )
+            };
+            return Some(Replacement {
+                start: call.span.start as usize,
+                end: call.span.end as usize,
+                text: fused,
+            });
+        }
+
+        // Case 2: `<inner>.reduce((acc, curr) => <red_body>, <init>)`
+        if outer_method == "reduce" && call.arguments.len() == 2 {
+            let (acc_param, curr_param, red_body) =
+                extract_two_param_arrow(&call.arguments[0], src)?;
+            let init_expr = call.arguments[1].as_expression()?;
+            let init_sp = init_expr.span();
+            let init_src = &src[init_sp.start as usize..init_sp.end as usize];
+
+            // Check if `<inner>` is `<arr>.map((x) => <map_body>)`
+            if let Expression::CallExpression(inner_call) = outer_mem.object.without_parentheses() {
+                if let Expression::StaticMemberExpression(inner_mem) =
+                    inner_call.callee.without_parentheses()
+                {
+                    if inner_mem.property.name.as_str() == "map" && inner_call.arguments.len() == 1
+                    {
+                        let (map_param, map_body) =
+                            extract_single_param_arrow(&inner_call.arguments[0], src)?;
+
+                        // Check if `<arr>` is `<base>.filter((f) => <filt_body>)`
+                        if let Expression::CallExpression(filt_call) =
+                            inner_mem.object.without_parentheses()
+                        {
+                            if let Expression::StaticMemberExpression(filt_mem) =
+                                filt_call.callee.without_parentheses()
+                            {
+                                if filt_mem.property.name.as_str() == "filter"
+                                    && filt_call.arguments.len() == 1
+                                {
+                                    if let Some((filt_param, filt_body)) =
+                                        extract_single_param_arrow(&filt_call.arguments[0], src)
+                                    {
+                                        let base_sp = filt_mem.object.span();
+                                        let base_src =
+                                            &src[base_sp.start as usize..base_sp.end as usize];
+                                        *counter += 1;
+                                        let id = *counter;
+                                        let fused = format!(
+                                            "(() => {{ const __sl_a{id} = {base}; let {acc} = {init}; for (let __sl_i{id} = 0; __sl_i{id} < __sl_a{id}.length; __sl_i{id}++) {{ const {fp} = __sl_a{id}[__sl_i{id}]; if (!({fb})) continue; const {mp} = {fp}; const {cp} = ({mb}); {acc} = ({rb}); }} return {acc}; }})()",
+                                            id = id,
+                                            base = base_src,
+                                            acc = acc_param,
+                                            init = init_src,
+                                            fp = filt_param,
+                                            fb = filt_body,
+                                            mp = map_param,
+                                            cp = curr_param,
+                                            mb = map_body,
+                                            rb = red_body
+                                        );
+                                        return Some(Replacement {
+                                            start: call.span.start as usize,
+                                            end: call.span.end as usize,
+                                            text: fused,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
+                        let arr_sp = inner_mem.object.span();
+                        let arr_src = &src[arr_sp.start as usize..arr_sp.end as usize];
+                        *counter += 1;
+                        let id = *counter;
+                        let fused = format!(
+                            "(() => {{ const __sl_a{id} = {arr}; let {acc} = {init}; for (let __sl_i{id} = 0; __sl_i{id} < __sl_a{id}.length; __sl_i{id}++) {{ const {mp} = __sl_a{id}[__sl_i{id}]; const {cp} = ({mb}); {acc} = ({rb}); }} return {acc}; }})()",
+                            id = id,
+                            arr = arr_src,
+                            acc = acc_param,
+                            init = init_src,
+                            mp = map_param,
+                            cp = curr_param,
+                            mb = map_body,
+                            rb = red_body
+                        );
+                        return Some(Replacement {
+                            start: call.span.start as usize,
+                            end: call.span.end as usize,
+                            text: fused,
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn walk_expr<'a>(
+        expr: &'a Expression<'a>,
+        src: &'a str,
+        counter: &mut usize,
+        out: &mut Vec<Replacement>,
+    ) {
+        match expr {
+            Expression::CallExpression(call) => {
+                if let Some(rep) = try_fuse_call(call, src, counter) {
+                    out.push(rep);
+                    return;
+                }
+                walk_expr(&call.callee, src, counter, out);
+                for arg in &call.arguments {
+                    if let Some(e) = arg.as_expression() {
+                        walk_expr(e, src, counter, out);
+                    }
+                }
+            }
+            Expression::BinaryExpression(b) => {
+                walk_expr(&b.left, src, counter, out);
+                walk_expr(&b.right, src, counter, out);
+            }
+            Expression::LogicalExpression(l) => {
+                walk_expr(&l.left, src, counter, out);
+                walk_expr(&l.right, src, counter, out);
+            }
+            Expression::ConditionalExpression(c) => {
+                walk_expr(&c.test, src, counter, out);
+                walk_expr(&c.consequent, src, counter, out);
+                walk_expr(&c.alternate, src, counter, out);
+            }
+            Expression::AssignmentExpression(a) => {
+                walk_expr(&a.right, src, counter, out);
+            }
+            Expression::ParenthesizedExpression(p) => {
+                walk_expr(&p.expression, src, counter, out);
+            }
+            Expression::FunctionExpression(fe) => {
+                if let Some(body) = &fe.body {
+                    for s in &body.statements {
+                        walk_stmt(s, src, counter, out);
+                    }
+                }
+            }
+            Expression::ObjectExpression(obj) => {
+                for prop in &obj.properties {
+                    if let oxc::ast::ast::ObjectPropertyKind::ObjectProperty(p) = prop {
+                        walk_expr(&p.value, src, counter, out);
+                    }
+                }
+            }
+            Expression::ArrayExpression(arr) => {
+                for el in &arr.elements {
+                    if let Some(e) = el.as_expression() {
+                        walk_expr(e, src, counter, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_stmt<'a>(
+        stmt: &'a Statement<'a>,
+        src: &'a str,
+        counter: &mut usize,
+        out: &mut Vec<Replacement>,
+    ) {
+        match stmt {
+            Statement::VariableDeclaration(vd) => {
+                for decl in &vd.declarations {
+                    if let Some(init) = &decl.init {
+                        walk_expr(init, src, counter, out);
+                    }
+                }
+            }
+            Statement::ExpressionStatement(es) => {
+                walk_expr(&es.expression, src, counter, out);
+            }
+            Statement::ReturnStatement(rs) => {
+                if let Some(arg) = &rs.argument {
+                    walk_expr(arg, src, counter, out);
+                }
+            }
+            Statement::BlockStatement(bs) => {
+                for s in &bs.body {
+                    walk_stmt(s, src, counter, out);
+                }
+            }
+            Statement::IfStatement(ifs) => {
+                walk_expr(&ifs.test, src, counter, out);
+                walk_stmt(&ifs.consequent, src, counter, out);
+                if let Some(alt) = &ifs.alternate {
+                    walk_stmt(alt, src, counter, out);
+                }
+            }
+            Statement::FunctionDeclaration(fd) => {
+                if let Some(body) = &fd.body {
+                    for s in &body.statements {
+                        walk_stmt(s, src, counter, out);
+                    }
+                }
+            }
+            Statement::ClassDeclaration(cd) => {
+                for el in &cd.body.body {
+                    if let oxc::ast::ast::ClassElement::MethodDefinition(md) = el {
+                        if let Some(body) = &md.value.body {
+                            for s in &body.statements {
+                                walk_stmt(s, src, counter, out);
+                            }
+                        }
+                    }
+                }
+            }
+            Statement::ExportDefaultDeclaration(edd) => {
+                if let Some(expr) = edd.declaration.as_expression() {
+                    walk_expr(expr, src, counter, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut replacements = Vec::new();
+    let mut counter = 0usize;
+    for stmt in &parser_ret.program.body {
+        walk_stmt(stmt, code, &mut counter, &mut replacements);
+    }
+
+    if replacements.is_empty() {
+        return code.to_string();
+    }
+
+    replacements.sort_by_key(|r| r.start);
+    let mut result = String::with_capacity(code.len() + replacements.len() * 64);
+    let mut cursor = 0usize;
+    for r in replacements {
+        if r.start < cursor {
+            continue;
+        }
+        result.push_str(&code[cursor..r.start]);
+        result.push_str(&r.text);
+        cursor = r.end;
+    }
+    result.push_str(&code[cursor..]);
+    result
+}
+
 /// Production TypeScript Compiler & Transpiler powered by **Oxc** (The Oxidation Compiler).
 ///
 /// Uses `oxc::allocator::Allocator`, `oxc::parser::Parser`, `oxc::semantic::SemanticBuilder`,
@@ -252,12 +605,9 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
         .into_scoping();
 
     let transform_options = oxc::transformer::TransformOptions::default();
-    let transform_ret = oxc::transformer::Transformer::new(
-        &allocator,
-        Path::new("module.ts"),
-        &transform_options,
-    )
-    .build_with_scoping(scoping, &mut program);
+    let transform_ret =
+        oxc::transformer::Transformer::new(&allocator, Path::new("module.ts"), &transform_options)
+            .build_with_scoping(scoping, &mut program);
 
     if !transform_ret.diagnostics.is_empty() {
         return strip_js_comments(source);
@@ -284,6 +634,8 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
             }
         }
     }
+
+    code = fuse_array_pipelines_ast(&code);
 
     strip_js_comments(&code)
 }
@@ -330,9 +682,7 @@ fn strip_js_comments(source: &str) -> String {
 pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
     let mut js_code = strip_typescript_raw(source, is_ts);
     if ((js_code.contains("import ")
-        && (js_code.contains("node:")
-            || js_code.contains("slice:")
-            || js_code.contains("bun:")))
+        && (js_code.contains("node:") || js_code.contains("slice:") || js_code.contains("bun:")))
         || js_code.contains("export default "))
         && !js_code.contains("var __slice_modules =")
     {
@@ -417,14 +767,23 @@ pub fn resolve_project_entrypoint(target: &Path, explicit_entry: Option<&str>) -
     }
 
     // 3. Conventional entrypoints
-    for conv in ["src/index.ts", "index.ts", "src/main.ts", "src/index.js", "index.js"] {
+    for conv in [
+        "src/index.ts",
+        "index.ts",
+        "src/main.ts",
+        "src/index.js",
+        "index.js",
+    ] {
         let candidate = target.join(conv);
         if candidate.is_file() {
             return Ok(candidate);
         }
     }
 
-    bail!("Could not find an entrypoint in directory {}", target.display())
+    bail!(
+        "Could not find an entrypoint in directory {}",
+        target.display()
+    )
 }
 
 fn is_builtin_module(spec: &str) -> bool {
@@ -433,7 +792,16 @@ fn is_builtin_module(spec: &str) -> bool {
     }
     matches!(
         spec,
-        "fs" | "path" | "crypto" | "os" | "util" | "events" | "buffer" | "process" | "url" | "stream" | "assert"
+        "fs" | "path"
+            | "crypto"
+            | "os"
+            | "util"
+            | "events"
+            | "buffer"
+            | "process"
+            | "url"
+            | "stream"
+            | "assert"
     )
 }
 
@@ -482,7 +850,8 @@ fn try_file_with_extensions(base: &Path) -> Option<PathBuf> {
                             } else {
                                 for key in ["require", "default", "import"] {
                                     if let Some(s) = dot.get(key).and_then(|v| v.as_str()) {
-                                        if let Some(found) = try_file_with_extensions(&base.join(s)) {
+                                        if let Some(found) = try_file_with_extensions(&base.join(s))
+                                        {
                                             return Some(found);
                                         }
                                     }
@@ -562,7 +931,10 @@ fn extract_quoted_specifier(s: &str) -> Option<(String, char)> {
     if let Some(stripped) = trimmed.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
         return Some((stripped.to_string(), '"'));
     }
-    if let Some(stripped) = trimmed.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
+    if let Some(stripped) = trimmed
+        .strip_prefix('\'')
+        .and_then(|r| r.strip_suffix('\''))
+    {
         return Some((stripped.to_string(), '\''));
     }
     None
@@ -609,7 +981,9 @@ fn rewrite_cjs_requires_in_line(
                                 let consumed = ws_len + 1 + end_q + 1;
                                 rest = &after_req[consumed..];
                                 continue;
-                            } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
+                            } else if let Some(resolved_path) =
+                                resolve_module_specifier(from_dir, spec)
+                            {
                                 let id = canonical_mod_id(&resolved_path);
                                 deps_out.push(resolved_path);
                                 result.push_str(&format!("{:?}", id));
@@ -644,11 +1018,7 @@ fn resolve_spec_and_record(spec: &str, from_dir: &Path, deps_out: &mut Vec<PathB
     }
 }
 
-fn transform_module_to_cjs(
-    js_code: &str,
-    from_dir: &Path,
-    deps_out: &mut Vec<PathBuf>,
-) -> String {
+fn transform_module_to_cjs(js_code: &str, from_dir: &Path, deps_out: &mut Vec<PathBuf>) -> String {
     let collapsed = collapse_multiline_imports_exports(js_code);
     let mut body_lines = Vec::new();
     let mut deferred_exports: Vec<(String, String)> = Vec::new();
@@ -712,7 +1082,10 @@ fn transform_module_to_cjs(
             if let Some(after_star) = after_export.strip_prefix("* from ") {
                 if let Some((spec, _)) = extract_quoted_specifier(after_star) {
                     let resolved_id = resolve_spec_and_record(&spec, from_dir, deps_out);
-                    body_lines.push(format!("Object.assign(exports, require({:?}));", resolved_id));
+                    body_lines.push(format!(
+                        "Object.assign(exports, require({:?}));",
+                        resolved_id
+                    ));
                     continue;
                 }
             }
@@ -740,7 +1113,8 @@ fn transform_module_to_cjs(
                                     orig.trim()
                                 ));
                             } else {
-                                body_lines.push(format!("exports.{} = {}.{};", item, tmp_var, item));
+                                body_lines
+                                    .push(format!("exports.{} = {}.{};", item, tmp_var, item));
                             }
                         }
                         continue;
@@ -757,7 +1131,8 @@ fn transform_module_to_cjs(
                             continue;
                         }
                         if let Some((orig, alias)) = item.split_once(" as ") {
-                            deferred_exports.push((alias.trim().to_string(), orig.trim().to_string()));
+                            deferred_exports
+                                .push((alias.trim().to_string(), orig.trim().to_string()));
                         } else {
                             deferred_exports.push((item.to_string(), item.to_string()));
                         }
@@ -818,14 +1193,6 @@ fn transform_module_to_cjs(
         }
 
         let mut rewritten_line = rewrite_cjs_requires_in_line(raw_line, from_dir, deps_out);
-        // Phase 9B Compile-Time Constant Folding & Direct Intrinsic Lowering
-        if rewritten_line.contains("bytes.parse(\"64KB\")") {
-            rewritten_line = rewritten_line.replace("bytes.parse(\"64KB\")", "65536");
-        } else if rewritten_line.contains("bytes.parse(\"32KB\")") {
-            rewritten_line = rewritten_line.replace("bytes.parse(\"32KB\")", "32768");
-        } else if rewritten_line.contains("bytes.parse(\"128KB\")") {
-            rewritten_line = rewritten_line.replace("bytes.parse(\"128KB\")", "131072");
-        }
         if rewritten_line.contains("crypto.createHash(\"sha256\").update(")
             && rewritten_line.contains(").digest(\"hex\")")
         {
@@ -847,77 +1214,6 @@ fn transform_module_to_cjs(
                 .replace(").update(", ", ")
                 .replace(").digest(\"hex\")", ")");
         }
-        if rewritten_line.contains("Buffer.from(jsonStr, \"utf8\").toString(\"base64url\")") {
-            rewritten_line = rewritten_line.replace(
-                "Buffer.from(jsonStr, \"utf8\").toString(\"base64url\")",
-                "globalThis.__slice_base64_encode(jsonStr, true)",
-            );
-        }
-        if rewritten_line.contains("Buffer.from(b64Url, \"base64url\").toString(\"utf8\")") {
-            rewritten_line = rewritten_line.replace(
-                "Buffer.from(b64Url, \"base64url\").toString(\"utf8\")",
-                "globalThis.__slice_base64_decode(b64Url)",
-            );
-        }
-        let clean_stmt = rewritten_line.trim().trim_end_matches(';');
-        if clean_stmt == "const safe = makeSafeRegex(value)" {
-            rewritten_line = "  const safe = value;".to_string();
-        } else if clean_stmt.starts_with("safeRe[index] = new RegExp(") {
-            rewritten_line = "  safeRe[index] = re[index];".to_string();
-        } else if clean_stmt == "range = new Range(range, options)" {
-            rewritten_line = "    var __rk = (typeof range === 'string' && !options) ? range : null; if (__rk) { Range.__c = Range.__c || {}; range = Range.__c[__rk] || (Range.__c[__rk] = new Range(range, options)); } else { range = new Range(range, options); }".to_string();
-        } else if clean_stmt == "return new SemVer(version, options)" {
-            rewritten_line = "    if (typeof version === 'string' && !options) { SemVer.__c = SemVer.__c || {}; return SemVer.__c[version] || (SemVer.__c[version] = new SemVer(version, options)); } return new SemVer(version, options);".to_string();
-        } else if clean_stmt == "const m = version.trim().match(options.loose ? re[t.LOOSE] : re[t.FULL])" {
-            rewritten_line = "    if (!this.loose && !this.includePrerelease && SemVer.__c && SemVer.__c[version]) return SemVer.__c[version]; const m = version.trim().match(options.loose ? re[t.LOOSE] : re[t.FULL]);".to_string();
-        } else if clean_stmt == "this.format()" {
-            rewritten_line = "    this.format(); if (!this.loose && !this.includePrerelease) { SemVer.__c = SemVer.__c || {}; SemVer.__c[version] = this; }".to_string();
-        } else if clean_stmt == "match = version.match(options.includePrerelease ? re[t.COERCEFULL] : re[t.COERCE])" {
-            rewritten_line = "    if (!options.includePrerelease) { coerce.__c = coerce.__c || {}; if (coerce.__c[version]) return coerce.__c[version]; } match = version.match(options.includePrerelease ? re[t.COERCEFULL] : re[t.COERCE]);".to_string();
-        } else if clean_stmt == "return parse(`${major}.${minor}.${patch}${prerelease}${build}`, options)" {
-            rewritten_line = "  var __cr = parse(`${major}.${minor}.${patch}${prerelease}${build}`, options); if (!options.includePrerelease && coerce.__c) coerce.__c[version] = __cr; return __cr;".to_string();
-        } else if clean_stmt.starts_with("const fastDecode = require(\"") && clean_stmt.ends_with("\")") {
-            let req_call = clean_stmt.trim_start_matches("const fastDecode = ").trim();
-            rewritten_line = format!("let __fd; const fastDecode = function(s) {{ return (__fd || (__fd = {}))(s); }};", req_call);
-        } else if clean_stmt == "function parse (input) {" || clean_stmt == "function parse(input) {" {
-            rewritten_line = "function parse(input) { if (typeof input === 'string' && input.indexOf('%') === -1 && input.indexOf('+') === -1) { parse.__c = parse.__c || Object.create(null); var __hit = parse.__c[input]; if (__hit) return __hit; var __r = new Empty(); if (input.length > 0) { var __p = input.split('&'); for (var __i = 0; __i < __p.length; __i++) { var __s = __p[__i], __eq = __s.indexOf('='); if (__eq > 0) { var __k = __s.slice(0, __eq), __v = __s.slice(__eq + 1); if (__r[__k] !== undefined) { __r = null; break; } __r[__k] = __v; } else { __r = null; break; } } } if (__r) { parse.__c[input] = __r; return __r; } }".to_string();
-        } else if clean_stmt == "const parse = (text, reviver) => {" {
-            rewritten_line = "const parse = (text, reviver) => { if (!reviver) { const __in = $parse(text), __len = __in.length; for (let __i = 0; __i < __len; __i++) { const __el = __in[__i]; if (__el && typeof __el === 'object') { if (Array.isArray(__el)) { for (let __j = 0; __j < __el.length; __j++) { const __v = __el[__j]; if (typeof __v === 'string') __el[__j] = __in[__v]; } } else { const __ke = keys(__el); for (let __j = 0; __j < __ke.length; __j++) { const __k = __ke[__j], __v = __el[__k]; if (typeof __v === 'string') __el[__k] = __in[__v]; } } } } return __in[0]; }".to_string();
-        } else if clean_stmt == "const stringify = (value, replacer, space) => {" {
-            rewritten_line = "const stringify = (value, replacer, space) => { if (!replacer && !space && value && typeof value === 'object') { const __kn = new Map(), __in = [value], __out = []; __kn.set(value, '0'); for (let __i = 0; __i < __in.length; __i++) { const __c = __in[__i]; if (typeof __c === 'string') { __out.push((__c.indexOf('\"') === -1 && __c.indexOf('\\\\') === -1 && __c.indexOf('\\n') === -1 && __c.indexOf('\\r') === -1 && __c.indexOf('\\t') === -1) ? '\"' + __c + '\"' : $stringify(__c)); } else if (Array.isArray(__c)) { let __s = '['; for (let __j = 0; __j < __c.length; __j++) { if (__j > 0) __s += ','; const __v = __c[__j]; if (__v !== null && (typeof __v === 'object' || typeof __v === 'string')) { let __id = __kn.get(__v); if (__id === undefined) { __id = String(__in.push(__v) - 1); __kn.set(__v, __id); } __s += '\"' + __id + '\"'; } else { __s += (__v === undefined || typeof __v === 'function' || typeof __v === 'symbol') ? 'null' : $stringify(__v); } } __out.push(__s + ']'); } else { let __s = '{', __f = true; const __ke = keys(__c); for (let __j = 0; __j < __ke.length; __j++) { const __k = __ke[__j], __v = __c[__k]; if (__v === undefined || typeof __v === 'function' || typeof __v === 'symbol') continue; if (!__f) __s += ','; __f = false; __s += (__k.indexOf('\"') === -1 && __k.indexOf('\\\\') === -1) ? '\"' + __k + '\":' : $stringify(__k) + ':'; if (__v !== null && (typeof __v === 'object' || typeof __v === 'string')) { let __id = __kn.get(__v); if (__id === undefined) { __id = String(__in.push(__v) - 1); __kn.set(__v, __id); } __s += '\"' + __id + '\"'; } else if (typeof __v === 'number' || typeof __v === 'boolean') { __s += String(__v); } else { __s += $stringify(__v); } } __out.push(__s + '}'); } } return '[' + __out.join(',') + ']'; }".to_string();
-        } else if clean_stmt == "const decode = (str, opt = {}) => {" {
-            rewritten_line = "const decode = (str, opt = {}) => { if ((!opt || Object.keys(opt).length === 0) && typeof str === 'string' && str.indexOf(';') === -1 && str.indexOf('#') === -1 && str.indexOf('\\\\') === -1 && str.indexOf('\"') === -1 && str.indexOf(\"'\") === -1 && str.indexOf('[]') === -1) { const __out = Object.create(null); let __p = __out, __ok = true; const __lines = str.split('\\n'); for (let __i = 0; __i < __lines.length; __i++) { const __l = __lines[__i].trim(); if (!__l) continue; if (__l.charCodeAt(0) === 91 && __l.charCodeAt(__l.length - 1) === 93) { const __sec = __l.slice(1, -1).trim(); if (__sec.indexOf('.') !== -1) { __ok = false; break; } __p = __sec === '__proto__' ? Object.create(null) : (__out[__sec] = __out[__sec] || Object.create(null)); continue; } const __eq = __l.indexOf('='); const __k = (__eq === -1 ? __l : __l.slice(0, __eq)).trim(); if (__k === '__proto__') continue; const __vr = __eq === -1 ? true : __l.slice(__eq + 1).trim(); __p[__k] = __vr === 'true' ? true : __vr === 'false' ? false : __vr === 'null' ? null : __vr; } if (__ok) return __out; }".to_string();
-        } else if clean_stmt == "module.exports = function(val, options) {" || clean_stmt == "module.exports = function (val, options) {" {
-            rewritten_line = "module.exports = function(val, options) { if (!options && typeof val === 'string' && globalThis.__slice_fast_ms) { var __fm = globalThis.__slice_fast_ms(val); if (__fm !== undefined) return __fm; }".to_string();
-        } else if clean_stmt == "function format(value, options) {" || clean_stmt == "function format (value, options) {" {
-            rewritten_line = "function format(value, options) { if (!options && globalThis.__slice_fast_bytes_format) { var __bf = globalThis.__slice_fast_bytes_format(value); if (__bf !== undefined) return __bf; }".to_string();
-        } else if clean_stmt == "function parse(val) {" || clean_stmt == "function parse (val) {" {
-            rewritten_line = "function parse(val) { if (globalThis.__slice_fast_bytes_parse) { var __bp = globalThis.__slice_fast_bytes_parse(val); if (__bp !== undefined) return __bp; }".to_string();
-        } else if clean_stmt == "function serialize(name, val, options) {" || clean_stmt == "function serialize (name, val, options) {" {
-            let mut s = String::from(
-                "function serialize(name, val, options) { if (options && !options.domain && !options.expires && !options.priority && !options.encode && !options.partitioned && String(val).indexOf(':') === -1 && String(val).indexOf(' ') === -1) { var __cs = name + '=' + val; if (options.maxAge != null) __cs += '; Max-Age=' + Math.floor(options.maxAge); if (options.path) __cs += '; Path=' + options.path; if (options.httpOnly) __cs += '; HttpOnly'; if (options.secure) __cs += '; Secure'; ",
-            );
-            s.push_str(
-                "if (options.sameSite === 'strict' || options.sameSite === true) __cs += '; SameSite=Strict'; else if (options.sameSite === 'lax') __cs += '; SameSite=Lax'; else if (options.sameSite === 'none') __cs += '; SameSite=None'; return __cs; }",
-            );
-            rewritten_line = s;
-        } else if clean_stmt == "function parse(str, options) {" || clean_stmt == "function parse (str, options) {" {
-            let mut s = String::from(
-                "function parse(str, options) { if (!options && typeof str === 'string' && str.indexOf('%') === -1 && str.indexOf('\"') === -1) { var __co = {}, __cp = str.split(';'); ",
-            );
-            s.push_str(
-                "for (var __ci = 0; __ci < __cp.length; __ci++) { var __s = __cp[__ci], __eq = __s.indexOf('='); if (__eq > 0) { var __k = __s.slice(0, __eq).trim(); if (__co[__k] === undefined) __co[__k] = __s.slice(__eq + 1).trim(); } } return __co; }",
-            );
-            rewritten_line = s;
-        } else if clean_stmt == "const encodedHeader = this.toBase64Url(JSON.stringify(header))" {
-            rewritten_line = "  const encodedHeader = this.__eh || (this.__eh = this.toBase64Url(JSON.stringify(header)));".to_string();
-        } else if clean_stmt == "const subtotalCents = req.items.map((item) => item.unitPriceCents * item.quantity).reduce((acc, curr) => acc + curr, 0)" {
-            rewritten_line = "  let subtotalCents = 0; for (let __i = 0; __i < req.items.length; __i++) { const __it = req.items[__i]; subtotalCents += __it.unitPriceCents * __it.quantity; }".to_string();
-        } else if clean_stmt == "const totalUnits = req.items.map((item) => item.quantity).reduce((a, b) => a + b, 0)" {
-            rewritten_line = "  let totalUnits = 0; for (let __i = 0; __i < req.items.length; __i++) { totalUnits += req.items[__i].quantity; }".to_string();
-        } else if clean_stmt == "const hasAiGpu = req.items.some((item) => item.category === \"ai-gpu\")" {
-            rewritten_line = "  let hasAiGpu = false; for (let __i = 0; __i < req.items.length; __i++) { if (req.items[__i].category === \"ai-gpu\") { hasAiGpu = true; break; } }".to_string();
-        }
         body_lines.push(rewritten_line);
     }
 
@@ -927,9 +1223,10 @@ fn transform_module_to_cjs(
         body_lines.retain(|l| l.trim() != "const crypto = require(\"node:crypto\");");
     }
 
-    // Optimize CommonJS barrel files (such as `semver/index.js` and `fast-querystring/lib/index.js`)
-    // where `const fnName = require("...")` is used inside `module.exports = { ... }`:
-    // convert those into lazy getters or native Rust fast-path wrappers so unused submodules are never parsed or loaded!
+    // General-purpose CommonJS barrel file lazy-getter optimization:
+    // When a CommonJS barrel file defines `const fnName = require("...")` and re-exports `fnName,`
+    // inside `module.exports = { ... }`, convert the re-export into a lazy getter `get fnName() { return require("..."); }`
+    // so unused submodules in large barrel packages are only loaded if accessed.
     if body_lines.iter().any(|l| l.trim() == "module.exports = {") {
         let mut const_req_map: FxHashMap<String, (usize, String)> = FxHashMap::default();
         for (idx, line) in body_lines.iter().enumerate() {
@@ -944,110 +1241,33 @@ fn transform_module_to_cjs(
                 }
             }
         }
-        let is_semver_barrel = const_req_map.contains_key("satisfies")
-            && const_req_map.contains_key("coerce")
-            && const_req_map.contains_key("SemVer");
-        let is_fast_qs_barrel = const_req_map.contains_key("parse")
-            && const_req_map.contains_key("stringify")
-            && const_req_map.len() == 2;
         let mut to_remove_indices = FxHashSet::default();
         let mut shorthand_replacements: FxHashMap<usize, String> = FxHashMap::default();
-        let mut pruned_req_ids = FxHashSet::default();
 
-        if is_fast_qs_barrel {
-            if let Some((stringify_idx, stringify_req)) = const_req_map.get("stringify") {
-                to_remove_indices.insert(*stringify_idx);
-                if let Some(req_id) = stringify_req
-                    .strip_prefix("require(\"")
-                    .and_then(|s| s.strip_suffix("\")"))
-                {
-                    pruned_req_ids.insert(req_id.to_string());
-                }
-            }
-            for (idx, line) in body_lines.iter().enumerate() {
-                let t = line.trim().trim_end_matches(',');
-                if t == "stringify" || t == "encode: stringify" {
-                    to_remove_indices.insert(idx);
-                }
-            }
-        } else {
-            for (idx, line) in body_lines.iter().enumerate() {
-                let t = line.trim();
-                if let Some(ident) = t.strip_suffix(',') {
-                    let ident = ident.trim();
-                    if let Some((decl_idx, req_expr)) = const_req_map.get(ident) {
+        for (idx, line) in body_lines.iter().enumerate() {
+            let t = line.trim();
+            if let Some(ident) = t.strip_suffix(',') {
+                let ident = ident.trim();
+                if let Some((decl_idx, req_expr)) = const_req_map.get(ident) {
+                    // Only convert to a lazy getter if `ident` is not referenced elsewhere in the barrel file
+                    let used_elsewhere =
+                        body_lines
+                            .iter()
+                            .enumerate()
+                            .any(|(other_idx, other_line)| {
+                                other_idx != idx
+                                    && other_idx != *decl_idx
+                                    && other_line.contains(ident)
+                            });
+                    if !used_elsewhere {
                         to_remove_indices.insert(*decl_idx);
-                        if is_semver_barrel {
-                            match ident {
-                                "valid" => {
-                                    shorthand_replacements.insert(
-                                        idx,
-                                        format!("  valid: function(v, o) {{ return (!o && globalThis.__slice_semver_valid) ? globalThis.__slice_semver_valid(v) : {}(v, o); }},", req_expr),
-                                    );
-                                }
-                                "coerce" => {
-                                    shorthand_replacements.insert(
-                                        idx,
-                                        format!("  coerce: function(v, o) {{ if (!o && globalThis.__slice_semver_coerce) {{ var c = globalThis.__slice_semver_coerce(v); return c ? {{ version: c, toString: function() {{ return c; }} }} : null; }} return {}(v, o); }},", req_expr),
-                                    );
-                                }
-                                "gt" => {
-                                    shorthand_replacements.insert(
-                                        idx,
-                                        format!("  gt: function(a, b, l) {{ return (!l && globalThis.__slice_semver_gt) ? globalThis.__slice_semver_gt(a, b) : {}(a, b, l); }},", req_expr),
-                                    );
-                                }
-                                "satisfies" => {
-                                    shorthand_replacements.insert(
-                                        idx,
-                                        format!("  satisfies: function(v, r, o) {{ if (!o && globalThis.__slice_semver_satisfies) {{ var s = globalThis.__slice_semver_satisfies(v, r); if (s >= 0) return Boolean(s); }} return {}(v, r, o); }},", req_expr),
-                                    );
-                                }
-                                "parse" | "compare" | "SemVer" | "Range" | "Comparator" => {
-                                    shorthand_replacements.insert(
-                                        idx,
-                                        format!("  get {}() {{ return {}; }},", ident, req_expr),
-                                    );
-                                }
-                                _ => {
-                                    // Phase 7.2: Prune unused barrel submodules from the CAS dependency graph
-                                    to_remove_indices.insert(idx);
-                                    if let Some(req_id) = req_expr
-                                        .strip_prefix("require(\"")
-                                        .and_then(|s| s.strip_suffix("\")"))
-                                    {
-                                        pruned_req_ids.insert(req_id.to_string());
-                                    }
-                                }
-                            }
-                        } else {
-                            shorthand_replacements.insert(
-                                idx,
-                                format!("  get {}() {{ return {}; }},", ident, req_expr),
-                            );
-                        }
-                    } else if is_semver_barrel {
-                        // Handle `re: internalRe.re,`, `SEMVER_SPEC_VERSION: constants.SEMVER_SPEC_VERSION,` etc.
-                        if let Some((_prop, rhs_dot)) = ident.split_once(':') {
-                            if let Some((obj_name, _field)) = rhs_dot.trim().split_once('.') {
-                                if let Some((decl_idx, req_expr)) = const_req_map.get(obj_name.trim()) {
-                                    to_remove_indices.insert(*decl_idx);
-                                    to_remove_indices.insert(idx);
-                                    if let Some(req_id) = req_expr
-                                        .strip_prefix("require(\"")
-                                        .and_then(|s| s.strip_suffix("\")"))
-                                    {
-                                        pruned_req_ids.insert(req_id.to_string());
-                                    }
-                                }
-                            }
-                        }
+                        shorthand_replacements.insert(
+                            idx,
+                            format!("  get {}() {{ return {}; }},", ident, req_expr),
+                        );
                     }
                 }
             }
-        }
-        if !pruned_req_ids.is_empty() {
-            deps_out.retain(|p| !pruned_req_ids.contains(&canonical_mod_id(p)));
         }
         if !shorthand_replacements.is_empty() || !to_remove_indices.is_empty() {
             let mut optimized_lines = Vec::with_capacity(body_lines.len());
@@ -1126,49 +1346,6 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         }
         seen.insert(mod_id.clone());
 
-        if mod_id.ends_with("/node_modules/ms/index.js") {
-            visited_order.push((
-                mod_id.clone(),
-                "module.exports = function(v, o) { return globalThis.__slice_fast_ms(v, Boolean(o && o.long)); };".to_string(),
-            ));
-            return Ok(mod_id);
-        }
-        if mod_id.ends_with("/node_modules/bytes/index.js") {
-            visited_order.push((
-                mod_id.clone(),
-                "function format(v, o) { return globalThis.__slice_fast_bytes_format(v, o); } function parse(v) { return globalThis.__slice_fast_bytes_parse(v); } function bytes(v, o) { return typeof v === 'string' ? parse(v) : typeof v === 'number' ? format(v, o) : null; } bytes.format = format; bytes.parse = parse; module.exports = bytes;".to_string(),
-            ));
-            return Ok(mod_id);
-        }
-        if mod_id.ends_with("/node_modules/flatted/cjs/index.js") {
-            visited_order.push((
-                mod_id.clone(),
-                "const $parse = JSON.parse, $stringify = JSON.stringify, {keys} = Object; const parse = (text) => { const __in = $parse(text), __len = __in.length; for (let __i = 0; __i < __len; __i++) { const __el = __in[__i]; if (__el && typeof __el === 'object') { if (Array.isArray(__el)) { for (let __j = 0; __j < __el.length; __j++) { const __v = __el[__j]; if (typeof __v === 'string') __el[__j] = __in[__v]; } } else { const __ke = keys(__el); for (let __j = 0; __j < __ke.length; __j++) { const __k = __ke[__j], __v = __el[__k]; if (typeof __v === 'string') __el[__k] = __in[__v]; } } } } return __in[0]; }; const stringify = (value) => { const __kn = new Map(), __in = [value], __out = []; __kn.set(value, '0'); for (let __i = 0; __i < __in.length; __i++) { const __c = __in[__i]; if (typeof __c === 'string') { __out.push((__c.indexOf('\"') === -1 && __c.indexOf('\\\\') === -1 && __c.indexOf('\\n') === -1 && __c.indexOf('\\r') === -1 && __c.indexOf('\\t') === -1) ? '\"' + __c + '\"' : $stringify(__c)); } else if (Array.isArray(__c)) { let __s = '['; for (let __j = 0; __j < __c.length; __j++) { if (__j > 0) __s += ','; const __v = __c[__j]; if (__v !== null && (typeof __v === 'object' || typeof __v === 'string')) { let __id = __kn.get(__v); if (__id === undefined) { __id = String(__in.push(__v) - 1); __kn.set(__v, __id); } __s += '\"' + __id + '\"'; } else { __s += (__v === undefined || typeof __v === 'function' || typeof __v === 'symbol') ? 'null' : $stringify(__v); } } __out.push(__s + ']'); } else { let __s = '{', __f = true; const __ke = keys(__c); for (let __j = 0; __j < __ke.length; __j++) { const __k = __ke[__j], __v = __c[__k]; if (__v === undefined || typeof __v === 'function' || typeof __v === 'symbol') continue; if (!__f) __s += ','; __f = false; __s += (__k.indexOf('\"') === -1 && __k.indexOf('\\\\') === -1) ? '\"' + __k + '\":' : $stringify(__k) + ':'; if (__v !== null && (typeof __v === 'object' || typeof __v === 'string')) { let __id = __kn.get(__v); if (__id === undefined) { __id = String(__in.push(__v) - 1); __kn.set(__v, __id); } __s += '\"' + __id + '\"'; } else if (typeof __v === 'number' || typeof __v === 'boolean') { __s += String(__v); } else { __s += $stringify(__v); } } __out.push(__s + '}'); } } return '[' + __out.join(',') + ']'; }; exports.parse = parse; exports.stringify = stringify;".to_string(),
-            ));
-            return Ok(mod_id);
-        }
-        if mod_id.ends_with("/node_modules/dlv/index.js") {
-            visited_order.push((
-                mod_id.clone(),
-                "var __kc = Object.create(null); module.exports = function(o, k, d, p, u) { if (typeof k === 'string') { if (k.indexOf('.') === -1) { var v = o ? o[k] : u; return v === u ? d : v; } var ks = __kc[k] || (__kc[k] = k.split('.')); for (p = 0; p < ks.length; p++) { o = o ? o[ks[p]] : u; } return o === u ? d : o; } for (p = 0; p < k.length; p++) { o = o ? o[k[p]] : u; } return o === u ? d : o; };".to_string(),
-            ));
-            return Ok(mod_id);
-        }
-        if mod_id.ends_with("/node_modules/dset/dist/index.js") {
-            visited_order.push((
-                mod_id.clone(),
-                "var __kc = Object.create(null); exports.dset = function(obj, keys, val) { var ks = typeof keys === 'string' ? (__kc[keys] || (__kc[keys] = keys.split('.'))) : keys; var i = 0, l = ks.length, t = obj, x, k; while (i < l) { k = ks[i++]; if (k === '__proto__' || k === 'constructor' || k === 'prototype') break; t = t[k] = (i === l) ? val : (typeof (x = t[k]) === typeof ks) ? x : (ks[i] * 0 !== 0 || !!~('' + ks[i]).indexOf('.')) ? {} : []; } };".to_string(),
-            ));
-            return Ok(mod_id);
-        }
-        if mod_id.ends_with("/node_modules/mitt/dist/mitt.mjs") || mod_id.ends_with("/node_modules/mitt/dist/mitt.js") {
-            visited_order.push((
-                mod_id.clone(),
-                "function mitt(n) { var all = n || new Map(); return { all: all, on: function(t, h) { var i = all.get(t); if (i) i.push(h); else all.set(t, [h]); }, off: function(t, h) { var i = all.get(t); if (i) { if (h) i.splice(i.indexOf(h) >>> 0, 1); else all.set(t, []); } }, emit: function(t, e) { var i = all.get(t); if (i) { if (i.length === 1) i[0](e); else { for (var j = 0, s = i.slice(); j < s.length; j++) s[j](e); } } var w = all.get('*'); if (w) { if (w.length === 1) w[0](t, e); else { for (var k = 0, ws = w.slice(); k < ws.length; k++) ws[k](t, e); } } } }; } module.exports = mitt; module.exports.default = mitt; module.exports.__esModule = true;".to_string(),
-            ));
-            return Ok(mod_id);
-        }
-
         let raw_src = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read module {}", path.display()))?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -1236,7 +1413,12 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     let id_replacements: Vec<(String, String)> = visited_order
         .iter()
         .enumerate()
-        .map(|(idx, (mod_id, _))| (format!("require({:?})", mod_id), format!("require({})", idx)))
+        .map(|(idx, (mod_id, _))| {
+            (
+                format!("require({:?})", mod_id),
+                format!("require({})", idx),
+            )
+        })
         .collect();
 
     for (_, body) in &mut visited_order {
@@ -1268,8 +1450,13 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
 
     let rc_key = compute_bundle_rc_key(&format!("{}\n{}", modules_code, entry_body));
     let mut bundle = String::with_capacity(modules_code.len() + entry_body.len() + 512);
-    bundle.push_str(&format!("var __slice_modules = {{}};//__SLICE_RC:{}\n", rc_key));
-    bundle.push_str("var __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\n");
+    bundle.push_str(&format!(
+        "var __slice_modules = {{}};//__SLICE_RC:{}\n",
+        rc_key
+    ));
+    bundle.push_str(
+        "var __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\n",
+    );
     bundle.push_str(&format!("var __run = __rc[\"{}\"];\n", rc_key));
     bundle.push_str("if (!__run) {\n");
     bundle.push_str("var __slice_cache = [];\n");
@@ -1292,7 +1479,9 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         bundle.push_str("\n__h = exports.default || module.exports;\n}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n};\n}\n__run();\n");
     } else {
         bundle.push_str(&format!("__run = __rc[\"{}\"] = function() {{\n", rc_key));
-        bundle.push_str("var require = __slice_require, exports = {}, module = { exports: exports };\n");
+        bundle.push_str(
+            "var require = __slice_require, exports = {}, module = { exports: exports };\n",
+        );
         bundle.push_str(&entry_body);
         bundle.push_str("\n};\n}\n__run();\n");
     }
@@ -1464,7 +1653,13 @@ impl StaticAssetTable {
         self.by_path.is_empty()
     }
 
-    pub fn insert_asset(&mut self, rel_url_path: &str, content_type: String, etag_hex16: &str, payload: Arc<Vec<u8>>) {
+    pub fn insert_asset(
+        &mut self,
+        rel_url_path: &str,
+        content_type: String,
+        etag_hex16: &str,
+        payload: Arc<Vec<u8>>,
+    ) {
         let clean_path = if rel_url_path.starts_with('/') {
             rel_url_path.to_string()
         } else {
@@ -1482,7 +1677,8 @@ impl StaticAssetTable {
         } else if let Some(dir_prefix) = clean_path.strip_suffix("/index.html") {
             if !dir_prefix.is_empty() {
                 self.by_path.insert(dir_prefix.to_string(), entry.clone());
-                self.by_path.insert(format!("{}/", dir_prefix), entry.clone());
+                self.by_path
+                    .insert(format!("{}/", dir_prefix), entry.clone());
             }
         }
         self.by_path.insert(clean_path, entry);
@@ -1492,7 +1688,10 @@ impl StaticAssetTable {
     /// 256-bit BLAKE3 `ETag` digests for instant `304 Not Modified` negotiation.
     pub fn extend_from_directory(&mut self, static_dir: &Path) -> Result<usize> {
         if !static_dir.exists() {
-            bail!("Static asset directory does not exist: {}", static_dir.display());
+            bail!(
+                "Static asset directory does not exist: {}",
+                static_dir.display()
+            );
         }
         let mut count = 0;
         let mut stack = vec![static_dir.to_path_buf()];
@@ -1616,7 +1815,10 @@ impl CasBuilder {
     /// single `.cas` archive or compiled into a single `SLICEEXE` executable.
     pub fn ingest_static_directory(&mut self, static_dir: &Path) -> Result<usize> {
         if !static_dir.exists() {
-            bail!("Static asset directory does not exist: {}", static_dir.display());
+            bail!(
+                "Static asset directory does not exist: {}",
+                static_dir.display()
+            );
         }
         let mut count = 0;
         let mut stack = vec![static_dir.to_path_buf()];
@@ -1695,7 +1897,11 @@ impl CasBuilder {
                 }
 
                 if *specifier == self.entrypoint
-                    || stripped_ext == self.entrypoint.trim_end_matches(".ts").trim_end_matches(".js")
+                    || stripped_ext
+                        == self
+                            .entrypoint
+                            .trim_end_matches(".ts")
+                            .trim_end_matches(".js")
                 {
                     entry_hash = hash_hex.clone();
                 }
@@ -1763,8 +1969,9 @@ impl CasBuilder {
         let pad_len = (CACHE_LINE_ALIGN - (pre_data_len % CACHE_LINE_ALIGN)) % CACHE_LINE_ALIGN;
         let data_start_offset = (pre_data_len + pad_len) as u64;
 
-        let mut file = File::create(output_path)
-            .with_context(|| format!("Failed to create CAS archive at {}", output_path.display()))?;
+        let mut file = File::create(output_path).with_context(|| {
+            format!("Failed to create CAS archive at {}", output_path.display())
+        })?;
         file.write_all(CAS_MAGIC)?;
         file.write_all(&CAS_VERSION.to_le_bytes())?;
         file.write_all(&0u32.to_le_bytes())?;
@@ -1822,10 +2029,14 @@ impl MappedCasArchive {
     /// Resolves an import specifier in O(1) time without touching the OS filesystem.
     #[inline]
     pub fn resolve_specifier(&self, specifier: &str) -> Option<&CasBlobEntry> {
-        let hash = self.header.radix_resolution_map.get(specifier).or_else(|| {
-            let trimmed = specifier.trim_start_matches("./");
-            self.header.radix_resolution_map.get(trimmed)
-        })?;
+        let hash = self
+            .header
+            .radix_resolution_map
+            .get(specifier)
+            .or_else(|| {
+                let trimmed = specifier.trim_start_matches("./");
+                self.header.radix_resolution_map.get(trimmed)
+            })?;
         self.header.blobs.get(hash)
     }
 
@@ -1901,7 +2112,8 @@ impl MappedCasArchive {
             return Ok(None);
         }
         let cas_offset = u64::from_le_bytes(mmap[tail_start..tail_start + 8].try_into()?) as usize;
-        let cas_len = u64::from_le_bytes(mmap[tail_start + 8..tail_start + 16].try_into()?) as usize;
+        let cas_len =
+            u64::from_le_bytes(mmap[tail_start + 8..tail_start + 16].try_into()?) as usize;
         drop(mmap);
         let archive = Self::open_from_offset(&exe_path, cas_offset, cas_len)?;
         Ok(Some(archive))
@@ -2002,11 +2214,7 @@ function add(a: number, b: number): number {
             r#"{"name":"test-app","main":"./src/index.ts"}"#,
         )
         .unwrap();
-        std::fs::write(
-            src_dir.join("config.json"),
-            r#"{"multiplier": 3}"#,
-        )
-        .unwrap();
+        std::fs::write(src_dir.join("config.json"), r#"{"multiplier": 3}"#).unwrap();
         std::fs::write(
             src_dir.join("helper.ts"),
             r#"export function scale(v: number, m: number): number { return v * m; }"#,
@@ -2052,9 +2260,12 @@ console.log(scale(addBase(4), cfg.multiplier));
 
         std::fs::write(&fake_exe, vec![0x90u8; 100]).unwrap();
         let mut builder = CasBuilder::new("./index.ts");
-        builder.add_module("./index.ts", PathBuf::from("index.ts"), "const a = 7;", |s| {
-            s.as_bytes().to_vec()
-        });
+        builder.add_module(
+            "./index.ts",
+            PathBuf::from("index.ts"),
+            "const a = 7;",
+            |s| s.as_bytes().to_vec(),
+        );
         builder.write_to_file(&cas_path).unwrap();
 
         let total_size = embed_cas_into_executable(&fake_exe, &cas_path, &out_exe).unwrap();
@@ -2111,6 +2322,60 @@ console.log(assertValidOrder({ id: "ord-1", amountCents: -50 }));
             mapped.contains("(src/pricing_validator.ts:6)"),
             "Expected mapped error location to point to (src/pricing_validator.ts:6), got: {}",
             mapped
+        );
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_phase_n0_oxc_ast_array_pipeline_fusion_and_unmodified_node_modules() {
+        // 1. Verify Oxc AST array pipeline fusion works on arbitrary variable/property names
+        let raw_code = r#"
+const orders = [{ price: 120, qty: 2, active: true }, { price: 50, qty: 5, active: false }, { price: 300, qty: 1, active: true }];
+const totalGross = orders.map((item) => item.price * item.qty).reduce((acc, v) => acc + v, 0);
+const activeRevenue = orders.filter((o) => o.active).map((o) => o.price * o.qty).reduce((sum, val) => sum + val, 0);
+const hasHighValue = orders.some((entry) => entry.price >= 250);
+const allPositive = orders.every((entry) => entry.qty > 0);
+"#;
+        let fused = fuse_array_pipelines_ast(raw_code);
+        assert!(
+            !fused.contains(".map(") && !fused.contains(".reduce(") && !fused.contains(".some(") && !fused.contains(".every("),
+            "Expected all higher-order array pipelines to be fused into single-pass for loops, got:\n{}",
+            fused
+        );
+        assert!(fused.contains("for (let __sl_i1 = 0;"));
+        assert!(fused.contains("for (let __sl_i2 = 0;"));
+        assert!(fused.contains("for (let __sl_i3 = 0;"));
+        assert!(fused.contains("for (let __sl_i4 = 0;"));
+
+        // 2. Verify that bundling a project with `node_modules/ms/index.js` preserves the real
+        //    on-disk `node_modules` implementation instead of replacing it with a hardcoded shim.
+        let test_dir = std::env::temp_dir().join("slice_phase_n0_real_node_modules_test");
+        let _ = std::fs::remove_dir_all(&test_dir);
+        let nm_ms_dir = test_dir.join("node_modules").join("ms");
+        std::fs::create_dir_all(&nm_ms_dir).unwrap();
+        std::fs::write(
+            nm_ms_dir.join("package.json"),
+            r#"{"name":"ms","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            nm_ms_dir.join("index.js"),
+            r#"module.exports = function customMsFromDisk(val) { return "disk-ms:" + val; };"#,
+        )
+        .unwrap();
+        let entry_path = test_dir.join("index.ts");
+        std::fs::write(
+            &entry_path,
+            r#"import ms from "ms"; console.log(ms("5m"));"#,
+        )
+        .unwrap();
+
+        let bundled = bundle_entrypoint_with_deps(&entry_path).unwrap();
+        assert!(
+            bundled.contains("customMsFromDisk") && bundled.contains("disk-ms:"),
+            "Expected bundler to preserve actual node_modules/ms/index.js source from disk, got:\n{}",
+            bundled
         );
 
         let _ = std::fs::remove_dir_all(&test_dir);
