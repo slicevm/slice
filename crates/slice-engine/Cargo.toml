@@ -15,4 +15,7 @@ thiserror.workspace = true
 boa_engine.workspace = true
 oxc.workspace = true
 rustc-hash.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
+rustls-pki-types.workspace = true
 

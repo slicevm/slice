@@ -40,6 +40,9 @@ pub use isolate::{
     run_source_isolated, ExecutionMetrics, HttpExecutionOutcome, HttpRequestContext,
     SandboxEvalOptions, SandboxEvalOutcome, SliceIsolate,
 };
+pub use outbound_http::{
+    clear_outbound_conn_pool, outbound_pool_reuse_count, register_custom_root_cert_der,
+};
 pub use parser_and_compiler::{compile_source_to_bytecode, disassemble_bytecode};
 pub use value_and_ast::{
     BinOp, BytecodeModule, BytecodeOp, ExecutionTier, Expr, JsFunction, JsValue, Stmt, UnaryOp,

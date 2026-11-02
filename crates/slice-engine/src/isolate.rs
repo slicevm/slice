@@ -386,8 +386,13 @@ impl SliceIsolate {
                     self.verify_egress_not_leaked(line)?;
                 }
                 self.verify_egress_not_leaked(&last_val.to_string())?;
-                if let Some((_, ref res_body, _)) = BOA_HTTP_RES.with(|res| res.borrow().clone()) {
+                if let Some((_, ref res_body, _, ref res_hdrs)) =
+                    BOA_HTTP_RES.with(|res| res.borrow().clone())
+                {
                     self.verify_egress_not_leaked(res_body)?;
+                    for (_, hv) in res_hdrs {
+                        self.verify_egress_not_leaked(hv)?;
+                    }
                 }
             }
             let exec_ns = exec_start.elapsed().as_nanos() as u64;
@@ -670,16 +675,16 @@ impl SliceIsolate {
             let custom_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
             let wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.get());
 
-            let (status_code, content_type, response_body) =
-                if let Some((st, body, ct)) = custom_res {
-                    (st, ct, body)
+            let (status_code, content_type, response_body, response_headers) =
+                if let Some((st, body, ct, hdrs)) = custom_res {
+                    (st, ct, body, hdrs)
                 } else {
                     let body = if !metrics.stdout.is_empty() {
                         metrics.stdout.join("\n")
                     } else {
                         metrics.return_value.clone()
                     };
-                    (200, "application/json".to_string(), body)
+                    (200, "application/json".to_string(), body, Vec::new())
                 };
             self.verify_egress_not_leaked(&response_body)?;
 
@@ -688,6 +693,7 @@ impl SliceIsolate {
                 status_code,
                 content_type,
                 response_body,
+                response_headers,
                 wait_until_count,
             });
         }
@@ -703,6 +709,7 @@ impl SliceIsolate {
             status_code: 200,
             content_type: "application/json".to_string(),
             response_body: body,
+            response_headers: Vec::new(),
             wait_until_count: 0,
         })
     }
@@ -1791,6 +1798,7 @@ pub struct HttpExecutionOutcome {
     pub status_code: u16,
     pub content_type: String,
     pub response_body: String,
+    pub response_headers: Vec<(String, String)>,
     pub wait_until_count: usize,
 }
 
