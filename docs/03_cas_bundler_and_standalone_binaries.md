@@ -16,16 +16,21 @@ When you pass a **project directory** (e.g., `slice pack ./my-app ./my-app.cas`)
 1. **Explicit `--entry` CLI flag:** `slice pack ./my-app ./my-app.cas --entry=./src/worker.ts`
 2. **`slice.toml` `[package] entrypoint`:** Reads `entrypoint = "./src/index.ts"` from `./my-app/slice.toml`.
 3. **`package.json`:** Reads `"exports": { ".": "..." }`, `"module"`, or `"main"`.
-4. **Conventional Fallbacks:** Checks `src/index.ts`, `index.ts`, `src/index.js`, `index.js`, `src/main.ts`, and `main.ts`.
+4. **Conventional Fallbacks:** Checks `src/index.ts`, `src/index.tsx`, `index.ts`, `index.tsx`, `src/index.js`, `src/index.jsx`, `index.js`, `index.jsx`, `src/main.ts`, and `main.ts`.
 
 ### Supported Module Formats & Imports
 Inside your project, you can freely mix and match:
-- **TypeScript & ESM (`import` / `export`):**
-  ```typescript
+- **TypeScript, TSX/JSX & ESM (`import` / `export`):**
+  ```tsx
   import { PricingEngine } from "./pricing_engine.ts"; // or "./pricing_engine" or "./pricing_engine.js"
   import type { OrderReceipt } from "./types.ts";
+  import { renderToString } from "slice:jsx";
   import semver from "semver";
   import * as crypto from "node:crypto";
+
+  export function ReceiptCard(props: { id: string; total: number }) {
+      return <article className="receipt"><h2>Order {props.id}</h2><p>{props.total}</p></article>;
+  }
   ```
 - **CommonJS (`require` / `module.exports` / `exports`):**
   ```javascript
@@ -37,7 +42,7 @@ Inside your project, you can freely mix and match:
   import config from "./config/default.json";
   ```
 - **Node & Slice Built-Ins:**
-  - `"node:crypto"`, `"node:fs"`, `"node:fs/promises"`, `"node:path"`, `"node:os"`, `"node:buffer"`, `"node:events"`, `"node:url"`, `"node:util"`, `"node:util/types"`, `"node:assert"`, `"node:assert/strict"`, `"node:process"`, `"node:test"`, `"slice:test"`, `"bun:test"`
+  - `"node:crypto"`, `"node:fs"`, `"node:fs/promises"`, `"node:path"`, `"node:os"`, `"node:buffer"`, `"node:events"`, `"node:timers"`, `"node:timers/promises"`, `"node:url"`, `"node:util"`, `"node:util/types"`, `"node:assert"`, `"node:assert/strict"`, `"node:process"`, `"node:test"`, `"slice:test"`, `"bun:test"`, `"slice:jsx"`, `"react/jsx-runtime"`, `"preact/jsx-runtime"`, `"hono/jsx"`
 
 ### Modern ESM NPM Packages & Conditional `"exports"` Resolution
 Slice's zero-stat bundler ([`crates/slice-cas/src/lib.rs`](file:///p:/opensource/slice/crates/slice-cas/src/lib.rs)) includes a full **Oxc AST-driven ESM-to-CJS module linker** (`try_transform_esm_to_cjs_ast`) and **Node.js `package.json` `"exports"` resolver** (`resolve_package_exports_value`):

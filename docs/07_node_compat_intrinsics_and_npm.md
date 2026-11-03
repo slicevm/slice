@@ -137,6 +137,61 @@ import { describe, test, it, beforeEach, afterEach, expect } from "slice:test";
 // import { describe, test, expect } from "bun:test";
 ```
 
+### 1.9 `node:timers`, `node:timers/promises`, `setImmediate`, & `process.nextTick`
+Slice enforces the exact Node.js / WinterTC task and microtask priority hierarchy (`synchronous code -> process.nextTick -> Promise.then / queueMicrotask -> setImmediate -> setTimeout(0)`) and supports Promise-based timers with `AbortSignal` cancellation and `0 ns` deterministic virtual time-warp:
+```typescript
+import { setTimeout as sleep, setImmediate as nextCheck } from "node:timers/promises";
+
+process.nextTick(() => console.log("1. nextTick queue"));
+queueMicrotask(() => console.log("2. microtask queue"));
+setImmediate(() => console.log("3. check-phase setImmediate"));
+
+const res = await sleep(25, "warped-in-0ns-under-deterministic-mode");
+const imm = await nextCheck("immediate-resolved");
+```
+
+### 1.10 Full WHATWG `console.*` Specification (Protected by Egress DLP)
+Every `console.*` method (`log`, `info`, `warn`, `error`, `debug`, `table`, `time`, `timeLog`, `timeEnd`, `group`, `groupCollapsed`, `groupEnd`, `dir`, `dirxml`, `count`, `countReset`, `assert`, `trace`, `clear`) formats structured output with automatic group indentation, deterministic `console.time`/`timeEnd` deltas under `--deterministic`, and full Outbound Egress Secret DLP scanning:
+```typescript
+console.group("Edge Request Diagnostics");
+console.time("db-query");
+console.table([
+    { shard: "iad-01", latencyMs: 1.2, healthy: true },
+    { shard: "fra-02", latencyMs: 2.4, healthy: true },
+]);
+console.timeEnd("db-query");
+console.groupEnd();
+```
+
+### 1.11 Built-In Native JSX / TSX & Edge SSR (`slice:jsx`)
+Slice compiles `.tsx` and `.jsx` files natively in Rust using Oxc (`v0.152.0`) and includes a built-in zero-dependency JSX/SSR runtime (`"slice:jsx"`, plus automatic fallback for `"react/jsx-runtime"`, `"preact/jsx-runtime"`, and `"hono/jsx"` when not installed in `node_modules/`):
+```tsx
+import { renderToString, raw, Fragment } from "slice:jsx";
+
+function Page(props: { user: string; items: string[] }) {
+    return (
+        <>
+            <header className="hero" style={{ backgroundColor: "#0b0f19", paddingTop: "16px" }}>
+                <h1>Welcome, {props.user}</h1>
+            </header>
+            <ul>
+                {props.items.map((item) => <li key={item}>{item}</li>)}
+            </ul>
+            {raw("<!-- pre-sanitized static footer -->")}
+        </>
+    );
+}
+
+export default {
+    fetch(req: Request): Response {
+        const html = renderToString(<Page user="Alice <Admin>" items={["Fast", "Secure"]} />);
+        return new Response("<!doctype html>" + html, {
+            headers: { "content-type": "text/html; charset=utf-8" },
+        });
+    },
+};
+```
+
 ---
 
 ## 2. Using External `npm` Packages (`node_modules/`)
