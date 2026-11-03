@@ -3666,3 +3666,97 @@ s.send("leak: ghp_UDP_DLP_TOKEN_888", 9999, "127.0.0.1");
     ));
 }
 
+#[test]
+fn test_pillar1_speculative_worker_pool_reuse_and_script_cache_isolation() {
+    crate::prewarm_worker_pool_sync(1);
+    let reuse_before = crate::worker_pool_reuse_count();
+    let cache_hits_before = crate::worker_script_cache_hits();
+
+    // Run 3 sequential workers with identical script source across differing capabilities/workerData
+    // to verify:
+    // 1. IDLE_WORKER_POOL reuses the pre-warmed worker OS thread + WarmBoaRealm (`worker_pool_reuse_count` increases).
+    // 2. WORKER_SCRIPT_CACHE + `__SLICE_RC` function cache hits on subsequent worker executions (`worker_script_cache_hits` increases).
+    // 3. Zero cross-worker state leak (each worker sees only its own `workerData`, VFS is scrubbed between runs, and attenuated capabilities do not bleed).
+    let code = r#"
+import { Worker } from "node:worker_threads";
+
+    let script = `
+    import { parentPort, workerData } from "node:worker_threads";
+    import fs from "node:fs";
+    const leakedFile = fs.existsSync("/tmp/worker-leak.txt");
+    if (workerData.allowTmpWrite) {
+        fs.writeFileSync("/tmp/worker-leak.txt", "from-" + workerData.id);
+    }
+    const wroteVfs = fs.existsSync("/tmp/worker-leak.txt");
+    parentPort.postMessage({
+        id: workerData.id,
+        leakedFile,
+        wroteVfs,
+        leakedGlobal: typeof globalThis.__workerSecretLeak !== "undefined"
+    });
+`;
+
+async function runSequential(id, allowTmpWrite) {
+    return await new Promise((resolve, reject) => {
+        const w = new Worker(script, {
+            eval: true,
+            workerData: { id, allowTmpWrite },
+            slice: allowTmpWrite ? { allowWrite: ["/tmp"] } : { allowRead: ["/tmp"], allowWrite: [] }
+        });
+        w.on("message", (msg) => resolve(msg));
+        w.on("error", (err) => reject(err));
+    });
+}
+
+async function main() {
+    const r1 = await runSequential(1, true);
+    const r2 = await runSequential(2, true);
+    const r3 = await runSequential(3, false);
+
+    // Also verify that on worker #4 with allowWrite: [], an actual write triggers a SandboxViolation
+    const writeBlockedOn4 = await new Promise((resolve) => {
+        let blocked = false;
+        const w = new Worker(
+            `import fs from "node:fs"; fs.writeFileSync("/tmp/worker-leak.txt", "blocked");`,
+            { eval: true, slice: { allowWrite: [] } }
+        );
+        w.on("error", (e) => {
+            if (e.message.includes("filesystem") || e.message.includes("SandboxViolation")) {
+                blocked = true;
+            }
+        });
+        w.on("exit", (code) => resolve(code === 1 && blocked));
+    });
+
+    console.log(JSON.stringify({ r1, r2, r3, writeBlockedOn4 }));
+}
+main();
+"#;
+
+    let caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/tmp")
+        .with_write_prefix("/tmp");
+    let m = run_source_isolated("pillar1-pool-test", code, caps, 2_000_000, 16 * 1024 * 1024)
+        .unwrap();
+    assert_eq!(
+        m.stdout[0],
+        r#"{"r1":{"id":1,"leakedFile":false,"wroteVfs":true,"leakedGlobal":false},"r2":{"id":2,"leakedFile":false,"wroteVfs":true,"leakedGlobal":false},"r3":{"id":3,"leakedFile":false,"wroteVfs":false,"leakedGlobal":false},"writeBlockedOn4":true}"#
+    );
+
+    let reuse_after = crate::worker_pool_reuse_count();
+    let cache_hits_after = crate::worker_script_cache_hits();
+    assert!(
+        reuse_after >= reuse_before + 3,
+        "Expected at least 3 warm worker pool reuses, got before={} after={}",
+        reuse_before,
+        reuse_after
+    );
+    assert!(
+        cache_hits_after >= cache_hits_before + 2,
+        "Expected at least 2 worker script cache hits, got before={} after={}",
+        cache_hits_before,
+        cache_hits_after
+    );
+}
+
+

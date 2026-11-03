@@ -24,6 +24,7 @@ pub(crate) struct WarmBoaRealm {
     pub(crate) loaded_bundles: FxHashMap<u64, boa_engine::JsObject>,
     pub(crate) ses_check_fn: Option<boa_engine::JsObject>,
     pub(crate) ensure_shard_fn: Option<boa_engine::JsObject>,
+    pub(crate) init_worker_self_fn: Option<boa_engine::JsObject>,
     pub(crate) loaded_shards_mask: u16,
 }
 
@@ -177,6 +178,7 @@ pub(crate) fn create_warm_boa_realm() -> WarmBoaRealm {
         loaded_bundles: FxHashMap::default(),
         ses_check_fn,
         ensure_shard_fn,
+        init_worker_self_fn: None,
         loaded_shards_mask: 0,
     }
 }
@@ -207,6 +209,17 @@ pub(crate) fn ensure_realm_shards(
                     &mut realm.ctx,
                 );
                 realm.loaded_shards_mask |= bit;
+                if shard_id == 8 && realm.init_worker_self_fn.is_none() {
+                    realm.init_worker_self_fn = realm
+                        .ctx
+                        .global_object()
+                        .get(
+                            boa_engine::js_string!("__slice_init_worker_self_env"),
+                            &mut realm.ctx,
+                        )
+                        .ok()
+                        .and_then(|v| v.as_object());
+                }
             }
         }
     }

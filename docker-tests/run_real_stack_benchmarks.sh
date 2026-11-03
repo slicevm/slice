@@ -86,7 +86,7 @@ cleanup_upstream_f3() {
 }
 trap cleanup_upstream_f3 EXIT
 
-if should_run_tag "apps" || should_run_tag "f3"; then
+if should_run_tag "apps" || should_run_tag "f3" || should_run_tag "app22"; then
 cat << 'EOF' > /tmp/f3_upstream_server.ts
 export default {
     fetch(req: Request): Response {
@@ -928,6 +928,23 @@ else
     echo "    [FAIL] Unexpected slice test JSON output: $F4_TEST_JSON"
     exit 1
 fi
+fi
+
+if should_run_tag "app22"; then
+echo "========================================================================="
+echo "  [TAG: app22] APP 22 WORKER THREADS & RAW SOCKETS BENCHMARK"
+echo "========================================================================="
+"$SLICE_BIN" pack "$APP22_DIR" "/tmp/app22.cas" >/dev/null
+"$SLICE_BIN" compile "/tmp/app22.cas" -o "/tmp/app22_bin" >/dev/null
+verify_app_parity "App 22: 22-worker-threads-and-raw-sockets" "$APP22_DIR" "/tmp/app22.cas" "-A"
+bench_app 22 "22-WORKER-THREADS-AND-RAW-SOCKETS (Worker Threads + TCP/UDP + 5-Ring Sec)" "$APP22_DIR" "-A"
+measure_rss_kb "Slice (App 22: Workers + Sockets)"  "$SLICE_BIN" run "/tmp/app22.cas" --quiet
+measure_rss_kb "Bun (App 22: Workers + Sockets)"    bun run "$APP22_DIR/src/index.ts"
+measure_rss_kb "Deno (App 22: Workers + Sockets)"   deno run -A "$APP22_DIR/src/index.ts"
+measure_rss_kb "Node (App 22: Workers + Sockets)"   node "$APP22_DIR/src/index.ts"
+echo "  --- App 22 Cold vs Warm Isolate Telemetry ---"
+"$SLICE_BIN" run "/tmp/app22.cas" --quiet --metrics
+"$SLICE_BIN" run "/tmp/app22.cas" --warm --quiet --metrics
 fi
 
 if should_run_tag "swarm"; then

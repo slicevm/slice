@@ -1609,6 +1609,9 @@ impl SliceIsolate {
         Self::prewarm_boa_pool(1);
         if bytecode.starts_with(b"SLICEBOA") {
             let js_code = std::str::from_utf8(&bytecode[8..]).unwrap_or("");
+            if js_code.contains("Worker") || js_code.contains("worker_threads") {
+                crate::workers::prewarm_worker_pool_sync(1);
+            }
             if let Some((rc_key_u64, hex_bytes)) = extract_slice_rc_key(js_code) {
                 let mut realm = acquire_warm_boa_realm();
                 if !realm.loaded_bundles.contains_key(&rc_key_u64) {
@@ -1703,6 +1706,11 @@ impl SliceIsolate {
             });
         }
 
+        let is_worker = crate::workers::is_worker_thread();
+        if !is_worker && (js_code.contains("Worker") || js_code.contains("worker_threads")) {
+            crate::workers::speculative_prewarm_worker_pool(1);
+        }
+
         let mut realm = acquire_warm_boa_realm();
         let remaining_fuel = self
             .compartment
@@ -1720,12 +1728,19 @@ impl SliceIsolate {
                 b"__slice_sync_process_env(true);",
             ));
         }
-        let is_worker = crate::workers::is_worker_thread();
         if is_worker {
             ensure_realm_shards(&mut realm, (1 << 8) | (1 << 3) | (1 << 2), false);
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"globalThis.__slice_init_worker_self_env(true);",
-            ));
+            if let Some(ref init_fn) = realm.init_worker_self_fn {
+                let _ = init_fn.call(
+                    &boa_engine::JsValue::undefined(),
+                    &[boa_engine::JsValue::from(true)],
+                    &mut realm.ctx,
+                );
+            } else {
+                let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                    b"globalThis.__slice_init_worker_self_env(true);",
+                ));
+            }
         }
         let is_http_req = BOA_HTTP_REQ.with(|r| r.borrow().active);
         let rc_key_opt = extract_slice_rc_key(js_code);
@@ -1843,7 +1858,8 @@ impl SliceIsolate {
             return Err(violation);
         }
         if !ses_mutated_target.is_empty() {
-            release_warm_boa_realm(realm);
+            // Do NOT return a realm whose SES intrinsics were mutated back to BOA_CONTEXT_POOL.
+            drop(realm);
             return Err(SandboxViolation::IntrinsicMutationBlocked {
                 tenant_id: self.compartment.tenant_id.clone(),
                 intrinsic: ses_mutated_target,

@@ -22,9 +22,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 use std::cell::{Cell, RefCell};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// Maximum concurrent active workers per parent isolate.
@@ -36,7 +37,65 @@ pub const MAX_GLOBAL_ACTIVE_WORKERS: usize = 32;
 /// Maximum serialized message payload size (`4 MB`) for `postMessage`.
 pub const MAX_WORKER_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
+/// Maximum persistent warm worker OS threads retained in `IDLE_WORKER_POOL`.
+pub const MAX_POOLED_WORKER_THREADS: usize = 8;
+
+/// Maximum cached transpiled worker script bytecode payloads in `WORKER_SCRIPT_CACHE`.
+const MAX_CACHED_WORKER_SCRIPTS: usize = 256;
+
 static GLOBAL_ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
+static TOTAL_POOLED_WORKER_THREADS: AtomicUsize = AtomicUsize::new(0);
+static WORKER_POOL_REUSE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static WORKER_SCRIPT_CACHE_HITS: AtomicUsize = AtomicUsize::new(0);
+static WORKER_SCRIPT_CACHE: OnceLock<Mutex<FxHashMap<u64, Arc<Vec<u8>>>>> = OnceLock::new();
+static IDLE_WORKER_POOL: OnceLock<Mutex<Vec<Sender<WorkerJob>>>> = OnceLock::new();
+
+struct WorkerJob {
+    worker_id: u32,
+    worker_name: String,
+    child_tenant: String,
+    worker_data_json: String,
+    child_caps: CapabilityToken,
+    child_fuel: u64,
+    child_mem: usize,
+    parent_det: Option<(u64, u64)>,
+    parent_egress_secrets: Vec<String>,
+    parent_vfs_cache: FxHashMap<String, String>,
+    parent_vfs_dirs: FxHashSet<String>,
+    parent_fetch_mocks: FxHashMap<String, String>,
+    parent_ws_mocks: FxHashMap<String, String>,
+    parent_sock_mocks: FxHashMap<String, String>,
+    inbound_rx: Receiver<WorkerInboundCmd>,
+    event_tx: Sender<WorkerOutboundEvent>,
+    terminated: Arc<AtomicBool>,
+    bytecode: Arc<Vec<u8>>,
+}
+
+fn worker_script_cache() -> &'static Mutex<FxHashMap<u64, Arc<Vec<u8>>>> {
+    WORKER_SCRIPT_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+fn idle_worker_pool() -> &'static Mutex<Vec<Sender<WorkerJob>>> {
+    IDLE_WORKER_POOL.get_or_init(|| Mutex::new(Vec::with_capacity(MAX_POOLED_WORKER_THREADS)))
+}
+
+/// Returns the number of times `new Worker()` reused a warm worker thread from `IDLE_WORKER_POOL`
+/// instead of spawning a new OS thread and cold-initializing a `boa_engine::Context`.
+pub fn worker_pool_reuse_count() -> usize {
+    WORKER_POOL_REUSE_COUNT.load(Ordering::Acquire)
+}
+
+/// Returns the number of times `new Worker()` hit the pre-transpiled `WORKER_SCRIPT_CACHE`
+/// instead of re-running Oxc TypeScript stripping.
+pub fn worker_script_cache_hits() -> usize {
+    WORKER_SCRIPT_CACHE_HITS.load(Ordering::Acquire)
+}
+
+/// Resets worker pool telemetry counters (for deterministic testing).
+pub fn reset_worker_pool_telemetry() {
+    WORKER_POOL_REUSE_COUNT.store(0, Ordering::Release);
+    WORKER_SCRIPT_CACHE_HITS.store(0, Ordering::Release);
+}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -471,122 +530,30 @@ pub fn worker_spawn(specifier_or_code: &str, options_json: &str) -> Result<u32, 
 
     let worker_name = opts.name.unwrap_or_else(|| format!("worker-{}", worker_id));
     let child_tenant = format!("{}:worker-{}", parent_tenant, worker_id);
+    let bytecode = compile_or_get_worker_bytecode(&raw_script);
 
-    // Pre-compile bytecode before spawning thread (ensures TypeScript/ESM/JSX stripping happens once)
-    let transpiled_js = slice_cas::strip_typescript_and_normalize(&raw_script, true);
-    let mut bytecode = Vec::with_capacity(12 + transpiled_js.len());
-    bytecode.extend_from_slice(b"SLICEBOA{\n");
-    bytecode.extend_from_slice(transpiled_js.as_bytes());
-    bytecode.extend_from_slice(b"\n}");
+    let job = WorkerJob {
+        worker_id,
+        worker_name,
+        child_tenant,
+        worker_data_json,
+        child_caps,
+        child_fuel,
+        child_mem,
+        parent_det,
+        parent_egress_secrets,
+        parent_vfs_cache,
+        parent_vfs_dirs,
+        parent_fetch_mocks,
+        parent_ws_mocks,
+        parent_sock_mocks,
+        inbound_rx,
+        event_tx,
+        terminated: terminated_clone,
+        bytecode,
+    };
 
-    let builder = std::thread::Builder::new()
-        .name(format!("slice-worker-{}", worker_id))
-        .stack_size(8 * 1024 * 1024);
-
-    let spawn_res = builder.spawn(move || {
-        // Initialize worker thread-local state
-        BOA_VFS_CACHE.with(|c| *c.borrow_mut() = parent_vfs_cache);
-        BOA_VFS_DIRS.with(|d| *d.borrow_mut() = parent_vfs_dirs);
-        BOA_FETCH_MOCKS.with(|m| *m.borrow_mut() = parent_fetch_mocks);
-        BOA_WS_MOCKS.with(|m| *m.borrow_mut() = parent_ws_mocks);
-        BOA_SOCKET_MOCKS.with(|m| *m.borrow_mut() = parent_sock_mocks);
-
-        let tx_for_self = event_tx.clone();
-        WORKER_SELF_ENV.with(|env| {
-            *env.borrow_mut() = WorkerSelfThreadEnv {
-                is_worker_thread: true,
-                thread_id: worker_id,
-                name: worker_name,
-                worker_data_json,
-                inbound_rx: Some(inbound_rx),
-                outbound_tx: Some(tx_for_self),
-                terminated: Some(Arc::clone(&terminated_clone)),
-                self_listening: false,
-                explicit_exit_code: None,
-            };
-        });
-
-        let _ = event_tx.send(WorkerOutboundEvent {
-            worker_id,
-            kind: WorkerOutboundEventKind::Online,
-        });
-
-        let mut child_isolate = SliceIsolate::spawn(
-            child_tenant,
-            100 + (worker_id % 16),
-            child_caps,
-            child_fuel,
-            child_mem,
-        );
-        if let Some((prng, _clk)) = parent_det {
-            child_isolate.set_deterministic_seed(Some(
-                prng ^ (worker_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
-            ));
-        }
-        for sec in parent_egress_secrets {
-            child_isolate.add_egress_audit_secret(sec);
-        }
-
-        let exec_res = child_isolate.execute_bytecode(&bytecode, None);
-        let was_terminated = terminated_clone.load(Ordering::Acquire);
-        let explicit_code = WORKER_SELF_ENV.with(|env| env.borrow().explicit_exit_code);
-
-        if was_terminated {
-            let _ = event_tx.send(WorkerOutboundEvent {
-                worker_id,
-                kind: WorkerOutboundEventKind::Exit {
-                    exit_code: explicit_code.unwrap_or(1),
-                },
-            });
-        } else {
-            match exec_res {
-                Ok(metrics) => {
-                    if metrics.return_value.starts_with("Uncaught ") {
-                        let _ = event_tx.send(WorkerOutboundEvent {
-                            worker_id,
-                            kind: WorkerOutboundEventKind::Error {
-                                message: metrics.return_value,
-                                is_violation: false,
-                            },
-                        });
-                        let _ = event_tx.send(WorkerOutboundEvent {
-                            worker_id,
-                            kind: WorkerOutboundEventKind::Exit {
-                                exit_code: explicit_code.unwrap_or(1),
-                            },
-                        });
-                    } else {
-                        let _ = event_tx.send(WorkerOutboundEvent {
-                            worker_id,
-                            kind: WorkerOutboundEventKind::Exit {
-                                exit_code: explicit_code.unwrap_or(0),
-                            },
-                        });
-                    }
-                }
-                Err(violation) => {
-                    let _ = event_tx.send(WorkerOutboundEvent {
-                        worker_id,
-                        kind: WorkerOutboundEventKind::Error {
-                            message: violation.to_string(),
-                            is_violation: true,
-                        },
-                    });
-                    let _ = event_tx.send(WorkerOutboundEvent {
-                        worker_id,
-                        kind: WorkerOutboundEventKind::Exit {
-                            exit_code: explicit_code.unwrap_or(1),
-                        },
-                    });
-                }
-            }
-        }
-
-        WORKER_SELF_ENV.with(|env| *env.borrow_mut() = WorkerSelfThreadEnv::default());
-        GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
-    });
-
-    if let Err(e) = spawn_res {
+    if let Err(e) = dispatch_worker_job(job) {
         GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
         PARENT_WORKERS.with(|reg| {
             reg.borrow_mut().workers.remove(&worker_id);
@@ -595,6 +562,291 @@ pub fn worker_spawn(specifier_or_code: &str, options_json: &str) -> Result<u32, 
     }
 
     Ok(worker_id)
+}
+
+fn compile_or_get_worker_bytecode(raw_script: &str) -> Arc<Vec<u8>> {
+    let mut hasher = rustc_hash::FxHasher::default();
+    raw_script.hash(&mut hasher);
+    let script_hash = hasher.finish();
+
+    if let Ok(cache) = worker_script_cache().lock() {
+        if let Some(existing) = cache.get(&script_hash) {
+            WORKER_SCRIPT_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            return Arc::clone(existing);
+        }
+    }
+
+    let transpiled_js = slice_cas::strip_typescript_and_normalize(raw_script, true);
+    let rc_key = format!("{:016x}", script_hash);
+    let wrapped = if transpiled_js.starts_with("var __slice_modules = {};//__SLICE_RC:") {
+        format!("SLICEBOA{{\n{}\n}}", transpiled_js)
+    } else {
+        format!(
+            "SLICEBOA{{\nvar __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"] || (__rc[\"{}\"] = function() {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n}});\n__run();\n}}",
+            rc_key, rc_key, rc_key, transpiled_js
+        )
+    };
+    let arc_bc = Arc::new(wrapped.into_bytes());
+
+    if let Ok(mut cache) = worker_script_cache().lock() {
+        if cache.len() >= MAX_CACHED_WORKER_SCRIPTS {
+            cache.clear();
+        }
+        cache.insert(script_hash, Arc::clone(&arc_bc));
+    }
+    arc_bc
+}
+
+/// Speculatively spawns up to `target_threads` background worker threads into `IDLE_WORKER_POOL`
+/// if none have been spawned yet, allowing background worker `WarmBoaRealm` initialization to run
+/// concurrently on another CPU core while the main isolate is booting.
+pub fn speculative_prewarm_worker_pool(target_threads: usize) {
+    let target = target_threads.min(MAX_POOLED_WORKER_THREADS);
+    if TOTAL_POOLED_WORKER_THREADS.load(Ordering::Acquire) >= target {
+        return;
+    }
+    let Ok(mut pool) = idle_worker_pool().lock() else {
+        return;
+    };
+    while TOTAL_POOLED_WORKER_THREADS.load(Ordering::Acquire) < target {
+        let idx = TOTAL_POOLED_WORKER_THREADS.fetch_add(1, Ordering::AcqRel) + 1;
+        let (job_tx, job_rx) = mpsc::channel::<WorkerJob>();
+        pool.push(job_tx.clone());
+        let builder = std::thread::Builder::new()
+            .name(format!("slice-worker-pool-{}", idx))
+            .stack_size(8 * 1024 * 1024);
+        if builder
+            .spawn(move || {
+                worker_pool_thread_loop(job_tx, job_rx, None);
+            })
+            .is_err()
+        {
+            TOTAL_POOLED_WORKER_THREADS.fetch_sub(1, Ordering::AcqRel);
+            let _ = pool.pop();
+            break;
+        }
+    }
+}
+
+/// Synchronously warms `target_threads` background worker threads (waiting until their
+/// `WarmBoaRealm` and prelude shards `2` and `8` are fully initialized). Used by `--warm`.
+pub fn prewarm_worker_pool_sync(target_threads: usize) {
+    let target = target_threads.min(MAX_POOLED_WORKER_THREADS);
+    if TOTAL_POOLED_WORKER_THREADS.load(Ordering::Acquire) >= target {
+        return;
+    }
+    let mut ready_rxs = Vec::new();
+    if let Ok(mut pool) = idle_worker_pool().lock() {
+        while TOTAL_POOLED_WORKER_THREADS.load(Ordering::Acquire) < target {
+            let idx = TOTAL_POOLED_WORKER_THREADS.fetch_add(1, Ordering::AcqRel) + 1;
+            let (job_tx, job_rx) = mpsc::channel::<WorkerJob>();
+            let (ready_tx, ready_rx) = mpsc::channel::<()>();
+            pool.push(job_tx.clone());
+            let builder = std::thread::Builder::new()
+                .name(format!("slice-worker-pool-{}", idx))
+                .stack_size(8 * 1024 * 1024);
+            if builder
+                .spawn(move || {
+                    worker_pool_thread_loop(job_tx, job_rx, Some(ready_tx));
+                })
+                .is_ok()
+            {
+                ready_rxs.push(ready_rx);
+            } else {
+                TOTAL_POOLED_WORKER_THREADS.fetch_sub(1, Ordering::AcqRel);
+                let _ = pool.pop();
+                break;
+            }
+        }
+    }
+    for rx in ready_rxs {
+        let _ = rx.recv_timeout(Duration::from_secs(2));
+    }
+}
+
+fn dispatch_worker_job(mut job: WorkerJob) -> Result<(), String> {
+    loop {
+        let candidate_tx = idle_worker_pool().lock().ok().and_then(|mut p| p.pop());
+        let Some(tx) = candidate_tx else {
+            break;
+        };
+        match tx.send(job) {
+            Ok(()) => {
+                WORKER_POOL_REUSE_COUNT.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+            Err(sent_err) => {
+                job = sent_err.0;
+            }
+        }
+    }
+
+    let idx = TOTAL_POOLED_WORKER_THREADS.fetch_add(1, Ordering::AcqRel) + 1;
+    let (job_tx, job_rx) = mpsc::channel::<WorkerJob>();
+    let _ = job_tx.send(job);
+    let builder = std::thread::Builder::new()
+        .name(format!("slice-worker-pool-{}", idx))
+        .stack_size(8 * 1024 * 1024);
+    builder
+        .spawn(move || {
+            worker_pool_thread_loop(job_tx, job_rx, None);
+        })
+        .map(|_| ())
+        .map_err(|e| {
+            TOTAL_POOLED_WORKER_THREADS.fetch_sub(1, Ordering::AcqRel);
+            e.to_string()
+        })
+}
+
+fn worker_pool_thread_loop(
+    self_job_tx: Sender<WorkerJob>,
+    job_rx: Receiver<WorkerJob>,
+    ready_notify: Option<Sender<()>>,
+) {
+    // Eagerly warm this worker thread's `WarmBoaRealm` + Shards 2 & 8 before waiting on `job_rx`
+    {
+        let mut realm = crate::boa_realm::acquire_warm_boa_realm();
+        crate::boa_realm::ensure_realm_shards(&mut realm, (1 << 8) | (1 << 2), true);
+        crate::boa_realm::release_warm_boa_realm(realm);
+    }
+    if let Some(r_tx) = ready_notify {
+        let _ = r_tx.send(());
+    }
+
+    while let Ok(job) = job_rx.recv() {
+        run_pooled_worker_job(job, &self_job_tx);
+    }
+}
+
+fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
+    let worker_id = job.worker_id;
+    let event_tx = job.event_tx;
+    let terminated_clone = job.terminated;
+
+    // Fast abort if parent already called `worker.terminate()` before job started
+    if terminated_clone.load(Ordering::Acquire) {
+        GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
+        if let Ok(mut pool) = idle_worker_pool().lock() {
+            if pool.len() < MAX_POOLED_WORKER_THREADS {
+                pool.push(self_job_tx.clone());
+            }
+        }
+        let _ = event_tx.send(WorkerOutboundEvent {
+            worker_id,
+            kind: WorkerOutboundEventKind::Exit { exit_code: 1 },
+        });
+        return;
+    }
+
+    BOA_VFS_CACHE.with(|c| *c.borrow_mut() = job.parent_vfs_cache);
+    BOA_VFS_DIRS.with(|d| *d.borrow_mut() = job.parent_vfs_dirs);
+    BOA_FETCH_MOCKS.with(|m| *m.borrow_mut() = job.parent_fetch_mocks);
+    BOA_WS_MOCKS.with(|m| *m.borrow_mut() = job.parent_ws_mocks);
+    BOA_SOCKET_MOCKS.with(|m| *m.borrow_mut() = job.parent_sock_mocks);
+
+    let tx_for_self = event_tx.clone();
+    WORKER_SELF_ENV.with(|env| {
+        *env.borrow_mut() = WorkerSelfThreadEnv {
+            is_worker_thread: true,
+            thread_id: worker_id,
+            name: job.worker_name,
+            worker_data_json: job.worker_data_json,
+            inbound_rx: Some(job.inbound_rx),
+            outbound_tx: Some(tx_for_self),
+            terminated: Some(Arc::clone(&terminated_clone)),
+            self_listening: false,
+            explicit_exit_code: None,
+        };
+    });
+
+    let _ = event_tx.send(WorkerOutboundEvent {
+        worker_id,
+        kind: WorkerOutboundEventKind::Online,
+    });
+
+    let mut child_isolate = SliceIsolate::spawn(
+        job.child_tenant,
+        100 + (worker_id % 16),
+        job.child_caps,
+        job.child_fuel,
+        job.child_mem,
+    );
+    if let Some((prng, _clk)) = job.parent_det {
+        child_isolate.set_deterministic_seed(Some(
+            prng ^ (worker_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+        ));
+    }
+    for sec in job.parent_egress_secrets {
+        child_isolate.add_egress_audit_secret(sec);
+    }
+
+    let exec_res = child_isolate.execute_bytecode(&job.bytecode, None);
+    let was_terminated = terminated_clone.load(Ordering::Acquire);
+    let explicit_code = WORKER_SELF_ENV.with(|env| env.borrow().explicit_exit_code);
+
+    // Scrub thread-local worker state and return this thread to `IDLE_WORKER_POOL`
+    // BEFORE sending `Exit` to the parent isolate so sequential `await worker` loops
+    // immediately reuse this warm thread without a race condition!
+    WORKER_SELF_ENV.with(|env| *env.borrow_mut() = WorkerSelfThreadEnv::default());
+    BOA_VFS_CACHE.with(|c| c.borrow_mut().clear());
+    BOA_VFS_DIRS.with(|d| d.borrow_mut().clear());
+    GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
+    if let Ok(mut pool) = idle_worker_pool().lock() {
+        if pool.len() < MAX_POOLED_WORKER_THREADS {
+            pool.push(self_job_tx.clone());
+        }
+    }
+
+    if was_terminated {
+        let _ = event_tx.send(WorkerOutboundEvent {
+            worker_id,
+            kind: WorkerOutboundEventKind::Exit {
+                exit_code: explicit_code.unwrap_or(1),
+            },
+        });
+    } else {
+        match exec_res {
+            Ok(metrics) => {
+                if metrics.return_value.starts_with("Uncaught ") {
+                    let _ = event_tx.send(WorkerOutboundEvent {
+                        worker_id,
+                        kind: WorkerOutboundEventKind::Error {
+                            message: metrics.return_value,
+                            is_violation: false,
+                        },
+                    });
+                    let _ = event_tx.send(WorkerOutboundEvent {
+                        worker_id,
+                        kind: WorkerOutboundEventKind::Exit {
+                            exit_code: explicit_code.unwrap_or(1),
+                        },
+                    });
+                } else {
+                    let _ = event_tx.send(WorkerOutboundEvent {
+                        worker_id,
+                        kind: WorkerOutboundEventKind::Exit {
+                            exit_code: explicit_code.unwrap_or(0),
+                        },
+                    });
+                }
+            }
+            Err(violation) => {
+                let _ = event_tx.send(WorkerOutboundEvent {
+                    worker_id,
+                    kind: WorkerOutboundEventKind::Error {
+                        message: violation.to_string(),
+                        is_violation: true,
+                    },
+                });
+                let _ = event_tx.send(WorkerOutboundEvent {
+                    worker_id,
+                    kind: WorkerOutboundEventKind::Exit {
+                        exit_code: explicit_code.unwrap_or(1),
+                    },
+                });
+            }
+        }
+    }
 }
 
 /// Posts a JSON-serialized message from the parent isolate to `worker_id`.
@@ -829,6 +1081,14 @@ pub(crate) fn poll_parent_worker_events_and_dispatch(
                         }
                     }
                     events.push(ev);
+                    while let Ok(ev2) = r.event_rx.try_recv() {
+                        if matches!(ev2.kind, WorkerOutboundEventKind::Exit { .. }) {
+                            if let Some(h) = r.workers.get_mut(&ev2.worker_id) {
+                                h.finished = true;
+                            }
+                        }
+                        events.push(ev2);
+                    }
                 }
             }
         }

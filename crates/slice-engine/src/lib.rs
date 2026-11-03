@@ -66,3 +66,7 @@ pub use websocket::{
     DecodedWsFrame, ServerWsOutFrame, MAX_WS_FRAME_BYTES, WS_GUID, WS_OPCODE_BINARY,
     WS_OPCODE_CLOSE, WS_OPCODE_CONTINUATION, WS_OPCODE_PING, WS_OPCODE_PONG, WS_OPCODE_TEXT,
 };
+pub use workers::{
+    prewarm_worker_pool_sync, reset_worker_pool_telemetry, speculative_prewarm_worker_pool,
+    worker_pool_reuse_count, worker_script_cache_hits,
+};

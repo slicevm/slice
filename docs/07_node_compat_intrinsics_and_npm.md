@@ -193,7 +193,7 @@ export default {
 ```
 
 ### 1.12 MicroVM Web Workers (`new Worker()`) & `node:worker_threads`
-Slice supports both WHATWG `globalThis.Worker` (`new Worker(url, options)`, `URL.createObjectURL(blob)`) and Node.js `node:worker_threads` (`Worker`, `isMainThread`, `workerData`, `parentPort`, `threadId`, `MessageChannel`, `MessagePort`, `receiveMessageOnPort`). Every spawned worker executes inside an isolated child `SliceIsolate` compartment on a background thread and supports strict capability attenuation via `slice: { allowRead, allowWrite, allowNet, fuel, memoryBytes }`:
+Slice supports both WHATWG `globalThis.Worker` (`new Worker(url, options)`, `URL.createObjectURL(blob)`) and Node.js `node:worker_threads` (`Worker`, `isMainThread`, `workerData`, `parentPort`, `threadId`, `MessageChannel`, `MessagePort`, `receiveMessageOnPort`). Every spawned worker executes inside an isolated child `SliceIsolate` compartment backed by a persistent warm worker pool (`IDLE_WORKER_POOL`) with speculative background pre-warming and cached `__SLICE_RC` worker closures (`WORKER_SCRIPT_CACHE`), and supports strict capability attenuation via `slice: { allowRead, allowWrite, allowNet, fuel, memoryBytes }`:
 ```typescript
 import { Worker, isMainThread, MessageChannel, receiveMessageOnPort } from "node:worker_threads";
 
