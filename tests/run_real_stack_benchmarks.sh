@@ -8,7 +8,7 @@
 #   - Deno (V8)
 #   - Node.js (V8 native TypeScript execution)
 #
-# 10 Folder-Based Production Test Applications (`docker-tests/apps/`):
+# 24 Folder-Based Production Test Applications (`tests/apps/`) & Framework Suite (`tests/frameworks/`):
 #   1. `01-fintech-checkout`:
 #      Multi-module TypeScript OOP/Functional checkout engine + `node:crypto` SHA-256
 #   2. `02-npm-ecosystem-suite`:
@@ -37,7 +37,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 SLICE_BIN="$ROOT_DIR/target/release/slice"
-APPS_DIR="$ROOT_DIR/docker-tests/apps"
+APPS_DIR="$ROOT_DIR/tests/apps"
+FRAMEWORKS_DIR="$ROOT_DIR/tests/frameworks"
 BENCH_TAGS="${1:-${SLICE_BENCH_TAGS:-all}}"
 
 should_run_tag() {

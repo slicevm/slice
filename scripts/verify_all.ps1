@@ -23,8 +23,8 @@ Write-Host "[4/5] Building and Running Linux Docker Synthetic & MicroVM Benchmar
 docker build -t slice-linux-bench .
 docker run --rm --privileged slice-linux-bench
 
-Write-Host "[5/5] Building and Running Linux Docker Folder-Apps, NPM & Disk I/O Suite..."
-docker build -f docker-tests/Dockerfile -t slice-real-stack-bench .
+Write-Host "[5/5] Building and Running Linux Docker Folder-Apps, Frameworks, NPM & Disk I/O Suite..."
+docker build -f tests/Dockerfile -t slice-real-stack-bench .
 docker run --rm slice-real-stack-bench
 
 

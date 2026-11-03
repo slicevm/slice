@@ -63,7 +63,7 @@ Slice's zero-stat bundler ([`crates/slice-cas/src/lib.rs`](file:///p:/opensource
 slice pack ./src/index.ts ./bundle.cas
 
 # Pack an entire folder project (with package.json, slice.toml, src/, and node_modules/)
-slice pack ./docker-tests/apps/02-npm-ecosystem-suite ./npm-app.cas
+slice pack ./tests/apps/02-npm-ecosystem-suite ./npm-app.cas
 
 # Pack with a custom entrypoint and embedded static frontend assets
 slice pack ./my-webapp ./webapp.cas --entry=./src/server.ts --static=./public
@@ -93,7 +93,7 @@ Use **`slice compile`** to fuse the native `slice` runtime binary and your `.cas
 
 ```bash
 # Compile a folder app (including node_modules/ and slice.toml) into a standalone executable
-slice compile ./docker-tests/apps/01-fintech-checkout -o ./fintech-checkout
+slice compile ./tests/apps/01-fintech-checkout -o ./fintech-checkout
 
 # Or compile a full-stack web app (Backend API + ./public Frontend UI) into one binary
 slice compile ./my-webapp -o ./my-webapp-bin --static=./public
@@ -122,7 +122,7 @@ Use `slice inspect` whenever you want to verify what modules were bundled into a
 
 ### 4.1 Inspecting a `.cas` Archive
 ```bash
-slice pack ./docker-tests/apps/01-fintech-checkout ./fintech.cas
+slice pack ./tests/apps/01-fintech-checkout ./fintech.cas
 slice inspect ./fintech.cas
 ```
 Example output:
@@ -136,7 +136,7 @@ Example output:
   Static Web Assets  : 0 embedded files
   Modules Indexed    : 1
 -------------------------------------------------------------------------
-  [000] Specifier : ./docker-tests/apps/01-fintech-checkout
+  [000] Specifier : ./tests/apps/01-fintech-checkout
         BLAKE3    : 4a8e9c1b7d3f2056...
         Source    : offset=448 (64B aligned=true), len=3412 bytes
         Bytecode  : offset=3904 (64B aligned=true), len=3420 bytes

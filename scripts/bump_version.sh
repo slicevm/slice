@@ -52,16 +52,18 @@ sed -i.bak -E "/^\[workspace\.package\]/,/^\[/ s/^version = \"${OLD_VERSION}\"/v
 rm -f Cargo.toml.bak
 echo "  [updated] Cargo.toml"
 
-# 2. Update scripts and docs (never touching docker-tests/apps/* fixtures)
+# 2. Update scripts and docs (never touching tests/apps/* or tests/frameworks/* fixtures)
 FILES=(
     "scripts/install.ps1"
     "scripts/install.sh"
     "scripts/package_release.ps1"
-    "docker-tests/run_real_stack_benchmarks.sh"
+    "tests/run_real_stack_benchmarks.sh"
     "README.md"
-    "docker-tests/README.md"
-    docs/*.md
-    sys-docs/*.md
+    "tests/README.md"
+    "tests/frameworks/README.md"
+    docs/general/*.md
+    docs/guides/*.md
+    docs/system/*.md
 )
 
 for f in "${FILES[@]}"; do

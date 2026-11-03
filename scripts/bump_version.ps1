@@ -65,16 +65,15 @@ $TargetFiles = @(
     "scripts/install.ps1",
     "scripts/install.sh",
     "scripts/package_release.ps1",
-    "docker-tests/run_real_stack_benchmarks.sh",
+    "tests/run_real_stack_benchmarks.sh",
     "README.md",
-    "docker-tests/README.md"
+    "tests/README.md",
+    "tests/frameworks/README.md"
 )
 
-Get-ChildItem -Path (Join-Path $RootDir "docs") -Filter "*.md" | ForEach-Object {
-    $TargetFiles += "docs/$($_.Name)"
-}
-Get-ChildItem -Path (Join-Path $RootDir "sys-docs") -Filter "*.md" | ForEach-Object {
-    $TargetFiles += "sys-docs/$($_.Name)"
+Get-ChildItem -Path (Join-Path $RootDir "docs") -Filter "*.md" -Recurse | ForEach-Object {
+    $Rel = $_.FullName.Substring($RootDir.Length + 1).Replace('\', '/')
+    $TargetFiles += $Rel
 }
 
 $EscOld = [regex]::Escape($OldVersion)

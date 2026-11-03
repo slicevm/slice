@@ -246,7 +246,7 @@ slice run . --warm --metrics
 ```
 
 ### Verified Production NPM Packages in Slice's 20-App Suite
-All 20 production applications in [`docker-tests/apps/`](file:///p:/opensource/slice/docker-tests/README.md) bundle and execute real third-party `node_modules` libraries and verify **100% byte-for-byte identical output** against Node.js, Deno, and Bun:
+All 20 production applications in [`tests/apps/`](file:///p:/opensource/slice/tests/README.md) bundle and execute real third-party `node_modules` libraries and verify **100% byte-for-byte identical output** against Node.js, Deno, and Bun:
 
 | NPM Package | Common Use Case | Slice Optimization / Compatibility Applied |
 | :--- | :--- | :--- |
@@ -265,7 +265,7 @@ All 20 production applications in [`docker-tests/apps/`](file:///p:/opensource/s
 | **`dlv`** (`@1.1.3`) & **`dset`** (`@3.1.3`) | Deep nested object property lookup and mutation | Direct CommonJS/ESM bundling |
 | **`mitt`** (`@3.0.1`) | Event emitter & CQRS pub/sub bus | Direct CommonJS/ESM bundling |
 
-> For the complete API matrix of supported WinterTC globals, `Buffer` methods, and `node:*` modules, see [`docs/COMPATIBILITY.md`](file:///p:/opensource/slice/docs/COMPATIBILITY.md).
+> For the complete API matrix of supported WinterTC globals, `Buffer` methods, and `node:*` modules, see [`docs/general/COMPATIBILITY.md`](file:///p:/opensource/slice/docs/general/COMPATIBILITY.md).
 
 ---
 

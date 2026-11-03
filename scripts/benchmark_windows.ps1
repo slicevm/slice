@@ -103,9 +103,9 @@ $SummaryJson = @{
     microvm    = (& $SliceBin microvm-bench --tenants=1000 --json | ConvertFrom-Json)
 } | ConvertTo-Json -Depth 6
 
-Set-Content -Path (Join-Path $RootDir "sys-docs\raw_results_windows.json") -Value $SummaryJson
+Set-Content -Path (Join-Path $RootDir "docs\system\raw_results_windows.json") -Value $SummaryJson
 Remove-Item -Force $ColdStartCas, $ComputeCas, $ModGraphCas -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force (Join-Path $RootDir "benchmarks\workloads\module_graph") -ErrorAction SilentlyContinue
-Write-Host "Saved Windows benchmark telemetry to sys-docs/raw_results_windows.json"
+Write-Host "Saved Windows benchmark telemetry to docs/system/raw_results_windows.json"
 
 

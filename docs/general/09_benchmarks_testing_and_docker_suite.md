@@ -132,13 +132,13 @@ When deterministic mode is active:
 
 ---
 
-## 4. Running the 24-Application Docker Benchmark Suite (`docker-tests/`)
+## 4. Running the 24-Application Docker Benchmark Suite (`tests/`)
 
-Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md)) that tests **24 realistic multi-file TypeScript + `node_modules` applications** against the latest official releases of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v27.0.0-alpha`)**, verifying **100% byte-for-byte identical JSON output** across all 4 runtimes.
+Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`](file:///p:/opensource/slice/tests/README.md)) that tests **24 realistic multi-file TypeScript + `node_modules` applications** against the latest official releases of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v27.0.0-alpha`)**, verifying **100% byte-for-byte identical JSON output** across all 4 runtimes.
 
 ```bash
 # Build the Linux Docker benchmark container
-docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
+docker build -f tests/Dockerfile -t slice-realworld-bench .
 
 # Run all 24 applications + HTTP server + KV + AI MCP + 1,000-tenant swarm benchmarks
 docker run --rm slice-realworld-bench

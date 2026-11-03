@@ -42,7 +42,7 @@ You never have to manually configure which tier to use — Slice inspects your c
 Pass `--metrics` to any `slice run` command (or standalone compiled binary) to see exactly how your code executed:
 
 ```bash
-slice run ./docker-tests/apps/02-npm-ecosystem-suite --warm --metrics
+slice run ./tests/apps/02-npm-ecosystem-suite --warm --metrics
 ```
 Output:
 ```text

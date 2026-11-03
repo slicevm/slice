@@ -38,11 +38,11 @@ WORKDIR /app
 COPY --from=builder /workspace/target/release/slice /app/target/release/slice
 COPY benchmarks /app/benchmarks
 COPY scripts /app/scripts
-COPY docker-tests /app/docker-tests
+COPY tests /app/tests
 
-RUN bun install --cwd /app/docker-tests/apps/02-npm-ecosystem-suite \
-    && bun install --cwd /app/docker-tests/apps/04-edge-api-gateway \
-    && sed -i 's/\r$//' /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh \
-    && chmod +x /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh
+RUN bun install --cwd /app/tests/apps/02-npm-ecosystem-suite \
+    && bun install --cwd /app/tests/apps/04-edge-api-gateway \
+    && sed -i 's/\r$//' /app/scripts/benchmark_linux.sh /app/tests/run_real_stack_benchmarks.sh \
+    && chmod +x /app/scripts/benchmark_linux.sh /app/tests/run_real_stack_benchmarks.sh
 
 CMD ["/app/scripts/benchmark_linux.sh"]

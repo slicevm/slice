@@ -656,14 +656,14 @@ export default {
         }
     });
 
-    // Copy App 17 (`docker-tests/apps/17-zero-trust-redirect-keepalive-mesh`) into a temp dir bound to `bound_port`
+    // Copy App 17 (`tests/apps/17-zero-trust-redirect-keepalive-mesh`) into a temp dir bound to `bound_port`
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap();
     let app17_src = repo_root
-        .join("docker-tests")
+        .join("tests")
         .join("apps")
         .join("17-zero-trust-redirect-keepalive-mesh")
         .join("src");
@@ -831,7 +831,7 @@ export default {
         .unwrap()
         .parent()
         .unwrap()
-        .join("docker-tests/apps/18-async-event-loop-fanout-scheduler");
+        .join("tests/apps/18-async-event-loop-fanout-scheduler");
     let tmp_dir = std::env::temp_dir().join(format!("slice_n2_app18_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(tmp_dir.join("src")).unwrap();
@@ -947,7 +947,7 @@ fn test_phase_n3_wintertc_webcrypto_streams_cloning_and_http_roundtrip() {
     std::fs::create_dir_all(&src_dir).unwrap();
 
     let manifest_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docker-tests/apps/19-wintertc-webcrypto-streams-edge");
+        .join("../../tests/apps/19-wintertc-webcrypto-streams-edge");
     std::fs::copy(
         manifest_src.join("package.json"),
         tmp_dir.join("package.json"),
@@ -1059,7 +1059,7 @@ fn test_phase_n4_buffer_node_core_and_ast_bundler_roundtrip() {
     std::fs::create_dir_all(&src_dir).unwrap();
 
     let manifest_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docker-tests/apps/20-node-compat-and-edge-router");
+        .join("../../tests/apps/20-node-compat-and-edge-router");
     std::fs::copy(
         manifest_src.join("package.json"),
         tmp_dir.join("package.json"),
@@ -1747,7 +1747,7 @@ export default {
         .parent()
         .unwrap();
     let app21_src = repo_root
-        .join("docker-tests")
+        .join("tests")
         .join("apps")
         .join("21-websocket-realtime-and-security-guard")
         .join("src");
@@ -1954,7 +1954,7 @@ fn test_wave_c_app22_worker_threads_and_raw_sockets_roundtrip() {
         .parent()
         .unwrap();
     let app22_src = repo_root
-        .join("docker-tests")
+        .join("tests")
         .join("apps")
         .join("22-worker-threads-and-raw-sockets")
         .join("src");

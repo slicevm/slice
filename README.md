@@ -26,7 +26,7 @@
 +-----------------------------------+-------------------+-------------------+-------------------+-----------------------+
 ```
 
-### Real-World Multi-File TypeScript & `node_modules` Application Suite (`docker-tests/`)
+### Real-World Multi-File TypeScript & `node_modules` Application Suite (`tests/`)
 
 | Application Workload | Node.js (Min) | Deno (Min) | Bun (Min) | Slice Cold `.cas` / Bin | Slice Warm (`--warm`) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -93,10 +93,10 @@ This creates:
 ```bash
 # Execute a raw TypeScript file or an entire project folder (with package.json & node_modules)
 slice run ./src/index.ts --allow-env=SERVICE_STAGE=prod --metrics
-slice run ./docker-tests/apps/02-npm-ecosystem-suite --metrics
+slice run ./tests/apps/02-npm-ecosystem-suite --metrics
 
 # Pack an entire folder app (including transitive node_modules) into a 64-byte aligned BLAKE3 .cas archive
-slice pack ./docker-tests/apps/02-npm-ecosystem-suite ./bundle.cas
+slice pack ./tests/apps/02-npm-ecosystem-suite ./bundle.cas
 
 # Execute the memory-mapped .cas bundle with 0 stat() syscalls (or pass --warm to pre-warm the thread-local Boa pool)
 slice run ./bundle.cas --metrics
@@ -108,7 +108,7 @@ slice run ./bundle.cas --warm --metrics
 Embeds your compiled `.cas` archive and `SLICESNP`/`SLICEBOA` bytecode directly into a self-contained native binary:
 
 ```bash
-slice compile ./docker-tests/apps/01-fintech-checkout -o my-edge-app
+slice compile ./tests/apps/01-fintech-checkout -o my-edge-app
 ./my-edge-app --metrics
 ```
 
@@ -256,9 +256,9 @@ SERVICE_STAGE = "production"
 | `slice microvm-bench` | Spawn 1,000 isolated tenants and benchmark P50/P99 cold-start, CAS, and I/O rings. |
 | `slice verify-security` | Execute the 5-vector OCap, SES prototype lockdown, and CPU fuel DoS verification suite. |
 
-## Folder-Based Real-Life Production Applications, External NPM Libraries & Disk I/O Benchmarks (`docker-tests/apps/`)
+## Folder-Based Real-Life Production Applications, External NPM Libraries & Disk I/O Benchmarks (`tests/apps/`)
 
-In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md) runs **24 folder-based multi-module production TypeScript applications** (with standard WinterTC `Request`/`Response`/`Headers`/`URL`/`URLSearchParams`/`ReadableStream`/`TransformStream`/`TextEncoder`/`TextDecoder`/`crypto.subtle`/`Blob`/`File`/`FormData`/`structuredClone`/`EventTarget`/`AbortSignal`/`WebAssembly` APIs, pure-Rust `wasmi` WebAssembly execution with unified CPU fuel & linear memory cages, real `Uint8Array`-backed `Buffer` and `node:*` Core Tier-1 modules, OCap-guarded outbound HTTP/1.1 & HTTPS TLS 1.3 `fetch()` with Keep-Alive pooling, hop-by-hop redirect guard, Cloud Metadata SSRF Shield, and Egress DLP, `Slice.streamSSE` / `Response.sse`, zero-stat BLAKE3 `ETag` `304 Not Modified` static asset delivery, real external `node_modules/` packages `semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`, `cookie@0.6.0`/`1.0.2`, `bytes@3.1.2`, `flatted@3.3.1`, `dlv@1.1.3`, `dset@3.1.3`, `mitt@3.0.1`, FIPS-180-4 SHA-256/SHA-512 & RFC-2104 HMAC `node:crypto`, and `node:fs` disk I/O) and verifies **100% byte-for-byte identical JSON output** against the **absolute latest releases** of Bun (`v1.4.4`), Deno (`v2.9.8`), and Node.js (`v27.0.0-alpha`):
+In addition to synthetic microbenchmarks, [`tests/`](file:///p:/opensource/slice/tests/README.md) runs **24 folder-based multi-module production TypeScript applications** (with standard WinterTC `Request`/`Response`/`Headers`/`URL`/`URLSearchParams`/`ReadableStream`/`TransformStream`/`TextEncoder`/`TextDecoder`/`crypto.subtle`/`Blob`/`File`/`FormData`/`structuredClone`/`EventTarget`/`AbortSignal`/`WebAssembly` APIs, pure-Rust `wasmi` WebAssembly execution with unified CPU fuel & linear memory cages, real `Uint8Array`-backed `Buffer` and `node:*` Core Tier-1 modules, OCap-guarded outbound HTTP/1.1 & HTTPS TLS 1.3 `fetch()` with Keep-Alive pooling, hop-by-hop redirect guard, Cloud Metadata SSRF Shield, and Egress DLP, `Slice.streamSSE` / `Response.sse`, zero-stat BLAKE3 `ETag` `304 Not Modified` static asset delivery, real external `node_modules/` packages `semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`, `cookie@0.6.0`/`1.0.2`, `bytes@3.1.2`, `flatted@3.3.1`, `dlv@1.1.3`, `dset@3.1.3`, `mitt@3.0.1`, FIPS-180-4 SHA-256/SHA-512 & RFC-2104 HMAC `node:crypto`, and `node:fs` disk I/O) and verifies **100% byte-for-byte identical JSON output** against the **absolute latest releases** of Bun (`v1.4.4`), Deno (`v2.9.8`), and Node.js (`v27.0.0-alpha`):
 
 | Folder-Based Production App (Linux Docker `x86_64`) | Slice (`v0.9.2`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) |
 | :--- | :--- | :--- | :--- | :--- |
@@ -297,7 +297,7 @@ In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensourc
 Run the full Docker benchmark suite or filter by tags (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `f2`, `f3`, `f4`, `serve`, `swarm`):
 
 ```powershell
-docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
+docker build -f tests/Dockerfile -t slice-realworld-bench .
 # Run all benchmarks (20 folder apps + HTTP & Outbound Fetch + Serverless/KV + AI Agent/MCP + 1,000-tenant swarm)
 docker run --rm slice-realworld-bench
 # Or run only a specific tagged subset (e.g. f1, f2, f3, f4, n1, n2, n3, swarm)
@@ -308,25 +308,29 @@ cargo test --workspace
 
 ---
 
-## Documentation (`docs/`) & System Engineering Specs (`sys-docs/`)
+## Documentation (`docs/general/`, `docs/guides/`, `docs/system/`)
 
-### User & Developer Manual by Chapter (`docs/`)
-* **[Chapter 00: Master Documentation Index](file:///p:/opensource/slice/docs/00_index.md)**
-* **[Chapter 01: Getting Started, `slice.toml` & Complete CLI Reference](file:///p:/opensource/slice/docs/01_getting_started_and_cli.md)**
-* **[Chapter 02: Hybrid Three-Tier Execution Engine (`slice-engine`)](file:///p:/opensource/slice/docs/02_execution_engine_and_tiers.md)**
-* **[Chapter 03: Zero-Stat CAS Archive, Oxc Bundler & Standalone Binaries (`slice-cas`)](file:///p:/opensource/slice/docs/03_cas_bundler_and_standalone_binaries.md)**
-* **[Chapter 04: Security Architecture — OCap, SES Lockdown, Fuel Cage & Hardware MPK (`slice-sandbox`)](file:///p:/opensource/slice/docs/04_security_ocap_ses_and_hardware_mpk.md)**
-* **[Chapter 05: Multi-Tenant HTTP/1.1 Server, WinterTC Bridge & Sharded Edge KV (`slice serve`)](file:///p:/opensource/slice/docs/05_http_server_wintertc_and_edge_kv.md)**
-* **[Chapter 06: AI Agent "Code Mode" Sandbox, `< 5 us` Checkpoints & Native MCP Server (`slice mcp`)](file:///p:/opensource/slice/docs/06_ai_agent_sandbox_checkpoints_and_mcp.md)**
-* **[Chapter 07: Node.js Compatibility (`node:*`), Native Intrinsics & External NPM Packages](file:///p:/opensource/slice/docs/07_node_compat_intrinsics_and_npm.md)**
-* **[Chapter 08: Kernel Completion Rings (`slice-io`) & Embedding Slice in Rust](file:///p:/opensource/slice/docs/08_kernel_io_rings_and_rust_embedding.md)**
-* **[Chapter 09: Benchmarks, Time-Travel Testing & Docker Verification Suite](file:///p:/opensource/slice/docs/09_benchmarks_testing_and_docker_suite.md)**
-* **[Runtime Compatibility Matrix (`docs/COMPATIBILITY.md`)](file:///p:/opensource/slice/docs/COMPATIBILITY.md)**
+### User & Developer Manual by Chapter (`docs/general/`)
+* **[Chapter 00: Master Documentation Index](file:///p:/opensource/slice/docs/general/00_index.md)**
+* **[Chapter 01: Getting Started, `slice.toml` & Complete CLI Reference](file:///p:/opensource/slice/docs/general/01_getting_started_and_cli.md)**
+* **[Chapter 02: Hybrid Three-Tier Execution Engine (`slice-engine`)](file:///p:/opensource/slice/docs/general/02_execution_engine_and_tiers.md)**
+* **[Chapter 03: Zero-Stat CAS Archive, Oxc Bundler & Standalone Binaries (`slice-cas`)](file:///p:/opensource/slice/docs/general/03_cas_bundler_and_standalone_binaries.md)**
+* **[Chapter 04: Security Architecture — OCap, SES Lockdown, Fuel Cage & Hardware MPK (`slice-sandbox`)](file:///p:/opensource/slice/docs/general/04_security_ocap_ses_and_hardware_mpk.md)**
+* **[Chapter 05: Multi-Tenant HTTP/1.1 Server, WinterTC Bridge & Sharded Edge KV (`slice serve`)](file:///p:/opensource/slice/docs/general/05_http_server_wintertc_and_edge_kv.md)**
+* **[Chapter 06: AI Agent "Code Mode" Sandbox, `< 5 us` Checkpoints & Native MCP Server (`slice mcp`)](file:///p:/opensource/slice/docs/general/06_ai_agent_sandbox_checkpoints_and_mcp.md)**
+* **[Chapter 07: Node.js Compatibility (`node:*`), Native Intrinsics & External NPM Packages](file:///p:/opensource/slice/docs/general/07_node_compat_intrinsics_and_npm.md)**
+* **[Chapter 08: Kernel Completion Rings (`slice-io`) & Embedding Slice in Rust](file:///p:/opensource/slice/docs/general/08_kernel_io_rings_and_rust_embedding.md)**
+* **[Chapter 09: Benchmarks, Time-Travel Testing & Docker Verification Suite](file:///p:/opensource/slice/docs/general/09_benchmarks_testing_and_docker_suite.md)**
+* **[Runtime Compatibility Matrix (`docs/general/COMPATIBILITY.md`)](file:///p:/opensource/slice/docs/general/COMPATIBILITY.md)**
 
-### System Engineering Specifications (`sys-docs/` & `docker-tests/`)
-* **[Internal Architecture Specification (`sys-docs/architecture.md`)](file:///p:/opensource/slice/sys-docs/architecture.md)**
-* **[Empirical Benchmarks & Comparisons (`sys-docs/benchmarks_and_comparisons.md`)](file:///p:/opensource/slice/sys-docs/benchmarks_and_comparisons.md)**
-* **[Production Tooling & Deployment Guide (`sys-docs/production_tooling_guide.md`)](file:///p:/opensource/slice/sys-docs/production_tooling_guide.md)**
-* **[Cutting-Edge 2026 Research Deep Dive (`sys-docs/research_deep_dive.md`)](file:///p:/opensource/slice/sys-docs/research_deep_dive.md)**
-* **[Docker Real-Stack Production Benchmarks (`docker-tests/README.md`)](file:///p:/opensource/slice/docker-tests/README.md)**
+### Developer How-To Guides (`docs/guides/`)
+* **[Developer Guides & Recipes Index (`docs/guides/README.md`)](file:///p:/opensource/slice/docs/guides/README.md)**
+
+### System Engineering Specifications (`docs/system/` & `tests/`)
+* **[Internal Architecture Specification (`docs/system/architecture.md`)](file:///p:/opensource/slice/docs/system/architecture.md)**
+* **[Empirical Benchmarks & Comparisons (`docs/system/benchmarks_and_comparisons.md`)](file:///p:/opensource/slice/docs/system/benchmarks_and_comparisons.md)**
+* **[Production Tooling & Deployment Guide (`docs/system/production_tooling_guide.md`)](file:///p:/opensource/slice/docs/system/production_tooling_guide.md)**
+* **[Cutting-Edge 2026 Research Deep Dive (`docs/system/research_deep_dive.md`)](file:///p:/opensource/slice/docs/system/research_deep_dive.md)**
+* **[Docker Real-Stack Production Benchmarks (`tests/README.md`)](file:///p:/opensource/slice/tests/README.md)**
+* **[Framework Integration Benchmarks (`tests/frameworks/README.md`)](file:///p:/opensource/slice/tests/frameworks/README.md)**
 

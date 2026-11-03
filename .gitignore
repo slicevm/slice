@@ -5,7 +5,8 @@
 *.snap
 **/node_modules/
 /benchmarks/workloads/module_graph/generated
-/sys-docs/raw_results_*.json
+/docs/system/raw_results_*.json
+/docs/general/raw_results_*.json
 /docs/raw_results_*.json
 .vscode
 /archive

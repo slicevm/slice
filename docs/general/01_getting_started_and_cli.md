@@ -282,7 +282,7 @@ Executes a `.ts`/`.js` file, a project folder (with `package.json`, `slice.toml`
 slice run ./src/worker.ts --env-file=.env --allow-read=./data --allow-net=api.github.com:443
 
 # Run an entire folder application with warm pool telemetry
-slice run ./docker-tests/apps/02-npm-ecosystem-suite --warm --metrics
+slice run ./tests/apps/02-npm-ecosystem-suite --warm --metrics
 
 # Live development mode with automatic < 3 ms rebuilds on save
 slice run ./src/index.ts --watch --metrics
@@ -376,7 +376,7 @@ Embeds a `.ts` script, folder application (including `node_modules/` and `slice.
 
 **Examples:**
 ```bash
-slice compile ./docker-tests/apps/01-fintech-checkout -o ./fintech-service
+slice compile ./tests/apps/01-fintech-checkout -o ./fintech-service
 ./fintech-service --warm --metrics
 ```
 

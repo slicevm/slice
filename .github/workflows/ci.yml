@@ -70,16 +70,16 @@ jobs:
 
       - name: Verify TypeScript static check and CAS packing
         run: |
-          ./target/debug/slice inspect ./docker-tests/apps/01-fintech-checkout/src/index.ts
-          ./target/debug/slice pack ./docker-tests/apps/01-fintech-checkout /tmp/fintech.cas
+          ./target/debug/slice inspect ./tests/apps/01-fintech-checkout/src/index.ts
+          ./target/debug/slice pack ./tests/apps/01-fintech-checkout /tmp/fintech.cas
           ./target/debug/slice inspect /tmp/fintech.cas
           ./target/debug/slice run /tmp/fintech.cas --metrics
 
       - name: Verify WinterTC HTTP edge server smoke test
         run: |
-          ./target/debug/slice serve ./docker-tests/apps/09-wintertc-web-router --port=18080 --smoke-test
+          ./target/debug/slice serve ./tests/apps/09-wintertc-web-router --port=18080 --smoke-test
 
       - name: Verify time-travel deterministic test runner
         run: |
-          ./target/debug/slice test ./docker-tests/apps/15-time-travel-test-suite
+          ./target/debug/slice test ./tests/apps/15-time-travel-test-suite
 
