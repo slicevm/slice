@@ -69,14 +69,20 @@ APP18_DIR="$APPS_DIR/18-async-event-loop-fanout-scheduler"
 APP19_DIR="$APPS_DIR/19-wintertc-webcrypto-streams-edge"
 APP20_DIR="$APPS_DIR/20-node-compat-and-edge-router"
 APP21_DIR="$APPS_DIR/21-websocket-realtime-and-security-guard"
+APP22_DIR="$APPS_DIR/22-worker-threads-and-raw-sockets"
 
 UPSTREAM_F3_PID=""
+UPSTREAM_WC_PID=""
 cleanup_upstream_f3() {
     if [ -n "$UPSTREAM_F3_PID" ]; then
         kill "$UPSTREAM_F3_PID" 2>/dev/null || true
         wait "$UPSTREAM_F3_PID" 2>/dev/null || true
     fi
-    rm -f /tmp/f3_upstream_*
+    if [ -n "$UPSTREAM_WC_PID" ]; then
+        kill "$UPSTREAM_WC_PID" 2>/dev/null || true
+        wait "$UPSTREAM_WC_PID" 2>/dev/null || true
+    fi
+    rm -f /tmp/f3_upstream_* /tmp/wc_upstream_*
 }
 trap cleanup_upstream_f3 EXIT
 
@@ -140,6 +146,34 @@ EOF
 "$SLICE_BIN" pack /tmp/f3_upstream_server.ts /tmp/f3_upstream_server.cas >/dev/null
 "$SLICE_BIN" serve /tmp/f3_upstream_server.cas --port=18095 --workers=4 >/dev/null 2>&1 &
 UPSTREAM_F3_PID=$!
+
+cat << 'EOF' > /tmp/wc_upstream_sockets.mjs
+import net from "node:net";
+import dgram from "node:dgram";
+
+const tcpSrv = net.createServer((sock) => {
+    let buf = "";
+    sock.on("data", (chunk) => {
+        buf += chunk.toString("utf8");
+        if (buf.includes("QUIT")) {
+            sock.write("+PONG\r\n+OK\r\n$13\r\nactive-wave-c\r\n+BYE\r\n");
+        }
+    });
+    sock.on("error", () => {});
+});
+tcpSrv.listen(18096, "127.0.0.1");
+
+const udpSrv = dgram.createSocket("udp4");
+udpSrv.on("message", (msg, rinfo) => {
+    const text = msg.toString("utf8");
+    if (text.startsWith("SLICE_UDP_PROBE:")) {
+        udpSrv.send(Buffer.from("UDP_ACK:acme-realtime:seq=1:ok", "utf8"), rinfo.port, rinfo.address);
+    }
+});
+udpSrv.bind(18097, "127.0.0.1");
+EOF
+node /tmp/wc_upstream_sockets.mjs >/dev/null 2>&1 &
+UPSTREAM_WC_PID=$!
 sleep 0.3
 fi
 
@@ -154,9 +188,9 @@ echo "  Deno    : $(deno -V)"
 
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  [TAG: apps] PACKING & COMPILING ALL 21 FOLDER-BASED APPS (OXC + CAS)"
+echo "  [TAG: apps] PACKING & COMPILING ALL 22 FOLDER-BASED APPS (OXC + CAS)"
 echo "========================================================================="
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22; do
     eval "dir=\$APP${i}_DIR"
     "$SLICE_BIN" pack "$dir" "/tmp/app${i}.cas"
     "$SLICE_BIN" compile "/tmp/app${i}.cas" -o "/tmp/app${i}_bin"
@@ -221,6 +255,7 @@ verify_app_parity "App 18: 18-async-event-loop-fanout-scheduler (Timers/Microtas
 verify_app_parity "App 19: 19-wintertc-webcrypto-streams-edge (WebCrypto/Streams/FormData/Clone)" "$APP19_DIR" "/tmp/app19.cas" "-A"
 verify_app_parity "App 20: 20-node-compat-and-edge-router (Uint8Array Buffer/Node Core/AST Bundler)" "$APP20_DIR" "/tmp/app20.cas" "-A"
 verify_app_parity "App 21: 21-websocket-realtime-and-security-guard (RFC 6455 WS + N-Sec Hardening)" "$APP21_DIR" "/tmp/app21.cas" "-A"
+verify_app_parity "App 22: 22-worker-threads-and-raw-sockets (Worker Threads + TCP/UDP + 5-Ring Sec)" "$APP22_DIR" "/tmp/app22.cas" "-A"
 fi
 
 measure_ms() {
@@ -298,6 +333,7 @@ bench_app 18 "18-ASYNC-EVENT-LOOP-FANOUT-SCHEDULER (Timers/Microtasks/Fan-Out)" 
 bench_app 19 "19-WINTERTC-WEBCRYPTO-STREAMS-EDGE (WebCrypto/Streams/FormData/Clone)" "$APP19_DIR" "-A"
 bench_app 20 "20-NODE-COMPAT-AND-EDGE-ROUTER (Uint8Array Buffer/Node Core/AST Bundler)" "$APP20_DIR" "-A"
 bench_app 21 "21-WEBSOCKET-REALTIME-AND-SECURITY-GUARD (RFC 6455 WS + N-Sec Hardening)" "$APP21_DIR" "-A"
+bench_app 22 "22-WORKER-THREADS-AND-RAW-SOCKETS (Worker Threads + TCP/UDP + 5-Ring Sec)" "$APP22_DIR" "-A"
 
 echo "========================================================================="
 echo "  PEAK MEMORY FOOTPRINT (MAX RSS) ACROSS REPRESENTATIVE APPS"
@@ -316,16 +352,21 @@ measure_rss_kb "Slice (App 21: RFC 6455 WS + Sec)"  "$SLICE_BIN" run "/tmp/app21
 measure_rss_kb "Bun (App 21: RFC 6455 WS + Sec)"    bun run "$APP21_DIR/src/index.ts"
 measure_rss_kb "Deno (App 21: RFC 6455 WS + Sec)"   deno run -A "$APP21_DIR/src/index.ts"
 measure_rss_kb "Node (App 21: RFC 6455 WS + Sec)"   node "$APP21_DIR/src/index.ts"
+echo "-------------------------------------------------------------------------"
+measure_rss_kb "Slice (App 22: Workers + Sockets)"  "$SLICE_BIN" run "/tmp/app22.cas" --quiet
+measure_rss_kb "Bun (App 22: Workers + Sockets)"    bun run "$APP22_DIR/src/index.ts"
+measure_rss_kb "Deno (App 22: Workers + Sockets)"   deno run -A "$APP22_DIR/src/index.ts"
+measure_rss_kb "Node (App 22: Workers + Sockets)"   node "$APP22_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 21 APPS (COLD VS WARM POOL)"
+echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 22 APPS (COLD VS WARM POOL)"
 echo "========================================================================="
 echo "  --- Cold Realm Telemetry ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --quiet --metrics
 done
 echo "  --- Pre-Warmed Boa Pool Telemetry (--warm) ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --warm --quiet --metrics
 done
 fi

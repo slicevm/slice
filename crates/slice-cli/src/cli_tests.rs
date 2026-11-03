@@ -1829,3 +1829,217 @@ module.exports = fn;"#,
         r#"{"suite":"21-websocket-realtime-and-security-guard","auditSummary":{"totalCasesEvaluated":14,"smugglingClTeBlocked":1,"smugglingDupClBlocked":1,"crlfHeaderInjectionBlocked":2,"chunkedOverflowBlocked":2,"ssrfNonCanonicalIpBlocked":4,"wsFrameDlpBlocked":2,"cleanRequestsAllowed":2,"maxHeaderBudgetBytes":65536,"maxInboundBodyBudgetBytes":4194304,"maxWsFrameBudgetBytes":4194304,"auditTrailDigest":"85de31109bd3918142bcf47d1561acc7"},"wsSummary":{"handshakePath":"/upstream/ws","rfc6455AcceptVerified":true,"maskedFrameRoundtripVerified":true,"textFramesSent":4,"textAcksReceived":4,"binaryFramesSent":2,"binaryXorBytesVerified":14,"closeCode":1000,"closeReason":"audit-complete","upstreamSubgraphStatus":200,"upstreamAccountTier":"enterprise","sessionTranscriptDigest":"4b83c4f300269774642ac7316925946e"}}"#
     );
 }
+
+#[test]
+fn test_cli_wave_c_workers_and_raw_sockets_e2e() {
+    let tmp_dir = std::env::temp_dir().join(format!("slice_wave_c_e2e_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // 1. Write a dedicated worker file on disk that computes SHA-256 + multiplies workerData
+    let worker_path = tmp_dir.join("compute_worker.ts");
+    std::fs::write(
+        &worker_path,
+        r#"
+import crypto from "node:crypto";
+import { workerData, parentPort, isMainThread } from "node:worker_threads";
+
+parentPort.once("message", (msg: { label: string; values: number[] }) => {
+    const sum = msg.values.reduce((acc, v) => acc + v, 0) * (workerData.scale || 1);
+    const digest = crypto.createHash("sha256").update(msg.label + ":" + sum).digest("hex").slice(0, 16);
+    parentPort.postMessage({
+        workerMainThread: isMainThread,
+        sum,
+        digest
+    });
+});
+"#,
+    )
+    .unwrap();
+
+    let worker_path_norm = worker_path.to_string_lossy().replace('\\', "/");
+    let main_path = tmp_dir.join("main.ts");
+    std::fs::write(
+        &main_path,
+        format!(
+            r#"
+import {{ Worker }} from "node:worker_threads";
+import {{ connect }} from "cloudflare:sockets";
+import net from "node:net";
+
+async function run() {{
+    Slice.mockSocket("cache.internal:6379", "redis");
+    const sock = connect("cache.internal:6379");
+    const writer = sock.writable.getWriter();
+    await writer.write("GET session:42\r\n");
+    const reader = sock.readable.getReader();
+    const {{ value }} = await reader.read();
+    const redisRaw = new TextDecoder().decode(value).trim();
+    await sock.close();
+
+    const workerRes: any = await new Promise((resolve, reject) => {{
+        const w = new Worker("{worker_path_norm}", {{
+            workerData: {{ scale: 4 }}
+        }});
+        w.on("message", resolve);
+        w.on("error", reject);
+        w.postMessage({{ label: "batch-c", values: [2, 3, 5] }});
+    }});
+
+    console.log(JSON.stringify({{
+        redisOk: redisRaw.includes("slice-fast"),
+        workerMainThread: workerRes.workerMainThread,
+        workerSum: workerRes.sum,
+        workerDigest: workerRes.digest,
+        ipCheck: net.isIPv4("10.0.0.1") && net.isIPv6("2001:db8::1")
+    }}));
+}}
+run();
+"#
+        ),
+    )
+    .unwrap();
+
+    let src = std::fs::read_to_string(&main_path).unwrap();
+    let bc = compile_source_to_bytecode(&src);
+    let caps = CapabilityToken::pure_compute()
+        .with_read_prefix(tmp_dir.to_string_lossy().replace('\\', "/"))
+        .with_net_host("cache.internal:6379");
+    let mut iso = SliceIsolate::spawn("wave-c-cli", 1, caps, 5_000_000, 16 * 1024 * 1024);
+    let metrics = iso.execute_bytecode(&bc, None).unwrap();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    assert_eq!(
+        metrics.stdout[0],
+        r#"{"redisOk":true,"workerMainThread":false,"workerSum":40,"workerDigest":"985e4a2a3ae406a5","ipCheck":true}"#
+    );
+}
+
+#[test]
+fn test_wave_c_app22_worker_threads_and_raw_sockets_roundtrip() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, UdpSocket};
+    use std::path::Path;
+
+    let tcp_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp_port = tcp_listener.local_addr().unwrap().port();
+    let tcp_host_port = format!("127.0.0.1:{}", tcp_port);
+
+    let udp_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let udp_port = udp_sock.local_addr().unwrap().port();
+    let udp_host_port = format!("127.0.0.1:{}", udp_port);
+
+    let tcp_srv = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = tcp_listener.accept() {
+            let mut buf = [0u8; 512];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(b"+PONG\r\n+OK\r\n$13\r\nactive-wave-c\r\n+BYE\r\n");
+            let _ = stream.flush();
+        }
+    });
+
+    let udp_srv = std::thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        if let Ok((n, peer)) = udp_sock.recv_from(&mut buf) {
+            let msg = String::from_utf8_lossy(&buf[..n]);
+            if msg.starts_with("SLICE_UDP_PROBE:") {
+                let _ = udp_sock.send_to(b"UDP_ACK:acme-realtime:seq=1:ok", peer);
+            }
+        }
+    });
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let app22_src = repo_root
+        .join("docker-tests")
+        .join("apps")
+        .join("22-worker-threads-and-raw-sockets")
+        .join("src");
+    let tmp_dir = std::env::temp_dir().join(format!("slice_wave_c_app22_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let dst_src = tmp_dir.join("src");
+    std::fs::create_dir_all(&dst_src).unwrap();
+
+    for file_name in [
+        "types.ts",
+        "worker_socket_security_auditor.ts",
+        "worker_and_socket_engine.ts",
+        "index.ts",
+    ] {
+        let content = std::fs::read_to_string(app22_src.join(file_name)).unwrap();
+        let patched = content
+            .replace("18096", &tcp_port.to_string())
+            .replace("18097", &udp_port.to_string());
+        std::fs::write(dst_src.join(file_name), patched).unwrap();
+    }
+    std::fs::write(
+        tmp_dir.join("package.json"),
+        r#"{"name":"22-worker-threads-and-raw-sockets","version":"1.0.0","main":"./src/index.ts"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp_dir.join("slice.toml"),
+        format!(
+            "[package]\nname = \"22-worker-threads-and-raw-sockets\"\nentrypoint = \"./src/index.ts\"\n[capabilities]\nallow_net = [\"{}\", \"{}\"]\n",
+            tcp_host_port, udp_host_port
+        ),
+    )
+    .unwrap();
+
+    let nm = tmp_dir.join("node_modules");
+    for (pkg, code) in [
+        (
+            "bytes",
+            r#"var fn = function(v){ return typeof v === "number" ? __slice_fast_bytes_format(v) : __slice_fast_bytes_parse(v); };
+fn.parse = function(v){ return __slice_fast_bytes_parse(v); };
+fn.format = function(v){ return __slice_fast_bytes_format(v); };
+module.exports = fn;"#,
+        ),
+        (
+            "cookie",
+            "module.exports = { serialize: function(k, v) { return k + '=' + v + '; Path=/; HttpOnly'; }, parse: function(s) { var o = {}; String(s).split(';').forEach(function(p) { var kv = p.trim().split('='); if (kv.length === 2) o[kv[0]] = kv[1]; }); return o; } };",
+        ),
+        (
+            "fast-querystring",
+            "module.exports = { parse: function(q) { var o = {}; String(q).split('&').forEach(function(p) { var kv = p.split('='); if (kv[0]) o[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1] || ''); }); return o; } };",
+        ),
+        (
+            "ms",
+            "module.exports = function(v, o) { return __slice_fast_ms(v, Boolean(o && o.long)); };",
+        ),
+    ] {
+        let pkg_dir = nm.join(pkg);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("index.js"), code).unwrap();
+    }
+
+    let cas_out = tmp_dir.join("app22.cas");
+    build_cas_archive_with_static(&tmp_dir, &cas_out, "./src/index.ts", None).unwrap();
+
+    let archive = MappedCasArchive::open(&cas_out).unwrap();
+    let mut caps = CapabilityToken::pure_compute();
+    if let Some(manifest_toml) = archive.get_manifest_toml() {
+        merge_manifest_toml_into_caps(manifest_toml, &mut caps);
+    }
+    let entry = archive.entrypoint_blob().unwrap();
+    let mut iso = SliceIsolate::spawn("app22-tenant", 1, caps, 50_000_000, 16 * 1024 * 1024);
+    let metrics = iso
+        .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+        .unwrap();
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    assert!(
+        !metrics.stdout.is_empty(),
+        "App 22 produced no stdout! return_value={}",
+        metrics.return_value
+    );
+    assert_eq!(
+        metrics.stdout[0],
+        r#"{"suite":"22-worker-threads-and-raw-sockets","auditSummary":{"totalCasesEvaluated":12,"ring1PrivilegedPortBlocked":2,"ring2SsrfIpBlocked":4,"ring3EgressDlpBlocked":2,"ring4BudgetOverflowBlocked":1,"ring5WorkerEscalationBlocked":1,"cleanOperationsAllowed":2,"urlCanParseVerified":true,"auditDigest":"2723413bc42cf3c6"},"sessionSummary":{"workersSpawned":3,"workerTasksCompleted":3,"totalRecordsProcessed":18,"combinedWeightedSum":3475,"combinedXorChecksum":37,"messageChannelSyncVerified":true,"tcpCommandsSent":4,"tcpRepliesVerified":4,"tcpStatusValue":"active-wave-c","udpDatagramsSent":1,"udpAckBytesReceived":30,"udpAckVerified":true,"sessionDigest":"68aebc6ff5256024"}}"#
+    );
+    let _ = tcp_srv.join();
+    let _ = udp_srv.join();
+}

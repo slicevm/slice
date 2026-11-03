@@ -59,6 +59,7 @@ RUN bun install --cwd /app/docker-tests/apps/02-npm-ecosystem-suite \
     && bun install --cwd /app/docker-tests/apps/19-wintertc-webcrypto-streams-edge \
     && bun install --cwd /app/docker-tests/apps/20-node-compat-and-edge-router \
     && bun install --cwd /app/docker-tests/apps/21-websocket-realtime-and-security-guard \
+    && bun install --cwd /app/docker-tests/apps/22-worker-threads-and-raw-sockets \
     && sed -i 's/\r$//' /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh \
     && chmod +x /app/scripts/benchmark_linux.sh /app/docker-tests/run_real_stack_benchmarks.sh
 
