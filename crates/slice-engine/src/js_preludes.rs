@@ -29,8 +29,10 @@ pub const CONSOLE_EXT_PRELUDE_SRC: &str = include_str!("preludes/06_console_ext.
 pub const WEBSOCKET_PRELUDE_SRC: &str = include_str!("preludes/07_websocket.js");
 /// Human-readable source for Shard 8: `WORKERS_SOCKETS_PRELUDE` (`src/preludes/08_workers_sockets.js`).
 pub const WORKERS_SOCKETS_PRELUDE_SRC: &str = include_str!("preludes/08_workers_sockets.js");
+/// Human-readable source for Shard 9: `WASM_PRELUDE` (`src/preludes/09_wasm.js`).
+pub const WASM_PRELUDE_SRC: &str = include_str!("preludes/09_wasm.js");
 
-/// Evaluates a compile-time minified lazy prelude shard (`1..=8`) on demand inside `context`.
+/// Evaluates a compile-time minified lazy prelude shard (`1..=9`) on demand inside `context`.
 #[inline]
 pub(crate) fn eval_lazy_prelude_shard(
     shard_id: u32,
@@ -45,6 +47,7 @@ pub(crate) fn eval_lazy_prelude_shard(
         6 => CONSOLE_EXT_PRELUDE,
         7 => WEBSOCKET_PRELUDE,
         8 => WORKERS_SOCKETS_PRELUDE,
+        9 => WASM_PRELUDE,
         _ => return Ok(boa_engine::JsValue::undefined()),
     };
     context.eval(boa_engine::Source::from_bytes(bytes))
@@ -159,6 +162,9 @@ pub(crate) fn detect_needed_shards(js_code: &str, is_http: bool) -> u16 {
         || js_code.contains("mockSocket")
     {
         mask |= (1 << 8) | (1 << 2);
+    }
+    if js_code.contains("WebAssembly") {
+        mask |= 1 << 9;
     }
     mask
 }

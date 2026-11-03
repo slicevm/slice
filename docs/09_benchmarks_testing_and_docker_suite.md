@@ -132,24 +132,24 @@ When deterministic mode is active:
 
 ---
 
-## 4. Running the 20-Application Docker Benchmark Suite (`docker-tests/`)
+## 4. Running the 24-Application Docker Benchmark Suite (`docker-tests/`)
 
-Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md)) that tests **20 realistic multi-file TypeScript + `node_modules` applications** against the latest official releases of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v26.12.1`)**, verifying **100% byte-for-byte identical JSON output** across all 4 runtimes.
+Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`docker-tests/`](file:///p:/opensource/slice/docker-tests/README.md)) that tests **24 realistic multi-file TypeScript + `node_modules` applications** against the latest official releases of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v27.0.0-alpha`)**, verifying **100% byte-for-byte identical JSON output** across all 4 runtimes.
 
 ```bash
 # Build the Linux Docker benchmark container
 docker build -f docker-tests/Dockerfile -t slice-realworld-bench .
 
-# Run all 20 applications + HTTP server + KV + AI MCP + 1,000-tenant swarm benchmarks
+# Run all 24 applications + HTTP server + KV + AI MCP + 1,000-tenant swarm benchmarks
 docker run --rm slice-realworld-bench
 
 # Or run specific tagged suites:
-docker run --rm -e SLICE_BENCH_TAGS=apps,serve,swarm slice-realworld-bench
+docker run --rm -e SLICE_BENCH_TAGS=apps,wasm,serve,swarm slice-realworld-bench
 ```
 
-### 4.1 Verified Results Across All 20 Production Applications (Linux `x86_64` Docker)
+### 4.1 Verified Results Across All 24 Production Applications (Linux `x86_64` Docker)
 
-| Production Application | Slice Cold `.cas` / Bin | Slice Warm (`--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v26.12.1` | Speedup vs Bun / Deno / Node |
+| Production Application | Slice Cold `.cas` / Bin | Slice Warm (`--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v27.0.0-alpha` | Speedup vs Bun / Deno / Node |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **`01-fintech-checkout`** (Multi-File TS + SHA-256) | **5.297 ms** | **0.673 ms** (`0.08 us` init) | 12.729 ms | 34.766 ms | 63.778 ms | **2.40x Bun / 12.04x Node** |
 | **`02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **6.766 ms** | **0.272 ms** (`0.07 us` init) | 20.048 ms | 54.156 ms | 75.895 ms | **2.96x Bun / 11.22x Node** |
@@ -171,8 +171,10 @@ docker run --rm -e SLICE_BENCH_TAGS=apps,serve,swarm slice-realworld-bench
 | **`18-webcrypto-jose-zod-gateway`** (`jose` JWS/JWE + `zod` + `nanoid` + `TransformStream`) | **7.890 ms** | **1.320 ms** (`0.10 us` init) | 16.920 ms | 48.310 ms | 79.140 ms | **2.14x Bun / 10.03x Node** |
 | **`19-wintertc-webcrypto-streams-edge`** (WebCrypto/Streams/FormData/Clone) | **20.382 ms** | **1.272 ms** (`0.03 us` init) | 16.077 ms | 40.476 ms | 66.156 ms | **1.99x Deno / 3.25x Node** |
 | **`20-node-compat-and-edge-router`** (`Uint8Array` `Buffer` + Node Core + AST Bundler) | **23.428 ms** | **0.445 ms** (`0.03 us` init) | 16.395 ms | 40.664 ms | 67.095 ms | **36.8x Warm vs Bun / 2.86x Node** |
-| **`21-websocket-realtime-and-security-guard`** (RFC 6455 `WebSocket` + 5-Ring Guard) | **27.058 ms** | **3.145 ms** (`0.05 us` init) | 22.976 ms | 51.800 ms | 107.602 ms | **1.91x Deno / 3.98x Node** |
-| **`22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** | **2.423 ms** (`0.06 us` init) | 44.236 ms | 109.267 ms | 98.820 ms | **1.58x-1.98x Bun / 3.52x Node** |
+| **`21-websocket-realtime-and-security-guard`** (RFC 6455 `WebSocket` + 5-Ring Guard) | **25.210 ms** | **2.810 ms** (`0.16 us` init) | 22.976 ms | 51.800 ms | 107.602 ms | **2.05x Deno / 4.27x Node** |
+| **`22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** | **2.001 ms** (`0.06 us` init) | 44.236 ms | 109.267 ms | 98.820 ms | **1.58x-1.98x Bun / 3.52x Node** |
+| **`23-wasm-crypto-and-simd-kernel`** (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | **17.603 ms** | **1.822 ms** (`0.05 us` init) | 18.798 ms | 38.410 ms | 57.055 ms | **1.07x Cold / 10.3x Warm vs Bun** |
+| **`24-tsx-ssr-and-wasm-edge-pipeline`** (`WebAssembly` SLA Scorer + SSR Pipeline) | **14.489 ms** | **1.601 ms** (`0.03 us` init) | 17.284 ms | 38.347 ms | 63.228 ms | **1.19x Cold / 10.8x Warm vs Bun** |
 
 ### 4.2 HTTP Server (`slice serve`), Sharded KV & 1,000-Tenant MicroVM Benchmarks
 
@@ -190,6 +192,6 @@ docker run --rm -e SLICE_BENCH_TAGS=apps,serve,swarm slice-realworld-bench
 
 If you are building Slice from source and want to verify the internal Rust unit test suites:
 ```bash
-# Run all 47 workspace unit tests across all 5 crates
+# Run all 72 workspace unit tests across all 5 crates
 cargo test --workspace
 ```

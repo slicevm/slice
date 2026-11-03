@@ -4,8 +4,8 @@
 use crate::boa_realm::{
     acquire_warm_boa_realm, create_warm_boa_realm, ensure_realm_shards, release_warm_boa_realm,
     BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_CONTEXT_POOL, BOA_DET_STATE, BOA_EGRESS_SECRETS,
-    BOA_ENV_MAP, BOA_FETCH_MOCKS, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
-    BOA_STDOUT, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
+    BOA_ENV_MAP, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET,
+    BOA_NET_HOSTS, BOA_STDOUT, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
 };
 use crate::event_loop::{
     clear_event_loop_state, drive_event_loop_to_completion, has_pending_event_loop_work,
@@ -1721,6 +1721,7 @@ impl SliceIsolate {
             .fuel_limit
             .saturating_sub(self.compartment.fuel_consumed)
             .max(1);
+        BOA_FUEL_BUDGET.with(|f| f.set((0, remaining_fuel)));
         realm
             .ctx
             .runtime_limits_mut()
@@ -1868,9 +1869,17 @@ impl SliceIsolate {
         crate::websocket::clear_thread_websocket_state();
         crate::sockets::clear_thread_socket_state();
         crate::workers::clear_thread_worker_state();
+        crate::wasm::clear_thread_wasm_state();
         if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
             release_warm_boa_realm(realm);
             return Err(violation);
+        }
+        let wasm_fuel = BOA_FUEL_BUDGET.with(|f| f.get().0);
+        if wasm_fuel > 0 {
+            if let Err(v) = self.compartment.consume_fuel(wasm_fuel) {
+                release_warm_boa_realm(realm);
+                return Err(v);
+            }
         }
         if !ses_mutated_target.is_empty() {
             // Do NOT return a realm whose SES intrinsics were mutated back to BOA_CONTEXT_POOL.

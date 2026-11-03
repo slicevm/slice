@@ -1,6 +1,6 @@
 use crate::config_and_watch::{
     apply_dotenv_file_to_caps_and_dlp, find_project_manifest_path, load_manifest_or_default,
-    merge_manifest_toml_into_caps_and_dlp,
+    merge_manifest_toml_into_caps_and_dlp, OsNativeFileWatcher,
 };
 use anyhow::{bail, Result};
 use slice_engine::{compile_source_to_bytecode, SliceIsolate};
@@ -53,6 +53,8 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
     let mut audit_secrets: Vec<String> = Vec::new();
     let mut env_files: Vec<PathBuf> = Vec::new();
     let mut json_output = false;
+    let mut watch_mode = false;
+    let mut watch_once = false;
     let mut target_opt: Option<String> = None;
 
     for arg in args {
@@ -88,6 +90,11 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
             deterministic_seed = None;
         } else if arg == "--json" {
             json_output = true;
+        } else if arg == "--watch" {
+            watch_mode = true;
+        } else if arg == "--watch-once" {
+            watch_mode = true;
+            watch_once = true;
         } else if !arg.starts_with('-') && target_opt.is_none() {
             target_opt = Some(arg.clone());
         }
@@ -214,8 +221,66 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
         );
     }
 
-    if total_failed > 0 {
+    if total_failed > 0 && !watch_mode {
         bail!("{} test(s) failed", total_failed);
     }
+
+    if watch_mode {
+        let mut watcher = OsNativeFileWatcher::new(target_path);
+        while watcher.wait_for_change(watch_once) {
+            let reload_start = Instant::now();
+            let mut rerun_passed = 0usize;
+            let mut rerun_failed = 0usize;
+            for test_file in &discover_test_files(target_path)? {
+                let bundled = slice_cas::bundle_entrypoint_with_deps(test_file)?;
+                let filter_js = match &filter_opt {
+                    Some(flt) => format!(
+                        "globalThis.__slice_test_filter = {};",
+                        serde_json::to_string(flt).unwrap_or_else(|_| "\"\"".to_string())
+                    ),
+                    None => "globalThis.__slice_test_filter = \"\";".to_string(),
+                };
+                let wrapped_js = format!(
+                    "{}\nSlice.resetTests();\n{}\nconsole.log(\"__SLICE_TEST_REPORT__:\" + JSON.stringify(Slice.testSummary()));\n",
+                    filter_js, bundled
+                );
+                let bytecode = compile_source_to_bytecode(&wrapped_js);
+                let mut isolate = SliceIsolate::spawn(
+                    "slice-test-watch",
+                    1,
+                    caps.clone(),
+                    fuel_limit,
+                    mem_limit,
+                );
+                isolate.set_deterministic_seed(deterministic_seed);
+                for sec in &audit_secrets {
+                    isolate.add_egress_audit_secret(sec.clone());
+                }
+                let metrics = isolate.execute_bytecode(&bytecode, None)?;
+                for line in &metrics.stdout {
+                    if let Some(report_json) = line.strip_prefix("__SLICE_TEST_REPORT__:") {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(report_json) {
+                            rerun_passed += parsed["passed"].as_u64().unwrap_or(0) as usize;
+                            rerun_failed += parsed["failed"].as_u64().unwrap_or(0) as usize;
+                        }
+                    }
+                }
+            }
+            let reload_ms = reload_start.elapsed().as_secs_f64() * 1_000.0;
+            if !json_output {
+                println!(
+                    "[Slice Test Watch] Re-ran {} passed, {} failed in {:.2} ms",
+                    rerun_passed, rerun_failed, reload_ms
+                );
+            }
+            if watch_once {
+                if rerun_failed > 0 {
+                    bail!("{} test(s) failed on watch rerun", rerun_failed);
+                }
+                break;
+            }
+        }
+    }
+
     Ok(())
 }

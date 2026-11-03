@@ -2043,3 +2043,95 @@ module.exports = fn;"#,
     let _ = tcp_srv.join();
     let _ = udp_srv.join();
 }
+
+#[test]
+fn test_wave_d_wasm_import_bundling_and_os_native_watch_test_runner() {
+    let tmp_dir = env::temp_dir().join("slice_wave_d_wasm_bundle_and_watch");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(tmp_dir.join("src")).unwrap();
+    std::fs::create_dir_all(tmp_dir.join("tests")).unwrap();
+
+    // Minimal valid WebAssembly binary exporting `add(i32, i32) -> i32`
+    let add_wasm: [u8; 41] = [
+        0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00, // magic + version
+        0x01, 0x07, 0x01, 0x60, 0x02, 0x7F, 0x7F, 0x01, 0x7F, // type 0: (i32, i32) -> i32
+        0x03, 0x02, 0x01, 0x00, // func 0: type 0
+        0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00, // export "add" -> func 0
+        0x0A, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6A, 0x0B, // local.get 0, local.get 1, i32.add
+    ];
+    std::fs::write(tmp_dir.join("src/add.wasm"), add_wasm).unwrap();
+
+    std::fs::write(
+        tmp_dir.join("src/index.ts"),
+        r#"import addWasmBytes from "./add.wasm";
+
+const mod = new WebAssembly.Module(addWasmBytes);
+const inst = new WebAssembly.Instance(mod);
+const sum = (inst.exports.add as (a: number, b: number) => number)(19, 23);
+console.log(JSON.stringify({
+    wasmImported: true,
+    isUint8Array: addWasmBytes instanceof Uint8Array,
+    byteLen: addWasmBytes.byteLength,
+    sum
+}));
+"#,
+    )
+    .unwrap();
+
+    let cas_out = tmp_dir.join("wasm_bundle.cas");
+    build_cas_archive_with_static(&tmp_dir, &cas_out, "./src/index.ts", None).unwrap();
+
+    let archive = MappedCasArchive::open(&cas_out).unwrap();
+    let entry = archive.entrypoint_blob().unwrap();
+    let mut iso = SliceIsolate::spawn(
+        "wave-d-wasm-bundle-tenant",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    );
+    let metrics = iso
+        .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+        .unwrap();
+
+    assert_eq!(metrics.os_stat_syscalls, 0);
+    assert_eq!(
+        metrics.stdout[0],
+        r#"{"wasmImported":true,"isUint8Array":true,"byteLen":41,"sum":42}"#
+    );
+
+    // Also test OsNativeFileWatcher (`notify` crate) directly
+    let test_file = tmp_dir.join("tests/wasm.test.ts");
+    std::fs::write(
+        &test_file,
+        r#"import { describe, test, expect } from "slice:test";
+describe("wasm watch suite", () => {
+    test("adds numbers", () => {
+        expect(19 + 23).toBe(42);
+    });
+});
+"#,
+    )
+    .unwrap();
+
+    let mut watcher = crate::OsNativeFileWatcher::new(&tmp_dir);
+    let test_file_clone = test_file.clone();
+    let writer_handle = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let _ = std::fs::write(
+            &test_file_clone,
+            r#"import { describe, test, expect } from "slice:test";
+describe("wasm watch suite", () => {
+    test("adds numbers updated", () => {
+        expect(20 + 22).toBe(42);
+    });
+});
+"#,
+        );
+    });
+
+    assert!(watcher.wait_for_change(true));
+    writer_handle.join().unwrap();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+

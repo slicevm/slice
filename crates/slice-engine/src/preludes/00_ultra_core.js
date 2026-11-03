@@ -13,7 +13,14 @@
       __shMask |= bit;
       var ns = __shardProps[id];
       if (ns) {
-        for (var i = 0; i < ns.length; i++) delete globalThis[ns[i]];
+        for (var i = 0; i < ns.length; i++) {
+          Object.defineProperty(globalThis, ns[i], {
+            value: undefined,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+        }
       }
       __slice_lazy_prelude(id);
     }
@@ -32,8 +39,12 @@
             return globalThis[prop];
           },
           set: function(val) {
-            delete globalThis[prop];
-            globalThis[prop] = val;
+            Object.defineProperty(globalThis, prop, {
+              value: val,
+              writable: true,
+              enumerable: false,
+              configurable: true
+            });
           }
         });
       })(names[i]);
@@ -124,6 +135,9 @@
         "__slice_worker_host_deliver",
         "__slice_worker_self_deliver"
       ], 8);
+    }
+    if ((__shMask & 512) === 0) {
+      __defLazy(["WebAssembly"], 9);
     }
   };
 

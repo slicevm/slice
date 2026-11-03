@@ -33,6 +33,7 @@ const PRELUDE_SPECS: &[(&str, &str)] = &[
         "WORKERS_SOCKETS_PRELUDE",
         "src/preludes/08_workers_sockets.js",
     ),
+    ("WASM_PRELUDE", "src/preludes/09_wasm.js"),
 ];
 
 fn main() {

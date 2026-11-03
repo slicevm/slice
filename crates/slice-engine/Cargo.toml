@@ -18,4 +18,5 @@ rustc-hash.workspace = true
 rustls.workspace = true
 webpki-roots.workspace = true
 rustls-pki-types.workspace = true
+wasmi.workspace = true
 

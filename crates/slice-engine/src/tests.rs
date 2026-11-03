@@ -3535,7 +3535,7 @@ async function main() {{
         ipBad: net.isIP("not-an-ip")
     }}));
 }}
-main();
+main().catch((e) => console.log("ERR:" + (e && e.message || e)));
 "#
     );
 
@@ -3836,19 +3836,23 @@ async function main() {{
         fastTurnaround: tcpElapsedMs < 40
     }}));
 }}
-main();
+main().catch((e) => console.log("ERR:" + (e && e.message || e)));
 "#
     );
 
     let caps = CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", port));
     let m = run_source_isolated("pillar2-net-test", &code, caps, 2_000_000, 16 * 1024 * 1024)
         .unwrap();
-    let _ = server_handle.join();
-
+    assert!(
+        !m.stdout.is_empty(),
+        "pillar2 produced no stdout! return_value={}",
+        m.return_value
+    );
     assert_eq!(
         m.stdout[0],
         r#"{"workers":[20,42,66],"sockets":["FAST_ACK:PING-1","FAST_ACK:PING-2","FAST_ACK:PING-3"],"fastTurnaround":true}"#
     );
+    let _ = server_handle.join();
 
     let reuse_after = crate::worker_pool_reuse_count();
     assert!(
@@ -4057,6 +4061,254 @@ fn test_pillar5_sliceboa_payload_compaction_and_multiline_template_preservation(
         r#"{"rxOk":true,"strOk":true,"lines":["line1","    indented_line2","        indented_line3"]}"#
     );
 }
+
+#[test]
+fn test_wave_d_wasm_compile_instantiate_memory_globals_and_host_imports() {
+    let script = r#"
+        const sec = (id, body) => [id, body.length, ...body];
+        const str = (s) => [s.length, ...Array.from(s, (c) => c.charCodeAt(0))];
+        const body = (bytes) => [bytes.length, ...bytes];
+
+        const wasmBytes = new Uint8Array([
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
+            // Custom section (id 0): name "slice_meta" + payload "SLC"
+            ...sec(0x00, [...str("slice_meta"), 0x53, 0x4C, 0x43]),
+            // Type section (id 1): 2 types
+            ...sec(0x01, [
+                0x02,
+                0x60, 0x02, 0x7F, 0x7F, 0x01, 0x7F, // Type 0: (i32, i32) -> i32
+                0x60, 0x01, 0x7E, 0x01, 0x7E        // Type 1: (i64) -> i64
+            ]),
+            // Import section (id 2): 1 import: "env"."host_scale" -> func type 0
+            ...sec(0x02, [
+                0x01,
+                ...str("env"),
+                ...str("host_scale"),
+                0x00, 0x00
+            ]),
+            // Function section (id 3): 2 functions (type 0, type 1)
+            ...sec(0x03, [0x02, 0x00, 0x01]),
+            // Memory section (id 5): 1 memory (limits: flags=1, min=1, max=4)
+            ...sec(0x05, [0x01, 0x01, 0x01, 0x04]),
+            // Global section (id 6): 1 mutable i32 global = 100
+            ...sec(0x06, [0x01, 0x7F, 0x01, 0x41, 0xE4, 0x00, 0x0B]),
+            // Export section (id 7): 4 exports
+            ...sec(0x07, [
+                0x04,
+                ...str("memory"), 0x02, 0x00,
+                ...str("counter"), 0x03, 0x00,
+                ...str("compute_and_xor"), 0x00, 0x01,
+                ...str("mix64"), 0x00, 0x02
+            ]),
+            // Code section (id 10): 2 function bodies
+            ...sec(0x0A, [
+                0x02,
+                ...body([
+                    0x00, // 0 locals
+                    0x20, 0x00,
+                    0x20, 0x00, 0x28, 0x02, 0x00,
+                    0x20, 0x00, 0x20, 0x01, 0x10, 0x00,
+                    0x6A,
+                    0x23, 0x00,
+                    0x6A,
+                    0x36, 0x02, 0x00,
+                    0x23, 0x00, 0x41, 0x05, 0x6A, 0x24, 0x00,
+                    0x20, 0x00, 0x28, 0x02, 0x00,
+                    0x0B
+                ]),
+                ...body([
+                    0x00, // 0 locals
+                    0x20, 0x00, 0x42, 0x07, 0x7E, 0x42, 0x03, 0x7C,
+                    0x0B
+                ])
+            ])
+        ]);
+
+        const valid = WebAssembly.validate(wasmBytes);
+        const mod = new WebAssembly.Module(wasmBytes);
+        const exportsMeta = WebAssembly.Module.exports(mod);
+        const importsMeta = WebAssembly.Module.imports(mod);
+        const customSecs = WebAssembly.Module.customSections(mod, "slice_meta");
+        const customText = new TextDecoder().decode(new Uint8Array(customSecs[0]));
+
+        let hostCallCount = 0;
+        const importObj = {
+            env: {
+                host_scale(ptr, len) {
+                    hostCallCount++;
+                    return (ptr + len) * 3;
+                }
+            }
+        };
+
+        const inst1 = new WebAssembly.Instance(mod, importObj);
+        const memView = new Int32Array(inst1.exports.memory.buffer);
+        memView[4] = 1000; // byte offset 16
+
+        // Call compute_and_xor(16, 4):
+        // mem[16] = 1000 + host_scale(16, 4) [60] + counter [100] = 1160
+        // counter becomes 105
+        const res1 = inst1.exports.compute_and_xor(16, 4);
+        const memAfter = new Int32Array(inst1.exports.memory.buffer)[4];
+        const counterAfter = inst1.exports.counter.value;
+        inst1.exports.counter.value = 200;
+        const res2 = inst1.exports.compute_and_xor(16, 4); // 1160 + 60 + 200 = 1420
+
+        // Test memory.grow(1) and verify existing data is preserved
+        const prevPages = inst1.exports.memory.grow(1);
+        const grownBytes = inst1.exports.memory.buffer.byteLength;
+        const preservedWord = new Int32Array(inst1.exports.memory.buffer)[4];
+
+        // Test i64 BigInt roundtrip
+        const mix64Res = inst1.exports.mix64(10n);
+
+        // Test standalone WebAssembly.Global & WebAssembly.Table & async WebAssembly.instantiate
+        const standaloneGlobal = new WebAssembly.Global({ value: "i32", mutable: true }, 42);
+        standaloneGlobal.value = 99;
+        const table = new WebAssembly.Table({ element: "anyfunc", initial: 2, maximum: 4 });
+        const prevTableLen = table.grow(1);
+
+        WebAssembly.instantiate(wasmBytes, importObj).then(({ module, instance }) => {
+            console.log(JSON.stringify({
+                valid,
+                exportsCount: exportsMeta.length,
+                importsCount: importsMeta.length,
+                customText,
+                hostCallCount,
+                res1,
+                memAfter,
+                counterAfter,
+                res2,
+                prevPages,
+                grownBytes,
+                preservedWord,
+                mix64Res: String(mix64Res),
+                standaloneGlobal: standaloneGlobal.value,
+                prevTableLen,
+                tableLen: table.length,
+                asyncInstOk: typeof instance.exports.compute_and_xor === "function"
+            }));
+        });
+    "#;
+
+    let m = run_source_isolated(
+        "wave-d-wasm-full",
+        script,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        32 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        m.stdout[0],
+        r#"{"valid":true,"exportsCount":4,"importsCount":1,"customText":"SLC","hostCallCount":2,"res1":1160,"memAfter":1160,"counterAfter":105,"res2":1420,"prevPages":1,"grownBytes":131072,"preservedWord":1420,"mix64Res":"73","standaloneGlobal":99,"prevTableLen":2,"tableLen":3,"asyncInstOk":true}"#
+    );
+    assert!(
+        crate::wasm::wasm_module_cache_hits() >= 1,
+        "Expected GLOBAL_WASM_MODULE_CACHE to record at least 1 warm hit"
+    );
+}
+
+#[test]
+fn test_wave_d_wasm_5_ring_security_fuel_bomb_and_memory_cage() {
+    // 1. Ring 1 (Invalid Magic Header -> CompileError) & Ring 4 (Missing Host Import -> LinkError)
+    {
+        let script = r#"
+            const invalidBytes = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
+            const isValid = WebAssembly.validate(invalidBytes);
+            let compileErrOk = false;
+            try {
+                new WebAssembly.Module(invalidBytes);
+            } catch (e) {
+                compileErrOk = e instanceof WebAssembly.CompileError;
+            }
+
+            // Minimal module importing env.missing1
+            const importModBytes = new Uint8Array([
+                0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
+                0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                0x02, 0x10, 0x01, 0x03, 0x65, 0x6E, 0x76, 0x08, 0x6D, 0x69, 0x73, 0x73, 0x69, 0x6E, 0x67, 0x31, 0x00, 0x00
+            ]);
+            let linkErrOk = false;
+            try {
+                const m = new WebAssembly.Module(importModBytes);
+                new WebAssembly.Instance(m, {});
+            } catch (e) {
+                linkErrOk = e instanceof WebAssembly.LinkError;
+            }
+            console.log(JSON.stringify({ isValid, compileErrOk, linkErrOk }));
+        "#;
+        let m = run_source_isolated(
+            "wave-d-wasm-errors",
+            script,
+            CapabilityToken::pure_compute(),
+            500_000,
+            16 * 1024 * 1024,
+        )
+        .unwrap();
+        assert_eq!(
+            m.stdout[0],
+            r#"{"isValid":false,"compileErrOk":true,"linkErrOk":true}"#
+        );
+    }
+
+    // 2. Ring 2: Infinite WASM Loop `(loop (br 0))` deterministically trapped by shared CPU Fuel Meter
+    {
+        let script = r#"
+            const spinWasm = new Uint8Array([
+                0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
+                0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+                0x03, 0x02, 0x01, 0x00,
+                0x07, 0x08, 0x01, 0x04, 0x73, 0x70, 0x69, 0x6E, 0x00, 0x00,
+                0x0A, 0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0C, 0x00, 0x0B, 0x0B
+            ]);
+            const mod = new WebAssembly.Module(spinWasm);
+            const inst = new WebAssembly.Instance(mod);
+            inst.exports.spin();
+        "#;
+        let err = run_source_isolated(
+            "wave-d-wasm-fuel-bomb",
+            script,
+            CapabilityToken::pure_compute(),
+            25_000,
+            16 * 1024 * 1024,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<SandboxViolation>(),
+                Some(SandboxViolation::CpuFuelExhausted { .. })
+            ),
+            "Expected SandboxViolation::CpuFuelExhausted on infinite WASM loop, got {:?}",
+            err
+        );
+    }
+
+    // 3. Ring 3: WASM Linear Memory Bomb exceeding tenant memory ceiling deterministically trapped
+    {
+        let script = r#"
+            // Request 32 pages (2 MB) > 512 KB tenant ceiling
+            const mem = new WebAssembly.Memory({ initial: 32 });
+        "#;
+        let err = run_source_isolated(
+            "wave-d-wasm-mem-bomb",
+            script,
+            CapabilityToken::pure_compute(),
+            500_000,
+            512 * 1024, // 512 KB tenant ceiling
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<SandboxViolation>(),
+                Some(SandboxViolation::MemoryCeilingExceeded { .. })
+            ),
+            "Expected SandboxViolation::MemoryCeilingExceeded on oversized WASM memory, got {:?}",
+            err
+        );
+    }
+}
+
 
 
 

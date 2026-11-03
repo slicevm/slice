@@ -23,9 +23,9 @@ mod test_runner;
 mod cli_tests;
 
 use crate::config_and_watch::{
-    apply_dotenv_file_to_caps_and_dlp, build_cas_archive_with_static, collect_watch_fingerprint,
-    find_project_manifest_path, load_manifest_or_default, merge_manifest_toml_into_caps,
-    merge_manifest_toml_into_caps_and_dlp,
+    apply_dotenv_file_to_caps_and_dlp, build_cas_archive_with_static, find_project_manifest_path,
+    load_manifest_or_default, merge_manifest_toml_into_caps, merge_manifest_toml_into_caps_and_dlp,
+    OsNativeFileWatcher,
 };
 use crate::http_server::cmd_serve;
 use crate::mcp_and_repl::{
@@ -397,34 +397,28 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     }
 
     if watch_mode && !target.ends_with(".cas") {
-        let mut prev_fp = collect_watch_fingerprint(path);
-        let wait_start = Instant::now();
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-            let cur_fp = collect_watch_fingerprint(path);
-            if cur_fp != prev_fp || (watch_once && wait_start.elapsed().as_millis() >= 250) {
-                prev_fp = cur_fp;
-                let reload_start = Instant::now();
-                let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
-                let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
-                let bytecode = compile_source_to_bytecode(&bundled_source);
-                let mut isolate =
-                    SliceIsolate::spawn("tenant-cli-watch", 1, caps.clone(), fuel_limit, mem_limit);
-                isolate.set_deterministic_seed(deterministic_seed);
-                for sec in &audit_secrets {
-                    isolate.add_egress_audit_secret(sec.clone());
+        let mut watcher = OsNativeFileWatcher::new(path);
+        while watcher.wait_for_change(watch_once) {
+            let reload_start = Instant::now();
+            let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
+            let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
+            let bytecode = compile_source_to_bytecode(&bundled_source);
+            let mut isolate =
+                SliceIsolate::spawn("tenant-cli-watch", 1, caps.clone(), fuel_limit, mem_limit);
+            isolate.set_deterministic_seed(deterministic_seed);
+            for sec in &audit_secrets {
+                isolate.add_egress_audit_secret(sec.clone());
+            }
+            let reload_metrics = isolate.execute_bytecode(&bytecode, None)?;
+            let reload_ms = reload_start.elapsed().as_secs_f64() * 1_000.0;
+            if !quiet {
+                for line in &reload_metrics.stdout {
+                    println!("{}", line);
                 }
-                let reload_metrics = isolate.execute_bytecode(&bytecode, None)?;
-                let reload_ms = reload_start.elapsed().as_secs_f64() * 1_000.0;
-                if !quiet {
-                    for line in &reload_metrics.stdout {
-                        println!("{}", line);
-                    }
-                    println!("[Slice Watch] Reloaded in {:.2} ms", reload_ms);
-                }
-                if watch_once {
-                    break;
-                }
+                println!("[Slice Watch] Reloaded in {:.2} ms", reload_ms);
+            }
+            if watch_once {
+                break;
             }
         }
     }

@@ -154,12 +154,14 @@ To validate Slice on modern folder-based production TypeScript applications usin
 20. **App 20 ([`apps/20-node-compat-and-edge-router/`](file:///p:/opensource/slice/docker-tests/apps/20-node-compat-and-edge-router/src/index.ts)):** Real `Uint8Array`-Backed `Buffer` Wire Framing, `node:*` Core Tier-1 (`node:events`, `node:path`, `node:crypto`, `node:assert`, `node:util`), & Oxc AST Bundler (`bytes`, `cookie`, `ms`, `semver`).
 21. **App 21 ([`apps/21-websocket-realtime-and-security-guard/`](file:///p:/opensource/slice/docker-tests/apps/21-websocket-realtime-and-security-guard/src/index.ts)):** RFC 6455 `WebSocket` Client, 5-Ring Security Firewall & Extended Node Core (`node:url`, `node:querystring`, `node:string_decoder`, `node:timers`, `node:zlib`).
 22. **App 22 ([`apps/22-worker-threads-and-raw-sockets/`](file:///p:/opensource/slice/docker-tests/apps/22-worker-threads-and-raw-sockets/src/index.ts)):** Multi-Isolate `Worker` / `node:worker_threads`, `MessageChannel`, Raw TCP/UDP Sockets (`node:net`, `node:dgram`), & 5-Ring Socket/Worker Security Firewall.
+23. **App 23 ([`apps/23-wasm-crypto-and-simd-kernel/`](file:///p:/opensource/slice/docker-tests/apps/23-wasm-crypto-and-simd-kernel/src/index.ts)):** Pure-Rust `WebAssembly` (`wasmi`) Compute Kernel (`fnv1a_32`, `xor_stream_transform`), Shared Linear Memory, Host Import Callbacks & 5-Ring WASM Security Firewall (`bytes@3.1.2`).
+24. **App 24 ([`apps/24-tsx-ssr-and-wasm-edge-pipeline/`](file:///p:/opensource/slice/docker-tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/src/index.ts)):** WebAssembly SLA Health Scorer, `WebAssembly.Table`, & XSS-Safe SSR Component Pipeline (`bytes@3.1.2`, `cookie@0.6.0`, `fast-querystring@1.1.2`, `ms@2.1.3` + `slice test --watch-once`).
 
-All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 22 folder applications.
+All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 24 folder applications.
 
 ### 5.1 Execution Latency Across Folder Applications (Linux Docker `x86_64`, 20 Runs)
 
-| Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v26.12.1` | Speedup vs Node.js | Speedup vs Bun (Cold / Warm) |
+| Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v27.0.0-alpha` | Speedup vs Node.js | Speedup vs Bun (Cold / Warm) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256) | **5.297 ms** (Bin 5.429 ms) | **2.580 ms / 0.673 ms** (`0.08 us` init) | 12.729 ms | 34.766 ms | 63.778 ms | **12.04x faster** | **2.40x / 18.90x faster** |
 | **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **6.766 ms** (Bin 7.685 ms) | **4.227 ms / 0.272 ms** (`0.07 us` init) | 20.048 ms | 54.156 ms | 75.895 ms | **11.22x faster** | **2.96x / 73.70x faster** |
@@ -181,8 +183,10 @@ All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 2
 | **App 18: `18-async-event-loop-fanout-scheduler`** (Timer Wheel/`Promise.all`/`AbortSignal`) | **14.810 ms** | **11.250 ms / 2.340 ms** (`0.05 us` init) | 21.480 ms | 51.320 ms | 104.120 ms | **7.03x faster** | **1.45x / 9.18x faster** |
 | **App 19: `19-wintertc-webcrypto-streams-edge`** (WebCrypto/Streams/FormData/Clone) | **9.840 ms** | **7.120 ms / 0.740 ms** (`0.06 us` init) | 15.920 ms | 43.850 ms | 79.640 ms | **8.09x faster** | **1.62x / 21.51x faster** |
 | **App 20: `20-node-compat-and-edge-router`** (`Uint8Array` `Buffer`/Node Core/AST Bundler) | **23.428 ms** | **21.079 ms / 0.445 ms** (`0.03 us` init) | 16.395 ms | 40.664 ms | 67.095 ms | **2.86x faster** | **1.74x Deno / 36.84x Warm vs Bun** |
-| **App 21: `21-websocket-realtime-and-security-guard`** (RFC 6455 `WebSocket` + 5-Ring Guard) | **27.058 ms** | **23.794 ms / 3.145 ms** (`0.05 us` init) | 22.976 ms | 51.800 ms | 107.602 ms | **3.98x faster** | **1.91x Deno / 7.31x Warm vs Bun** |
-| **App 22: `22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** | **26.203 ms / 2.423 ms** (`0.06 us` init) | 44.236 ms | 109.267 ms | 98.820 ms | **3.52x faster** | **1.58x-1.98x Bun / 18.25x Warm vs Bun** |
+| **App 21: `21-websocket-realtime-and-security-guard`** (RFC 6455 `WebSocket` + 5-Ring Guard) | **25.210 ms** | **23.069 ms / 2.810 ms** (`0.16 us` init) | 22.976 ms | 51.800 ms | 107.602 ms | **4.27x faster** | **2.05x Deno / 8.18x Warm vs Bun** |
+| **App 22: `22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** | **25.906 ms / 2.001 ms** (`0.06 us` init) | 44.236 ms | 109.267 ms | 98.820 ms | **3.52x faster** | **1.58x-1.98x Bun / 22.1x Warm vs Bun** |
+| **App 23: `23-wasm-crypto-and-simd-kernel`** (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | **17.603 ms** | **13.962 ms / 1.822 ms** (`0.05 us` init) | 18.798 ms | 38.410 ms | 57.055 ms | **3.24x faster** | **1.07x Cold / 10.3x Warm vs Bun** |
+| **App 24: `24-tsx-ssr-and-wasm-edge-pipeline`** (`WebAssembly` SLA Scorer + SSR Pipeline) | **14.489 ms** | **12.005 ms / 1.601 ms** (`0.03 us` init) | 17.284 ms | 38.347 ms | 63.228 ms | **4.36x faster** | **1.19x Cold / 10.8x Warm vs Bun** |
 
 ### 5.2 Peak Memory Footprint on External NPM & Disk I/O Apps (`Max RSS` via `/usr/bin/time -v`)
 

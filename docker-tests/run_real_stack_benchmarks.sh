@@ -70,6 +70,8 @@ APP19_DIR="$APPS_DIR/19-wintertc-webcrypto-streams-edge"
 APP20_DIR="$APPS_DIR/20-node-compat-and-edge-router"
 APP21_DIR="$APPS_DIR/21-websocket-realtime-and-security-guard"
 APP22_DIR="$APPS_DIR/22-worker-threads-and-raw-sockets"
+APP23_DIR="$APPS_DIR/23-wasm-crypto-and-simd-kernel"
+APP24_DIR="$APPS_DIR/24-tsx-ssr-and-wasm-edge-pipeline"
 
 UPSTREAM_F3_PID=""
 UPSTREAM_WC_PID=""
@@ -188,9 +190,9 @@ echo "  Deno    : $(deno -V)"
 
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  [TAG: apps] PACKING & COMPILING ALL 22 FOLDER-BASED APPS (OXC + CAS)"
+echo "  [TAG: apps] PACKING & COMPILING ALL 24 FOLDER-BASED APPS (OXC + CAS)"
 echo "========================================================================="
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
     eval "dir=\$APP${i}_DIR"
     "$SLICE_BIN" pack "$dir" "/tmp/app${i}.cas"
     "$SLICE_BIN" compile "/tmp/app${i}.cas" -o "/tmp/app${i}_bin"
@@ -256,6 +258,8 @@ verify_app_parity "App 19: 19-wintertc-webcrypto-streams-edge (WebCrypto/Streams
 verify_app_parity "App 20: 20-node-compat-and-edge-router (Uint8Array Buffer/Node Core/AST Bundler)" "$APP20_DIR" "/tmp/app20.cas" "-A"
 verify_app_parity "App 21: 21-websocket-realtime-and-security-guard (RFC 6455 WS + N-Sec Hardening)" "$APP21_DIR" "/tmp/app21.cas" "-A"
 verify_app_parity "App 22: 22-worker-threads-and-raw-sockets (Worker Threads + TCP/UDP + 5-Ring Sec)" "$APP22_DIR" "/tmp/app22.cas" "-A"
+verify_app_parity "App 23: 23-wasm-crypto-and-simd-kernel (Pure-Rust WebAssembly + 5-Ring WASM Sec)" "$APP23_DIR" "/tmp/app23.cas" "-A"
+verify_app_parity "App 24: 24-tsx-ssr-and-wasm-edge-pipeline (WebAssembly SLA Scorer + SSR Pipeline)" "$APP24_DIR" "/tmp/app24.cas" "-A"
 fi
 
 measure_ms() {
@@ -337,6 +341,8 @@ bench_app 19 "19-WINTERTC-WEBCRYPTO-STREAMS-EDGE (WebCrypto/Streams/FormData/Clo
 bench_app 20 "20-NODE-COMPAT-AND-EDGE-ROUTER (Uint8Array Buffer/Node Core/AST Bundler)" "$APP20_DIR" "-A"
 bench_app 21 "21-WEBSOCKET-REALTIME-AND-SECURITY-GUARD (RFC 6455 WS + N-Sec Hardening)" "$APP21_DIR" "-A"
 bench_app 22 "22-WORKER-THREADS-AND-RAW-SOCKETS (Worker Threads + TCP/UDP + 5-Ring Sec)" "$APP22_DIR" "-A"
+bench_app 23 "23-WASM-CRYPTO-AND-SIMD-KERNEL (Pure-Rust WebAssembly + 5-Ring WASM Sec)" "$APP23_DIR" "-A"
+bench_app 24 "24-TSX-SSR-AND-WASM-EDGE-PIPELINE (WebAssembly SLA Scorer + SSR Pipeline)" "$APP24_DIR" "-A"
 
 echo "========================================================================="
 echo "  PEAK MEMORY FOOTPRINT (MAX RSS) ACROSS REPRESENTATIVE APPS"
@@ -360,16 +366,21 @@ measure_rss_kb "Slice (App 22: Workers + Sockets)"  "$SLICE_BIN" run "/tmp/app22
 measure_rss_kb "Bun (App 22: Workers + Sockets)"    bun run "$APP22_DIR/src/index.ts"
 measure_rss_kb "Deno (App 22: Workers + Sockets)"   deno run -A "$APP22_DIR/src/index.ts"
 measure_rss_kb "Node (App 22: Workers + Sockets)"   node "$APP22_DIR/src/index.ts"
+echo "-------------------------------------------------------------------------"
+measure_rss_kb "Slice (App 23: Pure-Rust WASM)"     "$SLICE_BIN" run "/tmp/app23.cas" --quiet
+measure_rss_kb "Bun (App 23: Pure-Rust WASM)"       bun run "$APP23_DIR/src/index.ts"
+measure_rss_kb "Deno (App 23: Pure-Rust WASM)"      deno run -A "$APP23_DIR/src/index.ts"
+measure_rss_kb "Node (App 23: Pure-Rust WASM)"      node "$APP23_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 22 APPS (COLD VS WARM POOL)"
+echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 24 APPS (COLD VS WARM POOL)"
 echo "========================================================================="
 echo "  --- Cold Realm Telemetry ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --quiet --metrics
 done
 echo "  --- Pre-Warmed Boa Pool Telemetry (--warm) ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --warm --quiet --metrics
 done
 fi
@@ -948,6 +959,36 @@ measure_rss_kb "Node (App 22: Workers + Sockets)"   node "$APP22_DIR/src/index.t
 echo "  --- App 22 Cold vs Warm Isolate Telemetry ---"
 "$SLICE_BIN" run "/tmp/app22.cas" --quiet --metrics
 "$SLICE_BIN" run "/tmp/app22.cas" --warm --quiet --metrics
+fi
+
+if should_run_tag "wasm"; then
+echo "========================================================================="
+echo "  [TAG: wasm] WAVE D WEBASSEMBLY (APPS 23 & 24) & OS-NATIVE WATCH MODE"
+echo "========================================================================="
+"$SLICE_BIN" pack "$APP23_DIR" "/tmp/app23.cas" >/dev/null
+"$SLICE_BIN" compile "/tmp/app23.cas" -o "/tmp/app23_bin" >/dev/null
+"$SLICE_BIN" pack "$APP24_DIR" "/tmp/app24.cas" >/dev/null
+"$SLICE_BIN" compile "/tmp/app24.cas" -o "/tmp/app24_bin" >/dev/null
+verify_app_parity "App 23: 23-wasm-crypto-and-simd-kernel" "$APP23_DIR" "/tmp/app23.cas" "-A"
+verify_app_parity "App 24: 24-tsx-ssr-and-wasm-edge-pipeline" "$APP24_DIR" "/tmp/app24.cas" "-A"
+bench_app 23 "23-WASM-CRYPTO-AND-SIMD-KERNEL (Pure-Rust WebAssembly + 5-Ring WASM Sec)" "$APP23_DIR" "-A"
+bench_app 24 "24-TSX-SSR-AND-WASM-EDGE-PIPELINE (WebAssembly SLA Scorer + SSR Pipeline)" "$APP24_DIR" "-A"
+measure_rss_kb "Slice (App 23: Pure-Rust WASM)"     "$SLICE_BIN" run "/tmp/app23.cas" --quiet
+measure_rss_kb "Bun (App 23: Pure-Rust WASM)"       bun run "$APP23_DIR/src/index.ts"
+measure_rss_kb "Deno (App 23: Pure-Rust WASM)"      deno run -A "$APP23_DIR/src/index.ts"
+measure_rss_kb "Node (App 23: Pure-Rust WASM)"      node "$APP23_DIR/src/index.ts"
+echo "-------------------------------------------------------------------------"
+measure_rss_kb "Slice (App 24: WASM + SSR)"         "$SLICE_BIN" run "/tmp/app24.cas" --quiet
+measure_rss_kb "Bun (App 24: WASM + SSR)"           bun run "$APP24_DIR/src/index.ts"
+measure_rss_kb "Deno (App 24: WASM + SSR)"          deno run -A "$APP24_DIR/src/index.ts"
+measure_rss_kb "Node (App 24: WASM + SSR)"          node "$APP24_DIR/src/index.ts"
+echo "  --- Apps 23 & 24 Cold vs Warm Isolate Telemetry ---"
+"$SLICE_BIN" run "/tmp/app23.cas" --quiet --metrics
+"$SLICE_BIN" run "/tmp/app23.cas" --warm --quiet --metrics
+"$SLICE_BIN" run "/tmp/app24.cas" --quiet --metrics
+"$SLICE_BIN" run "/tmp/app24.cas" --warm --quiet --metrics
+echo "  [Live slice test --watch-once (notify inotify/kqueue) on App 24]"
+"$SLICE_BIN" test "$APP24_DIR" --watch-once
 fi
 
 if should_run_tag "swarm"; then

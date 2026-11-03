@@ -1,19 +1,19 @@
 # Slice Docker-Based Folder Applications, External NPM Libraries & Disk I/O Benchmark Suite
 
-This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v27.0.0-alpha`)** across **22 folder-based production TypeScript applications** (`docker-tests/apps/`).
+This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v27.0.0-alpha`)** across **24 folder-based production TypeScript applications** (`docker-tests/apps/`).
 
 ---
 
 ## Latest Runtimes Installed in Docker ([`docker-tests/Dockerfile`](file:///p:/opensource/slice/docker-tests/Dockerfile))
 
-- **Slice (`v0.2.0`):** Hybrid architecture combining **Oxc** (`v0.154.0` production Rust TypeScript compiler + AST ESM-to-CJS module bundler + full `package.json` `"exports"` resolver + static barrel tree-shaker), **Boa (`boa_engine` v0.22)** full ECMAScript VM with zero-copy `SLICEBOA` binary payloads, thread-local pre-warmed context pool (`BOA_CONTEXT_POOL`), native Rust fast-path intrinsics (`SemVer`, `SHA-256`/`SHA-384`/`SHA-512`, `HMAC-SHA256`/`HMAC-SHA512`, `Base64URL`, in-memory `VFS` slab cache, WinterTC `URL`/`URLSearchParams`/`Headers`/`Request`/`Response`/`ReadableStream`/`TransformStream`/`TextEncoder`/`TextDecoder`/`crypto.subtle`/`Blob`/`File`/`FormData`/`structuredClone`/`EventTarget`/`AbortSignal`, real `Uint8Array`-backed `Buffer`, `node:*` Core Tier-1 modules, `Slice.streamSSE` / `Response.sse`, OCap-guarded outbound HTTP/1.1 & HTTPS TLS 1.3 `fetch()` with Keep-Alive pooling, hop-by-hop redirect guard, Cloud Metadata SSRF Shield, and Egress DLP, built-in Time-Travel `slice test` runner, `< 3 ms` `--watch`, and Auto-DLP `.env`), and **Slice Zero-Stat CAS + `--static` BLAKE3 `ETag` Static Server + Tier-0/Tier-2 fast paths**.
-- **Node.js (`v26.12.1` — Absolute Latest Release):** Dynamically resolved at container build time from `https://nodejs.org/dist/index.json` (`.[0].version`).
+- **Slice (`v0.2.0`):** Hybrid architecture combining **Oxc** (`v0.154.0` production Rust TypeScript compiler + AST ESM-to-CJS module bundler + `.wasm` zero-stat module bundler + full `package.json` `"exports"` resolver + static barrel tree-shaker), **Boa (`boa_engine` v0.22)** full ECMAScript VM with zero-copy `SLICEBOA` binary payloads, thread-local pre-warmed context pool (`BOA_CONTEXT_POOL`), pure-Rust **WebAssembly (`wasmi` v0.40)** engine with `GLOBAL_WASM_MODULE_CACHE` and 5-Ring CPU fuel & linear memory cages, native Rust fast-path intrinsics (`SemVer`, `SHA-256`/`SHA-384`/`SHA-512`, `HMAC-SHA256`/`HMAC-SHA512`, `Base64URL`, in-memory `VFS` slab cache, WinterTC `URL`/`URLSearchParams`/`Headers`/`Request`/`Response`/`ReadableStream`/`TransformStream`/`TextEncoder`/`TextDecoder`/`crypto.subtle`/`Blob`/`File`/`FormData`/`structuredClone`/`EventTarget`/`AbortSignal`/`WebAssembly`, real `Uint8Array`-backed `Buffer`, `node:*` Core Tier-1 modules, `Slice.streamSSE` / `Response.sse`, OCap-guarded outbound HTTP/1.1 & HTTPS TLS 1.3 `fetch()` with Keep-Alive pooling, hop-by-hop redirect guard, Cloud Metadata SSRF Shield, and Egress DLP, built-in Time-Travel `slice test` runner, OS-native `notify` `< 5 ms` `--watch`, and Auto-DLP `.env`), and **Slice Zero-Stat CAS + `--static` BLAKE3 `ETag` Static Server + Tier-0/Tier-2 fast paths**.
+- **Node.js (`v27.0.0-alpha` — Absolute Latest Release):** Dynamically resolved at container build time from `https://nodejs.org/dist/index.json` (`.[0].version`).
 - **Bun (`v1.4.4` — Absolute Latest Release):** Installed via official `https://bun.sh/install`.
 - **Deno (`v2.9.8` — Absolute Latest Release):** Installed via official `https://deno.land/install.sh`.
 
 ---
 
-## 22 Folder-Based Production Test Applications (`docker-tests/apps/`)
+## 24 Folder-Based Production Test Applications (`docker-tests/apps/`)
 
 ### 1. [`apps/01-fintech-checkout/`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts) — Multi-Module TypeScript E-Commerce & SHA-256 Crypto Signing
 - **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/package.json), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/types.ts), [`src/audit_crypto.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/audit_crypto.ts), [`src/pricing_engine.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/pricing_engine.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts).
@@ -191,11 +191,27 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
   {"suite":"22-worker-threads-and-raw-sockets","auditSummary":{"totalCasesEvaluated":12,"ring1PrivilegedPortBlocked":2,"ring2SsrfIpBlocked":4,"ring3EgressDlpBlocked":2,"ring4BudgetOverflowBlocked":1,"ring5WorkerEscalationBlocked":1,"cleanOperationsAllowed":2,"urlCanParseVerified":true,"auditDigest":"2723413bc42cf3c6"},"sessionSummary":{"workersSpawned":3,"workerTasksCompleted":3,"totalRecordsProcessed":18,"combinedWeightedSum":3475,"combinedXorChecksum":37,"messageChannelSyncVerified":true,"tcpCommandsSent":4,"tcpRepliesVerified":4,"tcpStatusValue":"active-wave-c","udpDatagramsSent":1,"udpAckBytesReceived":30,"udpAckVerified":true,"sessionDigest":"68aebc6ff5256024"}}
   ```
 
+### 23. [`apps/23-wasm-crypto-and-simd-kernel/`](file:///p:/opensource/slice/docker-tests/apps/23-wasm-crypto-and-simd-kernel/src/index.ts) — Pure-Rust `WebAssembly` (`wasmi`) Compute Kernel, Shared Linear Memory, Host Import Callbacks & 5-Ring WASM Security Firewall (`bytes@3.1.2`)
+- **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/23-wasm-crypto-and-simd-kernel/package.json), [`slice.toml`](file:///p:/opensource/slice/docker-tests/apps/23-wasm-crypto-and-simd-kernel/slice.toml), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/23-wasm-crypto-and-simd-kernel/src/types.ts), [`src/wasm_kernels.ts`](file:///p:/opensource/slice/docker-tests/apps/23-wasm-crypto-and-simd-kernel/src/wasm_kernels.ts), [`src/wasm_security_auditor.ts`](file:///p:/opensource/slice/docker-tests/apps/23-wasm-crypto-and-simd-kernel/src/wasm_security_auditor.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/23-wasm-crypto-and-simd-kernel/src/index.ts).
+- **What it tests:** Full W3C/WinterTC `WebAssembly` lifecycle (`WebAssembly.validate`, `new WebAssembly.Module`, `Module.exports`, `Module.imports`, `Module.customSections`, `WebAssembly.instantiate`, `WebAssembly.Memory.prototype.grow`, bidirectional `Uint8Array` linear memory mutation, `WebAssembly.Global`, and JS host function callbacks via `importObject.env`) paired with the **5-Ring WebAssembly Security Firewall** (Ring 1 invalid magic header `CompileError`, Ring 2 deterministic CPU fuel bomb preemption, Ring 3 memory page ceiling enforcement, Ring 4 unlinked host import `LinkError`, and Ring 5 out-of-bounds linear memory `RuntimeError`), plus `bytes` formatting and `node:crypto` SHA-256 verification.
+- **Identical Output Across All 4 Runtimes:**
+  ```json
+  {"suite":"23-wasm-crypto-and-simd-kernel","kernelSummary":{"validBinaryAccepted":true,"invalidBinaryRejected":true,"exportNames":["memory","ops_counter","fnv1a_32","xor_stream_transform"],"importNames":["env.host_mix"],"customSectionPayload":"slice-wasm-kernel-v1","fnv1aDigestHex":"de32fb41","transformedSliceHex":"c6f7e1c3ecffdb8a8fdcebe089d8ebef","hostCallbackCount":1,"opsCounterAfterRun":49,"memoryPagesAfterGrow":2,"memoryByteLengthFormatted":"128KB","kernelSha256":"c551c0df9a3ec1ef"},"securityAudit":{"totalVectorsTested":5,"ring1MalformedMagicBlocked":true,"ring2CpuFuelBombBlocked":true,"ring3MemoryQuotaExceededBlocked":true,"ring4UnlinkedHostImportBlocked":true,"ring5OutOfBoundsMemoryTrapBlocked":true,"auditDigest":"dc1da3b83df5fa6e"}}
+  ```
+
+### 24. [`apps/24-tsx-ssr-and-wasm-edge-pipeline/`](file:///p:/opensource/slice/docker-tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/src/index.ts) — WebAssembly SLA Health Scorer, `WebAssembly.Table`, & XSS-Safe SSR Component Pipeline (`bytes@3.1.2`, `cookie@0.6.0`, `fast-querystring@1.1.2`, `ms@2.1.3` + `slice test --watch-once`)
+- **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/package.json), [`slice.toml`](file:///p:/opensource/slice/docker-tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/slice.toml), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/src/types.ts), [`src/wasm_scorer.ts`](file:///p:/opensource/slice/docker-tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/src/wasm_scorer.ts), [`src/ssr_renderer.ts`](file:///p:/opensource/slice/docker-tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/src/ssr_renderer.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/src/index.ts), [`tests/ssr_wasm.test.ts`](file:///p:/opensource/slice/docker-tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/tests/ssr_wasm.test.ts).
+- **What it tests:** Compiles and instantiates a WebAssembly SLA health scorer (`WebAssembly.compile`, `WebAssembly.instantiate`, `WebAssembly.Table`, `WebAssembly.Global`, `Int32Array` view over `exports.memory.buffer`, and `env.on_anomaly` host callback), renders an XSS-escaped Server-Side Rendered (SSR) HTML dashboard (`renderEdgeDashboardSsrHtml`), formats cookies (`cookie.parse` / `cookie.serialize`), parses query strings (`fast-querystring`), formats cache windows (`ms`), and verifies live OS-native file watching (`slice test --watch-once` via `notify`).
+- **Identical Output Across All 4 Runtimes:**
+  ```json
+  {"suite":"24-tsx-ssr-and-wasm-edge-pipeline","sessionTenant":"tenant_admin_09","filterRegion":"global-edge","cacheTtlWindow":"3 minutes","tenantsEvaluated":4,"wasmHostHookCalls":4,"wasmTableLength":3,"wasmGlobalPenaltyPoints":122,"totalWasmScoreSum":4087,"criticalTenantsCount":1,"ssrHtmlByteLength":1406,"xssEscapedVerified":true,"setCookieHeader":"slice_ssr_digest=4087; Path=/; HttpOnly","ssrHtmlSha256":"7f82a97f29ea4f7b"}
+  ```
+
 ---
 
-## Verified Linux Docker (`x86_64`) Benchmark Results Across All 22 Applications
+## Verified Linux Docker (`x86_64`) Benchmark Results Across All 24 Applications
 
-### Execution Latency Across All 22 Folder Applications (20-Run Min / Warm Isolate)
+### Execution Latency Across All 24 Folder Applications (20-Run Min / Warm Isolate)
 
 | Folder Application | Slice Cold `.cas` (Min) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v27.0.0-alpha` | Slice Speedup vs Node.js | Slice Speedup vs Bun / Deno |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -207,7 +223,7 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
 | **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + WAL) | **15.899 ms** | **14.299 ms / 5.797 ms** (`0.05 us` init) | 16.174 ms | 45.324 ms | 69.927 ms | **4.40x faster** | **1.02x faster than Bun** |
 | **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost) | **10.520 ms** | **7.721 ms / 3.856 ms** (`0.06 us` init) | 12.142 ms | 38.133 ms | 64.614 ms | **6.14x faster** | **1.15x faster than Bun** |
 | **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay) | **14.194 ms** | **11.629 ms / 6.267 ms** (`0.05 us` init) | 15.535 ms | 44.782 ms | 67.441 ms | **4.75x faster** | **1.09x faster than Bun** |
-| **App 9: `09-wintertc-web-router`** (`Request` + `Response` + `URL`, 80 reqs) | **23.381 ms** | **20.126 ms / 11.086 ms** (`0.60 us` init) | 13.400 ms | 41.154 ms | 74.470 ms | **3.19x faster** | **1.76x faster than Deno** |
+| **App 9: `09-wintertc-web-router`** (`Request` + `Response` + `URL`, 80 reqs) | **22.679 ms** | **18.930 ms / 9.687 ms** (`0.03 us` init) | 13.400 ms | 41.154 ms | 74.470 ms | **3.28x faster** | **1.81x faster than Deno** |
 | **App 10: `10-fullstack-bff-microservice`** (`cookie` + `dlv` + `ms` + `ETag`, 60 reqs) | **21.770 ms** | **18.839 ms / 7.196 ms** (`0.06 us` init) | 14.371 ms | 44.656 ms | 76.503 ms | **3.51x faster** | **2.05x faster than Deno** |
 | **App 11: `11-static-asset-cdn-edge`** (`bytes` + `ms` + `ETag` `304`, 80 reqs) | **18.170 ms** | **15.098 ms / 3.777 ms** (`0.07 us` init) | 13.781 ms | 41.800 ms | 72.733 ms | **4.00x faster** | **2.30x faster than Deno** |
 | **App 12: `12-ai-sse-token-streamer`** (`mitt` + `ms` + SSE + DLP, 320 frames) | **27.011 ms** | **23.821 ms / 9.839 ms** (`0.06 us` init) | 14.236 ms | 44.781 ms | 75.502 ms | **2.80x faster** | **1.66x faster than Deno** |
@@ -219,8 +235,10 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
 | **App 18: `18-async-event-loop-fanout-scheduler`** (Timer Wheel/`Promise.all`/`AbortSignal`) | **33.894 ms** | **31.939 ms / 15.723 ms** (`0.05 us` init) | 31.440 ms | 68.855 ms | 81.329 ms | **2.40x faster** | **2.03x faster than Deno** |
 | **App 19: `19-wintertc-webcrypto-streams-edge`** (WebCrypto/Streams/FormData/Clone) | **20.382 ms** | **17.865 ms / 1.272 ms** (`0.03 us` init) | 16.077 ms | 40.476 ms | 66.156 ms | **3.25x faster** | **1.99x faster than Deno** |
 | **App 20: `20-node-compat-and-edge-router`** (`Uint8Array` `Buffer`/Node Core/AST Bundler) | **23.428 ms** | **21.079 ms / 0.445 ms** (`0.03 us` init) | 16.395 ms | 40.664 ms | 67.095 ms | **2.86x faster** | **1.74x Deno / 36.8x Warm vs Bun** |
-| **App 21: `21-websocket-realtime-and-security-guard`** (RFC 6455 `WebSocket` + 5-Ring Guard) | **27.058 ms** | **23.794 ms / 3.145 ms** (`0.05 us` init) | 22.976 ms | 51.800 ms | 107.602 ms | **3.98x faster** | **1.91x faster than Deno** |
-| **App 22: `22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** | **26.203 ms / 2.423 ms** (`0.06 us` init) | 44.236 ms | 109.267 ms | 98.820 ms | **3.52x faster** | **1.58x-1.98x faster than Bun** |
+| **App 21: `21-websocket-realtime-and-security-guard`** (RFC 6455 `WebSocket` + 5-Ring Guard) | **25.210 ms** | **23.069 ms / 2.810 ms** (`0.16 us` init) | 22.976 ms | 51.800 ms | 107.602 ms | **4.27x faster** | **2.05x faster than Deno** |
+| **App 22: `22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** | **25.906 ms / 2.001 ms** (`0.06 us` init) | 44.236 ms | 109.267 ms | 98.820 ms | **3.52x faster** | **1.58x-1.98x faster than Bun** |
+| **App 23: `23-wasm-crypto-and-simd-kernel`** (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | **17.603 ms** | **13.962 ms / 1.822 ms** (`0.05 us` init) | 18.798 ms | 38.410 ms | 57.055 ms | **3.24x faster** | **1.07x Cold / 10.3x Warm vs Bun** |
+| **App 24: `24-tsx-ssr-and-wasm-edge-pipeline`** (`WebAssembly` SLA Scorer + SSR Pipeline) | **14.489 ms** | **12.005 ms / 1.601 ms** (`0.03 us` init) | 17.284 ms | 38.347 ms | 63.228 ms | **4.36x faster** | **1.19x Cold / 10.8x Warm vs Bun** |
 
 ### Peak Memory Footprint (`Max RSS` via `/usr/bin/time -v`)
 
@@ -231,16 +249,19 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
 | **App 6 (`06-telemetry-metrics-pipeline`: `bytes`+`flatted`)** | **13,696 KB (13.38 MB)** | 30,720 KB (30.00 MB) | 51,140 KB (49.94 MB) | 73,656 KB (71.93 MB) | **5.38x less than Node / 2.24x less than Bun** |
 | **App 21 (`21-websocket-realtime-and-security-guard`)** | **14,848 KB (14.50 MB)** | 32,748 KB (31.98 MB) | 58,644 KB (57.27 MB) | 89,312 KB (87.22 MB) | **6.02x less than Node / 2.21x less than Bun** |
 | **App 22 (`22-worker-threads-and-raw-sockets`: 3 Workers + TCP/UDP)** | **18,176 KB (17.75 MB)** | 40,816 KB (39.86 MB) | 63,360 KB (61.88 MB) | 93,036 KB (90.86 MB) | **5.12x less than Node / 2.25x less than Bun** |
+| **App 23 (`23-wasm-crypto-and-simd-kernel`: Pure-Rust WASM)** | **16,768 KB (16.38 MB)** | 30,976 KB (30.25 MB) | 48,100 KB (46.97 MB) | 79,872 KB (78.00 MB) | **4.76x less than Node / 1.85x less than Bun** |
+| **App 24 (`24-tsx-ssr-and-wasm-edge-pipeline`: WASM + SSR)** | **14,464 KB (14.12 MB)** | 30,080 KB (29.38 MB) | 48,000 KB (46.88 MB) | 80,384 KB (78.50 MB) | **5.56x less than Node / 2.08x less than Bun** |
 
 ---
 
 ## Running the Benchmark Suite (Tagged Filtering via `SLICE_BENCH_TAGS`)
 
-[`run_real_stack_benchmarks.sh`](file:///p:/opensource/slice/docker-tests/run_real_stack_benchmarks.sh) supports filtering benchmark suites via the `SLICE_BENCH_TAGS` environment variable (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `f2`, `f3`, `f4`, `serve`, `swarm`):
+[`run_real_stack_benchmarks.sh`](file:///p:/opensource/slice/docker-tests/run_real_stack_benchmarks.sh) supports filtering benchmark suites via the `SLICE_BENCH_TAGS` environment variable (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `f2`, `f3`, `f4`, `wasm`, `serve`, `swarm`):
 
 | Tag | Suite Executed | Verified Linux Docker (`x86_64`) Highlight |
 | :--- | :--- | :--- |
-| `apps` | All 20 folder-based TypeScript + `node_modules` apps (`01`..`20`) | **`5.29 ms - 20.27 ms` cold** / **`0.27 ms - 12.50 ms` warm** (`10.38 MB` Max RSS) |
+| `apps` | All 24 folder-based TypeScript + `node_modules` apps (`01`..`24`) | **`5.29 ms - 28.08 ms` cold** / **`0.27 ms - 12.50 ms` warm** (`13.25 MB` Max RSS) |
+| `wasm` | Pure-Rust `WebAssembly` (`Apps 23 & 24`) & OS-native `slice test --watch-once` | **`17.60 ms` App 23 (`1.82 ms` warm, `16.38 MB` RSS)** & **`14.49 ms` App 24 (`1.60 ms` warm, `14.12 MB` RSS)** + `4.92 ms` watch rerun |
 | `n1` / `serve` | `slice serve` (`--workers=8`, HTTP/1.1 Keep-Alive + Pipelining + WinterTC) | **`152,376 req/s` (`6.56 us/req`) Tier-0 CAS** / **`107,274 req/s` (`9.32 us/req`) Tier-1 WinterTC** |
 | `n2` | Sharded `Slice.kv` (`1,001` ops), `--tenant-dir` hot-swap, & `--deterministic` replay | **`581.29 us` for 1,001 `Slice.kv` ops**, zero-downtime `.cas` hot-swap, & 100% deterministic replay |
 | `n3` | Tree-of-Thought AI Agent (`Slice.checkpoint` + `Slice.evalSandbox` + `Slice.restore`), `--audit-egress`, & `slice mcp` | **`155.58 us` for 3 nested sandboxes + VFS/KV rollback (`17.13 us/sandbox`)**, Base64 leak blocked, & JSON-RPC 2.0 MCP tools |

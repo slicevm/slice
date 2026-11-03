@@ -120,7 +120,7 @@ pub(crate) fn try_file_with_extensions(base: &Path) -> Option<PathBuf> {
             _ => {}
         }
     }
-    for ext in ["ts", "tsx", "js", "jsx", "mjs", "cjs", "json"] {
+    for ext in ["ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "wasm"] {
         let with_ext = base.with_extension(ext);
         if with_ext.is_file() {
             return Some(with_ext);
@@ -367,9 +367,21 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         }
         seen.insert(mod_id.clone());
 
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext == "wasm" {
+            let wasm_bytes = std::fs::read(path)
+                .with_context(|| format!("Failed to read .wasm module {}", path.display()))?;
+            let b64 = encode_wasm_base64(&wasm_bytes);
+            let cjs_body = format!(
+                "var __wasm_u8 = globalThis.__slice_base64_decode_bytes(\"{}\");\nmodule.exports = __wasm_u8;\nmodule.exports.default = __wasm_u8;",
+                b64
+            );
+            visited_order.push((mod_id.clone(), cjs_body));
+            return Ok(mod_id);
+        }
+
         let raw_src = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read module {}", path.display()))?;
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         if ext == "json" {
             let cjs_body = format!("module.exports = {};", raw_src.trim());
@@ -612,4 +624,29 @@ pub fn map_bundled_error_location(bundled_js: &str, error_msg: &str) -> String {
 
     error_msg.to_string()
 }
+
+fn encode_wasm_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
 

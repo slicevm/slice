@@ -38,6 +38,7 @@ pub mod parser_and_compiler;
 pub mod sockets;
 pub mod state_and_kv;
 pub mod value_and_ast;
+pub mod wasm;
 pub mod websocket;
 pub mod workers;
 
@@ -69,4 +70,8 @@ pub use websocket::{
 pub use workers::{
     prewarm_worker_pool_sync, reset_worker_pool_telemetry, speculative_prewarm_worker_pool,
     worker_pool_reuse_count, worker_script_cache_hits,
+};
+pub use wasm::{
+    clear_thread_wasm_state, reset_wasm_telemetry, wasm_module_cache_hits, MAX_WASM_BINARY_BYTES,
+    MAX_WASM_MEMORY_PAGES, WASM_PAGE_BYTES,
 };

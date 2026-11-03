@@ -56,6 +56,8 @@ thread_local! {
         std::cell::RefCell::new(String::with_capacity(32));
     pub(crate) static BOA_KV_MEM_BUDGET: std::cell::Cell<(usize, usize)> =
         const { std::cell::Cell::new((0, usize::MAX)) };
+    pub(crate) static BOA_FUEL_BUDGET: std::cell::Cell<(u64, u64)> =
+        const { std::cell::Cell::new((0, u64::MAX)) };
     pub(crate) static BOA_DET_STATE: std::cell::Cell<Option<(u64, u64)>> =
         const { std::cell::Cell::new(None) };
     pub(crate) static BOA_NET_HOSTS: std::cell::RefCell<FxHashSet<String>> =
@@ -200,7 +202,7 @@ pub(crate) fn ensure_realm_shards(
         return;
     }
     if let Some(ref ensure_fn) = realm.ensure_shard_fn {
-        for shard_id in [2u16, 1, 3, 4, 5, 6, 7, 8] {
+        for shard_id in [2u16, 1, 3, 4, 5, 6, 7, 8, 9] {
             let bit = 1u16 << shard_id;
             if (missing & bit) != 0 {
                 let _ = ensure_fn.call(

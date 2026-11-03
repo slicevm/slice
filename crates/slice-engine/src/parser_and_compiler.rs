@@ -1307,6 +1307,7 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains("process.env")
         || source.contains("describe(")
         || source.contains("expect(")
+        || source.contains("WebAssembly")
         || source.contains("globalThis");
 
     let has_direct_intrinsic_attack = (source.contains("Object.prototype.")

@@ -1,0 +1,9 @@
+[package]
+name = "23-wasm-crypto-and-simd-kernel"
+version = "1.0.0"
+entrypoint = "./src/index.ts"
+
+[limits]
+fuel = 50_000_000
+memory_kb = 16384
+

@@ -112,7 +112,7 @@ pub(crate) fn collect_watch_fingerprint(target: &Path) -> u64 {
                 let ext = p.extension().and_then(|s| s.to_str()).unwrap_or_default();
                 if matches!(
                     ext,
-                    "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "json" | "toml" | "env"
+                    "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "json" | "toml" | "env" | "wasm"
                 ) || name.starts_with(".env")
                 {
                     visit_watch(&p, hasher);
@@ -122,6 +122,70 @@ pub(crate) fn collect_watch_fingerprint(target: &Path) -> u64 {
     }
     visit_watch(target, &mut hasher);
     hasher.finish()
+}
+
+/// OS-native filesystem watcher backed by `notify` (`inotify` on Linux, `ReadDirectoryChangesW` on Windows,
+/// `FSEvents`/`kqueue` on macOS) with a 15ms debounce window and automatic fingerprint fallback.
+pub(crate) struct OsNativeFileWatcher {
+    target: PathBuf,
+    prev_fp: u64,
+    _watcher: Option<notify::RecommendedWatcher>,
+    rx: std::sync::mpsc::Receiver<notify::Event>,
+}
+
+impl OsNativeFileWatcher {
+    pub(crate) fn new(target: &Path) -> Self {
+        use notify::{RecursiveMode, Watcher};
+        let prev_fp = collect_watch_fingerprint(target);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher_opt = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(ev) = res {
+                let _ = tx.send(ev);
+            }
+        })
+        .ok();
+        if let Some(ref mut w) = watcher_opt {
+            let watch_root = if target.is_dir() {
+                target
+            } else {
+                target.parent().unwrap_or(target)
+            };
+            let _ = w.watch(watch_root, RecursiveMode::Recursive);
+        }
+        Self {
+            target: target.to_path_buf(),
+            prev_fp,
+            _watcher: watcher_opt,
+            rx,
+        }
+    }
+
+    /// Blocks on the OS kernel event channel (with zero polling CPU when idle) or until `watch_once`
+    /// deadline expires, debouncing rapid save bursts (15 ms) and confirming fingerprint change.
+    pub(crate) fn wait_for_change(&mut self, watch_once: bool) -> bool {
+        use std::time::{Duration, Instant};
+        let wait_start = Instant::now();
+        let timeout = if watch_once {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(500)
+        };
+        loop {
+            let _ = self.rx.recv_timeout(timeout);
+            // Drain any coalesced save events within a 15ms debounce window
+            let debounce_deadline = Instant::now() + Duration::from_millis(15);
+            while self
+                .rx
+                .recv_timeout(debounce_deadline.saturating_duration_since(Instant::now()))
+                .is_ok()
+            {}
+            let cur_fp = collect_watch_fingerprint(&self.target);
+            if cur_fp != self.prev_fp || (watch_once && wait_start.elapsed().as_millis() >= 250) {
+                self.prev_fp = cur_fp;
+                return true;
+            }
+        }
+    }
 }
 
 pub(crate) fn find_project_manifest_path(input_path: &Path) -> Option<PathBuf> {
