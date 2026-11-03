@@ -8,3 +8,4 @@ This directory contains practical step-by-step developer guides, production depl
 * **[Getting Started, `slice.toml` & CLI Reference](../general/01_getting_started_and_cli.md)**: Quickstart, project scaffolding (`slice init`), `.env` Auto-DLP configuration, and complete CLI command reference.
 * **[Node.js Compatibility (`node:*`) & External NPM Packages](../general/07_node_compat_intrinsics_and_npm.md)**: Using npm packages (`node_modules/`), CommonJS/ESM interop, and built-in `node:*` modules.
 * **[Runtime Compatibility Matrix](../general/COMPATIBILITY.md)**: Full WinterTC Web Standards, `node:*` module support, and WebAssembly (`wasmi`) reference.
+
