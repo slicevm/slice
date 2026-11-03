@@ -233,29 +233,33 @@ fn rewrite_cjs_requires_and_crypto(
     from_dir: &Path,
     deps_out: &mut Vec<PathBuf>,
 ) -> String {
-    let mut rewritten = rewrite_cjs_requires_in_line(snippet, from_dir, deps_out);
-    if rewritten.contains("crypto.createHash(\"sha256\").update(")
-        && rewritten.contains(").digest(\"hex\")")
-    {
-        rewritten = rewritten
-            .replace(
-                "crypto.createHash(\"sha256\").update(",
-                "globalThis.__slice_crypto_sha256(",
-            )
-            .replace(").digest(\"hex\")", ")");
+    let mut out = Vec::new();
+    for raw_line in snippet.lines() {
+        let mut rewritten = rewrite_cjs_requires_in_line(raw_line, from_dir, deps_out);
+        if rewritten.contains("crypto.createHash(\"sha256\").update(")
+            && rewritten.contains(").digest(\"hex\")")
+        {
+            rewritten = rewritten
+                .replace(
+                    "crypto.createHash(\"sha256\").update(",
+                    "globalThis.__slice_crypto_sha256(",
+                )
+                .replace(").digest(\"hex\")", ")");
+        }
+        if rewritten.contains("crypto.createHmac(\"sha256\", ")
+            && rewritten.contains(").digest(\"hex\")")
+        {
+            rewritten = rewritten
+                .replace(
+                    "crypto.createHmac(\"sha256\", ",
+                    "globalThis.__slice_crypto_hmac_sha256(",
+                )
+                .replace(").update(", ", ")
+                .replace(").digest(\"hex\")", ")");
+        }
+        out.push(rewritten);
     }
-    if rewritten.contains("crypto.createHmac(\"sha256\", ")
-        && rewritten.contains(").digest(\"hex\")")
-    {
-        rewritten = rewritten
-            .replace(
-                "crypto.createHmac(\"sha256\", ",
-                "globalThis.__slice_crypto_hmac_sha256(",
-            )
-            .replace(").update(", ", ")
-            .replace(").digest(\"hex\")", ")");
-    }
-    rewritten
+    out.join("\n")
 }
 
 fn try_transform_esm_to_cjs_ast(

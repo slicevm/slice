@@ -2,14 +2,15 @@
 //! Nested Sandbox Attenuator (`SandboxEvalOptions`), and Execution Telemetry (`ExecutionMetrics`).
 
 use crate::boa_realm::{
-    acquire_warm_boa_realm, create_warm_boa_realm, release_warm_boa_realm, BOA_ACTIVE_CAPS,
-    BOA_ACTIVE_TENANT, BOA_CONTEXT_POOL, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_ENV_MAP,
-    BOA_FETCH_MOCKS, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_STDOUT,
-    BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
+    acquire_warm_boa_realm, create_warm_boa_realm, ensure_realm_shards, release_warm_boa_realm,
+    BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_CONTEXT_POOL, BOA_DET_STATE, BOA_EGRESS_SECRETS,
+    BOA_ENV_MAP, BOA_FETCH_MOCKS, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
+    BOA_STDOUT, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
 };
 use crate::event_loop::{
     clear_event_loop_state, drive_event_loop_to_completion, has_pending_event_loop_work,
 };
+use crate::js_preludes::detect_needed_shards;
 use crate::parser_and_compiler::{
     compile_source_to_bytecode, decode_slicesnp_cached, expr_to_dotted_chain, extract_slice_rc_key,
 };
@@ -775,6 +776,7 @@ impl SliceIsolate {
             BOA_EGRESS_SECRETS.with(|s| s.borrow_mut().clear());
         }
         BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
+        crate::websocket::clear_thread_websocket_state();
         if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
             let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
                 b"globalThis.__slice_wu.length=0;",
@@ -790,6 +792,80 @@ impl SliceIsolate {
         });
         release_warm_boa_realm(realm);
         Ok(count)
+    }
+
+    /// Dispatches a server-side WebSocket event (`"open"`, `"message"`, or `"close"`) into the
+    /// isolate's active `Slice.onWebSocket` / `Slice.upgradeWebSocket` handler and returns any
+    /// outgoing server-to-client WebSocket frames (`ServerWsOutFrame`).
+    pub fn execute_websocket_event(
+        &mut self,
+        event_type: &str,
+        is_binary: bool,
+        payload_bytes: &[u8],
+        code: u16,
+        reason: &str,
+    ) -> Result<Vec<crate::websocket::ServerWsOutFrame>, SandboxViolation> {
+        self.compartment.consume_fuel(15)?;
+        let payload_arg = if is_binary {
+            crate::intrinsics::base64_encode(payload_bytes, false)
+        } else {
+            String::from_utf8_lossy(payload_bytes).into_owned()
+        };
+        BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
+        BOA_ACTIVE_TENANT.with(|t| {
+            let mut b = t.borrow_mut();
+            b.clear();
+            b.push_str(&self.compartment.tenant_id);
+        });
+        let has_egress_secrets = !self.egress_audit_secrets.is_empty();
+        if has_egress_secrets {
+            BOA_EGRESS_SECRETS.with(|s| {
+                *s.borrow_mut() = self.egress_audit_secrets.clone();
+            });
+        }
+        let has_env_keys = !self.compartment.capabilities.allowed_env_keys.is_empty();
+        if has_env_keys {
+            BOA_ENV_MAP.with(|m| {
+                *m.borrow_mut() = self.compartment.capabilities.allowed_env_keys.clone();
+            });
+        }
+        let mut realm = acquire_warm_boa_realm();
+        ensure_realm_shards(&mut realm, (1 << 2) | (1 << 7), false);
+        if has_env_keys {
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_sync_process_env(true);",
+            ));
+        }
+        let js_call = format!(
+            "globalThis.__slice_dispatch_server_ws({}, {}, {}, {}, {});",
+            serde_json::to_string(event_type).unwrap_or_else(|_| "\"message\"".to_string()),
+            if is_binary { "true" } else { "false" },
+            serde_json::to_string(&payload_arg).unwrap_or_else(|_| "\"\"".to_string()),
+            code,
+            serde_json::to_string(reason).unwrap_or_else(|_| "\"\"".to_string()),
+        );
+        let _ = realm
+            .ctx
+            .eval(boa_engine::Source::from_bytes(js_call.as_bytes()));
+        drive_event_loop_to_completion(&mut realm.ctx);
+        clear_event_loop_state();
+        if has_env_keys {
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_sync_process_env(false);",
+            ));
+            BOA_ENV_MAP.with(|m| m.borrow_mut().clear());
+        }
+        if has_egress_secrets {
+            BOA_EGRESS_SECRETS.with(|s| s.borrow_mut().clear());
+        }
+        if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
+            let _ = crate::websocket::drain_server_ws_outbox();
+            release_warm_boa_realm(realm);
+            return Err(violation);
+        }
+        let frames = crate::websocket::drain_server_ws_outbox();
+        release_warm_boa_realm(realm);
+        Ok(frames)
     }
 
     fn exec_numeric_loop_kernel(&mut self, iterations: u64) -> Result<JsValue, SandboxViolation> {
@@ -1534,6 +1610,11 @@ impl SliceIsolate {
             if let Some((rc_key_u64, hex_bytes)) = extract_slice_rc_key(js_code) {
                 let mut realm = acquire_warm_boa_realm();
                 if !realm.loaded_bundles.contains_key(&rc_key_u64) {
+                    ensure_realm_shards(
+                        &mut realm,
+                        detect_needed_shards(js_code, false),
+                        js_code.contains("globalThis"),
+                    );
                     let _ = realm
                         .ctx
                         .eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
@@ -1637,6 +1718,7 @@ impl SliceIsolate {
                 b"__slice_sync_process_env(true);",
             ));
         }
+        let is_http_req = BOA_HTTP_REQ.with(|r| r.borrow().active);
         let rc_key_opt = extract_slice_rc_key(js_code);
         let mut should_check_ses = rc_key_opt.is_none();
         // Phase 9B Priority 2 + Phase N1 Direct JsObject Invocation (`__slice_rc`):
@@ -1645,9 +1727,17 @@ impl SliceIsolate {
         // `fn_obj.call()` directly in Rust with ZERO JS source lexing, parsing, or `ctx.eval` overhead.
         let eval_res = if let Some((rc_key_u64, hex_bytes)) = rc_key_opt {
             if let Some(fn_obj) = realm.loaded_bundles.get(&rc_key_u64).cloned() {
+                if is_http_req && (realm.loaded_shards_mask & (1 << 1)) == 0 {
+                    ensure_realm_shards(&mut realm, (1 << 1) | (1 << 2), false);
+                }
                 fn_obj.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
             } else {
                 should_check_ses = true;
+                ensure_realm_shards(
+                    &mut realm,
+                    detect_needed_shards(js_code, is_http_req),
+                    js_code.contains("globalThis"),
+                );
                 let res = realm
                     .ctx
                     .eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
@@ -1663,10 +1753,20 @@ impl SliceIsolate {
                 res
             }
         } else if js_code.starts_with('{') {
+            ensure_realm_shards(
+                &mut realm,
+                detect_needed_shards(js_code, is_http_req),
+                js_code.contains("globalThis"),
+            );
             realm
                 .ctx
                 .eval(boa_engine::Source::from_bytes(js_code.as_bytes()))
         } else {
+            ensure_realm_shards(
+                &mut realm,
+                detect_needed_shards(js_code, is_http_req),
+                js_code.contains("globalThis"),
+            );
             let scoped_code = format!("{{\n{}\n}}", js_code);
             realm
                 .ctx
@@ -1687,7 +1787,12 @@ impl SliceIsolate {
             .set_loop_iteration_limit(u64::MAX);
 
         let mut ses_mutated_target = String::new();
-        if should_check_ses {
+        if should_check_ses
+            && (js_code.contains("prototype")
+                || js_code.contains("__proto__")
+                || js_code.contains("Reflect")
+                || js_code.contains("Object["))
+        {
             if let Some(ref check_fn) = realm.ses_check_fn {
                 if let Ok(v) = check_fn.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
                 {
@@ -1720,6 +1825,7 @@ impl SliceIsolate {
             BOA_ENV_MAP.with(|m| m.borrow_mut().clear());
         }
         BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
+        crate::websocket::clear_thread_websocket_state();
         if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
             release_warm_boa_realm(realm);
             return Err(violation);

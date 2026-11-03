@@ -1,7 +1,7 @@
 //! Warm `boa_engine` Realm Pool, Thread-Local Compartment State, and OCap VFS Guards.
 
 use crate::host_bindings::register_slice_native_host_functions;
-use crate::js_preludes::{CORE_PRELUDE, WINTERTC_PHASE_N3_PRELUDE};
+use crate::js_preludes::ULTRA_CORE_PRELUDE;
 use crate::state_and_kv::StateCheckpoint;
 use crate::value_and_ast::BytecodeModule;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -23,6 +23,8 @@ pub(crate) struct WarmBoaRealm {
     pub(crate) ctx: boa_engine::Context,
     pub(crate) loaded_bundles: FxHashMap<u64, boa_engine::JsObject>,
     pub(crate) ses_check_fn: Option<boa_engine::JsObject>,
+    pub(crate) ensure_shard_fn: Option<boa_engine::JsObject>,
+    pub(crate) loaded_shards_mask: u8,
 }
 
 pub(crate) type ActiveBoaCaps = (String, Vec<String>, Vec<String>);
@@ -157,11 +159,16 @@ pub(crate) fn create_warm_boa_realm() -> WarmBoaRealm {
     let mut ctx = boa_engine::Context::default();
     register_slice_native_host_functions(&mut ctx);
 
-    let _ = ctx.eval(boa_engine::Source::from_bytes(CORE_PRELUDE));
-    let _ = ctx.eval(boa_engine::Source::from_bytes(WINTERTC_PHASE_N3_PRELUDE));
+    let _ = ctx.eval(boa_engine::Source::from_bytes(ULTRA_CORE_PRELUDE));
     let ses_check_fn = ctx
         .eval(boa_engine::Source::from_bytes(
             b"globalThis.__slice_check_ses",
+        ))
+        .ok()
+        .and_then(|v| v.as_object());
+    let ensure_shard_fn = ctx
+        .eval(boa_engine::Source::from_bytes(
+            b"globalThis.__slice_ensure_shard",
         ))
         .ok()
         .and_then(|v| v.as_object());
@@ -169,5 +176,34 @@ pub(crate) fn create_warm_boa_realm() -> WarmBoaRealm {
         ctx,
         loaded_bundles: FxHashMap::default(),
         ses_check_fn,
+        ensure_shard_fn,
+        loaded_shards_mask: 0,
+    }
+}
+
+#[inline]
+pub(crate) fn ensure_realm_shards(realm: &mut WarmBoaRealm, needed_mask: u8, init_lazy_getters: bool) {
+    let missing = needed_mask & !realm.loaded_shards_mask;
+    if init_lazy_getters && (realm.loaded_shards_mask & 1) == 0 {
+        let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+            b"globalThis.__slice_init_lazy_getters();",
+        ));
+        realm.loaded_shards_mask |= 1;
+    }
+    if missing == 0 {
+        return;
+    }
+    if let Some(ref ensure_fn) = realm.ensure_shard_fn {
+        for shard_id in [2u8, 1, 3, 4, 5, 6, 7] {
+            let bit = 1u8 << shard_id;
+            if (missing & bit) != 0 {
+                let _ = ensure_fn.call(
+                    &boa_engine::JsValue::undefined(),
+                    &[boa_engine::JsValue::from(shard_id as i32)],
+                    &mut realm.ctx,
+                );
+                realm.loaded_shards_mask |= bit;
+            }
+        }
     }
 }

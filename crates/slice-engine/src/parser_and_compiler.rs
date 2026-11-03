@@ -1195,6 +1195,9 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains("crypto.")
         || source.contains("EventTarget")
         || source.contains("CustomEvent")
+        || source.contains("MessageEvent")
+        || source.contains("CloseEvent")
+        || source.contains("WebSocket")
         || source.contains("new Event(")
         || source.contains("structuredClone(")
         || source.contains("new Blob(")
@@ -1211,7 +1214,8 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains("performance.now(")
         || source.contains("process.env")
         || source.contains("describe(")
-        || source.contains("expect(");
+        || source.contains("expect(")
+        || source.contains("globalThis");
 
     let has_direct_intrinsic_attack = (source.contains("Object.prototype.")
         || source.contains("Array.prototype.")
