@@ -35,9 +35,11 @@ pub mod node_builtins;
 pub mod numeric_vm;
 pub mod outbound_http;
 pub mod parser_and_compiler;
+pub mod sockets;
 pub mod state_and_kv;
 pub mod value_and_ast;
 pub mod websocket;
+pub mod workers;
 
 #[cfg(test)]
 mod tests;

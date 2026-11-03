@@ -1198,6 +1198,18 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains("MessageEvent")
         || source.contains("CloseEvent")
         || source.contains("WebSocket")
+        || source.contains("Worker")
+        || source.contains("worker_threads")
+        || source.contains("MessageChannel")
+        || source.contains("MessagePort")
+        || source.contains("parentPort")
+        || source.contains("workerData")
+        || source.contains("onmessage")
+        || source.contains("postMessage")
+        || source.contains("self.")
+        || source.contains("cloudflare:")
+        || source.contains("createObjectURL")
+        || source.contains("canParse")
         || source.contains("new Event(")
         || source.contains("structuredClone(")
         || source.contains("new Blob(")
@@ -1221,7 +1233,8 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains("Array.prototype.")
         || source.contains("while (true)")
         || source.contains("while(true)"))
-        && !source.contains("Slice.evalSandbox(");
+        && !source.contains("Slice.evalSandbox(")
+        && !source.contains("Worker");
 
     if uses_full_es_vm && !has_direct_intrinsic_attack {
         let mut bytes = Vec::with_capacity(12 + source.len());

@@ -264,7 +264,7 @@
       raw = raw.slice(0, qi);
     }
     var si = raw.indexOf("://");
-    if (si === -1) throw new TypeError("Invalid URL: " + input);
+    if (si <= 0) throw new TypeError("Invalid URL: " + input);
     this.protocol = raw.slice(0, si + 1).toLowerCase();
     var rest = raw.slice(si + 3);
     var pi = rest.indexOf("/");
@@ -308,6 +308,30 @@
   };
   URL.prototype.toString = URL.prototype.toJSON = function() {
     return this.href;
+  };
+  URL.canParse = function(url, base) {
+    try {
+      new URL(url, base);
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  };
+  var __blobUrlSeq = 1;
+  globalThis.__slice_blob_urls = globalThis.__slice_blob_urls || Object.create(null);
+  URL.createObjectURL = function(blob) {
+    var id = "blob:slice/" + (__blobUrlSeq++);
+    var txt = "";
+    if (blob && blob._u8 instanceof Uint8Array) {
+      txt = __slice_text_decode(blob._u8, "utf-8", false, false);
+    } else if (blob !== undefined && blob !== null) {
+      txt = String(blob);
+    }
+    globalThis.__slice_blob_urls[id] = txt;
+    return id;
+  };
+  URL.revokeObjectURL = function(url) {
+    if (globalThis.__slice_blob_urls) delete globalThis.__slice_blob_urls[String(url)];
   };
 
   function Headers(init) {

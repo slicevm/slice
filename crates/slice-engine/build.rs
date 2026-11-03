@@ -29,6 +29,10 @@ const PRELUDE_SPECS: &[(&str, &str)] = &[
     ("FULL_BUFFER_PRELUDE", "src/preludes/05_full_buffer.js"),
     ("CONSOLE_EXT_PRELUDE", "src/preludes/06_console_ext.js"),
     ("WEBSOCKET_PRELUDE", "src/preludes/07_websocket.js"),
+    (
+        "WORKERS_SOCKETS_PRELUDE",
+        "src/preludes/08_workers_sockets.js",
+    ),
 ];
 
 fn main() {

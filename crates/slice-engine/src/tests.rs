@@ -3148,9 +3148,10 @@ fn test_compile_time_prelude_minifier_and_lazy_sharded_globals() {
         STREAMS_FORMDATA_PRELUDE, STREAMS_FORMDATA_PRELUDE_SRC, ULTRA_CORE_PRELUDE,
         ULTRA_CORE_PRELUDE_SRC, WEBCRYPTO_CLONE_PRELUDE, WEBCRYPTO_CLONE_PRELUDE_SRC,
         WEBSOCKET_PRELUDE, WEBSOCKET_PRELUDE_SRC, WEB_FETCH_URL_PRELUDE, WEB_FETCH_URL_PRELUDE_SRC,
+        WORKERS_SOCKETS_PRELUDE, WORKERS_SOCKETS_PRELUDE_SRC,
     };
 
-    // 1. Verify all 8 readable `.js` prelude sources are preserved and compile-time minified
+    // 1. Verify all 9 readable `.js` prelude sources are preserved and compile-time minified
     let pairs: &[(&str, &str, &[u8])] = &[
         ("00_ultra_core.js", ULTRA_CORE_PRELUDE_SRC, ULTRA_CORE_PRELUDE),
         (
@@ -3184,6 +3185,11 @@ fn test_compile_time_prelude_minifier_and_lazy_sharded_globals() {
             CONSOLE_EXT_PRELUDE,
         ),
         ("07_websocket.js", WEBSOCKET_PRELUDE_SRC, WEBSOCKET_PRELUDE),
+        (
+            "08_workers_sockets.js",
+            WORKERS_SOCKETS_PRELUDE_SRC,
+            WORKERS_SOCKETS_PRELUDE,
+        ),
     ];
 
     let mut total_src_bytes = 0usize;
@@ -3249,3 +3255,414 @@ console.log(JSON.stringify({
         r#"{"wasLazyGetter":true,"isFunc":true,"openConst":1,"replacedWithValue":true}"#
     );
 }
+
+#[test]
+fn test_web_worker_and_node_worker_threads_roundtrip() {
+    let code = r#"
+import {
+    Worker as NodeWorker,
+    isMainThread,
+    MessageChannel,
+    receiveMessageOnPort,
+} from "node:worker_threads";
+
+async function main() {
+    // 1. Verify URL.canParse + URL.createObjectURL + WHATWG Web Worker round-trip
+    const canParseOk = URL.canParse("https://example.com/a") && !URL.canParse("://bad");
+    const blob = new Blob([
+        "self.onmessage = function(e) { self.postMessage({ doubled: e.data.n * 2, tag: self.name }); self.close(); };"
+    ], { type: "application/javascript" });
+    const blobUrl = URL.createObjectURL(blob);
+
+    const webRes = await new Promise((resolve, reject) => {
+        const w = new Worker(blobUrl, { name: "whatwg-w" });
+        w.onmessage = (ev) => resolve(ev.data);
+        w.onerror = (err) => reject(new Error(err.message || "web worker error"));
+        w.postMessage({ n: 21 });
+    });
+    URL.revokeObjectURL(blobUrl);
+
+    // 2. Verify node:worker_threads with workerData, typed arrays (Uint8Array), Map, BigInt, and parentPort
+    const nodeWorkerCode = `
+        const { isMainThread, workerData, parentPort, threadId } = require("node:worker_threads");
+        parentPort.once("message", (msg) => {
+            const sum = Array.from(msg.bytes).reduce((a, b) => a + b, 0);
+            parentPort.postMessage({
+                fromWorker: true,
+                isMainThread,
+                hasThreadId: threadId > 0,
+                seedMult: workerData.multiplier * sum,
+                big: msg.big + 10n,
+                mapVal: msg.map.get("k"),
+                outBytes: new Uint8Array([sum, workerData.multiplier])
+            });
+        });
+    `;
+    const nodeRes = await new Promise((resolve, reject) => {
+        const nw = new NodeWorker(nodeWorkerCode, {
+            eval: true,
+            workerData: { multiplier: 3 }
+        });
+        nw.on("message", (data) => resolve(data));
+        nw.on("error", (err) => reject(err));
+        const mp = new Map([["k", "v-ok"]]);
+        nw.postMessage({
+            bytes: new Uint8Array([1, 2, 3, 4]),
+            big: 90n,
+            map: mp
+        });
+    });
+
+    // 3. Verify MessageChannel + synchronous receiveMessageOnPort + async port.on("message")
+    const { port1, port2 } = new MessageChannel();
+    port1.postMessage({ syncMsg: 77 });
+    const syncRead = receiveMessageOnPort(port2);
+    const emptyRead = receiveMessageOnPort(port2);
+
+    const asyncPortMsg = await new Promise((resolve) => {
+        port2.on("message", (m) => resolve(m));
+        port1.postMessage({ asyncMsg: 88 });
+    });
+    port1.close();
+    port2.close();
+
+    console.log(JSON.stringify({
+        isMainThread,
+        canParseOk,
+        webDoubled: webRes.doubled,
+        webTag: webRes.tag,
+        nodeWorkerIsMain: nodeRes.isMainThread,
+        nodeHasThreadId: nodeRes.hasThreadId,
+        nodeSeedMult: nodeRes.seedMult,
+        nodeBig: String(nodeRes.big),
+        nodeMapVal: nodeRes.mapVal,
+        nodeOutBytes: Array.from(nodeRes.outBytes),
+        syncMsg: syncRead && syncRead.message && syncRead.message.syncMsg,
+        emptyAfterSync: emptyRead === undefined,
+        asyncMsg: asyncPortMsg.asyncMsg
+    }));
+}
+main();
+"#;
+    let m = run_source_isolated(
+        "worker-roundtrip-tenant",
+        code,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        m.stdout[0],
+        r#"{"isMainThread":true,"canParseOk":true,"webDoubled":42,"webTag":"whatwg-w","nodeWorkerIsMain":false,"nodeHasThreadId":true,"nodeSeedMult":30,"nodeBig":"100","nodeMapVal":"v-ok","nodeOutBytes":[10,3],"syncMsg":77,"emptyAfterSync":true,"asyncMsg":88}"#
+    );
+}
+
+#[test]
+fn test_worker_capability_attenuation_and_fuel_isolation() {
+    let code = r#"
+import fs from "node:fs";
+import { Worker } from "node:worker_threads";
+
+fs.writeFileSync("/app/secret.txt", "TOP_SECRET_DATA");
+
+async function main() {
+    // 1. Spawn a worker attenuated with allowRead: [] (even though parent has /app read/write!)
+    const fsDeniedResult = await new Promise((resolve) => {
+        let errText = "";
+        const w = new Worker(
+            `const fs = require("node:fs"); fs.readFileSync("/app/secret.txt", "utf8");`,
+            {
+                eval: true,
+                slice: { allowRead: [] }
+            }
+        );
+        w.on("error", (e) => { errText = e.message; });
+        w.on("exit", (code) => {
+            resolve({ code, blocked: errText.includes("filesystem read authority") || errText.includes("SandboxViolation") });
+        });
+    });
+
+    // 2. Spawn a worker with an infinite loop and low fuel ceiling (5,000) — must not crash parent!
+    const fuelExhaustedResult = await new Promise((resolve) => {
+        let errText = "";
+        const w = new Worker(
+            `while (true) {}`,
+            {
+                eval: true,
+                slice: { fuel: 5000 }
+            }
+        );
+        w.on("error", (e) => { errText = e.message; });
+        w.on("exit", (code) => {
+            resolve({ code, exhausted: errText.includes("CPU instruction fuel") || errText.includes("SandboxViolation") });
+        });
+    });
+
+    // 3. Spawn an interactive worker and terminate() it from the parent
+    const wTerm = new Worker(
+        `const { parentPort } = require("node:worker_threads"); parentPort.on("message", () => {});`,
+        { eval: true }
+    );
+    const termCode = await wTerm.terminate();
+
+    // Parent can still read /app/secret.txt normally
+    const parentReadOk = fs.readFileSync("/app/secret.txt", "utf8") === "TOP_SECRET_DATA";
+
+    console.log(JSON.stringify({
+        fsDeniedCode: fsDeniedResult.code,
+        fsDeniedBlocked: fsDeniedResult.blocked,
+        fuelCode: fuelExhaustedResult.code,
+        fuelExhausted: fuelExhaustedResult.exhausted,
+        termCode,
+        parentReadOk
+    }));
+}
+main();
+"#;
+    let caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/app")
+        .with_write_prefix("/app");
+    let m = run_source_isolated(
+        "worker-attenuation-tenant",
+        code,
+        caps,
+        2_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        m.stdout[0],
+        r#"{"fsDeniedCode":1,"fsDeniedBlocked":true,"fuelCode":1,"fuelExhausted":true,"termCode":1,"parentReadOk":true}"#
+    );
+}
+
+#[test]
+fn test_wintertc_cloudflare_sockets_and_live_node_net_dgram() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, UdpSocket};
+
+    // 1. Start a live loopback TCP server
+    let tcp_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp_port = tcp_listener.local_addr().unwrap().port();
+    let tcp_handle = std::thread::spawn(move || {
+        // Accept 2 connections: 1 for `cloudflare:sockets` `connect()`, 1 for `node:net` `net.connect()`
+        for _ in 0..2 {
+            if let Ok((mut stream, _)) = tcp_listener.accept() {
+                let mut buf = [0u8; 256];
+                if let Ok(n) = stream.read(&mut buf) {
+                    let req_str = String::from_utf8_lossy(&buf[..n]);
+                    let reply = format!("TCP_ACK:{}", req_str);
+                    let _ = stream.write_all(reply.as_bytes());
+                    let _ = stream.flush();
+                }
+            }
+        }
+    });
+
+    // 2. Start a live loopback UDP echo server
+    let udp_server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let udp_port = udp_server.local_addr().unwrap().port();
+    let udp_handle = std::thread::spawn(move || {
+        let mut buf = [0u8; 256];
+        if let Ok((n, src)) = udp_server.recv_from(&mut buf) {
+            let msg = String::from_utf8_lossy(&buf[..n]);
+            let reply = format!("UDP_ACK:{}", msg);
+            let _ = udp_server.send_to(reply.as_bytes(), src);
+        }
+    });
+
+    let code = format!(
+        r#"
+import {{ connect }} from "cloudflare:sockets";
+import net from "node:net";
+import dgram from "node:dgram";
+
+async function main() {{
+    // A. Deterministic Slice.mockSocket test
+    Slice.mockSocket("redis.internal:6379", "+PONG\r\n");
+    const mockSock = connect("redis.internal:6379");
+    const mockWriter = mockSock.writable.getWriter();
+    await mockWriter.write("PING\r\n");
+    const mockReader = mockSock.readable.getReader();
+    const {{ value: mockVal }} = await mockReader.read();
+    const mockReply = new TextDecoder().decode(mockVal).trim();
+    await mockSock.close();
+
+    // B. Live WinterTC cloudflare:sockets connect()
+    const liveSock = connect({{ hostname: "127.0.0.1", port: {tcp_port} }});
+    const openedInfo = await liveSock.opened;
+    const writer = liveSock.writable.getWriter();
+    await writer.write(new TextEncoder().encode("wintertc-hello"));
+    const reader = liveSock.readable.getReader();
+    const {{ value: liveVal }} = await reader.read();
+    const liveTcpReply = new TextDecoder().decode(liveVal);
+    await liveSock.close();
+
+    // C. Live node:net Socket
+    const nodeNetReply = await new Promise((resolve, reject) => {{
+        const client = net.connect({{ host: "127.0.0.1", port: {tcp_port} }}, () => {{
+            client.setEncoding("utf8");
+            client.write("node-net-hi");
+        }});
+        client.on("data", (chunk) => {{
+            resolve(chunk);
+            client.end();
+        }});
+        client.on("error", reject);
+    }});
+
+    // D. Live node:dgram Socket
+    const nodeUdpReply = await new Promise((resolve, reject) => {{
+        const udp = dgram.createSocket("udp4");
+        udp.on("message", (msg, rinfo) => {{
+            udp.close();
+            resolve({{ text: msg.toString("utf8"), port: rinfo.port }});
+        }});
+        udp.on("error", reject);
+        udp.send("dgram-ping", {udp_port}, "127.0.0.1");
+    }});
+
+    console.log(JSON.stringify({{
+        mockReply,
+        hasRemoteAddr: openedInfo.remoteAddress.includes("{tcp_port}"),
+        liveTcpReply,
+        nodeNetReply,
+        nodeUdpText: nodeUdpReply.text,
+        nodeUdpPortMatch: nodeUdpReply.port === {udp_port},
+        ip4: net.isIP("127.0.0.1"),
+        ip6: net.isIP("::1"),
+        ipBad: net.isIP("not-an-ip")
+    }}));
+}}
+main();
+"#
+    );
+
+    let caps = CapabilityToken::pure_compute()
+        .with_net_host("redis.internal:6379")
+        .with_net_host(format!("127.0.0.1:{}", tcp_port))
+        .with_net_host(format!("127.0.0.1:{}", udp_port));
+
+    let m = run_source_isolated(
+        "sockets-live-tenant",
+        &code,
+        caps,
+        2_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    let _ = tcp_handle.join();
+    let _ = udp_handle.join();
+
+    assert_eq!(
+        m.stdout[0],
+        r#"{"mockReply":"+PONG","hasRemoteAddr":true,"liveTcpReply":"TCP_ACK:wintertc-hello","nodeNetReply":"TCP_ACK:node-net-hi","nodeUdpText":"UDP_ACK:dgram-ping","nodeUdpPortMatch":true,"ip4":4,"ip6":6,"ipBad":0}"#
+    );
+}
+
+#[test]
+fn test_raw_socket_5_ring_security_ocap_ssrf_and_egress_dlp() {
+    // 1. Ring 1: OCap deny when allow_net is empty
+    let err_no_cap = run_source_isolated(
+        "sock-sec-1",
+        r#"import { connect } from "cloudflare:sockets"; connect("example.com:80");"#,
+        CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    )
+    .unwrap_err()
+    .downcast::<SandboxViolation>()
+    .unwrap();
+    assert!(matches!(err_no_cap, SandboxViolation::NetAccessDenied { .. }));
+
+    // 2. Ring 1: Privileged port (< 1024 except 80/443) blocked under wildcard allow_net = ["*"]
+    let err_priv_port = run_source_isolated(
+        "sock-sec-2",
+        r#"import { connect } from "cloudflare:sockets"; connect("93.184.216.34:22");"#,
+        CapabilityToken::pure_compute().with_net_host("*"),
+        500_000,
+        4 * 1024 * 1024,
+    )
+    .unwrap_err()
+    .downcast::<SandboxViolation>()
+    .unwrap();
+    assert!(matches!(
+        err_priv_port,
+        SandboxViolation::NetAccessDenied { .. }
+    ));
+
+    // 3. Ring 2: Cloud metadata & non-canonical octal IPv4 literal blocked by SSRF shield
+    for bad_addr in ["169.254.169.254:80", "127.0.0.1:6379", "0177.0.0.1:80"] {
+        let code = format!(
+            r#"import {{ connect }} from "cloudflare:sockets"; connect("{}");"#,
+            bad_addr
+        );
+        let err_ssrf = run_source_isolated(
+            "sock-sec-ssrf",
+            &code,
+            CapabilityToken::pure_compute().with_net_host("*"),
+            500_000,
+            4 * 1024 * 1024,
+        )
+        .unwrap_err()
+        .downcast::<SandboxViolation>()
+        .unwrap();
+        assert!(
+            matches!(err_ssrf, SandboxViolation::NetAccessDenied { .. }),
+            "Expected SSRF block for {}",
+            bad_addr
+        );
+    }
+
+    // 4. Ring 3: Outbound Egress Secret DLP on TCP `socket.writable` (both raw and Base64-encoded!)
+    let mut iso_tcp = SliceIsolate::spawn(
+        "sock-dlp-tcp",
+        1,
+        CapabilityToken::pure_compute().with_net_host("dlp.example.com:8080"),
+        500_000,
+        4 * 1024 * 1024,
+    );
+    iso_tcp.add_egress_audit_secret("sk_live_RAW_SOCKET_SECRET_777");
+    let tcp_dlp_bc = compile_source_to_bytecode(
+        r#"
+import { connect } from "cloudflare:sockets";
+Slice.mockSocket("dlp.example.com:8080", "OK");
+async function run() {
+    const sock = connect("dlp.example.com:8080");
+    const writer = sock.writable.getWriter();
+    await writer.write(btoa("sk_live_RAW_SOCKET_SECRET_777"));
+}
+run();
+"#,
+    );
+    let tcp_dlp_err = iso_tcp.execute_bytecode(&tcp_dlp_bc, None).unwrap_err();
+    assert!(matches!(
+        tcp_dlp_err,
+        SandboxViolation::EnvAccessDenied { ref key, .. } if key.contains("EGRESS_SECRET_LEAK_BLOCKED")
+    ));
+
+    // 5. Ring 3: Outbound Egress Secret DLP on UDP `dgram.Socket.send`
+    let mut iso_udp = SliceIsolate::spawn(
+        "sock-dlp-udp",
+        1,
+        CapabilityToken::pure_compute().with_net_host("127.0.0.1:9999"),
+        500_000,
+        4 * 1024 * 1024,
+    );
+    iso_udp.add_egress_audit_secret("ghp_UDP_DLP_TOKEN_888");
+    let udp_dlp_bc = compile_source_to_bytecode(
+        r#"
+import dgram from "node:dgram";
+Slice.mockSocket("udp://127.0.0.1:9999", "ACK");
+const s = dgram.createSocket("udp4");
+s.send("leak: ghp_UDP_DLP_TOKEN_888", 9999, "127.0.0.1");
+"#,
+    );
+    let udp_dlp_err = iso_udp.execute_bytecode(&udp_dlp_bc, None).unwrap_err();
+    assert!(matches!(
+        udp_dlp_err,
+        SandboxViolation::EnvAccessDenied { ref key, .. } if key.contains("EGRESS_SECRET_LEAK_BLOCKED")
+    ));
+}
+

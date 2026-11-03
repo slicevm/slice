@@ -139,6 +139,9 @@ pub fn reset_virtual_time_warped_ms() {
 
 #[inline]
 pub(crate) fn has_pending_event_loop_work() -> bool {
+    if crate::workers::has_pending_worker_work() {
+        return true;
+    }
     if ACTIVE_ASYNC_ITEMS.with(|c| c.get() == 0) {
         return false;
     }
@@ -168,6 +171,8 @@ pub(crate) fn restore_event_loop_state(saved: SavedEventLoopSnapshot) {
 pub(crate) fn clear_event_loop_state() {
     ACTIVE_ASYNC_ITEMS.with(|c| c.set(0));
     EVENT_LOOP_STATE.with(|st| st.borrow_mut().reset());
+    crate::workers::clear_thread_worker_state();
+    crate::sockets::close_all_active_sockets();
 }
 
 pub(crate) fn schedule_timer(
@@ -343,15 +348,29 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
     }
 
     let mut total_ticks: usize = 0;
+    let mut idle_worker_polls: usize = 0;
 
     loop {
-        if BOA_VIOLATION.with(|v| v.borrow().is_some()) {
+        if BOA_VIOLATION.with(|v| v.borrow().is_some())
+            || crate::workers::is_current_worker_terminated()
+        {
             clear_event_loop_state();
             return;
         }
 
-        // 1. Drain microtasks first
+        // 1. Drain microtasks and any non-blocking worker messages first
         let _ = ctx.run_jobs();
+        let did_parent_w = crate::workers::poll_parent_worker_events_and_dispatch(ctx, None);
+        let did_self_w = crate::workers::poll_worker_self_inbox_and_dispatch(ctx, None);
+        if did_parent_w || did_self_w {
+            idle_worker_polls = 0;
+            if BOA_VIOLATION.with(|v| v.borrow().is_some())
+                || crate::workers::is_current_worker_terminated()
+            {
+                clear_event_loop_state();
+                return;
+            }
+        }
 
         // 2. Check and prune any queued or in-flight fetches whose AbortSignal has fired
         let mut aborted_callbacks: Vec<(JsObject, JsValue)> = Vec::new();
@@ -582,14 +601,36 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
         if has_queued {
             continue;
         }
-        if in_flight_count == 0 && next_timer_deadline.is_none() {
+        let has_worker_work = crate::workers::has_pending_worker_work();
+        if in_flight_count == 0 && next_timer_deadline.is_none() && !has_worker_work {
             ACTIVE_ASYNC_ITEMS.with(|c| c.set(0));
             break;
         }
 
-        // 7. Either warp virtual time (deterministic mode with 0 in-flight fetches) or wait on I/O / timer
+        // 7. Either warp virtual time (deterministic mode with 0 in-flight fetches) or wait on I/O / worker / timer
         let now_ms = current_event_loop_clock_ms();
         if in_flight_count == 0 {
+            if has_worker_work {
+                let wait_dur = match next_timer_deadline {
+                    Some(target_ms) if target_ms > now_ms => {
+                        Duration::from_millis((target_ms - now_ms).min(20))
+                    }
+                    Some(_) => Duration::ZERO,
+                    None => Duration::from_millis(20),
+                };
+                let got_p =
+                    crate::workers::poll_parent_worker_events_and_dispatch(ctx, Some(wait_dur));
+                let got_s =
+                    crate::workers::poll_worker_self_inbox_and_dispatch(ctx, Some(wait_dur));
+                if got_p || got_s {
+                    idle_worker_polls = 0;
+                    continue;
+                }
+                idle_worker_polls += 1;
+                if idle_worker_polls > 250 && next_timer_deadline.is_none() {
+                    break;
+                }
+            }
             if let Some(target_ms) = next_timer_deadline {
                 let is_det = BOA_DET_STATE.with(|s| {
                     if let Some((prng, clk)) = s.get() {
@@ -603,7 +644,7 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                         false
                     }
                 });
-                if !is_det && target_ms > now_ms {
+                if !is_det && target_ms > now_ms && !has_worker_work {
                     std::thread::sleep(Duration::from_millis(target_ms - now_ms));
                 }
                 continue;

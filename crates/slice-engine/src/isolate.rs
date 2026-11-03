@@ -777,6 +777,8 @@ impl SliceIsolate {
         }
         BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
         crate::websocket::clear_thread_websocket_state();
+        crate::sockets::clear_thread_socket_state();
+        crate::workers::clear_thread_worker_state();
         if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
             let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
                 b"globalThis.__slice_wu.length=0;",
@@ -1718,6 +1720,13 @@ impl SliceIsolate {
                 b"__slice_sync_process_env(true);",
             ));
         }
+        let is_worker = crate::workers::is_worker_thread();
+        if is_worker {
+            ensure_realm_shards(&mut realm, (1 << 8) | (1 << 3) | (1 << 2), false);
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"globalThis.__slice_init_worker_self_env(true);",
+            ));
+        }
         let is_http_req = BOA_HTTP_REQ.with(|r| r.borrow().active);
         let rc_key_opt = extract_slice_rc_key(js_code);
         let mut should_check_ses = rc_key_opt.is_none();
@@ -1773,9 +1782,10 @@ impl SliceIsolate {
                 .eval(boa_engine::Source::from_bytes(scoped_code.as_bytes()))
         };
 
-        if !BOA_HTTP_REQ.with(|r| r.borrow().active)
-            || BOA_HTTP_RES.with(|res| res.borrow().is_none())
-            || has_pending_event_loop_work()
+        if (!is_worker || eval_res.is_ok())
+            && (!BOA_HTTP_REQ.with(|r| r.borrow().active)
+                || BOA_HTTP_RES.with(|res| res.borrow().is_none())
+                || has_pending_event_loop_work())
         {
             drive_event_loop_to_completion(&mut realm.ctx);
         }
@@ -1826,6 +1836,8 @@ impl SliceIsolate {
         }
         BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
         crate::websocket::clear_thread_websocket_state();
+        crate::sockets::clear_thread_socket_state();
+        crate::workers::clear_thread_worker_state();
         if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
             release_warm_boa_realm(realm);
             return Err(violation);
@@ -1839,7 +1851,9 @@ impl SliceIsolate {
         }
         if let Err(ref err) = eval_res {
             let msg = err.to_string();
-            if msg.contains("loop iteration limit")
+            if msg.contains("RuntimeLimitError")
+                || msg.contains("iteration loops")
+                || msg.contains("loop iteration limit")
                 || msg.contains("Maximum call stack")
                 || msg.contains("recursion limit")
             {

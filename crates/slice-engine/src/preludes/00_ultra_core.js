@@ -5,8 +5,11 @@
   var __shMask = 0;
   var __shardProps = {};
   function __loadShard(id) {
-    if ((id === 1 || id === 3 || id === 7) && (__shMask & 4) === 0) {
+    if ((id === 1 || id === 3 || id === 7 || id === 8) && (__shMask & 4) === 0) {
       __loadShard(2);
+    }
+    if (id === 8 && (__shMask & 8) === 0) {
+      __loadShard(3);
     }
     var bit = 1 << id;
     if ((__shMask & bit) === 0) {
@@ -112,6 +115,18 @@
         "CloseEvent",
         "__slice_dispatch_server_ws"
       ], 7);
+    }
+    if ((__shMask & 256) === 0) {
+      __defLazy([
+        "Worker",
+        "MessageChannel",
+        "MessagePort",
+        "__slice_receiveMessageOnPort",
+        "__slice_wintertc_connect",
+        "__slice_init_worker_self_env",
+        "__slice_worker_host_deliver",
+        "__slice_worker_self_deliver"
+      ], 8);
     }
   };
 
@@ -368,6 +383,14 @@
     upgradeWebSocket: function(handlerOrOpts) {
       __loadShard(7);
       return globalThis.Slice.upgradeWebSocket(handlerOrOpts);
+    },
+    connect: function(addr, opts) {
+      __loadShard(8);
+      return globalThis.Slice.connect(addr, opts);
+    },
+    mockSocket: function(addr, spec) {
+      __loadShard(8);
+      return globalThis.Slice.mockSocket(addr, spec);
     },
     waitUntil: function(f) {
       __slice_wu.push(f);

@@ -24,7 +24,7 @@ pub(crate) struct WarmBoaRealm {
     pub(crate) loaded_bundles: FxHashMap<u64, boa_engine::JsObject>,
     pub(crate) ses_check_fn: Option<boa_engine::JsObject>,
     pub(crate) ensure_shard_fn: Option<boa_engine::JsObject>,
-    pub(crate) loaded_shards_mask: u8,
+    pub(crate) loaded_shards_mask: u16,
 }
 
 pub(crate) type ActiveBoaCaps = (String, Vec<String>, Vec<String>);
@@ -182,7 +182,11 @@ pub(crate) fn create_warm_boa_realm() -> WarmBoaRealm {
 }
 
 #[inline]
-pub(crate) fn ensure_realm_shards(realm: &mut WarmBoaRealm, needed_mask: u8, init_lazy_getters: bool) {
+pub(crate) fn ensure_realm_shards(
+    realm: &mut WarmBoaRealm,
+    needed_mask: u16,
+    init_lazy_getters: bool,
+) {
     let missing = needed_mask & !realm.loaded_shards_mask;
     if init_lazy_getters && (realm.loaded_shards_mask & 1) == 0 {
         let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
@@ -194,8 +198,8 @@ pub(crate) fn ensure_realm_shards(realm: &mut WarmBoaRealm, needed_mask: u8, ini
         return;
     }
     if let Some(ref ensure_fn) = realm.ensure_shard_fn {
-        for shard_id in [2u8, 1, 3, 4, 5, 6, 7] {
-            let bit = 1u8 << shard_id;
+        for shard_id in [2u16, 1, 3, 4, 5, 6, 7, 8] {
+            let bit = 1u16 << shard_id;
             if (missing & bit) != 0 {
                 let _ = ensure_fn.call(
                     &boa_engine::JsValue::undefined(),

@@ -100,7 +100,7 @@ fn build_tls_client_config(extra_ders: &[Vec<u8>]) -> Arc<rustls::ClientConfig> 
 }
 
 #[inline]
-fn get_tls_client_config() -> Arc<rustls::ClientConfig> {
+pub(crate) fn get_tls_client_config() -> Arc<rustls::ClientConfig> {
     if !HAS_CUSTOM_ROOTS.load(Ordering::Acquire) {
         return Arc::clone(DEFAULT_TLS_CLIENT_CONFIG.get_or_init(|| build_tls_client_config(&[])));
     }

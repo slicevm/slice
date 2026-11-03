@@ -27,8 +27,10 @@ pub const FULL_BUFFER_PRELUDE_SRC: &str = include_str!("preludes/05_full_buffer.
 pub const CONSOLE_EXT_PRELUDE_SRC: &str = include_str!("preludes/06_console_ext.js");
 /// Human-readable source for Shard 7: `WEBSOCKET_PRELUDE` (`src/preludes/07_websocket.js`).
 pub const WEBSOCKET_PRELUDE_SRC: &str = include_str!("preludes/07_websocket.js");
+/// Human-readable source for Shard 8: `WORKERS_SOCKETS_PRELUDE` (`src/preludes/08_workers_sockets.js`).
+pub const WORKERS_SOCKETS_PRELUDE_SRC: &str = include_str!("preludes/08_workers_sockets.js");
 
-/// Evaluates a compile-time minified lazy prelude shard (`1..=7`) on demand inside `context`.
+/// Evaluates a compile-time minified lazy prelude shard (`1..=8`) on demand inside `context`.
 #[inline]
 pub(crate) fn eval_lazy_prelude_shard(
     shard_id: u32,
@@ -42,17 +44,18 @@ pub(crate) fn eval_lazy_prelude_shard(
         5 => FULL_BUFFER_PRELUDE,
         6 => CONSOLE_EXT_PRELUDE,
         7 => WEBSOCKET_PRELUDE,
+        8 => WORKERS_SOCKETS_PRELUDE,
         _ => return Ok(boa_engine::JsValue::undefined()),
     };
     context.eval(boa_engine::Source::from_bytes(bytes))
 }
 
-/// Computes a bitmask of lazy prelude shards (`1..=7`) referenced by `js_code` so top-level
+/// Computes a bitmask of lazy prelude shards (`1..=8`) referenced by `js_code` so top-level
 /// execution can pre-load only the shards actually used by a script before entering async/generator
 /// frames, while scripts that don't use those globals pay 0 bytes of prelude evaluation cost.
 #[inline]
-pub(crate) fn detect_needed_shards(js_code: &str, is_http: bool) -> u8 {
-    let mut mask: u8 = 0;
+pub(crate) fn detect_needed_shards(js_code: &str, is_http: bool) -> u16 {
+    let mut mask: u16 = 0;
     if is_http
         || js_code.contains("fetch(")
         || js_code.contains("fetchSync")
@@ -139,6 +142,21 @@ pub(crate) fn detect_needed_shards(js_code: &str, is_http: bool) -> u8 {
         || js_code.contains("upgradeWebSocket")
     {
         mask |= (1 << 7) | (1 << 2);
+    }
+    if js_code.contains("Worker")
+        || js_code.contains("worker_threads")
+        || js_code.contains("MessageChannel")
+        || js_code.contains("MessagePort")
+        || js_code.contains("parentPort")
+        || js_code.contains("workerData")
+        || js_code.contains("cloudflare:sockets")
+        || js_code.contains("slice:sockets")
+        || js_code.contains("Slice.connect")
+        || js_code.contains("mockSocket")
+        || js_code.contains("createObjectURL")
+        || js_code.contains("canParse")
+    {
+        mask |= (1 << 8) | (1 << 3) | (1 << 2) | (1 << 1);
     }
     mask
 }
