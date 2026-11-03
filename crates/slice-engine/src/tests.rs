@@ -3859,5 +3859,85 @@ main();
     );
 }
 
+#[test]
+fn test_pillar3_speculative_promise_then_hook_and_nexttick_priority() {
+    // 1. Script that does NOT use process.nextTick: Promise.prototype.then stays bound to Boa's
+    // native Rust implementation (`[native code]`) with 0 JS wrapper closure allocations across 500 awaits.
+    let pure_async_code = r#"
+async function main() {
+    const isNativeThen = Function.prototype.toString.call(Promise.prototype.then).includes("[native code]");
+    let sum = 0;
+    for (let i = 0; i < 500; i++) {
+        sum += await Promise.resolve(1);
+    }
+    console.log(JSON.stringify({ sum, isNativeThen }));
+}
+main();
+"#;
+    let m1 = run_source_isolated(
+        "pillar3-pure-async",
+        pure_async_code,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(m1.stdout[0], r#"{"sum":500,"isNativeThen":true}"#);
+
+    // 2. Script that DOES use process.nextTick: Speculatively hooks Promise.prototype.then
+    // before execution so `process.nextTick` scheduled after `Promise.resolve().then(...)` in the
+    // same synchronous turn still drains BEFORE the `.then()` callback!
+    let nexttick_code = r#"
+async function main() {
+    const order = [];
+    Promise.resolve().then(() => order.push("promise-1"));
+    queueMicrotask(() => {
+        order.push("microtask-1");
+        process.nextTick(() => order.push("nextTick-nested"));
+    });
+    process.nextTick(() => order.push("nextTick-1"));
+    order.push("sync");
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    let caughtErr = "";
+    process.nextTick(() => order.push("nextTick-before-reject"));
+    try {
+        await Promise.reject(new Error("boom-reject"));
+    } catch (e) {
+        caughtErr = e.message;
+    }
+
+    console.log(JSON.stringify({ caughtErr, order }));
+}
+main();
+"#;
+    let m2 = run_source_isolated(
+        "pillar3-nexttick-async",
+        nexttick_code,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        m2.stdout[0],
+        r#"{"caughtErr":"boom-reject","order":["sync","nextTick-1","promise-1","microtask-1","nextTick-nested","nextTick-before-reject"]}"#
+    );
+
+    // 3. Subsequent script on the SAME warm realm that does NOT use process.nextTick:
+    // Verify `Promise.prototype.then` was restored to native `[native code]`!
+    let m3 = run_source_isolated(
+        "pillar3-restored-async",
+        pure_async_code,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(m3.stdout[0], r#"{"sum":500,"isNativeThen":true}"#);
+}
+
+
 
 

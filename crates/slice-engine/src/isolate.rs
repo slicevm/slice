@@ -1732,6 +1732,12 @@ impl SliceIsolate {
                 b"__slice_sync_process_env(true);",
             ));
         }
+        let has_next_tick = js_code.contains("nextTick");
+        if has_next_tick {
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_set_next_tick_hook(true);",
+            ));
+        }
         if is_worker {
             ensure_realm_shards(&mut realm, (1 << 8) | (1 << 3) | (1 << 2), false);
             if let Some(ref init_fn) = realm.init_worker_self_fn {
@@ -1852,6 +1858,11 @@ impl SliceIsolate {
                 b"__slice_sync_process_env(false);",
             ));
             BOA_ENV_MAP.with(|m| m.borrow_mut().clear());
+        }
+        if has_next_tick {
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_set_next_tick_hook(false);",
+            ));
         }
         BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
         crate::websocket::clear_thread_websocket_state();

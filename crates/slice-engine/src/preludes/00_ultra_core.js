@@ -210,14 +210,19 @@
   };
 
   // `process.nextTick` & `queueMicrotask`:
-  // Fast check (`if (__ntQ.length > 0)`) in `Promise.prototype.then` avoids loop overhead
-  // when no `nextTick` callbacks are queued while ensuring `nextTick` drains before `.then()`.
+  // Speculative On-Demand `Promise.prototype.then` Hook:
+  // By default, `Promise.prototype.then` stays bound to Boa's native Rust `__origThen` so
+  // `await` and `.then()` allocate 0 JS wrapper closures in scripts that do not use `nextTick`.
+  // When a script uses `process.nextTick` (or calls `__slice_enable_next_tick_hook()`),
+  // `Promise.prototype.then` is hooked to `__wrappedThen` so `nextTick` callbacks always
+  // drain before any `.then()` or `queueMicrotask` handler in the same turn.
   var __ntQ = [];
   var __qmQ = [];
   var __mtS = false;
+  var __ntHooked = false;
   var __origThen = Promise.prototype.then;
 
-  Promise.prototype.then = function(onF, onR) {
+  function __wrappedThen(onF, onR) {
     var wF = typeof onF === "function" ? function(v) {
       if (__ntQ.length > 0) {
         while (__ntQ.length > 0) {
@@ -234,9 +239,19 @@
           n.f.apply(undefined, n.a);
         }
       }
-      return onR(e);
+      throw onR(e);
     } : onR;
     return __origThen.call(this, wF, wR);
+  }
+
+  globalThis.__slice_set_next_tick_hook = function(enable) {
+    if (enable && !__ntHooked) {
+      __ntHooked = true;
+      Promise.prototype.then = __wrappedThen;
+    } else if (!enable && __ntHooked && __ntQ.length === 0) {
+      __ntHooked = false;
+      Promise.prototype.then = __origThen;
+    }
   };
 
   function __schedMt() {
@@ -263,6 +278,10 @@
   globalThis.process.nextTick = function(cb) {
     if (typeof cb !== "function") {
       throw new TypeError("process.nextTick requires a callback function");
+    }
+    if (!__ntHooked) {
+      __ntHooked = true;
+      Promise.prototype.then = __wrappedThen;
     }
     var a = [];
     for (var i = 1; i < arguments.length; i++) a.push(arguments[i]);
