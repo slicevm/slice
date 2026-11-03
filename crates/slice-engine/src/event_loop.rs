@@ -43,6 +43,7 @@ pub(crate) struct ScheduledTimer {
     pub(crate) id: u32,
     pub(crate) deadline_ms: u64,
     pub(crate) interval_ms: Option<u64>,
+    pub(crate) is_immediate: bool,
     pub(crate) callback: JsObject,
     pub(crate) args: Vec<JsValue>,
     pub(crate) cancelled: bool,
@@ -175,6 +176,23 @@ pub(crate) fn schedule_timer(
     is_interval: bool,
     args: Vec<JsValue>,
 ) -> Result<u32, SandboxViolation> {
+    schedule_timer_internal(callback, delay_ms, is_interval, false, args)
+}
+
+pub(crate) fn schedule_immediate(
+    callback: JsObject,
+    args: Vec<JsValue>,
+) -> Result<u32, SandboxViolation> {
+    schedule_timer_internal(callback, 0, false, true, args)
+}
+
+fn schedule_timer_internal(
+    callback: JsObject,
+    delay_ms: u64,
+    is_interval: bool,
+    is_immediate: bool,
+    args: Vec<JsValue>,
+) -> Result<u32, SandboxViolation> {
     EVENT_LOOP_STATE.with(|st| {
         let mut loop_st = st.borrow_mut();
         if loop_st.active_timer_count() >= MAX_ACTIVE_TIMERS {
@@ -199,6 +217,7 @@ pub(crate) fn schedule_timer(
             id,
             deadline_ms,
             interval_ms,
+            is_immediate,
             callback,
             args,
             cancelled: false,
@@ -494,9 +513,10 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
             continue;
         }
 
-        // 5. Fire all ready timers (`deadline_ms <= now_ms`) in deterministic `(deadline_ms, id)` order
+        // 5. Fire all ready timers (`deadline_ms <= now_ms`) in deterministic `(deadline_ms, !is_immediate, id)` order
+        // so `setImmediate` check-phase tasks always execute before `setTimeout(0)` timers scheduled at the same millisecond.
         let now_ms = current_event_loop_clock_ms();
-        let mut ready_timers: Vec<(u32, u64, JsObject, Vec<JsValue>)> = Vec::new();
+        let mut ready_timers: Vec<(u32, u64, bool, JsObject, Vec<JsValue>)> = Vec::new();
         EVENT_LOOP_STATE.with(|st| {
             let mut loop_st = st.borrow_mut();
             for timer in &mut loop_st.timers {
@@ -504,6 +524,7 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                     ready_timers.push((
                         timer.id,
                         timer.deadline_ms,
+                        timer.is_immediate,
                         timer.callback.clone(),
                         timer.args.clone(),
                     ));
@@ -518,8 +539,8 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
         });
 
         if !ready_timers.is_empty() {
-            ready_timers.sort_by_key(|(id, deadline, _, _)| (*deadline, *id));
-            for (_id, _deadline, cb, args) in ready_timers {
+            ready_timers.sort_by_key(|(id, deadline, is_imm, _, _)| (*deadline, !*is_imm, *id));
+            for (_id, _deadline, _is_imm, cb, args) in ready_timers {
                 total_ticks += 1;
                 if total_ticks > MAX_EVENT_LOOP_TICKS {
                     let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());

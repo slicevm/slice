@@ -26,8 +26,11 @@
 
 pub mod boa_realm;
 pub mod event_loop;
+pub mod host_bindings;
 pub mod intrinsics;
 pub mod isolate;
+pub mod js_preludes;
+pub mod node_builtins;
 pub mod numeric_vm;
 pub mod outbound_http;
 pub mod parser_and_compiler;

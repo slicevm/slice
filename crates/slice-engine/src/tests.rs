@@ -2420,3 +2420,192 @@ main();
     assert_eq!(out["rel"], "../d/file.tar.gz");
     assert_eq!(out["sum"], 42);
 }
+
+#[test]
+fn test_wave_a_next_tick_set_immediate_timers_promises_full_console_and_jsx_ssr() {
+    // 1. Verify strict task/microtask priority ordering:
+    //    sync -> process.nextTick -> Promise.then / queueMicrotask -> setImmediate -> setTimeout(0)
+    //    plus `clearImmediate` cancellation and `node:timers/promises` with virtual time-warp & AbortSignal.
+    let async_order_ts = r#"
+import * as timersPromises from "node:timers/promises";
+
+async function runSuite() {
+    const order: string[] = [];
+
+    setTimeout(() => order.push("timeout-0"), 0);
+    const cancelledImm = setImmediate(() => order.push("cancelled-immediate"));
+    clearImmediate(cancelledImm);
+    setImmediate((tag: string) => order.push(`immediate:${tag}`), "check");
+    Promise.resolve().then(() => order.push("promise-then"));
+    queueMicrotask(() => {
+        order.push("queue-microtask");
+        process.nextTick(() => order.push("nested-nextTick"));
+    });
+    process.nextTick((a: string, b: number) => order.push(`nextTick:${a}:${b}`), "hi", 1);
+    order.push("sync");
+
+    const delayedVal = await timersPromises.setTimeout(250, "warped-250ms");
+    const immVal = await timersPromises.setImmediate("imm-resolved");
+
+    let abortCaught = "";
+    try {
+        await timersPromises.setTimeout(5000, "never", {
+            signal: AbortSignal.abort(new Error("TimersPromiseAborted"))
+        });
+    } catch (e: any) {
+        abortCaught = String(e && e.message || e);
+    }
+
+    console.log(JSON.stringify({
+        order,
+        delayedVal,
+        immVal,
+        abortCaught
+    }));
+}
+runSuite();
+"#;
+
+    let bundled_order = slice_cas::strip_typescript_and_normalize(async_order_ts, true);
+    let bc_order = compile_source_to_bytecode(&bundled_order);
+    let mut iso_order = SliceIsolate::spawn(
+        "wave-a-order-tenant",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    iso_order.set_deterministic_seed(Some(20261105));
+    let m_order = iso_order.execute_bytecode(&bc_order, None).unwrap();
+    let out_order: serde_json::Value = serde_json::from_str(&m_order.stdout[0]).unwrap();
+    assert_eq!(
+        out_order["order"],
+        serde_json::json!([
+            "sync",
+            "nextTick:hi:1",
+            "promise-then",
+            "queue-microtask",
+            "nested-nextTick",
+            "immediate:check",
+            "timeout-0"
+        ])
+    );
+    assert_eq!(out_order["delayedVal"], "warped-250ms");
+    assert_eq!(out_order["immVal"], "imm-resolved");
+    assert!(out_order["abortCaught"]
+        .as_str()
+        .unwrap_or("")
+        .contains("TimersPromiseAborted"));
+
+    // 2. Verify full WHATWG `console.*` (`table`, `time`, `timeLog`, `timeEnd`, `group`, `groupEnd`, `count`, `countReset`, `dir`, `assert`)
+    //    and verify that Outbound Egress Secret DLP traps a secret leaked inside `console.table()`!
+    let console_ts = r#"
+console.group("OuterGroup");
+console.log("inside-outer");
+console.groupCollapsed("InnerGroup");
+console.count("hits");
+console.count("hits");
+console.countReset("hits");
+console.count("hits");
+console.groupEnd();
+console.groupEnd();
+
+console.time("db-query");
+console.timeLog("db-query", "rows=2");
+console.timeEnd("db-query");
+
+console.assert(true, "should-not-print");
+console.assert(false, "bad-invariant", 404);
+console.dir({ service: "slice", nested: { level: 2, deep: { hidden: true } } }, { depth: 1 });
+console.table([
+    { route: "/health", status: 200 },
+    { route: "/users", status: 201 }
+]);
+"#;
+    let bc_console = compile_source_to_bytecode(console_ts);
+    let mut iso_console = SliceIsolate::spawn(
+        "wave-a-console-tenant",
+        2,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    iso_console.set_deterministic_seed(Some(20261105));
+    let m_console = iso_console.execute_bytecode(&bc_console, None).unwrap();
+    let joined_console = m_console.stdout.join("\n");
+    assert!(joined_console.contains("OuterGroup\n  inside-outer\n  InnerGroup\n    hits: 1\n    hits: 2\n    hits: 1"));
+    assert!(joined_console.contains("db-query: 1.000ms rows=2"));
+    assert!(joined_console.contains("db-query: 2.000ms"));
+    assert!(joined_console.contains("Assertion failed: bad-invariant 404"));
+    assert!(joined_console.contains("{ service: 'slice', nested: [Object] }"));
+    assert!(joined_console.contains("| (index) | route     | status |"));
+    assert!(joined_console.contains("| 0       | '/health' | 200    |"));
+
+    // Verify Egress DLP firewall traps secret leaked via `console.table`
+    let dlp_table_js = r#"
+console.table([{ user: "alice", token: "sk_live_SUPER_SECRET_KEY_999" }]);
+"#;
+    let bc_dlp = compile_source_to_bytecode(dlp_table_js);
+    let mut iso_dlp = SliceIsolate::spawn(
+        "wave-a-dlp-console",
+        3,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        4 * 1024 * 1024,
+    );
+    iso_dlp.add_egress_audit_secret("sk_live_SUPER_SECRET_KEY_999");
+    let dlp_err = iso_dlp.execute_bytecode(&bc_dlp, None).unwrap_err();
+    assert!(
+        dlp_err.to_string().contains("EGRESS_SECRET_LEAK_BLOCKED"),
+        "Expected EGRESS_SECRET_LEAK_BLOCKED on console.table secret leak, got: {}",
+        dlp_err
+    );
+
+    // 3. Verify Native Oxc `.tsx` JSX/TSX Compilation + Built-In `slice:jsx` SSR Runtime & XSS Escaping
+    let tsx_source = r###"
+import { renderToString, raw } from "slice:jsx";
+
+interface BadgeProps {
+    label: string;
+    active?: boolean;
+}
+
+function Badge(props: BadgeProps) {
+    return <span className={props.active ? "badge-on" : "badge-off"} data-ok={props.active}>{props.label}</span>;
+}
+
+function Page(props: { user: string; items: string[] }) {
+    return (
+        <>
+            <header style={{ backgroundColor: "#111", fontSize: "14px" }}>
+                <h1>Hello {props.user}</h1>
+                <Badge label="PRO" active={true} />
+                <br />
+            </header>
+            <ul>
+                {props.items.map((item, idx) => <li key={idx}>{item}</li>)}
+            </ul>
+            {raw("<!-- trusted-footer -->")}
+        </>
+    );
+}
+
+const html = renderToString(
+    <Page user={'<script>alert("xss")</script>'} items={["one", "two & three"]} />
+);
+console.log(html);
+"###;
+    let compiled_tsx = slice_cas::strip_typescript_and_normalize(tsx_source, true);
+    let tsx_metrics = run_source_isolated(
+        "wave-a-tsx-tenant",
+        &compiled_tsx,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        tsx_metrics.stdout[0],
+        r#"<header style="background-color:#111;font-size:14px"><h1>Hello &lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;</h1><span class="badge-on" data-ok>PRO</span><br/></header><ul><li>one</li><li>two &amp; three</li></ul><!-- trusted-footer -->"#
+    );
+}
