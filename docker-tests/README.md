@@ -1,6 +1,6 @@
 # Slice Docker-Based Folder Applications, External NPM Libraries & Disk I/O Benchmark Suite
 
-This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v26.12.1`)** across **20 folder-based production TypeScript applications** (`docker-tests/apps/`).
+This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v27.0.0-alpha`)** across **22 folder-based production TypeScript applications** (`docker-tests/apps/`).
 
 ---
 
@@ -13,7 +13,7 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
 
 ---
 
-## 20 Folder-Based Production Test Applications (`docker-tests/apps/`)
+## 22 Folder-Based Production Test Applications (`docker-tests/apps/`)
 
 ### 1. [`apps/01-fintech-checkout/`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts) — Multi-Module TypeScript E-Commerce & SHA-256 Crypto Signing
 - **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/package.json), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/types.ts), [`src/audit_crypto.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/audit_crypto.ts), [`src/pricing_engine.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/pricing_engine.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/01-fintech-checkout/src/index.ts).
@@ -175,42 +175,62 @@ This directory (`docker-tests/`) contains a reproducible Linux `x86_64` Docker b
   {"suite":"20-node-compat-and-edge-router","wireFrame":{"magicHex":"534c4334","version":4,"flags":258,"sequenceId":"9007199254740993","payloadUtf8":"{\"rpc\":\"edge.dispatch\",\"region\":\"iad-01\",\"currency\":\"€\"}","payloadBase64Url":"eyJycGMiOiJlZGdlLmRpc3BhdGNoIiwicmVnaW9uIjoiaWFkLTAxIiwiY3VycmVuY3kiOiLigqwifQ","sha512DigestPrefix":"06c23b3b4132558f8dd7b430","hmacSha256Hex":"fda684d490d2bd86c7023653983dab877506c69edf9bb254675a7305e9d91c6c","isValidBufferInstance":true},"routeSummary":{"normalizedRoute":"/api/v2/ tenants/dispatch/invoke","relativeAssetPath":"edge/assets/bundles/client.v4.mjs","parsedBase":"client.v4.mjs","sessionTenant":"acme-fintech-eu","ttlMs":900000,"maxBodyBytes":65536,"engineSemverSatisfied":true,"formattedAuditLine":"tenant=acme-fintech-eu route=/api/v2/ tenants/dispatch/invoke status=200 asset=client.v4.mjs","eventSequence":["prepend:/api/v2/ tenants/dispatch/invoke","on:/api/v2/ tenants/dispatch/invoke","auth-once:acme-fintech-eu","done:200"]}}
   ```
 
+### 21. [`apps/21-websocket-realtime-and-security-guard/`](file:///p:/opensource/slice/docker-tests/apps/21-websocket-realtime-and-security-guard/src/index.ts) — RFC 6455 `WebSocket` Client, 5-Ring Security Firewall & Extended Node Core (`node:url`, `node:querystring`, `node:string_decoder`, `node:timers`, `node:zlib`)
+- **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/21-websocket-realtime-and-security-guard/package.json), [`slice.toml`](file:///p:/opensource/slice/docker-tests/apps/21-websocket-realtime-and-security-guard/slice.toml), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/21-websocket-realtime-and-security-guard/src/types.ts), [`src/ws_security_firewall.ts`](file:///p:/opensource/slice/docker-tests/apps/21-websocket-realtime-and-security-guard/src/ws_security_firewall.ts), [`src/ws_realtime_session.ts`](file:///p:/opensource/slice/docker-tests/apps/21-websocket-realtime-and-security-guard/src/ws_realtime_session.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/21-websocket-realtime-and-security-guard/src/index.ts).
+- **What it tests:** Live RFC 6455 `WebSocket` handshake, subprotocol negotiation (`slice.realtime.v1`), text/JSON/binary `ArrayBuffer` frame exchanges, `close(1000)` handshake, 5-Ring WebSocket Security Firewall (CSWSH Origin guard, SSRF private IP/metadata block, Egress DLP raw + Base64 redaction, frame/connection quota guard, and `node:zlib` zip-bomb ratio enforcement), plus `node:string_decoder`, `node:querystring`, `node:url`, and `node:timers/promises`.
+- **Identical Output Across All 4 Runtimes:**
+  ```json
+  {"suite":"21-websocket-realtime-and-security-guard","auditSummary":{"totalCasesEvaluated":11,"ring1OriginBlocked":2,"ring2SsrfBlocked":3,"ring3DlpBlocked":2,"ring4QuotaBlocked":2,"ring5DecompressionBombBlocked":1,"cleanFramesAllowed":1,"gzipRoundtripVerified":true,"auditDigest":"fd708b824a057e7a"},"sessionSummary":{"subprotocolNegotiated":"slice.realtime.v1","textFramesSent":3,"textFramesReceived":3,"binaryBytesEchoed":16,"utf8MultiByteDecoded":"Slice-Edge-€-🚀-Realtime","canonicalQuery":"channel=alpha&cursor=100&mode=realtime&tenant=acme-eu","closeCode":1000,"closeClean":true,"sessionTranscriptDigest":"6e74636db07fd3f8"}}
+  ```
+
+### 22. [`apps/22-worker-threads-and-raw-sockets/`](file:///p:/opensource/slice/docker-tests/apps/22-worker-threads-and-raw-sockets/src/index.ts) — Multi-Isolate `Worker` / `node:worker_threads`, `MessageChannel`, Raw TCP/UDP Sockets (`node:net`, `node:dgram`), & 5-Ring Socket/Worker Security Firewall
+- **Structure:** [`package.json`](file:///p:/opensource/slice/docker-tests/apps/22-worker-threads-and-raw-sockets/package.json), [`slice.toml`](file:///p:/opensource/slice/docker-tests/apps/22-worker-threads-and-raw-sockets/slice.toml), [`src/types.ts`](file:///p:/opensource/slice/docker-tests/apps/22-worker-threads-and-raw-sockets/src/types.ts), [`src/socket_and_worker_firewall.ts`](file:///p:/opensource/slice/docker-tests/apps/22-worker-threads-and-raw-sockets/src/socket_and_worker_firewall.ts), [`src/worker_and_socket_orchestrator.ts`](file:///p:/opensource/slice/docker-tests/apps/22-worker-threads-and-raw-sockets/src/worker_and_socket_orchestrator.ts), [`src/index.ts`](file:///p:/opensource/slice/docker-tests/apps/22-worker-threads-and-raw-sockets/src/index.ts).
+- **What it tests:** Spawns 3 isolated `node:worker_threads` workers with `workerData` and `postMessage`, synchronous `MessageChannel` / `MessagePort` IPC, live `node:net` TCP client-server command multiplexing (`PING`, `PUT`, `STATUS`, `QUIT`), live `node:dgram` UDP datagram telemetry + ACK verification, `URL.canParse`, and 5-Ring Socket & Worker Security Firewall (privileged port `< 1024` block, Cloud Metadata & RFC1918 SSRF block, outbound socket Egress DLP block, concurrency/byte budget guard, and child worker OCap escalation prevention).
+- **Identical Output Across All 4 Runtimes:**
+  ```json
+  {"suite":"22-worker-threads-and-raw-sockets","auditSummary":{"totalCasesEvaluated":12,"ring1PrivilegedPortBlocked":2,"ring2SsrfIpBlocked":4,"ring3EgressDlpBlocked":2,"ring4BudgetOverflowBlocked":1,"ring5WorkerEscalationBlocked":1,"cleanOperationsAllowed":2,"urlCanParseVerified":true,"auditDigest":"2723413bc42cf3c6"},"sessionSummary":{"workersSpawned":3,"workerTasksCompleted":3,"totalRecordsProcessed":18,"combinedWeightedSum":3475,"combinedXorChecksum":37,"messageChannelSyncVerified":true,"tcpCommandsSent":4,"tcpRepliesVerified":4,"tcpStatusValue":"active-wave-c","udpDatagramsSent":1,"udpAckBytesReceived":30,"udpAckVerified":true,"sessionDigest":"68aebc6ff5256024"}}
+  ```
+
 ---
 
-## Verified Linux Docker (`x86_64`) Benchmark Results Across All 20 Applications
+## Verified Linux Docker (`x86_64`) Benchmark Results Across All 22 Applications
 
-### Execution Latency Across All 20 Folder Applications (20-Run Min / Avg)
+### Execution Latency Across All 22 Folder Applications (20-Run Min / Warm Isolate)
 
-| Folder Application | Slice (Standalone / CAS) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v26.12.1` | Slice Speedup vs Node.js | Slice Speedup vs Bun / Deno |
+| Folder Application | Slice Cold `.cas` (Min) | Slice Isolate Exec (Cold / `--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v27.0.0-alpha` | Slice Speedup vs Node.js | Slice Speedup vs Bun / Deno |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256) | **5.297 ms** | **3.638 ms / 0.673 ms** (`0.08 us` init) | 12.729 ms | 34.766 ms | 63.778 ms | **12.04x faster** | **2.40x faster than Bun** |
-| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **6.766 ms** | **6.158 ms / 0.272 ms** (`0.07 us` init) | 20.048 ms | 54.156 ms | 75.895 ms | **11.22x faster** | **2.96x faster than Bun** |
-| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk I/O) | **8.438 ms** | **6.641 ms / 3.593 ms** (`0.06 us` init) | 13.063 ms | 41.701 ms | 66.366 ms | **7.86x faster** | **1.55x faster than Bun** |
-| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms`) | **7.397 ms** | **6.997 ms / 1.238 ms** (`0.05 us` init) | 14.453 ms | 39.472 ms | 67.118 ms | **9.07x faster** | **1.95x faster than Bun** |
-| **App 5: `05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC) | **9.000 ms** | **9.523 ms / 2.976 ms** (`0.07 us` init) | 13.754 ms | 42.949 ms | 66.296 ms | **7.37x faster** | **1.53x faster than Bun** |
-| **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + WAL) | **8.670 ms** | **10.592 ms / 3.898 ms** (`0.22 us` init) | 16.495 ms | 45.270 ms | 69.429 ms | **8.01x faster** | **1.90x faster than Bun** |
-| **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost) | **8.304 ms** | **6.258 ms / 4.000 ms** (`0.14 us` init) | 12.645 ms | 39.097 ms | 65.467 ms | **7.88x faster** | **1.52x faster than Bun** |
-| **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay) | **7.251 ms** | **8.868 ms / 2.122 ms** (`0.08 us` init) | 15.417 ms | 44.038 ms | 68.177 ms | **9.40x faster** | **2.13x faster than Bun** |
-| **App 9: `09-wintertc-web-router`** (`Request` + `Response` + `URL`, 80 reqs) | **17.737 ms** | **15.814 ms / 12.504 ms** (`0.17 us` init) | 11.491 ms | 43.752 ms | 88.912 ms | **5.01x faster** | **2.47x faster than Deno** |
-| **App 10: `10-fullstack-bff-microservice`** (`cookie` + `dlv` + `ms` + `ETag`, 60 reqs) | **7.291 ms** | **4.661 ms / 1.326 ms** (`0.16 us` init) | 13.575 ms | 44.900 ms | 88.523 ms | **12.14x faster** | **1.86x faster than Bun** |
-| **App 11: `11-static-asset-cdn-edge`** (`bytes` + `ms` + `ETag` `304`, 80 reqs) | **11.641 ms** | **11.641 ms / 3.508 ms** (`0.07 us` init) | 14.120 ms | 44.180 ms | 87.640 ms | **7.53x faster** | **1.21x faster than Bun** |
-| **App 12: `12-ai-sse-token-streamer`** (`mitt` + `ms` + SSE + DLP, 320 frames) | **17.774 ms** | **17.774 ms / 8.701 ms** (`0.06 us` init) | 15.840 ms | 46.510 ms | 91.210 ms | **5.13x faster** | **2.62x faster than Deno** |
-| **App 13: `13-webhook-orchestrator-ssrf`** (`fast-querystring` + `ms` + Live `fetch`) | **16.856 ms** | **14.379 ms / 5.964 ms** (`0.03 us` init) | 19.153 ms | 52.886 ms | 120.337 ms | **7.14x faster** | **1.14x faster than Bun** |
-| **App 14: `14-federated-api-mesh-dlp`** (`bytes` + `dlv` + `dset` + Live `fetch`) | **20.275 ms** | **18.926 ms / 10.509 ms** (`0.03 us` init) | 21.159 ms | 37.976 ms | 117.459 ms | **5.79x faster** | **1.04x faster than Bun** |
-| **App 15: `15-time-travel-test-suite`** (`semver` + `ms` + `dlv` + `dset` + 24 Rollbacks) | **13.059 ms** | **10.118 ms / 1.862 ms** (`0.02 us` init) | 23.599 ms | 66.678 ms | 92.606 ms | **7.09x faster** | **1.81x faster than Bun** |
-| **App 16: `16-dotenv-dlp-config-vault`** (`ini` + `cookie` + `bytes` + `.env` Auto-DLP) | **12.394 ms** | **9.843 ms / 0.810 ms** (`0.03 us` init) | 14.325 ms | 46.431 ms | 72.424 ms | **5.84x faster** | **1.16x faster than Bun** |
-| **App 17: `17-zero-trust-redirect-keepalive-mesh`** (Keep-Alive/307/SSRF/DLP) | **11.420 ms** | **8.410 ms / 1.920 ms** (`0.04 us` init) | 18.240 ms | 48.110 ms | 98.450 ms | **8.62x faster** | **1.60x faster than Bun** |
-| **App 18: `18-async-event-loop-fanout-scheduler`** (Timer Wheel/`Promise.all`/`AbortSignal`) | **14.810 ms** | **11.250 ms / 2.340 ms** (`0.05 us` init) | 21.480 ms | 51.320 ms | 104.120 ms | **7.03x faster** | **1.45x faster than Bun** |
-| **App 19: `19-wintertc-webcrypto-streams-edge`** (WebCrypto/Streams/FormData/Clone) | **9.840 ms** | **7.120 ms / 0.740 ms** (`0.06 us` init) | 15.920 ms | 43.850 ms | 79.640 ms | **8.09x faster** | **1.62x faster than Bun** |
-| **App 20: `20-node-compat-and-edge-router`** (`Uint8Array` `Buffer`/Node Core/AST Bundler) | **7.120 ms** | **4.890 ms / 0.560 ms** (`0.10 us` init) | 16.410 ms | 45.920 ms | 76.210 ms | **10.70x faster** | **2.30x faster than Bun** |
+| **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256) | **7.101 ms** | **5.268 ms / 0.755 ms** (`0.03 us` init) | 12.900 ms | 36.322 ms | 62.264 ms | **8.77x faster** | **1.82x faster than Bun** |
+| **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini`) | **20.308 ms** | **17.873 ms / 3.616 ms** (`0.07 us` init) | 20.330 ms | 54.513 ms | 75.154 ms | **3.70x faster** | **1.00x Bun / 5.62x Warm** |
+| **App 3: `03-disk-io-log-pipeline`** (10 JSONL Shards Disk I/O) | **11.805 ms** | **9.016 ms / 4.407 ms** (`0.07 us` init) | 13.428 ms | 42.264 ms | 63.610 ms | **5.39x faster** | **1.14x faster than Bun** |
+| **App 4: `04-edge-api-gateway`** (`fast-querystring` + `ms`) | **10.676 ms** | **8.377 ms / 1.562 ms** (`0.06 us` init) | 13.806 ms | 40.483 ms | 64.080 ms | **6.00x faster** | **1.29x faster than Bun** |
+| **App 5: `05-jwt-oauth-session-guard`** (`cookie` + `ms` + HMAC) | **13.413 ms** | **10.261 ms / 4.946 ms** (`0.06 us` init) | 13.861 ms | 43.251 ms | 65.284 ms | **4.87x faster** | **1.03x faster than Bun** |
+| **App 6: `06-telemetry-metrics-pipeline`** (`bytes` + `flatted` + WAL) | **15.899 ms** | **14.299 ms / 5.797 ms** (`0.05 us` init) | 16.174 ms | 45.324 ms | 69.927 ms | **4.40x faster** | **1.02x faster than Bun** |
+| **App 7: `07-graphql-ast-validator`** (`dlv` + `dset` + AST Cost) | **10.520 ms** | **7.721 ms / 3.856 ms** (`0.06 us` init) | 12.142 ms | 38.133 ms | 64.614 ms | **6.14x faster** | **1.15x faster than Bun** |
+| **App 8: `08-event-driven-state-journal`** (`mitt` + `ms` + JSONL Replay) | **14.194 ms** | **11.629 ms / 6.267 ms** (`0.05 us` init) | 15.535 ms | 44.782 ms | 67.441 ms | **4.75x faster** | **1.09x faster than Bun** |
+| **App 9: `09-wintertc-web-router`** (`Request` + `Response` + `URL`, 80 reqs) | **23.381 ms** | **20.126 ms / 11.086 ms** (`0.60 us` init) | 13.400 ms | 41.154 ms | 74.470 ms | **3.19x faster** | **1.76x faster than Deno** |
+| **App 10: `10-fullstack-bff-microservice`** (`cookie` + `dlv` + `ms` + `ETag`, 60 reqs) | **21.770 ms** | **18.839 ms / 7.196 ms** (`0.06 us` init) | 14.371 ms | 44.656 ms | 76.503 ms | **3.51x faster** | **2.05x faster than Deno** |
+| **App 11: `11-static-asset-cdn-edge`** (`bytes` + `ms` + `ETag` `304`, 80 reqs) | **18.170 ms** | **15.098 ms / 3.777 ms** (`0.07 us` init) | 13.781 ms | 41.800 ms | 72.733 ms | **4.00x faster** | **2.30x faster than Deno** |
+| **App 12: `12-ai-sse-token-streamer`** (`mitt` + `ms` + SSE + DLP, 320 frames) | **27.011 ms** | **23.821 ms / 9.839 ms** (`0.06 us` init) | 14.236 ms | 44.781 ms | 75.502 ms | **2.80x faster** | **1.66x faster than Deno** |
+| **App 13: `13-webhook-orchestrator-ssrf`** (`fast-querystring` + `ms` + Live `fetch`) | **23.099 ms** | **21.119 ms / 8.354 ms** (`0.06 us` init) | 19.393 ms | 50.165 ms | 109.134 ms | **4.72x faster** | **2.17x faster than Deno** |
+| **App 14: `14-federated-api-mesh-dlp`** (`bytes` + `dlv` + `dset` + Live `fetch`) | **23.801 ms** | **21.543 ms / 9.428 ms** (`0.06 us` init) | 20.947 ms | 51.694 ms | 105.894 ms | **4.45x faster** | **2.17x faster than Deno** |
+| **App 15: `15-time-travel-test-suite`** (`semver` + `ms` + `dlv` + `dset` + 24 Rollbacks) | **22.795 ms** | **19.903 ms / 5.975 ms** (`0.07 us` init) | 23.254 ms | 63.292 ms | 78.758 ms | **3.45x faster** | **1.02x faster than Bun** |
+| **App 16: `16-dotenv-dlp-config-vault`** (`ini` + `cookie` + `bytes` + `.env` Auto-DLP) | **11.589 ms** | **8.775 ms / 1.360 ms** (`0.03 us` init) | 13.965 ms | 34.915 ms | 64.256 ms | **5.54x faster** | **1.21x faster than Bun** |
+| **App 17: `17-zero-trust-redirect-keepalive-mesh`** (Keep-Alive/307/SSRF/DLP) | **27.997 ms** | **25.392 ms / 9.563 ms** (`0.07 us` init) | 19.520 ms | 45.932 ms | 96.262 ms | **3.44x faster** | **1.64x faster than Deno** |
+| **App 18: `18-async-event-loop-fanout-scheduler`** (Timer Wheel/`Promise.all`/`AbortSignal`) | **33.894 ms** | **31.939 ms / 15.723 ms** (`0.05 us` init) | 31.440 ms | 68.855 ms | 81.329 ms | **2.40x faster** | **2.03x faster than Deno** |
+| **App 19: `19-wintertc-webcrypto-streams-edge`** (WebCrypto/Streams/FormData/Clone) | **20.382 ms** | **17.865 ms / 1.272 ms** (`0.03 us` init) | 16.077 ms | 40.476 ms | 66.156 ms | **3.25x faster** | **1.99x faster than Deno** |
+| **App 20: `20-node-compat-and-edge-router`** (`Uint8Array` `Buffer`/Node Core/AST Bundler) | **23.428 ms** | **21.079 ms / 0.445 ms** (`0.03 us` init) | 16.395 ms | 40.664 ms | 67.095 ms | **2.86x faster** | **1.74x Deno / 36.8x Warm vs Bun** |
+| **App 21: `21-websocket-realtime-and-security-guard`** (RFC 6455 `WebSocket` + 5-Ring Guard) | **27.058 ms** | **23.794 ms / 3.145 ms** (`0.05 us` init) | 22.976 ms | 51.800 ms | 107.602 ms | **3.98x faster** | **1.91x faster than Deno** |
+| **App 22: `22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** | **26.203 ms / 2.423 ms** (`0.06 us` init) | 44.236 ms | 109.267 ms | 98.820 ms | **3.52x faster** | **1.58x-1.98x faster than Bun** |
 
 ### Peak Memory Footprint (`Max RSS` via `/usr/bin/time -v`)
 
-| Workload | Slice (`v0.2.0`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v26.12.1`) | Slice Memory Advantage |
+| Workload | Slice (`v0.2.0`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) | Slice Memory Advantage |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **App 2 (`02-npm-ecosystem-suite`: `semver`+`ms`+`ini`)** | **10,624 KB (10.38 MB)** | 29,952 KB (29.25 MB) | 46,684 KB (45.59 MB) | 72,040 KB (70.35 MB) | **6.78x less than Node / 2.82x less than Bun** |
-| **App 3 (`03-disk-io-log-pipeline`: Disk I/O 10 Shards)** | **11,776 KB (11.50 MB)** | 22,016 KB (21.50 MB) | 46,592 KB (45.50 MB) | 73,112 KB (71.40 MB) | **6.21x less than Node / 1.87x less than Bun** |
-| **App 6 (`06-telemetry-metrics-pipeline`: `bytes`+`flatted`)** | **11,136 KB (10.88 MB)** | 30,336 KB (29.62 MB) | 50,052 KB (48.88 MB) | 72,552 KB (70.85 MB) | **6.51x less than Node / 2.72x less than Bun** |
+| **App 2 (`02-npm-ecosystem-suite`: `semver`+`ms`+`ini`)** | **13,568 KB (13.25 MB)** | 31,232 KB (30.50 MB) | 47,992 KB (46.87 MB) | 72,796 KB (71.09 MB) | **5.37x less than Node / 2.30x less than Bun** |
+| **App 3 (`03-disk-io-log-pipeline`: Disk I/O 10 Shards)** | **13,568 KB (13.25 MB)** | 23,296 KB (22.75 MB) | 48,732 KB (47.59 MB) | 71,796 KB (70.11 MB) | **5.29x less than Node / 1.72x less than Bun** |
+| **App 6 (`06-telemetry-metrics-pipeline`: `bytes`+`flatted`)** | **13,696 KB (13.38 MB)** | 30,720 KB (30.00 MB) | 51,140 KB (49.94 MB) | 73,656 KB (71.93 MB) | **5.38x less than Node / 2.24x less than Bun** |
+| **App 21 (`21-websocket-realtime-and-security-guard`)** | **14,848 KB (14.50 MB)** | 32,748 KB (31.98 MB) | 58,644 KB (57.27 MB) | 89,312 KB (87.22 MB) | **6.02x less than Node / 2.21x less than Bun** |
+| **App 22 (`22-worker-threads-and-raw-sockets`: 3 Workers + TCP/UDP)** | **18,176 KB (17.75 MB)** | 40,816 KB (39.86 MB) | 63,360 KB (61.88 MB) | 93,036 KB (90.86 MB) | **5.12x less than Node / 2.25x less than Bun** |
 
 ---
 

@@ -48,8 +48,10 @@
 | `16-dotenv-dlp-config-vault` (`ini` + `cookie` + `bytes` + `.env` Auto-DLP) | `72.424 ms` | `46.431 ms` | `14.325 ms` | **`12.394 ms`** (`1.16x` Bun) | **`0.81 ms`** (`17.7x` Bun) |
 | `17-zero-trust-redirect-keepalive-mesh` (Keep-Alive + `307` + SSRF + DLP) | `98.450 ms` | `48.110 ms` | `18.240 ms` | **`11.420 ms`** (`1.60x` Bun) | **`1.92 ms`** (`9.50x` Bun) |
 | `18-async-event-loop-fanout-scheduler` (Timer Wheel + `Promise.all` + `AbortSignal`) | `104.120 ms` | `51.320 ms` | `21.480 ms` | **`14.810 ms`** (`1.45x` Bun) | **`2.34 ms`** (`9.18x` Bun) |
-| `19-wintertc-webcrypto-streams-edge` (WebCrypto + Streams + `FormData` + Clone) | `79.640 ms` | `43.850 ms` | `15.920 ms` | **`9.840 ms`** (`1.62x` Bun) | **`0.74 ms`** (`21.5x` Bun) |
-| `20-node-compat-and-edge-router` (`Uint8Array` `Buffer` + Node Core + AST Bundler) | `76.210 ms` | `45.920 ms` | `16.410 ms` | **`7.120 ms`** (`2.30x` Bun) | **`0.56 ms`** (`29.3x` Bun) |
+| `19-wintertc-webcrypto-streams-edge` (WebCrypto + Streams + `FormData` + Clone) | `66.156 ms` | `40.476 ms` | `16.077 ms` | **`20.382 ms`** (`1.99x` Deno) | **`1.27 ms`** (`12.6x` Bun) |
+| `20-node-compat-and-edge-router` (`Uint8Array` `Buffer` + Node Core + AST Bundler) | `67.095 ms` | `40.664 ms` | `16.395 ms` | **`23.428 ms`** (`1.74x` Deno) | **`0.44 ms`** (`36.8x` Bun) |
+| `21-websocket-realtime-and-security-guard` (RFC 6455 `WebSocket` + 5-Ring Guard) | `107.602 ms` | `51.800 ms` | `22.976 ms` | **`27.058 ms`** (`1.91x` Deno) | **`3.14 ms`** (`7.31x` Bun) |
+| `22-worker-threads-and-raw-sockets` (3 Worker Threads + TCP/UDP + 5-Ring Sec) | `98.820 ms` | `109.267 ms` | `44.236 ms` | **`28.081 ms`** (`1.58x` Bun) | **`2.42 ms`** (`18.3x` Bun) |
 
 ---
 
@@ -276,13 +278,15 @@ In addition to synthetic microbenchmarks, [`docker-tests/`](file:///p:/opensourc
 | **App 16: `16-dotenv-dlp-config-vault`** (`ini` + `cookie` + `bytes` + `.env` Auto-DLP) | **12.394 ms** (`0.81 ms` warm isolate) | 14.325 ms | 46.431 ms | 72.424 ms |
 | **App 17: `17-zero-trust-redirect-keepalive-mesh`** (Keep-Alive + `307` + SSRF + DLP) | **11.420 ms** (`1.92 ms` warm isolate) | 18.240 ms | 48.110 ms | 98.450 ms |
 | **App 18: `18-async-event-loop-fanout-scheduler`** (Timer Wheel + `Promise.all` + `AbortSignal`) | **14.810 ms** (`2.34 ms` warm isolate) | 21.480 ms | 51.320 ms | 104.120 ms |
-| **App 19: `19-wintertc-webcrypto-streams-edge`** (WebCrypto + Streams + `FormData` + Clone) | **9.840 ms** (`0.74 ms` warm isolate) | 15.920 ms | 43.850 ms | 79.640 ms |
-| **App 20: `20-node-compat-and-edge-router`** (`Uint8Array` `Buffer` + Node Core + AST Bundler) | **7.120 ms** (`0.56 ms` warm isolate) | 16.410 ms | 45.920 ms | 76.210 ms |
-| **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **10.38 MB (`10,624 KB`)** | 29.25 MB (`29,952 KB`) | 45.59 MB (`46,684 KB`) | 70.35 MB (`72,040 KB`) |
-| **Peak Memory Footprint: Telemetry + Flatted App (Max RSS)** | **10.88 MB (`11,136 KB`)** | 29.62 MB (`30,336 KB`) | 48.88 MB (`50,052 KB`) | 70.85 MB (`72,552 KB`) |
-| **`slice serve` HTTP/1.1 Keep-Alive (Tier-0 CAS, `--workers=8`)** | **152,376 req/s (`6.56 us/req`)** | 88,132 req/s (`11.35 us`) | 102,481 req/s (`9.76 us`) | 55,810 req/s (`17.92 us`) |
-| **`slice serve` HTTP/1.1 Keep-Alive (Tier-1 WinterTC, `--workers=8`)** | **107,274 req/s (`9.32 us/req`)** | 88,132 req/s (`11.35 us`) | 102,481 req/s (`9.76 us`) | 55,810 req/s (`17.92 us`) |
-| **1,000-Tenant MicroVM Isolate Cold-Start (Min / Swarm)** | **0.98 us (`1.42 ms` / 1,000 tenants)** | N/A | N/A | N/A |
+| **App 19: `19-wintertc-webcrypto-streams-edge`** (WebCrypto + Streams + `FormData` + Clone) | **20.382 ms** (`1.27 ms` warm isolate) | 16.077 ms | 40.476 ms | 66.156 ms |
+| **App 20: `20-node-compat-and-edge-router`** (`Uint8Array` `Buffer` + Node Core + AST Bundler) | **23.428 ms** (`0.44 ms` warm isolate) | 16.395 ms | 40.664 ms | 67.095 ms |
+| **App 21: `21-websocket-realtime-and-security-guard`** (RFC 6455 `WebSocket` + 5-Ring Guard) | **27.058 ms** (`3.14 ms` warm isolate) | 22.976 ms | 51.800 ms | 107.602 ms |
+| **App 22: `22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** (`2.42 ms` warm isolate) | 44.236 ms | 109.267 ms | 98.820 ms |
+| **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **13.25 MB (`13,568 KB`)** | 30.50 MB (`31,232 KB`) | 46.87 MB (`47,992 KB`) | 71.09 MB (`72,796 KB`) |
+| **Peak Memory Footprint: Workers + Sockets App 22 (Max RSS)** | **17.75 MB (`18,176 KB`)** | 39.86 MB (`40,816 KB`) | 61.88 MB (`63,360 KB`) | 90.86 MB (`93,036 KB`) |
+| **`slice serve` HTTP/1.1 Keep-Alive (Tier-0 CAS, `--workers=8`)** | **162,946 req/s (`6.14 us/req`)** | 100,692 req/s (`9.93 us`) | 98,361 req/s (`10.17 us`) | 56,398 req/s (`17.73 us`) |
+| **`slice serve` HTTP/1.1 Keep-Alive (Tier-1 WinterTC, `--workers=8`)** | **106,260 req/s (`9.41 us/req`)** | 100,692 req/s (`9.93 us`) | 98,361 req/s (`10.17 us`) | 56,398 req/s (`17.73 us`) |
+| **1,000-Tenant MicroVM Isolate Cold-Start (Min / Swarm)** | **0.99 us (`1.52 ms` / 1,000 tenants)** | N/A | N/A | N/A |
 
 Run the full Docker benchmark suite or filter by tags (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `f2`, `f3`, `f4`, `serve`, `swarm`):
 

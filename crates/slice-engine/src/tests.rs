@@ -4002,6 +4002,63 @@ console.log(JSON.stringify({ b64, b64Url, roundtripOk: roundtrip === secret, byt
     );
 }
 
+#[test]
+fn test_pillar5_sliceboa_payload_compaction_and_multiline_template_preservation() {
+    let raw_bundle = r#"var __slice_modules = {};//__SLICE_RC:0123456789abcdef
+// #slice-source: src/index.ts|/app/src/index.ts
+    // Indented comment that should be stripped from SLICEBOA
+    const rx = /'/g;
+    const inlineBacktickStr = "hello ` world";
+    const multilineTpl = `line1
+    indented_line2
+        indented_line3`;
+    function compute() {
+        return multilineTpl;
+    }
+    console.log(JSON.stringify({
+        rxOk: rx.test("'"),
+        strOk: inlineBacktickStr.includes("`"),
+        lines: compute().split("\n")
+    }));
+"#;
+
+    let bc = crate::compile_source_to_bytecode(raw_bundle);
+    let bc_str = std::str::from_utf8(&bc).unwrap();
+    let inner = bc_str
+        .strip_prefix("SLICEBOA{\n")
+        .and_then(|s| s.strip_suffix("\n}"))
+        .unwrap();
+
+    // 1. Line 1 `__SLICE_RC` header must remain intact at byte offset 21
+    assert!(inner.starts_with("var __slice_modules = {};//__SLICE_RC:0123456789abcdef\n"));
+    // 2. `#slice-source` and full-line comments and code indentation must be stripped
+    assert!(!inner.contains("#slice-source"));
+    assert!(!inner.contains("Indented comment"));
+    assert!(inner.contains("\nconst rx = /'/g;\n"));
+    // 3. Multi-line template literal indentation must be preserved verbatim!
+    assert!(inner.contains("`line1\n    indented_line2\n        indented_line3`"));
+    assert!(
+        inner.len() < raw_bundle.len(),
+        "Expected compacted SLICEBOA payload ({}) to be smaller than raw bundle ({})",
+        inner.len(),
+        raw_bundle.len()
+    );
+
+    let mut isolate = SliceIsolate::spawn(
+        "pillar5-compact-test",
+        1,
+        CapabilityToken::pure_compute(),
+        500_000,
+        16 * 1024 * 1024,
+    );
+    let m = isolate.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(
+        m.stdout[0],
+        r#"{"rxOk":true,"strOk":true,"lines":["line1","    indented_line2","        indented_line3"]}"#
+    );
+}
+
+
 
 
 

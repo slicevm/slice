@@ -577,13 +577,17 @@ fn compile_or_get_worker_bytecode(raw_script: &str) -> Arc<Vec<u8>> {
     }
 
     let transpiled_js = slice_cas::strip_typescript_and_normalize(raw_script, true);
+    let compacted_js = crate::parser_and_compiler::compact_js_for_boa_bytecode(&transpiled_js);
     let rc_key = format!("{:016x}", script_hash);
-    let wrapped = if transpiled_js.starts_with("var __slice_modules = {};//__SLICE_RC:") {
-        format!("SLICEBOA{{\n{}\n}}", transpiled_js)
+    let wrapped = if compacted_js.starts_with("var __slice_modules = {};//__SLICE_RC:") {
+        format!("SLICEBOA{{\n{}\n}}", compacted_js.trim_end())
     } else {
         format!(
             "SLICEBOA{{\nvar __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"] || (__rc[\"{}\"] = function() {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n}});\n__run();\n}}",
-            rc_key, rc_key, rc_key, transpiled_js
+            rc_key,
+            rc_key,
+            rc_key,
+            compacted_js.trim_end()
         )
     };
     let arc_bc = Arc::new(wrapped.into_bytes());

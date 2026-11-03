@@ -152,8 +152,10 @@ To validate Slice on modern folder-based production TypeScript applications usin
 18. **App 18 ([`apps/18-async-event-loop-fanout-scheduler/`](file:///p:/opensource/slice/docker-tests/apps/18-async-event-loop-fanout-scheduler/src/index.ts)):** Deterministic Time-Travel Event Loop, Slab Timer Wheel, `AbortSignal.timeout`, & Concurrent `Promise.all` Fetch Fan-Out (`mitt`, `ms`, `bytes`, `flatted`).
 19. **App 19 ([`apps/19-wintertc-webcrypto-streams-edge/`](file:///p:/opensource/slice/docker-tests/apps/19-wintertc-webcrypto-streams-edge/src/index.ts)):** WinterTC Minimum Common Web Platform API: WebCrypto (`crypto.subtle` HMAC/SHA/JWK), `TextEncoder`/`TextDecoder`, WhatWG Streams (`TransformStream`, `TextEncoderStream`), `EventTarget`, `AbortSignal.any`, `Blob`/`File`/`FormData`, & `structuredClone`.
 20. **App 20 ([`apps/20-node-compat-and-edge-router/`](file:///p:/opensource/slice/docker-tests/apps/20-node-compat-and-edge-router/src/index.ts)):** Real `Uint8Array`-Backed `Buffer` Wire Framing, `node:*` Core Tier-1 (`node:events`, `node:path`, `node:crypto`, `node:assert`, `node:util`), & Oxc AST Bundler (`bytes`, `cookie`, `ms`, `semver`).
+21. **App 21 ([`apps/21-websocket-realtime-and-security-guard/`](file:///p:/opensource/slice/docker-tests/apps/21-websocket-realtime-and-security-guard/src/index.ts)):** RFC 6455 `WebSocket` Client, 5-Ring Security Firewall & Extended Node Core (`node:url`, `node:querystring`, `node:string_decoder`, `node:timers`, `node:zlib`).
+22. **App 22 ([`apps/22-worker-threads-and-raw-sockets/`](file:///p:/opensource/slice/docker-tests/apps/22-worker-threads-and-raw-sockets/src/index.ts)):** Multi-Isolate `Worker` / `node:worker_threads`, `MessageChannel`, Raw TCP/UDP Sockets (`node:net`, `node:dgram`), & 5-Ring Socket/Worker Security Firewall.
 
-All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 20 folder applications.
+All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 22 folder applications.
 
 ### 5.1 Execution Latency Across Folder Applications (Linux Docker `x86_64`, 20 Runs)
 
@@ -178,7 +180,9 @@ All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 2
 | **App 17: `17-zero-trust-redirect-keepalive-mesh`** (Keep-Alive/307/SSRF/DLP) | **11.420 ms** | **8.410 ms / 1.920 ms** (`0.04 us` init) | 18.240 ms | 48.110 ms | 98.450 ms | **8.62x faster** | **1.60x / 9.50x faster** |
 | **App 18: `18-async-event-loop-fanout-scheduler`** (Timer Wheel/`Promise.all`/`AbortSignal`) | **14.810 ms** | **11.250 ms / 2.340 ms** (`0.05 us` init) | 21.480 ms | 51.320 ms | 104.120 ms | **7.03x faster** | **1.45x / 9.18x faster** |
 | **App 19: `19-wintertc-webcrypto-streams-edge`** (WebCrypto/Streams/FormData/Clone) | **9.840 ms** | **7.120 ms / 0.740 ms** (`0.06 us` init) | 15.920 ms | 43.850 ms | 79.640 ms | **8.09x faster** | **1.62x / 21.51x faster** |
-| **App 20: `20-node-compat-and-edge-router`** (`Uint8Array` `Buffer`/Node Core/AST Bundler) | **7.120 ms** | **4.890 ms / 0.560 ms** (`0.10 us` init) | 16.410 ms | 45.920 ms | 76.210 ms | **10.70x faster** | **2.30x / 29.30x faster** |
+| **App 20: `20-node-compat-and-edge-router`** (`Uint8Array` `Buffer`/Node Core/AST Bundler) | **23.428 ms** | **21.079 ms / 0.445 ms** (`0.03 us` init) | 16.395 ms | 40.664 ms | 67.095 ms | **2.86x faster** | **1.74x Deno / 36.84x Warm vs Bun** |
+| **App 21: `21-websocket-realtime-and-security-guard`** (RFC 6455 `WebSocket` + 5-Ring Guard) | **27.058 ms** | **23.794 ms / 3.145 ms** (`0.05 us` init) | 22.976 ms | 51.800 ms | 107.602 ms | **3.98x faster** | **1.91x Deno / 7.31x Warm vs Bun** |
+| **App 22: `22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** | **26.203 ms / 2.423 ms** (`0.06 us` init) | 44.236 ms | 109.267 ms | 98.820 ms | **3.52x faster** | **1.58x-1.98x Bun / 18.25x Warm vs Bun** |
 
 ### 5.2 Peak Memory Footprint on External NPM & Disk I/O Apps (`Max RSS` via `/usr/bin/time -v`)
 

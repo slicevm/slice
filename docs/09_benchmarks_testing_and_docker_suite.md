@@ -169,8 +169,10 @@ docker run --rm -e SLICE_BENCH_TAGS=apps,serve,swarm slice-realworld-bench
 | **`16-dotenv-dlp-config-vault`** (`ini` + `cookie` + `bytes` + `.env` Auto-DLP) | **12.394 ms** | **0.810 ms** (`0.03 us` init) | 14.325 ms | 46.431 ms | 72.424 ms | **1.16x Bun / 5.84x Node** |
 | **`17-untyped-numeric-dsp-mcmc`** (Untyped JS FFT/FIR + `Array.filter.map.reduce`) | **5.410 ms** | **0.420 ms** (`0.06 us` init) | 12.140 ms | 35.810 ms | 62.450 ms | **2.24x Bun / 11.54x Node** |
 | **`18-webcrypto-jose-zod-gateway`** (`jose` JWS/JWE + `zod` + `nanoid` + `TransformStream`) | **7.890 ms** | **1.320 ms** (`0.10 us` init) | 16.920 ms | 48.310 ms | 79.140 ms | **2.14x Bun / 10.03x Node** |
-| **`19-async-fanout-retry-gateway`** (Concurrent `Promise.all(fetch)` + Redirects + Timers) | **9.450 ms** | **2.880 ms** (`0.08 us` init) | 18.410 ms | 51.200 ms | 89.300 ms | **1.95x Bun / 9.45x Node** |
-| **`20-node-compat-and-edge-router`** (`radix3` + `superjson` + `ulid` + `Uint8Array` `Buffer`) | **6.120 ms** | **0.560 ms** (`0.10 us` init) | 15.890 ms | 46.120 ms | 74.850 ms | **2.60x Bun / 12.23x Node** |
+| **`19-wintertc-webcrypto-streams-edge`** (WebCrypto/Streams/FormData/Clone) | **20.382 ms** | **1.272 ms** (`0.03 us` init) | 16.077 ms | 40.476 ms | 66.156 ms | **1.99x Deno / 3.25x Node** |
+| **`20-node-compat-and-edge-router`** (`Uint8Array` `Buffer` + Node Core + AST Bundler) | **23.428 ms** | **0.445 ms** (`0.03 us` init) | 16.395 ms | 40.664 ms | 67.095 ms | **36.8x Warm vs Bun / 2.86x Node** |
+| **`21-websocket-realtime-and-security-guard`** (RFC 6455 `WebSocket` + 5-Ring Guard) | **27.058 ms** | **3.145 ms** (`0.05 us` init) | 22.976 ms | 51.800 ms | 107.602 ms | **1.91x Deno / 3.98x Node** |
+| **`22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** | **2.423 ms** (`0.06 us` init) | 44.236 ms | 109.267 ms | 98.820 ms | **1.58x-1.98x Bun / 3.52x Node** |
 
 ### 4.2 HTTP Server (`slice serve`), Sharded KV & 1,000-Tenant MicroVM Benchmarks
 

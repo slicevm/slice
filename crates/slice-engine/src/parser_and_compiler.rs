@@ -1115,14 +1115,94 @@ pub(crate) fn expr_to_dotted_chain(expr: &Expr) -> String {
 // Compiler: JS/TS Source -> SLICESNP Bytecode Snapshot
 // ============================================================================
 
+fn update_backtick_state_on_line(line: &str, mut in_backtick: bool) -> bool {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+    while i < len {
+        let b = bytes[i];
+        if b == b'\\' {
+            i += 2;
+            continue;
+        }
+        if in_backtick {
+            if b == b'`' {
+                in_backtick = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'\'' || b == b'"' {
+            let q = b;
+            let mut j = i + 1;
+            let mut found_close = None;
+            while j < len {
+                if bytes[j] == b'\\' {
+                    j += 2;
+                    continue;
+                }
+                if bytes[j] == q {
+                    found_close = Some(j);
+                    break;
+                }
+                j += 1;
+            }
+            if let Some(close_idx) = found_close {
+                i = close_idx + 1;
+                continue;
+            }
+        } else if b == b'`' {
+            in_backtick = true;
+        }
+        i += 1;
+    }
+    in_backtick
+}
+
+/// Compacts a JavaScript payload before embedding it into a `SLICEBOA` bytecode buffer:
+/// - Preserves the `var __slice_modules = {};//__SLICE_RC:<16-hex>` header on line 1 at exact byte offset 21.
+/// - Preserves multi-line backtick template literals verbatim (`in_backtick`).
+/// - Strips leading/trailing indentation whitespace, blank lines, and `// #slice-source:` / `//` comment lines
+///   from the `SLICEBOA` bytecode slot while keeping the `.cas` archive's `source` slot human-readable.
+pub(crate) fn compact_js_for_boa_bytecode(js: &str) -> String {
+    let mut out = String::with_capacity(js.len());
+    let mut in_backtick = false;
+    for (idx, line) in js.lines().enumerate() {
+        if idx == 0 && line.starts_with("var __slice_modules =") {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_backtick {
+            out.push_str(line);
+            out.push('\n');
+            if line.as_bytes().contains(&b'`') {
+                in_backtick = update_backtick_state_on_line(line, in_backtick);
+            }
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        out.push_str(trimmed);
+        out.push('\n');
+        if trimmed.as_bytes().contains(&b'`') {
+            in_backtick = update_backtick_state_on_line(trimmed, in_backtick);
+        }
+    }
+    out
+}
+
 /// Compiles JavaScript/TypeScript source into a compact binary `SLICESNP` bytecode buffer.
 /// Combines **Oxc** production TypeScript transpilation, **Tier-0/Tier-2** fast-path SIMD intrinsics,
 /// and **Boa (`boa_engine`)** full-spec ES2024+ execution for classes, closures, RegExp, Map/Set, and OOP.
 pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
     if raw_source.starts_with("var __slice_modules =") {
-        let mut bytes = Vec::with_capacity(12 + raw_source.len());
+        let compacted = compact_js_for_boa_bytecode(raw_source);
+        let mut bytes = Vec::with_capacity(12 + compacted.len());
         bytes.extend_from_slice(b"SLICEBOA{\n");
-        bytes.extend_from_slice(raw_source.as_bytes());
+        bytes.extend_from_slice(compacted.trim_end().as_bytes());
         bytes.extend_from_slice(b"\n}");
         return bytes;
     }
@@ -1237,9 +1317,10 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         && !source.contains("Worker");
 
     if uses_full_es_vm && !has_direct_intrinsic_attack {
-        let mut bytes = Vec::with_capacity(12 + source.len());
+        let compacted = compact_js_for_boa_bytecode(&source);
+        let mut bytes = Vec::with_capacity(12 + compacted.len());
         bytes.extend_from_slice(b"SLICEBOA{\n");
-        bytes.extend_from_slice(source.as_bytes());
+        bytes.extend_from_slice(compacted.trim_end().as_bytes());
         bytes.extend_from_slice(b"\n}");
         return bytes;
     }
