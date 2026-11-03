@@ -159,10 +159,19 @@ impl HardwareProtectionDomain {
     }
 }
 
-/// Extracts the lowercase hostname (without `:port` or IPv6 brackets) from a `host` or `host:port` string.
+/// Extracts the lowercase hostname (without scheme, path, `:port`, or IPv6 brackets) from a `host`, `host:port`, or URL string.
 #[inline]
 pub fn extract_clean_hostname(host: &str) -> String {
-    let trimmed = host.trim();
+    let mut trimmed = host.trim();
+    if let Some((_, after_scheme)) = trimmed.split_once("://") {
+        trimmed = after_scheme;
+    }
+    if let Some((authority, _)) = trimmed.split_once(['/', '?', '#']) {
+        trimmed = authority;
+    }
+    if let Some((_, after_auth)) = trimmed.rsplit_once('@') {
+        trimmed = after_auth;
+    }
     let without_port = if let Some(rest) = trimmed.strip_prefix('[') {
         if let Some((ipv6, _)) = rest.split_once(']') {
             ipv6
@@ -181,6 +190,43 @@ pub fn extract_clean_hostname(host: &str) -> String {
     without_port.to_ascii_lowercase()
 }
 
+/// Attempts to parse non-canonical IPv4 literal strings (octal `0177.0.0.1`, hex `0x7f.0.0.1`,
+/// integer/dword `2130706433`, or shorthand 2/3-part dotted quads like `127.1` or `169.254.43518`)
+/// into a canonical `std::net::Ipv4Addr` so SSRF guards cannot be bypassed via alternative IP encodings.
+fn parse_nonstandard_ipv4(h: &str) -> Option<std::net::Ipv4Addr> {
+    if h.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = h.split('.').collect();
+    if parts.len() > 4 {
+        return None;
+    }
+    let mut vals = Vec::with_capacity(parts.len());
+    for part in &parts {
+        if part.is_empty() {
+            return None;
+        }
+        let val = if let Some(hex) = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
+            u32::from_str_radix(hex, 16).ok()?
+        } else if part.len() > 1 && part.starts_with('0') && part.bytes().all(|b| b.is_ascii_digit()) {
+            u32::from_str_radix(part, 8).ok()?
+        } else {
+            part.parse::<u32>().ok()?
+        };
+        vals.push(val);
+    }
+    let ip_u32 = match vals.as_slice() {
+        [a] => *a,
+        [a, b] if *a <= 0xff && *b <= 0x00ff_ffff => (*a << 24) | *b,
+        [a, b, c] if *a <= 0xff && *b <= 0xff && *c <= 0xffff => (*a << 24) | (*b << 16) | *c,
+        [a, b, c, d] if *a <= 0xff && *b <= 0xff && *c <= 0xff && *d <= 0xff => {
+            (*a << 24) | (*b << 16) | (*c << 8) | *d
+        }
+        _ => return None,
+    };
+    Some(std::net::Ipv4Addr::from(ip_u32))
+}
+
 /// Returns `true` if `host` resolves to a cloud instance metadata endpoint
 /// (AWS/GCP/Azure/DigitalOcean `169.254.169.254`, AWS ECS `169.254.170.2`,
 /// Alibaba `100.100.100.200`, AWS IPv6 `fd00:ec2::254`, or GCP `metadata.google.internal`).
@@ -188,7 +234,7 @@ pub fn extract_clean_hostname(host: &str) -> String {
 #[inline]
 pub fn is_cloud_metadata_ssrf_target(host: &str) -> bool {
     let h = extract_clean_hostname(host);
-    matches!(
+    if matches!(
         h.as_str(),
         "169.254.169.254"
             | "169.254.170.2"
@@ -197,11 +243,26 @@ pub fn is_cloud_metadata_ssrf_target(host: &str) -> bool {
             | "metadata.google.internal"
             | "metadata.goog"
             | "instance-data"
-    )
+    ) {
+        return true;
+    }
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        if is_cloud_metadata_ip(ip) {
+            return true;
+        }
+    }
+    if let Some(v4) = parse_nonstandard_ipv4(&h) {
+        if is_cloud_metadata_ip(std::net::IpAddr::V4(v4)) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Returns `true` if `host` is a cloud metadata endpoint, loopback address (`localhost`, `127.0.0.0/8`, `::1`),
-/// link-local (`169.254.0.0/16`), or RFC1918 private network (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`).
+/// link-local (`169.254.0.0/16`, `fe80::/10`), RFC1918 private network (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`),
+/// CGNAT (`100.64.0.0/10`), benchmark (`198.18.0.0/15`), IETF protocol (`192.0.0.0/24`), multicast (`224.0.0.0/4`, `ff00::/8`),
+/// IPv6 Unique Local (`fc00::/7`), or any non-canonical numeric IP representation (octal, hex, dword, shorthand IPv4).
 /// Wildcard `allow_net = ["*"]` never grants access to these targets; they require explicit host allowlisting.
 #[inline]
 pub fn is_private_or_loopback_ssrf_target(host: &str) -> bool {
@@ -209,22 +270,20 @@ pub fn is_private_or_loopback_ssrf_target(host: &str) -> bool {
         return true;
     }
     let h = extract_clean_hostname(host);
-    if matches!(h.as_str(), "localhost" | "0.0.0.0" | "::1" | "0:0:0:0:0:0:0:1")
-        || h.starts_with("127.")
-        || h.starts_with("10.")
-        || h.starts_with("192.168.")
-        || h.starts_with("169.254.")
+    if matches!(
+        h.as_str(),
+        "localhost" | "0.0.0.0" | "::" | "::1" | "0:0:0:0:0:0:0:1" | "0:0:0:0:0:0:0:0"
+    ) || h.ends_with(".localhost")
     {
         return true;
     }
-    if let Some(rest) = h.strip_prefix("172.") {
-        if let Some((second_octet_str, _)) = rest.split_once('.') {
-            if let Ok(octet) = second_octet_str.parse::<u8>() {
-                if (16..=31).contains(&octet) {
-                    return true;
-                }
-            }
-        }
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return is_private_or_loopback_ip(ip);
+    }
+    if parse_nonstandard_ipv4(&h).is_some() {
+        // Any non-canonical numeric IPv4 literal (octal `0177.0.0.1`, hex `0x7f.0.0.1`,
+        // dword `2130706433`, or shorthand `127.1`) is unconditionally blocked under wildcard allow_net.
+        return true;
     }
     false
 }
@@ -253,7 +312,9 @@ pub fn is_cloud_metadata_ip(ip: std::net::IpAddr) -> bool {
 /// Returns `true` if `ip` is a cloud metadata IP, loopback (`127.0.0.0/8`, `::1`),
 /// unspecified (`0.0.0.0`, `::`), link-local (`169.254.0.0/16`, `fe80::/10`),
 /// RFC 1918 private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`),
-/// CGNAT (`100.64.0.0/10`), unique local (`fc00::/7`), or IPv4-mapped IPv6 equivalent.
+/// CGNAT (`100.64.0.0/10`), IETF protocol (`192.0.0.0/24`), TEST-NET (`192.0.2.0/24`,
+/// `198.51.100.0/24`, `203.0.113.0/24`), benchmark (`198.18.0.0/15`), multicast (`224.0.0.0/4`, `ff00::/8`),
+/// reserved (`240.0.0.0/4`), unique local (`fc00::/7`), or IPv4-mapped IPv6 equivalent.
 #[inline]
 pub fn is_private_or_loopback_ip(ip: std::net::IpAddr) -> bool {
     if is_cloud_metadata_ip(ip) {
@@ -267,7 +328,12 @@ pub fn is_private_or_loopback_ip(ip: std::net::IpAddr) -> bool {
                 || v4.is_link_local()
                 || v4.is_unspecified()
                 || v4.is_broadcast()
-                || (octs[0] == 100 && (octs[1] & 0b1100_0000) == 64)
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || (octs[0] == 100 && (octs[1] & 0b1100_0000) == 64) // 100.64.0.0/10 CGNAT
+                || (octs[0] == 192 && octs[1] == 0 && octs[2] == 0) // 192.0.0.0/24 IETF Protocol
+                || (octs[0] == 198 && (octs[1] == 18 || octs[1] == 19)) // 198.18.0.0/15 Benchmark
+                || octs[0] >= 240 // 240.0.0.0/4 Reserved for future use
         }
         std::net::IpAddr::V6(v6) => {
             if let Some(mapped_v4) = v6.to_ipv4_mapped() {
@@ -276,8 +342,10 @@ pub fn is_private_or_loopback_ip(ip: std::net::IpAddr) -> bool {
             let segs = v6.segments();
             v6.is_loopback()
                 || v6.is_unspecified()
-                || (segs[0] & 0xfe00) == 0xfc00
-                || (segs[0] & 0xffc0) == 0xfe80
+                || v6.is_multicast()
+                || (segs[0] & 0xfe00) == 0xfc00 // fc00::/7 Unique Local
+                || (segs[0] & 0xffc0) == 0xfe80 // fe80::/10 Link-Local
+                || (segs[0] == 0x2001 && segs[1] == 0x0db8) // 2001:db8::/32 Documentation
         }
     }
 }
@@ -1025,6 +1093,70 @@ env_file = ".env.production"
             let parsed: IpAddr = pub_ip.parse().unwrap();
             assert!(!is_cloud_metadata_ip(parsed));
             assert!(!is_private_or_loopback_ip(parsed));
+        }
+    }
+
+    #[test]
+    fn test_nsec8_noncanonical_ip_and_special_cidr_ssrf_blocking() {
+        use std::net::IpAddr;
+
+        // Octal, hex, dword, and shorthand metadata IPs must be caught as cloud metadata targets
+        for meta_bypass in [
+            "http://2852039166/latest/meta-data/",
+            "http://0251.0376.0251.0376/",
+            "http://0xa9.0xfe.0xa9.0xfe/",
+            "http://169.254.43518/",
+            "http://[::ffff:169.254.169.254]/",
+        ] {
+            assert!(
+                is_cloud_metadata_ssrf_target(meta_bypass),
+                "Expected cloud metadata detection for {}",
+                meta_bypass
+            );
+        }
+
+        // Octal, hex, dword, shorthand loopback/private, and special-use CIDRs must be blocked under wildcard allow_net
+        for ssrf_bypass in [
+            "http://0177.0.0.1:8080/",
+            "http://0x7f.0.0.1/",
+            "http://2130706433/",
+            "http://127.1/",
+            "http://10.1/",
+            "http://sub.localhost:3000/",
+            "http://[fc00::1]/",
+            "http://[fe80::1]/",
+            "http://100.64.0.1/",
+            "http://198.18.0.1/",
+            "http://192.0.0.1/",
+            "http://224.0.0.1/",
+            "http://[ff02::1]/",
+        ] {
+            assert!(
+                is_private_or_loopback_ssrf_target(ssrf_bypass),
+                "Expected SSRF target classification for {}",
+                ssrf_bypass
+            );
+        }
+
+        // Verify special-use IPs in `is_private_or_loopback_ip`
+        for special_ip in [
+            "192.0.0.1",
+            "192.0.2.1",
+            "198.18.0.1",
+            "198.19.255.254",
+            "198.51.100.1",
+            "203.0.113.1",
+            "224.0.0.1",
+            "240.0.0.1",
+            "ff02::1",
+            "2001:db8::1",
+        ] {
+            let parsed: IpAddr = special_ip.parse().unwrap();
+            assert!(
+                is_private_or_loopback_ip(parsed),
+                "Expected special-use IP blocking for {}",
+                special_ip
+            );
         }
     }
 }

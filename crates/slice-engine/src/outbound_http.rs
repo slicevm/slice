@@ -1,7 +1,9 @@
 //! Outbound `fetch()` HTTP/1.1 & TLS 1.3 (`rustls`) Engine with Keep-Alive Connection Pooling,
 //! Pre-Connect DNS Resolved-IP SSRF Firewall, Zero-Trust Hop-by-Hop Redirect Guard, and Egress DLP.
 
-use crate::boa_realm::{BOA_ACTIVE_TENANT, BOA_EGRESS_SECRETS, BOA_NET_HOSTS, BOA_VIOLATION};
+use crate::boa_realm::{
+    BOA_ACTIVE_TENANT, BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VIOLATION,
+};
 use crate::state_and_kv::verify_egress_secrets_slice;
 use serde::Serialize;
 use slice_sandbox::SandboxViolation;
@@ -15,6 +17,46 @@ use std::time::{Duration, Instant};
 const MAX_REDIRECT_HOPS: usize = 5;
 const MAX_IDLE_CONNS_GLOBAL: usize = 32;
 const IDLE_CONN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum allowed size of outbound HTTP response headers (`64 KB`).
+pub const MAX_OUTBOUND_HEADER_BYTES: usize = 64 * 1024;
+/// Maximum allowed size of an outbound HTTP response body (`16 MB`), further bounded by active tenant memory budget.
+pub const MAX_OUTBOUND_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Compile-time lookup table for RFC 9110 Section 5.6.2 `tchar` token characters.
+const HTTP_TCHAR_TABLE: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut c = 0usize;
+    while c < 256 {
+        let b = c as u8;
+        t[c] = matches!(
+            b,
+            b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_'
+                | b'`' | b'|' | b'~' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
+        );
+        c += 1;
+    }
+    t
+};
+
+/// Validates an HTTP header field name against RFC 9110 `tchar` rules (blocks `\r`, `\n`, `\0`, `:`, spaces, etc.).
+#[inline]
+pub fn is_valid_http_header_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| HTTP_TCHAR_TABLE[b as usize])
+}
+
+/// Validates an HTTP header field value (blocks `\r`, `\n`, `\0`, and ASCII control characters except HTAB `\t`).
+#[inline]
+pub fn is_valid_http_header_value(val: &str) -> bool {
+    val.bytes()
+        .all(|b| b == b'\t' || (b >= 0x20 && b != 0x7F))
+}
+
+/// Validates an HTTP request target (`path_and_query`) to prevent request line splitting via spaces or control chars.
+#[inline]
+pub fn is_valid_request_target(target: &str) -> bool {
+    !target.is_empty() && target.bytes().all(|b| b > 0x20 && b != 0x7F)
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct OutboundUrlParts {
@@ -74,6 +116,19 @@ pub(crate) enum OutboundStream {
     Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
 }
 
+impl OutboundStream {
+    pub(crate) fn set_read_timeout(&mut self, dur: Option<Duration>) {
+        match self {
+            OutboundStream::Plain(s) => {
+                let _ = s.set_read_timeout(dur);
+            }
+            OutboundStream::Tls(s) => {
+                let _ = s.get_ref().set_read_timeout(dur);
+            }
+        }
+    }
+}
+
 impl Read for OutboundStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
@@ -100,6 +155,7 @@ impl Write for OutboundStream {
 }
 
 struct PooledOutboundConn {
+    tenant_id: String,
     is_https: bool,
     host_port: String,
     stream: OutboundStream,
@@ -135,14 +191,24 @@ pub fn clear_outbound_conn_pool() {
     }
 }
 
-fn take_pooled_stream(is_https: bool, host_port: &str) -> Option<OutboundStream> {
+fn current_tenant_id() -> String {
+    BOA_ACTIVE_TENANT.with(|t| {
+        let b = t.borrow();
+        if b.is_empty() {
+            "boa-tenant".to_string()
+        } else {
+            b.clone()
+        }
+    })
+}
+
+fn take_pooled_stream(tenant_id: &str, is_https: bool, host_port: &str) -> Option<OutboundStream> {
     let now = Instant::now();
     if let Ok(mut vec) = shared_conn_pool().lock() {
         vec.retain(|entry| now.duration_since(entry.last_used) < IDLE_CONN_TIMEOUT);
-        if let Some(pos) = vec
-            .iter()
-            .rposition(|e| e.is_https == is_https && e.host_port == host_port)
-        {
+        if let Some(pos) = vec.iter().rposition(|e| {
+            e.tenant_id == tenant_id && e.is_https == is_https && e.host_port == host_port
+        }) {
             let entry = vec.swap_remove(pos);
             return Some(entry.stream);
         }
@@ -150,7 +216,12 @@ fn take_pooled_stream(is_https: bool, host_port: &str) -> Option<OutboundStream>
     None
 }
 
-fn return_pooled_stream(is_https: bool, host_port: String, stream: OutboundStream) {
+fn return_pooled_stream(
+    tenant_id: String,
+    is_https: bool,
+    host_port: String,
+    stream: OutboundStream,
+) {
     let now = Instant::now();
     if let Ok(mut vec) = shared_conn_pool().lock() {
         vec.retain(|entry| now.duration_since(entry.last_used) < IDLE_CONN_TIMEOUT);
@@ -158,6 +229,7 @@ fn return_pooled_stream(is_https: bool, host_port: String, stream: OutboundStrea
             vec.remove(0);
         }
         vec.push(PooledOutboundConn {
+            tenant_id,
             is_https,
             host_port,
             stream,
@@ -333,18 +405,11 @@ pub(crate) fn check_boa_outbound_fetch_ocap_and_dlp(
 
 /// Resolves DNS for `parts` and validates every resolved `SocketAddr` against the Pre-Connect
 /// Resolved-IP SSRF Firewall (preventing DNS rebinding attacks to `169.254.169.254` or `127.0.0.1`).
-fn resolve_and_verify_ssrf_socket_addrs(
+pub(crate) fn resolve_and_verify_ssrf_socket_addrs(
     parts: &OutboundUrlParts,
     explicit_host_grant: bool,
 ) -> Result<Vec<SocketAddr>, String> {
-    let tenant_id = BOA_ACTIVE_TENANT.with(|t| {
-        let b = t.borrow();
-        if b.is_empty() {
-            "boa-tenant".to_string()
-        } else {
-            b.clone()
-        }
-    });
+    let tenant_id = current_tenant_id();
 
     let mut addrs: Vec<SocketAddr> = (parts.hostname.as_str(), parts.port)
         .to_socket_addrs()
@@ -388,30 +453,105 @@ fn resolve_and_verify_ssrf_socket_addrs(
     Ok(addrs)
 }
 
-pub(crate) fn decode_chunked_http_body(raw: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(raw.len());
-    let mut pos = 0;
+/// Strictly parses an HTTP/1.1 `Transfer-Encoding: chunked` body with checked arithmetic (`N-Sec-5`),
+/// strict hex length validation (`1..=16` hex digits), and bounded decoded payload size.
+/// Returns:
+/// - `Ok(None)` if `raw` does not yet contain the complete terminating `0\r\n...\r\n` chunk.
+/// - `Ok(Some((decoded_bytes, consumed_raw_bytes)))` when the complete chunked stream is decoded.
+/// - `Err(io::Error)` (`InvalidData` or `OutOfMemory`) on malformed chunk headers or size overflow.
+pub fn parse_chunked_body(
+    raw: &[u8],
+    max_decoded_bytes: usize,
+) -> Result<Option<(Vec<u8>, usize)>, std::io::Error> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
     while pos < raw.len() {
         let Some(rel_end) = raw[pos..].windows(2).position(|w| w == b"\r\n") else {
-            break;
+            if raw.len() - pos > 1024 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "chunk header line exceeds 1024 bytes without CRLF",
+                ));
+            }
+            return Ok(None);
         };
-        let size_line = std::str::from_utf8(&raw[pos..pos + rel_end]).unwrap_or("");
+        let size_line = std::str::from_utf8(&raw[pos..pos + rel_end]).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid UTF-8 in chunk size line",
+            )
+        })?;
         let size_hex = size_line.split(';').next().unwrap_or("").trim();
-        let Ok(chunk_len) = usize::from_str_radix(size_hex, 16) else {
-            break;
-        };
-        pos += rel_end + 2;
-        if chunk_len == 0 {
-            break;
+        if size_hex.is_empty()
+            || size_hex.len() > 16
+            || !size_hex.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "malformed hexadecimal chunk size",
+            ));
         }
-        let end = (pos + chunk_len).min(raw.len());
-        out.extend_from_slice(&raw[pos..end]);
-        pos = (end + 2).min(raw.len());
+        let chunk_len = usize::from_str_radix(size_hex, 16).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk size overflow")
+        })?;
+        let data_start = pos
+            .checked_add(rel_end)
+            .and_then(|v| v.checked_add(2))
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk offset overflow")
+            })?;
+
+        if chunk_len == 0 {
+            // Final `0\r\n` chunk; wait for trailing `\r\n` (or optional trailers + `\r\n\r\n`)
+            if raw.len() < data_start.saturating_add(2) {
+                return Ok(None);
+            }
+            if &raw[data_start..data_start + 2] == b"\r\n" {
+                return Ok(Some((out, data_start + 2)));
+            }
+            if let Some(trailer_end) = raw[data_start..].windows(4).position(|w| w == b"\r\n\r\n") {
+                return Ok(Some((out, data_start + trailer_end + 4)));
+            }
+            return Ok(None);
+        }
+
+        let new_decoded_len = out.len().checked_add(chunk_len).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "decoded chunked total overflow",
+            )
+        })?;
+        if new_decoded_len > max_decoded_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                "chunked HTTP body exceeded maximum memory budget",
+            ));
+        }
+
+        let data_end = data_start.checked_add(chunk_len).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk data_end overflow")
+        })?;
+        let frame_end = data_end.checked_add(2).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk frame_end overflow")
+        })?;
+
+        if raw.len() < frame_end {
+            return Ok(None);
+        }
+        if &raw[data_end..frame_end] != b"\r\n" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "missing CRLF after chunk payload",
+            ));
+        }
+
+        out.extend_from_slice(&raw[data_start..data_end]);
+        pos = frame_end;
     }
-    out
+    Ok(None)
 }
 
-fn dial_fresh_outbound_stream(
+pub(crate) fn dial_fresh_outbound_stream(
     parts: &OutboundUrlParts,
     verified_addrs: &[SocketAddr],
 ) -> Result<OutboundStream, String> {
@@ -478,27 +618,22 @@ fn find_header_delimiter(buf: &[u8]) -> Option<(usize, usize)> {
         })
 }
 
-fn chunked_stream_complete(raw: &[u8]) -> bool {
-    let mut pos = 0;
-    while pos < raw.len() {
-        let Some(rel_end) = raw[pos..].windows(2).position(|w| w == b"\r\n") else {
-            return false;
-        };
-        let size_line = std::str::from_utf8(&raw[pos..pos + rel_end]).unwrap_or("");
-        let size_hex = size_line.split(';').next().unwrap_or("").trim();
-        let Ok(chunk_len) = usize::from_str_radix(size_hex, 16) else {
-            return true;
-        };
-        pos += rel_end + 2;
-        if chunk_len == 0 {
-            return raw.len() >= pos + 2;
-        }
-        if raw.len() < pos + chunk_len + 2 {
-            return false;
-        }
-        pos += chunk_len + 2;
-    }
-    false
+fn trap_outbound_memory_exceeded(requested: usize, limit: usize) -> std::io::Error {
+    let tenant_id = current_tenant_id();
+    BOA_VIOLATION.with(|v| {
+        *v.borrow_mut() = Some(SandboxViolation::MemoryCeilingExceeded {
+            tenant_id,
+            requested,
+            limit,
+        });
+    });
+    std::io::Error::new(
+        std::io::ErrorKind::OutOfMemory,
+        format!(
+            "MemoryCeilingExceeded: outbound HTTP response ({} bytes) exceeded budget ({} bytes)",
+            requested, limit
+        ),
+    )
 }
 
 fn send_and_read_framed_http11(
@@ -509,13 +644,30 @@ fn send_and_read_framed_http11(
     stream.write_all(req_buf)?;
     stream.flush()?;
 
+    let effective_max_body = BOA_KV_MEM_BUDGET.with(|m| {
+        let (used, limit) = m.get();
+        limit.saturating_sub(used).min(MAX_OUTBOUND_BODY_BYTES)
+    });
+
     let mut raw_resp = Vec::with_capacity(4096);
     let mut scratch = [0u8; 4096];
 
-    // 1. Read until end of HTTP response headers (`\r\n\r\n`)
+    // 1. Read until end of HTTP response headers (`\r\n\r\n`), capped at `MAX_OUTBOUND_HEADER_BYTES` (64 KB)
     let (hdr_end, body_start) = loop {
         if let Some(found) = find_header_delimiter(&raw_resp) {
+            if found.0 > MAX_OUTBOUND_HEADER_BYTES {
+                return Err(trap_outbound_memory_exceeded(
+                    found.0,
+                    MAX_OUTBOUND_HEADER_BYTES,
+                ));
+            }
             break found;
+        }
+        if raw_resp.len() > MAX_OUTBOUND_HEADER_BYTES {
+            return Err(trap_outbound_memory_exceeded(
+                raw_resp.len(),
+                MAX_OUTBOUND_HEADER_BYTES,
+            ));
         }
         let n = stream.read(&mut scratch)?;
         if n == 0 {
@@ -568,21 +720,50 @@ fn send_and_read_framed_http11(
         }
     }
 
-    // 2. Frame the response body without waiting for TCP EOF whenever possible
+    // 2. Frame the response body with strict `effective_max_body` ceiling enforcement (`N-Sec-1` & `N-Sec-5`)
     let no_body_status = method == "HEAD" || matches!(status_code, 100..=199 | 204 | 304);
     let decoded_body = if no_body_status {
         String::new()
     } else if is_chunked {
-        while !chunked_stream_complete(&raw_resp[body_start..]) {
-            let n = stream.read(&mut scratch)?;
-            if n == 0 {
-                peer_closed = true;
-                break;
+        loop {
+            match parse_chunked_body(&raw_resp[body_start..], effective_max_body) {
+                Ok(Some((decoded, _consumed))) => {
+                    break String::from_utf8_lossy(&decoded).into_owned();
+                }
+                Ok(None) => {
+                    if raw_resp.len().saturating_sub(body_start) > effective_max_body.saturating_add(65536) {
+                        return Err(trap_outbound_memory_exceeded(
+                            raw_resp.len().saturating_sub(body_start),
+                            effective_max_body,
+                        ));
+                    }
+                    let n = stream.read(&mut scratch)?;
+                    if n == 0 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "truncated chunked HTTP response body",
+                        ));
+                    }
+                    raw_resp.extend_from_slice(&scratch[..n]);
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::OutOfMemory {
+                        return Err(trap_outbound_memory_exceeded(
+                            effective_max_body.saturating_add(1),
+                            effective_max_body,
+                        ));
+                    }
+                    return Err(e);
+                }
             }
-            raw_resp.extend_from_slice(&scratch[..n]);
         }
-        String::from_utf8_lossy(&decode_chunked_http_body(&raw_resp[body_start..])).into_owned()
     } else if let Some(expected_len) = content_length {
+        if expected_len > effective_max_body {
+            return Err(trap_outbound_memory_exceeded(
+                expected_len,
+                effective_max_body,
+            ));
+        }
         while raw_resp.len().saturating_sub(body_start) < expected_len {
             let remaining = expected_len - (raw_resp.len() - body_start);
             let to_read = remaining.min(scratch.len());
@@ -597,7 +778,26 @@ fn send_and_read_framed_http11(
         String::from_utf8_lossy(&raw_resp[body_start..end_idx]).into_owned()
     } else {
         peer_closed = true;
-        let _ = stream.read_to_end(&mut raw_resp);
+        loop {
+            let current_body_len = raw_resp.len().saturating_sub(body_start);
+            if current_body_len > effective_max_body {
+                return Err(trap_outbound_memory_exceeded(
+                    current_body_len,
+                    effective_max_body,
+                ));
+            }
+            let n = stream.read(&mut scratch)?;
+            if n == 0 {
+                break;
+            }
+            if current_body_len.saturating_add(n) > effective_max_body {
+                return Err(trap_outbound_memory_exceeded(
+                    current_body_len.saturating_add(n),
+                    effective_max_body,
+                ));
+            }
+            raw_resp.extend_from_slice(&scratch[..n]);
+        }
         String::from_utf8_lossy(&raw_resp[body_start..]).into_owned()
     };
 
@@ -617,6 +817,25 @@ fn execute_single_http11_hop(
     req_headers: &[(String, String)],
     body: &str,
 ) -> Result<RawHttpResponse, String> {
+    // N-Sec-2: Strictly validate method, request target, Host header, and all custom headers against CRLF / control char injection
+    if !is_valid_http_header_name(method) {
+        return Err(format!("InvalidMethod: '{}' contains invalid token characters", method));
+    }
+    if !is_valid_request_target(&parts.path_and_query) {
+        return Err("InvalidRequestTarget: URL path/query contains forbidden whitespace or control characters".to_string());
+    }
+    if !is_valid_http_header_value(&parts.host_header) {
+        return Err("InvalidHostHeader: Host contains forbidden control characters".to_string());
+    }
+    for (k, v) in req_headers {
+        if !is_valid_http_header_name(k) || !is_valid_http_header_value(v) {
+            return Err(format!(
+                "InvalidHeader: CRLF or invalid token character blocked in header '{}'",
+                k
+            ));
+        }
+    }
+
     let mut req_buf = Vec::with_capacity(256 + body.len());
     let _ = write!(
         &mut req_buf,
@@ -638,12 +857,14 @@ fn execute_single_http11_hop(
         req_buf.extend_from_slice(b"\r\n");
     }
 
-    // 1. Try warm Keep-Alive stream from `OUTBOUND_CONN_POOL` first
-    if let Some(mut pooled_stream) = take_pooled_stream(parts.is_https, &parts.host_port) {
+    let tenant_id = current_tenant_id();
+
+    // 1. Try tenant-scoped warm Keep-Alive stream from `SHARED_OUTBOUND_CONN_POOL` first (`N-Sec-7`)
+    if let Some(mut pooled_stream) = take_pooled_stream(&tenant_id, parts.is_https, &parts.host_port) {
         if let Ok(resp) = send_and_read_framed_http11(&mut pooled_stream, &req_buf, method) {
             OUTBOUND_POOL_REUSE_COUNT.with(|c| c.set(c.get() + 1));
             if !resp.peer_closed {
-                return_pooled_stream(parts.is_https, parts.host_port.clone(), pooled_stream);
+                return_pooled_stream(tenant_id, parts.is_https, parts.host_port.clone(), pooled_stream);
             }
             return Ok(resp);
         }
@@ -655,7 +876,7 @@ fn execute_single_http11_hop(
     let resp = send_and_read_framed_http11(&mut fresh_stream, &req_buf, method)
         .map_err(|e| format!("HTTP/1.1 exchange failed with {}: {}", parts.host_port, e))?;
     if !resp.peer_closed {
-        return_pooled_stream(parts.is_https, parts.host_port.clone(), fresh_stream);
+        return_pooled_stream(tenant_id, parts.is_https, parts.host_port.clone(), fresh_stream);
     }
     Ok(resp)
 }

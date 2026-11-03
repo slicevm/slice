@@ -299,9 +299,13 @@ pub(crate) fn find_http_header_end(buf: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
+/// Maximum allowed inbound HTTP request body size (`4 MB`).
+pub(crate) const MAX_INBOUND_BODY_BYTES: usize = 4 * 1024 * 1024;
+
 #[inline]
 pub(crate) fn http_status_reason(code: u16) -> &'static str {
     match code {
+        101 => "Switching Protocols",
         200 => "OK",
         201 => "Created",
         204 => "No Content",
@@ -314,10 +318,68 @@ pub(crate) fn http_status_reason(code: u16) -> &'static str {
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        408 => "Request Timeout",
+        413 => "Payload Too Large",
         429 => "Too Many Requests",
+        431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         _ => "OK",
     }
+}
+
+fn write_http_error_and_close(
+    stream: &mut TcpStream,
+    status: u16,
+    json_body: &str,
+) -> Result<()> {
+    let mut resp = Vec::with_capacity(256 + json_body.len());
+    let _ = write!(
+        &mut resp,
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nServer: Slice-NexusJS/0.2\r\n\r\n{}",
+        status,
+        http_status_reason(status),
+        json_body.len(),
+        json_body
+    );
+    let _ = stream.write_all(&resp);
+    let _ = stream.flush();
+    Ok(())
+}
+
+fn flush_server_ws_frames(
+    stream: &mut TcpStream,
+    frames: Vec<slice_engine::ServerWsOutFrame>,
+) -> Result<bool> {
+    let mut should_close = false;
+    for frame in frames {
+        let encoded = match frame {
+            slice_engine::ServerWsOutFrame::Text(ref s) => slice_engine::encode_websocket_frame(
+                true,
+                slice_engine::WS_OPCODE_TEXT,
+                None,
+                s.as_bytes(),
+            ),
+            slice_engine::ServerWsOutFrame::Binary(ref b) => slice_engine::encode_websocket_frame(
+                true,
+                slice_engine::WS_OPCODE_BINARY,
+                None,
+                b,
+            ),
+            slice_engine::ServerWsOutFrame::Close(code, ref reason) => {
+                should_close = true;
+                let payload = slice_engine::build_close_frame_payload(code, reason);
+                slice_engine::encode_websocket_frame(
+                    true,
+                    slice_engine::WS_OPCODE_CLOSE,
+                    None,
+                    &payload,
+                )
+            }
+        };
+        stream.write_all(&encoded)?;
+    }
+    stream.flush()?;
+    Ok(should_close)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -336,6 +398,10 @@ pub(crate) fn serve_connection_keep_alive(
     max_requests_tracker: Option<(&std::sync::atomic::AtomicUsize, usize)>,
 ) -> Result<()> {
     let _ = stream.set_nodelay(true);
+    // N-Sec-4: Defend against Slowloris socket starvation with 10s read/write socket timeouts
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
+
     let mut filled: usize = 0;
     write_buf.clear();
     let mut isolate = SliceIsolate::spawn(
@@ -346,37 +412,101 @@ pub(crate) fn serve_connection_keep_alive(
         mem_limit,
     );
     isolate.set_deterministic_seed(deterministic_seed);
+    for (k, v) in &caps.allowed_env_keys {
+        if slice_sandbox::is_sensitive_env_key(k) && v.len() >= 6 {
+            isolate.add_egress_audit_secret(v.clone());
+        }
+    }
 
     loop {
+        let mut header_deadline: Option<Instant> = if filled > 0 {
+            Some(Instant::now() + std::time::Duration::from_secs(5))
+        } else {
+            None
+        };
+
         // 1. Read until complete HTTP headers (`\r\n\r\n`) are present in `read_buf[..filled]`
         let (hdr_end, body_offset) = loop {
             if let Some(pos) = find_http_header_end(&read_buf[..filled]) {
                 break pos;
             }
+            if let Some(deadline) = header_deadline {
+                if Instant::now() > deadline {
+                    return write_http_error_and_close(
+                        &mut stream,
+                        408,
+                        r#"{"error":"HEADER_READ_TIMEOUT"}"#,
+                    );
+                }
+            }
             if filled >= read_buf.len() {
-                return Ok(());
+                return write_http_error_and_close(
+                    &mut stream,
+                    431,
+                    r#"{"error":"REQUEST_HEADER_FIELDS_TOO_LARGE"}"#,
+                );
             }
             match stream.read(&mut read_buf[filled..]) {
-                Ok(0) | Err(_) => return Ok(()),
-                Ok(n) => filled += n,
+                Ok(0) => return Ok(()),
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    if filled > 0 {
+                        return write_http_error_and_close(
+                            &mut stream,
+                            408,
+                            r#"{"error":"HEADER_READ_TIMEOUT"}"#,
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(_) => return Ok(()),
+                Ok(n) => {
+                    if header_deadline.is_none() {
+                        header_deadline = Some(Instant::now() + std::time::Duration::from_secs(5));
+                    }
+                    filled += n;
+                }
             }
         };
 
         let req_start = Instant::now();
         let (hdr_slice, after_hdr_buf) = read_buf.split_at_mut(body_offset);
-        let hdr_str = std::str::from_utf8(&hdr_slice[..hdr_end]).unwrap_or("");
+        let Ok(hdr_str) = std::str::from_utf8(&hdr_slice[..hdr_end]) else {
+            return write_http_error_and_close(
+                &mut stream,
+                400,
+                r#"{"error":"INVALID_HEADER_UTF8"}"#,
+            );
+        };
         let mut lines = hdr_str.lines();
         let req_line = lines.next().unwrap_or("");
 
         // Zero-allocation request line split: `METHOD /path?query HTTP/1.1`
         let mut parts = req_line.split_whitespace();
-        let method = parts.next().unwrap_or("GET");
-        let raw_target = parts.next().unwrap_or("/");
+        let method = parts.next().unwrap_or("");
+        let raw_target = parts.next().unwrap_or("");
         let version = parts.next().unwrap_or("HTTP/1.1");
+        if method.is_empty()
+            || raw_target.is_empty()
+            || !slice_engine::is_valid_http_header_name(method)
+            || !slice_engine::is_valid_request_target(raw_target)
+        {
+            return write_http_error_and_close(
+                &mut stream,
+                400,
+                r#"{"error":"MALFORMED_REQUEST_LINE"}"#,
+            );
+        }
         let (raw_path, query) = raw_target.split_once('?').unwrap_or((raw_target, ""));
 
         let mut keep_alive = !version.ends_with("1.0");
-        let mut content_length: usize = 0;
+        let mut seen_content_length: Option<usize> = None;
+        let mut has_transfer_encoding = false;
+        let mut is_chunked_te = false;
+        let mut is_ws_upgrade = false;
+        let mut sec_websocket_key: String = String::new();
         let mut if_none_match: &str = "";
         let mut path = raw_path;
         let mut tenant_id: &str = "tenant-default";
@@ -395,107 +525,261 @@ pub(crate) fn serve_connection_keep_alive(
                 path = "/";
             }
         }
-        let mut headers_stack: [(&str, &str); 16] = [("", ""); 16];
+        // N-Sec-6: Support up to 64 request headers on the stack; reject > 64 with 431
+        let mut headers_stack: [(&str, &str); 64] = [("", ""); 64];
         let mut headers_len: usize = 0;
 
         for line in lines {
-            if let Some((k, v)) = line.split_once(':') {
-                let k = k.trim();
-                let v = v.trim();
-                if k.eq_ignore_ascii_case("x-slice-tenant") && !v.is_empty() {
-                    tenant_id = v;
-                } else if k.eq_ignore_ascii_case("connection") {
-                    if v.eq_ignore_ascii_case("close") {
-                        keep_alive = false;
-                    } else if v.eq_ignore_ascii_case("keep-alive") {
-                        keep_alive = true;
+            if line.is_empty() {
+                continue;
+            }
+            let Some((k, v)) = line.split_once(':') else {
+                return write_http_error_and_close(
+                    &mut stream,
+                    400,
+                    r#"{"error":"MALFORMED_HEADER_LINE"}"#,
+                );
+            };
+            let k = k.trim();
+            let v = v.trim();
+            if !slice_engine::is_valid_http_header_name(k)
+                || !slice_engine::is_valid_http_header_value(v)
+            {
+                return write_http_error_and_close(
+                    &mut stream,
+                    400,
+                    r#"{"error":"INVALID_HEADER_CHARACTERS"}"#,
+                );
+            }
+            if headers_len >= headers_stack.len() {
+                return write_http_error_and_close(
+                    &mut stream,
+                    431,
+                    r#"{"error":"TOO_MANY_REQUEST_HEADERS"}"#,
+                );
+            }
+            if k.eq_ignore_ascii_case("x-slice-tenant") && !v.is_empty() {
+                tenant_id = v;
+            } else if k.eq_ignore_ascii_case("connection") {
+                if v.to_ascii_lowercase().contains("close") {
+                    keep_alive = false;
+                } else if v.to_ascii_lowercase().contains("keep-alive") {
+                    keep_alive = true;
+                }
+            } else if k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket") {
+                is_ws_upgrade = true;
+            } else if k.eq_ignore_ascii_case("sec-websocket-key") {
+                sec_websocket_key = v.to_string();
+            } else if k.eq_ignore_ascii_case("transfer-encoding") {
+                // N-Sec-3: Reject requests with both Transfer-Encoding and Content-Length (CL.TE / TE.CL smuggling)
+                if seen_content_length.is_some() {
+                    return write_http_error_and_close(
+                        &mut stream,
+                        400,
+                        r#"{"error":"SMUGGLING_CL_TE_CONFLICT_BLOCKED"}"#,
+                    );
+                }
+                has_transfer_encoding = true;
+                if v.to_ascii_lowercase().contains("chunked") {
+                    is_chunked_te = true;
+                } else {
+                    return write_http_error_and_close(
+                        &mut stream,
+                        400,
+                        r#"{"error":"UNSUPPORTED_TRANSFER_ENCODING"}"#,
+                    );
+                }
+            } else if k.eq_ignore_ascii_case("content-length") {
+                // N-Sec-3: Reject requests with both Transfer-Encoding and Content-Length or conflicting duplicate Content-Length
+                if has_transfer_encoding {
+                    return write_http_error_and_close(
+                        &mut stream,
+                        400,
+                        r#"{"error":"SMUGGLING_CL_TE_CONFLICT_BLOCKED"}"#,
+                    );
+                }
+                let Ok(parsed_len) = v.parse::<usize>() else {
+                    return write_http_error_and_close(
+                        &mut stream,
+                        400,
+                        r#"{"error":"INVALID_CONTENT_LENGTH"}"#,
+                    );
+                };
+                if let Some(prev_len) = seen_content_length {
+                    if prev_len != parsed_len {
+                        return write_http_error_and_close(
+                            &mut stream,
+                            400,
+                            r#"{"error":"SMUGGLING_DUPLICATE_CONTENT_LENGTH_BLOCKED"}"#,
+                        );
                     }
-                } else if k.eq_ignore_ascii_case("content-length") {
-                    content_length = v.parse().unwrap_or(0);
-                } else if k.eq_ignore_ascii_case("if-none-match") {
-                    if_none_match = v;
                 }
-                if headers_len < headers_stack.len() {
-                    headers_stack[headers_len] = (k, v);
-                    headers_len += 1;
+                if parsed_len > MAX_INBOUND_BODY_BYTES {
+                    return write_http_error_and_close(
+                        &mut stream,
+                        413,
+                        r#"{"error":"PAYLOAD_TOO_LARGE"}"#,
+                    );
                 }
+                seen_content_length = Some(parsed_len);
+            } else if k.eq_ignore_ascii_case("if-none-match") {
+                if_none_match = v;
             }
+            headers_stack[headers_len] = (k, v);
+            headers_len += 1;
         }
 
+        let content_length = seen_content_length.unwrap_or(0);
         let mut body_filled = filled.saturating_sub(body_offset);
-        while body_filled < content_length && content_length <= after_hdr_buf.len() {
-            match stream.read(&mut after_hdr_buf[body_filled..]) {
-                Ok(0) | Err(_) => return Ok(()),
-                Ok(n) => body_filled += n,
-            }
-        }
-        filled = body_offset + body_filled;
+        let mut owned_body_opt: Option<String> = None;
+        let body_end: usize;
 
-        let body_end = body_offset.saturating_add(content_length).min(filled);
+        if is_chunked_te {
+            let mut chunk_raw = Vec::with_capacity(body_filled.max(1024));
+            chunk_raw.extend_from_slice(&after_hdr_buf[..body_filled]);
+            let mut scratch = [0u8; 4096];
+            let (decoded, consumed_raw) = loop {
+                match slice_engine::parse_chunked_body(&chunk_raw, MAX_INBOUND_BODY_BYTES) {
+                    Ok(Some(res)) => break res,
+                    Ok(None) => {
+                        if chunk_raw.len() > MAX_INBOUND_BODY_BYTES.saturating_add(65536) {
+                            return write_http_error_and_close(
+                                &mut stream,
+                                413,
+                                r#"{"error":"CHUNKED_PAYLOAD_TOO_LARGE"}"#,
+                            );
+                        }
+                        match stream.read(&mut scratch) {
+                            Ok(0) | Err(_) => {
+                                return write_http_error_and_close(
+                                    &mut stream,
+                                    400,
+                                    r#"{"error":"TRUNCATED_CHUNKED_BODY"}"#,
+                                );
+                            }
+                            Ok(n) => chunk_raw.extend_from_slice(&scratch[..n]),
+                        }
+                    }
+                    Err(e) => {
+                        let status = if e.kind() == std::io::ErrorKind::OutOfMemory {
+                            413
+                        } else {
+                            400
+                        };
+                        return write_http_error_and_close(
+                            &mut stream,
+                            status,
+                            r#"{"error":"INVALID_CHUNKED_BODY"}"#,
+                        );
+                    }
+                }
+            };
+            // Preserve any pipelined bytes that arrived after the chunked terminator
+            let leftover = chunk_raw.len().saturating_sub(consumed_raw);
+            if leftover > 0 && leftover <= after_hdr_buf.len() {
+                after_hdr_buf[..leftover].copy_from_slice(&chunk_raw[consumed_raw..]);
+            }
+            filled = body_offset + leftover;
+            body_end = body_offset;
+            owned_body_opt = Some(String::from_utf8_lossy(&decoded).into_owned());
+        } else if content_length <= after_hdr_buf.len() {
+            while body_filled < content_length {
+                match stream.read(&mut after_hdr_buf[body_filled..]) {
+                    Ok(0) | Err(_) => return Ok(()),
+                    Ok(n) => body_filled += n,
+                }
+            }
+            filled = body_offset + body_filled;
+            body_end = body_offset.saturating_add(content_length).min(filled);
+        } else {
+            // Spillover path for bodies between ~64 KB and `MAX_INBOUND_BODY_BYTES` (4 MB)
+            let mut large_body = Vec::with_capacity(content_length);
+            let initial_copy = body_filled.min(content_length);
+            large_body.extend_from_slice(&after_hdr_buf[..initial_copy]);
+            let mut scratch = [0u8; 8192];
+            while large_body.len() < content_length {
+                let rem = (content_length - large_body.len()).min(scratch.len());
+                match stream.read(&mut scratch[..rem]) {
+                    Ok(0) | Err(_) => return Ok(()),
+                    Ok(n) => large_body.extend_from_slice(&scratch[..n]),
+                }
+            }
+            filled = body_offset;
+            body_end = body_offset;
+            owned_body_opt = Some(String::from_utf8_lossy(&large_body).into_owned());
+        }
+
         let body_len = content_length.min(body_filled);
         let conn_hdr = if keep_alive { "keep-alive" } else { "close" };
-        let has_more_pipelined =
-            keep_alive && find_http_header_end(&after_hdr_buf[body_len..body_filled]).is_some();
+        let has_more_pipelined = keep_alive
+            && body_end < filled
+            && find_http_header_end(&after_hdr_buf[body_end.saturating_sub(body_offset)..filled.saturating_sub(body_offset)]).is_some();
 
         // Phase F2: Zero-Stat CAS / In-Memory Static Asset Fast-Path (`< 2 us`, 0 JS VM spinup, 0 disk syscalls)
-        if let Some(static_table) = static_assets_opt {
-            if method == "GET" || method == "HEAD" {
-                if let Some(asset) = static_table.resolve(path) {
-                    let is_304 = !if_none_match.is_empty()
-                        && (if_none_match == "*"
-                            || if_none_match.contains(&asset.etag_quoted)
-                            || if_none_match.trim_matches('"')
-                                == asset.etag_quoted.trim_matches('"'));
-                    let total_us = req_start.elapsed().as_nanos() / 1_000;
-                    if is_304 {
-                        let _ = write!(
-                            write_buf,
-                            "HTTP/1.1 304 Not Modified\r\nETag: {}\r\nCache-Control: public, max-age=3600\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Static: HIT-304\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: 0\r\n\r\n",
-                            asset.etag_quoted,
-                            conn_hdr,
-                            tenant_id,
-                            total_us,
-                        );
-                    } else {
-                        let _ = write!(
-                            write_buf,
-                            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nETag: {}\r\nCache-Control: public, max-age=3600\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Static: HIT-200\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: 0\r\n\r\n",
-                            asset.content_type,
-                            asset.payload.len(),
-                            asset.etag_quoted,
-                            conn_hdr,
-                            tenant_id,
-                            total_us,
-                        );
-                        if method != "HEAD" {
-                            write_buf.extend_from_slice(&asset.payload);
+        if !is_ws_upgrade {
+            if let Some(static_table) = static_assets_opt {
+                if method == "GET" || method == "HEAD" {
+                    if let Some(asset) = static_table.resolve(path) {
+                        let is_304 = !if_none_match.is_empty()
+                            && (if_none_match == "*"
+                                || if_none_match.contains(&asset.etag_quoted)
+                                || if_none_match.trim_matches('"')
+                                    == asset.etag_quoted.trim_matches('"'));
+                        let total_us = req_start.elapsed().as_nanos() / 1_000;
+                        if is_304 {
+                            let _ = write!(
+                                write_buf,
+                                "HTTP/1.1 304 Not Modified\r\nETag: {}\r\nCache-Control: public, max-age=3600\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Static: HIT-304\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: 0\r\n\r\n",
+                                asset.etag_quoted,
+                                conn_hdr,
+                                tenant_id,
+                                total_us,
+                            );
+                        } else {
+                            let _ = write!(
+                                write_buf,
+                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nETag: {}\r\nCache-Control: public, max-age=3600\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Static: HIT-200\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: 0\r\n\r\n",
+                                asset.content_type,
+                                asset.payload.len(),
+                                asset.etag_quoted,
+                                conn_hdr,
+                                tenant_id,
+                                total_us,
+                            );
+                            if method != "HEAD" {
+                                write_buf.extend_from_slice(&asset.payload);
+                            }
                         }
-                    }
-                    if !has_more_pipelined || write_buf.len() >= 32768 {
-                        stream.write_all(write_buf)?;
-                        write_buf.clear();
-                    }
-                    if let Some((counter, max_reqs)) = max_requests_tracker {
-                        let prev = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if max_reqs > 0 && prev + 1 >= max_reqs {
-                            std::process::exit(0);
+                        if !has_more_pipelined || write_buf.len() >= 32768 {
+                            stream.write_all(write_buf)?;
+                            write_buf.clear();
                         }
+                        if let Some((counter, max_reqs)) = max_requests_tracker {
+                            let prev = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if max_reqs > 0 && prev + 1 >= max_reqs {
+                                std::process::exit(0);
+                            }
+                        }
+                        if !keep_alive {
+                            break;
+                        }
+                        if filled > body_end {
+                            read_buf.copy_within(body_end..filled, 0);
+                            filled -= body_end;
+                        } else {
+                            filled = 0;
+                        }
+                        continue;
                     }
-                    if !keep_alive {
-                        break;
-                    }
-                    if filled > body_end {
-                        read_buf.copy_within(body_end..filled, 0);
-                        filled -= body_end;
-                    } else {
-                        filled = 0;
-                    }
-                    continue;
                 }
             }
         }
 
-        let body_str = std::str::from_utf8(&after_hdr_buf[..body_len]).unwrap_or("");
+        let body_str: &str = if let Some(ref owned) = owned_body_opt {
+            owned.as_str()
+        } else {
+            std::str::from_utf8(&after_hdr_buf[..body_len]).unwrap_or("")
+        };
         let req_ctx = slice_engine::HttpRequestContext {
             method,
             path,
@@ -517,9 +801,106 @@ pub(crate) fn serve_connection_keep_alive(
 
         match isolate.execute_http_request(active_bytecode, None, &req_ctx) {
             Ok(outcome) => {
+                // Check for RFC 6455 Server-Side WebSocket Upgrade (`Upgrade: websocket` + `Sec-WebSocket-Key`)
+                if is_ws_upgrade && !sec_websocket_key.is_empty() && outcome.status_code != 403 && outcome.status_code != 400 {
+                    let accept_key = slice_engine::compute_websocket_accept_key(&sec_websocket_key);
+                    write_buf.clear();
+                    let _ = write!(
+                        write_buf,
+                        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\n\r\n",
+                        accept_key, outcome.metrics.tenant_id
+                    );
+                    stream.write_all(write_buf)?;
+                    stream.flush()?;
+                    write_buf.clear();
+
+                    if let Ok(open_frames) =
+                        isolate.execute_websocket_event("open", false, &[], 0, "")
+                    {
+                        if flush_server_ws_frames(&mut stream, open_frames)? {
+                            return Ok(());
+                        }
+                    }
+
+                    let mut ws_pending = Vec::new();
+                    if filled > body_end {
+                        ws_pending.extend_from_slice(&read_buf[body_end..filled]);
+                    }
+                    let effective_ws_limit = mem_limit.min(slice_engine::MAX_WS_FRAME_BYTES);
+                    loop {
+                        match slice_engine::read_websocket_message_from_stream(
+                            &mut stream,
+                            &mut ws_pending,
+                            true,
+                            effective_ws_limit,
+                        ) {
+                            Ok(Some((slice_engine::WS_OPCODE_CLOSE, payload))) => {
+                                let (code, reason) =
+                                    slice_engine::parse_close_frame_payload(&payload);
+                                let _ = isolate.execute_websocket_event(
+                                    "close",
+                                    false,
+                                    &[],
+                                    code,
+                                    &reason,
+                                );
+                                let reply_payload =
+                                    slice_engine::build_close_frame_payload(code, &reason);
+                                let close_frame = slice_engine::encode_websocket_frame(
+                                    true,
+                                    slice_engine::WS_OPCODE_CLOSE,
+                                    None,
+                                    &reply_payload,
+                                );
+                                let _ = stream.write_all(&close_frame);
+                                let _ = stream.flush();
+                                break;
+                            }
+                            Ok(Some((opcode, payload))) => {
+                                let is_bin = opcode == slice_engine::WS_OPCODE_BINARY;
+                                match isolate.execute_websocket_event(
+                                    "message",
+                                    is_bin,
+                                    &payload,
+                                    0,
+                                    "",
+                                ) {
+                                    Ok(out_frames) => {
+                                        if flush_server_ws_frames(&mut stream, out_frames)? {
+                                            break;
+                                        }
+                                    }
+                                    Err(_violation) => {
+                                        let close_payload = slice_engine::build_close_frame_payload(
+                                            1008,
+                                            "Policy Violation",
+                                        );
+                                        let close_frame = slice_engine::encode_websocket_frame(
+                                            true,
+                                            slice_engine::WS_OPCODE_CLOSE,
+                                            None,
+                                            &close_payload,
+                                        );
+                                        let _ = stream.write_all(&close_frame);
+                                        let _ = stream.flush();
+                                        break;
+                                    }
+                                }
+                            }
+                            Ok(None) | Err(_) => break,
+                        }
+                    }
+                    return Ok(());
+                }
+
                 let isolate_us = outcome.metrics.total_time_ns / 1_000;
                 let total_us = req_start.elapsed().as_nanos() / 1_000;
-                let extra_sse_hdr = if outcome.content_type.starts_with("text/event-stream") {
+                let safe_ct = if slice_engine::is_valid_http_header_value(&outcome.content_type) {
+                    outcome.content_type.as_str()
+                } else {
+                    "application/octet-stream"
+                };
+                let extra_sse_hdr = if safe_ct.starts_with("text/event-stream") {
                     "Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\n"
                 } else {
                     ""
@@ -529,7 +910,7 @@ pub(crate) fn serve_connection_keep_alive(
                     "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}Content-Length: {}\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Isolate-Us: {}\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: {}\r\n",
                     outcome.status_code,
                     http_status_reason(outcome.status_code),
-                    outcome.content_type,
+                    safe_ct,
                     extra_sse_hdr,
                     outcome.response_body.len(),
                     conn_hdr,
@@ -538,8 +919,13 @@ pub(crate) fn serve_connection_keep_alive(
                     total_us,
                     outcome.metrics.fuel_consumed,
                 );
+                // N-Sec-2: Validate all custom response headers against CRLF / control character injection
                 for (hk, hv) in &outcome.response_headers {
-                    let _ = write!(write_buf, "{}: {}\r\n", hk, hv);
+                    if slice_engine::is_valid_http_header_name(hk)
+                        && slice_engine::is_valid_http_header_value(hv)
+                    {
+                        let _ = write!(write_buf, "{}: {}\r\n", hk, hv);
+                    }
                 }
                 write_buf.extend_from_slice(b"\r\n");
                 write_buf.extend_from_slice(outcome.response_body.as_bytes());

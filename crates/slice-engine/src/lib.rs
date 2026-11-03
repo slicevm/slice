@@ -29,6 +29,7 @@ pub mod event_loop;
 pub mod host_bindings;
 pub mod intrinsics;
 pub mod isolate;
+pub mod js_minifier;
 pub mod js_preludes;
 pub mod node_builtins;
 pub mod numeric_vm;
@@ -36,6 +37,7 @@ pub mod outbound_http;
 pub mod parser_and_compiler;
 pub mod state_and_kv;
 pub mod value_and_ast;
+pub mod websocket;
 
 #[cfg(test)]
 mod tests;
@@ -46,10 +48,19 @@ pub use isolate::{
     SandboxEvalOptions, SandboxEvalOutcome, SliceIsolate,
 };
 pub use outbound_http::{
-    clear_outbound_conn_pool, outbound_pool_reuse_count, register_custom_root_cert_der,
+    clear_outbound_conn_pool, is_valid_http_header_name, is_valid_http_header_value,
+    is_valid_request_target, outbound_pool_reuse_count, parse_chunked_body,
+    register_custom_root_cert_der, MAX_OUTBOUND_BODY_BYTES, MAX_OUTBOUND_HEADER_BYTES,
 };
 pub use parser_and_compiler::{compile_source_to_bytecode, disassemble_bytecode};
 pub use value_and_ast::{
     BinOp, BytecodeModule, BytecodeOp, ExecutionTier, Expr, JsFunction, JsValue, Stmt, UnaryOp,
     SNAPSHOT_MAGIC, TIER1_PROMOTION_THRESHOLD,
+};
+pub use websocket::{
+    apply_websocket_mask_in_place, build_close_frame_payload, clear_thread_websocket_state,
+    compute_websocket_accept_key, decode_websocket_frame, drain_server_ws_outbox,
+    encode_websocket_frame, parse_close_frame_payload, read_websocket_message_from_stream,
+    DecodedWsFrame, ServerWsOutFrame, MAX_WS_FRAME_BYTES, WS_GUID, WS_OPCODE_BINARY,
+    WS_OPCODE_CLOSE, WS_OPCODE_CONTINUATION, WS_OPCODE_PING, WS_OPCODE_PONG, WS_OPCODE_TEXT,
 };
