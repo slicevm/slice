@@ -144,10 +144,17 @@ You have two ways to enable Slice's **Egress Data Loss Prevention (DLP) Firewall
 // Suppose --audit-egress="sk_live_99887766" is active:
 const leakedBase64 = Buffer.from("sk_live_99887766", "utf8").toString("base64");
 
-// Attempting to print or fetch() the Base64-encoded secret immediately traps!
+// Attempting to print, fetch(), or ws.send() the Base64-encoded secret immediately traps!
 console.log("Diagnostic trace:", leakedBase64);
 // -> Traps with: OCap Violation: Compartment '...' lacks environment variable authority for 'EGRESS_SECRET_LEAK_BLOCKED'
 ```
+
+### 4.4 Hardened HTTP/1.1 & RFC 6455 WebSocket Wire-Protocol Defenses
+Both the outbound `fetch()` / `WebSocket` client engine and the inbound `slice serve` HTTP/WebSocket server enforce strict wire-level security guards:
+- **Non-Canonical IP & Special-Use CIDR SSRF Blocking:** Under wildcard `allow_net = ["*"]`, the SSRF shield blocks octal (`0177.0.0.1`), hexadecimal (`0x7f.0.0.1`), integer/dword (`2130706433`), and shorthand (`127.1`, `169.254.43518`) IPv4 encodings alongside RFC 1918, loopback, link-local (`169.254.0.0/16`, `fe80::/10`), CGNAT (`100.64.0.0/10`), benchmark (`198.18.0.0/15`), IETF protocol (`192.0.0.0/24`), multicast (`224.0.0.0/4`, `ff00::/8`), and IPv6 Unique Local (`fc00::/7`) ranges.
+- **RFC 9110 `tchar` Header & CRLF Injection Prevention:** Outbound and inbound header names are validated against a compile-time RFC 9110 `tchar` lookup table, and header values / request targets reject `\r`, `\n`, `\0`, and ASCII control characters to prevent HTTP Request/Response Splitting.
+- **RFC 9112 Request Smuggling (`CL.TE` / `TE.CL`) & Chunked Arithmetic Guards:** `slice serve` immediately rejects requests containing both `Transfer-Encoding` and `Content-Length` or conflicting duplicate `Content-Length` headers with `400 Bad Request` (`Connection: close`), validates chunked hex sizes with checked arithmetic, and caps inbound bodies at `4 MB` (`413 Payload Too Large`) and headers at 64 fields / 64 KB (`431 Request Header Fields Too Large`).
+- **Tenant-Partitioned Keep-Alive Pool & Outbound Memory Ceilings:** Warm Keep-Alive sockets are keyed by `(tenant_id, is_https, host_port)` so tenants never share an upstream connection, and outbound HTTP responses (`64 KB` max headers, `16 MB` max body) and WebSocket frames (`4 MB` max) are strictly bounded by the active tenant's remaining memory budget (`SandboxViolation::MemoryCeilingExceeded`).
 
 ---
 

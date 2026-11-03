@@ -68,6 +68,7 @@ APP17_DIR="$APPS_DIR/17-zero-trust-redirect-keepalive-mesh"
 APP18_DIR="$APPS_DIR/18-async-event-loop-fanout-scheduler"
 APP19_DIR="$APPS_DIR/19-wintertc-webcrypto-streams-edge"
 APP20_DIR="$APPS_DIR/20-node-compat-and-edge-router"
+APP21_DIR="$APPS_DIR/21-websocket-realtime-and-security-guard"
 
 UPSTREAM_F3_PID=""
 cleanup_upstream_f3() {
@@ -84,6 +85,31 @@ cat << 'EOF' > /tmp/f3_upstream_server.ts
 export default {
     fetch(req: Request): Response {
         const url = new URL(req.url);
+        if ((req.headers.get("upgrade") || "").toLowerCase() === "websocket") {
+            return Slice.upgradeWebSocket({
+                open(ws: any) {
+                    ws.send(JSON.stringify({ type: "handshake_ack", path: url.pathname }));
+                },
+                message(ws: any, msg: any) {
+                    if (typeof msg === "string") {
+                        const parsed = JSON.parse(msg);
+                        ws.send(JSON.stringify({
+                            type: "telemetry_ack",
+                            seq: parsed.seq,
+                            tenant: parsed.tenant,
+                            digest: parsed.digest,
+                            ok: true
+                        }));
+                    } else if (msg instanceof Uint8Array) {
+                        const out = new Uint8Array(msg.length);
+                        for (let i = 0; i < msg.length; i++) {
+                            out[i] = (msg[i] ^ 0x5a) & 0xff;
+                        }
+                        ws.send(out);
+                    }
+                }
+            });
+        }
         if (url.pathname === "/upstream/webhook") {
             const body = req.jsonSync() as { eventId?: string };
             return Response.json({
@@ -128,9 +154,9 @@ echo "  Deno    : $(deno -V)"
 
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  [TAG: apps] PACKING & COMPILING ALL 20 FOLDER-BASED APPS (OXC + CAS)"
+echo "  [TAG: apps] PACKING & COMPILING ALL 21 FOLDER-BASED APPS (OXC + CAS)"
 echo "========================================================================="
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21; do
     eval "dir=\$APP${i}_DIR"
     "$SLICE_BIN" pack "$dir" "/tmp/app${i}.cas"
     "$SLICE_BIN" compile "/tmp/app${i}.cas" -o "/tmp/app${i}_bin"
@@ -194,6 +220,7 @@ verify_app_parity "App 17: 17-zero-trust-redirect-keepalive-mesh (Keep-Alive/307
 verify_app_parity "App 18: 18-async-event-loop-fanout-scheduler (Timers/Microtasks/Fan-Out)" "$APP18_DIR" "/tmp/app18.cas" "-A"
 verify_app_parity "App 19: 19-wintertc-webcrypto-streams-edge (WebCrypto/Streams/FormData/Clone)" "$APP19_DIR" "/tmp/app19.cas" "-A"
 verify_app_parity "App 20: 20-node-compat-and-edge-router (Uint8Array Buffer/Node Core/AST Bundler)" "$APP20_DIR" "/tmp/app20.cas" "-A"
+verify_app_parity "App 21: 21-websocket-realtime-and-security-guard (RFC 6455 WS + N-Sec Hardening)" "$APP21_DIR" "/tmp/app21.cas" "-A"
 fi
 
 measure_ms() {
@@ -270,6 +297,7 @@ bench_app 17 "17-ZERO-TRUST-REDIRECT-KEEPALIVE-MESH (Keep-Alive/307/SSRF/DLP)" "
 bench_app 18 "18-ASYNC-EVENT-LOOP-FANOUT-SCHEDULER (Timers/Microtasks/Fan-Out)" "$APP18_DIR" "-A"
 bench_app 19 "19-WINTERTC-WEBCRYPTO-STREAMS-EDGE (WebCrypto/Streams/FormData/Clone)" "$APP19_DIR" "-A"
 bench_app 20 "20-NODE-COMPAT-AND-EDGE-ROUTER (Uint8Array Buffer/Node Core/AST Bundler)" "$APP20_DIR" "-A"
+bench_app 21 "21-WEBSOCKET-REALTIME-AND-SECURITY-GUARD (RFC 6455 WS + N-Sec Hardening)" "$APP21_DIR" "-A"
 
 echo "========================================================================="
 echo "  PEAK MEMORY FOOTPRINT (MAX RSS) ACROSS REPRESENTATIVE APPS"
@@ -283,16 +311,21 @@ measure_rss_kb "Slice (App 6: Telemetry + Flatted)" "$SLICE_BIN" run "/tmp/app6.
 measure_rss_kb "Bun (App 6: Telemetry + Flatted)"   bun run "$APP6_DIR/src/index.ts"
 measure_rss_kb "Deno (App 6: Telemetry + Flatted)"  deno run -A "$APP6_DIR/src/index.ts"
 measure_rss_kb "Node (App 6: Telemetry + Flatted)"  node "$APP6_DIR/src/index.ts"
+echo "-------------------------------------------------------------------------"
+measure_rss_kb "Slice (App 21: RFC 6455 WS + Sec)"  "$SLICE_BIN" run "/tmp/app21.cas" --quiet
+measure_rss_kb "Bun (App 21: RFC 6455 WS + Sec)"    bun run "$APP21_DIR/src/index.ts"
+measure_rss_kb "Deno (App 21: RFC 6455 WS + Sec)"   deno run -A "$APP21_DIR/src/index.ts"
+measure_rss_kb "Node (App 21: RFC 6455 WS + Sec)"   node "$APP21_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 17 APPS (COLD VS WARM POOL)"
+echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 21 APPS (COLD VS WARM POOL)"
 echo "========================================================================="
 echo "  --- Cold Realm Telemetry ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --quiet --metrics
 done
 echo "  --- Pre-Warmed Boa Pool Telemetry (--warm) ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --warm --quiet --metrics
 done
 fi

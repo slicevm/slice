@@ -332,5 +332,58 @@ slice serve --port=3000 --workers=8 --tenant-dir=./tenants
    - A request with header `X-Slice-Tenant: tenant-alpha` **or** URL path `/t/tenant-alpha/checkout` automatically executes `./tenants/tenant-alpha.cas` inside `tenant-alpha`'s isolated `SliceIsolate` and `Slice.kv` partition.
    - Unknown tenants automatically fall back to `./tenants/default.cas` (if present).
 2. **Zero-Downtime Atomic Hot-Swapping:**
-   - When `tenant-alpha` deploys new code, simply run `slice pack ./alpha-src ./tenants/tenant-alpha.cas`.
+    - When `tenant-alpha` deploys new code, simply run `slice pack ./alpha-src ./tenants/tenant-alpha.cas`.
    - On the very next HTTP request for `tenant-alpha`, `slice serve` detects the new file modification timestamp (`mtime_ns`), memory-maps the updated `.cas` archive, pre-warms its realm closure, and serves the new version with **0 dropped connections and 0 server restarts**.
+
+---
+
+## 9. Real-Time RFC 6455 WebSockets (Client `new WebSocket` & Server `Slice.upgradeWebSocket`)
+
+Slice includes a zero-dependency **RFC 6455 WebSocket engine** supporting both outbound client connections (`ws://` and `wss://` over TLS 1.3) and inbound server connection upgrades (`HTTP/1.1 101 Switching Protocols`).
+
+### 9.1 Outbound Client `new WebSocket(url, protocols?)`
+Client WebSockets enforce the exact same **OCap `allow_net` host allowlist**, **Pre-Connect DNS Resolved-IP SSRF Firewall**, **Tenant Memory Ceiling**, and **Outbound Egress Secret DLP** (on every `ws.send()` frame) as `fetch()`:
+
+```typescript
+const ws = new WebSocket("wss://echo.example.com/realtime", ["chat.v1"]);
+ws.binaryType = "arraybuffer";
+
+ws.onopen = () => {
+    ws.send("hello from Slice");
+    ws.send(new Uint8Array([1, 2, 3, 4]));
+    ws.close(1000, "done");
+};
+
+ws.onmessage = (ev: MessageEvent) => {
+    console.log("Received frame:", ev.data);
+};
+```
+
+For offline unit testing and deterministic replay, mock any WebSocket endpoint with `Slice.mockWebSocket(urlPattern, modeOrHandler)`:
+```typescript
+Slice.mockWebSocket("wss://echo.example.com/realtime", "echo");
+```
+
+### 9.2 Server-Side WebSocket Upgrade (`Slice.upgradeWebSocket`)
+Inside `export default { fetch(req) }`, upgrade incoming WebSocket connections (`req.headers.get("upgrade") === "websocket"`) using `Slice.upgradeWebSocket({ open, message, close })`:
+
+```typescript
+export default {
+    fetch(req: Request): Response {
+        if (req.headers.get("upgrade") === "websocket") {
+            return Slice.upgradeWebSocket({
+                open(ws) {
+                    ws.send("connected");
+                },
+                message(ws, msg) {
+                    ws.send(typeof msg === "string" ? `echo:${msg}` : msg);
+                },
+                close(ws, code, reason) {
+                    // Clean disconnect
+                },
+            });
+        }
+        return Response.json({ status: "http-ok" });
+    },
+};
+```
