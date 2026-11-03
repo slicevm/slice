@@ -1739,7 +1739,7 @@ impl SliceIsolate {
             ));
         }
         if is_worker {
-            ensure_realm_shards(&mut realm, (1 << 8) | (1 << 3) | (1 << 2), false);
+            ensure_realm_shards(&mut realm, (1 << 8) | (1 << 2), false);
             if let Some(ref init_fn) = realm.init_worker_self_fn {
                 let _ = init_fn.call(
                     &boa_engine::JsValue::undefined(),

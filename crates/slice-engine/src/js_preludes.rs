@@ -71,6 +71,8 @@ pub(crate) fn detect_needed_shards(js_code: &str, is_http: bool) -> u16 {
         || js_code.contains("new Headers(")
         || js_code.contains("AbortController")
         || js_code.contains("AbortSignal")
+        || js_code.contains("createObjectURL")
+        || js_code.contains("canParse")
     {
         mask |= (1 << 1) | (1 << 2);
     }
@@ -143,20 +145,20 @@ pub(crate) fn detect_needed_shards(js_code: &str, is_http: bool) -> u16 {
     {
         mask |= (1 << 7) | (1 << 2);
     }
-    if js_code.contains("Worker")
+    if js_code.contains("cloudflare:sockets")
+        || js_code.contains("slice:sockets")
+        || js_code.contains("Slice.connect")
+    {
+        mask |= (1 << 8) | (1 << 3) | (1 << 2);
+    } else if js_code.contains("Worker")
         || js_code.contains("worker_threads")
         || js_code.contains("MessageChannel")
         || js_code.contains("MessagePort")
         || js_code.contains("parentPort")
         || js_code.contains("workerData")
-        || js_code.contains("cloudflare:sockets")
-        || js_code.contains("slice:sockets")
-        || js_code.contains("Slice.connect")
         || js_code.contains("mockSocket")
-        || js_code.contains("createObjectURL")
-        || js_code.contains("canParse")
     {
-        mask |= (1 << 8) | (1 << 3) | (1 << 2) | (1 << 1);
+        mask |= (1 << 8) | (1 << 2);
     }
     mask
 }

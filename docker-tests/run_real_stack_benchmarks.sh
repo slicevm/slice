@@ -299,6 +299,9 @@ bench_app() {
     local title="$2"
     local app_dir="$3"
     local deno_flags="$4"
+    if [ -n "${SLICE_ONLY_APPS:-}" ] && [[ ",${SLICE_ONLY_APPS}," != *",${idx},"* ]]; then
+        return 0
+    fi
     echo "========================================================================="
     echo "  APP ${idx} LATENCY: ${title} (20 Runs)"
     echo "========================================================================="

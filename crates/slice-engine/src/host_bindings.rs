@@ -544,13 +544,15 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
         js_string!("__slice_base64_encode"),
         2,
         NativeFunction::from_fn_ptr(|_this, args, context| {
-            let input = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
             let url_safe = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(false);
+            let Some(first) = args.first() else {
+                return Ok(BoaVal::from(js_string!("")));
+            };
+            if first.is_object() {
+                let bytes = extract_buffer_source_bytes(first, context)?;
+                return Ok(BoaVal::from(js_string!(base64_encode(&bytes, url_safe))));
+            }
+            let input = first.to_string(context)?.to_std_string_escaped();
             let encoded = base64_encode(input.as_bytes(), url_safe);
             Ok(BoaVal::from(js_string!(encoded)))
         }),
@@ -568,6 +570,72 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .unwrap_or_default();
             let decoded = String::from_utf8_lossy(&base64_decode(&input)).into_owned();
             Ok(BoaVal::from(js_string!(decoded)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_buf_to_utf8"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let Some(first) = args.first() else {
+                return Ok(BoaVal::from(js_string!("")));
+            };
+            if first.is_string() {
+                return Ok(first.clone());
+            }
+            if first.is_object() {
+                let bytes = extract_buffer_source_bytes(first, context)?;
+                let decoded = String::from_utf8_lossy(&bytes).into_owned();
+                return Ok(BoaVal::from(js_string!(decoded)));
+            }
+            let s = first.to_string(context)?.to_std_string_escaped();
+            Ok(BoaVal::from(js_string!(s)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_utf8_byte_len"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let Some(first) = args.first() else {
+                return Ok(BoaVal::from(0.0));
+            };
+            if let Some(obj) = first.as_object() {
+                if let Ok(bl) = obj.get(js_string!("byteLength"), context) {
+                    if let Some(n) = bl.as_number() {
+                        return Ok(BoaVal::from(n));
+                    }
+                }
+                if let Ok(l) = obj.get(js_string!("length"), context) {
+                    if let Some(n) = l.as_number() {
+                        return Ok(BoaVal::from(n));
+                    }
+                }
+            }
+            let s = first.to_string(context)?.to_std_string_escaped();
+            if let Some(enc_val) = args.get(1).filter(|v| !v.is_undefined() && !v.is_null()) {
+                let e = enc_val.to_string(context)?.to_std_string_escaped();
+                if e.eq_ignore_ascii_case("hex") {
+                    return Ok(BoaVal::from((s.len() >> 1) as f64));
+                }
+                if e.eq_ignore_ascii_case("base64") || e.eq_ignore_ascii_case("base64url") {
+                    return Ok(BoaVal::from(base64_decode(&s).len() as f64));
+                }
+                if e.eq_ignore_ascii_case("latin1")
+                    || e.eq_ignore_ascii_case("binary")
+                    || e.eq_ignore_ascii_case("ascii")
+                {
+                    return Ok(BoaVal::from(s.chars().count() as f64));
+                }
+                if e.eq_ignore_ascii_case("utf16le")
+                    || e.eq_ignore_ascii_case("utf-16le")
+                    || e.eq_ignore_ascii_case("ucs2")
+                    || e.eq_ignore_ascii_case("ucs-2")
+                {
+                    return Ok(BoaVal::from((s.encode_utf16().count() * 2) as f64));
+                }
+            }
+            Ok(BoaVal::from(s.len() as f64))
         }),
     );
 

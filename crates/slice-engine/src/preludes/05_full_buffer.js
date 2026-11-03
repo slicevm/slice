@@ -8,27 +8,6 @@
     return u8;
   }
 
-  function __utf8ByteLen(str) {
-    var s = String(str), len = s.length, bytes = 0;
-    for (var i = 0; i < len; i++) {
-      var c = s.charCodeAt(i);
-      if (c < 0x80) bytes += 1;
-      else if (c < 0x800) bytes += 2;
-      else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < len) {
-        var c2 = s.charCodeAt(i + 1);
-        if (c2 >= 0xDC00 && c2 <= 0xDFFF) {
-          bytes += 4;
-          i++;
-        } else {
-          bytes += 3;
-        }
-      } else {
-        bytes += 3;
-      }
-    }
-    return bytes;
-  }
-
   function Buffer(arg, encOrOffset, length) {
     if (typeof arg === "number") return Buffer.alloc(arg);
     return Buffer.from(arg, encOrOffset, length);
@@ -105,19 +84,7 @@
     return Buffer.alloc(size);
   };
 
-  Buffer.byteLength = function(input, encoding) {
-    if (typeof input !== "string") {
-      if (input && typeof input.byteLength === "number") return input.byteLength;
-      if (input && typeof input.length === "number") return input.length;
-      input = String(input);
-    }
-    var e = encoding ? String(encoding).toLowerCase() : "utf8";
-    if (e === "utf8" || e === "utf-8") return __utf8ByteLen(input);
-    if (e === "hex") return input.length >>> 1;
-    if (e === "base64" || e === "base64url") return __slice_base64_decode_bytes(input).byteLength;
-    if (e === "latin1" || e === "binary" || e === "ascii") return input.length;
-    return __utf8ByteLen(input);
-  };
+  Buffer.byteLength = __slice_utf8_byte_len;
 
   Buffer.concat = function(list, totalLength) {
     if (!Array.isArray(list)) throw new TypeError("The \"list\" argument must be an instance of Array");

@@ -8,9 +8,6 @@
     if ((id === 1 || id === 3 || id === 7 || id === 8) && (__shMask & 4) === 0) {
       __loadShard(2);
     }
-    if (id === 8 && (__shMask & 8) === 0) {
-      __loadShard(3);
-    }
     var bit = 1 << id;
     if ((__shMask & bit) === 0) {
       __shMask |= bit;

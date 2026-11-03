@@ -2,7 +2,6 @@
 // and Zero-Trust OCap TCP/TLS Sockets (`connect` / `Slice.connect` / `Slice.mockSocket`).
 (function() {
   __slice_ensure_shard(2);
-  __slice_ensure_shard(3);
 
   function __serReplacer(_k, v) {
     if (v instanceof Uint8Array) {
@@ -543,6 +542,7 @@
   }
 
   function __makeWinterTcSocket(sockId, meta, origHostname, secureTransportMode) {
+    __slice_ensure_shard(3);
     var closedResolved = false;
     var resolveClosed, rejectClosed;
     var closedPromise = new Promise(function(res, rej) {

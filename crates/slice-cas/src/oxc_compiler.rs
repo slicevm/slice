@@ -666,7 +666,12 @@ pub(crate) fn strip_js_comments(source: &str) -> String {
             }
             continue;
         }
-        out.push_str(line);
+        if line.contains("Buffer.") {
+            let rewritten = crate::esm_cjs_linker::rewrite_buffer_fast_paths_in_line(line);
+            out.push_str(&rewritten);
+        } else {
+            out.push_str(line);
+        }
         out.push('\n');
     }
     out

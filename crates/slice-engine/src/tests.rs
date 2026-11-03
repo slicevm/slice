@@ -3938,6 +3938,71 @@ main();
     assert_eq!(m3.stdout[0], r#"{"sum":500,"isNativeThen":true}"#);
 }
 
+#[test]
+fn test_pillar4_surgical_shard_gating_and_native_buffer_fast_paths() {
+    // 1. Verify surgical `detect_needed_shards` bitmasks
+    let worker_mask = crate::js_preludes::detect_needed_shards(
+        "const { Worker, MessageChannel } = require('node:worker_threads');",
+        false,
+    );
+    assert_eq!(
+        worker_mask,
+        (1 << 8) | (1 << 2),
+        "Worker-only scripts must not eagerly load Shard 1 (URL/Fetch) or Shard 3 (Streams)"
+    );
+
+    let wintertc_sock_mask =
+        crate::js_preludes::detect_needed_shards("const sock = Slice.connect('127.0.0.1:6379');", false);
+    assert_eq!(wintertc_sock_mask, (1 << 8) | (1 << 3) | (1 << 2));
+
+    let url_can_parse_mask =
+        crate::js_preludes::detect_needed_shards("const ok = URL.canParse('https://example.com');", false);
+    assert_eq!(
+        url_can_parse_mask,
+        (1 << 1) | (1 << 2),
+        "URL.canParse must load Shard 1 + 2, not Shard 8"
+    );
+
+    // 2. Verify compile-time lowering of `Buffer.from(...).toString(...)` & `Buffer.byteLength(...)`
+    let ts_src = r#"
+const secret: string = "sk_live_slice_9941_\u00e9";
+const b64: string = Buffer.from(secret).toString("base64");
+const b64Url: string = Buffer.from(secret, "utf8").toString("base64url");
+const roundtrip: string = Buffer.from(b64Url, "base64url").toString("utf8");
+const byteLen: number = Buffer.byteLength(secret);
+const u8 = new Uint8Array([72, 105]);
+const u8B64: string = Buffer.from(u8).toString("base64");
+const u8Utf8: string = Buffer.from(u8).toString("utf8");
+const u8Len: number = Buffer.byteLength(u8);
+console.log(JSON.stringify({ b64, b64Url, roundtripOk: roundtrip === secret, byteLen, u8B64, u8Utf8, u8Len }));
+"#;
+    let normalized = slice_cas::strip_typescript_and_normalize(ts_src, true);
+    assert!(
+        !normalized.contains("Buffer."),
+        "Expected Buffer.from(...).toString(...) and Buffer.byteLength(...) to lower to native intrinsics, got:\n{}",
+        normalized
+    );
+    assert_eq!(
+        crate::js_preludes::detect_needed_shards(&normalized, false) & (1 << 5),
+        0,
+        "Expected Shard 5 (05_full_buffer.js) not to be required after intrinsic lowering"
+    );
+
+    let m = run_source_isolated(
+        "pillar4-buffer-fast-path",
+        ts_src,
+        CapabilityToken::pure_compute(),
+        500_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        m.stdout[0],
+        r#"{"b64":"c2tfbGl2ZV9zbGljZV85OTQxX8Op","b64Url":"c2tfbGl2ZV9zbGljZV85OTQxX8Op","roundtripOk":true,"byteLen":21,"u8B64":"SGk=","u8Utf8":"Hi","u8Len":2}"#
+    );
+}
+
+
 
 
 

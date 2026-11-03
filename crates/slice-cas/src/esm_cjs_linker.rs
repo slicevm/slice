@@ -239,6 +239,148 @@ fn collect_binding_pattern_names(
     }
 }
 
+fn find_matching_close_paren(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 1usize;
+    let mut in_quote: Option<u8> = None;
+    let mut escaped = false;
+    for (idx, &b) in bytes.iter().enumerate() {
+        if let Some(q) = in_quote {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == q {
+                in_quote = None;
+            }
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => in_quote = Some(b),
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_top_level_comma(s: &str) -> (&str, Option<&str>) {
+    let bytes = s.as_bytes();
+    let mut depth = 0usize;
+    let mut in_quote: Option<u8> = None;
+    let mut escaped = false;
+    for (idx, &b) in bytes.iter().enumerate() {
+        if let Some(q) = in_quote {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == q {
+                in_quote = None;
+            }
+            continue;
+        }
+        match b {
+            b'\'' | b'"' | b'`' => in_quote = Some(b),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                return (s[..idx].trim(), Some(s[idx + 1..].trim()));
+            }
+            _ => {}
+        }
+    }
+    (s.trim(), None)
+}
+
+pub(crate) fn rewrite_buffer_fast_paths_in_line(line: &str) -> String {
+    if !line.contains("Buffer.") {
+        return line.to_string();
+    }
+    let mut current = if line.contains("Buffer.byteLength(") {
+        line.replace("Buffer.byteLength(", "globalThis.__slice_utf8_byte_len(")
+    } else {
+        line.to_string()
+    };
+    if !current.contains("Buffer.from(") {
+        return current;
+    }
+
+    let mut out = String::with_capacity(current.len() + 32);
+    let mut rest = current.as_str();
+    while let Some(pos) = rest.find("Buffer.from(") {
+        let valid_boundary = pos == 0 || {
+            let prev = rest.as_bytes()[pos - 1];
+            !prev.is_ascii_alphanumeric() && prev != b'_' && prev != b'$' && prev != b'.'
+        };
+        if !valid_boundary {
+            out.push_str(&rest[..pos + 12]);
+            rest = &rest[pos + 12..];
+            continue;
+        }
+        let after_from_open = &rest[pos + 12..];
+        let Some(close_from_rel) = find_matching_close_paren(after_from_open) else {
+            out.push_str(&rest[..pos + 12]);
+            rest = &rest[pos + 12..];
+            continue;
+        };
+        let from_args_raw = &after_from_open[..close_from_rel];
+        let after_from_close = &after_from_open[close_from_rel + 1..];
+        if let Some(after_to_str_open) = after_from_close.strip_prefix(".toString(") {
+            if let Some(close_to_str_rel) = find_matching_close_paren(after_to_str_open) {
+                let to_enc_raw = after_to_str_open[..close_to_str_rel].trim();
+                let (first_arg, second_arg_opt) = split_top_level_comma(from_args_raw);
+                let from_enc = match second_arg_opt {
+                    None
+                    | Some("\"utf8\"")
+                    | Some("'utf8'")
+                    | Some("\"utf-8\"")
+                    | Some("'utf-8'") => Some("utf8"),
+                    Some("\"base64\"")
+                    | Some("'base64'")
+                    | Some("\"base64url\"")
+                    | Some("'base64url'") => Some("base64"),
+                    _ => None,
+                };
+                let replacement_opt = match (from_enc, to_enc_raw) {
+                    (Some("utf8"), "\"base64\"" | "'base64'") => Some(format!(
+                        "globalThis.__slice_base64_encode({}, false)",
+                        first_arg
+                    )),
+                    (Some("utf8"), "\"base64url\"" | "'base64url'") => Some(format!(
+                        "globalThis.__slice_base64_encode({}, true)",
+                        first_arg
+                    )),
+                    (Some("utf8"), "" | "\"utf8\"" | "'utf8'" | "\"utf-8\"" | "'utf-8'") => {
+                        Some(format!("globalThis.__slice_buf_to_utf8({})", first_arg))
+                    }
+                    (Some("base64"), "" | "\"utf8\"" | "'utf8'" | "\"utf-8\"" | "'utf-8'") => {
+                        Some(format!("globalThis.__slice_base64_decode({})", first_arg))
+                    }
+                    _ => None,
+                };
+                if let Some(rep) = replacement_opt {
+                    out.push_str(&rest[..pos]);
+                    out.push_str(&rep);
+                    rest = &after_to_str_open[close_to_str_rel + 1..];
+                    continue;
+                }
+            }
+        }
+        out.push_str(&rest[..pos + 12]);
+        rest = &rest[pos + 12..];
+    }
+    out.push_str(rest);
+    current = out;
+    current
+}
+
 fn rewrite_cjs_requires_and_crypto(
     snippet: &str,
     from_dir: &Path,
@@ -247,6 +389,7 @@ fn rewrite_cjs_requires_and_crypto(
     let mut out = Vec::new();
     for raw_line in snippet.lines() {
         let mut rewritten = rewrite_cjs_requires_in_line(raw_line, from_dir, deps_out);
+        rewritten = rewrite_buffer_fast_paths_in_line(&rewritten);
         if rewritten.contains("crypto.createHash(\"sha256\").update(")
             && rewritten.contains(").digest(\"hex\")")
         {
@@ -771,6 +914,7 @@ pub(crate) fn transform_module_to_cjs(
         }
 
         let mut rewritten_line = rewrite_cjs_requires_in_line(raw_line, from_dir, deps_out);
+        rewritten_line = rewrite_buffer_fast_paths_in_line(&rewritten_line);
         if rewritten_line.contains("crypto.createHash(\"sha256\").update(")
             && rewritten_line.contains(").digest(\"hex\")")
         {
