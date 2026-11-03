@@ -7,7 +7,11 @@ use std::path::{Path, PathBuf};
 
 #[inline]
 pub(crate) fn is_builtin_module(spec: &str) -> bool {
-    if spec.starts_with("node:") || spec.starts_with("slice:") || spec.starts_with("bun:") {
+    if spec.starts_with("node:")
+        || spec.starts_with("slice:")
+        || spec.starts_with("bun:")
+        || spec.starts_with("cloudflare:")
+    {
         return true;
     }
     matches!(
@@ -29,6 +33,9 @@ pub(crate) fn is_builtin_module(spec: &str) -> bool {
             | "assert/strict"
             | "timers"
             | "timers/promises"
+            | "worker_threads"
+            | "net"
+            | "dgram"
     )
 }
 
@@ -50,7 +57,11 @@ pub(crate) fn is_jsx_runtime_builtin(spec: &str) -> bool {
 
 #[inline]
 pub(crate) fn normalize_builtin_specifier(spec: &str) -> String {
-    if spec.starts_with("node:") || spec.starts_with("slice:") || spec.starts_with("bun:") {
+    if spec.starts_with("node:")
+        || spec.starts_with("slice:")
+        || spec.starts_with("bun:")
+        || spec.starts_with("cloudflare:")
+    {
         spec.to_string()
     } else if is_jsx_runtime_builtin(spec) {
         "slice:jsx".to_string()
