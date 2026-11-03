@@ -85,7 +85,7 @@ fn cli_entrypoint() -> Result<()> {
         "doctor" => cmd_doctor(),
         "microvm-bench" => cmd_microvm_bench(&args[2..]),
         "verify-security" => cmd_verify_security(),
-        "info" | "--version" | "-v" => cmd_info(),
+        "info" | "version" | "--version" | "-v" | "-V" => cmd_info(),
         "help" | "--help" | "-h" => {
             print_usage();
             Ok(())
@@ -136,7 +136,10 @@ fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
 }
 
 fn print_usage() {
-    println!("slice (Nexus-JS) v0.2.0 - Production MicroVM-Grade Edge Runtime");
+    println!(
+        "slice (Nexus-JS) v{} - Production MicroVM-Grade Edge Runtime",
+        env!("CARGO_PKG_VERSION")
+    );
     println!();
     println!("Core Commands:");
     println!("  slice init [dir]                               Scaffold a new TypeScript Edge project with slice.toml");
@@ -147,7 +150,7 @@ fn print_usage() {
     println!("  slice compile <input> -o <binary>              Compile a script, folder app, or .cas into a standalone binary");
     println!("  slice inspect <bundle.cas|script.ts|dir>       Disassemble SLICESNP/SLICEBOA bytecode and inspect CAS Radix table");
     println!("  slice mcp [--smoke-test] [--audit-egress=SEC]  Start built-in Model Context Protocol (MCP) JSON-RPC 2.0 server");
-    println!("  slice repl                                     Start interactive SES-locked TypeScript/JS shell");
+    println!("  slice repl                                     Start interactive SES-Locked TypeScript/JS shell");
     println!("  slice doctor                                   Audit host OS kernel io_uring/IOCP, MPK, Warm Pool, and OCap");
     println!("  slice microvm-bench [--tenants=1000] [--json]  Run 1,000-tenant MicroVM cold-start & density benchmark");
     println!("  slice verify-security                          Run 5-vector OCap, SES, and Fuel containment verification");
@@ -157,7 +160,8 @@ fn print_usage() {
 fn cmd_info() -> Result<()> {
     let io_engine = CompletionRingEngine::new(64, true)?;
     println!(
-        "slice (Nexus-JS) v0.2.0 [{}-{}]",
+        "slice (Nexus-JS) v{} [{}-{}]",
+        env!("CARGO_PKG_VERSION"),
         env::consts::OS,
         env::consts::ARCH
     );

@@ -31,7 +31,10 @@ struct MicroVmBenchReport {
 }
 
 pub(crate) fn cmd_repl() -> Result<()> {
-    println!("Slice (Nexus-JS) v0.2.0 Interactive SES-Locked Compartment Shell");
+    println!(
+        "Slice (Nexus-JS) v{} Interactive SES-Locked Compartment Shell",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("Commands: :help, :metrics, :caps, :vars, :reset, :quit");
     let (caps, fuel_limit, mem_limit) = load_manifest_or_default();
     let mut isolate = SliceIsolate::spawn("repl-tenant", 1, caps.clone(), fuel_limit, mem_limit);
@@ -144,7 +147,11 @@ pub(crate) fn cmd_mcp(args: &[String]) -> Result<()> {
 
     if smoke_test {
         let requests = [
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","clientInfo":{"name":"slice-smoke","version":"0.2.0"}}}"#,
+            concat!(
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","clientInfo":{"name":"slice-smoke","version":""#,
+                env!("CARGO_PKG_VERSION"),
+                r#""}}}"#
+            ),
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"const x: number = 21 * 2; console.log('mcp-eval=' + x); x","fuel":500000}}}"#,
             r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"slice_kv_set","arguments":{"key":"agent_state","value":"ready"}}}"#,
@@ -207,7 +214,7 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
             "protocolVersion": "2024-11-05",
             "serverInfo": {
                 "name": "slice-nexusjs-mcp",
-                "version": "0.2.0"
+                "version": env!("CARGO_PKG_VERSION")
             },
             "capabilities": {
                 "tools": {}

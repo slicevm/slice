@@ -839,8 +839,11 @@ fn execute_single_http11_hop(
     let mut req_buf = Vec::with_capacity(256 + body.len());
     let _ = write!(
         &mut req_buf,
-        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Slice-NexusJS/0.2.0\r\nConnection: keep-alive\r\n",
-        method, parts.path_and_query, parts.host_header
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Slice-NexusJS/{}\r\nConnection: keep-alive\r\n",
+        method,
+        parts.path_and_query,
+        parts.host_header,
+        env!("CARGO_PKG_VERSION")
     );
     for (k, v) in req_headers {
         if !k.eq_ignore_ascii_case("host")

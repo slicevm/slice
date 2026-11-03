@@ -178,7 +178,7 @@ docker run --rm -e SLICE_BENCH_TAGS=apps,wasm,serve,swarm slice-realworld-bench
 
 ### 4.2 HTTP Server (`slice serve`), Sharded KV & 1,000-Tenant MicroVM Benchmarks
 
-| Workload | Slice (`v0.2.0`) | Deno (`v2.9.8`) | Bun (`v1.4.4`) | Node.js (`v26.12.1`) |
+| Workload | Slice (`v0.9.2`) | Deno (`v2.9.8`) | Bun (`v1.4.4`) | Node.js (`v26.12.1`) |
 | :--- | :--- | :--- | :--- | :--- |
 | **`slice serve` Tier-0 CAS (`--workers=8`, Keep-Alive)** | **`152,376 req/s` (`6.56 us/req`)** | 102,481 req/s | 88,132 req/s | 55,810 req/s |
 | **`slice serve` Tier-1 WinterTC (`--workers=8`, Keep-Alive)** | **`107,274 req/s` (`9.32 us/req`)** | 102,481 req/s | 88,132 req/s | 55,810 req/s |

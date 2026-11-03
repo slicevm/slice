@@ -16,6 +16,6 @@ if (-not (Test-Path $ReleaseExe)) {
 
 $DestExe = Join-Path $InstallDir "slice.exe"
 Copy-Item -Force $ReleaseExe $DestExe
-Write-Host "Installed Slice v0.2.0 to $DestExe"
+Write-Host "Installed Slice v0.9.2 to $DestExe"
 & $DestExe info
 
