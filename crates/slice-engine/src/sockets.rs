@@ -522,7 +522,7 @@ pub fn tcp_socket_read(id: u32, max_bytes: usize, timeout_ms: u64) -> Result<Str
                 .to_string())
             }
             TcpConnectionBackend::Live(stream) => {
-                let read_to = Duration::from_millis(timeout_ms.clamp(5, 5_000));
+                let read_to = Duration::from_millis(timeout_ms.clamp(1, 5_000));
                 match stream {
                     OutboundStream::Plain(tcp) => {
                         let _ = tcp.set_read_timeout(Some(read_to));
@@ -771,7 +771,7 @@ pub fn udp_socket_send_bytes(
                     .map_err(|e| format!("UdpSendError: {}", e))?;
 
                 // Non-blocking / short-poll check for immediate UDP response (e.g. local DNS / echo server)
-                let _ = udp.set_read_timeout(Some(Duration::from_millis(20)));
+                let _ = udp.set_read_timeout(Some(Duration::from_millis(10)));
                 let mut recv_buf = [0u8; 65_536];
                 let mut replies = Vec::new();
                 if let Ok((n, src_addr)) = udp.recv_from(&mut recv_buf) {

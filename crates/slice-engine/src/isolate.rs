@@ -1631,6 +1631,10 @@ impl SliceIsolate {
                         }
                     }
                     let _ = realm.ctx.run_jobs();
+                    clear_event_loop_state();
+                    crate::websocket::clear_thread_websocket_state();
+                    crate::sockets::clear_thread_socket_state();
+                    crate::workers::clear_thread_worker_state();
                     let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
                         b"globalThis.__slice_wu.length=0;",
                     ));

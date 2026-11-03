@@ -216,7 +216,7 @@ worker.postMessage({ values: [1, 2, 3, 4] });
 ```
 
 ### 1.13 Zero-Trust TCP/TLS/UDP Sockets (`cloudflare:sockets`, `node:net`, `node:dgram`)
-Slice implements the WinterTC / Cloudflare `connect(address, options)` Streams Socket API (`"cloudflare:sockets"` / `"slice:sockets"` / `Slice.connect`), `node:net` (`Socket`, `connect`, `createConnection`, `isIP`, `isIPv4`, `isIPv6`), and `node:dgram` (`createSocket("udp4" | "udp6")`). Every raw TCP, TLS 1.3 (`secureTransport: "on" | "starttls"`), and UDP socket is protected by 5-Ring Security (OCap `allow_net` verification, privileged port `< 1024` blocking under wildcard `*`, Pre-Connect DNS Resolved-IP SSRF filtering, Outbound Egress Secret DLP on every `socket.write()` and `udp.send()`, and deterministic `Slice.mockSocket` testing):
+Slice implements the WinterTC / Cloudflare `connect(address, options)` Streams Socket API (`"cloudflare:sockets"` / `"slice:sockets"` / `Slice.connect`), `node:net` (`Socket`, `connect`, `createConnection`, `isIP`, `isIPv4`, `isIPv6` with coalesced non-blocking `_schedulePump()` read microtasks), and `node:dgram` (`createSocket("udp4" | "udp6")`). Every raw TCP, TLS 1.3 (`secureTransport: "on" | "starttls"`), and UDP socket is protected by 5-Ring Security (OCap `allow_net` verification, privileged port `< 1024` blocking under wildcard `*`, Pre-Connect DNS Resolved-IP SSRF filtering, Outbound Egress Secret DLP on every `socket.write()` and `udp.send()`, and deterministic `Slice.mockSocket` testing):
 ```typescript
 import { connect } from "cloudflare:sockets";
 

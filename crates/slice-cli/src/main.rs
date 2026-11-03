@@ -327,13 +327,17 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             .entrypoint_blob()
             .context("CAS archive has no valid entrypoint blob")?;
         let bytecode = archive.get_bytecode_slice(entry);
-        if prewarm_pool {
-            SliceIsolate::prewarm_boa_bundle(bytecode);
-        }
         let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps.clone(), fuel_limit, mem_limit);
         isolate.set_deterministic_seed(deterministic_seed);
         for sec in &audit_secrets {
             isolate.add_egress_audit_secret(sec.clone());
+        }
+        if prewarm_pool {
+            SliceIsolate::prewarm_boa_bundle(bytecode);
+            let snap = isolate.checkpoint();
+            let _ = isolate.execute_bytecode(bytecode, Some(&archive));
+            isolate.restore(snap);
+            isolate.reset_for_request("tenant-cli", 1, fuel_limit, mem_limit);
         }
         isolate.execute_bytecode(bytecode, Some(&archive))?
     } else {
@@ -351,13 +355,17 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
         let bytecode = compile_source_to_bytecode(&bundled_source);
         bundled_for_sourcemap = Some(bundled_source);
-        if prewarm_pool {
-            SliceIsolate::prewarm_boa_bundle(&bytecode);
-        }
         let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps.clone(), fuel_limit, mem_limit);
         isolate.set_deterministic_seed(deterministic_seed);
         for sec in &audit_secrets {
             isolate.add_egress_audit_secret(sec.clone());
+        }
+        if prewarm_pool {
+            SliceIsolate::prewarm_boa_bundle(&bytecode);
+            let snap = isolate.checkpoint();
+            let _ = isolate.execute_bytecode(&bytecode, None);
+            isolate.restore(snap);
+            isolate.reset_for_request("tenant-cli", 1, fuel_limit, mem_limit);
         }
         isolate.execute_bytecode(&bytecode, None)?
     };

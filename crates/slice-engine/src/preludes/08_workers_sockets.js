@@ -313,14 +313,9 @@
     }
     this._terminated = true;
     __slice_worker_terminate_child(this.threadId);
-    delete __activeWorkers[this.threadId];
-    this._exited = true;
-    this._exitCode = 1;
-    this.emit("exit", 1);
-    var ev = new Event("exit");
-    ev.code = 1;
-    this.dispatchEvent(ev);
-    return Promise.resolve(1);
+    return new Promise(function(resolve) {
+      self._termResolvers.push(resolve);
+    });
   };
 
   Worker.prototype.ref = function() {
@@ -372,6 +367,13 @@
       var exEv = new Event("exit");
       exEv.code = w._exitCode;
       w.dispatchEvent(exEv);
+      if (w._termResolvers && w._termResolvers.length > 0) {
+        var resolvers = w._termResolvers.slice();
+        w._termResolvers.length = 0;
+        for (var i = 0; i < resolvers.length; i++) {
+          resolvers[i](w._exitCode);
+        }
+      }
     }
   };
 

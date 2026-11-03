@@ -3759,4 +3759,105 @@ main();
     );
 }
 
+#[test]
+fn test_pillar2_coalesced_node_net_pump_and_worker_terminate_await() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server_handle = std::thread::spawn(move || {
+        for _ in 0..3 {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 256];
+                if let Ok(n) = stream.read(&mut buf) {
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let reply = format!("FAST_ACK:{}", req.trim());
+                    let _ = stream.write_all(reply.as_bytes());
+                    let _ = stream.flush();
+                }
+            }
+        }
+    });
+
+    crate::prewarm_worker_pool_sync(1);
+    let reuse_before = crate::worker_pool_reuse_count();
+
+    let code = format!(
+        r#"
+import net from "node:net";
+import {{ Worker }} from "node:worker_threads";
+
+const workerScript = `
+    const {{ parentPort }} = require("node:worker_threads");
+    parentPort.on("message", (x) => parentPort.postMessage(x * 2));
+`;
+
+async function runTerminateWorker(val) {{
+    return await new Promise((resolve, reject) => {{
+        const w = new Worker(workerScript, {{ eval: true }});
+        w.on("message", (out) => {{
+            w.terminate().then(() => resolve(out));
+        }});
+        w.on("error", reject);
+        w.postMessage(val);
+    }});
+}}
+
+async function runTcpSession(id) {{
+    return await new Promise((resolve, reject) => {{
+        const sock = net.createConnection({{ host: "127.0.0.1", port: {port} }});
+        sock.on("connect", () => {{
+            sock.write("PING-" + id + "\r\n");
+        }});
+        sock.on("data", (chunk) => {{
+            const txt = chunk.toString("utf8");
+            sock.destroy();
+            resolve(txt);
+        }});
+        sock.on("error", reject);
+    }});
+}}
+
+async function main() {{
+    const w1 = await runTerminateWorker(10);
+    const w2 = await runTerminateWorker(21);
+    const w3 = await runTerminateWorker(33);
+
+    const t0 = performance.now();
+    const s1 = await runTcpSession(1);
+    const s2 = await runTcpSession(2);
+    const s3 = await runTcpSession(3);
+    const tcpElapsedMs = performance.now() - t0;
+
+    console.log(JSON.stringify({{
+        workers: [w1, w2, w3],
+        sockets: [s1, s2, s3],
+        fastTurnaround: tcpElapsedMs < 40
+    }}));
+}}
+main();
+"#
+    );
+
+    let caps = CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", port));
+    let m = run_source_isolated("pillar2-net-test", &code, caps, 2_000_000, 16 * 1024 * 1024)
+        .unwrap();
+    let _ = server_handle.join();
+
+    assert_eq!(
+        m.stdout[0],
+        r#"{"workers":[20,42,66],"sockets":["FAST_ACK:PING-1","FAST_ACK:PING-2","FAST_ACK:PING-3"],"fastTurnaround":true}"#
+    );
+
+    let reuse_after = crate::worker_pool_reuse_count();
+    assert!(
+        reuse_after >= reuse_before + 3,
+        "Expected all 3 worker.terminate() workers to reuse the single warm worker thread, got before={} after={}",
+        reuse_before,
+        reuse_after
+    );
+}
+
+
 
