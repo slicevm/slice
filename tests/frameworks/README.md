@@ -37,15 +37,15 @@ General multi-file application and security benchmarks (`01-fintech-checkout` th
 
 | Framework Suite | Slice Cold `.cas` (Min / Avg) | Slice Standalone Bin (Min / Avg) | Slice Warm Isolate (`--warm`) | Bun `v1.4.4` (Min / Avg) | Deno `v2.9.8` (Min / Avg) | Node.js `v27.0.0-alpha` (Min / Avg) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **FW 1: `01-hono-edge-microservice`** (`hono@4.6.20` + `cookie` + `ms`) | **17.534 ms / 18.599 ms** | **17.594 ms / 18.607 ms** | **2.312 ms** (`0.08 us` init) | 18.829 ms / 19.871 ms | 50.341 ms / 54.317 ms | 94.402 ms / 97.324 ms |
-| **FW 2: `02-itty-router-unjs-nitro-stack`** (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | **16.680 ms / 17.373 ms** | **17.033 ms / 17.930 ms** | **2.073 ms** (`0.03 us` init) | 18.018 ms / 19.310 ms | 44.211 ms / 47.543 ms | 84.550 ms / 88.654 ms |
+| **FW 1: `01-hono-edge-microservice`** (`hono@4.6.20` + `cookie` + `ms`) | **28.212 ms / 29.229 ms** | **28.499 ms / 29.332 ms** | **6.560 ms** (`0.06 us` init) | 18.391 ms / 19.633 ms | 48.183 ms / 51.357 ms | 90.885 ms / 97.127 ms |
+| **FW 2: `02-itty-router-unjs-nitro-stack`** (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | **27.422 ms / 28.482 ms** | **27.554 ms / 29.443 ms** | **8.922 ms** (`0.05 us` init) | 17.925 ms / 19.030 ms | 43.899 ms / 47.855 ms | 82.748 ms / 87.404 ms |
 
 ### 4. Peak Process Memory Footprint (`Max RSS` via `/usr/bin/time -v`)
 
-| Framework Suite | Slice (`v0.9.3`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) | Slice Memory Advantage |
+| Framework Suite | Slice (`v0.9.4`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) | Slice Memory Advantage |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **FW 1: `01-hono-edge-microservice`** (`hono` v4) | **13,672 KB (13.35 MB)** | 30,336 KB (29.62 MB) | 49,520 KB (48.36 MB) | 89,112 KB (87.02 MB) | **6.52x less than Node / 2.22x less than Bun** |
-| **FW 2: `02-itty-router-unjs-nitro-stack`** (UnJS / Nitro) | **13,672 KB (13.35 MB)** | 31,232 KB (30.50 MB) | 47,860 KB (46.74 MB) | 86,920 KB (84.88 MB) | **6.36x less than Node / 2.28x less than Bun** |
+| **FW 1: `01-hono-edge-microservice`** (`hono` v4) | **15,488 KB (15.12 MB)** | 30,720 KB (30.00 MB) | 49,008 KB (47.86 MB) | 89,116 KB (87.03 MB) | **5.75x less than Node / 1.98x less than Bun** |
+| **FW 2: `02-itty-router-unjs-nitro-stack`** (UnJS / Nitro) | **14,464 KB (14.12 MB)** | 31,744 KB (31.00 MB) | 48,760 KB (47.62 MB) | 86,924 KB (84.89 MB) | **6.01x less than Node / 2.19x less than Bun** |
 
 ---
 

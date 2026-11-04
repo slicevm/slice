@@ -187,8 +187,8 @@ All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 2
 | **App 22: `22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** | **25.906 ms / 2.001 ms** (`0.06 us` init) | 44.236 ms | 109.267 ms | 98.820 ms | **3.52x faster** | **1.58x-1.98x Bun / 22.1x Warm vs Bun** |
 | **App 23: `23-wasm-crypto-and-simd-kernel`** (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | **16.693 ms** | **13.962 ms / 1.822 ms** (`0.05 us` init) | 18.798 ms | 38.410 ms | 57.055 ms | **3.42x faster** | **1.13x Cold / 10.3x Warm vs Bun** |
 | **App 24: `24-tsx-ssr-and-wasm-edge-pipeline`** (`WebAssembly` SLA Scorer + SSR Pipeline) | **13.621 ms** | **12.005 ms / 1.601 ms** (`0.03 us` init) | 17.284 ms | 38.347 ms | 63.228 ms | **4.64x faster** | **1.27x Cold / 10.8x Warm vs Bun** |
-| **FW 1: `frameworks/01-hono-edge-microservice`** (`hono@4.6.20` + `hono/cookie` + `ms`) | **17.534 ms** | **15.110 ms / 2.312 ms** (`0.08 us` init) | 18.829 ms | 50.341 ms | 94.402 ms | **5.38x faster** | **1.07x Cold / 8.15x Warm vs Bun** |
-| **FW 2: `frameworks/02-itty-router-unjs-nitro-stack`** (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | **16.680 ms** | **14.220 ms / 2.073 ms** (`0.03 us` init) | 18.018 ms | 44.211 ms | 84.550 ms | **5.07x faster** | **1.08x Cold / 8.70x Warm vs Bun** |
+| **FW 1: `frameworks/01-hono-edge-microservice`** (`hono@4.6.20` + `hono/cookie` + `ms`) | **28.212 ms** | **25.466 ms / 6.560 ms** (`0.06 us` init) | 18.391 ms | 48.183 ms | 90.885 ms | **3.22x faster** | **1.71x Deno / 2.80x Warm vs Bun** |
+| **FW 2: `frameworks/02-itty-router-unjs-nitro-stack`** (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | **27.422 ms** | **24.148 ms / 8.922 ms** (`0.05 us` init) | 17.925 ms | 43.899 ms | 82.748 ms | **3.02x faster** | **1.60x Deno / 2.01x Warm vs Bun** |
 
 ### 5.2 Peak Memory Footprint on External NPM & Disk I/O Apps (`Max RSS` via `/usr/bin/time -v`)
 

@@ -104,7 +104,21 @@ fn has_outbound_fetch_call(js_code: &str) -> bool {
 /// execution can pre-load only the shards actually used by a script before entering async/generator
 /// frames, while scripts that don't use those globals pay 0 bytes of prelude evaluation cost.
 #[inline]
-pub(crate) fn detect_needed_shards(js_code: &str, is_http: bool) -> u16 {
+pub(crate) fn detect_needed_shards(raw_js_code: &str, is_http: bool) -> u16 {
+    let active_storage: String;
+    let js_code: &str = if raw_js_code.contains("] = \"") || raw_js_code.contains("]=\"") {
+        active_storage = raw_js_code
+            .lines()
+            .filter(|l| {
+                !(l.starts_with("__slice_modules[")
+                    && (l.contains("] = \"") || l.contains("]=\"")))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        &active_storage
+    } else {
+        raw_js_code
+    };
     let mut mask: u16 = 0;
     let needs_outbound_fetch_sse = has_outbound_fetch_call(js_code)
         || js_code.contains("fetchSync")
@@ -163,7 +177,9 @@ pub(crate) fn detect_needed_shards(js_code: &str, is_http: bool) -> u16 {
     {
         mask |= 1 << 4;
     }
-    if js_code.contains("Buffer.")
+    if js_code.contains("Buffer.from")
+        || js_code.contains("Buffer.alloc")
+        || js_code.contains("Buffer.byteLength")
         || js_code.contains("Buffer(")
         || js_code.contains("Buffer.concat")
         || js_code.contains("Buffer.compare")

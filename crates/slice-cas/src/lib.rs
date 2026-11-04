@@ -230,23 +230,39 @@ impl CasBuilder {
                 if rem != 0 {
                     data_payload.resize(data_payload.len() + (CACHE_LINE_ALIGN - rem), 0);
                 }
-                let source_offset = data_payload.len() as u64;
                 let source_bytes = normalized_source.as_bytes();
-                data_payload.extend_from_slice(source_bytes);
-
-                let rem_bc = data_payload.len() % CACHE_LINE_ALIGN;
-                if rem_bc != 0 {
-                    data_payload.resize(data_payload.len() + (CACHE_LINE_ALIGN - rem_bc), 0);
-                }
-                let bytecode_offset = data_payload.len() as u64;
-                data_payload.extend_from_slice(bytecode);
+                let (source_offset, source_len, bytecode_offset) = if bytecode.len() >= 12
+                    && &bytecode[0..10] == b"SLICEBOA{\n"
+                    && &bytecode[bytecode.len() - 2..] == b"\n}"
+                {
+                    let bc_off = data_payload.len() as u64;
+                    data_payload.extend_from_slice(bytecode);
+                    (bc_off + 10, (bytecode.len() - 12) as u64, bc_off)
+                } else if bytecode.len() == source_bytes.len() + 8
+                    && &bytecode[0..8] == b"SLICEBOA"
+                    && &bytecode[8..] == source_bytes
+                {
+                    let bc_off = data_payload.len() as u64;
+                    data_payload.extend_from_slice(bytecode);
+                    (bc_off + 8, source_bytes.len() as u64, bc_off)
+                } else {
+                    let src_off = data_payload.len() as u64;
+                    data_payload.extend_from_slice(source_bytes);
+                    let rem_bc = data_payload.len() % CACHE_LINE_ALIGN;
+                    if rem_bc != 0 {
+                        data_payload.resize(data_payload.len() + (CACHE_LINE_ALIGN - rem_bc), 0);
+                    }
+                    let bc_off = data_payload.len() as u64;
+                    data_payload.extend_from_slice(bytecode);
+                    (src_off, source_bytes.len() as u64, bc_off)
+                };
 
                 blobs.insert(
                     hash_hex.clone(),
                     CasBlobEntry {
                         hash_hex,
                         offset: source_offset,
-                        source_len: source_bytes.len() as u64,
+                        source_len,
                         bytecode_offset,
                         bytecode_len: bytecode.len() as u64,
                         original_specifier: specifier.clone(),
@@ -808,5 +824,83 @@ export function Card({ title, items }: CardProps) {
             "Expected automatic JSX runtime import to resolve to slice:jsx builtin:\n{}",
             compiled
         );
+    }
+
+    #[test]
+    fn test_general_oxc_ast_dead_export_tree_shaker_and_cold_method_inliner() {
+        let test_dir = std::env::temp_dir().join("slice_cas_tree_shaker_and_cold_inliner_test");
+        let _ = std::fs::remove_dir_all(&test_dir);
+        let src_dir = test_dir.join("src");
+        let pkg_dir = test_dir.join("node_modules").join("synth-kit");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            r#"{"name":"synth-kit","module":"./index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg_dir.join("cold_body.js"),
+            r#"export function parseBody(raw) { return "parsed:" + raw; }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg_dir.join("unused_sub.js"),
+            r#"export function neverCalledSub() { return "dead-sub-module"; }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg_dir.join("index.js"),
+            r#"
+import { parseBody } from "./cold_body.js";
+import { neverCalledSub } from "./unused_sub.js";
+
+function deadRecursiveHelper(n) {
+    return n <= 0 ? neverCalledSub() : deadRecursiveHelper(n - 1);
+}
+
+export function unusedExportFn(x) {
+    return deadRecursiveHelper(x);
+}
+
+export class SynthRequest {
+    constructor(url) {
+        this.url = url;
+    }
+    async parseBody() {
+        return parseBody(this.url);
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let entry_ts = src_dir.join("index.ts");
+        std::fs::write(
+            &entry_ts,
+            r#"
+import { SynthRequest } from "synth-kit";
+const req = new SynthRequest("/v1/ping");
+console.log(req.url);
+"#,
+        )
+        .unwrap();
+
+        let bundled = bundle_entrypoint_with_deps(&entry_ts).unwrap();
+        assert!(
+            !bundled.contains("unusedExportFn")
+                && !bundled.contains("deadRecursiveHelper")
+                && !bundled.contains("neverCalledSub"),
+            "Expected Oxc AST dead-export tree-shaker to prune unused exports, self-recursive helpers, and transitive dead modules:\n{}",
+            bundled
+        );
+        assert!(
+            bundled.contains(r#"__slice_modules[0] = ""#),
+            "Expected cold-method-only dependency cold_body.js to be emitted as a lazy JSON string module:\n{}",
+            bundled
+        );
+
+        let _ = std::fs::remove_dir_all(&test_dir);
     }
 }

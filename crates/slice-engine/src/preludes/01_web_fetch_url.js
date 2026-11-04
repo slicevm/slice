@@ -292,6 +292,7 @@
     }
   };
   Headers.prototype.get = function(n) {
+    if (typeof n === "string" && this._m && n in this._m) return this._m[n];
     var k = String(n).toLowerCase();
     if (this._m && k in this._m) return this._m[k];
     if (this._live) return __slice_http_header(k);
@@ -329,8 +330,12 @@
     return r;
   };
   Headers.prototype.forEach = function(cb, ta) {
-    var es = this.entries();
-    for (var i = 0; i < es.length; i++) cb.call(ta, es[i][1], es[i][0], this);
+    this._ensure();
+    var m = this._m, ks = Object.keys(m);
+    for (var i = 0; i < ks.length; i++) {
+      var k = ks[i];
+      cb.call(ta, m[k], k, this);
+    }
   };
   if (typeof Symbol !== "undefined" && Symbol.iterator) {
     Headers.prototype[Symbol.iterator] = function() {
@@ -412,6 +417,18 @@
       this.url = "http://" + h + p + (q ? "?" + q : "");
       this.headers = new Headers("__SLICE_LIVE_REQ__");
       this._body = __slice_http_body() || "";
+      this._u8 = null;
+      this._fd = null;
+      this.redirect = "follow";
+      this.signal = null;
+      this.bodyUsed = false;
+      return;
+    }
+    if (!init && typeof input === "string") {
+      this.url = input;
+      this.method = "GET";
+      this.headers = new Headers();
+      this._body = "";
       this._u8 = null;
       this._fd = null;
       this.redirect = "follow";
@@ -536,6 +553,7 @@
   };
   var __bodyDesc = {
     get: function() {
+      if (!this._body && !this._u8 && this._data === undefined) return null;
       var b = __extractBodyBytes(this);
       return new globalThis.ReadableStream({
         start: function(c) {
@@ -548,12 +566,10 @@
   Object.defineProperty(RP, "body", __bodyDesc);
   Object.defineProperty(SP, "body", __bodyDesc);
   Response.json = function(data, init) {
-    var o = init ? (typeof init === "number" ? { status: init } : init) : {};
-    var h = o.headers instanceof Headers ? o.headers : new Headers(o.headers);
-    if (!h._m["content-type"]) h._m["content-type"] = "application/json";
-    var r = new Response(null, { status: o.status || 200, statusText: o.statusText, headers: h });
+    var r = new Response(null, typeof init === "number" ? { status: init } : init);
+    if (!r.headers._m["content-type"]) r.headers._m["content-type"] = "application/json";
     r._data = data;
-    r._ct = h._m["content-type"];
+    r._ct = r.headers._m["content-type"];
     return r;
   };
   Response.redirect = function(url, status) {

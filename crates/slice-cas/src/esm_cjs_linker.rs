@@ -649,7 +649,10 @@ fn try_transform_esm_to_cjs_ast(
                     }
                     let local_n = spec.local.name().to_string();
                     let exported_n = spec.exported.name().to_string();
-                    if exported_n == "default" {
+                    if exported_n == "default"
+                        && exp_named.specifiers.len() == 1
+                        && deferred_exports.is_empty()
+                    {
                         has_default_export = true;
                         body_lines.push(format!("const __slice_default = {};", local_n));
                     } else {
@@ -681,18 +684,16 @@ fn try_transform_esm_to_cjs_ast(
                             tmp = tmp_var
                         ));
                     } else if orig_n == "default" {
-                        reexp_lines.push(format!(
-                            "Object.defineProperty(exports, {exp:?}, {{ enumerable: true, configurable: true, get: function() {{ return ({tmp} && {tmp}.default !== undefined) ? {tmp}.default : {tmp}; }} }});",
-                            exp = exp_n.as_str(),
-                            tmp = tmp_var
+                        deferred_exports.push((
+                            exp_n.to_string(),
+                            format!(
+                                "(({tmp} && {tmp}.default !== undefined) ? {tmp}.default : {tmp})",
+                                tmp = tmp_var
+                            ),
                         ));
                     } else {
-                        reexp_lines.push(format!(
-                            "Object.defineProperty(exports, {exp:?}, {{ enumerable: true, configurable: true, get: function() {{ return {tmp}[{orig:?}]; }} }});",
-                            exp = exp_n.as_str(),
-                            tmp = tmp_var,
-                            orig = orig_n.as_str()
-                        ));
+                        deferred_exports
+                            .push((exp_n.to_string(), format!("{}.{}", tmp_var, orig_n)));
                     }
                 }
                 if has_runtime_spec {
@@ -1037,4 +1038,1153 @@ pub(crate) fn transform_module_to_cjs(
 
     body_lines.join("\n")
 }
+
+#[derive(Debug, Clone)]
+pub(crate) enum UsedExports {
+    All,
+    Unreferenced,
+    Subset(FxHashSet<String>),
+}
+
+#[inline]
+fn is_js_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_' || b == b'$'
+}
+
+#[inline]
+fn is_js_ident_continue(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+#[inline]
+fn is_js_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "const"
+            | "let"
+            | "var"
+            | "function"
+            | "return"
+            | "if"
+            | "else"
+            | "for"
+            | "while"
+            | "do"
+            | "switch"
+            | "case"
+            | "default"
+            | "break"
+            | "continue"
+            | "try"
+            | "catch"
+            | "finally"
+            | "throw"
+            | "new"
+            | "class"
+            | "extends"
+            | "super"
+            | "this"
+            | "typeof"
+            | "instanceof"
+            | "in"
+            | "void"
+            | "delete"
+            | "await"
+            | "yield"
+            | "true"
+            | "false"
+            | "null"
+            | "undefined"
+    )
+}
+
+/// Scans `snippet` for all referenced free identifier names, skipping comments, string literals,
+/// static template literal segments (while scanning `${...}` interpolations), RegExp literals,
+/// and `.prop` member access names.
+pub(crate) fn extract_referenced_identifiers_with_offsets(
+    snippet: &str,
+    base_offset: u32,
+) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    let bytes = snippet.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+    let mut prev_sig_byte = 0u8;
+    let mut prev_was_regex_kw = false;
+    let mut in_template = false;
+    let mut brace_depth = 0usize;
+    let mut tpl_brace_stack: Vec<usize> = Vec::new();
+
+    while i < len {
+        if in_template {
+            let b = bytes[i];
+            if b == b'\\' {
+                i = (i + 2).min(len);
+                continue;
+            }
+            if b == b'`' {
+                in_template = false;
+                prev_sig_byte = b'`';
+                prev_was_regex_kw = false;
+                i += 1;
+                continue;
+            }
+            if b == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
+                tpl_brace_stack.push(brace_depth);
+                in_template = false;
+                prev_sig_byte = b'{';
+                prev_was_regex_kw = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+
+        // Line comment
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Block comment
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(len);
+            continue;
+        }
+
+        // RegExp literal
+        if b == b'/' {
+            let can_start_regex = prev_was_regex_kw
+                || prev_sig_byte == 0
+                || matches!(
+                    prev_sig_byte,
+                    b'(' | b','
+                        | b'='
+                        | b':'
+                        | b'['
+                        | b'!'
+                        | b'&'
+                        | b'|'
+                        | b'?'
+                        | b'{'
+                        | b'}'
+                        | b';'
+                        | b'+'
+                        | b'-'
+                        | b'*'
+                        | b'%'
+                        | b'^'
+                        | b'~'
+                        | b'<'
+                        | b'>'
+                );
+            if can_start_regex {
+                i += 1;
+                let mut in_class = false;
+                while i < len {
+                    let rb = bytes[i];
+                    if rb == b'\\' {
+                        i = (i + 2).min(len);
+                        continue;
+                    }
+                    if rb == b'[' {
+                        in_class = true;
+                    } else if rb == b']' {
+                        in_class = false;
+                    } else if rb == b'/' && !in_class {
+                        i += 1;
+                        while i < len && bytes[i].is_ascii_alphabetic() {
+                            i += 1;
+                        }
+                        break;
+                    } else if rb == b'\n' {
+                        break;
+                    }
+                    i += 1;
+                }
+                prev_sig_byte = b'/';
+                prev_was_regex_kw = false;
+                continue;
+            }
+        }
+
+        // Quote literal
+        if b == b'\'' || b == b'"' {
+            let q = b;
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(len);
+                    continue;
+                }
+                if bytes[i] == q {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            prev_sig_byte = q;
+            prev_was_regex_kw = false;
+            continue;
+        }
+
+        if b == b'`' {
+            in_template = true;
+            i += 1;
+            continue;
+        }
+
+        if b == b'{' {
+            brace_depth += 1;
+            prev_sig_byte = b'{';
+            prev_was_regex_kw = false;
+            i += 1;
+            continue;
+        }
+
+        if b == b'}' {
+            if tpl_brace_stack.last() == Some(&brace_depth) {
+                tpl_brace_stack.pop();
+                in_template = true;
+            } else {
+                brace_depth = brace_depth.saturating_sub(1);
+            }
+            prev_sig_byte = b'}';
+            prev_was_regex_kw = false;
+            i += 1;
+            continue;
+        }
+
+        if is_js_ident_start(b) {
+            let start = i;
+            i += 1;
+            while i < len && is_js_ident_continue(bytes[i]) {
+                i += 1;
+            }
+            let ident = &snippet[start..i];
+            prev_was_regex_kw = matches!(
+                ident,
+                "return"
+                    | "typeof"
+                    | "void"
+                    | "delete"
+                    | "in"
+                    | "of"
+                    | "instanceof"
+                    | "case"
+                    | "throw"
+                    | "else"
+                    | "yield"
+                    | "await"
+            );
+            if (prev_sig_byte != b'.' || (start >= 3 && &bytes[start - 3..start] == b"..."))
+                && !is_js_keyword(ident)
+            {
+                out.push((ident.to_string(), base_offset + start as u32));
+            }
+            prev_sig_byte = bytes[i - 1];
+            continue;
+        }
+
+        prev_sig_byte = b;
+        prev_was_regex_kw = false;
+        i += 1;
+    }
+
+    out
+}
+
+pub(crate) fn extract_referenced_identifiers(snippet: &str) -> FxHashSet<String> {
+    extract_referenced_identifiers_with_offsets(snippet, 0)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect()
+}
+
+fn is_require_call_for_target(
+    expr: &oxc::ast::ast::Expression<'_>,
+    target_mod_id: &str,
+) -> bool {
+    use oxc::ast::ast::{Argument, Expression};
+    let Expression::CallExpression(call) = expr.without_parentheses() else {
+        return false;
+    };
+    let Expression::Identifier(callee) = call.callee.without_parentheses() else {
+        return false;
+    };
+    if callee.name.as_str() != "require" || call.arguments.len() != 1 {
+        return false;
+    }
+    let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
+        return false;
+    };
+    str_lit.value.as_str() == target_mod_id
+}
+
+fn collect_member_accesses_on_var(
+    code: &str,
+    var_name: &str,
+    skip_span: (usize, usize),
+    used_out: &mut FxHashSet<String>,
+) -> bool {
+    let bytes = code.as_bytes();
+    let vbytes = var_name.as_bytes();
+    let vlen = vbytes.len();
+    let mut pos = 0usize;
+    while let Some(rel) = code[pos..].find(var_name) {
+        let idx = pos + rel;
+        let end = idx + vlen;
+        pos = end;
+        if idx >= skip_span.0 && end <= skip_span.1 {
+            continue;
+        }
+        let valid_start = idx == 0
+            || (!is_js_ident_continue(bytes[idx - 1]) && bytes[idx - 1] != b'.');
+        let valid_end = end == bytes.len() || !is_js_ident_continue(bytes[end]);
+        if !valid_start || !valid_end {
+            continue;
+        }
+        let after = code[end..].trim_start();
+        let Some(after_dot) = after.strip_prefix('.') else {
+            return false;
+        };
+        let prop: String = after_dot
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+            .collect();
+        if prop.is_empty() {
+            return false;
+        }
+        used_out.insert(prop);
+    }
+    true
+}
+
+/// Inspects all other modules in the bundle to determine whether `target_mod_id` is:
+/// - `UsedExports::Unreferenced` (0 `require(target_mod_id)` calls remain in the bundle),
+/// - `UsedExports::Subset(names)` (every consumer accesses a statically known set of named exports), or
+/// - `UsedExports::All` (consumed via default import, namespace value, or dynamic access).
+pub(crate) fn analyze_module_used_exports(
+    target_mod_id: &str,
+    other_modules: &[&str],
+) -> UsedExports {
+    use oxc::ast::ast::{BindingPattern, Statement};
+
+    let mut total_occurrences = 0usize;
+    let mut used_set = FxHashSet::default();
+
+    for &consumer_code in other_modules {
+        if !consumer_code.contains(target_mod_id) {
+            continue;
+        }
+        let occurrences_in_consumer = consumer_code.matches(target_mod_id).count();
+        total_occurrences += occurrences_in_consumer;
+
+        let allocator = oxc::allocator::Allocator::default();
+        let source_type = oxc::span::SourceType::mjs().with_module(false);
+        let parser_ret = oxc::parser::Parser::new(&allocator, consumer_code, source_type).parse();
+        if !parser_ret.diagnostics.is_empty() {
+            return UsedExports::All;
+        }
+
+        let mut accounted = 0usize;
+        for stmt in &parser_ret.program.body {
+            let Statement::VariableDeclaration(vd) = stmt else {
+                continue;
+            };
+            for decl in &vd.declarations {
+                let Some(init) = &decl.init else {
+                    continue;
+                };
+                if !is_require_call_for_target(init, target_mod_id) {
+                    continue;
+                }
+                match &decl.id {
+                    BindingPattern::ObjectPattern(obj_pat) => {
+                        if obj_pat.rest.is_some() {
+                            return UsedExports::All;
+                        }
+                        for prop in &obj_pat.properties {
+                            let Some(key_name) = prop.key.name() else {
+                                return UsedExports::All;
+                            };
+                            used_set.insert(key_name.to_string());
+                        }
+                        accounted += 1;
+                    }
+                    BindingPattern::BindingIdentifier(ident) => {
+                        let var_name = ident.name.as_str();
+                        if var_name.starts_with("__imp_") {
+                            return UsedExports::All;
+                        }
+                        if !collect_member_accesses_on_var(
+                            consumer_code,
+                            var_name,
+                            (decl.span.start as usize, decl.span.end as usize),
+                            &mut used_set,
+                        ) {
+                            return UsedExports::All;
+                        }
+                        accounted += 1;
+                    }
+                    _ => return UsedExports::All,
+                }
+            }
+        }
+
+        // Also check direct `require("target_mod_id").Prop` inline member accesses
+        for pat in [
+            format!("require({:?}).", target_mod_id),
+            format!("require('{}').", target_mod_id),
+        ] {
+            let mut search_pos = 0usize;
+            while let Some(rel) = consumer_code[search_pos..].find(&pat) {
+                let after_dot = &consumer_code[search_pos + rel + pat.len()..];
+                let prop: String = after_dot
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+                    .collect();
+                if !prop.is_empty() {
+                    used_set.insert(prop);
+                    accounted += 1;
+                }
+                search_pos += rel + pat.len();
+            }
+        }
+
+        if accounted != occurrences_in_consumer {
+            return UsedExports::All;
+        }
+    }
+
+    if total_occurrences == 0 {
+        UsedExports::Unreferenced
+    } else {
+        UsedExports::Subset(used_set)
+    }
+}
+
+fn pattern_bound_names(pat: &oxc::ast::ast::BindingPattern<'_>, out: &mut Vec<String>) {
+    use oxc::ast::ast::BindingPattern;
+    match pat {
+        BindingPattern::BindingIdentifier(id) => out.push(id.name.to_string()),
+        BindingPattern::ObjectPattern(obj) => {
+            for p in &obj.properties {
+                pattern_bound_names(&p.value, out);
+            }
+            if let Some(r) = &obj.rest {
+                pattern_bound_names(&r.argument, out);
+            }
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            for el in arr.elements.iter().flatten() {
+                pattern_bound_names(el, out);
+            }
+            if let Some(r) = &arr.rest {
+                pattern_bound_names(&r.argument, out);
+            }
+        }
+        BindingPattern::AssignmentPattern(assign) => {
+            pattern_bound_names(&assign.left, out);
+        }
+    }
+}
+
+fn pattern_has_live(pat: &oxc::ast::ast::BindingPattern<'_>, live: &FxHashSet<String>) -> bool {
+    let mut names = Vec::new();
+    pattern_bound_names(pat, &mut names);
+    names.iter().any(|n| live.contains(n))
+}
+
+fn is_any_require_call(expr: &oxc::ast::ast::Expression<'_>) -> Option<String> {
+    use oxc::ast::ast::{Argument, Expression};
+    let Expression::CallExpression(call) = expr.without_parentheses() else {
+        return None;
+    };
+    let Expression::Identifier(callee) = call.callee.without_parentheses() else {
+        return None;
+    };
+    if callee.name.as_str() != "require" || call.arguments.len() != 1 {
+        return None;
+    }
+    let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
+        return None;
+    };
+    Some(str_lit.value.to_string())
+}
+
+fn match_exports_assignment_stmt(
+    stmt: &oxc::ast::ast::Statement<'_>,
+    src: &str,
+) -> Option<(String, FxHashSet<String>)> {
+    use oxc::ast::ast::Statement;
+    use oxc::span::GetSpan;
+    let Statement::ExpressionStatement(_) = stmt else {
+        return None;
+    };
+    let sp = stmt.span();
+    let text = src[sp.start as usize..sp.end as usize].trim();
+    let after_exp = text.strip_prefix("exports.")?;
+    let eq_idx = after_exp.find('=')?;
+    if after_exp[eq_idx + 1..].starts_with('=') {
+        return None;
+    }
+    let exp_name = after_exp[..eq_idx].trim();
+    if exp_name.is_empty()
+        || !exp_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    {
+        return None;
+    }
+    let rhs = after_exp[eq_idx + 1..].trim().trim_end_matches(';').trim();
+    if rhs.contains("exports.") {
+        return None;
+    }
+    Some((exp_name.to_string(), extract_referenced_identifiers(rhs)))
+}
+
+/// General-Purpose Oxc AST Dead-Declaration & Dead-Export Tree-Shaker (`prune_and_minify_cjs_module_ast`):
+/// - Computes the transitive closure of top-level declarations (`function`, `class`, and per-`VariableDeclarator`
+///   `const`/`let`/`var` bindings) reachable from `used_exports` and top-level side effects.
+/// - Prunes unreferenced `exports.<Unused> = ...` assignments, unreferenced top-level functions/classes/variables,
+///   and unused destructured properties in `const { a, b } = require("...")`.
+/// - Emits clean, comment-free (and optionally minified) JavaScript via `oxc::codegen::Codegen`.
+pub(crate) fn prune_and_minify_cjs_module_ast(
+    cjs_code: &str,
+    used_exports: Option<&FxHashSet<String>>,
+    minify: bool,
+) -> String {
+    use oxc::ast::ast::{BindingPattern, Statement};
+    use oxc::span::GetSpan;
+
+    let allocator = oxc::allocator::Allocator::default();
+    let source_type = oxc::span::SourceType::mjs().with_module(false);
+    let parser_ret = oxc::parser::Parser::new(&allocator, cjs_code, source_type).parse();
+    if !parser_ret.diagnostics.is_empty() {
+        return cjs_code.to_string();
+    }
+
+    let mut program = parser_ret.program;
+
+    if let Some(used_set) = used_exports {
+        let has_named_export_stmts = program.body.iter().any(|s| {
+            match_exports_assignment_stmt(s, cjs_code)
+                .is_some_and(|(name, _)| name != "__esModule")
+        });
+
+        if has_named_export_stmts {
+            // Step 1: Remove unused `exports.<Unused> = ...` and unused `module.exports = __slice_default`
+            program.body.retain(|stmt| {
+                if let Some((exp_name, _)) = match_exports_assignment_stmt(stmt, cjs_code) {
+                    exp_name == "__esModule" || used_set.contains(&exp_name)
+                } else {
+                    let sp = stmt.span();
+                    let text = cjs_code[sp.start as usize..sp.end as usize].trim();
+                    !text.starts_with("module.exports = __slice_default;")
+                        || used_set.contains("default")
+                }
+            });
+
+            // Step 2: Iterative Oxc Semantic Scope-Resolved Zero-Reference Pruning.
+            // `scoping.get_resolved_reference_ids(sym_id).is_empty()` uses Oxc's full ECMAScript
+            // lexical scope resolver, so shadowed single-letter local variables (`e`, `t`, `s`, etc.)
+            // inside live functions never false-keep dead top-level declarators.
+            for _ in 0..8 {
+                let scoping = oxc::semantic::SemanticBuilder::new()
+                    .build(&program)
+                    .semantic
+                    .into_scoping();
+                let root_scope = scoping.root_scope_id();
+                let mut referenced_root_syms: FxHashSet<String> = FxHashSet::default();
+                for sym_id in scoping.symbol_ids() {
+                    if scoping.symbol_scope_id(sym_id) == root_scope
+                        && !scoping.get_resolved_reference_ids(sym_id).is_empty()
+                    {
+                        referenced_root_syms.insert(scoping.symbol_name(sym_id).to_string());
+                    }
+                }
+
+                let mut changed = false;
+                for stmt in program.body.iter_mut() {
+                    if let Statement::VariableDeclaration(vd) = stmt {
+                        for decl in vd.declarations.iter_mut() {
+                            let is_req = decl
+                                .init
+                                .as_ref()
+                                .is_some_and(|e| is_any_require_call(e).is_some());
+                            if is_req {
+                                if let BindingPattern::ObjectPattern(obj_pat) = &mut decl.id {
+                                    if obj_pat.rest.is_none() {
+                                        let before_len = obj_pat.properties.len();
+                                        obj_pat.properties.retain(|prop| {
+                                            pattern_has_live(&prop.value, &referenced_root_syms)
+                                        });
+                                        if obj_pat.properties.len() != before_len {
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let before_decls = vd.declarations.len();
+                        vd.declarations
+                            .retain(|decl| pattern_has_live(&decl.id, &referenced_root_syms));
+                        if vd.declarations.len() != before_decls {
+                            changed = true;
+                        }
+                    }
+                }
+
+                let before_stmts = program.body.len();
+                program.body.retain(|stmt| match stmt {
+                    Statement::FunctionDeclaration(fd) => fd
+                        .id
+                        .as_ref()
+                        .is_none_or(|id| referenced_root_syms.contains(id.name.as_str())),
+                    Statement::ClassDeclaration(cd) => cd
+                        .id
+                        .as_ref()
+                        .is_none_or(|id| referenced_root_syms.contains(id.name.as_str())),
+                    Statement::VariableDeclaration(vd) => !vd.declarations.is_empty(),
+                    _ => true,
+                });
+                if program.body.len() != before_stmts {
+                    changed = true;
+                }
+                if !changed {
+                    break;
+                }
+            }
+
+            // Step 3: Transitive reachability closure to prune self-recursive dead functions
+            // (e.g. `_matchRoutes`, `_routerNodeToTable`, `_diff`, `_toHashedObject`).
+            let mut decl_dep_map: FxHashMap<String, Vec<String>> = FxHashMap::default();
+            for stmt in &program.body {
+                match stmt {
+                    Statement::FunctionDeclaration(fd) => {
+                        if let Some(id) = &fd.id {
+                            let name = id.name.to_string();
+                            let refs = extract_referenced_identifiers(
+                                &cjs_code[fd.span.start as usize..fd.span.end as usize],
+                            );
+                            decl_dep_map.entry(name).or_default().extend(refs);
+                        }
+                    }
+                    Statement::ClassDeclaration(cd) => {
+                        if let Some(id) = &cd.id {
+                            let name = id.name.to_string();
+                            let refs = extract_referenced_identifiers(
+                                &cjs_code[cd.span.start as usize..cd.span.end as usize],
+                            );
+                            decl_dep_map.entry(name).or_default().extend(refs);
+                        }
+                    }
+                    Statement::VariableDeclaration(vd) => {
+                        for decl in &vd.declarations {
+                            let mut bound = Vec::new();
+                            pattern_bound_names(&decl.id, &mut bound);
+                            let is_destructured_req = matches!(&decl.id, BindingPattern::ObjectPattern(obj) if obj.rest.is_none())
+                                && decl.init.as_ref().is_some_and(|e| is_any_require_call(e).is_some());
+                            let refs = if is_destructured_req {
+                                FxHashSet::default()
+                            } else {
+                                extract_referenced_identifiers(
+                                    &cjs_code[decl.span.start as usize..decl.span.end as usize],
+                                )
+                            };
+                            for b_name in bound {
+                                decl_dep_map
+                                    .entry(b_name)
+                                    .or_default()
+                                    .extend(refs.iter().cloned());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut worklist: Vec<String> = Vec::new();
+            for stmt in &program.body {
+                match stmt {
+                    Statement::FunctionDeclaration(_)
+                    | Statement::ClassDeclaration(_)
+                    | Statement::VariableDeclaration(_) => {}
+                    _ => {
+                        let sp = stmt.span();
+                        let text = cjs_code[sp.start as usize..sp.end as usize].trim();
+                        worklist.extend(extract_referenced_identifiers(text));
+                    }
+                }
+            }
+
+            let mut live_idents: FxHashSet<String> = FxHashSet::default();
+            while let Some(ident) = worklist.pop() {
+                if live_idents.insert(ident.clone()) {
+                    if let Some(deps) = decl_dep_map.get(&ident) {
+                        for d in deps {
+                            if !live_idents.contains(d) {
+                                worklist.push(d.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            for stmt in program.body.iter_mut() {
+                if let Statement::VariableDeclaration(vd) = stmt {
+                    for decl in vd.declarations.iter_mut() {
+                        let is_req = decl
+                            .init
+                            .as_ref()
+                            .is_some_and(|e| is_any_require_call(e).is_some());
+                        if is_req {
+                            if let BindingPattern::ObjectPattern(obj_pat) = &mut decl.id {
+                                if obj_pat.rest.is_none() {
+                                    obj_pat
+                                        .properties
+                                        .retain(|prop| pattern_has_live(&prop.value, &live_idents));
+                                }
+                            }
+                        }
+                    }
+                    vd.declarations
+                        .retain(|decl| pattern_has_live(&decl.id, &live_idents));
+                }
+            }
+
+            program.body.retain(|stmt| match stmt {
+                Statement::FunctionDeclaration(fd) => fd
+                    .id
+                    .as_ref()
+                    .is_none_or(|id| live_idents.contains(id.name.as_str())),
+                Statement::ClassDeclaration(cd) => cd
+                    .id
+                    .as_ref()
+                    .is_none_or(|id| live_idents.contains(id.name.as_str())),
+                Statement::VariableDeclaration(vd) => !vd.declarations.is_empty(),
+                _ => {
+                    if let Some((exp_name, _)) = match_exports_assignment_stmt(stmt, cjs_code) {
+                        exp_name == "__esModule" || used_set.contains(&exp_name)
+                    } else {
+                        let sp = stmt.span();
+                        let text = cjs_code[sp.start as usize..sp.end as usize].trim();
+                        !text.starts_with("module.exports = __slice_default;")
+                            || used_set.contains("default")
+                    }
+                }
+            });
+        }
+    }
+
+    oxc::codegen::Codegen::new()
+        .with_options(oxc::codegen::CodegenOptions {
+            minify,
+            comments: oxc::codegen::CommentOptions::disabled(),
+            ..Default::default()
+        })
+        .build(&program)
+        .code
+}
+
+fn replace_whole_ident_in_slice(src: &str, ident: &str, replacement: &str) -> String {
+    let bytes = src.as_bytes();
+    let ibytes = ident.as_bytes();
+    let ilen = ibytes.len();
+    let mut out = String::with_capacity(src.len() + 64);
+    let mut last = 0usize;
+    let mut pos = 0usize;
+    while let Some(rel) = src[pos..].find(ident) {
+        let idx = pos + rel;
+        let end = idx + ilen;
+        let valid_start = idx == 0
+            || (!is_js_ident_continue(bytes[idx - 1]) && bytes[idx - 1] != b'.');
+        let valid_end = end == bytes.len() || !is_js_ident_continue(bytes[end]);
+        if valid_start && valid_end {
+            out.push_str(&src[last..idx]);
+            out.push_str(replacement);
+            last = end;
+        }
+        pos = end;
+    }
+    out.push_str(&src[last..]);
+    out
+}
+
+/// General-Purpose Cold Method-Scoped `require` Inliner (`inline_cold_method_requires_ast`):
+/// If a `/node_modules/` module has a top-level `const { a, b } = require("<dep_id>");` where
+/// `<dep_id>` is only required once in the bundle and its bindings (`a`, `b`) are never referenced
+/// at module top-level, in `constructor`, or in hot-path router/request methods, inlines
+/// `require("<dep_id>").a` directly into the cold method body and removes the eager top-level `require`.
+pub(crate) fn inline_cold_method_requires_ast(
+    cjs_code: &str,
+    single_consumer_deps: &FxHashSet<String>,
+) -> String {
+    use oxc::ast::ast::{
+        BindingPattern, ClassElement, Expression, MethodDefinitionKind, Statement,
+    };
+    use oxc::span::GetSpan;
+
+    if single_consumer_deps.is_empty() {
+        return cjs_code.to_string();
+    }
+
+    let allocator = oxc::allocator::Allocator::default();
+    let source_type = oxc::span::SourceType::mjs().with_module(false);
+    let parser_ret = oxc::parser::Parser::new(&allocator, cjs_code, source_type).parse();
+    if !parser_ret.diagnostics.is_empty() {
+        return cjs_code.to_string();
+    }
+
+    // Collect cold class method body spans and non-computed class element key spans
+    let mut cold_method_spans: Vec<(usize, usize)> = Vec::new();
+    let mut non_computed_key_spans: Vec<(usize, usize)> = Vec::new();
+    let is_hot_method_name = |name: &str| {
+        matches!(
+            name,
+            "constructor"
+                | "fetch"
+                | "match"
+                | "add"
+                | "insert"
+                | "lookup"
+                | "search"
+                | "get"
+                | "set"
+                | "header"
+                | "json"
+                | "text"
+                | "body"
+                | "newResponse"
+                | "param"
+                | "query"
+                | "queries"
+                | "req"
+                | "res"
+                | "url"
+                | "method"
+                | "status"
+        )
+    };
+
+    let mut collect_from_class = |cls: &oxc::ast::ast::Class<'_>| {
+        for el in &cls.body.body {
+            match el {
+                ClassElement::MethodDefinition(md) => {
+                    if !md.computed {
+                        let ksp = md.key.span();
+                        non_computed_key_spans.push((ksp.start as usize, ksp.end as usize));
+                    }
+                    if md.kind == MethodDefinitionKind::Constructor {
+                        continue;
+                    }
+                    let mname = md.key.name().unwrap_or_default();
+                    if is_hot_method_name(&mname) {
+                        continue;
+                    }
+                    if let Some(body) = &md.value.body {
+                        cold_method_spans.push((body.span.start as usize, body.span.end as usize));
+                    }
+                }
+                ClassElement::PropertyDefinition(pd) => {
+                    if !pd.computed {
+                        let ksp = pd.key.span();
+                        non_computed_key_spans.push((ksp.start as usize, ksp.end as usize));
+                    }
+                    let pname = pd.key.name().unwrap_or_default();
+                    if is_hot_method_name(&pname) {
+                        continue;
+                    }
+                    if let Some(Expression::ArrowFunctionExpression(arrow)) = &pd.value {
+                        let sp = arrow.body.span();
+                        cold_method_spans.push((sp.start as usize, sp.end as usize));
+                    }
+                }
+                _ => {}
+            }
+        }
+    };
+
+    for stmt in &parser_ret.program.body {
+        match stmt {
+            Statement::ClassDeclaration(cd) => collect_from_class(cd),
+            Statement::VariableDeclaration(vd) => {
+                for decl in &vd.declarations {
+                    if let Some(Expression::ClassExpression(ce)) = &decl.init {
+                        collect_from_class(ce);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if cold_method_spans.is_empty() {
+        return cjs_code.to_string();
+    }
+
+    let mut stmt_spans_to_remove: Vec<(usize, usize)> = Vec::new();
+    let mut inline_bindings: Vec<(String, String)> = Vec::new();
+
+    for stmt in &parser_ret.program.body {
+        let Statement::VariableDeclaration(vd) = stmt else {
+            continue;
+        };
+        if vd.declarations.len() != 1 {
+            continue;
+        }
+        let decl = &vd.declarations[0];
+        let Some(init) = &decl.init else {
+            continue;
+        };
+        let Some(dep_id) = is_any_require_call(init) else {
+            continue;
+        };
+        if !single_consumer_deps.contains(&dep_id) {
+            continue;
+        }
+        let BindingPattern::ObjectPattern(obj_pat) = &decl.id else {
+            continue;
+        };
+        if obj_pat.rest.is_some() || obj_pat.properties.is_empty() {
+            continue;
+        }
+        let mut bindings = Vec::new();
+        let mut all_simple = true;
+        for prop in &obj_pat.properties {
+            let Some(k) = prop.key.name() else {
+                all_simple = false;
+                break;
+            };
+            let BindingPattern::BindingIdentifier(loc) = &prop.value else {
+                all_simple = false;
+                break;
+            };
+            if k != loc.name.as_str() {
+                all_simple = false;
+                break;
+            }
+            bindings.push(loc.name.to_string());
+        }
+        if !all_simple {
+            continue;
+        }
+
+        // Verify that every reference to each binding after `vd.span.end` is inside `cold_method_spans`
+        let decl_end = vd.span.end as usize;
+        let bytes = cjs_code.as_bytes();
+        let mut eligible = true;
+        for b_name in &bindings {
+            let b_len = b_name.len();
+            let mut pos = decl_end;
+            let mut ref_count = 0usize;
+            while let Some(rel) = cjs_code[pos..].find(b_name.as_str()) {
+                let idx = pos + rel;
+                let end = idx + b_len;
+                pos = end;
+                let valid_start = idx == 0
+                    || (!is_js_ident_continue(bytes[idx - 1]) && bytes[idx - 1] != b'.');
+                let valid_end = end == bytes.len() || !is_js_ident_continue(bytes[end]);
+                if !valid_start || !valid_end {
+                    continue;
+                }
+                if non_computed_key_spans
+                    .iter()
+                    .any(|&(ks, ke)| idx >= ks && end <= ke)
+                {
+                    continue;
+                }
+                let in_cold_span = cold_method_spans
+                    .iter()
+                    .any(|&(s, e)| idx >= s && end <= e);
+                if !in_cold_span {
+                    eligible = false;
+                    break;
+                }
+                ref_count += 1;
+            }
+            if !eligible || ref_count == 0 || ref_count > 2 {
+                eligible = false;
+                break;
+            }
+        }
+
+        if eligible {
+            stmt_spans_to_remove.push((vd.span.start as usize, vd.span.end as usize));
+            for b_name in bindings {
+                inline_bindings.push((b_name.clone(), format!("require({:?}).{}", dep_id, b_name)));
+            }
+        }
+    }
+
+    if stmt_spans_to_remove.is_empty() {
+        return cjs_code.to_string();
+    }
+
+    // Apply replacements inside cold_method_spans and remove the top-level require statements
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    for (s, e) in &stmt_spans_to_remove {
+        edits.push((*s, *e, String::new()));
+    }
+    for &(ms, me) in &cold_method_spans {
+        let orig_slice = &cjs_code[ms..me];
+        let mut updated = orig_slice.to_string();
+        for (b_name, rep_expr) in &inline_bindings {
+            if updated.contains(b_name.as_str()) {
+                updated = replace_whole_ident_in_slice(&updated, b_name, rep_expr);
+            }
+        }
+        if updated != orig_slice {
+            edits.push((ms, me, updated));
+        }
+    }
+    edits.sort_by_key(|e| e.0);
+
+    let mut result = String::with_capacity(cjs_code.len() + 64);
+    let mut cursor = 0usize;
+    for (s, e, rep) in edits {
+        if s < cursor {
+            continue;
+        }
+        result.push_str(&cjs_code[cursor..s]);
+        result.push_str(&rep);
+        cursor = e;
+    }
+    result.push_str(&cjs_code[cursor..]);
+    result
+}
+
+/// Computes the set of module indices `0..modules.len()` that are reachable from `entry_body`
+/// via **eager** `require(idx)` edges (excluding `require(idx)` calls inside lazy property getters
+/// `get prop() { ... }` or cold non-constructor class methods).
+pub(crate) fn collect_eager_module_indices(
+    entry_body: &str,
+    modules: &[(String, String)],
+) -> FxHashSet<usize> {
+    use oxc::ast::ast::{Expression, ObjectPropertyKind, PropertyKind, Statement};
+    use oxc::span::GetSpan;
+
+    fn extract_eager_require_ids(code: &str, max_id: usize) -> Vec<usize> {
+        let allocator = oxc::allocator::Allocator::default();
+        let source_type = oxc::span::SourceType::mjs().with_module(false);
+        let parser_ret = oxc::parser::Parser::new(&allocator, code, source_type).parse();
+
+        let mut deferred_spans: Vec<(usize, usize)> = Vec::new();
+        if parser_ret.diagnostics.is_empty() {
+            fn collect_class_deferred(
+                cls: &oxc::ast::ast::Class<'_>,
+                deferred_spans: &mut Vec<(usize, usize)>,
+            ) {
+                use oxc::ast::ast::{ClassElement, Expression, MethodDefinitionKind};
+                use oxc::span::GetSpan;
+                for el in &cls.body.body {
+                    match el {
+                        ClassElement::MethodDefinition(md) => {
+                            if md.kind != MethodDefinitionKind::Constructor {
+                                if let Some(b) = &md.value.body {
+                                    deferred_spans.push((b.span.start as usize, b.span.end as usize));
+                                }
+                            }
+                        }
+                        ClassElement::PropertyDefinition(pd) => {
+                            if let Some(Expression::ArrowFunctionExpression(arrow)) = &pd.value {
+                                let sp = arrow.body.span();
+                                deferred_spans.push((sp.start as usize, sp.end as usize));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            for stmt in &parser_ret.program.body {
+                match stmt {
+                    Statement::ClassDeclaration(cd) => {
+                        collect_class_deferred(cd, &mut deferred_spans)
+                    }
+                    Statement::VariableDeclaration(vd) => {
+                        for decl in &vd.declarations {
+                            if let Some(Expression::ClassExpression(ce)) = &decl.init {
+                                collect_class_deferred(ce, &mut deferred_spans);
+                            }
+                        }
+                    }
+                    Statement::ExpressionStatement(es) => {
+                        if let Expression::AssignmentExpression(assign) =
+                            es.expression.without_parentheses()
+                        {
+                            if let Expression::ObjectExpression(obj) =
+                                assign.right.without_parentheses()
+                            {
+                                for prop in &obj.properties {
+                                    if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                                        if p.kind == PropertyKind::Get {
+                                            let sp = p.value.span();
+                                            deferred_spans
+                                                .push((sp.start as usize, sp.end as usize));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let mut out = Vec::new();
+        let mut pos = 0usize;
+        while let Some(rel) = code[pos..].find("require(") {
+            let idx = pos + rel;
+            let after = &code[idx + 8..];
+            pos = idx + 8;
+            let in_deferred = deferred_spans.iter().any(|&(s, e)| idx >= s && idx < e);
+            if in_deferred {
+                continue;
+            }
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty() && after[digits.len()..].starts_with(')') {
+                if let Ok(id) = digits.parse::<usize>() {
+                    if id < max_id {
+                        out.push(id);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    let max_id = modules.len();
+    let mut eager_set = FxHashSet::default();
+    let mut queue = extract_eager_require_ids(entry_body, max_id);
+
+    while let Some(idx) = queue.pop() {
+        if eager_set.insert(idx) {
+            for child in extract_eager_require_ids(&modules[idx].1, max_id) {
+                if !eager_set.contains(&child) {
+                    queue.push(child);
+                }
+            }
+        }
+    }
+
+    eager_set
+}
+
 
