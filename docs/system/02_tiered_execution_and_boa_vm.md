@@ -28,33 +28,37 @@
 ### 2.3 Compile-Time Minified Sharded Preludes (`00_ultra_core.js` .. `10_annex_b_escape.js`)
 - Implemented in [`crates/slice-engine/build.rs`](file:///p:/opensource/slice/crates/slice-engine/build.rs) and [`crates/slice-engine/src/js_preludes.rs`](file:///p:/opensource/slice/crates/slice-engine/src/js_preludes.rs):
   - Instead of evaluating a monolithic ~48 KB JS prelude on every cold process launch, `00_ultra_core.js` (`~6 KB` minified) registers self-replacing `Object.defineProperty` lazy getters (`__defLazy(names, shardId)`) on `globalThis` for 10 specialized shards:
-    - **Shard 1 (`01_web_fetch_url.js`):** `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`, `fetch`, `Blob`, `File`, `FormData`, `AbortController`, `AbortSignal`.
-    - **Shard 2 (`02_web_crypto_enc.js`):** `TextEncoder`, `TextDecoder`, `crypto`, `CryptoKey`, `SubtleCrypto`, `btoa`, `atob`.
-    - **Shard 3 (`03_streams_events.js`):** `Event`, `CustomEvent`, `EventTarget`, `ReadableStream`, `WritableStream`, `TransformStream`, `TextEncoderStream`, `TextDecoderStream`, `structuredClone`.
-    - **Shard 4 (`04_websocket.js`):** `WebSocket`, `CloseEvent`.
+    - **Shard 1 (`01_web_fetch_url.js`):** `URL`, `URLSearchParams`, `URLPattern`, `Headers`, `Request`, `Response`.
+    - **Shard 2 (`02_encoding_events.js`):** `TextEncoder`, `TextDecoder`, `Event`, `CustomEvent`, `EventTarget`, `btoa`, `atob`.
+    - **Shard 3 (`03_streams_formdata.js`):** `ReadableStream`, `WritableStream`, `TransformStream`, `TextEncoderStream`, `TextDecoderStream`, `CompressionStream`, `DecompressionStream`, `Blob`, `File`, `FormData`.
+    - **Shard 4 (`04_webcrypto_clone.js`):** `crypto`, `CryptoKey`, `SubtleCrypto`, `structuredClone`.
     - **Shard 5 (`05_full_buffer.js`):** Full `Uint8Array`-backed `Buffer` with `DataView` integer readers/writers.
     - **Shard 6 (`06_console_ext.js`):** Extended WHATWG `console.table`, `time`, `group`, `dir`, `count`, `assert`, `trace`.
-    - **Shard 7 (`07_timers_Immediate.js`):** `setImmediate`, `clearImmediate`.
-    - **Shard 8 (`08_workers_sockets.js`):** `Worker`, `MessageChannel`, `MessagePort`, `BroadcastChannel`, `Slice.connect`.
+    - **Shard 7 (`07_websocket.js`):** `WebSocket`, `MessageEvent`, `CloseEvent`.
+    - **Shard 8 (`08_workers_sockets.js`):** `Worker`, `MessageChannel`, `MessagePort`, `Slice.connect`.
     - **Shard 9 (`09_wasm.js`):** `WebAssembly` (`Module`, `Instance`, `Memory`, `Table`, `Global`, `compile`, `instantiate`).
-    - **Shard 10 (`10_annex_b_escape.js`):** ECMA-262 Annex B.2.1 `escape` and `unescape`.
+    - **Shard 10 (`10_outbound_fetch_sse.js`):** `fetch`, `AbortController`, `AbortSignal`, `Slice.streamSSE`, `Response.sse`.
 
 ---
 
-## 3. Native Rust Fast-Path Intrinsics (`SHA-NI`, `SemVer`, `Base64URL`, & In-Memory VFS Slab)
+## 3. Native Rust Fast-Path Intrinsics (`SHA-NI`, `SemVer`, `Base64URL`, `DEFLATE`/`Gzip`, `AsyncLocalStorage`, & In-Memory VFS Slab)
 
-Implemented in [`crates/slice-engine/src/intrinsics.rs`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs) and [`crates/slice-engine/src/host_bindings.rs`](file:///p:/opensource/slice/crates/slice-engine/src/host_bindings.rs):
+Implemented in [`crates/slice-engine/src/intrinsics.rs`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs), [`crates/slice-engine/src/boa_realm.rs`](file:///p:/opensource/slice/crates/slice-engine/src/boa_realm.rs), and [`crates/slice-engine/src/host_bindings.rs`](file:///p:/opensource/slice/crates/slice-engine/src/host_bindings.rs):
 
 1. **Hardware `SHA-NI` Block Compression ([`Sha256State::compress_block_sha_ni`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs)):**
    - Uses Intel/AMD `SHA-NI` instructions (`_mm_sha256rnds2_epu32`, `_mm_sha256msg1_epu32`, `_mm_sha256msg2_epu32`) with cached `AtomicU8` runtime feature detection (`sha,sse4.1,ssse3`) and automatic fallback to [`Sha256State::compress_block_soft`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs).
 2. **Pure-Rust FIPS-180-4 SHA-1/256/384/512, RFC-2104 HMAC & Base64/Base64URL:**
    - Direct `JsArrayBuffer` / `JsUint8Array` zero-copy Rust host functions (`__slice_crypto_sha256`, `__slice_crypto_hmac_sha256`, `__slice_crypto_digest`, `__slice_crypto_hmac_sign`, `__slice_base64_encode`, `__slice_base64_decode`).
-3. **Zero-Regex Native Rust SemVer & Utility Scanners:**
+3. **Self-Contained RFC 1951 (`deflate-raw`), RFC 1950 (`deflate`), & RFC 1952 (`gzip`) Compression Engine:**
+   - Implemented in [`zlib_compress_bytes`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs) and [`zlib_decompress_bytes`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs) with LZ77 32 KB sliding-window compression, Stored/Fixed/Dynamic Huffman decompression, Adler-32, and CRC-32 validation, powering both WinterTC `CompressionStream` / `DecompressionStream` and `node:zlib` with zero external crate dependencies.
+4. **Zero-Overhead `SliceJobExecutor` for `node:async_hooks` (`AsyncLocalStorage` & `AsyncResource`):**
+   - Implemented in [`SliceJobExecutor`](file:///p:/opensource/slice/crates/slice-engine/src/boa_realm.rs) and [`event_loop.rs`](file:///p:/opensource/slice/crates/slice-engine/src/event_loop.rs): when `BOA_ALS_ACTIVE` is `false`, promise microtasks execute with zero snapshot overhead; when `AsyncLocalStorage` is active, `SliceJobExecutor` and the event loop capture and restore `BOA_ALS_SNAP` across every `await`, `.then()`, `Promise.all`, `setTimeout`, `setImmediate`, `queueMicrotask`, `process.nextTick`, and `fetch` boundary.
+5. **Zero-Regex Native Rust SemVer & Utility Scanners:**
    - Implemented in [`semver_parse_strict_xyz`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs), [`semver_coerce_xyz`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs), and [`semver_satisfies_xyz`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs) (~150 ns per check).
-4. **Thread-Local Binary-Safe In-Memory VFS Slab Cache (`BOA_VFS_CACHE` & `BOA_VFS_DIRS`):**
+6. **Thread-Local Binary-Safe In-Memory VFS Slab Cache (`BOA_VFS_CACHE` & `BOA_VFS_DIRS`):**
    - Ephemeral files created during an isolate run (`writeFileSync`, `appendFileSync`, `mkdirSync`) are stored as raw `Vec<u8>` byte slabs in thread-local memory (`FxHashMap<String, Vec<u8>>`) and served in nanoseconds on subsequent `statSync` (with real OS `mtimeMs`), `readdirSync`, and binary/UTF-8 `readFileSync` calls, while falling back transparently to `std::fs` for pre-existing host files.
-5. **Lazy On-Demand Host Binding Registration by Category:**
-   - Cold `create_warm_boa_realm()` initialization registers only the 19 ultra-core host functions (`__slice_console_log`, `__slice_load_builtin`, `__slice_lazy_prelude`, timers, env, SHA-256, Base64, UTF-8), while specialized host bindings (`register_http_bridge_host_functions`, `register_kv_and_sandbox_host_functions`, `register_semver_and_fast_intrinsics_host_functions`, `register_wintertc_phase_n3_host_functions`) are registered lazily only when their corresponding shard or built-in module is loaded.
+7. **Lazy On-Demand Host Binding Registration by Category:**
+   - Cold `create_warm_boa_realm()` initialization registers only the 19 ultra-core host functions (`__slice_console_log`, `__slice_load_builtin`, `__slice_lazy_prelude`, timers, env, SHA-256, Base64, UTF-8), while specialized host bindings (`register_http_bridge_host_functions`, `register_kv_and_sandbox_host_functions`, `register_semver_and_fast_intrinsics_host_functions`, `register_wintertc_phase_n3_host_functions`, `register_async_hooks_host_functions`) are registered lazily only when their corresponding shard or built-in module is loaded.
 
 ---
 

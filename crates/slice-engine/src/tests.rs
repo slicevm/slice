@@ -4600,6 +4600,171 @@ console.log(JSON.stringify({
     assert_eq!(parsed["sameUrl"], true);
 }
 
+#[test]
+fn test_wave_j_async_local_storage_compression_streams_zlib_and_url_pattern() {
+    let script = r#"
+import { AsyncLocalStorage, AsyncResource } from "node:async_hooks";
+import zlib from "node:zlib";
+import { promisify } from "node:util";
+
+async function runWaveJ() {
+  // 1. AsyncLocalStorage across concurrent Promise.all, setTimeout, queueMicrotask, nextTick, exit, snapshot, AsyncResource
+  const reqStore = new AsyncLocalStorage();
+  const traceStore = new AsyncLocalStorage();
+
+  const [resA, resB] = await Promise.all([
+    reqStore.run({ reqId: "req-alpha" }, async () => {
+      await Promise.resolve();
+      const s1 = reqStore.getStore().reqId;
+      await new Promise((r) => setTimeout(r, 8));
+      const s2 = reqStore.getStore().reqId;
+      const nested = await traceStore.run({ span: "span-1" }, async () => {
+        await new Promise((r) => queueMicrotask(r));
+        return `${reqStore.getStore().reqId}:${traceStore.getStore().span}`;
+      });
+      const exited = reqStore.exit(() => reqStore.getStore());
+      return { s1, s2, nested, exitedIsUndefined: exited === undefined, afterExit: reqStore.getStore().reqId };
+    }),
+    reqStore.run({ reqId: "req-beta" }, async () => {
+      await new Promise((r) => setTimeout(r, 2));
+      const s1 = reqStore.getStore().reqId;
+      const fromNextTick = await new Promise((r) => process.nextTick(() => r(reqStore.getStore().reqId)));
+      return { s1, fromNextTick };
+    }),
+  ]);
+
+  let snapResult = "";
+  let resourceResult = "";
+  reqStore.run({ reqId: "req-snap" }, () => {
+    const runInSnap = AsyncLocalStorage.snapshot();
+    const ar = new AsyncResource("CustomPool");
+    reqStore.run({ reqId: "req-overridden" }, () => {
+      snapResult = runInSnap(() => reqStore.getStore().reqId);
+      resourceResult = ar.runInAsyncScope(() => reqStore.getStore().reqId);
+    });
+  });
+
+  // 2. CompressionStream / DecompressionStream ("gzip", "deflate", "deflate-raw") + node:zlib
+  const payload = "Slice WinterTC Edge Compression & Decompression Stream Verification! ".repeat(20);
+  const streamFormats = ["gzip", "deflate", "deflate-raw"];
+  const streamResults = {};
+  for (const fmt of streamFormats) {
+    const cs = new CompressionStream(fmt);
+    const compressedStream = new Blob([payload]).stream().pipeThrough(cs);
+    const compressedBytes = new Uint8Array(await new Response(compressedStream).arrayBuffer());
+    const ds = new DecompressionStream(fmt);
+    const decompressedStream = new Blob([compressedBytes]).stream().pipeThrough(ds);
+    const roundtripText = await new Response(decompressedStream).text();
+    streamResults[fmt] = {
+      compressedSmaller: compressedBytes.byteLength < payload.length,
+      matches: roundtripText === payload,
+    };
+  }
+
+  const gzBuf = zlib.gzipSync(payload);
+  const gunzStr = zlib.gunzipSync(gzBuf).toString("utf8");
+  const defBuf = zlib.deflateSync(payload);
+  const infStr = zlib.inflateSync(defBuf).toString("utf8");
+  const rawBuf = zlib.deflateRawSync(payload);
+  const infRawStr = zlib.inflateRawSync(rawBuf).toString("utf8");
+  const unzipAutoGz = zlib.unzipSync(gzBuf).toString("utf8");
+  const unzipAutoDef = zlib.unzipSync(defBuf).toString("utf8");
+  const gzipAsync = promisify(zlib.gzip);
+  const gunzipAsync = promisify(zlib.gunzip);
+  const asyncRoundtrip = (await gunzipAsync(await gzipAsync("async-zlib-ok"))).toString("utf8");
+
+  // 3. URLPattern global routing primitive
+  const p1 = new URLPattern("https://api.example.com/v1/users/:id/posts/:postId?");
+  const m1 = p1.exec("https://api.example.com/v1/users/42/posts/99?sort=asc#top");
+  const m2 = p1.exec("https://api.example.com/v1/users/42/posts");
+  const p2 = new URLPattern({ pathname: "/files/:dir+/download/*" });
+  const m3 = p2.exec("https://cdn.example.com/files/a/b/c/download/report.pdf");
+  const p3 = new URLPattern("/items/:id(\\d+)", "https://shop.example.com");
+
+  console.log(JSON.stringify({
+    als: {
+      resA,
+      resB,
+      snapResult,
+      resourceResult,
+      outsideIsUndefined: reqStore.getStore() === undefined,
+    },
+    compression: {
+      streamResults,
+      zlibOk:
+        gunzStr === payload &&
+        infStr === payload &&
+        infRawStr === payload &&
+        unzipAutoGz === payload &&
+        unzipAutoDef === payload &&
+        asyncRoundtrip === "async-zlib-ok",
+    },
+    urlPattern: {
+      m1Id: m1.pathname.groups.id,
+      m1PostId: m1.pathname.groups.postId,
+      m2Id: m2.pathname.groups.id,
+      m2PostIdUndefined: m2.pathname.groups.postId === undefined,
+      m3Dir: m3.pathname.groups.dir,
+      m3Wild: m3.pathname.groups["0"],
+      p3NumericMatch: p3.test("https://shop.example.com/items/12345"),
+      p3AlphaReject: !p3.test("https://shop.example.com/items/abc"),
+      p3HasRegExp: p3.hasRegExpGroups,
+    },
+  }));
+}
+runWaveJ().catch((e) => console.log(JSON.stringify({ __err: String(e && e.stack || e) })));
+"#;
+
+    let test_dir =
+        std::env::temp_dir().join(format!("slice_wave_j_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&test_dir);
+    std::fs::create_dir_all(&test_dir).unwrap();
+    let entry_path = test_dir.join("index.ts");
+    std::fs::write(&entry_path, script).unwrap();
+    let bundled =
+        slice_cas::bundle_entrypoint_with_deps(&entry_path).expect("bundle wave j script");
+    let _ = std::fs::remove_dir_all(&test_dir);
+
+    let m = run_source_isolated(
+        "wave-j-tenant",
+        &bundled,
+        CapabilityToken::pure_compute(),
+        800_000,
+        16 * 1024 * 1024,
+    )
+    .expect("wave-j execution");
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).expect("parse wave-j json");
+    assert!(out.get("__err").is_none(), "wave-j error: {}", out);
+
+    assert_eq!(out["als"]["resA"]["s1"], "req-alpha");
+    assert_eq!(out["als"]["resA"]["s2"], "req-alpha");
+    assert_eq!(out["als"]["resA"]["nested"], "req-alpha:span-1");
+    assert_eq!(out["als"]["resA"]["exitedIsUndefined"], true);
+    assert_eq!(out["als"]["resA"]["afterExit"], "req-alpha");
+    assert_eq!(out["als"]["resB"]["s1"], "req-beta");
+    assert_eq!(out["als"]["resB"]["fromNextTick"], "req-beta");
+    assert_eq!(out["als"]["snapResult"], "req-snap");
+    assert_eq!(out["als"]["resourceResult"], "req-snap");
+    assert_eq!(out["als"]["outsideIsUndefined"], true);
+
+    for fmt in ["gzip", "deflate", "deflate-raw"] {
+        assert_eq!(out["compression"]["streamResults"][fmt]["compressedSmaller"], true);
+        assert_eq!(out["compression"]["streamResults"][fmt]["matches"], true);
+    }
+    assert_eq!(out["compression"]["zlibOk"], true);
+
+    assert_eq!(out["urlPattern"]["m1Id"], "42");
+    assert_eq!(out["urlPattern"]["m1PostId"], "99");
+    assert_eq!(out["urlPattern"]["m2Id"], "42");
+    assert_eq!(out["urlPattern"]["m2PostIdUndefined"], true);
+    assert_eq!(out["urlPattern"]["m3Dir"], "a/b/c");
+    assert_eq!(out["urlPattern"]["m3Wild"], "report.pdf");
+    assert_eq!(out["urlPattern"]["p3NumericMatch"], true);
+    assert_eq!(out["urlPattern"]["p3AlphaReject"], true);
+    assert_eq!(out["urlPattern"]["p3HasRegExp"], true);
+}
+
+
 
 
 

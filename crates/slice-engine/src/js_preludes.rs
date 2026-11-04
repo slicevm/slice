@@ -36,7 +36,7 @@ pub const OUTBOUND_FETCH_SSE_PRELUDE_SRC: &str = include_str!("preludes/10_outbo
 
 /// On-demand self-replacing lazy property getter registration (`__defLazy`) evaluated ONLY when
 /// `needs_lazy_global_getters(js_code)` is true (`globalThis.*` dynamic probes).
-pub(crate) const LAZY_GETTERS_INIT_PRELUDE: &[u8] = br#"(function(){var __loadShard=globalThis.__slice_ensure_shard,__shardProps=globalThis.__shardProps,__shMask=globalThis.__shMask;globalThis.__slice_mark_lazy_inited();function __defLazy(names,shardId){__shardProps[shardId]=names;for(var i=0;i<names.length;i++){(function(prop){Object.defineProperty(globalThis,prop,{configurable:true,enumerable:false,get:function(){__loadShard(shardId);return globalThis[prop];},set:function(val){Object.defineProperty(globalThis,prop,{value:val,writable:true,enumerable:false,configurable:true});}});})(names[i]);}}if((__shMask&2)===0)__defLazy(["URLSearchParams","URL","Headers","Request","Response","__slice_make_web_request"],1);if((__shMask&1024)===0)__defLazy(["AbortSignal","AbortController","fetch"],10);if((__shMask&4)===0)__defLazy(["btoa","atob","TextEncoder","TextDecoder","Event","CustomEvent","EventTarget"],2);if((__shMask&8)===0)__defLazy(["ReadableStream","WritableStream","TransformStream","TextEncoderStream","TextDecoderStream","Blob","File","FormData"],3);if((__shMask&16)===0)__defLazy(["crypto","CryptoKey","structuredClone"],4);if((__shMask&32)===0)__defLazy(["Buffer"],5);if((__shMask&64)===0){var __cMethods=["dir","dirxml","table","trace","assert","clear","count","countReset","group","groupCollapsed","groupEnd","time","timeLog","timeEnd"];for(var c=0;c<__cMethods.length;c++){(function(m){globalThis.console[m]=function(){__loadShard(6);return globalThis.console[m].apply(globalThis.console,arguments);};})(__cMethods[c]);}}if((__shMask&128)===0)__defLazy(["WebSocket","MessageEvent","CloseEvent","__slice_dispatch_server_ws"],7);if((__shMask&256)===0)__defLazy(["Worker","MessageChannel","MessagePort","__slice_receiveMessageOnPort","__slice_wintertc_connect","__slice_init_worker_self_env","__slice_worker_host_deliver","__slice_worker_self_deliver"],8);if((__shMask&512)===0)__defLazy(["WebAssembly"],9);})();"#;
+pub(crate) const LAZY_GETTERS_INIT_PRELUDE: &[u8] = br#"(function(){var __loadShard=globalThis.__slice_ensure_shard,__shardProps=globalThis.__shardProps,__shMask=globalThis.__shMask;globalThis.__slice_mark_lazy_inited();function __defLazy(names,shardId){__shardProps[shardId]=names;for(var i=0;i<names.length;i++){(function(prop){Object.defineProperty(globalThis,prop,{configurable:true,enumerable:false,get:function(){__loadShard(shardId);return globalThis[prop];},set:function(val){Object.defineProperty(globalThis,prop,{value:val,writable:true,enumerable:false,configurable:true});}});})(names[i]);}}if((__shMask&2)===0)__defLazy(["URLSearchParams","URL","URLPattern","Headers","Request","Response","__slice_make_web_request"],1);if((__shMask&1024)===0)__defLazy(["AbortSignal","AbortController","fetch"],10);if((__shMask&4)===0)__defLazy(["btoa","atob","TextEncoder","TextDecoder","Event","CustomEvent","EventTarget"],2);if((__shMask&8)===0)__defLazy(["ReadableStream","WritableStream","TransformStream","TextEncoderStream","TextDecoderStream","CompressionStream","DecompressionStream","Blob","File","FormData"],3);if((__shMask&16)===0)__defLazy(["crypto","CryptoKey","structuredClone"],4);if((__shMask&32)===0)__defLazy(["Buffer"],5);if((__shMask&64)===0){var __cMethods=["dir","dirxml","table","trace","assert","clear","count","countReset","group","groupCollapsed","groupEnd","time","timeLog","timeEnd"];for(var c=0;c<__cMethods.length;c++){(function(m){globalThis.console[m]=function(){__loadShard(6);return globalThis.console[m].apply(globalThis.console,arguments);};})(__cMethods[c]);}}if((__shMask&128)===0)__defLazy(["WebSocket","MessageEvent","CloseEvent","__slice_dispatch_server_ws"],7);if((__shMask&256)===0)__defLazy(["Worker","MessageChannel","MessagePort","__slice_receiveMessageOnPort","__slice_wintertc_connect","__slice_init_worker_self_env","__slice_worker_host_deliver","__slice_worker_self_deliver"],8);if((__shMask&512)===0)__defLazy(["WebAssembly"],9);})();"#;
 
 /// Evaluates a compile-time minified lazy prelude shard (`1..=10`) on demand inside `context`.
 #[inline]
@@ -142,6 +142,7 @@ pub(crate) fn detect_needed_shards(raw_js_code: &str, is_http: bool) -> u16 {
     } else if is_http
         || js_code.contains(".fetch(")
         || js_code.contains("new URL(")
+        || js_code.contains("URLPattern")
         || js_code.contains("new URLSearchParams(")
         || js_code.contains("URLSearchParams.")
         || js_code.contains("node:url")
@@ -169,6 +170,8 @@ pub(crate) fn detect_needed_shards(raw_js_code: &str, is_http: bool) -> u16 {
         || js_code.contains("TransformStream")
         || js_code.contains("TextEncoderStream")
         || js_code.contains("TextDecoderStream")
+        || js_code.contains("CompressionStream")
+        || js_code.contains("DecompressionStream")
         || js_code.contains("new Blob(")
         || js_code.contains("new File(")
         || js_code.contains("new FormData(")

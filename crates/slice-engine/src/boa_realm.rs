@@ -72,6 +72,76 @@ thread_local! {
         std::cell::RefCell::new(FxHashMap::default());
     pub(crate) static NEXT_CHECKPOINT_ID: std::cell::Cell<u64> =
         const { std::cell::Cell::new(1) };
+    pub(crate) static BOA_ALS_ACTIVE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    pub(crate) static BOA_ALS_SNAP: std::cell::RefCell<boa_engine::JsValue> =
+        const { std::cell::RefCell::new(boa_engine::JsValue::undefined()) };
+}
+
+struct SliceJobExecutor {
+    promise_jobs: std::cell::RefCell<
+        std::collections::VecDeque<(
+            boa_engine::job::PromiseJob,
+            Option<boa_engine::JsValue>,
+        )>,
+    >,
+    fallback: std::rc::Rc<boa_engine::job::SimpleJobExecutor>,
+}
+
+impl SliceJobExecutor {
+    fn new() -> Self {
+        Self {
+            promise_jobs: std::cell::RefCell::new(std::collections::VecDeque::with_capacity(16)),
+            fallback: std::rc::Rc::new(boa_engine::job::SimpleJobExecutor::new()),
+        }
+    }
+}
+
+impl boa_engine::job::JobExecutor for SliceJobExecutor {
+    fn enqueue_job(
+        self: std::rc::Rc<Self>,
+        job: boa_engine::job::Job,
+        context: &mut boa_engine::Context,
+    ) {
+        match job {
+            boa_engine::job::Job::PromiseJob(p) => {
+                let snap = if BOA_ALS_ACTIVE.with(|a| a.get()) {
+                    Some(BOA_ALS_SNAP.with(|s| s.borrow().clone()))
+                } else {
+                    None
+                };
+                self.promise_jobs.borrow_mut().push_back((p, snap));
+            }
+            other => {
+                self.fallback.clone().enqueue_job(other, context);
+            }
+        }
+    }
+
+    fn run_jobs(
+        self: std::rc::Rc<Self>,
+        context: &mut boa_engine::Context,
+    ) -> boa_engine::JsResult<()> {
+        loop {
+            let next_job = self.promise_jobs.borrow_mut().pop_front();
+            if let Some((job, snap_opt)) = next_job {
+                if let Some(snap) = snap_opt {
+                    let prev = BOA_ALS_SNAP.with(|s| s.replace(snap));
+                    let res = job.call(context);
+                    BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
+                    res?;
+                } else {
+                    job.call(context)?;
+                }
+            } else {
+                self.fallback.clone().run_jobs(context)?;
+                if self.promise_jobs.borrow().is_empty() {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[inline]
@@ -159,7 +229,10 @@ pub(crate) fn release_warm_boa_realm(realm: WarmBoaRealm) {
 /// `ReadableStream`, `WritableStream`, `TransformStream`, `WebCrypto`, `Buffer`, `structuredClone`),
 /// and microtask/macrotask schedulers (`process.nextTick`, `queueMicrotask`, `setImmediate`, `setTimeout`).
 pub(crate) fn create_warm_boa_realm() -> WarmBoaRealm {
-    let mut ctx = boa_engine::Context::default();
+    let mut ctx = boa_engine::context::ContextBuilder::new()
+        .job_executor(std::rc::Rc::new(SliceJobExecutor::new()))
+        .build()
+        .unwrap_or_else(|_| boa_engine::Context::default());
     register_slice_native_host_functions(&mut ctx);
 
     let _ = ctx.eval(boa_engine::Source::from_bytes(ULTRA_CORE_PRELUDE));

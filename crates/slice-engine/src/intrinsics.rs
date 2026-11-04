@@ -1309,3 +1309,599 @@ pub(crate) fn generate_uuid_v4(det_prng: Option<&mut u64>) -> String {
     }
     unsafe { String::from_utf8_unchecked(out.to_vec()) }
 }
+
+// ============================================================================
+// Wave J.2: Self-Contained RFC 1951 (DEFLATE), RFC 1950 (Zlib), & RFC 1952 (Gzip)
+// ============================================================================
+
+const MAX_DECOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
+
+const LENGTH_BASE: [u16; 29] = [
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
+    131, 163, 195, 227, 258,
+];
+const LENGTH_EXTRA: [u8; 29] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+];
+const DIST_BASE: [u16; 30] = [
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+    2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+];
+const DIST_EXTRA: [u8; 30] = [
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
+    13, 13,
+];
+const CL_ORDER: [usize; 19] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
+
+#[inline]
+pub(crate) fn adler32_checksum(data: &[u8]) -> u32 {
+    const MOD_ADLER: u32 = 65521;
+    let mut a: u32 = 1;
+    let mut b: u32 = 0;
+    for chunk in data.chunks(5552) {
+        for &byte in chunk {
+            a += byte as u32;
+            b += a;
+        }
+        a %= MOD_ADLER;
+        b %= MOD_ADLER;
+    }
+    (b << 16) | a
+}
+
+#[inline]
+pub(crate) fn crc32_checksum(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        let mut c = (crc ^ (byte as u32)) & 0xFF;
+        for _ in 0..8 {
+            c = if (c & 1) != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
+        }
+        crc = (crc >> 8) ^ c;
+    }
+    !crc
+}
+
+struct DeflateBitWriter {
+    out: Vec<u8>,
+    bit_buf: u32,
+    bit_count: u8,
+}
+
+impl DeflateBitWriter {
+    #[inline]
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            out: Vec::with_capacity(cap),
+            bit_buf: 0,
+            bit_count: 0,
+        }
+    }
+
+    #[inline]
+    fn write_bits_lsb(&mut self, val: u32, nbits: u8) {
+        self.bit_buf |= (val & ((1u32 << nbits) - 1)) << self.bit_count;
+        self.bit_count += nbits;
+        while self.bit_count >= 8 {
+            self.out.push((self.bit_buf & 0xFF) as u8);
+            self.bit_buf >>= 8;
+            self.bit_count -= 8;
+        }
+    }
+
+    #[inline]
+    fn write_huffman_msb(&mut self, code: u16, nbits: u8) {
+        let mut rev = 0u32;
+        for i in 0..nbits {
+            if ((code >> (nbits - 1 - i)) & 1) != 0 {
+                rev |= 1u32 << i;
+            }
+        }
+        self.write_bits_lsb(rev, nbits);
+    }
+
+    #[inline]
+    fn write_fixed_sym(&mut self, sym: u16) {
+        match sym {
+            0..=143 => self.write_huffman_msb(0x30 + sym, 8),
+            144..=255 => self.write_huffman_msb(0x190 + (sym - 144), 9),
+            256..=279 => self.write_huffman_msb(sym - 256, 7),
+            _ => self.write_huffman_msb(0xC0 + (sym - 280), 8),
+        }
+    }
+
+    #[inline]
+    fn write_length_dist(&mut self, length: usize, dist: usize) {
+        let mut l_idx = 0usize;
+        for (i, &base) in LENGTH_BASE.iter().enumerate() {
+            if length >= base as usize {
+                l_idx = i;
+            } else {
+                break;
+            }
+        }
+        self.write_fixed_sym(257 + l_idx as u16);
+        let l_extra = LENGTH_EXTRA[l_idx];
+        if l_extra > 0 {
+            self.write_bits_lsb((length - LENGTH_BASE[l_idx] as usize) as u32, l_extra);
+        }
+
+        let mut d_idx = 0usize;
+        for (i, &base) in DIST_BASE.iter().enumerate() {
+            if dist >= base as usize {
+                d_idx = i;
+            } else {
+                break;
+            }
+        }
+        self.write_huffman_msb(d_idx as u16, 5);
+        let d_extra = DIST_EXTRA[d_idx];
+        if d_extra > 0 {
+            self.write_bits_lsb((dist - DIST_BASE[d_idx] as usize) as u32, d_extra);
+        }
+    }
+
+    #[inline]
+    fn finish(mut self) -> Vec<u8> {
+        if self.bit_count > 0 {
+            self.out.push((self.bit_buf & 0xFF) as u8);
+        }
+        self.out
+    }
+}
+
+#[inline]
+fn lz77_hash3(bytes: &[u8], pos: usize) -> usize {
+    let v = (bytes[pos] as u32)
+        | ((bytes[pos + 1] as u32) << 8)
+        | ((bytes[pos + 2] as u32) << 16);
+    ((v.wrapping_mul(0x1E35_A7BD)) >> 20) as usize & 0xFFF
+}
+
+/// Compresses `input` into a raw RFC 1951 DEFLATE bitstream using LZ77 + Fixed Huffman encoding.
+pub(crate) fn deflate_raw_compress(input: &[u8]) -> Vec<u8> {
+    let mut bw = DeflateBitWriter::with_capacity(input.len() / 2 + 16);
+    // BFINAL = 1, BTYPE = 01 (Fixed Huffman)
+    bw.write_bits_lsb(1, 1);
+    bw.write_bits_lsb(1, 2);
+
+    if input.len() < 3 {
+        for &b in input {
+            bw.write_fixed_sym(b as u16);
+        }
+        bw.write_fixed_sym(256);
+        return bw.finish();
+    }
+
+    let mut head = [usize::MAX; 4096];
+    let mut prev = vec![usize::MAX; input.len().min(32768)];
+    let mask = prev.len() - 1;
+    let mut pos = 0usize;
+
+    while pos < input.len() {
+        let mut best_len = 0usize;
+        let mut best_dist = 0usize;
+
+        if pos + 3 <= input.len() {
+            let h = lz77_hash3(input, pos);
+            let mut cand = head[h];
+            head[h] = pos;
+            if !prev.is_empty() {
+                prev[pos & mask] = cand;
+            }
+
+            let max_len = (input.len() - pos).min(258);
+            let mut chain_steps = 0usize;
+            while cand != usize::MAX && pos > cand && (pos - cand) <= 32768 && chain_steps < 24 {
+                chain_steps += 1;
+                if input[cand + best_len] == input[pos + best_len]
+                    && input[cand..cand + 3] == input[pos..pos + 3]
+                {
+                    let mut mlen = 3usize;
+                    while mlen < max_len && input[cand + mlen] == input[pos + mlen] {
+                        mlen += 1;
+                    }
+                    if mlen > best_len {
+                        best_len = mlen;
+                        best_dist = pos - cand;
+                        if best_len == max_len {
+                            break;
+                        }
+                    }
+                }
+                if prev.is_empty() {
+                    break;
+                }
+                let next_cand = prev[cand & mask];
+                if next_cand >= cand {
+                    break;
+                }
+                cand = next_cand;
+            }
+        }
+
+        if best_len >= 3 {
+            bw.write_length_dist(best_len, best_dist);
+            let step_end = (pos + best_len).min(input.len());
+            pos += 1;
+            while pos < step_end {
+                if pos + 3 <= input.len() {
+                    let h = lz77_hash3(input, pos);
+                    let prev_head = head[h];
+                    head[h] = pos;
+                    if !prev.is_empty() {
+                        prev[pos & mask] = prev_head;
+                    }
+                }
+                pos += 1;
+            }
+        } else {
+            bw.write_fixed_sym(input[pos] as u16);
+            pos += 1;
+        }
+    }
+
+    bw.write_fixed_sym(256);
+    bw.finish()
+}
+
+struct HuffmanTree {
+    counts: [u16; 16],
+    symbols: Vec<u16>,
+}
+
+impl HuffmanTree {
+    fn from_code_lengths(lengths: &[u8]) -> Result<Self, &'static str> {
+        let mut counts = [0u16; 16];
+        for &len in lengths {
+            if len as usize >= 16 {
+                return Err("Invalid Huffman code length");
+            }
+            if len > 0 {
+                counts[len as usize] += 1;
+            }
+        }
+        let mut offsets = [0u16; 16];
+        let mut total = 0u16;
+        for bits in 1..16 {
+            offsets[bits] = total;
+            total += counts[bits];
+        }
+        let mut symbols = vec![0u16; total as usize];
+        for (sym, &len) in lengths.iter().enumerate() {
+            if len > 0 {
+                let idx = offsets[len as usize] as usize;
+                offsets[len as usize] += 1;
+                symbols[idx] = sym as u16;
+            }
+        }
+        Ok(Self { counts, symbols })
+    }
+}
+
+struct InflateBitReader<'a> {
+    data: &'a [u8],
+    byte_pos: usize,
+    bit_buf: u32,
+    bit_count: u8,
+}
+
+impl<'a> InflateBitReader<'a> {
+    #[inline]
+    fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            byte_pos: 0,
+            bit_buf: 0,
+            bit_count: 0,
+        }
+    }
+
+    #[inline]
+    fn ensure_bits(&mut self, n: u8) -> Result<(), &'static str> {
+        while self.bit_count < n {
+            if self.byte_pos >= self.data.len() {
+                return Err("Unexpected end of DEFLATE stream");
+            }
+            self.bit_buf |= (self.data[self.byte_pos] as u32) << self.bit_count;
+            self.byte_pos += 1;
+            self.bit_count += 8;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn read_bits(&mut self, n: u8) -> Result<u32, &'static str> {
+        if n == 0 {
+            return Ok(0);
+        }
+        self.ensure_bits(n)?;
+        let val = self.bit_buf & ((1u32 << n) - 1);
+        self.bit_buf >>= n;
+        self.bit_count -= n;
+        Ok(val)
+    }
+
+    #[inline]
+    fn align_byte(&mut self) {
+        let drop_bits = self.bit_count & 7;
+        self.bit_buf >>= drop_bits;
+        self.bit_count -= drop_bits;
+    }
+
+    #[inline]
+    fn read_u16_aligned(&mut self) -> Result<u16, &'static str> {
+        let lo = self.read_bits(8)? as u16;
+        let hi = self.read_bits(8)? as u16;
+        Ok(lo | (hi << 8))
+    }
+
+    #[inline]
+    fn decode_huffman(&mut self, tree: &HuffmanTree) -> Result<u16, &'static str> {
+        let mut code: i32 = 0;
+        let mut first: i32 = 0;
+        let mut index: i32 = 0;
+        for len in 1..16 {
+            code |= self.read_bits(1)? as i32;
+            let count = tree.counts[len] as i32;
+            if code - count < first {
+                return tree
+                    .symbols
+                    .get((index + (code - first)) as usize)
+                    .copied()
+                    .ok_or("Corrupt Huffman symbol table");
+            }
+            index += count;
+            first = (first + count) << 1;
+            code <<= 1;
+        }
+        Err("Invalid Huffman code in DEFLATE stream")
+    }
+}
+
+/// Decompresses a raw RFC 1951 DEFLATE stream (`BTYPE = 00`, `01`, or `10`).
+pub(crate) fn inflate_raw_decompress(input: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let mut br = InflateBitReader::new(input);
+    let mut out = Vec::with_capacity(input.len().saturating_mul(2).min(65536));
+
+    loop {
+        let bfinal = br.read_bits(1)?;
+        let btype = br.read_bits(2)?;
+        match btype {
+            0 => {
+                br.align_byte();
+                let len = br.read_u16_aligned()?;
+                let nlen = br.read_u16_aligned()?;
+                if len != !nlen {
+                    return Err("Corrupt stored DEFLATE block length complement");
+                }
+                if out.len().saturating_add(len as usize) > MAX_DECOMPRESSED_BYTES {
+                    return Err("Decompressed payload exceeds 64MB sandbox limit");
+                }
+                for _ in 0..len {
+                    out.push(br.read_bits(8)? as u8);
+                }
+            }
+            1 | 2 => {
+                let (lit_tree, dist_tree) = if btype == 1 {
+                    let mut lit_lengths = [0u8; 288];
+                    lit_lengths[0..144].fill(8);
+                    lit_lengths[144..256].fill(9);
+                    lit_lengths[256..280].fill(7);
+                    lit_lengths[280..288].fill(8);
+                    let dist_lengths = [5u8; 32];
+                    (
+                        HuffmanTree::from_code_lengths(&lit_lengths)?,
+                        HuffmanTree::from_code_lengths(&dist_lengths)?,
+                    )
+                } else {
+                    let hlit = br.read_bits(5)? as usize + 257;
+                    let hdist = br.read_bits(5)? as usize + 1;
+                    let hclen = br.read_bits(4)? as usize + 4;
+                    if hlit > 286 || hdist > 30 {
+                        return Err("Invalid dynamic Huffman table header");
+                    }
+                    let mut cl_lengths = [0u8; 19];
+                    for i in 0..hclen {
+                        cl_lengths[CL_ORDER[i]] = br.read_bits(3)? as u8;
+                    }
+                    let cl_tree = HuffmanTree::from_code_lengths(&cl_lengths)?;
+                    let total_codes = hlit + hdist;
+                    let mut unpacked = Vec::with_capacity(total_codes);
+                    while unpacked.len() < total_codes {
+                        let sym = br.decode_huffman(&cl_tree)?;
+                        match sym {
+                            0..=15 => unpacked.push(sym as u8),
+                            16 => {
+                                let prev = *unpacked
+                                    .last()
+                                    .ok_or("Invalid repeat code 16 at start of table")?;
+                                let repeat = br.read_bits(2)? as usize + 3;
+                                for _ in 0..repeat {
+                                    unpacked.push(prev);
+                                }
+                            }
+                            17 => {
+                                let repeat = br.read_bits(3)? as usize + 3;
+                                unpacked.resize(unpacked.len() + repeat, 0);
+                            }
+                            18 => {
+                                let repeat = br.read_bits(7)? as usize + 11;
+                                unpacked.resize(unpacked.len() + repeat, 0);
+                            }
+                            _ => return Err("Invalid code length symbol"),
+                        }
+                    }
+                    if unpacked.len() > total_codes {
+                        return Err("Dynamic Huffman code lengths overflow");
+                    }
+                    (
+                        HuffmanTree::from_code_lengths(&unpacked[..hlit])?,
+                        HuffmanTree::from_code_lengths(&unpacked[hlit..])?,
+                    )
+                };
+
+                loop {
+                    let sym = br.decode_huffman(&lit_tree)?;
+                    if sym < 256 {
+                        if out.len() >= MAX_DECOMPRESSED_BYTES {
+                            return Err("Decompressed payload exceeds 64MB sandbox limit");
+                        }
+                        out.push(sym as u8);
+                    } else if sym == 256 {
+                        break;
+                    } else {
+                        let l_idx = (sym - 257) as usize;
+                        if l_idx >= LENGTH_BASE.len() {
+                            return Err("Invalid DEFLATE length code");
+                        }
+                        let length = LENGTH_BASE[l_idx] as usize
+                            + br.read_bits(LENGTH_EXTRA[l_idx])? as usize;
+                        let d_sym = br.decode_huffman(&dist_tree)? as usize;
+                        if d_sym >= DIST_BASE.len() {
+                            return Err("Invalid DEFLATE distance code");
+                        }
+                        let dist =
+                            DIST_BASE[d_sym] as usize + br.read_bits(DIST_EXTRA[d_sym])? as usize;
+                        if dist == 0 || dist > out.len() {
+                            return Err("DEFLATE back-reference distance out of bounds");
+                        }
+                        if out.len().saturating_add(length) > MAX_DECOMPRESSED_BYTES {
+                            return Err("Decompressed payload exceeds 64MB sandbox limit");
+                        }
+                        for _ in 0..length {
+                            let b = out[out.len() - dist];
+                            out.push(b);
+                        }
+                    }
+                }
+            }
+            _ => return Err("Invalid DEFLATE block type (BTYPE=11)"),
+        }
+
+        if bfinal != 0 {
+            break;
+        }
+    }
+
+    Ok(out)
+}
+
+/// Compresses `input` using `"gzip"` (RFC 1952), `"deflate"` (RFC 1950 zlib), or `"deflate-raw"` (RFC 1951).
+pub(crate) fn zlib_compress_bytes(input: &[u8], format: &str) -> Result<Vec<u8>, &'static str> {
+    let raw = deflate_raw_compress(input);
+    match format {
+        "deflate-raw" => Ok(raw),
+        "deflate" => {
+            let mut out = Vec::with_capacity(raw.len() + 6);
+            out.extend_from_slice(&[0x78, 0x9C]);
+            out.extend_from_slice(&raw);
+            let adler = adler32_checksum(input);
+            out.extend_from_slice(&adler.to_be_bytes());
+            Ok(out)
+        }
+        "gzip" => {
+            let mut out = Vec::with_capacity(raw.len() + 18);
+            out.extend_from_slice(&[0x1F, 0x8B, 0x08, 0x00, 0, 0, 0, 0, 0x00, 0xFF]);
+            out.extend_from_slice(&raw);
+            let crc = crc32_checksum(input);
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&(input.len() as u32).to_le_bytes());
+            Ok(out)
+        }
+        _ => Err("Unsupported compression format"),
+    }
+}
+
+/// Decompresses `input` using `"gzip"` (RFC 1952), `"deflate"` (RFC 1950 zlib), or `"deflate-raw"` (RFC 1951).
+pub(crate) fn zlib_decompress_bytes(input: &[u8], format: &str) -> Result<Vec<u8>, &'static str> {
+    match format {
+        "deflate-raw" => inflate_raw_decompress(input),
+        "deflate" => {
+            if input.len() < 6 {
+                return Err("Truncated zlib stream");
+            }
+            let cmf = input[0];
+            let flg = input[1];
+            if (cmf & 0x0F) != 8 || !((cmf as u16) << 8 | (flg as u16)).is_multiple_of(31) {
+                return Err("Invalid zlib header");
+            }
+            let start = if (flg & 0x20) != 0 { 6 } else { 2 };
+            if input.len() < start + 4 {
+                return Err("Truncated zlib stream");
+            }
+            let end = input.len() - 4;
+            let out = inflate_raw_decompress(&input[start..end])?;
+            let expected_adler = u32::from_be_bytes([
+                input[end],
+                input[end + 1],
+                input[end + 2],
+                input[end + 3],
+            ]);
+            if adler32_checksum(&out) != expected_adler {
+                return Err("Zlib Adler-32 checksum mismatch");
+            }
+            Ok(out)
+        }
+        "gzip" => {
+            if input.len() < 18 {
+                return Err("Truncated gzip stream");
+            }
+            if input[0] != 0x1F || input[1] != 0x8B || input[2] != 0x08 {
+                return Err("Invalid gzip header magic");
+            }
+            let flg = input[3];
+            let mut pos = 10usize;
+            if (flg & 0x04) != 0 {
+                if pos + 2 > input.len() {
+                    return Err("Truncated gzip FEXTRA header");
+                }
+                let xlen = u16::from_le_bytes([input[pos], input[pos + 1]]) as usize;
+                pos += 2 + xlen;
+            }
+            if (flg & 0x08) != 0 {
+                while pos < input.len() && input[pos] != 0 {
+                    pos += 1;
+                }
+                pos += 1;
+            }
+            if (flg & 0x10) != 0 {
+                while pos < input.len() && input[pos] != 0 {
+                    pos += 1;
+                }
+                pos += 1;
+            }
+            if (flg & 0x02) != 0 {
+                pos += 2;
+            }
+            if pos + 8 > input.len() {
+                return Err("Truncated gzip trailer");
+            }
+            let end = input.len() - 8;
+            let out = inflate_raw_decompress(&input[pos..end])?;
+            let expected_crc = u32::from_le_bytes([
+                input[end],
+                input[end + 1],
+                input[end + 2],
+                input[end + 3],
+            ]);
+            let expected_isize = u32::from_le_bytes([
+                input[end + 4],
+                input[end + 5],
+                input[end + 6],
+                input[end + 7],
+            ]);
+            if crc32_checksum(&out) != expected_crc || (out.len() as u32) != expected_isize {
+                return Err("Gzip CRC-32 or ISIZE trailer mismatch");
+            }
+            Ok(out)
+        }
+        _ => Err("Unsupported decompression format"),
+    }
+}

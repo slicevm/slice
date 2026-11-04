@@ -2,9 +2,9 @@
 
 use crate::boa_realm::{
     check_boa_fs_read_ocap, check_boa_fs_write_ocap, norm_vfs_path, BOA_ACTIVE_CAPS,
-    BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_FETCH_MOCKS,
-    BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_STDOUT, BOA_VFS_CACHE,
-    BOA_VFS_DIRS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
+    BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, BOA_EGRESS_SECRETS,
+    BOA_ENV_MAP, BOA_FETCH_MOCKS, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
+    BOA_STDOUT, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
 };
 use crate::event_loop::{
     cancel_timer, clear_event_loop_state, drive_event_loop_to_completion, enqueue_async_fetch,
@@ -16,6 +16,7 @@ use crate::intrinsics::{
     hex_decode_bytes, hmac_sha1_bytes, hmac_sha256_bytes, hmac_sha256_hex, hmac_sha384_bytes,
     hmac_sha512_bytes, semver_coerce_xyz, semver_parse_strict_xyz, semver_satisfies_xyz,
     sha1_bytes, sha256_bytes, sha256_hex, sha384_bytes, sha512_bytes, whatwg_atob, whatwg_btoa,
+    zlib_compress_bytes, zlib_decompress_bytes,
 };
 use crate::isolate::{SandboxEvalOptions, SliceIsolate};
 use crate::js_preludes::eval_lazy_prelude_shard;
@@ -1557,6 +1558,82 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
                 let decoded = String::from_utf8_lossy(slice).into_owned();
                 Ok(BoaVal::from(js_string!(decoded)))
             }
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_zlib_compress"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let bytes = match args.first() {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let fmt = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "gzip".to_string());
+            match zlib_compress_bytes(&bytes, &fmt) {
+                Ok(compressed) => bytes_to_js_uint8_array(&compressed, context),
+                Err(msg) => Err(JsNativeError::typ().with_message(msg).into()),
+            }
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_zlib_decompress"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let bytes = match args.first() {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let fmt = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "gzip".to_string());
+            match zlib_decompress_bytes(&bytes, &fmt) {
+                Ok(decompressed) => bytes_to_js_uint8_array(&decompressed, context),
+                Err(msg) => Err(JsNativeError::typ().with_message(msg).into()),
+            }
+        }),
+    );
+}
+
+pub(crate) fn register_async_hooks_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_als_get"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_als_get"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            Ok(BOA_ALS_SNAP.with(|s| s.borrow().clone()))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_als_set"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, _context| {
+            let next = args.first().cloned().unwrap_or_else(BoaVal::undefined);
+            BOA_ALS_ACTIVE.with(|a| a.set(true));
+            let prev = BOA_ALS_SNAP.with(|s| s.replace(next));
+            Ok(prev)
         }),
     );
 }

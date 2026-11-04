@@ -36,6 +36,8 @@ pub(crate) fn is_builtin_module(spec: &str) -> bool {
             | "worker_threads"
             | "net"
             | "dgram"
+            | "async_hooks"
+            | "zlib"
     )
 }
 

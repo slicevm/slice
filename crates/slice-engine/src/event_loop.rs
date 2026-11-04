@@ -3,7 +3,8 @@
 //! Outbound `fetch()` Multiplexer (`Promise.all([fetch(...), ...])`).
 
 use crate::boa_realm::{
-    BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_NET_HOSTS, BOA_VIOLATION,
+    BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, BOA_EGRESS_SECRETS,
+    BOA_NET_HOSTS, BOA_VIOLATION,
 };
 use crate::outbound_http::{
     execute_outbound_fetch_with_redirects, outbound_pool_reuse_count, record_outbound_pool_reuses,
@@ -46,6 +47,7 @@ pub(crate) struct ScheduledTimer {
     pub(crate) is_immediate: bool,
     pub(crate) callback: JsObject,
     pub(crate) args: Vec<JsValue>,
+    pub(crate) als_snap: Option<JsValue>,
     pub(crate) cancelled: bool,
 }
 
@@ -59,6 +61,7 @@ pub(crate) struct QueuedAsyncFetch {
     pub(crate) resolve_fn: JsObject,
     pub(crate) reject_fn: JsObject,
     pub(crate) signal_obj: Option<JsObject>,
+    pub(crate) als_snap: Option<JsValue>,
 }
 
 struct InFlightFetchHandle {
@@ -67,6 +70,7 @@ struct InFlightFetchHandle {
     resolve_fn: JsObject,
     reject_fn: JsObject,
     signal_obj: Option<JsObject>,
+    als_snap: Option<JsValue>,
 }
 
 struct CompletedAsyncFetch {
@@ -170,6 +174,8 @@ pub(crate) fn restore_event_loop_state(saved: SavedEventLoopSnapshot) {
 
 pub(crate) fn clear_event_loop_state() {
     ACTIVE_ASYNC_ITEMS.with(|c| c.set(0));
+    BOA_ALS_ACTIVE.with(|a| a.set(false));
+    BOA_ALS_SNAP.with(|s| *s.borrow_mut() = JsValue::undefined());
     EVENT_LOOP_STATE.with(|st| st.borrow_mut().reset());
     crate::workers::clear_thread_worker_state();
     crate::sockets::close_all_active_sockets();
@@ -218,6 +224,11 @@ fn schedule_timer_internal(
         } else {
             None
         };
+        let als_snap = if BOA_ALS_ACTIVE.with(|a| a.get()) {
+            Some(BOA_ALS_SNAP.with(|s| s.borrow().clone()))
+        } else {
+            None
+        };
         loop_st.timers.push(ScheduledTimer {
             id,
             deadline_ms,
@@ -225,6 +236,7 @@ fn schedule_timer_internal(
             is_immediate,
             callback,
             args,
+            als_snap,
             cancelled: false,
         });
         ACTIVE_ASYNC_ITEMS.with(|c| c.set(c.get().saturating_add(1)));
@@ -266,6 +278,11 @@ pub(crate) fn enqueue_async_fetch(
         let mut loop_st = st.borrow_mut();
         let id = loop_st.next_fetch_id;
         loop_st.next_fetch_id = loop_st.next_fetch_id.wrapping_add(1).max(1);
+        let als_snap = if BOA_ALS_ACTIVE.with(|a| a.get()) {
+            Some(BOA_ALS_SNAP.with(|s| s.borrow().clone()))
+        } else {
+            None
+        };
         loop_st.queued_fetches.push(QueuedAsyncFetch {
             id,
             url,
@@ -276,6 +293,7 @@ pub(crate) fn enqueue_async_fetch(
             resolve_fn,
             reject_fn,
             signal_obj,
+            als_snap,
         });
         ACTIVE_ASYNC_ITEMS.with(|c| c.set(c.get().saturating_add(1)));
         id
@@ -309,10 +327,17 @@ fn settle_completed_fetch(
     result: Result<String, String>,
     ctx: &mut Context,
 ) {
+    let prev_als = handle
+        .als_snap
+        .as_ref()
+        .map(|snap| BOA_ALS_SNAP.with(|s| s.replace(snap.clone())));
     if let Some(abort_reason) = is_signal_aborted(&handle.signal_obj, ctx) {
         let _ = handle
             .reject_fn
             .call(&JsValue::undefined(), &[abort_reason], ctx);
+        if let Some(prev) = prev_als {
+            BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
+        }
         return;
     }
     match result {
@@ -330,6 +355,9 @@ fn settle_completed_fetch(
             let arg = JsValue::from(js_string!(err_json));
             let _ = handle.resolve_fn.call(&JsValue::undefined(), &[arg], ctx);
         }
+    }
+    if let Some(prev) = prev_als {
+        BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
     }
 }
 
@@ -444,6 +472,7 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                         resolve_fn: req.resolve_fn,
                         reject_fn: req.reject_fn,
                         signal_obj: req.signal_obj,
+                        als_snap: req.als_snap,
                     },
                     res,
                     ctx,
@@ -476,6 +505,7 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                                 resolve_fn: req.resolve_fn,
                                 reject_fn: req.reject_fn,
                                 signal_obj: req.signal_obj,
+                                als_snap: req.als_snap,
                             },
                         );
                     });
@@ -542,7 +572,8 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
         // 5. Fire all ready timers (`deadline_ms <= now_ms`) in deterministic `(deadline_ms, !is_immediate, id)` order
         // so `setImmediate` check-phase tasks always execute before `setTimeout(0)` timers scheduled at the same millisecond.
         let now_ms = current_event_loop_clock_ms();
-        let mut ready_timers: Vec<(u32, u64, bool, JsObject, Vec<JsValue>)> = Vec::new();
+        type ReadyTimerEntry = (u32, u64, bool, JsObject, Vec<JsValue>, Option<JsValue>);
+        let mut ready_timers: Vec<ReadyTimerEntry> = Vec::new();
         EVENT_LOOP_STATE.with(|st| {
             let mut loop_st = st.borrow_mut();
             for timer in &mut loop_st.timers {
@@ -553,6 +584,7 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                         timer.is_immediate,
                         timer.callback.clone(),
                         timer.args.clone(),
+                        timer.als_snap.clone(),
                     ));
                     if let Some(iv) = timer.interval_ms {
                         timer.deadline_ms = now_ms.saturating_add(iv);
@@ -565,8 +597,8 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
         });
 
         if !ready_timers.is_empty() {
-            ready_timers.sort_by_key(|(id, deadline, is_imm, _, _)| (*deadline, !*is_imm, *id));
-            for (_id, _deadline, _is_imm, cb, args) in ready_timers {
+            ready_timers.sort_by_key(|(id, deadline, is_imm, _, _, _)| (*deadline, !*is_imm, *id));
+            for (_id, _deadline, _is_imm, cb, args, als_snap) in ready_timers {
                 total_ticks += 1;
                 if total_ticks > MAX_EVENT_LOOP_TICKS {
                     let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
@@ -579,7 +611,13 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                     clear_event_loop_state();
                     return;
                 }
+                let prev_als = als_snap
+                    .as_ref()
+                    .map(|snap| BOA_ALS_SNAP.with(|s| s.replace(snap.clone())));
                 let _ = cb.call(&JsValue::undefined(), &args, ctx);
+                if let Some(prev) = prev_als {
+                    BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
+                }
                 let _ = ctx.run_jobs();
                 if BOA_VIOLATION.with(|v| v.borrow().is_some()) {
                     clear_event_loop_state();

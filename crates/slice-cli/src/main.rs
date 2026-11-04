@@ -314,6 +314,83 @@ declare module "*.wasm" {
     const wasmBytes: Uint8Array;
     export default wasmBytes;
 }
+
+declare interface URLPatternComponentResult {
+    input: string;
+    groups: Record<string, string | undefined>;
+}
+
+declare interface URLPatternResult {
+    inputs: unknown[];
+    protocol: URLPatternComponentResult;
+    username: URLPatternComponentResult;
+    password: URLPatternComponentResult;
+    hostname: URLPatternComponentResult;
+    port: URLPatternComponentResult;
+    pathname: URLPatternComponentResult;
+    search: URLPatternComponentResult;
+    hash: URLPatternComponentResult;
+}
+
+declare interface URLPatternInit {
+    protocol?: string;
+    username?: string;
+    password?: string;
+    hostname?: string;
+    port?: string;
+    pathname?: string;
+    search?: string;
+    hash?: string;
+    baseURL?: string;
+}
+
+declare class URLPattern {
+    readonly protocol: string;
+    readonly username: string;
+    readonly password: string;
+    readonly hostname: string;
+    readonly port: string;
+    readonly pathname: string;
+    readonly search: string;
+    readonly hash: string;
+    readonly hasRegExpGroups: boolean;
+    constructor(input?: string | URLPatternInit, baseURL?: string | { ignoreCase?: boolean }, options?: { ignoreCase?: boolean });
+    test(input?: string | URLPatternInit, baseURL?: string): boolean;
+    exec(input?: string | URLPatternInit, baseURL?: string): URLPatternResult | null;
+}
+
+declare class CompressionStream {
+    readonly readable: ReadableStream<Uint8Array>;
+    readonly writable: WritableStream<Uint8Array>;
+    constructor(format: "gzip" | "deflate" | "deflate-raw");
+}
+
+declare class DecompressionStream {
+    readonly readable: ReadableStream<Uint8Array>;
+    readonly writable: WritableStream<Uint8Array>;
+    constructor(format: "gzip" | "deflate" | "deflate-raw");
+}
+
+declare module "node:async_hooks" {
+    export class AsyncLocalStorage<T = unknown> {
+        run<R>(store: T, callback: (...args: any[]) => R, ...args: any[]): R;
+        exit<R>(callback: (...args: any[]) => R, ...args: any[]): R;
+        getStore(): T | undefined;
+        enterWith(store: T): void;
+        disable(): void;
+        static bind<F extends (...args: any[]) => any>(fn: F): F;
+        static snapshot(): <R>(fn: (...args: any[]) => R, ...args: any[]) => R;
+    }
+    export class AsyncResource {
+        constructor(type: string, opts?: { triggerAsyncId?: number });
+        runInAsyncScope<T, R>(fn: (this: T, ...args: any[]) => R, thisArg?: T, ...args: any[]): R;
+        bind<F extends (...args: any[]) => any>(fn: F, thisArg?: any): F;
+        static bind<F extends (...args: any[]) => any>(fn: F, type?: string, thisArg?: any): F;
+        asyncId(): number;
+        triggerAsyncId(): number;
+        emitDestroy(): this;
+    }
+}
 "#;
 
 const DEFAULT_TSCONFIG_JSON: &str = r#"{

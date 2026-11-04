@@ -283,6 +283,52 @@
   }
   globalThis.TextDecoderStream = TextDecoderStream;
 
+  function __normCompFmt(format, ctorName) {
+    var f = String(format || "").toLowerCase();
+    if (f !== "gzip" && f !== "deflate" && f !== "deflate-raw") {
+      throw new TypeError(ctorName + ": Unsupported compression format '" + format + "'");
+    }
+    return f;
+  }
+
+  function CompressionStream(format) {
+    var fmt = __normCompFmt(format, "CompressionStream");
+    var chunks = [];
+    var ts = new TransformStream({
+      transform: function(chunk) {
+        chunks.push(__slice_toU8(chunk));
+      },
+      flush: function(ctrl) {
+        var input = __slice_concatU8(chunks);
+        chunks = [];
+        var out = __slice_zlib_compress(input, fmt);
+        if (out.byteLength > 0) ctrl.enqueue(out);
+      }
+    });
+    this.readable = ts.readable;
+    this.writable = ts.writable;
+  }
+  globalThis.CompressionStream = CompressionStream;
+
+  function DecompressionStream(format) {
+    var fmt = __normCompFmt(format, "DecompressionStream");
+    var chunks = [];
+    var ts = new TransformStream({
+      transform: function(chunk) {
+        chunks.push(__slice_toU8(chunk));
+      },
+      flush: function(ctrl) {
+        var input = __slice_concatU8(chunks);
+        chunks = [];
+        var out = __slice_zlib_decompress(input, fmt);
+        if (out.byteLength > 0) ctrl.enqueue(out);
+      }
+    });
+    this.readable = ts.readable;
+    this.writable = ts.writable;
+  }
+  globalThis.DecompressionStream = DecompressionStream;
+
   function Blob(blobParts, options) {
     var o = options || {};
     this.type = o.type ? String(o.type).toLowerCase() : "";

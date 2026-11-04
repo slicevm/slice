@@ -144,27 +144,30 @@
   var __qmQ = [];
   var __mtS = false;
   var __ntHooked = false;
+  var __alsWrap = null;
   var __origThen = Promise.prototype.then;
 
   function __wrappedThen(onF, onR) {
-    var wF = typeof onF === "function" ? function(v) {
+    var fF = (__alsWrap && typeof onF === "function") ? __alsWrap(onF) : onF;
+    var fR = (__alsWrap && typeof onR === "function") ? __alsWrap(onR) : onR;
+    var wF = typeof fF === "function" ? function(v) {
       if (__ntQ.length > 0) {
         while (__ntQ.length > 0) {
           var n = __ntQ.shift();
           n.f.apply(undefined, n.a);
         }
       }
-      return onF(v);
-    } : onF;
-    var wR = typeof onR === "function" ? function(e) {
+      return fF(v);
+    } : fF;
+    var wR = typeof fR === "function" ? function(e) {
       if (__ntQ.length > 0) {
         while (__ntQ.length > 0) {
           var n = __ntQ.shift();
           n.f.apply(undefined, n.a);
         }
       }
-      throw onR(e);
-    } : onR;
+      return fR(e);
+    } : fR;
     return __origThen.call(this, wF, wR);
   }
 
@@ -172,9 +175,17 @@
     if (enable && !__ntHooked) {
       __ntHooked = true;
       Promise.prototype.then = __wrappedThen;
-    } else if (!enable && __ntHooked && __ntQ.length === 0) {
+    } else if (!enable && __ntHooked && __ntQ.length === 0 && !__alsWrap) {
       __ntHooked = false;
       Promise.prototype.then = __origThen;
+    }
+  };
+
+  globalThis.__slice_set_als_wrap = function(wrapFn) {
+    __alsWrap = wrapFn || null;
+    if (__alsWrap && !__ntHooked) {
+      __ntHooked = true;
+      Promise.prototype.then = __wrappedThen;
     }
   };
 
@@ -209,7 +220,7 @@
     }
     var a = [];
     for (var i = 1; i < arguments.length; i++) a.push(arguments[i]);
-    __ntQ.push({ f: cb, a: a });
+    __ntQ.push({ f: __alsWrap ? __alsWrap(cb) : cb, a: a });
     __schedMt();
   };
 
@@ -217,7 +228,7 @@
     if (typeof cb !== "function") {
       throw new TypeError("queueMicrotask requires a callback function");
     }
-    __qmQ.push(cb);
+    __qmQ.push(__alsWrap ? __alsWrap(cb) : cb);
     __schedMt();
   };
 
