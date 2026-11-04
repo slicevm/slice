@@ -1554,10 +1554,32 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(js_string!("")));
             }
             let norm = norm_vfs_path(&path);
-            let content = BOA_VFS_CACHE
+            let bytes = BOA_VFS_CACHE
                 .with(|c| c.borrow().get(&norm).cloned())
-                .unwrap_or_else(|| std::fs::read_to_string(&path).unwrap_or_default());
+                .unwrap_or_else(|| std::fs::read(&path).unwrap_or_default());
+            let content = String::from_utf8_lossy(&bytes).into_owned();
             Ok(BoaVal::from(js_string!(content)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_read_bytes_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&path) {
+                return bytes_to_js_uint8_array(&[], context);
+            }
+            let norm = norm_vfs_path(&path);
+            let bytes = BOA_VFS_CACHE
+                .with(|c| c.borrow().get(&norm).cloned())
+                .unwrap_or_else(|| std::fs::read(&path).unwrap_or_default());
+            bytes_to_js_uint8_array(&bytes, context)
         }),
     );
 
@@ -1574,12 +1596,15 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_write_ocap(&path) {
                 return Ok(BoaVal::undefined());
             }
-            let data = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
+            let data_bytes = if let Some(val) = args.get(1) {
+                if val.is_object() {
+                    extract_buffer_source_bytes(val, context)?
+                } else {
+                    val.to_string(context)?.to_std_string_escaped().into_bytes()
+                }
+            } else {
+                Vec::new()
+            };
             let norm = norm_vfs_path(&path);
             if let Some(idx) = norm.rfind('/') {
                 let parent = &norm[..idx];
@@ -1588,7 +1613,7 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                 });
             }
             BOA_VFS_CACHE.with(|c| {
-                c.borrow_mut().insert(norm, data);
+                c.borrow_mut().insert(norm, data_bytes);
             });
             Ok(BoaVal::undefined())
         }),
@@ -1607,19 +1632,22 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_write_ocap(&path) {
                 return Ok(BoaVal::undefined());
             }
-            let data = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
+            let data_bytes = if let Some(val) = args.get(1) {
+                if val.is_object() {
+                    extract_buffer_source_bytes(val, context)?
+                } else {
+                    val.to_string(context)?.to_std_string_escaped().into_bytes()
+                }
+            } else {
+                Vec::new()
+            };
             let norm = norm_vfs_path(&path);
             BOA_VFS_CACHE.with(|c| {
                 let mut map = c.borrow_mut();
                 let entry = map
                     .entry(norm)
-                    .or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_default());
-                entry.push_str(&data);
+                    .or_insert_with(|| std::fs::read(&path).unwrap_or_default());
+                entry.extend_from_slice(&data_bytes);
             });
             Ok(BoaVal::undefined())
         }),
@@ -1725,6 +1753,34 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
     );
 
     let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_mtime_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&path) || BOA_DET_STATE.with(|s| s.get().is_some()) {
+                return Ok(BoaVal::from(1_700_000_000_000.0));
+            }
+            let mtime_ms = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as f64)
+                .unwrap_or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as f64)
+                        .unwrap_or(1_700_000_000_000.0)
+                });
+            Ok(BoaVal::from(mtime_ms))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_fs_is_dir_sync"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
@@ -1769,7 +1825,7 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             let norm_dest = norm_vfs_path(&dest);
             let content = BOA_VFS_CACHE
                 .with(|c| c.borrow().get(&norm_src).cloned())
-                .unwrap_or_else(|| std::fs::read_to_string(&src).unwrap_or_default());
+                .unwrap_or_else(|| std::fs::read(&src).unwrap_or_default());
             if let Some(idx) = norm_dest.rfind('/') {
                 let parent = &norm_dest[..idx];
                 BOA_VFS_DIRS.with(|d| {
@@ -1806,7 +1862,7 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             let norm_new = norm_vfs_path(&new_p);
             let content = BOA_VFS_CACHE
                 .with(|c| c.borrow_mut().remove(&norm_old))
-                .unwrap_or_else(|| std::fs::read_to_string(&old_p).unwrap_or_default());
+                .unwrap_or_else(|| std::fs::read(&old_p).unwrap_or_default());
             if let Some(idx) = norm_new.rfind('/') {
                 let parent = &norm_new[..idx];
                 BOA_VFS_DIRS.with(|d| {

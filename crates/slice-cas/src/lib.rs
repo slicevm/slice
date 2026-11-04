@@ -903,4 +903,68 @@ console.log(req.url);
 
         let _ = std::fs::remove_dir_all(&test_dir);
     }
+
+    #[test]
+    fn test_wave_g_oxc_ast_typescript_semantics_and_string_literal_require_safety() {
+        let ts_src = r#"
+export interface OrderPayload {
+    readonly orderId: string;
+    totalCents: number;
+    settled: boolean;
+    status: "pending" | "paid";
+}
+
+const msg = "do not touch require('fs') inside string literal or fake: number";
+const obj = { fakeObjField: number_ref };
+export function processOrder(order: OrderPayload, discount: number, active: boolean): string {
+    const label: string = `template require("crypto") stays untouched`;
+    const fsMod = require("fs");
+    return label + typeof fsMod + order.orderId + String(discount) + String(active);
+}
+"#;
+        let hints = analyze_typescript_semantics(ts_src);
+        assert!(hints.numeric_vars.contains("discount"));
+        assert!(hints.boolean_vars.contains("active"));
+        assert!(hints.string_vars.contains("label"));
+        assert!(
+            !hints.numeric_vars.contains("fake") && !hints.numeric_vars.contains("fakeObjField"),
+            "Object literal and string literal colons must not be misclassified as TypeScript type annotations"
+        );
+        assert!(
+            !hints.interface_schemas.contains_key("JournalRecord"),
+            "No hardcoded JournalRecord schema should be injected"
+        );
+        let schema = hints.interface_schemas.get("OrderPayload").expect("OrderPayload schema");
+        assert_eq!(
+            schema,
+            &vec![
+                ("orderId".to_string(), "string".to_string()),
+                ("totalCents".to_string(), "number".to_string()),
+                ("settled".to_string(), "boolean".to_string()),
+                ("status".to_string(), "string".to_string()),
+            ]
+        );
+        assert_eq!(
+            hints.interface_vars.get("order").map(|s| s.as_str()),
+            Some("OrderPayload")
+        );
+
+        let normalized = strip_typescript_and_normalize(ts_src, true);
+        assert!(
+            normalized.contains("do not touch require('fs') inside string literal"),
+            "String literal containing require('fs') must not be rewritten:\n{}",
+            normalized
+        );
+        assert!(
+            normalized.contains("template require(\"crypto\") stays untouched"),
+            "Template literal containing require(\"crypto\") must not be rewritten:\n{}",
+            normalized
+        );
+        assert!(
+            normalized.contains("__slice_cjs_require(\"fs\")")
+                || normalized.contains("__slice_cjs_require(\"node:fs\")"),
+            "Actual CallExpression require(\"fs\") must be rewritten:\n{}",
+            normalized
+        );
+    }
 }

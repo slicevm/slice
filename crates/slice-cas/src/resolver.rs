@@ -423,7 +423,7 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     // Single-Module Unwrapping + Persistent Realm Cache (`__slice_rc`):
     if visited_order.len() == 1 {
         let (_, entry_body) = visited_order.pop().unwrap();
-        let direct_body = entry_body.replace("require(", "__slice_cjs_require(");
+        let direct_body = crate::oxc_compiler::rewrite_cjs_require(&entry_body);
         let rc_key = compute_bundle_rc_key(&direct_body);
         let mut bundle = String::with_capacity(direct_body.len() + 384);
         if direct_body.contains("exports.default = __slice_default;") {

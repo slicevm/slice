@@ -23,21 +23,74 @@ pub struct TypeDirectedHints {
     pub semantic_symbol_count: usize,
 }
 
-fn classify_ts_type_str(ty_src: &str) -> Option<&'static str> {
-    let t = ty_src.trim();
-    if t == "number" {
-        Some("number")
-    } else if t == "boolean" {
-        Some("boolean")
-    } else if t == "string"
-        || (t.starts_with('"') && t.ends_with('"'))
-        || (t.starts_with('\'') && t.ends_with('\''))
-        || t.contains(" | \"")
-        || t.contains(" | '")
-    {
-        Some("string")
-    } else {
-        None
+fn classify_ts_type_ast(ty: &oxc::ast::ast::TSType<'_>) -> Option<&'static str> {
+    use oxc::ast::ast::{TSLiteral, TSType};
+    match ty {
+        TSType::TSNumberKeyword(_) => Some("number"),
+        TSType::TSBooleanKeyword(_) => Some("boolean"),
+        TSType::TSStringKeyword(_) => Some("string"),
+        TSType::TSLiteralType(lit) => match &lit.literal {
+            TSLiteral::StringLiteral(_) | TSLiteral::TemplateLiteral(_) => Some("string"),
+            TSLiteral::NumericLiteral(_) | TSLiteral::BigIntLiteral(_) => Some("number"),
+            TSLiteral::BooleanLiteral(_) => Some("boolean"),
+            _ => None,
+        },
+        TSType::TSUnionType(union) => {
+            let mut common: Option<&'static str> = None;
+            for member in &union.types {
+                let kind = classify_ts_type_ast(member)?;
+                if let Some(prev) = common {
+                    if prev != kind {
+                        return None;
+                    }
+                } else {
+                    common = Some(kind);
+                }
+            }
+            common
+        }
+        TSType::TSParenthesizedType(p) => classify_ts_type_ast(&p.type_annotation),
+        _ => None,
+    }
+}
+
+fn extract_ts_type_ref_name<'a>(ty: &'a oxc::ast::ast::TSType<'a>) -> Option<&'a str> {
+    use oxc::ast::ast::{TSType, TSTypeName};
+    if let TSType::TSTypeReference(tref) = ty {
+        if let TSTypeName::IdentifierReference(id) = &tref.type_name {
+            return Some(id.name.as_str());
+        }
+    }
+    None
+}
+
+fn record_annotated_ident(
+    ident: &str,
+    ty: &oxc::ast::ast::TSType<'_>,
+    hints: &mut TypeDirectedHints,
+) {
+    if ident.is_empty() {
+        return;
+    }
+    if let Some(prim) = classify_ts_type_ast(ty) {
+        match prim {
+            "number" => {
+                hints.numeric_vars.insert(ident.to_string());
+            }
+            "string" => {
+                hints.string_vars.insert(ident.to_string());
+            }
+            "boolean" => {
+                hints.boolean_vars.insert(ident.to_string());
+            }
+            _ => {}
+        }
+    } else if let Some(ref_name) = extract_ts_type_ref_name(ty) {
+        if hints.interface_schemas.contains_key(ref_name) {
+            hints
+                .interface_vars
+                .insert(ident.to_string(), ref_name.to_string());
+        }
     }
 }
 
@@ -52,8 +105,13 @@ pub(crate) fn source_contains_jsx(source: &str) -> bool {
 
 /// Analyzes TypeScript source using `oxc::parser::Parser` and `oxc::semantic::SemanticBuilder`
 /// to extract static primitive variable types (`: number`, `: string`, `: boolean`) and flat
-/// `interface` schemas before TypeScript erasure.
+/// `interface` schemas via 100% Oxc AST traversal before TypeScript erasure.
 pub fn analyze_typescript_semantics(source: &str) -> TypeDirectedHints {
+    use oxc::ast::ast::{
+        BindingPattern, ClassElement, Declaration, Expression, FormalParameters, Statement,
+        TSInterfaceDeclaration, TSSignature,
+    };
+
     let mut hints = TypeDirectedHints::default();
     let allocator = oxc::allocator::Allocator::default();
     let source_type = if source_contains_jsx(source) {
@@ -65,132 +123,200 @@ pub fn analyze_typescript_semantics(source: &str) -> TypeDirectedHints {
     let semantic_ret = oxc::semantic::SemanticBuilder::new().build(&parser_ret.program);
     hints.semantic_symbol_count = semantic_ret.semantic.scoping().symbols_len();
 
-    // Extract flat `interface Name { field: type; ... }` declarations
-    let mut in_iface: Option<(String, Vec<(String, String)>)> = None;
-    for raw_line in source.lines() {
-        let line = raw_line.trim();
-        if let Some((iface_name, mut fields)) = in_iface.take() {
-            if line.starts_with('}') {
-                if !fields.is_empty() {
-                    hints.interface_schemas.insert(iface_name, fields);
-                }
-            } else {
-                let clean = line
-                    .strip_prefix("readonly ")
-                    .unwrap_or(line)
-                    .trim_end_matches(';')
-                    .trim_end_matches(',');
-                if let Some((fname, ftype)) = clean.split_once(':') {
-                    let fname = fname.trim();
-                    if let Some(kind) = classify_ts_type_str(ftype) {
-                        fields.push((fname.to_string(), kind.to_string()));
-                        in_iface = Some((iface_name, fields));
-                    }
-                } else {
-                    in_iface = Some((iface_name, fields));
-                }
-            }
-            continue;
-        }
-
-        let after_export = line.strip_prefix("export ").unwrap_or(line);
-        if let Some(after_iface) = after_export.strip_prefix("interface ") {
-            if let Some(name) = after_iface
-                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                .next()
-            {
-                if !name.is_empty() && after_iface.contains('{') && !after_iface.contains('}') {
-                    in_iface = Some((name.to_string(), Vec::new()));
-                }
-            }
-        }
-    }
-
-    // Seed well-known cross-module schema when imported via `type JournalRecord`
-    if source.contains("JournalRecord") && !hints.interface_schemas.contains_key("JournalRecord") {
-        hints.interface_schemas.insert(
-            "JournalRecord".to_string(),
-            vec![
-                ("seq".to_string(), "number".to_string()),
-                ("accountId".to_string(), "string".to_string()),
-                ("kind".to_string(), "string".to_string()),
-                ("amountCents".to_string(), "number".to_string()),
-                ("resultingBalanceCents".to_string(), "number".to_string()),
-                ("holdWindowMs".to_string(), "number".to_string()),
-                ("status".to_string(), "string".to_string()),
-            ],
-        );
-    }
-
-    // Scan variable & parameter annotations (`ident: Type`)
-    for raw_line in source.lines() {
-        let mut rest = raw_line;
-        while let Some(colon_idx) = rest.find(':') {
-            let before = &rest[..colon_idx];
-            let after = &rest[colon_idx + 1..];
-            let ident: String = before
-                .chars()
-                .rev()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect();
-            let ty_ident: String = after
-                .trim_start()
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
-            if !ident.is_empty() && !ty_ident.is_empty() {
-                match ty_ident.as_str() {
-                    "number" => {
-                        hints.numeric_vars.insert(ident);
-                    }
-                    "string" => {
-                        hints.string_vars.insert(ident);
-                    }
-                    "boolean" => {
-                        hints.boolean_vars.insert(ident);
-                    }
-                    other => {
-                        if hints.interface_schemas.contains_key(other) {
-                            hints.interface_vars.insert(ident, other.to_string());
+    fn extract_interface_decl(iface: &TSInterfaceDeclaration<'_>, hints: &mut TypeDirectedHints) {
+        let iface_name = iface.id.name.to_string();
+        let mut fields = Vec::new();
+        for sig in &iface.body.body {
+            if let TSSignature::TSPropertySignature(prop) = sig {
+                if let Some(fname) = prop.key.name() {
+                    if let Some(ta) = &prop.type_annotation {
+                        if let Some(kind) = classify_ts_type_ast(&ta.type_annotation) {
+                            fields.push((fname.to_string(), kind.to_string()));
                         }
                     }
                 }
             }
-            rest = after;
         }
+        if !fields.is_empty() {
+            hints.interface_schemas.insert(iface_name, fields);
+        }
+    }
+
+    // Pass 1: Extract all `interface Name { ... }` declarations from the Oxc AST
+    for stmt in &parser_ret.program.body {
+        match stmt {
+            Statement::TSInterfaceDeclaration(iface) => {
+                extract_interface_decl(iface, &mut hints);
+            }
+            Statement::ExportDeclaration(exp) => {
+                if let Declaration::TSInterfaceDeclaration(iface) = &exp.declaration {
+                    extract_interface_decl(iface, &mut hints);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_params(params: &FormalParameters<'_>, hints: &mut TypeDirectedHints) {
+        for param in &params.items {
+            if let Some(ta) = &param.type_annotation {
+                if let BindingPattern::BindingIdentifier(id) = &param.pattern {
+                    record_annotated_ident(id.name.as_str(), &ta.type_annotation, hints);
+                }
+            }
+        }
+    }
+
+    fn walk_expr_types(expr: &Expression<'_>, hints: &mut TypeDirectedHints) {
+        match expr {
+            Expression::ArrowFunctionExpression(arrow) => {
+                walk_params(&arrow.params, hints);
+                if let oxc::ast::ast::ArrowFunctionBody::FunctionBody(fb) = &arrow.body {
+                    for s in &fb.statements {
+                        walk_stmt_types(s, hints);
+                    }
+                } else if let Some(e) = arrow.body.as_expression() {
+                    walk_expr_types(e, hints);
+                }
+            }
+            Expression::FunctionExpression(func) => {
+                walk_params(&func.params, hints);
+                if let Some(body) = &func.body {
+                    for s in &body.statements {
+                        walk_stmt_types(s, hints);
+                    }
+                }
+            }
+            Expression::CallExpression(call) => {
+                walk_expr_types(&call.callee, hints);
+                for arg in &call.arguments {
+                    if let Some(e) = arg.as_expression() {
+                        walk_expr_types(e, hints);
+                    }
+                }
+            }
+            Expression::ParenthesizedExpression(p) => walk_expr_types(&p.expression, hints),
+            Expression::AssignmentExpression(a) => walk_expr_types(&a.right, hints),
+            _ => {}
+        }
+    }
+
+    fn walk_stmt_types(stmt: &Statement<'_>, hints: &mut TypeDirectedHints) {
+        match stmt {
+            Statement::VariableDeclaration(vd) => {
+                for decl in &vd.declarations {
+                    if let Some(ta) = &decl.type_annotation {
+                        if let BindingPattern::BindingIdentifier(id) = &decl.id {
+                            record_annotated_ident(id.name.as_str(), &ta.type_annotation, hints);
+                        }
+                    }
+                    if let Some(init) = &decl.init {
+                        walk_expr_types(init, hints);
+                    }
+                }
+            }
+            Statement::FunctionDeclaration(fd) => {
+                walk_params(&fd.params, hints);
+                if let Some(body) = &fd.body {
+                    for s in &body.statements {
+                        walk_stmt_types(s, hints);
+                    }
+                }
+            }
+            Statement::ClassDeclaration(cd) => {
+                for el in &cd.body.body {
+                    if let ClassElement::MethodDefinition(md) = el {
+                        walk_params(&md.value.params, hints);
+                        if let Some(body) = &md.value.body {
+                            for s in &body.statements {
+                                walk_stmt_types(s, hints);
+                            }
+                        }
+                    }
+                }
+            }
+            Statement::ExportDeclaration(exp) => match &exp.declaration {
+                Declaration::VariableDeclaration(vd) => {
+                    for d in &vd.declarations {
+                        if let Some(ta) = &d.type_annotation {
+                            if let BindingPattern::BindingIdentifier(id) = &d.id {
+                                record_annotated_ident(
+                                    id.name.as_str(),
+                                    &ta.type_annotation,
+                                    hints,
+                                );
+                            }
+                        }
+                        if let Some(init) = &d.init {
+                            walk_expr_types(init, hints);
+                        }
+                    }
+                }
+                Declaration::FunctionDeclaration(fd) => {
+                    walk_params(&fd.params, hints);
+                    if let Some(body) = &fd.body {
+                        for s in &body.statements {
+                            walk_stmt_types(s, hints);
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Statement::BlockStatement(bs) => {
+                for s in &bs.body {
+                    walk_stmt_types(s, hints);
+                }
+            }
+            Statement::IfStatement(ifs) => {
+                walk_stmt_types(&ifs.consequent, hints);
+                if let Some(alt) = &ifs.alternate {
+                    walk_stmt_types(alt, hints);
+                }
+            }
+            Statement::ForStatement(fs) => {
+                if let Some(oxc::ast::ast::ForStatementInit::VariableDeclaration(vd)) = &fs.init {
+                    for d in &vd.declarations {
+                        if let Some(ta) = &d.type_annotation {
+                            if let BindingPattern::BindingIdentifier(id) = &d.id {
+                                record_annotated_ident(
+                                    id.name.as_str(),
+                                    &ta.type_annotation,
+                                    hints,
+                                );
+                            }
+                        }
+                    }
+                }
+                walk_stmt_types(&fs.body, hints);
+            }
+            Statement::TryStatement(ts) => {
+                for s in &ts.block.body {
+                    walk_stmt_types(s, hints);
+                }
+                if let Some(handler) = &ts.handler {
+                    for s in &handler.body.body {
+                        walk_stmt_types(s, hints);
+                    }
+                }
+            }
+            Statement::ExpressionStatement(es) => {
+                walk_expr_types(&es.expression, hints);
+            }
+            Statement::ReturnStatement(rs) => {
+                if let Some(arg) = &rs.argument {
+                    walk_expr_types(arg, hints);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Pass 2: Walk variable and parameter type annotations via Oxc AST
+    for stmt in &parser_ret.program.body {
+        walk_stmt_types(stmt, &mut hints);
     }
 
     hints
-}
-
-fn build_fast_json_template_for_schema(var_name: &str, fields: &[(String, String)]) -> String {
-    let mut parts: Vec<String> = Vec::with_capacity(fields.len() * 2 + 1);
-    let mut literal_buf = String::from("{");
-    for (idx, (fname, fkind)) in fields.iter().enumerate() {
-        if idx > 0 {
-            literal_buf.push(',');
-        }
-        literal_buf.push('"');
-        literal_buf.push_str(fname);
-        literal_buf.push_str("\":");
-        if fkind == "string" {
-            literal_buf.push('"');
-            parts.push(format!("'{}'", literal_buf));
-            literal_buf.clear();
-            parts.push(format!("{}.{}", var_name, fname));
-            literal_buf.push('"');
-        } else {
-            parts.push(format!("'{}'", literal_buf));
-            literal_buf.clear();
-            parts.push(format!("{}.{}", var_name, fname));
-        }
-    }
-    literal_buf.push('}');
-    parts.push(format!("'{}'", literal_buf));
-    parts.join(" + ")
 }
 
 /// General-Purpose Oxc AST Array Pipeline Fusion Pass:
@@ -561,8 +687,6 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
         return strip_js_comments(source);
     }
 
-    let hints = analyze_typescript_semantics(source);
-
     let allocator = oxc::allocator::Allocator::default();
     let primary_source_type = if has_jsx {
         oxc::span::SourceType::tsx().with_module(true)
@@ -614,20 +738,6 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
         .build(&program)
         .code;
 
-    // Schema-driven JSON.stringify(var) lowering for statically typed interfaces
-    for (var_name, iface_name) in &hints.interface_vars {
-        if iface_name == "JwtHeader" {
-            continue;
-        }
-        if let Some(schema) = hints.interface_schemas.get(iface_name) {
-            let target_call = format!("JSON.stringify({})", var_name);
-            if code.contains(&target_call) {
-                let fast_expr = build_fast_json_template_for_schema(var_name, schema);
-                code = code.replace(&target_call, &format!("({})", fast_expr));
-            }
-        }
-    }
-
     code = fuse_array_pipelines_ast(&code);
 
     strip_js_comments(&code)
@@ -666,15 +776,14 @@ pub(crate) fn strip_js_comments(source: &str) -> String {
             }
             continue;
         }
-        if line.contains("Buffer.") {
-            let rewritten = crate::esm_cjs_linker::rewrite_buffer_fast_paths_in_line(line);
-            out.push_str(&rewritten);
-        } else {
-            out.push_str(line);
-        }
+        out.push_str(line);
         out.push('\n');
     }
-    out
+    if out.contains("Buffer.") {
+        crate::esm_cjs_linker::rewrite_buffer_fast_paths_ast(&out)
+    } else {
+        out
+    }
 }
 
 pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
@@ -710,13 +819,18 @@ pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
     rewrite_cjs_require(&js_code)
 }
 
-/// Rewrites legacy CommonJS `const x = require("mod")` into synthetic deterministic ESM/CAS lookup.
+/// Rewrites legacy CommonJS `const x = require("mod")` into synthetic deterministic ESM/CAS lookup
+/// using Oxc AST `CallExpression` span replacement so `"require(...)"` inside string or template
+/// literals is never modified.
 pub(crate) fn rewrite_cjs_require(source: &str) -> String {
     if !source.contains("require(")
         || source.contains("var __slice_modules =")
         || source.contains("__slice_cjs_require(")
     {
         return source.to_string();
+    }
+    if let Some(rewritten) = crate::esm_cjs_linker::rewrite_require_ident_ast(source) {
+        return rewritten;
     }
     source.replace("require(", "__slice_cjs_require(")
 }

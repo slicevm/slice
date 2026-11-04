@@ -8,7 +8,7 @@ use slice_sandbox::SandboxViolation;
 
 #[derive(Clone, Debug)]
 pub(crate) struct StateCheckpoint {
-    pub(crate) vfs_files: FxHashMap<String, String>,
+    pub(crate) vfs_files: FxHashMap<String, Vec<u8>>,
     pub(crate) vfs_dirs: FxHashSet<String>,
     pub(crate) tenant_kv: Vec<((String, String), KvEntry)>,
 }

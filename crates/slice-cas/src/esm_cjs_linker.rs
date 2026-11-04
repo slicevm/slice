@@ -239,181 +239,663 @@ fn collect_binding_pattern_names(
     }
 }
 
-fn find_matching_close_paren(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut depth = 1usize;
-    let mut in_quote: Option<u8> = None;
-    let mut escaped = false;
-    for (idx, &b) in bytes.iter().enumerate() {
-        if let Some(q) = in_quote {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == q {
-                in_quote = None;
-            }
-            continue;
-        }
-        match b {
-            b'\'' | b'"' | b'`' => in_quote = Some(b),
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(idx);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn split_top_level_comma(s: &str) -> (&str, Option<&str>) {
-    let bytes = s.as_bytes();
-    let mut depth = 0usize;
-    let mut in_quote: Option<u8> = None;
-    let mut escaped = false;
-    for (idx, &b) in bytes.iter().enumerate() {
-        if let Some(q) = in_quote {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == q {
-                in_quote = None;
-            }
-            continue;
-        }
-        match b {
-            b'\'' | b'"' | b'`' => in_quote = Some(b),
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
-            b',' if depth == 0 => {
-                return (s[..idx].trim(), Some(s[idx + 1..].trim()));
-            }
-            _ => {}
-        }
-    }
-    (s.trim(), None)
-}
-
-pub(crate) fn rewrite_buffer_fast_paths_in_line(line: &str) -> String {
-    if !line.contains("Buffer.") {
-        return line.to_string();
-    }
-    let mut current = if line.contains("Buffer.byteLength(") {
-        line.replace("Buffer.byteLength(", "globalThis.__slice_utf8_byte_len(")
-    } else {
-        line.to_string()
+fn walk_ast_call_expressions<'a, F>(program: &'a oxc::ast::ast::Program<'a>, visit_call: &mut F)
+where
+    F: FnMut(&'a oxc::ast::ast::CallExpression<'a>),
+{
+    use oxc::ast::ast::{
+        BindingPattern, ClassElement, Declaration, ExportDefaultDeclarationKind, Expression,
+        ForStatementInit, ObjectPropertyKind, Statement,
     };
-    if !current.contains("Buffer.from(") {
-        return current;
-    }
 
-    let mut out = String::with_capacity(current.len() + 32);
-    let mut rest = current.as_str();
-    while let Some(pos) = rest.find("Buffer.from(") {
-        let valid_boundary = pos == 0 || {
-            let prev = rest.as_bytes()[pos - 1];
-            !prev.is_ascii_alphanumeric() && prev != b'_' && prev != b'$' && prev != b'.'
-        };
-        if !valid_boundary {
-            out.push_str(&rest[..pos + 12]);
-            rest = &rest[pos + 12..];
-            continue;
-        }
-        let after_from_open = &rest[pos + 12..];
-        let Some(close_from_rel) = find_matching_close_paren(after_from_open) else {
-            out.push_str(&rest[..pos + 12]);
-            rest = &rest[pos + 12..];
-            continue;
-        };
-        let from_args_raw = &after_from_open[..close_from_rel];
-        let after_from_close = &after_from_open[close_from_rel + 1..];
-        if let Some(after_to_str_open) = after_from_close.strip_prefix(".toString(") {
-            if let Some(close_to_str_rel) = find_matching_close_paren(after_to_str_open) {
-                let to_enc_raw = after_to_str_open[..close_to_str_rel].trim();
-                let (first_arg, second_arg_opt) = split_top_level_comma(from_args_raw);
-                let from_enc = match second_arg_opt {
-                    None
-                    | Some("\"utf8\"")
-                    | Some("'utf8'")
-                    | Some("\"utf-8\"")
-                    | Some("'utf-8'") => Some("utf8"),
-                    Some("\"base64\"")
-                    | Some("'base64'")
-                    | Some("\"base64url\"")
-                    | Some("'base64url'") => Some("base64"),
-                    _ => None,
-                };
-                let replacement_opt = match (from_enc, to_enc_raw) {
-                    (Some("utf8"), "\"base64\"" | "'base64'") => Some(format!(
-                        "globalThis.__slice_base64_encode({}, false)",
-                        first_arg
-                    )),
-                    (Some("utf8"), "\"base64url\"" | "'base64url'") => Some(format!(
-                        "globalThis.__slice_base64_encode({}, true)",
-                        first_arg
-                    )),
-                    (Some("utf8"), "" | "\"utf8\"" | "'utf8'" | "\"utf-8\"" | "'utf-8'") => {
-                        Some(format!("globalThis.__slice_buf_to_utf8({})", first_arg))
-                    }
-                    (Some("base64"), "" | "\"utf8\"" | "'utf8'" | "\"utf-8\"" | "'utf-8'") => {
-                        Some(format!("globalThis.__slice_base64_decode({})", first_arg))
-                    }
-                    _ => None,
-                };
-                if let Some(rep) = replacement_opt {
-                    out.push_str(&rest[..pos]);
-                    out.push_str(&rep);
-                    rest = &after_to_str_open[close_to_str_rel + 1..];
-                    continue;
+    fn walk_pat<'a, F>(pat: &'a BindingPattern<'a>, visit: &mut F)
+    where
+        F: FnMut(&'a oxc::ast::ast::CallExpression<'a>),
+    {
+        match pat {
+            BindingPattern::ObjectPattern(obj) => {
+                for p in &obj.properties {
+                    walk_pat(&p.value, visit);
+                }
+                if let Some(r) = &obj.rest {
+                    walk_pat(&r.argument, visit);
                 }
             }
+            BindingPattern::ArrayPattern(arr) => {
+                for el in arr.elements.iter().flatten() {
+                    walk_pat(el, visit);
+                }
+                if let Some(r) = &arr.rest {
+                    walk_pat(&r.argument, visit);
+                }
+            }
+            BindingPattern::AssignmentPattern(assign) => {
+                walk_pat(&assign.left, visit);
+                walk_expr(&assign.right, visit);
+            }
+            BindingPattern::BindingIdentifier(_) => {}
         }
-        out.push_str(&rest[..pos + 12]);
-        rest = &rest[pos + 12..];
     }
-    out.push_str(rest);
-    current = out;
-    current
+
+    fn walk_class<'a, F>(cls: &'a oxc::ast::ast::Class<'a>, visit: &mut F)
+    where
+        F: FnMut(&'a oxc::ast::ast::CallExpression<'a>),
+    {
+        for el in &cls.body.body {
+            match el {
+                ClassElement::MethodDefinition(md) => {
+                    for p in &md.value.params.items {
+                        walk_pat(&p.pattern, visit);
+                    }
+                    if let Some(body) = &md.value.body {
+                        for s in &body.statements {
+                            walk_stmt(s, visit);
+                        }
+                    }
+                }
+                ClassElement::PropertyDefinition(pd) => {
+                    if let Some(v) = &pd.value {
+                        walk_expr(v, visit);
+                    }
+                }
+                ClassElement::StaticBlock(sb) => {
+                    for s in &sb.body {
+                        walk_stmt(s, visit);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn walk_expr<'a, F>(expr: &'a Expression<'a>, visit: &mut F)
+    where
+        F: FnMut(&'a oxc::ast::ast::CallExpression<'a>),
+    {
+        match expr {
+            Expression::CallExpression(call) => {
+                visit(call);
+                walk_expr(&call.callee, visit);
+                for arg in &call.arguments {
+                    if let Some(e) = arg.as_expression() {
+                        walk_expr(e, visit);
+                    }
+                }
+            }
+            Expression::NewExpression(ne) => {
+                walk_expr(&ne.callee, visit);
+                for arg in &ne.arguments {
+                    if let Some(e) = arg.as_expression() {
+                        walk_expr(e, visit);
+                    }
+                }
+            }
+            Expression::StaticMemberExpression(m) => walk_expr(&m.object, visit),
+            Expression::ComputedMemberExpression(m) => {
+                walk_expr(&m.object, visit);
+                walk_expr(&m.expression, visit);
+            }
+            Expression::PrivateFieldExpression(m) => walk_expr(&m.object, visit),
+            Expression::BinaryExpression(b) => {
+                walk_expr(&b.left, visit);
+                walk_expr(&b.right, visit);
+            }
+            Expression::LogicalExpression(l) => {
+                walk_expr(&l.left, visit);
+                walk_expr(&l.right, visit);
+            }
+            Expression::UnaryExpression(u) => walk_expr(&u.argument, visit),
+            Expression::UpdateExpression(_) => {}
+            Expression::ConditionalExpression(c) => {
+                walk_expr(&c.test, visit);
+                walk_expr(&c.consequent, visit);
+                walk_expr(&c.alternate, visit);
+            }
+            Expression::AssignmentExpression(a) => walk_expr(&a.right, visit),
+            Expression::SequenceExpression(seq) => {
+                for e in &seq.expressions {
+                    walk_expr(e, visit);
+                }
+            }
+            Expression::ParenthesizedExpression(p) => walk_expr(&p.expression, visit),
+            Expression::AwaitExpression(aw) => walk_expr(&aw.argument, visit),
+            Expression::YieldExpression(y) => {
+                if let Some(arg) = &y.argument {
+                    walk_expr(arg, visit);
+                }
+            }
+            Expression::ArrowFunctionExpression(arrow) => {
+                for p in &arrow.params.items {
+                    walk_pat(&p.pattern, visit);
+                }
+                if let oxc::ast::ast::ArrowFunctionBody::FunctionBody(fb) = &arrow.body {
+                    for s in &fb.statements {
+                        walk_stmt(s, visit);
+                    }
+                } else if let Some(e) = arrow.body.as_expression() {
+                    walk_expr(e, visit);
+                }
+            }
+            Expression::FunctionExpression(fe) => {
+                for p in &fe.params.items {
+                    walk_pat(&p.pattern, visit);
+                }
+                if let Some(body) = &fe.body {
+                    for s in &body.statements {
+                        walk_stmt(s, visit);
+                    }
+                }
+            }
+            Expression::ClassExpression(ce) => walk_class(ce, visit),
+            Expression::ObjectExpression(obj) => {
+                for prop in &obj.properties {
+                    match prop {
+                        ObjectPropertyKind::ObjectProperty(p) => {
+                            if p.computed {
+                                if let Some(ke) = p.key.as_expression() {
+                                    walk_expr(ke, visit);
+                                }
+                            }
+                            walk_expr(&p.value, visit);
+                        }
+                        ObjectPropertyKind::SpreadProperty(sp) => walk_expr(&sp.argument, visit),
+                    }
+                }
+            }
+            Expression::ArrayExpression(arr) => {
+                for el in &arr.elements {
+                    if let Some(e) = el.as_expression() {
+                        walk_expr(e, visit);
+                    } else if let oxc::ast::ast::ArrayExpressionElement::SpreadElement(sp) = el {
+                        walk_expr(&sp.argument, visit);
+                    }
+                }
+            }
+            Expression::TemplateLiteral(tpl) => {
+                for e in &tpl.expressions {
+                    walk_expr(e, visit);
+                }
+            }
+            Expression::TaggedTemplateExpression(tt) => {
+                walk_expr(&tt.tag, visit);
+                for e in &tt.quasi.expressions {
+                    walk_expr(e, visit);
+                }
+            }
+            Expression::ChainExpression(ch) => {
+                if let oxc::ast::ast::ChainElement::CallExpression(call) = &ch.expression {
+                    visit(call);
+                    walk_expr(&call.callee, visit);
+                    for arg in &call.arguments {
+                        if let Some(e) = arg.as_expression() {
+                            walk_expr(e, visit);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn walk_decl<'a, F>(decl: &'a Declaration<'a>, visit: &mut F)
+    where
+        F: FnMut(&'a oxc::ast::ast::CallExpression<'a>),
+    {
+        match decl {
+            Declaration::VariableDeclaration(vd) => {
+                for d in &vd.declarations {
+                    walk_pat(&d.id, visit);
+                    if let Some(init) = &d.init {
+                        walk_expr(init, visit);
+                    }
+                }
+            }
+            Declaration::FunctionDeclaration(fd) => {
+                for p in &fd.params.items {
+                    walk_pat(&p.pattern, visit);
+                }
+                if let Some(body) = &fd.body {
+                    for s in &body.statements {
+                        walk_stmt(s, visit);
+                    }
+                }
+            }
+            Declaration::ClassDeclaration(cd) => walk_class(cd, visit),
+            _ => {}
+        }
+    }
+
+    fn walk_stmt<'a, F>(stmt: &'a Statement<'a>, visit: &mut F)
+    where
+        F: FnMut(&'a oxc::ast::ast::CallExpression<'a>),
+    {
+        match stmt {
+            Statement::VariableDeclaration(vd) => {
+                for d in &vd.declarations {
+                    walk_pat(&d.id, visit);
+                    if let Some(init) = &d.init {
+                        walk_expr(init, visit);
+                    }
+                }
+            }
+            Statement::FunctionDeclaration(fd) => {
+                for p in &fd.params.items {
+                    walk_pat(&p.pattern, visit);
+                }
+                if let Some(body) = &fd.body {
+                    for s in &body.statements {
+                        walk_stmt(s, visit);
+                    }
+                }
+            }
+            Statement::ClassDeclaration(cd) => walk_class(cd, visit),
+            Statement::ExpressionStatement(es) => walk_expr(&es.expression, visit),
+            Statement::BlockStatement(bs) => {
+                for s in &bs.body {
+                    walk_stmt(s, visit);
+                }
+            }
+            Statement::ReturnStatement(rs) => {
+                if let Some(arg) = &rs.argument {
+                    walk_expr(arg, visit);
+                }
+            }
+            Statement::ThrowStatement(ts) => walk_expr(&ts.argument, visit),
+            Statement::IfStatement(ifs) => {
+                walk_expr(&ifs.test, visit);
+                walk_stmt(&ifs.consequent, visit);
+                if let Some(alt) = &ifs.alternate {
+                    walk_stmt(alt, visit);
+                }
+            }
+            Statement::SwitchStatement(sw) => {
+                walk_expr(&sw.discriminant, visit);
+                for c in &sw.cases {
+                    if let Some(t) = &c.test {
+                        walk_expr(t, visit);
+                    }
+                    for s in &c.consequent {
+                        walk_stmt(s, visit);
+                    }
+                }
+            }
+            Statement::ForStatement(fs) => {
+                if let Some(init) = &fs.init {
+                    match init {
+                        ForStatementInit::VariableDeclaration(vd) => {
+                            for d in &vd.declarations {
+                                walk_pat(&d.id, visit);
+                                if let Some(e) = &d.init {
+                                    walk_expr(e, visit);
+                                }
+                            }
+                        }
+                        _ => {
+                            if let Some(e) = init.as_expression() {
+                                walk_expr(e, visit);
+                            }
+                        }
+                    }
+                }
+                if let Some(t) = &fs.test {
+                    walk_expr(t, visit);
+                }
+                if let Some(u) = &fs.update {
+                    walk_expr(u, visit);
+                }
+                walk_stmt(&fs.body, visit);
+            }
+            Statement::ForInStatement(fi) => {
+                walk_expr(&fi.right, visit);
+                walk_stmt(&fi.body, visit);
+            }
+            Statement::ForOfStatement(fo) => {
+                walk_expr(&fo.right, visit);
+                walk_stmt(&fo.body, visit);
+            }
+            Statement::WhileStatement(ws) => {
+                walk_expr(&ws.test, visit);
+                walk_stmt(&ws.body, visit);
+            }
+            Statement::DoWhileStatement(dw) => {
+                walk_stmt(&dw.body, visit);
+                walk_expr(&dw.test, visit);
+            }
+            Statement::TryStatement(ts) => {
+                for s in &ts.block.body {
+                    walk_stmt(s, visit);
+                }
+                if let Some(h) = &ts.handler {
+                    for s in &h.body.body {
+                        walk_stmt(s, visit);
+                    }
+                }
+                if let Some(f) = &ts.finalizer {
+                    for s in &f.body {
+                        walk_stmt(s, visit);
+                    }
+                }
+            }
+            Statement::LabeledStatement(ls) => walk_stmt(&ls.body, visit),
+            Statement::ExportDeclaration(exp) => walk_decl(&exp.declaration, visit),
+            Statement::ExportDefaultDeclaration(exp) => match &exp.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(fd) => {
+                    for p in &fd.params.items {
+                        walk_pat(&p.pattern, visit);
+                    }
+                    if let Some(body) = &fd.body {
+                        for s in &body.statements {
+                            walk_stmt(s, visit);
+                        }
+                    }
+                }
+                ExportDefaultDeclarationKind::ClassDeclaration(cd) => walk_class(cd, visit),
+                other => {
+                    if let Some(e) = other.as_expression() {
+                        walk_expr(e, visit);
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    for stmt in &program.body {
+        walk_stmt(stmt, visit_call);
+    }
 }
 
-fn rewrite_cjs_requires_and_crypto(
+/// Rewrites `require("<spec>")` `CallExpression` string literal arguments via Oxc AST span
+/// replacement without modifying `"require(...)"` inside string literals, template literals, or comments.
+pub(crate) fn rewrite_cjs_requires_ast(
     snippet: &str,
     from_dir: &Path,
     deps_out: &mut Vec<PathBuf>,
 ) -> String {
-    let mut out = Vec::new();
-    for raw_line in snippet.lines() {
-        let mut rewritten = rewrite_cjs_requires_in_line(raw_line, from_dir, deps_out);
-        rewritten = rewrite_buffer_fast_paths_in_line(&rewritten);
-        if rewritten.contains("crypto.createHash(\"sha256\").update(")
-            && rewritten.contains(").digest(\"hex\")")
-        {
-            rewritten = rewritten
-                .replace(
-                    "crypto.createHash(\"sha256\").update(",
-                    "globalThis.__slice_crypto_sha256(",
-                )
-                .replace(").digest(\"hex\")", ")");
-        }
-        if rewritten.contains("crypto.createHmac(\"sha256\", ")
-            && rewritten.contains(").digest(\"hex\")")
-        {
-            rewritten = rewritten
-                .replace(
-                    "crypto.createHmac(\"sha256\", ",
-                    "globalThis.__slice_crypto_hmac_sha256(",
-                )
-                .replace(").update(", ", ")
-                .replace(").digest(\"hex\")", ")");
-        }
-        out.push(rewritten);
+    use oxc::ast::ast::{Argument, Expression};
+
+    if !snippet.contains("require(") {
+        return snippet.to_string();
     }
-    out.join("\n")
+
+    let allocator = oxc::allocator::Allocator::default();
+    let source_type = oxc::span::SourceType::ts().with_module(true);
+    let parser_ret = oxc::parser::Parser::new(&allocator, snippet, source_type).parse();
+    if !parser_ret.diagnostics.is_empty() {
+        let wrapped = format!("({});", snippet);
+        let retry_ret = oxc::parser::Parser::new(&allocator, &wrapped, source_type).parse();
+        if retry_ret.diagnostics.is_empty() {
+            let mut edits: Vec<(usize, usize, String)> = Vec::new();
+            walk_ast_call_expressions(&retry_ret.program, &mut |call| {
+                let Expression::Identifier(callee) = call.callee.without_parentheses() else {
+                    return;
+                };
+                if callee.name.as_str() != "require" || call.arguments.len() != 1 {
+                    return;
+                }
+                let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
+                    return;
+                };
+                let spec = str_lit.value.as_str();
+                let resolved_opt = if is_builtin_module(spec) || is_jsx_runtime_builtin(spec) {
+                    Some(normalize_builtin_specifier(spec))
+                } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
+                    let id = canonical_mod_id(&resolved_path);
+                    deps_out.push(resolved_path);
+                    Some(id)
+                } else {
+                    None
+                };
+                if let Some(resolved) = resolved_opt {
+                    let start = (str_lit.span.start as usize).saturating_sub(1);
+                    let end = (str_lit.span.end as usize).saturating_sub(1);
+                    edits.push((start, end, format!("{:?}", resolved)));
+                }
+            });
+            if edits.is_empty() {
+                return snippet.to_string();
+            }
+            edits.sort_by_key(|e| e.0);
+            let mut out = String::with_capacity(snippet.len() + edits.len() * 32);
+            let mut cursor = 0usize;
+            for (s, e, rep) in edits {
+                if s < cursor || e > snippet.len() {
+                    continue;
+                }
+                out.push_str(&snippet[cursor..s]);
+                out.push_str(&rep);
+                cursor = e;
+            }
+            out.push_str(&snippet[cursor..]);
+            return out;
+        }
+        return snippet
+            .lines()
+            .map(|l| rewrite_cjs_requires_in_line(l, from_dir, deps_out))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    walk_ast_call_expressions(&parser_ret.program, &mut |call| {
+        let Expression::Identifier(callee) = call.callee.without_parentheses() else {
+            return;
+        };
+        if callee.name.as_str() != "require" || call.arguments.len() != 1 {
+            return;
+        }
+        let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
+            return;
+        };
+        let spec = str_lit.value.as_str();
+        let resolved_opt = if is_builtin_module(spec) || is_jsx_runtime_builtin(spec) {
+            Some(normalize_builtin_specifier(spec))
+        } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
+            let id = canonical_mod_id(&resolved_path);
+            deps_out.push(resolved_path);
+            Some(id)
+        } else {
+            None
+        };
+        if let Some(resolved) = resolved_opt {
+            edits.push((
+                str_lit.span.start as usize,
+                str_lit.span.end as usize,
+                format!("{:?}", resolved),
+            ));
+        }
+    });
+
+    if edits.is_empty() {
+        return snippet.to_string();
+    }
+
+    edits.sort_by_key(|e| e.0);
+    let mut out = String::with_capacity(snippet.len() + edits.len() * 32);
+    let mut cursor = 0usize;
+    for (s, e, rep) in edits {
+        if s < cursor || e > snippet.len() {
+            continue;
+        }
+        out.push_str(&snippet[cursor..s]);
+        out.push_str(&rep);
+        cursor = e;
+    }
+    out.push_str(&snippet[cursor..]);
+    out
+}
+
+/// Rewrites `require(...)` callee identifiers to `__slice_cjs_require(...)` using Oxc AST
+/// `CallExpression` spans so string literals, template literals, and comments are untouched.
+pub(crate) fn rewrite_require_ident_ast(source: &str) -> Option<String> {
+    use oxc::ast::ast::Expression;
+
+    let allocator = oxc::allocator::Allocator::default();
+    let source_type = oxc::span::SourceType::ts().with_module(true);
+    let parser_ret = oxc::parser::Parser::new(&allocator, source, source_type).parse();
+    if !parser_ret.diagnostics.is_empty() {
+        return None;
+    }
+
+    let mut callee_spans: Vec<(usize, usize)> = Vec::new();
+    walk_ast_call_expressions(&parser_ret.program, &mut |call| {
+        if let Expression::Identifier(callee) = call.callee.without_parentheses() {
+            if callee.name.as_str() == "require" {
+                callee_spans.push((callee.span.start as usize, callee.span.end as usize));
+            }
+        }
+    });
+
+    if callee_spans.is_empty() {
+        return Some(source.to_string());
+    }
+
+    callee_spans.sort_by_key(|s| s.0);
+    let mut out = String::with_capacity(source.len() + callee_spans.len() * 12);
+    let mut cursor = 0usize;
+    for (s, e) in callee_spans {
+        if s < cursor || e > source.len() {
+            continue;
+        }
+        out.push_str(&source[cursor..s]);
+        out.push_str("__slice_cjs_require");
+        cursor = e;
+    }
+    out.push_str(&source[cursor..]);
+    Some(out)
+}
+
+/// Lowers `Buffer.byteLength(<arg>)` and `Buffer.from(<arg>, <enc>?).toString(<to_enc>?)`
+/// via Oxc AST `CallExpression` span replacement so string literals and comments are never touched.
+pub(crate) fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
+    use oxc::ast::ast::{Argument, Expression};
+    use oxc::span::GetSpan;
+
+    if !code.contains("Buffer.") {
+        return code.to_string();
+    }
+
+    let allocator = oxc::allocator::Allocator::default();
+    let source_type = oxc::span::SourceType::ts().with_module(true);
+    let parser_ret = oxc::parser::Parser::new(&allocator, code, source_type).parse();
+    if !parser_ret.diagnostics.is_empty() {
+        return code.to_string();
+    }
+
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    walk_ast_call_expressions(&parser_ret.program, &mut |call| {
+        let Expression::StaticMemberExpression(outer_mem) = call.callee.without_parentheses()
+        else {
+            return;
+        };
+        let prop_name = outer_mem.property.name.as_str();
+
+        // 1. `Buffer.byteLength(<arg>)`
+        if prop_name == "byteLength" && call.arguments.len() == 1 {
+            if let Expression::Identifier(obj_id) = outer_mem.object.without_parentheses() {
+                if obj_id.name.as_str() == "Buffer" {
+                    if let Some(arg_expr) = call.arguments[0].as_expression() {
+                        let sp = arg_expr.span();
+                        let arg_src = &code[sp.start as usize..sp.end as usize];
+                        edits.push((
+                            call.span.start as usize,
+                            call.span.end as usize,
+                            format!("globalThis.__slice_utf8_byte_len({})", arg_src),
+                        ));
+                    }
+                }
+            }
+            return;
+        }
+
+        // 2. `Buffer.from(<arg>, <from_enc>?).toString(<to_enc>?)`
+        if prop_name == "toString" && call.arguments.len() <= 1 {
+            let Expression::CallExpression(inner_call) = outer_mem.object.without_parentheses()
+            else {
+                return;
+            };
+            let Expression::StaticMemberExpression(inner_mem) =
+                inner_call.callee.without_parentheses()
+            else {
+                return;
+            };
+            let Expression::Identifier(obj_id) = inner_mem.object.without_parentheses() else {
+                return;
+            };
+            if obj_id.name.as_str() != "Buffer"
+                || inner_mem.property.name.as_str() != "from"
+                || inner_call.arguments.is_empty()
+                || inner_call.arguments.len() > 2
+            {
+                return;
+            }
+            let Some(first_expr) = inner_call.arguments[0].as_expression() else {
+                return;
+            };
+            let fsp = first_expr.span();
+            let first_src = &code[fsp.start as usize..fsp.end as usize];
+
+            let from_enc = if inner_call.arguments.len() == 1 {
+                Some("utf8")
+            } else if let Argument::StringLiteral(sl) = &inner_call.arguments[1] {
+                match sl.value.as_str() {
+                    "utf8" | "utf-8" => Some("utf8"),
+                    "base64" | "base64url" => Some("base64"),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            let to_enc = if call.arguments.is_empty() {
+                Some("utf8")
+            } else if let Argument::StringLiteral(sl) = &call.arguments[0] {
+                Some(sl.value.as_str())
+            } else {
+                None
+            };
+
+            let rep_opt = match (from_enc, to_enc) {
+                (Some("utf8"), Some("base64")) => Some(format!(
+                    "globalThis.__slice_base64_encode({}, false)",
+                    first_src
+                )),
+                (Some("utf8"), Some("base64url")) => Some(format!(
+                    "globalThis.__slice_base64_encode({}, true)",
+                    first_src
+                )),
+                (Some("utf8"), Some("utf8" | "utf-8")) => {
+                    Some(format!("globalThis.__slice_buf_to_utf8({})", first_src))
+                }
+                (Some("base64"), Some("utf8" | "utf-8")) => {
+                    Some(format!("globalThis.__slice_base64_decode({})", first_src))
+                }
+                _ => None,
+            };
+
+            if let Some(rep) = rep_opt {
+                edits.push((call.span.start as usize, call.span.end as usize, rep));
+            }
+        }
+    });
+
+    if edits.is_empty() {
+        return code.to_string();
+    }
+
+    edits.sort_by_key(|e| e.0);
+    let mut out = String::with_capacity(code.len() + edits.len() * 32);
+    let mut cursor = 0usize;
+    for (s, e, rep) in edits {
+        if s < cursor || e > code.len() {
+            continue;
+        }
+        out.push_str(&code[cursor..s]);
+        out.push_str(&rep);
+        cursor = e;
+    }
+    out.push_str(&code[cursor..]);
+    out
 }
 
 fn try_transform_esm_to_cjs_ast(
@@ -570,7 +1052,7 @@ fn try_transform_esm_to_cjs_ast(
                 has_default_export = true;
                 match &exp_def.declaration {
                     ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                        let fn_src = rewrite_cjs_requires_and_crypto(
+                        let fn_src = rewrite_cjs_requires_ast(
                             &js_code[func.span.start as usize..func.span.end as usize],
                             from_dir,
                             deps_out,
@@ -583,7 +1065,7 @@ fn try_transform_esm_to_cjs_ast(
                         }
                     }
                     ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
-                        let cls_src = rewrite_cjs_requires_and_crypto(
+                        let cls_src = rewrite_cjs_requires_ast(
                             &js_code[cls.span.start as usize..cls.span.end as usize],
                             from_dir,
                             deps_out,
@@ -600,7 +1082,7 @@ fn try_transform_esm_to_cjs_ast(
                     }
                     expr => {
                         let sp = expr.span();
-                        let expr_src = rewrite_cjs_requires_and_crypto(
+                        let expr_src = rewrite_cjs_requires_ast(
                             &js_code[sp.start as usize..sp.end as usize],
                             from_dir,
                             deps_out,
@@ -612,7 +1094,7 @@ fn try_transform_esm_to_cjs_ast(
             Statement::ExportDeclaration(exp_decl) => {
                 let decl = &exp_decl.declaration;
                 let sp = decl.span();
-                let decl_src = rewrite_cjs_requires_and_crypto(
+                let decl_src = rewrite_cjs_requires_ast(
                     &js_code[sp.start as usize..sp.end as usize],
                     from_dir,
                     deps_out,
@@ -704,9 +1186,7 @@ fn try_transform_esm_to_cjs_ast(
             other => {
                 let sp = other.span();
                 let raw_stmt = &js_code[sp.start as usize..sp.end as usize];
-                body_lines.push(rewrite_cjs_requires_and_crypto(
-                    raw_stmt, from_dir, deps_out,
-                ));
+                body_lines.push(rewrite_cjs_requires_ast(raw_stmt, from_dir, deps_out));
             }
         }
     }
@@ -751,6 +1231,73 @@ pub(crate) fn transform_module_to_cjs(
 ) -> String {
     if let Some(ast_transformed) = try_transform_esm_to_cjs_ast(js_code, from_dir, deps_out) {
         return ast_transformed;
+    }
+
+    // Pure CommonJS module path: rewrite `require(...)` calls using Oxc AST CallExpression spans
+    if !js_code.contains("import ") && !js_code.contains("export ") {
+        let rewritten_cjs = rewrite_cjs_requires_ast(js_code, from_dir, deps_out);
+        let mut body_lines: Vec<String> = rewritten_cjs
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
+            .collect();
+        if body_lines.iter().any(|l| l.trim() == "module.exports = {") {
+            let mut const_req_map: FxHashMap<String, (usize, String)> = FxHashMap::default();
+            for (idx, line) in body_lines.iter().enumerate() {
+                let t = line.trim().trim_end_matches(';');
+                if let Some(rest) = t.strip_prefix("const ") {
+                    if let Some((ident, rhs)) = rest.split_once('=') {
+                        let ident = ident.trim();
+                        let rhs = rhs.trim();
+                        if rhs.starts_with("require(\"") && rhs.ends_with("\")") {
+                            const_req_map.insert(ident.to_string(), (idx, rhs.to_string()));
+                        }
+                    }
+                }
+            }
+            let mut to_remove_indices = FxHashSet::default();
+            let mut shorthand_replacements: FxHashMap<usize, String> = FxHashMap::default();
+
+            for (idx, line) in body_lines.iter().enumerate() {
+                let t = line.trim();
+                if let Some(ident) = t.strip_suffix(',') {
+                    let ident = ident.trim();
+                    if let Some((decl_idx, req_expr)) = const_req_map.get(ident) {
+                        let used_elsewhere =
+                            body_lines
+                                .iter()
+                                .enumerate()
+                                .any(|(other_idx, other_line)| {
+                                    other_idx != idx
+                                        && other_idx != *decl_idx
+                                        && other_line.contains(ident)
+                                });
+                        if !used_elsewhere {
+                            to_remove_indices.insert(*decl_idx);
+                            shorthand_replacements.insert(
+                                idx,
+                                format!("  get {}() {{ return {}; }},", ident, req_expr),
+                            );
+                        }
+                    }
+                }
+            }
+            if !shorthand_replacements.is_empty() || !to_remove_indices.is_empty() {
+                let mut optimized_lines = Vec::with_capacity(body_lines.len());
+                for (idx, line) in body_lines.into_iter().enumerate() {
+                    if to_remove_indices.contains(&idx) {
+                        continue;
+                    }
+                    if let Some(rep) = shorthand_replacements.remove(&idx) {
+                        optimized_lines.push(rep);
+                    } else {
+                        optimized_lines.push(line);
+                    }
+                }
+                body_lines = optimized_lines;
+            }
+        }
+        return body_lines.join("\n");
     }
 
     let collapsed = collapse_multiline_imports_exports(js_code);
@@ -883,11 +1430,7 @@ pub(crate) fn transform_module_to_cjs(
                             deferred_exports.push((ident.to_string(), ident.to_string()));
                         }
                     }
-                    body_lines.push(rewrite_cjs_requires_in_line(
-                        after_export,
-                        from_dir,
-                        deps_out,
-                    ));
+                    body_lines.push(rewrite_cjs_requires_ast(after_export, from_dir, deps_out));
                     break;
                 }
             }
@@ -907,11 +1450,7 @@ pub(crate) fn transform_module_to_cjs(
                             deferred_exports.push((ident.to_string(), ident.to_string()));
                         }
                     }
-                    body_lines.push(rewrite_cjs_requires_in_line(
-                        after_export,
-                        from_dir,
-                        deps_out,
-                    ));
+                    body_lines.push(rewrite_cjs_requires_ast(after_export, from_dir, deps_out));
                     break;
                 }
             }
@@ -923,30 +1462,7 @@ pub(crate) fn transform_module_to_cjs(
             }
         }
 
-        let mut rewritten_line = rewrite_cjs_requires_in_line(raw_line, from_dir, deps_out);
-        rewritten_line = rewrite_buffer_fast_paths_in_line(&rewritten_line);
-        if rewritten_line.contains("crypto.createHash(\"sha256\").update(")
-            && rewritten_line.contains(").digest(\"hex\")")
-        {
-            rewritten_line = rewritten_line
-                .replace(
-                    "crypto.createHash(\"sha256\").update(",
-                    "globalThis.__slice_crypto_sha256(",
-                )
-                .replace(").digest(\"hex\")", ")");
-        }
-        if rewritten_line.contains("crypto.createHmac(\"sha256\", ")
-            && rewritten_line.contains(").digest(\"hex\")")
-        {
-            rewritten_line = rewritten_line
-                .replace(
-                    "crypto.createHmac(\"sha256\", ",
-                    "globalThis.__slice_crypto_hmac_sha256(",
-                )
-                .replace(").update(", ", ")
-                .replace(").digest(\"hex\")", ")");
-        }
-        body_lines.push(rewritten_line);
+        body_lines.push(rewrite_cjs_requires_ast(raw_line, from_dir, deps_out));
     }
 
     let uses_crypto_obj = body_lines.iter().any(|l| {

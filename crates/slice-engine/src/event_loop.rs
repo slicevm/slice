@@ -406,12 +406,19 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
             let _ = ctx.run_jobs();
         }
 
-        // 3. Dispatch queued outbound `fetch()` requests
+        // 3. Dispatch queued outbound `fetch()` requests (bounded by MAX_CONCURRENT_FETCHES = 16)
+        const MAX_CONCURRENT_FETCHES: usize = 16;
         let (queued_batch, has_timers_or_inflight, tx_clone) = EVENT_LOOP_STATE.with(|st| {
             let mut loop_st = st.borrow_mut();
-            let batch: Vec<QueuedAsyncFetch> = loop_st.queued_fetches.drain(..).collect();
-            let has_other =
-                !loop_st.in_flight_fetches.is_empty() || loop_st.active_timer_count() > 0;
+            let avail_slots =
+                MAX_CONCURRENT_FETCHES.saturating_sub(loop_st.in_flight_fetches.len());
+            let drain_count = loop_st.queued_fetches.len().min(avail_slots);
+            let has_more_queued = loop_st.queued_fetches.len() > drain_count;
+            let batch: Vec<QueuedAsyncFetch> =
+                loop_st.queued_fetches.drain(..drain_count).collect();
+            let has_other = has_more_queued
+                || !loop_st.in_flight_fetches.is_empty()
+                || loop_st.active_timer_count() > 0;
             (batch, has_other, loop_st.fetch_tx.clone())
         });
 
