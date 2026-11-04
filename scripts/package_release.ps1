@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 $RootDir = Split-Path -Parent $PSScriptRoot
 Set-Location $RootDir
 
-Write-Host "[1/4] Building Slice v0.9.4 Release Binary (LTO=fat, opt-level=3)..."
+Write-Host "[1/4] Building Slice v0.9.5 Release Binary (LTO=fat, opt-level=3)..."
 cargo build --release
 
 $DistDir = Join-Path $RootDir "dist"

@@ -156,8 +156,10 @@ To validate Slice on modern folder-based production TypeScript applications usin
 22. **App 22 ([`apps/22-worker-threads-and-raw-sockets/`](file:///p:/opensource/slice/tests/apps/22-worker-threads-and-raw-sockets/src/index.ts)):** Multi-Isolate `Worker` / `node:worker_threads`, `MessageChannel`, Raw TCP/UDP Sockets (`node:net`, `node:dgram`), & 5-Ring Socket/Worker Security Firewall.
 23. **App 23 ([`apps/23-wasm-crypto-and-simd-kernel/`](file:///p:/opensource/slice/tests/apps/23-wasm-crypto-and-simd-kernel/src/index.ts)):** Pure-Rust `WebAssembly` (`wasmi`) Compute Kernel (`fnv1a_32`, `xor_stream_transform`), Shared Linear Memory, Host Import Callbacks & 5-Ring WASM Security Firewall (`bytes@3.1.2`).
 24. **App 24 ([`apps/24-tsx-ssr-and-wasm-edge-pipeline/`](file:///p:/opensource/slice/tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/src/index.ts)):** WebAssembly SLA Health Scorer, `WebAssembly.Table`, & XSS-Safe SSR Component Pipeline (`bytes@3.1.2`, `cookie@0.6.0`, `fast-querystring@1.1.2`, `ms@2.1.3` + `slice test --watch-once`).
+25. **Framework 1 ([`frameworks/01-hono-edge-microservice/`](file:///p:/opensource/slice/tests/frameworks/01-hono-edge-microservice/src/index.ts)):** Unmodified `hono@4.6.20` (`Hono`, `hono/cookie` `getCookie`/`setCookie`) + `ms@2.1.3` across 12 HTTP requests (middleware, route params, query parsing, JSON POST bodies, cookies, custom headers, and 404 fallback).
+26. **Framework 2 ([`frameworks/02-itty-router-unjs-nitro-stack/`](file:///p:/opensource/slice/tests/frameworks/02-itty-router-unjs-nitro-stack/src/index.ts)):** Unmodified `itty-router@5.0.18` (`AutoRouter`, `withParams`, `error`, `json`) + UnJS Nitro stack (`ufo@1.5.4`, `destr@2.0.3`, `ohash@1.1.4`, `radix3@1.1.2`, `cookie@0.7.2`, `ms@2.1.3`) across 12 requests with `ETag` `304 Not Modified` short-circuiting.
 
-All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 24 folder applications.
+All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 26 folder applications and framework suites.
 
 ### 5.1 Execution Latency Across Folder Applications (Linux Docker `x86_64`, 20 Runs)
 
@@ -187,8 +189,8 @@ All 4 runtimes produce **100% byte-for-byte identical JSON output** across all 2
 | **App 22: `22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** | **25.906 ms / 2.001 ms** (`0.06 us` init) | 44.236 ms | 109.267 ms | 98.820 ms | **3.52x faster** | **1.58x-1.98x Bun / 22.1x Warm vs Bun** |
 | **App 23: `23-wasm-crypto-and-simd-kernel`** (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | **16.693 ms** | **13.962 ms / 1.822 ms** (`0.05 us` init) | 18.798 ms | 38.410 ms | 57.055 ms | **3.42x faster** | **1.13x Cold / 10.3x Warm vs Bun** |
 | **App 24: `24-tsx-ssr-and-wasm-edge-pipeline`** (`WebAssembly` SLA Scorer + SSR Pipeline) | **13.621 ms** | **12.005 ms / 1.601 ms** (`0.03 us` init) | 17.284 ms | 38.347 ms | 63.228 ms | **4.64x faster** | **1.27x Cold / 10.8x Warm vs Bun** |
-| **FW 1: `frameworks/01-hono-edge-microservice`** (`hono@4.6.20` + `hono/cookie` + `ms`) | **28.212 ms** | **25.466 ms / 6.560 ms** (`0.06 us` init) | 18.391 ms | 48.183 ms | 90.885 ms | **3.22x faster** | **1.71x Deno / 2.80x Warm vs Bun** |
-| **FW 2: `frameworks/02-itty-router-unjs-nitro-stack`** (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | **27.422 ms** | **24.148 ms / 8.922 ms** (`0.05 us` init) | 17.925 ms | 43.899 ms | 82.748 ms | **3.02x faster** | **1.60x Deno / 2.01x Warm vs Bun** |
+| **FW 1: `frameworks/01-hono-edge-microservice`** (`hono@4.6.20` + `hono/cookie` + `ms`) | **6.764 ms** (Bin 7.018 ms) | **6.204 ms / 0.900 ms** (`0.03 us` init) | 24.307 ms | 52.878 ms | 76.266 ms | **11.28x faster** | **3.59x Cold / 27.0x Warm vs Bun** |
+| **FW 2: `frameworks/02-itty-router-unjs-nitro-stack`** (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | **6.260 ms** (Bin 6.625 ms) | **5.557 ms / 0.600 ms** (`0.04 us` init) | 17.209 ms | 46.976 ms | 65.405 ms | **10.45x faster** | **2.75x Cold / 28.7x Warm vs Bun** |
 
 ### 5.2 Peak Memory Footprint on External NPM & Disk I/O Apps (`Max RSS` via `/usr/bin/time -v`)
 

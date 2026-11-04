@@ -6,7 +6,7 @@ use crate::mcp_and_repl::{
     handle_mcp_jsonrpc_line, measure_current_process_rss_kb, run_security_containment_checks,
 };
 use crate::test_runner::{cmd_test, discover_test_files};
-use crate::cmd_run;
+use crate::{cmd_init, cmd_run};
 use slice_cas::MappedCasArchive;
 use slice_engine::{compile_source_to_bytecode, SliceIsolate};
 use slice_sandbox::CapabilityToken;
@@ -2219,5 +2219,30 @@ fn test_wave_e_hono_and_itty_unjs_framework_suites() {
         assert!(out2.stdout[0].contains(r#""status304Count":2"#));
     }
 }
+
+#[test]
+fn test_wave_f_slice_init_generates_slice_d_ts_and_tsconfig() {
+    let tmp_dir = env::temp_dir().join("slice_cli_test_wave_f_init");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    cmd_init(&[tmp_dir.to_string_lossy().to_string()]).unwrap();
+
+    assert!(tmp_dir.join("slice.toml").is_file());
+    assert!(tmp_dir.join("slice.d.ts").is_file());
+    assert!(tmp_dir.join("tsconfig.json").is_file());
+    assert!(tmp_dir.join("src/index.ts").is_file());
+
+    let dts = std::fs::read_to_string(tmp_dir.join("slice.d.ts")).unwrap();
+    assert!(dts.contains("declare namespace Slice"));
+    assert!(dts.contains("declare module \"slice:test\""));
+    assert!(dts.contains("declare module \"slice:jsx\""));
+
+    let tsconfig = std::fs::read_to_string(tmp_dir.join("tsconfig.json")).unwrap();
+    assert!(tsconfig.contains("\"jsxImportSource\": \"slice:jsx\""));
+    assert!(tsconfig.contains("\"slice.d.ts\""));
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
 
 

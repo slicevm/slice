@@ -1,6 +1,6 @@
-# The Slice (Nexus-JS) Developer Handbook (`v0.9.4`)
+# The Slice (Nexus-JS) Developer Handbook (`v0.9.5`)
 
-Welcome to the complete developer handbook for **Slice (Nexus-JS)** (`v0.9.4`) — a microVM-grade JavaScript and TypeScript runtime, compiler, HTTP server, and AI sandbox engineered in Rust.
+Welcome to the complete developer handbook for **Slice (Nexus-JS)** (`v0.9.5`) — a microVM-grade JavaScript and TypeScript runtime, compiler, HTTP server, and AI sandbox engineered in Rust.
 
 Whether you are building a high-throughput full-stack web service, packaging a CLI tool into a single zero-dependency executable, running 1,000 untrusted customer plugins on a single machine, or executing LLM-generated TypeScript inside an AI coding agent, this handbook walks you through every feature, CLI command, API, security capability, and migration pattern from the perspective of an application developer.
 
@@ -70,11 +70,19 @@ Traditional JavaScript runtimes (**Node.js**, **Deno**, and **Bun**) were built 
 
 - **Developer How-To Guides (`docs/guides/`):**
   - [`docs/guides/README.md`](file:///p:/opensource/slice/docs/guides/README.md)
+  - [`docs/guides/01_hono_and_unjs_edge_microservices.md`](file:///p:/opensource/slice/docs/guides/01_hono_and_unjs_edge_microservices.md)
+  - [`docs/guides/02_typescript_ide_linting_and_wasm.md`](file:///p:/opensource/slice/docs/guides/02_typescript_ide_linting_and_wasm.md)
 - **Core Maintainer & Internal Architecture Specs (`docs/system/`):**
-  - [`docs/system/architecture.md`](file:///p:/opensource/slice/docs/system/architecture.md)
-  - [`docs/system/benchmarks_and_comparisons.md`](file:///p:/opensource/slice/docs/system/benchmarks_and_comparisons.md)
-  - [`docs/system/production_tooling_guide.md`](file:///p:/opensource/slice/docs/system/production_tooling_guide.md)
-  - [`docs/system/research_deep_dive.md`](file:///p:/opensource/slice/docs/system/research_deep_dive.md)
+  - [`docs/system/00_index.md`](file:///p:/opensource/slice/docs/system/00_index.md)
+  - [`docs/system/01_cas_bundler_and_oxc_compiler.md`](file:///p:/opensource/slice/docs/system/01_cas_bundler_and_oxc_compiler.md)
+  - [`docs/system/02_tiered_execution_and_boa_vm.md`](file:///p:/opensource/slice/docs/system/02_tiered_execution_and_boa_vm.md)
+  - [`docs/system/03_security_sandbox_ocap_and_mpk.md`](file:///p:/opensource/slice/docs/system/03_security_sandbox_ocap_and_mpk.md)
+  - [`docs/system/04_networking_wintertc_and_event_loop.md`](file:///p:/opensource/slice/docs/system/04_networking_wintertc_and_event_loop.md)
+  - [`docs/system/05_wasm_workers_and_kernel_io.md`](file:///p:/opensource/slice/docs/system/05_wasm_workers_and_kernel_io.md)
+  - [`docs/system/06_edge_kv_ai_sandbox_and_mcp.md`](file:///p:/opensource/slice/docs/system/06_edge_kv_ai_sandbox_and_mcp.md)
+  - [`docs/system/07_production_tooling_guide.md`](file:///p:/opensource/slice/docs/system/07_production_tooling_guide.md)
+  - [`docs/system/08_benchmarks_and_comparisons.md`](file:///p:/opensource/slice/docs/system/08_benchmarks_and_comparisons.md)
+  - [`docs/system/09_research_deep_dive.md`](file:///p:/opensource/slice/docs/system/09_research_deep_dive.md)
 - **Docker Application & Framework Test Suites (`tests/`):**
   - [`tests/README.md`](file:///p:/opensource/slice/tests/README.md) (`tests/apps/`)
   - [`tests/frameworks/README.md`](file:///p:/opensource/slice/tests/frameworks/README.md) (`tests/frameworks/`)

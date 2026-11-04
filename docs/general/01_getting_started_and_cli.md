@@ -1,6 +1,6 @@
 # Chapter 01: Installation, Upgrading, Quickstart, `slice.toml` & Complete CLI Reference
 
-This chapter is your complete day-one guide to installing, upgrading, configuring, and operating **Slice (Nexus-JS)** (`v0.9.4`). By the end of this chapter, you will know how to install and update Slice on any operating system, scaffold a new TypeScript project, configure your `slice.toml` manifest and `.env` vault, run live development with `< 3 ms` `--watch` reloads, use the interactive `slice repl` shell, and master all 13 CLI commands.
+This chapter is your complete day-one guide to installing, upgrading, configuring, and operating **Slice (Nexus-JS)** (`v0.9.5`). By the end of this chapter, you will know how to install and update Slice on any operating system, scaffold a new TypeScript project, configure your `slice.toml` manifest and `.env` vault, run live development with `< 3 ms` `--watch` reloads, use the interactive `slice repl` shell, and master all 13 CLI commands.
 
 ---
 
@@ -127,9 +127,22 @@ Let's scaffold, run, watch, test, and serve a new TypeScript edge project in 5 s
 slice init ./hello-slice
 cd ./hello-slice
 ```
-This creates two files:
+This creates four files:
 - `slice.toml`: Your declarative security policy, resource limits, and entrypoint configuration.
+- `slice.d.ts`: Complete ambient TypeScript type declarations for `Slice.*` (`kv`, `evalSandbox`, `checkpoint`, `restore`, `connect`, `mockFetch`, `mockSocket`, `mockWebSocket`), `WinterTC.*`, `slice:test`, `slice:jsx`, and `cloudflare:sockets`.
+- `tsconfig.json`: Pre-configured `"moduleResolution": "bundler"`, `"jsxImportSource": "slice:jsx"`, and `"noEmit": true` for instant IDE IntelliSense and `tsc --noEmit`.
 - `src/index.ts`: Your TypeScript entrypoint.
+
+### Step 1b: Type-Checking (`tsc --noEmit`) & Linting/Formatting (`oxlint` / `Biome`)
+At runtime and during `slice pack` / `slice compile`, Slice uses the native Rust **Oxc (`v0.152.0`)** compiler to transpile `.ts` and `.tsx` in microseconds without waiting for the TypeScript type-checker. For static type validation, linting, and code formatting in your IDE or CI pipeline:
+```bash
+# Type-check against slice.d.ts and tsconfig.json:
+npx tsc --noEmit
+
+# Ultra-fast Rust-based linting and formatting (Oxc / Biome):
+npx oxlint ./src
+npx @biomejs/biome check --write ./src
+```
 
 ### Step 2: Run Your TypeScript Code (`slice run`)
 You can run the project directory directly (Slice automatically reads `slice.toml`), or pass a specific `.ts` file:
@@ -408,7 +421,7 @@ Launches an interactive **SES-Locked TypeScript/JavaScript Compartment Shell** w
 **Example REPL Session:**
 ```text
 $ slice repl
-Slice (Nexus-JS) v0.9.4 Interactive SES-Locked Compartment Shell
+Slice (Nexus-JS) v0.9.5 Interactive SES-Locked Compartment Shell
 Commands: :help, :metrics, :caps, :vars, :reset, :quit
 slice(ses)> const price: number = 250 * 4;
 => 1000

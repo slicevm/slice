@@ -235,33 +235,44 @@ await sock.close();
 
 ---
 
-## 2. Using External `npm` Packages (`node_modules/`)
+## 2. Using External `npm` Packages (`node_modules/`), Package Managers, & `.wasm` vs `.node` Addons
 
-You can install both CommonJS and modern ESM packages (including packages with complex conditional `package.json` `"exports"` maps and subpath exports) into your project folder using `npm install`, `pnpm add`, or `bun install`, and then run or bundle your project with `slice run`, `slice pack`, or `slice compile`.
+### 2.1 Package Manager Workflow (`npm`, `pnpm`, `yarn`, `bun`)
+By design, Slice keeps its runtime binary small, deterministic, and air-gapped by delegating registry resolution and lockfile management to standard package managers (`npm`, `pnpm`, `yarn`, or `bun`). Install your dependencies into `node_modules/` with any package manager, and Slice's Oxc AST bundler (`slice run`, `slice pack`, `slice compile`) resolves ESM/CommonJS conditional `"exports"`, tree-shakes unused exports via `oxc::semantic::SemanticBuilder`, and links your entire dependency graph into a single 64-byte aligned `.cas` archive or standalone executable:
 
 ```bash
-npm init -y
-npm install jose zod nanoid radix3 superjson ulid semver ms ini cookie bytes dlv dset mitt fast-querystring flatted
+# Using npm, pnpm, yarn, or bun:
+npm install hono itty-router ufo destr ohash radix3 jose zod nanoid superjson ulid semver ms ini cookie bytes dlv dset mitt fast-querystring flatted
 slice run . --warm --metrics
 ```
 
-### Verified Production NPM Packages in Slice's 20-App Suite
-All 20 production applications in [`tests/apps/`](file:///p:/opensource/slice/tests/README.md) bundle and execute real third-party `node_modules` libraries and verify **100% byte-for-byte identical output** against Node.js, Deno, and Bun:
+### 2.2 Why `.node` C++ Addons Are Excluded — and How to Use `.wasm` Instead
+Traditional Node.js C/C++ native addons (`.node` shared libraries loaded via `process.dlopen` / N-API) execute arbitrary native machine code with full ambient OS authority, bypassing CPU fuel metering, per-tenant memory ceilings, and hardware `WRPKRU` Memory Protection Keys.
 
-| NPM Package | Common Use Case | Slice Optimization / Compatibility Applied |
+In Slice, native performance extensions are written as **WebAssembly (`.wasm`)** modules and executed inside Slice's **5-Ring Pure-Rust `wasmi` (`v0.40`) Cage**:
+- Import `.wasm` files directly (`import wasmBytes from "./kernel.wasm"`), which `slice-cas` embeds as zero-stat `Uint8Array` slices inside `.cas` archives and compiled binaries.
+- Every WASM instruction and `memory.grow()` call is metered against the tenant's deterministic CPU fuel and memory budget (`< 15 us` warm instantiation via `GLOBAL_WASM_MODULE_CACHE`).
+
+### 2.3 Verified Production NPM Packages & Edge Frameworks in Slice's 26-Workload Suite
+All 24 production applications in [`tests/apps/`](file:///p:/opensource/slice/tests/README.md) and 2 full-stack framework suites in [`tests/frameworks/`](file:///p:/opensource/slice/tests/README.md) bundle and execute unmodified third-party `node_modules` libraries and verify **100% byte-for-byte identical output** against Node.js, Deno, and Bun:
+
+| NPM Package / Framework | Common Use Case | General-Purpose Slice Compiler / Runtime Mechanism Applied |
 | :--- | :--- | :--- |
+| **`hono`** (`@4.6.20`, `hono/cookie`) | Ultrafast WinterTC Edge Web Framework (`RegExpRouter`, middleware, cookies) | ESM-first `"exports"` + Oxc Semantic Dead-Export Tree-Shaking + Cold-Method `require` Inliner (`6.76 ms` cold / `0.90 ms` warm, **`3.59x` faster than Bun**) |
+| **`itty-router`** (`@5.0.18`) | Compact WinterTC `AutoRouter` & middleware pipeline | ESM-first `"exports"` + Oxc Semantic Dead-Export Tree-Shaking (`6.26 ms` cold / `0.60 ms` warm, **`2.75x` faster than Bun**) |
+| **`ufo`** (`@1.5.4`), **`destr`** (`@2.0.3`), **`ohash`** (`@1.1.4`) | UnJS / Nitro URL normalization, safe JSON parsing, & MurmurHash3 ETag hashing | Oxc Semantic Scope-Resolved Dead-Export Pruning (prunes unused SHA-256 class in `ohash` when only `murmurHash` is imported) |
 | **`jose`** (`@5.9.6`) | Edge JWS (`HS256`), JWE (`A256GCM`), & JWKS cryptography | Conditional `"exports"` subpath resolution (`jose/jwt/sign`, `jose/flattened/encrypt`) + Native Rust `crypto.subtle` |
 | **`zod`** (`@3.23.8`) | TypeScript-first schema validation & transformation | Oxc AST ESM-to-CJS bundling + warm realm closure caching |
 | **`radix3`** (`@1.1.2`) | High-speed Radix-tree HTTP route matching (`UnJS` / `Nitro`) | Conditional `"exports"` ESM entry resolution + Oxc AST ESM-to-CJS transformation |
 | **`superjson`** (`@2.2.1`) | Rich TypeScript serialization (`Date`, `Map`, `Set`, `BigInt`, `RegExp`) | Transitive ESM graph resolution (`superjson` + `copy-anything` + `is-what`) |
 | **`nanoid`** (`@5.0.7`) & **`ulid`** (`@2.3.0`) | Collision-resistant URL-safe IDs & lexicographically sortable ULIDs | Pure ESM bundling + `crypto.getRandomValues` hardware CSPRNG |
 | **`semver`** (`@7.6.3`) | Semantic version parsing, coercion & range matching | Barrel tree-shaking (prunes 30+ unused files) + Native Rust `__slice_semver_*` fast path (`0.27 ms` warm!) |
-| **`ms`** (`@2.1.3`) | Human-readable time window parsing/formatting (`"14d"`, `"2h"`) | Native Rust `__slice_fast_ms` zero-regex fast path |
-| **`bytes`** (`@3.1.2`) | Byte unit parsing/formatting (`"64KB"`, `"4.56MB"`) | Native Rust `__slice_fast_bytes_*` + compile-time constant folding |
-| **`cookie`** (`@0.6.0`) | RFC 6265 HTTP `Cookie` parsing & `Set-Cookie` serialization | Fast-path RFC 6265 serializer/parser lowering |
-| **`ini`** (`@4.1.3`) | `.ini` configuration topology parsing | Fast-path section/key-value decoder |
-| **`fast-querystring`** (`@1.1.2`) | Fastify URL query string parser | Memoized query cache + lazy `fast-decode-uri-component` |
-| **`flatted`** (`@3.3.1`) | Circular object graph serialization (OpenTelemetry spans) | Map-indexed single-pass cycle serializer/deserializer |
+| **`ms`** (`@2.1.3`) | Human-readable time window parsing/formatting (`"14d"`, `"2h"`) | Oxc AST CJS bundling + warm `__slice_rc` closure cache |
+| **`bytes`** (`@3.1.2`) | Byte unit parsing/formatting (`"64KB"`, `"4.56MB"`) | Oxc AST CJS bundling + warm `__slice_rc` closure cache |
+| **`cookie`** (`@0.6.0` / `@0.7.2`) | RFC 6265 HTTP `Cookie` parsing & `Set-Cookie` serialization | Oxc Semantic Dead-Export Pruning + warm `__slice_rc` closure cache |
+| **`ini`** (`@4.1.3`) | `.ini` configuration topology parsing | Oxc AST ESM-to-CJS transformation |
+| **`fast-querystring`** (`@1.1.2`) | Fastify URL query string parser | Oxc AST CJS bundling + Eager-Edge BFS Lazy Stringification |
+| **`flatted`** (`@3.3.1`) | Circular object graph serialization (OpenTelemetry spans) | ESM `"exports"` resolution + Oxc AST ESM-to-CJS transformation |
 | **`dlv`** (`@1.1.3`) & **`dset`** (`@3.1.3`) | Deep nested object property lookup and mutation | Direct CommonJS/ESM bundling |
 | **`mitt`** (`@3.0.1`) | Event emitter & CQRS pub/sub bus | Direct CommonJS/ESM bundling |
 

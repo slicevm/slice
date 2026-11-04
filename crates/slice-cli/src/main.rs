@@ -182,7 +182,152 @@ fn cmd_info() -> Result<()> {
     Ok(())
 }
 
-fn cmd_init(args: &[String]) -> Result<()> {
+const DEFAULT_SLICE_D_TS: &str = r#"// Slice (Nexus-JS) Ambient TypeScript Declarations (`slice.d.ts`)
+// Automatically included by `tsconfig.json` for IDE IntelliSense and `tsc --noEmit`.
+
+declare function env(key: string): string;
+
+declare namespace WinterTC {
+    function route(method: string, url: string): string;
+}
+
+declare namespace Slice {
+    interface HttpRequestSnapshot {
+        method: string;
+        path: string;
+        query: string;
+        tenantId: string;
+        body: string;
+        headers: Record<string, string>;
+    }
+
+    interface SandboxEvalOptions {
+        fuel?: number;
+        memoryBytes?: number;
+        allowRead?: string[];
+        allowWrite?: string[];
+        allowNet?: string[];
+        auditSecret?: string;
+    }
+
+    interface SandboxEvalOutcome {
+        ok: boolean;
+        value: string;
+        stdout: string[];
+        fuelUsed: number;
+        timeUs: number;
+        violation: string | null;
+    }
+
+    interface SseStreamController {
+        send(event: { event?: string; data: unknown; id?: string; retry?: number }): void;
+        close(): void;
+    }
+
+    interface TcpSocketOptions {
+        secureTransport?: "off" | "on" | "starttls";
+        allowHalfOpen?: boolean;
+    }
+
+    interface TcpSocket {
+        readonly readable: ReadableStream<Uint8Array>;
+        readonly writable: WritableStream<Uint8Array>;
+        readonly closed: Promise<void>;
+        close(): Promise<void>;
+        startTls(): TcpSocket;
+    }
+
+    namespace kv {
+        function get(key: string): string | null;
+        function set(key: string, value: string, ttlMs?: number): boolean;
+        function del(key: string): boolean;
+        function incr(key: string, delta?: number): number;
+    }
+
+    function request(): HttpRequestSnapshot;
+    function respond(status: number, body: string, contentType?: string, headers?: Record<string, string>): void;
+    function waitUntil(task: Promise<unknown> | (() => unknown)): void;
+    function streamSSE(callback: (stream: SseStreamController) => void | Promise<void>): Response;
+    function evalSandbox(code: string, options?: SandboxEvalOptions): SandboxEvalOutcome;
+    function checkpoint(): number;
+    function restore(snapshotId: number): boolean;
+    function connect(address: string | { hostname: string; port: number }, options?: TcpSocketOptions): TcpSocket;
+}
+
+declare module "slice:test" {
+    export interface SliceMatchers<T = unknown> {
+        toBe(expected: T): void;
+        toEqual(expected: unknown): void;
+        toContain(substring: string): void;
+        toBeTruthy(): void;
+        toBeFalsy(): void;
+        toBeGreaterThan(n: number): void;
+        toBeLessThan(n: number): void;
+        toThrow(expectedSubstring?: string): void;
+        toViolate(expectedViolationType?: string): void;
+        toStayWithinFuel(maxFuel: number): void;
+        toStayWithinMemory(maxBytes: number): void;
+    }
+    export function describe(suiteName: string, fn: () => void | Promise<void>): void;
+    export function test(specName: string, fn: () => void | Promise<void>): void;
+    export function it(specName: string, fn: () => void | Promise<void>): void;
+    export function expect<T = unknown>(actual: T): SliceMatchers<T>;
+}
+
+declare module "slice:jsx" {
+    export type VNode = {
+        type: string | ((props: Record<string, unknown>) => unknown);
+        props: Record<string, unknown>;
+    };
+    export const Fragment: unique symbol;
+    export function jsx(type: VNode["type"] | symbol, props: Record<string, unknown>, key?: string | number): VNode;
+    export function jsxs(type: VNode["type"] | symbol, props: Record<string, unknown>, key?: string | number): VNode;
+    export function renderToString(node: unknown): string;
+    export function escapeHtml(raw: string): string;
+    export function raw(trustedHtml: string): { __slice_raw_html: string };
+}
+
+declare module "slice:jsx/jsx-runtime" {
+    export { Fragment, jsx, jsxs, renderToString, escapeHtml, raw } from "slice:jsx";
+    export namespace JSX {
+        type Element = unknown;
+        interface IntrinsicElements {
+            [elemName: string]: Record<string, unknown>;
+        }
+    }
+}
+
+declare module "cloudflare:sockets" {
+    export function connect(
+        address: string | { hostname: string; port: number },
+        options?: Slice.TcpSocketOptions
+    ): Slice.TcpSocket;
+}
+
+declare module "*.wasm" {
+    const wasmBytes: Uint8Array;
+    export default wasmBytes;
+}
+"#;
+
+const DEFAULT_TSCONFIG_JSON: &str = r#"{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "slice:jsx",
+    "types": []
+  },
+  "include": ["src/**/*", "tests/**/*", "slice.d.ts"]
+}
+"#;
+
+pub(crate) fn cmd_init(args: &[String]) -> Result<()> {
     let target_dir = if args.is_empty() {
         PathBuf::from(".")
     } else {
@@ -201,6 +346,16 @@ fn cmd_init(args: &[String]) -> Result<()> {
             &manifest_path,
             SliceManifest::default_template(project_name),
         )?;
+    }
+
+    let dts_path = target_dir.join("slice.d.ts");
+    if !dts_path.exists() {
+        std::fs::write(&dts_path, DEFAULT_SLICE_D_TS)?;
+    }
+
+    let tsconfig_path = target_dir.join("tsconfig.json");
+    if !tsconfig_path.exists() {
+        std::fs::write(&tsconfig_path, DEFAULT_TSCONFIG_JSON)?;
     }
 
     let entry_path = target_dir.join("src").join("index.ts");
@@ -232,6 +387,8 @@ console.log(route_response);
         target_dir.display()
     );
     println!("  Created {}", manifest_path.display());
+    println!("  Created {}", dts_path.display());
+    println!("  Created {}", tsconfig_path.display());
     println!("  Created {}", entry_path.display());
     println!("Next steps:");
     println!("  slice run                        (Execute with slice.toml OCap policy)");

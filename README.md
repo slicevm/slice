@@ -54,8 +54,8 @@
 | `22-worker-threads-and-raw-sockets` (3 Worker Threads + TCP/UDP + 5-Ring Sec) | `98.820 ms` | `109.267 ms` | `44.236 ms` | **`28.081 ms`** (`1.58x` Bun) | **`2.00 ms`** (`22.1x` Bun) |
 | `23-wasm-crypto-and-simd-kernel` (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | `57.055 ms` | `38.410 ms` | `18.798 ms` | **`16.693 ms`** (`1.13x` Bun) | **`1.82 ms`** (`10.3x` Bun) |
 | `24-tsx-ssr-and-wasm-edge-pipeline` (`WebAssembly` SLA Scorer + SSR Pipeline) | `63.228 ms` | `38.347 ms` | `17.284 ms` | **`13.621 ms`** (`1.27x` Bun) | **`1.60 ms`** (`10.8x` Bun) |
-| `frameworks/01-hono-edge-microservice` (`hono@4.6.20` + `hono/cookie` + `ms`) | `90.885 ms` | `48.183 ms` | `18.391 ms` | **`28.212 ms`** (`1.71x` Deno) | **`6.56 ms`** (`2.80x` Bun) |
-| `frameworks/02-itty-router-unjs-nitro-stack` (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | `83.829 ms` | `43.899 ms` | `17.925 ms` | **`27.422 ms`** (`1.60x` Deno) | **`8.92 ms`** (`2.01x` Bun) |
+| `frameworks/01-hono-edge-microservice` (`hono@4.6.20` + `hono/cookie` + `ms`) | `76.266 ms` | `52.878 ms` | `24.307 ms` | **`6.764 ms`** (`3.59x` Bun) | **`0.90 ms`** (`27.0x` Bun) |
+| `frameworks/02-itty-router-unjs-nitro-stack` (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | `65.405 ms` | `46.976 ms` | `17.209 ms` | **`6.260 ms`** (`2.75x` Bun) | **`0.60 ms`** (`28.7x` Bun) |
 
 ---
 
@@ -88,6 +88,8 @@ slice run --metrics
 
 This creates:
 * `slice.toml`: Declarative Object-Capability (OCap) policy and resource cage configuration.
+* `slice.d.ts`: Ambient TypeScript declarations for `Slice.*`, `WinterTC.*`, `slice:test`, `slice:jsx`, and `cloudflare:sockets`.
+* `tsconfig.json`: Pre-configured TypeScript compiler config (`"moduleResolution": "bundler"`, `"jsxImportSource": "slice:jsx"`).
 * `src/index.ts`: TypeScript edge entrypoint.
 
 ### 3. Run TypeScript Files, Folder Apps, or Pre-Packed CAS Bundles (`slice run`)
@@ -262,7 +264,7 @@ SERVICE_STAGE = "production"
 
 In addition to synthetic microbenchmarks, [`tests/`](file:///p:/opensource/slice/tests/README.md) runs **24 folder-based multi-module production TypeScript applications** (with standard WinterTC `Request`/`Response`/`Headers`/`URL`/`URLSearchParams`/`ReadableStream`/`TransformStream`/`TextEncoder`/`TextDecoder`/`crypto.subtle`/`Blob`/`File`/`FormData`/`structuredClone`/`EventTarget`/`AbortSignal`/`WebAssembly` APIs, pure-Rust `wasmi` WebAssembly execution with unified CPU fuel & linear memory cages, real `Uint8Array`-backed `Buffer` and `node:*` Core Tier-1 modules, OCap-guarded outbound HTTP/1.1 & HTTPS TLS 1.3 `fetch()` with Keep-Alive pooling, hop-by-hop redirect guard, Cloud Metadata SSRF Shield, and Egress DLP, `Slice.streamSSE` / `Response.sse`, zero-stat BLAKE3 `ETag` `304 Not Modified` static asset delivery, real external `node_modules/` packages `semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`, `cookie@0.6.0`/`1.0.2`, `bytes@3.1.2`, `flatted@3.3.1`, `dlv@1.1.3`, `dset@3.1.3`, `mitt@3.0.1`, FIPS-180-4 SHA-256/SHA-512 & RFC-2104 HMAC `node:crypto`, and `node:fs` disk I/O) and verifies **100% byte-for-byte identical JSON output** against the **absolute latest releases** of Bun (`v1.4.4`), Deno (`v2.9.8`), and Node.js (`v27.0.0-alpha`):
 
-| Folder-Based Production App (Linux Docker `x86_64`) | Slice (`v0.9.4`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) |
+| Folder-Based Production App (Linux Docker `x86_64`) | Slice (`v0.9.5`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) |
 | :--- | :--- | :--- | :--- | :--- |
 | **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256, 50 orders) | **5.297 ms** (`0.67 ms` warm isolate) | 12.729 ms | 34.766 ms | 63.778 ms |
 | **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini` from `node_modules`) | **6.766 ms** (`0.27 ms` warm isolate) | 20.048 ms | 54.156 ms | 75.895 ms |
@@ -330,12 +332,20 @@ cargo test --workspace
 
 ### Developer How-To Guides (`docs/guides/`)
 * **[Developer Guides & Recipes Index (`docs/guides/README.md`)](file:///p:/opensource/slice/docs/guides/README.md)**
+* **[Guide 01: Building & Deploying Hono (`v4`) and UnJS Edge Microservices (`docs/guides/01_hono_and_unjs_edge_microservices.md`)](file:///p:/opensource/slice/docs/guides/01_hono_and_unjs_edge_microservices.md)**
+* **[Guide 02: TypeScript IDE Setup (`slice.d.ts`), Linting (`oxlint` / `Biome`), & `.wasm` Modules (`docs/guides/02_typescript_ide_linting_and_wasm.md`)](file:///p:/opensource/slice/docs/guides/02_typescript_ide_linting_and_wasm.md)**
 
 ### System Engineering Specifications (`docs/system/` & `tests/`)
-* **[Internal Architecture Specification (`docs/system/architecture.md`)](file:///p:/opensource/slice/docs/system/architecture.md)**
-* **[Empirical Benchmarks & Comparisons (`docs/system/benchmarks_and_comparisons.md`)](file:///p:/opensource/slice/docs/system/benchmarks_and_comparisons.md)**
-* **[Production Tooling & Deployment Guide (`docs/system/production_tooling_guide.md`)](file:///p:/opensource/slice/docs/system/production_tooling_guide.md)**
-* **[Cutting-Edge 2026 Research Deep Dive (`docs/system/research_deep_dive.md`)](file:///p:/opensource/slice/docs/system/research_deep_dive.md)**
+* **[00: System Architecture & Internal Specification Index (`docs/system/00_index.md`)](file:///p:/opensource/slice/docs/system/00_index.md)**
+* **[01: `slice-cas` — Zero-Stat CAS, Oxc Compiler & AST Tree-Shaker (`docs/system/01_cas_bundler_and_oxc_compiler.md`)](file:///p:/opensource/slice/docs/system/01_cas_bundler_and_oxc_compiler.md)**
+* **[02: `slice-engine` — Hybrid Three-Tier Execution Pipeline & `WarmBoaRealm` (`docs/system/02_tiered_execution_and_boa_vm.md`)](file:///p:/opensource/slice/docs/system/02_tiered_execution_and_boa_vm.md)**
+* **[03: `slice-sandbox` — 5-Ring Zero-Trust OCap, Dynamic SES & Hardware MPK (`docs/system/03_security_sandbox_ocap_and_mpk.md`)](file:///p:/opensource/slice/docs/system/03_security_sandbox_ocap_and_mpk.md)**
+* **[04: Networking, WinterTC Web Platform & Async Event Loop (`docs/system/04_networking_wintertc_and_event_loop.md`)](file:///p:/opensource/slice/docs/system/04_networking_wintertc_and_event_loop.md)**
+* **[05: Pure-Rust WebAssembly, Web Workers & Direct Kernel I/O (`docs/system/05_wasm_workers_and_kernel_io.md`)](file:///p:/opensource/slice/docs/system/05_wasm_workers_and_kernel_io.md)**
+* **[06: Serverless Edge KV, AI Agent "Code Mode" & MCP Server (`docs/system/06_edge_kv_ai_sandbox_and_mcp.md`)](file:///p:/opensource/slice/docs/system/06_edge_kv_ai_sandbox_and_mcp.md)**
+* **[07: Production Tooling & Deployment Guide (`docs/system/07_production_tooling_guide.md`)](file:///p:/opensource/slice/docs/system/07_production_tooling_guide.md)**
+* **[08: Empirical Benchmarks & Comparisons (`docs/system/08_benchmarks_and_comparisons.md`)](file:///p:/opensource/slice/docs/system/08_benchmarks_and_comparisons.md)**
+* **[09: Cutting-Edge 2026 Research Deep Dive (`docs/system/09_research_deep_dive.md`)](file:///p:/opensource/slice/docs/system/09_research_deep_dive.md)**
 * **[Docker Real-Stack Production Benchmarks (`tests/README.md`)](file:///p:/opensource/slice/tests/README.md)**
 * **[Framework Integration Benchmarks (`tests/frameworks/README.md`)](file:///p:/opensource/slice/tests/frameworks/README.md)**
 
