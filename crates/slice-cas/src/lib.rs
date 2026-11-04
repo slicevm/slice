@@ -58,6 +58,9 @@ pub struct CasIndexHeader {
     pub radix_resolution_map: FxHashMap<String, String>,
     /// Maps `hash_hex` -> `CasBlobEntry`
     pub blobs: FxHashMap<String, CasBlobEntry>,
+    /// Compact source-line table (`(compacted_line_1, "#slice-source payload")`) for `.cas` and `SLICEEXE` stack traces
+    #[serde(default)]
+    pub source_map_markers: Vec<(usize, String)>,
 }
 
 /// Builder for constructing a Zero-Stat Content-Addressed Storage (`.cas`) archive.
@@ -178,10 +181,29 @@ impl CasBuilder {
         let mut blobs = FxHashMap::default();
         let mut data_payload: Vec<u8> = Vec::new();
         let mut entry_hash = String::new();
+        let mut source_map_markers: Vec<(usize, String)> = Vec::new();
 
         for (specifier, _path, normalized_source, bytecode) in &self.modules {
             let is_static = specifier.starts_with("static:/");
             let is_manifest = specifier == "manifest:/slice.toml";
+            if !is_static && !is_manifest && normalized_source.contains("// #slice-source: ") {
+                let mut compacted_line_1 = 1usize;
+                for (idx, line) in normalized_source.lines().enumerate() {
+                    if idx == 0 && line.starts_with("var __slice_modules =") {
+                        compacted_line_1 += 1;
+                        continue;
+                    }
+                    let trimmed = line.trim();
+                    if let Some(rest) = trimmed.strip_prefix("// #slice-source: ") {
+                        source_map_markers.push((compacted_line_1, rest.to_string()));
+                        continue;
+                    }
+                    if trimmed.is_empty() || trimmed.starts_with("//") {
+                        continue;
+                    }
+                    compacted_line_1 += 1;
+                }
+            }
             let hash_hex = if is_static || is_manifest {
                 blake3::hash(bytecode).to_hex().to_string()
             } else {
@@ -284,6 +306,7 @@ impl CasBuilder {
             entrypoint_hash: entry_hash,
             radix_resolution_map: radix_map,
             blobs,
+            source_map_markers,
         };
 
         let header_bytes = serde_json::to_vec(&header)?;
@@ -388,6 +411,29 @@ impl MappedCasArchive {
     pub fn get_manifest_toml(&self) -> Option<&str> {
         let entry = self.resolve_specifier("manifest:/slice.toml")?;
         Some(self.get_source_slice(entry))
+    }
+
+    /// Reconstructs the `// #slice-source:` annotated JS source from `self.header.source_map_markers`
+    /// so `.cas` archives and standalone `SLICEEXE` binaries map uncaught errors back to exact TypeScript lines.
+    pub fn reconstruct_annotated_source(&self, entry: &CasBlobEntry) -> String {
+        let src = self.get_source_slice(entry);
+        if self.header.source_map_markers.is_empty() || src.contains("// #slice-source: ") {
+            return src.to_string();
+        }
+        let mut out = String::with_capacity(src.len() + self.header.source_map_markers.len() * 64);
+        for (idx, line) in src.lines().enumerate() {
+            let line_1 = idx + 1;
+            for (m_line, marker_rest) in &self.header.source_map_markers {
+                if *m_line == line_1 {
+                    out.push_str("// #slice-source: ");
+                    out.push_str(marker_rest);
+                    out.push('\n');
+                }
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
     }
 
     /// Opens a `.cas` archive embedded at `cas_offset` inside a larger file (such as a standalone executable).
@@ -1025,5 +1071,137 @@ console.log(answer);
         );
 
         let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_wave_i_tsconfig_paths_pkg_imports_meta_dynamic_import_and_embedded_sourcemap() {
+        let test_dir = std::env::temp_dir().join("slice_wave_i_dx_resolution_test");
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(test_dir.join("src/utils")).unwrap();
+        std::fs::create_dir_all(test_dir.join("src/internal")).unwrap();
+        std::fs::create_dir_all(test_dir.join("src/lazy")).unwrap();
+        std::fs::create_dir_all(test_dir.join("config")).unwrap();
+
+        // 1. Base tsconfig and child tsconfig with JSONC comments + trailing commas
+        std::fs::write(
+            test_dir.join("tsconfig.base.json"),
+            r#"{
+  // Base TypeScript configuration with JSONC comments
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "~config": ["./config/app.ts"],
+    },
+  },
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            test_dir.join("tsconfig.json"),
+            r#"{
+  /* Child config extending base */
+  "extends": "./tsconfig.base.json",
+}"#,
+        )
+        .unwrap();
+
+        // 2. package.json with Node.js subpath `"imports"` (`#...`)
+        std::fs::write(
+            test_dir.join("package.json"),
+            r##"{
+  "name": "wave-i-app",
+  "imports": {
+    "#internal/*": "./src/internal/*.ts"
+  }
+}"##,
+        )
+        .unwrap();
+
+        std::fs::write(
+            test_dir.join("src/utils/math.ts"),
+            r#"export function doubleVal(n: number): number {
+  return n * 2;
+}
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            test_dir.join("config/app.ts"),
+            r#"export const APP_TITLE = "SliceWaveI";
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            test_dir.join("src/internal/secret.ts"),
+            r#"export const INTERNAL_TAG = "subpath-ok";
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            test_dir.join("src/lazy/feature.ts"),
+            r#"export function lazyBanner(): string {
+  return "dynamic-import-ok";
+}
+"#,
+        )
+        .unwrap();
+
+        let entry_path = test_dir.join("src/index.ts");
+        std::fs::write(
+            &entry_path,
+            r##"import { doubleVal } from "@/utils/math";
+import { APP_TITLE } from "~config";
+import { INTERNAL_TAG } from "#internal/secret";
+
+export interface UnusedTypeBlock {
+  alpha: string;
+  beta: number;
+  gamma: boolean;
+}
+
+const metaUrl = import.meta.url;
+const metaDir = import.meta.dirname;
+const cjsDir = __dirname;
+const dynMod = await import("@/lazy/feature");
+if (doubleVal(21) === 42) {
+  throw new Error("wave-i-exact-line-check");
+}
+console.log(APP_TITLE, INTERNAL_TAG, metaUrl, metaDir, cjsDir, dynMod.lazyBanner());
+"##,
+        )
+        .unwrap();
+
+        let bundled =
+            bundle_entrypoint_with_deps(&entry_path).expect("Wave I bundle_entrypoint_with_deps");
+
+        assert!(
+            bundled.contains("async function()"),
+            "Top-level await must wrap entrypoint runner in async function():\n{}",
+            bundled
+        );
+        assert!(
+            bundled.contains("var __filename =") && bundled.contains("__dirname ="),
+            "__dirname reference must inject __filename and __dirname bindings:\n{}",
+            bundled
+        );
+        assert!(
+            bundled.contains("file:///"),
+            "import.meta.url must lower to file:// URL:\n{}",
+            bundled
+        );
+
+        // Delete the entire source directory from disk to prove embedded line-map works offline
+        let _ = std::fs::remove_dir_all(&test_dir);
+
+        let mapped = map_bundled_error_location(&bundled, "Uncaught Error: \"wave-i-exact-line-check\"");
+        assert!(
+            mapped.contains("(src/index.ts:16)"),
+            "Embedded #slice-source line map must resolve exact TypeScript line 16 without disk access, got: {}",
+            mapped
+        );
     }
 }

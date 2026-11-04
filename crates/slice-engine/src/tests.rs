@@ -4513,6 +4513,94 @@ console.log(JSON.stringify({ kvVal, b64, svOk, sbVal: sb.returnValue }));
     assert_eq!(parsed["sbVal"], "42");
 }
 
+#[test]
+fn test_wave_i_end_to_end_aliases_import_meta_dynamic_import_and_node_url() {
+    let test_dir = std::env::temp_dir().join("slice_wave_i_engine_e2e_test");
+    let _ = std::fs::remove_dir_all(&test_dir);
+    std::fs::create_dir_all(test_dir.join("src/services")).unwrap();
+    std::fs::create_dir_all(test_dir.join("src/internal")).unwrap();
+
+    std::fs::write(
+        test_dir.join("tsconfig.json"),
+        r#"{
+  // Wave I tsconfig paths with JSONC comments
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+    },
+  },
+}"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        test_dir.join("package.json"),
+        r##"{
+  "name": "wave-i-e2e",
+  "imports": {
+    "#internal/*": "./src/internal/*.ts"
+  }
+}"##,
+    )
+    .unwrap();
+
+    std::fs::write(
+        test_dir.join("src/internal/token.ts"),
+        r#"export const SECRET_PREFIX = "tok_wave_i";
+"#,
+    )
+    .unwrap();
+
+    std::fs::write(
+        test_dir.join("src/services/plugin.ts"),
+        r##"import { SECRET_PREFIX } from "#internal/token";
+export function runPlugin(id: number): string {
+  return `${SECRET_PREFIX}_${id}`;
+}
+"##,
+    )
+    .unwrap();
+
+    let entry_path = test_dir.join("src/index.ts");
+    std::fs::write(
+        &entry_path,
+        r#"import { fileURLToPath, pathToFileURL } from "node:url";
+import path from "node:path";
+
+const mod = await import("@/services/plugin");
+const fromMeta = fileURLToPath(import.meta.url);
+const roundtripHref = pathToFileURL(__filename).href;
+console.log(JSON.stringify({
+  pluginOut: mod.runPlugin(99),
+  sameFile: fromMeta === __filename && import.meta.filename === __filename,
+  sameDir: path.dirname(fromMeta) === __dirname && import.meta.dirname === __dirname,
+  sameUrl: roundtripHref === import.meta.url,
+}));
+"#,
+    )
+    .unwrap();
+
+    let bundled =
+        slice_cas::bundle_entrypoint_with_deps(&entry_path).expect("bundle_entrypoint_with_deps");
+    let _ = std::fs::remove_dir_all(&test_dir);
+
+    let m = run_source_isolated(
+        "wave-i-e2e",
+        &bundled,
+        CapabilityToken::pure_compute(),
+        500_000,
+        8 * 1024 * 1024,
+    )
+    .expect("wave-i-e2e execution");
+    let parsed: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(parsed["pluginOut"], "tok_wave_i_99");
+    assert_eq!(parsed["sameFile"], true);
+    assert_eq!(parsed["sameDir"], true);
+    assert_eq!(parsed["sameUrl"], true);
+}
+
+
 
 
 

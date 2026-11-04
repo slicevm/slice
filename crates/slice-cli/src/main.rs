@@ -117,6 +117,12 @@ fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
     let bc = archive.get_bytecode_slice(entry);
     let metrics = isolate.execute_bytecode(bc, Some(&archive))?;
 
+    if metrics.return_value.starts_with("Uncaught ") {
+        let annotated = archive.reconstruct_annotated_source(entry);
+        let mapped = slice_cas::map_bundled_error_location(&annotated, &metrics.return_value);
+        bail!("{}", mapped);
+    }
+
     if !quiet {
         for line in &metrics.stdout {
             println!("{}", line);
@@ -473,7 +479,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     };
 
     let path = Path::new(&target);
-    let mut bundled_for_sourcemap: Option<String> = None;
+    let bundled_for_sourcemap: String;
     let metrics = if target.ends_with(".cas") {
         let archive = MappedCasArchive::open(path)?;
         if let Some(toml_str) = archive.get_manifest_toml() {
@@ -487,6 +493,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         let entry = archive
             .entrypoint_blob()
             .context("CAS archive has no valid entrypoint blob")?;
+        bundled_for_sourcemap = archive.reconstruct_annotated_source(entry);
         let bytecode = archive.get_bytecode_slice(entry);
         let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps.clone(), fuel_limit, mem_limit);
         isolate.set_deterministic_seed(deterministic_seed);
@@ -515,7 +522,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
         let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
         let bytecode = compile_source_to_bytecode(&bundled_source);
-        bundled_for_sourcemap = Some(bundled_source);
+        bundled_for_sourcemap = bundled_source;
         let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps.clone(), fuel_limit, mem_limit);
         isolate.set_deterministic_seed(deterministic_seed);
         for sec in &audit_secrets {
@@ -532,10 +539,8 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     };
 
     if metrics.return_value.starts_with("Uncaught ") {
-        let mapped = match bundled_for_sourcemap.as_deref() {
-            Some(b) => slice_cas::map_bundled_error_location(b, &metrics.return_value),
-            None => metrics.return_value.clone(),
-        };
+        let mapped =
+            slice_cas::map_bundled_error_location(&bundled_for_sourcemap, &metrics.return_value);
         bail!("{}", mapped);
     }
 

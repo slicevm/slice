@@ -803,7 +803,7 @@ pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
         && !js_code.contains("var __slice_modules =")
     {
         let mut dummy_deps = Vec::new();
-        js_code = transform_module_to_cjs(&js_code, Path::new("."), &mut dummy_deps);
+        js_code = transform_module_to_cjs(&js_code, Path::new("."), None, &mut dummy_deps);
         if js_code.contains("exports.default = __slice_default;") {
             use std::hash::{Hash, Hasher};
             let mut hasher = rustc_hash::FxHasher::default();

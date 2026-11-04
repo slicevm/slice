@@ -3,8 +3,8 @@
 
 use crate::esm_cjs_linker::{
     analyze_module_used_exports, canonical_mod_id, collect_eager_module_indices,
-    inline_cold_method_requires_ast, prune_and_minify_cjs_module_ast, transform_module_to_cjs,
-    UsedExports,
+    has_top_level_await, inline_cold_method_requires_ast, prune_and_minify_cjs_module_ast,
+    transform_module_to_cjs, UsedExports,
 };
 use crate::oxc_compiler::{source_contains_jsx, strip_typescript_raw};
 use anyhow::{bail, Context, Result};
@@ -288,11 +288,258 @@ fn split_bare_package_specifier(spec: &str) -> (&str, String) {
     }
 }
 
+fn strip_jsonc(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut no_comments = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let mut in_str = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            no_comments.push(b);
+            if b == b'\\' && i + 1 < bytes.len() {
+                no_comments.push(bytes[i + 1]);
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_str = true;
+            no_comments.push(b);
+            i += 1;
+            continue;
+        }
+        if b == b'/' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'/' {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            } else if bytes[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+        }
+        no_comments.push(b);
+        i += 1;
+    }
+
+    let mut out = Vec::with_capacity(no_comments.len());
+    let mut j = 0;
+    let mut in_str2 = false;
+    while j < no_comments.len() {
+        let b = no_comments[j];
+        if in_str2 {
+            out.push(b);
+            if b == b'\\' && j + 1 < no_comments.len() {
+                out.push(no_comments[j + 1]);
+                j += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_str2 = false;
+            }
+            j += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_str2 = true;
+            out.push(b);
+            j += 1;
+            continue;
+        }
+        if b == b',' {
+            let mut k = j + 1;
+            while k < no_comments.len() && no_comments[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            if k < no_comments.len() && (no_comments[k] == b'}' || no_comments[k] == b']') {
+                j += 1;
+                continue;
+            }
+        }
+        out.push(b);
+        j += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn resolve_package_imports(
+    pkg_dir: &Path,
+    imports: &serde_json::Value,
+    spec: &str,
+) -> Option<PathBuf> {
+    let serde_json::Value::Object(map) = imports else {
+        return None;
+    };
+    if let Some(exact) = map.get(spec) {
+        if let Some(found) = resolve_exports_target(pkg_dir, exact, None) {
+            return Some(found);
+        }
+    }
+    let mut pattern_keys: Vec<(&String, &serde_json::Value)> =
+        map.iter().filter(|(k, _)| k.contains('*')).collect();
+    pattern_keys.sort_by_key(|(b, _)| std::cmp::Reverse(b.len()));
+    for (pat_key, target_val) in pattern_keys {
+        if let Some((prefix, suffix)) = pat_key.split_once('*') {
+            if spec.starts_with(prefix)
+                && spec.ends_with(suffix)
+                && spec.len() >= prefix.len() + suffix.len()
+            {
+                let matched = &spec[prefix.len()..spec.len() - suffix.len()];
+                if let Some(found) = resolve_exports_target(pkg_dir, target_val, Some(matched)) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn load_tsconfig_value(config_path: &Path) -> Option<serde_json::Value> {
+    let raw = std::fs::read_to_string(config_path).ok()?;
+    let cleaned = strip_jsonc(&raw);
+    let mut val = serde_json::from_str::<serde_json::Value>(&cleaned).ok()?;
+    if let Some(ext_str) = val
+        .get("extends")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+    {
+        if let Some(parent_dir) = config_path.parent() {
+            let mut ext_path = parent_dir.join(&ext_str);
+            if !ext_path.is_file() && ext_path.extension().is_none() {
+                ext_path.set_extension("json");
+            }
+            if let Some(parent_val) = load_tsconfig_value(&ext_path) {
+                if let Some(parent_co) = parent_val
+                    .get("compilerOptions")
+                    .and_then(|c| c.as_object())
+                {
+                    let co_entry = val
+                        .as_object_mut()?
+                        .entry("compilerOptions")
+                        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                    if let Some(co_map) = co_entry.as_object_mut() {
+                        for (k, v) in parent_co {
+                            co_map.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Some(val)
+}
+
+fn resolve_tsconfig_paths(from_dir: &Path, spec: &str) -> Option<PathBuf> {
+    let mut curr = Some(from_dir);
+    while let Some(dir) = curr {
+        for cfg_name in ["tsconfig.json", "jsconfig.json"] {
+            let cfg_path = dir.join(cfg_name);
+            if !cfg_path.is_file() {
+                continue;
+            }
+            let Some(val) = load_tsconfig_value(&cfg_path) else {
+                continue;
+            };
+            let Some(co) = val.get("compilerOptions").and_then(|v| v.as_object()) else {
+                continue;
+            };
+            let has_explicit_base_url = co.get("baseUrl").and_then(|v| v.as_str()).is_some();
+            let base_url_dir = match co.get("baseUrl").and_then(|v| v.as_str()) {
+                Some(b) => dir.join(b),
+                None => dir.to_path_buf(),
+            };
+            if let Some(paths_map) = co.get("paths").and_then(|v| v.as_object()) {
+                if let Some(exact_targets) = paths_map.get(spec).and_then(|v| v.as_array()) {
+                    for t in exact_targets.iter().filter_map(|x| x.as_str()) {
+                        let rel = t.strip_prefix("./").unwrap_or(t);
+                        if let Some(found) = try_file_with_extensions(&base_url_dir.join(rel)) {
+                            return Some(found);
+                        }
+                    }
+                }
+                let mut pattern_keys: Vec<(&String, &serde_json::Value)> =
+                    paths_map.iter().filter(|(k, _)| k.contains('*')).collect();
+                pattern_keys.sort_by_key(|(b, _)| std::cmp::Reverse(b.len()));
+                for (pat_key, target_val) in pattern_keys {
+                    let Some((prefix, suffix)) = pat_key.split_once('*') else {
+                        continue;
+                    };
+                    if spec.starts_with(prefix)
+                        && spec.ends_with(suffix)
+                        && spec.len() >= prefix.len() + suffix.len()
+                    {
+                        let matched = &spec[prefix.len()..spec.len() - suffix.len()];
+                        if let Some(targets) = target_val.as_array() {
+                            for t in targets.iter().filter_map(|x| x.as_str()) {
+                                let expanded = t.replace('*', matched);
+                                let rel = expanded.strip_prefix("./").unwrap_or(&expanded);
+                                if let Some(found) =
+                                    try_file_with_extensions(&base_url_dir.join(rel))
+                                {
+                                    return Some(found);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if has_explicit_base_url {
+                if let Some(found) = try_file_with_extensions(&base_url_dir.join(spec)) {
+                    return Some(found);
+                }
+            }
+        }
+        curr = dir.parent();
+    }
+    None
+}
+
 pub(crate) fn resolve_module_specifier(from_dir: &Path, spec: &str) -> Option<PathBuf> {
     if spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/') {
         return try_file_with_extensions(&from_dir.join(spec));
     }
 
+    // 1. `package.json` Subpath `"imports"` (`#...`)
+    if spec.starts_with('#') {
+        let mut curr = Some(from_dir);
+        while let Some(dir) = curr {
+            let pkg_json = dir.join("package.json");
+            if pkg_json.is_file() {
+                if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if let Some(imports) = val.get("imports") {
+                            if let Some(found) = resolve_package_imports(dir, imports, spec) {
+                                return Some(found);
+                            }
+                        }
+                    }
+                }
+            }
+            curr = dir.parent();
+        }
+        return None;
+    }
+
+    // 2. `tsconfig.json` / `jsconfig.json` `"paths"` & `"baseUrl"` (`@/*`, `~/*`, etc.)
+    if !from_dir.to_string_lossy().contains("node_modules") {
+        if let Some(found) = resolve_tsconfig_paths(from_dir, spec) {
+            return Some(found);
+        }
+    }
+
+    // 3. `node_modules` bare package & conditional `"exports"` resolution
     let (pkg_name, subpath) = split_bare_package_specifier(spec);
 
     let mut curr = Some(from_dir);
@@ -323,6 +570,70 @@ pub(crate) fn resolve_module_specifier(from_dir: &Path, spec: &str) -> Option<Pa
     None
 }
 
+fn compute_source_line_map(raw_src: &str, cjs_body: &str) -> String {
+    let orig_lines: Vec<&str> = raw_src.lines().collect();
+    if orig_lines.is_empty() {
+        return String::new();
+    }
+    let mut mapped: Vec<String> = Vec::new();
+    let mut search_cursor = 0usize;
+
+    for raw_cjs_line in cjs_body.lines() {
+        let trimmed = raw_cjs_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        let probe_raw = if let Some(rest) = trimmed.strip_prefix("const __slice_default = ") {
+            rest.trim_end_matches(';').trim()
+        } else {
+            trimmed.trim_end_matches(';').trim()
+        };
+
+        if probe_raw.starts_with("exports.")
+            || probe_raw.starts_with("module.exports = __slice_default")
+            || probe_raw.starts_with("var __filename =")
+        {
+            let fallback_line = (search_cursor + 1).min(orig_lines.len()).max(1);
+            mapped.push(fallback_line.to_string());
+            continue;
+        }
+
+        let rhs_probe = probe_raw
+            .split_once(" = ")
+            .map(|(_, r)| r.trim())
+            .filter(|r| r.len() >= 4);
+
+        let mut found_idx: Option<usize> = None;
+        for (offset, orig_line) in orig_lines[search_cursor..].iter().enumerate() {
+            if orig_line.contains(probe_raw)
+                || rhs_probe.is_some_and(|rp| !rp.starts_with("require(") && orig_line.contains(rp))
+            {
+                found_idx = Some(search_cursor + offset);
+                break;
+            }
+        }
+        if found_idx.is_none() {
+            for (idx, orig_line) in orig_lines.iter().enumerate() {
+                if orig_line.contains(probe_raw)
+                    || rhs_probe
+                        .is_some_and(|rp| !rp.starts_with("require(") && orig_line.contains(rp))
+                {
+                    found_idx = Some(idx);
+                    break;
+                }
+            }
+        }
+        if let Some(idx) = found_idx {
+            search_cursor = idx;
+            mapped.push((idx + 1).to_string());
+        } else {
+            let next_guess = (search_cursor + 1).min(orig_lines.len()).max(1);
+            mapped.push(next_guess.to_string());
+        }
+    }
+    mapped.join(",")
+}
+
 /// Bundles a TypeScript/JavaScript/JSX/TSX entrypoint and its entire transitive dependency graph
 /// (including relative `.ts`/`.tsx`/`.js`/`.jsx` files AND `node_modules` CommonJS/ESM packages)
 /// into a single zero-stat self-contained ECMAScript payload.
@@ -338,6 +649,11 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     // Fast path for single-file scripts with no imports/exports/requires/classes/JSX/WinterTC bridge
     if !is_jsx_entry
         && !raw.contains("import ")
+        && !raw.contains("import(")
+        && !raw.contains("import.meta")
+        && !raw.contains("__dirname")
+        && !raw.contains("__filename")
+        && !raw.contains("throw ")
         && !raw.contains("require(")
         && !raw.contains("export ")
         && !raw.contains("class ")
@@ -397,10 +713,22 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         let js_stripped = strip_typescript_raw(&raw_src, is_ts);
         let from_dir = path.parent().unwrap_or_else(|| Path::new("."));
         let mut child_deps = Vec::new();
-        let mut cjs_body = transform_module_to_cjs(&js_stripped, from_dir, &mut child_deps);
+        let mut cjs_body =
+            transform_module_to_cjs(&js_stripped, from_dir, Some(path), &mut child_deps);
+        if cjs_body.contains("__dirname") || cjs_body.contains("__filename") {
+            let dir_id = canonical_mod_id(from_dir);
+            cjs_body = format!(
+                "var __filename = {:?}, __dirname = {:?};\n{}",
+                mod_id, dir_id, cjs_body
+            );
+        }
         if !mod_id.contains("/node_modules/") {
             let short_label = short_source_label(path);
-            cjs_body = format!("// #slice-source: {}|{}\n{}", short_label, mod_id, cjs_body);
+            let line_map = compute_source_line_map(&raw_src, &cjs_body);
+            cjs_body = format!(
+                "// #slice-source: {}|{}|{}\n{}",
+                short_label, mod_id, line_map, cjs_body
+            );
         }
 
         for dep_path in child_deps {
@@ -425,16 +753,21 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         let (_, entry_body) = visited_order.pop().unwrap();
         let direct_body = crate::oxc_compiler::rewrite_cjs_require(&entry_body);
         let rc_key = compute_bundle_rc_key(&direct_body);
+        let fn_kw = if has_top_level_await(&direct_body) {
+            "async function()"
+        } else {
+            "function()"
+        };
         let mut bundle = String::with_capacity(direct_body.len() + 384);
         if direct_body.contains("exports.default = __slice_default;") {
             bundle.push_str(&format!(
-                "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{}\"] = function() {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n__h = exports.default || module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n",
-                rc_key, rc_key, rc_key, direct_body
+                "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{}\"] = {} {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n__h = exports.default || module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n",
+                rc_key, rc_key, rc_key, fn_kw, direct_body
             ));
         } else {
             bundle.push_str(&format!(
-                "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"] || (__rc[\"{}\"] = function() {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n}});\n__run();\n",
-                rc_key, rc_key, rc_key, direct_body
+                "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"] || (__rc[\"{}\"] = {} {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n}});\n__run();\n",
+                rc_key, rc_key, rc_key, fn_kw, direct_body
             ));
         }
         return Ok(bundle);
@@ -582,14 +915,19 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     bundle.push_str("    return m.exports;\n");
     bundle.push_str("}\n");
     bundle.push_str(&modules_code);
+    let fn_kw = if has_top_level_await(&entry_body) {
+        "async function()"
+    } else {
+        "function()"
+    };
     if entry_body.contains("exports.default = __slice_default;") {
         bundle.push_str("var __h = null;\n");
-        bundle.push_str(&format!("__run = __rc[\"{}\"] = function() {{\n", rc_key));
+        bundle.push_str(&format!("__run = __rc[\"{}\"] = {} {{\n", rc_key, fn_kw));
         bundle.push_str("if (!__h) {\nvar require = __slice_require, exports = {}, module = { exports: exports };\n");
         bundle.push_str(&entry_body);
         bundle.push_str("\n__h = exports.default || module.exports;\n}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n};\n}\n__run();\n");
     } else {
-        bundle.push_str(&format!("__run = __rc[\"{}\"] = function() {{\n", rc_key));
+        bundle.push_str(&format!("__run = __rc[\"{}\"] = {} {{\n", rc_key, fn_kw));
         bundle.push_str(
             "var require = __slice_require, exports = {}, module = { exports: exports };\n",
         );
@@ -616,6 +954,24 @@ fn short_source_label(path: &Path) -> String {
     fname.to_string()
 }
 
+fn parse_slice_source_marker(rest: &str) -> (&str, &str, &str) {
+    let mut parts = rest.splitn(3, '|');
+    let short = parts.next().unwrap_or(rest).trim();
+    let full = parts.next().unwrap_or(short).trim();
+    let line_map = parts.next().unwrap_or("").trim();
+    (short, full, line_map)
+}
+
+fn lookup_embedded_line_map(line_map: &str, rel_idx_0: usize) -> Option<usize> {
+    if line_map.is_empty() {
+        return None;
+    }
+    line_map
+        .split(',')
+        .nth(rel_idx_0)
+        .and_then(|s| s.trim().parse::<usize>().ok())
+}
+
 /// Maps an uncaught JS error or bundled line reference back to its original TypeScript/JavaScript
 /// source file and 1-based line number (`<short_file>:<line>`) using `// #slice-source:` markers.
 pub fn map_bundled_error_location(bundled_js: &str, error_msg: &str) -> String {
@@ -635,6 +991,7 @@ pub fn map_bundled_error_location(bundled_js: &str, error_msg: &str) -> String {
     if let Some(b_line) = explicit_line {
         let mut active_short = "";
         let mut active_full = "";
+        let mut active_line_map = "";
         let mut marker_line_idx = 0usize;
         for (idx, line) in lines.iter().enumerate() {
             let line_1 = idx + 1;
@@ -642,14 +999,17 @@ pub fn map_bundled_error_location(bundled_js: &str, error_msg: &str) -> String {
                 break;
             }
             if let Some(rest) = line.trim().strip_prefix("// #slice-source: ") {
-                let (s, f) = rest.split_once('|').unwrap_or((rest, rest));
-                active_short = s.trim();
-                active_full = f.trim();
+                let (s, f, lm) = parse_slice_source_marker(rest);
+                active_short = s;
+                active_full = f;
+                active_line_map = lm;
                 marker_line_idx = line_1;
             }
         }
         if !active_short.is_empty() && b_line > marker_line_idx {
-            let mut resolved_line = b_line - marker_line_idx;
+            let rel_idx_0 = (b_line - marker_line_idx).saturating_sub(1);
+            let mut resolved_line =
+                lookup_embedded_line_map(active_line_map, rel_idx_0).unwrap_or(b_line - marker_line_idx);
             if let Some(stmt_text) = lines.get(b_line - 1).map(|s| s.trim()) {
                 if !stmt_text.is_empty() {
                     if let Ok(orig_src) = std::fs::read_to_string(active_full) {
@@ -679,18 +1039,22 @@ pub fn map_bundled_error_location(bundled_js: &str, error_msg: &str) -> String {
     if !core_msg.is_empty() {
         let mut active_short = "";
         let mut active_full = "";
+        let mut active_line_map = "";
         let mut marker_line_idx = 0usize;
         for (idx, line) in lines.iter().enumerate() {
             let line_1 = idx + 1;
             if let Some(rest) = line.trim().strip_prefix("// #slice-source: ") {
-                let (s, f) = rest.split_once('|').unwrap_or((rest, rest));
-                active_short = s.trim();
-                active_full = f.trim();
+                let (s, f, lm) = parse_slice_source_marker(rest);
+                active_short = s;
+                active_full = f;
+                active_line_map = lm;
                 marker_line_idx = line_1;
                 continue;
             }
             if !active_short.is_empty() && line.contains(core_msg) {
-                let mut resolved_line = line_1 - marker_line_idx;
+                let rel_idx_0 = (line_1 - marker_line_idx).saturating_sub(1);
+                let mut resolved_line = lookup_embedded_line_map(active_line_map, rel_idx_0)
+                    .unwrap_or(line_1 - marker_line_idx);
                 if let Ok(orig_src) = std::fs::read_to_string(active_full) {
                     if let Some((orig_idx, _)) = orig_src
                         .lines()

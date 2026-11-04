@@ -72,10 +72,11 @@ pub(crate) fn normalize_builtin_specifier(spec: &str) -> String {
 
 #[inline]
 pub(crate) fn canonical_mod_id(path: &Path) -> String {
-    std::fs::canonicalize(path)
+    let s = std::fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
-        .replace('\\', "/")
+        .replace('\\', "/");
+    s.strip_prefix("//?/").map(|r| r.to_string()).unwrap_or(s)
 }
 
 fn collapse_multiline_imports_exports(code: &str) -> String {
@@ -239,9 +240,9 @@ fn collect_binding_pattern_names(
     }
 }
 
-fn walk_ast_call_expressions<'a, F>(program: &'a oxc::ast::ast::Program<'a>, visit_call: &mut F)
+fn walk_ast_expressions<'a, F>(program: &'a oxc::ast::ast::Program<'a>, visit_expr: &mut F)
 where
-    F: FnMut(&'a oxc::ast::ast::CallExpression<'a>),
+    F: FnMut(&'a oxc::ast::ast::Expression<'a>),
 {
     use oxc::ast::ast::{
         BindingPattern, ClassElement, Declaration, ExportDefaultDeclarationKind, Expression,
@@ -250,7 +251,7 @@ where
 
     fn walk_pat<'a, F>(pat: &'a BindingPattern<'a>, visit: &mut F)
     where
-        F: FnMut(&'a oxc::ast::ast::CallExpression<'a>),
+        F: FnMut(&'a oxc::ast::ast::Expression<'a>),
     {
         match pat {
             BindingPattern::ObjectPattern(obj) => {
@@ -279,7 +280,7 @@ where
 
     fn walk_class<'a, F>(cls: &'a oxc::ast::ast::Class<'a>, visit: &mut F)
     where
-        F: FnMut(&'a oxc::ast::ast::CallExpression<'a>),
+        F: FnMut(&'a oxc::ast::ast::Expression<'a>),
     {
         for el in &cls.body.body {
             match el {
@@ -310,17 +311,20 @@ where
 
     fn walk_expr<'a, F>(expr: &'a Expression<'a>, visit: &mut F)
     where
-        F: FnMut(&'a oxc::ast::ast::CallExpression<'a>),
+        F: FnMut(&'a oxc::ast::ast::Expression<'a>),
     {
+        visit(expr);
         match expr {
             Expression::CallExpression(call) => {
-                visit(call);
                 walk_expr(&call.callee, visit);
                 for arg in &call.arguments {
                     if let Some(e) = arg.as_expression() {
                         walk_expr(e, visit);
                     }
                 }
+            }
+            Expression::ImportExpression(imp) => {
+                walk_expr(&imp.source, visit);
             }
             Expression::NewExpression(ne) => {
                 walk_expr(&ne.callee, visit);
@@ -424,7 +428,6 @@ where
             }
             Expression::ChainExpression(ch) => {
                 if let oxc::ast::ast::ChainElement::CallExpression(call) = &ch.expression {
-                    visit(call);
                     walk_expr(&call.callee, visit);
                     for arg in &call.arguments {
                         if let Some(e) = arg.as_expression() {
@@ -439,7 +442,7 @@ where
 
     fn walk_decl<'a, F>(decl: &'a Declaration<'a>, visit: &mut F)
     where
-        F: FnMut(&'a oxc::ast::ast::CallExpression<'a>),
+        F: FnMut(&'a oxc::ast::ast::Expression<'a>),
     {
         match decl {
             Declaration::VariableDeclaration(vd) => {
@@ -467,7 +470,7 @@ where
 
     fn walk_stmt<'a, F>(stmt: &'a Statement<'a>, visit: &mut F)
     where
-        F: FnMut(&'a oxc::ast::ast::CallExpression<'a>),
+        F: FnMut(&'a oxc::ast::ast::Expression<'a>),
     {
         match stmt {
             Statement::VariableDeclaration(vd) => {
@@ -601,8 +604,24 @@ where
     }
 
     for stmt in &program.body {
-        walk_stmt(stmt, visit_call);
+        walk_stmt(stmt, visit_expr);
     }
+}
+
+fn walk_ast_call_expressions<'a, F>(program: &'a oxc::ast::ast::Program<'a>, visit_call: &mut F)
+where
+    F: FnMut(&'a oxc::ast::ast::CallExpression<'a>),
+{
+    use oxc::ast::ast::{ChainElement, Expression};
+    walk_ast_expressions(program, &mut |expr| match expr {
+        Expression::CallExpression(call) => visit_call(call),
+        Expression::ChainExpression(ch) => {
+            if let ChainElement::CallExpression(call) = &ch.expression {
+                visit_call(call);
+            }
+        }
+        _ => {}
+    });
 }
 
 /// Rewrites `require("<spec>")` `CallExpression` string literal arguments via Oxc AST span
@@ -902,22 +921,29 @@ fn collect_require_edits_from_program(
     code: &str,
     program: &oxc::ast::ast::Program<'_>,
     from_dir: &Path,
+    module_path: Option<&Path>,
     deps_out: &mut Vec<PathBuf>,
 ) -> Vec<(usize, usize, String)> {
-    use oxc::ast::ast::{Argument, Expression};
+    use oxc::ast::ast::{Argument, ChainElement, Expression};
+    use oxc::span::GetSpan;
 
-    if !code.contains("require(") {
+    if !code.contains("require(") && !code.contains("import(") && !code.contains("import.meta") {
         return Vec::new();
     }
 
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
-    walk_ast_call_expressions(program, &mut |call| {
+    fn handle_call(
+        call: &oxc::ast::ast::CallExpression<'_>,
+        from_dir: &Path,
+        deps_out: &mut Vec<PathBuf>,
+        edits: &mut Vec<(usize, usize, String)>,
+    ) {
         let Expression::Identifier(callee) = call.callee.without_parentheses() else {
             return;
         };
         if callee.name.as_str() != "require" || call.arguments.len() != 1 {
             return;
-        }
+        };
         let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
             return;
         };
@@ -938,9 +964,184 @@ fn collect_require_edits_from_program(
                 format!("{:?}", resolved),
             ));
         }
+    }
+
+    walk_ast_expressions(program, &mut |expr| match expr {
+        Expression::CallExpression(call) => handle_call(call, from_dir, deps_out, &mut edits),
+        Expression::ChainExpression(ch) => {
+            if let ChainElement::CallExpression(call) = &ch.expression {
+                handle_call(call, from_dir, deps_out, &mut edits);
+            }
+        }
+        Expression::ImportExpression(imp_expr) => {
+            if let Expression::StringLiteral(str_lit) = imp_expr.source.without_parentheses() {
+                let spec = str_lit.value.as_str();
+                let resolved_id = resolve_spec_and_record(spec, from_dir, deps_out);
+                edits.push((
+                    imp_expr.span.start as usize,
+                    imp_expr.span.end as usize,
+                    format!(
+                        "Promise.resolve().then(function() {{ var __m = require({:?}); return (__m && __m.__esModule) ? __m : Object.assign({{ default: __m }}, __m); }})",
+                        resolved_id
+                    ),
+                ));
+            }
+        }
+        other
+            if !matches!(
+                other,
+                Expression::StringLiteral(_)
+                    | Expression::TemplateLiteral(_)
+                    | Expression::ParenthesizedExpression(_)
+            ) =>
+        {
+            let sp = other.span();
+            let s = sp.start as usize;
+            let e = sp.end as usize;
+            if e.saturating_sub(s) == 11 && code.get(s..e) == Some("import.meta") {
+                let dir_str = canonical_mod_id(from_dir);
+                let file_str = module_path
+                    .map(canonical_mod_id)
+                    .unwrap_or_else(|| format!("{}/index.ts", dir_str));
+                let file_url = if file_str.starts_with('/') {
+                    format!("file://{}", file_str)
+                } else {
+                    format!("file:///{}", file_str)
+                };
+                edits.push((
+                    s,
+                    e,
+                    format!(
+                        "({{ url: {:?}, dirname: {:?}, filename: {:?}, env: (globalThis.process ? globalThis.process.env : {{}}) }})",
+                        file_url, dir_str, file_str
+                    ),
+                ));
+            }
+        }
+        _ => {}
     });
     edits.sort_by_key(|e| e.0);
     edits
+}
+
+/// Detects via Oxc AST whether `code` contains any top-level `await` expression or `for await`
+/// loop outside nested function/method scopes.
+pub(crate) fn has_top_level_await(code: &str) -> bool {
+    use oxc::ast::ast::{Declaration, Expression, ForStatementInit, ObjectPropertyKind, Statement};
+
+    if !code.contains("await ") && !code.contains("await(") {
+        return false;
+    }
+
+    let allocator = oxc::allocator::Allocator::default();
+    let source_type = oxc::span::SourceType::ts().with_module(true);
+    let parser_ret = oxc::parser::Parser::new(&allocator, code, source_type).parse();
+    if !parser_ret.diagnostics.is_empty() {
+        return false;
+    }
+
+    fn expr_has_tla(expr: &Expression<'_>) -> bool {
+        match expr {
+            Expression::AwaitExpression(_) => true,
+            Expression::CallExpression(c) => {
+                expr_has_tla(&c.callee)
+                    || c.arguments
+                        .iter()
+                        .any(|a| a.as_expression().is_some_and(expr_has_tla))
+            }
+            Expression::NewExpression(n) => {
+                expr_has_tla(&n.callee)
+                    || n.arguments
+                        .iter()
+                        .any(|a| a.as_expression().is_some_and(expr_has_tla))
+            }
+            Expression::StaticMemberExpression(m) => expr_has_tla(&m.object),
+            Expression::ComputedMemberExpression(m) => {
+                expr_has_tla(&m.object) || expr_has_tla(&m.expression)
+            }
+            Expression::BinaryExpression(b) => expr_has_tla(&b.left) || expr_has_tla(&b.right),
+            Expression::LogicalExpression(l) => expr_has_tla(&l.left) || expr_has_tla(&l.right),
+            Expression::UnaryExpression(u) => expr_has_tla(&u.argument),
+            Expression::ConditionalExpression(c) => {
+                expr_has_tla(&c.test) || expr_has_tla(&c.consequent) || expr_has_tla(&c.alternate)
+            }
+            Expression::AssignmentExpression(a) => expr_has_tla(&a.right),
+            Expression::SequenceExpression(s) => s.expressions.iter().any(expr_has_tla),
+            Expression::ParenthesizedExpression(p) => expr_has_tla(&p.expression),
+            Expression::ArrayExpression(arr) => arr.elements.iter().any(|el| {
+                if let Some(e) = el.as_expression() {
+                    expr_has_tla(e)
+                } else if let oxc::ast::ast::ArrayExpressionElement::SpreadElement(sp) = el {
+                    expr_has_tla(&sp.argument)
+                } else {
+                    false
+                }
+            }),
+            Expression::ObjectExpression(obj) => obj.properties.iter().any(|prop| match prop {
+                ObjectPropertyKind::ObjectProperty(p) => {
+                    (p.computed && p.key.as_expression().is_some_and(expr_has_tla))
+                        || expr_has_tla(&p.value)
+                }
+                ObjectPropertyKind::SpreadProperty(sp) => expr_has_tla(&sp.argument),
+            }),
+            Expression::TemplateLiteral(t) => t.expressions.iter().any(expr_has_tla),
+            _ => false,
+        }
+    }
+
+    fn stmt_has_tla(stmt: &Statement<'_>) -> bool {
+        match stmt {
+            Statement::VariableDeclaration(vd) => vd
+                .declarations
+                .iter()
+                .any(|d| d.init.as_ref().is_some_and(expr_has_tla)),
+            Statement::ExpressionStatement(es) => expr_has_tla(&es.expression),
+            Statement::BlockStatement(bs) => bs.body.iter().any(stmt_has_tla),
+            Statement::IfStatement(ifs) => {
+                expr_has_tla(&ifs.test)
+                    || stmt_has_tla(&ifs.consequent)
+                    || ifs.alternate.as_ref().is_some_and(stmt_has_tla)
+            }
+            Statement::ForOfStatement(fo) => {
+                fo.r#await || expr_has_tla(&fo.right) || stmt_has_tla(&fo.body)
+            }
+            Statement::ForStatement(fs) => {
+                let init_tla = fs.init.as_ref().is_some_and(|i| match i {
+                    ForStatementInit::VariableDeclaration(vd) => vd
+                        .declarations
+                        .iter()
+                        .any(|d| d.init.as_ref().is_some_and(expr_has_tla)),
+                    _ => i.as_expression().is_some_and(expr_has_tla),
+                });
+                init_tla
+                    || fs.test.as_ref().is_some_and(expr_has_tla)
+                    || fs.update.as_ref().is_some_and(expr_has_tla)
+                    || stmt_has_tla(&fs.body)
+            }
+            Statement::WhileStatement(ws) => expr_has_tla(&ws.test) || stmt_has_tla(&ws.body),
+            Statement::TryStatement(ts) => {
+                ts.block.body.iter().any(stmt_has_tla)
+                    || ts
+                        .handler
+                        .as_ref()
+                        .is_some_and(|h| h.body.body.iter().any(stmt_has_tla))
+                    || ts
+                        .finalizer
+                        .as_ref()
+                        .is_some_and(|f| f.body.iter().any(stmt_has_tla))
+            }
+            Statement::ExportDeclaration(exp) => match &exp.declaration {
+                Declaration::VariableDeclaration(vd) => vd
+                    .declarations
+                    .iter()
+                    .any(|d| d.init.as_ref().is_some_and(expr_has_tla)),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    parser_ret.program.body.iter().any(stmt_has_tla)
 }
 
 fn slice_with_edits(
@@ -1032,6 +1233,7 @@ fn apply_cjs_lazy_barrel_getters(mut body_lines: Vec<String>) -> Vec<String> {
 fn try_transform_esm_to_cjs_ast(
     js_code: &str,
     from_dir: &Path,
+    module_path: Option<&Path>,
     deps_out: &mut Vec<PathBuf>,
 ) -> Option<String> {
     use oxc::ast::ast::{
@@ -1046,9 +1248,14 @@ fn try_transform_esm_to_cjs_ast(
         return None;
     }
 
-    // Single-pass `require(...)` AST edit collection across the entire parsed program:
-    let req_edits =
-        collect_require_edits_from_program(js_code, &parser_ret.program, from_dir, deps_out);
+    // Single-pass `require(...)`, dynamic `import(...)`, and `import.meta` AST edit collection:
+    let req_edits = collect_require_edits_from_program(
+        js_code,
+        &parser_ret.program,
+        from_dir,
+        module_path,
+        deps_out,
+    );
 
     let has_esm_stmt = parser_ret.program.body.iter().any(|stmt| {
         matches!(
@@ -1062,16 +1269,13 @@ fn try_transform_esm_to_cjs_ast(
         )
     });
     if !has_esm_stmt {
-        if !js_code.contains("import ") && !js_code.contains("export ") {
-            let rewritten_cjs = slice_with_edits(js_code, 0, js_code.len(), &req_edits);
-            let body_lines: Vec<String> = rewritten_cjs
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| l.to_string())
-                .collect();
-            return Some(apply_cjs_lazy_barrel_getters(body_lines).join("\n"));
-        }
-        return None;
+        let rewritten_cjs = slice_with_edits(js_code, 0, js_code.len(), &req_edits);
+        let body_lines: Vec<String> = rewritten_cjs
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
+            .collect();
+        return Some(apply_cjs_lazy_barrel_getters(body_lines).join("\n"));
     }
 
     let mut body_lines = Vec::with_capacity(parser_ret.program.body.len() + 4);
@@ -1375,9 +1579,12 @@ fn try_transform_esm_to_cjs_ast(
 pub(crate) fn transform_module_to_cjs(
     js_code: &str,
     from_dir: &Path,
+    module_path: Option<&Path>,
     deps_out: &mut Vec<PathBuf>,
 ) -> String {
-    if let Some(ast_transformed) = try_transform_esm_to_cjs_ast(js_code, from_dir, deps_out) {
+    if let Some(ast_transformed) =
+        try_transform_esm_to_cjs_ast(js_code, from_dir, module_path, deps_out)
+    {
         return ast_transformed;
     }
 
