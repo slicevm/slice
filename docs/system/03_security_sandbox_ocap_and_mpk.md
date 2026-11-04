@@ -25,3 +25,4 @@ Every `SliceIsolate` executes inside a [`TenantCompartment`](file:///p:/opensour
    - Every operation deducts instruction fuel (`consume_fuel`) and tracks heap bytes (`alloc_memory`), preempting infinite `while (true) {}` loops in `< 10 us` (`SandboxViolation::CpuFuelExhausted`).
    - Before evaluating code in [`SliceIsolate::exec_boa_full_es_vm`](file:///p:/opensource/slice/crates/slice-engine/src/isolate.rs), Slice configures `realm.ctx.runtime_limits_mut().set_loop_iteration_limit(remaining_fuel)` and `set_recursion_limit(512)`, translating loop or call-stack exhaustion inside `Boa` directly into `SandboxViolation::CpuFuelExhausted`.
    - On Linux `x86_64`, [`HardwareProtectionDomain`](file:///p:/opensource/slice/crates/slice-sandbox/src/lib.rs) allocates hardware memory protection keys via `SYS_pkey_alloc` (syscall 330) and switches page permissions in `< 20` CPU cycles using the unprivileged `WRPKRU` instruction.
+

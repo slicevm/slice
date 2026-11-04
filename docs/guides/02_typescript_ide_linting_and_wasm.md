@@ -52,3 +52,4 @@ const exports = instance.exports as {
 };
 ```
 See [`tests/apps/23-wasm-crypto-and-simd-kernel`](file:///p:/opensource/slice/tests/apps/23-wasm-crypto-and-simd-kernel/src/index.ts) and [`tests/apps/24-tsx-ssr-and-wasm-edge-pipeline`](file:///p:/opensource/slice/tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/src/index.ts) for working examples.
+

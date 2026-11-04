@@ -61,3 +61,4 @@ slice compile . -o ./my-hono-bin
 ## 2. Building an `itty-router` + UnJS (`radix3`, `ufo`, `destr`, `ohash`) Edge Stack
 
 See [`tests/frameworks/01-hono-edge-microservice`](file:///p:/opensource/slice/tests/frameworks/01-hono-edge-microservice/src/index.ts) and [`tests/frameworks/02-itty-router-unjs-nitro-stack`](file:///p:/opensource/slice/tests/frameworks/02-itty-router-unjs-nitro-stack/src/index.ts) for complete, benchmarked reference implementations verified across Slice, Bun, Deno, and Node.js.
+

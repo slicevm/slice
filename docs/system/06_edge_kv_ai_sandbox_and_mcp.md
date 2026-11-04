@@ -52,3 +52,4 @@ This document covers Slice's 16-way sharded in-memory Edge KV (`Slice.kv`), zero
    - Automatically checkpoints and restores VFS + KV state around every `test()` block in `< 5 us`, warps virtual timer deadlines in `0 ns`, and provides first-class OCap security matchers (`.toViolate()`, `.toStayWithinFuel()`, `.toStayWithinMemory()`).
 4. **Built-In Model Context Protocol Server (`slice mcp`):**
    - Implemented in [`crates/slice-cli/src/mcp_and_repl.rs`](file:///p:/opensource/slice/crates/slice-cli/src/mcp_and_repl.rs), exposing `slice_eval_ts`, `slice_kv_get`, `slice_kv_set`, and `slice_checkpoint` over JSON-RPC 2.0 `stdio`.
+

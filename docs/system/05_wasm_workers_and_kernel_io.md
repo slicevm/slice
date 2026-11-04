@@ -44,3 +44,4 @@ Implemented in [`crates/slice-engine/src/workers.rs`](file:///p:/opensource/slic
 
 ### 3.2 OS-Native Kernel Event File Watcher ([`OsNativeFileWatcher`](file:///p:/opensource/slice/crates/slice-cli/src/config_and_watch.rs))
 - Uses the cross-platform `notify` (`v6.1`) crate (`inotify` on Linux, `ReadDirectoryChangesW` on Windows, `FSEvents`/`kqueue` on macOS) with a `15 ms` debounce window and automatic fingerprint fallback (`collect_watch_fingerprint`) to power zero-idle-CPU live reload (`4.92 ms` rebuild+rerun) across `slice run --watch`, `slice test --watch` / `--watch-once`, and `slice serve --watch`.
+
