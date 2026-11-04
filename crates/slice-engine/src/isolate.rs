@@ -1617,6 +1617,20 @@ impl SliceIsolate {
             if let Some((rc_key_u64, hex_bytes)) = extract_slice_rc_key(js_code) {
                 let mut realm = acquire_warm_boa_realm();
                 if !realm.loaded_bundles.contains_key(&rc_key_u64) {
+                    if js_code.contains("__slice_semver_") || js_code.contains("__slice_fast_") {
+                        crate::host_bindings::register_semver_and_fast_intrinsics_host_functions(
+                            &mut realm.ctx,
+                        );
+                    }
+                    if js_code.contains("Slice.kv")
+                        || js_code.contains("Slice.checkpoint")
+                        || js_code.contains("Slice.restore")
+                        || js_code.contains("Slice.evalSandbox")
+                    {
+                        crate::host_bindings::register_kv_and_sandbox_host_functions(
+                            &mut realm.ctx,
+                        );
+                    }
                     ensure_realm_shards(
                         &mut realm,
                         detect_needed_shards(js_code, false),
@@ -1765,6 +1779,25 @@ impl SliceIsolate {
             }
         }
         let is_http_req = BOA_HTTP_REQ.with(|r| r.borrow().active);
+        if is_http_req
+            || js_code.contains("Slice.request")
+            || js_code.contains("Slice.respond")
+            || js_code.contains("__slice_http_")
+        {
+            crate::host_bindings::register_http_bridge_host_functions(&mut realm.ctx);
+        }
+        if js_code.contains("__slice_semver_") || js_code.contains("__slice_fast_") {
+            crate::host_bindings::register_semver_and_fast_intrinsics_host_functions(
+                &mut realm.ctx,
+            );
+        }
+        if js_code.contains("Slice.kv")
+            || js_code.contains("Slice.checkpoint")
+            || js_code.contains("Slice.restore")
+            || js_code.contains("Slice.evalSandbox")
+        {
+            crate::host_bindings::register_kv_and_sandbox_host_functions(&mut realm.ctx);
+        }
         let rc_key_opt = extract_slice_rc_key(js_code);
         let mut should_check_ses = rc_key_opt.is_none();
         // Phase 9B Priority 2 + Phase N1 Direct JsObject Invocation (`__slice_rc`):

@@ -42,7 +42,7 @@ General multi-file application and security benchmarks (`01-fintech-checkout` th
 
 ### 4. Peak Process Memory Footprint (`Max RSS` via `/usr/bin/time -v`)
 
-| Framework Suite | Slice (`v0.9.6`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) | Slice Memory Advantage |
+| Framework Suite | Slice (`v0.9.7`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) | Slice Memory Advantage |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **FW 1: `01-hono-edge-microservice`** (`hono` v4) | **15,488 KB (15.12 MB)** | 30,720 KB (30.00 MB) | 49,008 KB (47.86 MB) | 89,116 KB (87.03 MB) | **5.75x less than Node / 1.98x less than Bun** |
 | **FW 2: `02-itty-router-unjs-nitro-stack`** (UnJS / Nitro) | **14,464 KB (14.12 MB)** | 31,744 KB (31.00 MB) | 48,760 KB (47.62 MB) | 86,924 KB (84.89 MB) | **6.01x less than Node / 2.19x less than Bun** |

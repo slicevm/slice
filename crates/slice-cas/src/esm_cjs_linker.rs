@@ -898,6 +898,137 @@ pub(crate) fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
     out
 }
 
+fn collect_require_edits_from_program(
+    code: &str,
+    program: &oxc::ast::ast::Program<'_>,
+    from_dir: &Path,
+    deps_out: &mut Vec<PathBuf>,
+) -> Vec<(usize, usize, String)> {
+    use oxc::ast::ast::{Argument, Expression};
+
+    if !code.contains("require(") {
+        return Vec::new();
+    }
+
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    walk_ast_call_expressions(program, &mut |call| {
+        let Expression::Identifier(callee) = call.callee.without_parentheses() else {
+            return;
+        };
+        if callee.name.as_str() != "require" || call.arguments.len() != 1 {
+            return;
+        }
+        let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
+            return;
+        };
+        let spec = str_lit.value.as_str();
+        let resolved_opt = if is_builtin_module(spec) || is_jsx_runtime_builtin(spec) {
+            Some(normalize_builtin_specifier(spec))
+        } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
+            let id = canonical_mod_id(&resolved_path);
+            deps_out.push(resolved_path);
+            Some(id)
+        } else {
+            None
+        };
+        if let Some(resolved) = resolved_opt {
+            edits.push((
+                str_lit.span.start as usize,
+                str_lit.span.end as usize,
+                format!("{:?}", resolved),
+            ));
+        }
+    });
+    edits.sort_by_key(|e| e.0);
+    edits
+}
+
+fn slice_with_edits(
+    code: &str,
+    span_start: usize,
+    span_end: usize,
+    edits: &[(usize, usize, String)],
+) -> String {
+    if edits.is_empty() {
+        return code[span_start..span_end].to_string();
+    }
+    let mut out = String::with_capacity((span_end - span_start) + 32);
+    let mut cursor = span_start;
+    for (s, e, rep) in edits {
+        if *e <= span_start {
+            continue;
+        }
+        if *s >= span_end {
+            break;
+        }
+        if *s >= cursor && *e <= span_end {
+            out.push_str(&code[cursor..*s]);
+            out.push_str(rep);
+            cursor = *e;
+        }
+    }
+    out.push_str(&code[cursor..span_end]);
+    out
+}
+
+fn apply_cjs_lazy_barrel_getters(mut body_lines: Vec<String>) -> Vec<String> {
+    if body_lines.iter().any(|l| l.trim() == "module.exports = {") {
+        let mut const_req_map: FxHashMap<String, (usize, String)> = FxHashMap::default();
+        for (idx, line) in body_lines.iter().enumerate() {
+            let t = line.trim().trim_end_matches(';');
+            if let Some(rest) = t.strip_prefix("const ") {
+                if let Some((ident, rhs)) = rest.split_once('=') {
+                    let ident = ident.trim();
+                    let rhs = rhs.trim();
+                    if rhs.starts_with("require(\"") && rhs.ends_with("\")") {
+                        const_req_map.insert(ident.to_string(), (idx, rhs.to_string()));
+                    }
+                }
+            }
+        }
+        let mut to_remove_indices = FxHashSet::default();
+        let mut shorthand_replacements: FxHashMap<usize, String> = FxHashMap::default();
+
+        for (idx, line) in body_lines.iter().enumerate() {
+            let t = line.trim();
+            if let Some(ident) = t.strip_suffix(',') {
+                let ident = ident.trim();
+                if let Some((decl_idx, req_expr)) = const_req_map.get(ident) {
+                    let used_elsewhere = body_lines.iter().enumerate().any(
+                        |(other_idx, other_line)| {
+                            other_idx != idx
+                                && other_idx != *decl_idx
+                                && other_line.contains(ident)
+                        },
+                    );
+                    if !used_elsewhere {
+                        to_remove_indices.insert(*decl_idx);
+                        shorthand_replacements.insert(
+                            idx,
+                            format!("  get {}() {{ return {}; }},", ident, req_expr),
+                        );
+                    }
+                }
+            }
+        }
+        if !shorthand_replacements.is_empty() || !to_remove_indices.is_empty() {
+            let mut optimized_lines = Vec::with_capacity(body_lines.len());
+            for (idx, line) in body_lines.into_iter().enumerate() {
+                if to_remove_indices.contains(&idx) {
+                    continue;
+                }
+                if let Some(rep) = shorthand_replacements.remove(&idx) {
+                    optimized_lines.push(rep);
+                } else {
+                    optimized_lines.push(line);
+                }
+            }
+            body_lines = optimized_lines;
+        }
+    }
+    body_lines
+}
+
 fn try_transform_esm_to_cjs_ast(
     js_code: &str,
     from_dir: &Path,
@@ -915,6 +1046,10 @@ fn try_transform_esm_to_cjs_ast(
         return None;
     }
 
+    // Single-pass `require(...)` AST edit collection across the entire parsed program:
+    let req_edits =
+        collect_require_edits_from_program(js_code, &parser_ret.program, from_dir, deps_out);
+
     let has_esm_stmt = parser_ret.program.body.iter().any(|stmt| {
         matches!(
             stmt,
@@ -927,6 +1062,15 @@ fn try_transform_esm_to_cjs_ast(
         )
     });
     if !has_esm_stmt {
+        if !js_code.contains("import ") && !js_code.contains("export ") {
+            let rewritten_cjs = slice_with_edits(js_code, 0, js_code.len(), &req_edits);
+            let body_lines: Vec<String> = rewritten_cjs
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.to_string())
+                .collect();
+            return Some(apply_cjs_lazy_barrel_getters(body_lines).join("\n"));
+        }
         return None;
     }
 
@@ -1052,10 +1196,11 @@ fn try_transform_esm_to_cjs_ast(
                 has_default_export = true;
                 match &exp_def.declaration {
                     ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                        let fn_src = rewrite_cjs_requires_ast(
-                            &js_code[func.span.start as usize..func.span.end as usize],
-                            from_dir,
-                            deps_out,
+                        let fn_src = slice_with_edits(
+                            js_code,
+                            func.span.start as usize,
+                            func.span.end as usize,
+                            &req_edits,
                         );
                         if let Some(id) = &func.id {
                             body_lines.push(fn_src);
@@ -1065,10 +1210,11 @@ fn try_transform_esm_to_cjs_ast(
                         }
                     }
                     ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
-                        let cls_src = rewrite_cjs_requires_ast(
-                            &js_code[cls.span.start as usize..cls.span.end as usize],
-                            from_dir,
-                            deps_out,
+                        let cls_src = slice_with_edits(
+                            js_code,
+                            cls.span.start as usize,
+                            cls.span.end as usize,
+                            &req_edits,
                         );
                         if let Some(id) = &cls.id {
                             body_lines.push(cls_src);
@@ -1082,10 +1228,11 @@ fn try_transform_esm_to_cjs_ast(
                     }
                     expr => {
                         let sp = expr.span();
-                        let expr_src = rewrite_cjs_requires_ast(
-                            &js_code[sp.start as usize..sp.end as usize],
-                            from_dir,
-                            deps_out,
+                        let expr_src = slice_with_edits(
+                            js_code,
+                            sp.start as usize,
+                            sp.end as usize,
+                            &req_edits,
                         );
                         body_lines.push(format!("const __slice_default = {};", expr_src));
                     }
@@ -1094,11 +1241,8 @@ fn try_transform_esm_to_cjs_ast(
             Statement::ExportDeclaration(exp_decl) => {
                 let decl = &exp_decl.declaration;
                 let sp = decl.span();
-                let decl_src = rewrite_cjs_requires_ast(
-                    &js_code[sp.start as usize..sp.end as usize],
-                    from_dir,
-                    deps_out,
-                );
+                let decl_src =
+                    slice_with_edits(js_code, sp.start as usize, sp.end as usize, &req_edits);
                 match decl {
                     Declaration::VariableDeclaration(vd) => {
                         body_lines.push(decl_src);
@@ -1185,8 +1329,12 @@ fn try_transform_esm_to_cjs_ast(
             }
             other => {
                 let sp = other.span();
-                let raw_stmt = &js_code[sp.start as usize..sp.end as usize];
-                body_lines.push(rewrite_cjs_requires_ast(raw_stmt, from_dir, deps_out));
+                body_lines.push(slice_with_edits(
+                    js_code,
+                    sp.start as usize,
+                    sp.end as usize,
+                    &req_edits,
+                ));
             }
         }
     }
@@ -1233,71 +1381,15 @@ pub(crate) fn transform_module_to_cjs(
         return ast_transformed;
     }
 
-    // Pure CommonJS module path: rewrite `require(...)` calls using Oxc AST CallExpression spans
+    // Fallback CommonJS module path if top-level parse failed
     if !js_code.contains("import ") && !js_code.contains("export ") {
         let rewritten_cjs = rewrite_cjs_requires_ast(js_code, from_dir, deps_out);
-        let mut body_lines: Vec<String> = rewritten_cjs
+        let body_lines: Vec<String> = rewritten_cjs
             .lines()
             .filter(|l| !l.trim().is_empty())
             .map(|l| l.to_string())
             .collect();
-        if body_lines.iter().any(|l| l.trim() == "module.exports = {") {
-            let mut const_req_map: FxHashMap<String, (usize, String)> = FxHashMap::default();
-            for (idx, line) in body_lines.iter().enumerate() {
-                let t = line.trim().trim_end_matches(';');
-                if let Some(rest) = t.strip_prefix("const ") {
-                    if let Some((ident, rhs)) = rest.split_once('=') {
-                        let ident = ident.trim();
-                        let rhs = rhs.trim();
-                        if rhs.starts_with("require(\"") && rhs.ends_with("\")") {
-                            const_req_map.insert(ident.to_string(), (idx, rhs.to_string()));
-                        }
-                    }
-                }
-            }
-            let mut to_remove_indices = FxHashSet::default();
-            let mut shorthand_replacements: FxHashMap<usize, String> = FxHashMap::default();
-
-            for (idx, line) in body_lines.iter().enumerate() {
-                let t = line.trim();
-                if let Some(ident) = t.strip_suffix(',') {
-                    let ident = ident.trim();
-                    if let Some((decl_idx, req_expr)) = const_req_map.get(ident) {
-                        let used_elsewhere =
-                            body_lines
-                                .iter()
-                                .enumerate()
-                                .any(|(other_idx, other_line)| {
-                                    other_idx != idx
-                                        && other_idx != *decl_idx
-                                        && other_line.contains(ident)
-                                });
-                        if !used_elsewhere {
-                            to_remove_indices.insert(*decl_idx);
-                            shorthand_replacements.insert(
-                                idx,
-                                format!("  get {}() {{ return {}; }},", ident, req_expr),
-                            );
-                        }
-                    }
-                }
-            }
-            if !shorthand_replacements.is_empty() || !to_remove_indices.is_empty() {
-                let mut optimized_lines = Vec::with_capacity(body_lines.len());
-                for (idx, line) in body_lines.into_iter().enumerate() {
-                    if to_remove_indices.contains(&idx) {
-                        continue;
-                    }
-                    if let Some(rep) = shorthand_replacements.remove(&idx) {
-                        optimized_lines.push(rep);
-                    } else {
-                        optimized_lines.push(line);
-                    }
-                }
-                body_lines = optimized_lines;
-            }
-        }
-        return body_lines.join("\n");
+        return apply_cjs_lazy_barrel_getters(body_lines).join("\n");
     }
 
     let collapsed = collapse_multiline_imports_exports(js_code);

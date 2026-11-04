@@ -51,8 +51,10 @@ Implemented in [`crates/slice-engine/src/intrinsics.rs`](file:///p:/opensource/s
    - Direct `JsArrayBuffer` / `JsUint8Array` zero-copy Rust host functions (`__slice_crypto_sha256`, `__slice_crypto_hmac_sha256`, `__slice_crypto_digest`, `__slice_crypto_hmac_sign`, `__slice_base64_encode`, `__slice_base64_decode`).
 3. **Zero-Regex Native Rust SemVer & Utility Scanners:**
    - Implemented in [`semver_parse_strict_xyz`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs), [`semver_coerce_xyz`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs), and [`semver_satisfies_xyz`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs) (~150 ns per check).
-4. **Thread-Local In-Memory VFS Slab Cache (`BOA_VFS_CACHE` & `BOA_VFS_DIRS`):**
-   - Ephemeral files created during an isolate run (`writeFileSync`, `appendFileSync`, `mkdirSync`) are stored in thread-local memory slabs and served in nanoseconds on subsequent `statSync`, `readdirSync`, and `readFileSync` calls, while falling back transparently to `std::fs` for pre-existing host files.
+4. **Thread-Local Binary-Safe In-Memory VFS Slab Cache (`BOA_VFS_CACHE` & `BOA_VFS_DIRS`):**
+   - Ephemeral files created during an isolate run (`writeFileSync`, `appendFileSync`, `mkdirSync`) are stored as raw `Vec<u8>` byte slabs in thread-local memory (`FxHashMap<String, Vec<u8>>`) and served in nanoseconds on subsequent `statSync` (with real OS `mtimeMs`), `readdirSync`, and binary/UTF-8 `readFileSync` calls, while falling back transparently to `std::fs` for pre-existing host files.
+5. **Lazy On-Demand Host Binding Registration by Category:**
+   - Cold `create_warm_boa_realm()` initialization registers only the 19 ultra-core host functions (`__slice_console_log`, `__slice_load_builtin`, `__slice_lazy_prelude`, timers, env, SHA-256, Base64, UTF-8), while specialized host bindings (`register_http_bridge_host_functions`, `register_kv_and_sandbox_host_functions`, `register_semver_and_fast_intrinsics_host_functions`, `register_wintertc_phase_n3_host_functions`) are registered lazily only when their corresponding shard or built-in module is loaded.
 
 ---
 

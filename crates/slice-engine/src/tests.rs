@@ -4462,6 +4462,57 @@ console.log(JSON.stringify({
     assert_eq!(f_out["last"], "ok-23");
 }
 
+#[test]
+fn test_wave_h_lazy_host_binding_gating_on_cold_realm_and_on_demand_activation() {
+    // 1. Fresh cold `WarmBoaRealm` must NOT eagerly register HTTP bridge, KV/sandbox, or SemVer/fast-ms host bindings
+    let mut cold_realm = crate::boa_realm::create_warm_boa_realm();
+    let global = cold_realm.ctx.global_object();
+    for deferred_binding in [
+        "__slice_http_method",
+        "__slice_http_respond",
+        "__slice_kv_get",
+        "__slice_eval_sandbox",
+        "__slice_semver_valid",
+        "__slice_fast_ms",
+        "__slice_btoa",
+    ] {
+        assert!(
+            !global
+                .has_own_property(
+                    boa_engine::JsString::from(deferred_binding),
+                    &mut cold_realm.ctx
+                )
+                .unwrap_or(true),
+            "Cold WarmBoaRealm should NOT eagerly register {}",
+            deferred_binding
+        );
+    }
+
+    // 2. When a script uses `Slice.kv`, `Slice.evalSandbox`, `btoa`, and `slice:semver`, those host bindings are registered on demand
+    let script = r#"
+import semver from "slice:semver";
+Slice.kv.set("wave-h-key", "active-val");
+const kvVal = Slice.kv.get("wave-h-key");
+const b64 = btoa("wave-h");
+const svOk = semver.satisfies("2.5.0", ">=2.0.0 <3.0.0");
+const sb = Slice.evalSandbox("19 + 23", { fuelLimit: 10000 });
+console.log(JSON.stringify({ kvVal, b64, svOk, sbVal: sb.returnValue }));
+"#;
+    let m = run_source_isolated(
+        "wave-h-lazy-bindings",
+        script,
+        CapabilityToken::pure_compute(),
+        500_000,
+        8 * 1024 * 1024,
+    )
+    .expect("wave-h-lazy-bindings execution");
+    let parsed: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(parsed["kvVal"], "active-val");
+    assert_eq!(parsed["b64"], "d2F2ZS1o");
+    assert_eq!(parsed["svOk"], true);
+    assert_eq!(parsed["sbVal"], "42");
+}
+
 
 
 

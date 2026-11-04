@@ -569,6 +569,7 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     );
     bundle.push_str(&format!("var __run = __rc[\"{}\"];\n", rc_key));
     bundle.push_str("if (!__run) {\n");
+    bundle.push_str("__slice_modules = [];\n");
     bundle.push_str("var __slice_cache = [];\n");
     bundle.push_str("function __slice_require(id) {\n");
     bundle.push_str("    if (typeof id === 'string') return globalThis.__slice_cjs_require(id);\n");

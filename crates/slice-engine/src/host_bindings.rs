@@ -337,6 +337,207 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     );
 
     let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_det_random"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let val = BOA_DET_STATE.with(|s| {
+                if let Some((mut prng, clk)) = s.get() {
+                    let r = splitmix64_next_f64(&mut prng);
+                    s.set(Some((prng, clk)));
+                    r
+                } else {
+                    -1.0
+                }
+            });
+            Ok(BoaVal::from(val))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_det_now"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let val = BOA_DET_STATE.with(|s| {
+                if let Some((prng, clk)) = s.get() {
+                    let next_clk = clk.wrapping_add(1);
+                    s.set(Some((prng, next_clk)));
+                    next_clk as f64
+                } else {
+                    -1.0
+                }
+            });
+            Ok(BoaVal::from(val))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_env_get"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let key = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let found = BOA_ENV_MAP.with(|m| m.borrow().get(&key).cloned());
+            match found {
+                Some(v) => Ok(BoaVal::from(js_string!(v))),
+                None => {
+                    let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+                    BOA_VIOLATION.with(|v| {
+                        *v.borrow_mut() = Some(SandboxViolation::EnvAccessDenied {
+                            tenant_id: tenant,
+                            key,
+                        });
+                    });
+                    Ok(BoaVal::from(js_string!("")))
+                }
+            }
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_env_json"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let json = BOA_ENV_MAP
+                .with(|m| serde_json::to_string(&*m.borrow()).unwrap_or_else(|_| "{}".to_string()));
+            Ok(BoaVal::from(js_string!(json)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_timer_set"),
+        4,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let Some(cb_obj) = args.first().and_then(|v| v.as_object()) else {
+                return Ok(BoaVal::from(0));
+            };
+            let delay_ms = args
+                .get(1)
+                .and_then(|v| v.as_number())
+                .map(|n| n.max(0.0) as u64)
+                .unwrap_or(0);
+            let is_interval = args.get(2).and_then(|v| v.as_boolean()).unwrap_or(false);
+            let mut extra_args = Vec::new();
+            if let Some(arr_obj) = args.get(3).and_then(|v| v.as_object()) {
+                if let Ok(len_val) = arr_obj.get(js_string!("length"), context) {
+                    let len = len_val.as_number().unwrap_or(0.0) as u32;
+                    for i in 0..len.min(8) {
+                        if let Ok(elem) = arr_obj.get(i, context) {
+                            extra_args.push(elem);
+                        }
+                    }
+                }
+            }
+            match schedule_timer(cb_obj.clone(), delay_ms, is_interval, extra_args) {
+                Ok(id) => Ok(BoaVal::from(id as f64)),
+                Err(_) => Ok(BoaVal::from(0)),
+            }
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_immediate_set"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let Some(cb_obj) = args.first().and_then(|v| v.as_object()) else {
+                return Ok(BoaVal::from(0));
+            };
+            let mut extra_args = Vec::new();
+            if let Some(arr_obj) = args.get(1).and_then(|v| v.as_object()) {
+                if let Ok(len_val) = arr_obj.get(js_string!("length"), context) {
+                    let len = len_val.as_number().unwrap_or(0.0) as u32;
+                    for i in 0..len.min(8) {
+                        if let Ok(elem) = arr_obj.get(i, context) {
+                            extra_args.push(elem);
+                        }
+                    }
+                }
+            }
+            match schedule_immediate(cb_obj.clone(), extra_args) {
+                Ok(id) => Ok(BoaVal::from(id as f64)),
+                Err(_) => Ok(BoaVal::from(0)),
+            }
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_timer_clear"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, _context| {
+            let id = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n.max(0.0) as u32)
+                .unwrap_or(0);
+            cancel_timer(id);
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_clear_timers"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            clear_event_loop_state();
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_drain_event_loop"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, context| {
+            drive_event_loop_to_completion(context);
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_is_active"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let active = BOA_HTTP_REQ.with(|r| r.borrow().active);
+            Ok(BoaVal::from(active))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_mark_wait_until"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            BOA_WAIT_UNTIL_COUNT.with(|c| c.set(c.get() + 1));
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_text_encode"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let s = match args.first() {
+                None => String::new(),
+                Some(v) if v.is_undefined() => String::new(),
+                Some(v) => v.to_string(context)?.to_std_string_escaped(),
+            };
+            bytes_to_js_uint8_array(s.as_bytes(), context)
+        }),
+    );
+}
+
+pub(crate) fn register_semver_and_fast_intrinsics_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_semver_valid"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_semver_valid"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
@@ -491,15 +692,17 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
             Ok(BoaVal::undefined())
         }),
     );
+}
 
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_http_is_active"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| {
-            let active = BOA_HTTP_REQ.with(|r| r.borrow().active);
-            Ok(BoaVal::from(active))
-        }),
-    );
+pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_http_method"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_http_headers_all"),
@@ -621,15 +824,17 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
             Ok(BoaVal::undefined())
         }),
     );
+}
 
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_mark_wait_until"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| {
-            BOA_WAIT_UNTIL_COUNT.with(|c| c.set(c.get() + 1));
-            Ok(BoaVal::undefined())
-        }),
-    );
+pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_kv_get"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_kv_get"),
@@ -734,40 +939,6 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     );
 
     let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_det_random"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| {
-            let val = BOA_DET_STATE.with(|s| {
-                if let Some((mut prng, clk)) = s.get() {
-                    let r = splitmix64_next_f64(&mut prng);
-                    s.set(Some((prng, clk)));
-                    r
-                } else {
-                    -1.0
-                }
-            });
-            Ok(BoaVal::from(val))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_det_now"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| {
-            let val = BOA_DET_STATE.with(|s| {
-                if let Some((prng, clk)) = s.get() {
-                    let next_clk = clk.wrapping_add(1);
-                    s.set(Some((prng, next_clk)));
-                    next_clk as f64
-                } else {
-                    -1.0
-                }
-            });
-            Ok(BoaVal::from(val))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_checkpoint"),
         0,
         NativeFunction::from_fn_ptr(|_this, _args, _context| {
@@ -864,133 +1035,6 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
             Ok(BoaVal::from(js_string!(json)))
         }),
     );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_env_get"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let key = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            let found = BOA_ENV_MAP.with(|m| m.borrow().get(&key).cloned());
-            match found {
-                Some(v) => Ok(BoaVal::from(js_string!(v))),
-                None => {
-                    let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-                    BOA_VIOLATION.with(|v| {
-                        *v.borrow_mut() = Some(SandboxViolation::EnvAccessDenied {
-                            tenant_id: tenant,
-                            key,
-                        });
-                    });
-                    Ok(BoaVal::from(js_string!("")))
-                }
-            }
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_env_json"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| {
-            let json = BOA_ENV_MAP
-                .with(|m| serde_json::to_string(&*m.borrow()).unwrap_or_else(|_| "{}".to_string()));
-            Ok(BoaVal::from(js_string!(json)))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_timer_set"),
-        4,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let Some(cb_obj) = args.first().and_then(|v| v.as_object()) else {
-                return Ok(BoaVal::from(0));
-            };
-            let delay_ms = args
-                .get(1)
-                .and_then(|v| v.as_number())
-                .map(|n| n.max(0.0) as u64)
-                .unwrap_or(0);
-            let is_interval = args.get(2).and_then(|v| v.as_boolean()).unwrap_or(false);
-            let mut extra_args = Vec::new();
-            if let Some(arr_obj) = args.get(3).and_then(|v| v.as_object()) {
-                if let Ok(len_val) = arr_obj.get(js_string!("length"), context) {
-                    let len = len_val.as_number().unwrap_or(0.0) as u32;
-                    for i in 0..len.min(8) {
-                        if let Ok(elem) = arr_obj.get(i, context) {
-                            extra_args.push(elem);
-                        }
-                    }
-                }
-            }
-            match schedule_timer(cb_obj.clone(), delay_ms, is_interval, extra_args) {
-                Ok(id) => Ok(BoaVal::from(id as f64)),
-                Err(_) => Ok(BoaVal::from(0)),
-            }
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_immediate_set"),
-        2,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let Some(cb_obj) = args.first().and_then(|v| v.as_object()) else {
-                return Ok(BoaVal::from(0));
-            };
-            let mut extra_args = Vec::new();
-            if let Some(arr_obj) = args.get(1).and_then(|v| v.as_object()) {
-                if let Ok(len_val) = arr_obj.get(js_string!("length"), context) {
-                    let len = len_val.as_number().unwrap_or(0.0) as u32;
-                    for i in 0..len.min(8) {
-                        if let Ok(elem) = arr_obj.get(i, context) {
-                            extra_args.push(elem);
-                        }
-                    }
-                }
-            }
-            match schedule_immediate(cb_obj.clone(), extra_args) {
-                Ok(id) => Ok(BoaVal::from(id as f64)),
-                Err(_) => Ok(BoaVal::from(0)),
-            }
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_timer_clear"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, _context| {
-            let id = args
-                .first()
-                .and_then(|v| v.as_number())
-                .map(|n| n.max(0.0) as u32)
-                .unwrap_or(0);
-            cancel_timer(id);
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_clear_timers"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| {
-            clear_event_loop_state();
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_drain_event_loop"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, context| {
-            drive_event_loop_to_completion(context);
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    register_wintertc_phase_n3_host_functions(ctx);
 }
 
 pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engine::Context) {
@@ -1350,7 +1394,7 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
     use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
     if ctx
         .global_object()
-        .has_own_property(js_string!("__slice_text_encode"), ctx)
+        .has_own_property(js_string!("__slice_btoa"), ctx)
         .unwrap_or(false)
     {
         return;
@@ -1387,19 +1431,6 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
                 Ok(decoded) => Ok(BoaVal::from(js_string!(decoded))),
                 Err(msg) => Err(JsNativeError::error().with_message(msg).into()),
             }
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_text_encode"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let s = match args.first() {
-                None => String::new(),
-                Some(v) if v.is_undefined() => String::new(),
-                Some(v) => v.to_string(context)?.to_std_string_escaped(),
-            };
-            bytes_to_js_uint8_array(s.as_bytes(), context)
         }),
     );
 

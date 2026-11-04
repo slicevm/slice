@@ -967,4 +967,63 @@ export function processOrder(order: OrderPayload, discount: number, active: bool
             normalized
         );
     }
+
+    #[test]
+    fn test_wave_h_single_pass_ast_bundler_and_array_module_table() {
+        let test_dir = std::env::temp_dir().join("slice_wave_h_single_pass_bundler_test");
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(test_dir.join("src")).unwrap();
+        std::fs::create_dir_all(test_dir.join("node_modules/pkg-cjs")).unwrap();
+
+        std::fs::write(
+            test_dir.join("node_modules/pkg-cjs/package.json"),
+            r#"{"name":"pkg-cjs","main":"index.js"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            test_dir.join("node_modules/pkg-cjs/sub.js"),
+            r#"module.exports = { compute: function(x) { return x * 3; } };"#,
+        )
+        .unwrap();
+        std::fs::write(
+            test_dir.join("node_modules/pkg-cjs/index.js"),
+            r#"const sub = require("./sub");
+module.exports = {
+  sub,
+};"#,
+        )
+        .unwrap();
+
+        let entry_path = test_dir.join("src/index.ts");
+        std::fs::write(
+            &entry_path,
+            r#"import pkg from "pkg-cjs";
+const literalNote = "require('./sub') inside string literal stays untouched";
+export const answer = pkg.sub.compute(14) + ":" + literalNote;
+console.log(answer);
+"#,
+        )
+        .unwrap();
+
+        let bundled =
+            bundle_entrypoint_with_deps(&entry_path).expect("bundle_entrypoint_with_deps");
+        assert!(
+            bundled.contains("__slice_modules = [];"),
+            "Wave H bundle must initialize dense JS Array __slice_modules = []:\n{}",
+            bundled
+        );
+        assert!(
+            bundled.contains("get sub() { return require(0); }")
+                || bundled.contains("get sub(){return require(0)}"),
+            "Single-pass CJS transform must preserve lazy barrel getter optimization:\n{}",
+            bundled
+        );
+        assert!(
+            bundled.contains("require('./sub') inside string literal stays untouched"),
+            "Single-pass span rewriter must not touch string literals:\n{}",
+            bundled
+        );
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
 }

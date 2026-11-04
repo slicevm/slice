@@ -16,10 +16,10 @@
 ## 2. Type-Directed Oxc Semantic Lowering & AST Array Pipeline Fusion
 
 ### 2.1 Type-Directed Oxc Semantic Lowering ([`analyze_typescript_semantics`](file:///p:/opensource/slice/crates/slice-cas/src/oxc_compiler.rs))
-- Before Oxc strips TypeScript types, `slice-cas` inspects `oxc::parser::Parser` and `oxc::semantic::SemanticBuilder` symbol tables and flat `interface` declarations (`AccessLogRecord`, `JournalRecord`), performing type-directed lowering:
-  1. Rewrites `JSON.stringify(<typed_var>)` on known flat interfaces into direct monomorphic string template concatenations.
-  2. Rewrites chained `crypto.createHash`/`createHmac`, `Buffer.from(...).toString("base64" | "base64url" | "utf8")`, and `Buffer.byteLength(...)` calls directly to `__slice_crypto_*`, `__slice_base64_encode`, `__slice_base64_decode`, `__slice_buf_to_utf8`, and `__slice_utf8_byte_len` native Rust intrinsics (eliminating intermediate `Uint8Array` / `Buffer` allocations and avoiding loading Shard 5 `05_full_buffer.js` when no other `Buffer` APIs are used).
-  3. Prunes dead `require("node:crypto")` imports when all crypto calls have been lowered to native intrinsics.
+- Before Oxc strips TypeScript types, `slice-cas` walks `oxc::parser::Parser` AST nodes (`TSInterfaceDeclaration`, `TSTypeAnnotation`, `BindingPattern`) and `oxc::semantic::SemanticBuilder` symbol tables, performing 100% AST-driven lowering:
+  1. Extracts exact `string` / `number` / `boolean` property schemas from `TSInterfaceDeclaration` AST nodes and variable/parameter `TSTypeAnnotation` bindings without fragile line/colon text heuristics.
+  2. Lowers `Buffer.from(<arg>, <enc>?).toString("base64" | "base64url" | "utf8")` and `Buffer.byteLength(<arg>)` via Oxc AST `CallExpression` span replacement ([`rewrite_buffer_fast_paths_ast`](file:///p:/opensource/slice/crates/slice-cas/src/esm_cjs_linker.rs)) directly to `__slice_base64_encode`, `__slice_base64_decode`, `__slice_buf_to_utf8`, and `__slice_utf8_byte_len` native Rust intrinsics without touching string literals or comments.
+  3. Collects all `require("<spec>")` `CallExpression` string literal spans in a single Oxc AST pass per module ([`collect_require_edits_from_program`](file:///p:/opensource/slice/crates/slice-cas/src/esm_cjs_linker.rs) + [`slice_with_edits`](file:///p:/opensource/slice/crates/slice-cas/src/esm_cjs_linker.rs)), eliminating per-statement Oxc parser re-invocations and duplicate CJS parses.
 
 ### 2.2 General-Purpose Oxc AST Array Pipeline Fusion ([`fuse_array_pipelines_ast`](file:///p:/opensource/slice/crates/slice-cas/src/oxc_compiler.rs))
 - During build/pack time, `slice-cas` parses each module's JavaScript AST via `oxc::parser::Parser` and walks call expressions to fuse chained higher-order array operations on **any** receiver expression `<arr_expr>` into single-pass, zero-allocation `for` loop IIFEs:

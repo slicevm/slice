@@ -45,14 +45,24 @@ pub(crate) fn eval_lazy_prelude_shard(
     context: &mut boa_engine::Context,
 ) -> boa_engine::JsResult<boa_engine::JsValue> {
     let bytes: &[u8] = match shard_id {
-        1 => WEB_FETCH_URL_PRELUDE,
-        2 => ENCODING_EVENTS_PRELUDE,
-        3 => STREAMS_FORMDATA_PRELUDE,
+        1 => {
+            crate::host_bindings::register_http_bridge_host_functions(context);
+            WEB_FETCH_URL_PRELUDE
+        }
+        2 => {
+            crate::host_bindings::register_wintertc_phase_n3_host_functions(context);
+            ENCODING_EVENTS_PRELUDE
+        }
+        3 => {
+            crate::host_bindings::register_wintertc_phase_n3_host_functions(context);
+            STREAMS_FORMDATA_PRELUDE
+        }
         4 => {
             crate::host_bindings::register_webcrypto_host_functions(context);
             WEBCRYPTO_CLONE_PRELUDE
         }
         5 => {
+            crate::host_bindings::register_wintertc_phase_n3_host_functions(context);
             crate::host_bindings::register_buffer_host_functions(context);
             FULL_BUFFER_PRELUDE
         }
