@@ -10,7 +10,7 @@ use crate::boa_realm::{
 use crate::event_loop::{
     clear_event_loop_state, drive_event_loop_to_completion, has_pending_event_loop_work,
 };
-use crate::js_preludes::detect_needed_shards;
+use crate::js_preludes::{detect_needed_shards, needs_lazy_global_getters};
 use crate::parser_and_compiler::{
     compile_source_to_bytecode, decode_slicesnp_cached, expr_to_dotted_chain, extract_slice_rc_key,
 };
@@ -1618,16 +1618,25 @@ impl SliceIsolate {
                     ensure_realm_shards(
                         &mut realm,
                         detect_needed_shards(js_code, false),
-                        js_code.contains("globalThis"),
+                        needs_lazy_global_getters(js_code),
                     );
                     let _ = realm
                         .ctx
                         .eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
-                    let mut lookup_buf = *b"__slice_rc[\"0000000000000000\"]";
-                    lookup_buf[12..28].copy_from_slice(hex_bytes);
-                    if let Ok(val) = realm.ctx.eval(boa_engine::Source::from_bytes(&lookup_buf)) {
-                        if let Some(obj) = val.as_object() {
-                            realm.loaded_bundles.insert(rc_key_u64, obj.clone());
+                    if let Ok(hex_str) = std::str::from_utf8(hex_bytes) {
+                        let global = realm.ctx.global_object();
+                        if let Ok(rc_val) =
+                            global.get(boa_engine::js_string!("__slice_rc"), &mut realm.ctx)
+                        {
+                            if let Some(rc_obj) = rc_val.as_object() {
+                                if let Ok(val) =
+                                    rc_obj.get(boa_engine::js_string!(hex_str), &mut realm.ctx)
+                                {
+                                    if let Some(obj) = val.as_object() {
+                                        realm.loaded_bundles.insert(rc_key_u64, obj.clone());
+                                    }
+                                }
+                            }
                         }
                     }
                     let _ = realm.ctx.run_jobs();
@@ -1771,17 +1780,26 @@ impl SliceIsolate {
                 ensure_realm_shards(
                     &mut realm,
                     detect_needed_shards(js_code, is_http_req),
-                    js_code.contains("globalThis"),
+                    needs_lazy_global_getters(js_code),
                 );
                 let res = realm
                     .ctx
                     .eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
                 if res.is_ok() && BOA_VIOLATION.with(|v| v.borrow().is_none()) {
-                    let mut lookup_buf = *b"__slice_rc[\"0000000000000000\"]";
-                    lookup_buf[12..28].copy_from_slice(hex_bytes);
-                    if let Ok(val) = realm.ctx.eval(boa_engine::Source::from_bytes(&lookup_buf)) {
-                        if let Some(obj) = val.as_object() {
-                            realm.loaded_bundles.insert(rc_key_u64, obj.clone());
+                    if let Ok(hex_str) = std::str::from_utf8(hex_bytes) {
+                        let global = realm.ctx.global_object();
+                        if let Ok(rc_val) =
+                            global.get(boa_engine::js_string!("__slice_rc"), &mut realm.ctx)
+                        {
+                            if let Some(rc_obj) = rc_val.as_object() {
+                                if let Ok(val) =
+                                    rc_obj.get(boa_engine::js_string!(hex_str), &mut realm.ctx)
+                                {
+                                    if let Some(obj) = val.as_object() {
+                                        realm.loaded_bundles.insert(rc_key_u64, obj.clone());
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1791,7 +1809,7 @@ impl SliceIsolate {
             ensure_realm_shards(
                 &mut realm,
                 detect_needed_shards(js_code, is_http_req),
-                js_code.contains("globalThis"),
+                needs_lazy_global_getters(js_code),
             );
             realm
                 .ctx
@@ -1800,7 +1818,7 @@ impl SliceIsolate {
             ensure_realm_shards(
                 &mut realm,
                 detect_needed_shards(js_code, is_http_req),
-                js_code.contains("globalThis"),
+                needs_lazy_global_getters(js_code),
             );
             let scoped_code = format!("{{\n{}\n}}", js_code);
             realm

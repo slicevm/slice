@@ -1,0 +1,15 @@
+{
+  "name": "02-itty-router-unjs-nitro-stack",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "dependencies": {
+    "destr": "2.0.3",
+    "itty-router": "5.0.18",
+    "ohash": "1.1.4",
+    "radix3": "1.1.2",
+    "ufo": "1.5.4"
+  }
+}
+

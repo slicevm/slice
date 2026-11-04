@@ -2,16 +2,43 @@
 // Evaluated eagerly on realm creation; registers self-replacing lazy getters (`__defLazy`)
 // for Shards 1..=7 so unused WinterTC/Node.js subsystems incur 0 bytes of parse/eval cost.
 (function() {
-  var __shMask = 0;
-  var __shardProps = {};
+  globalThis.__export = function(t, a) {
+    for (var k in a) Object.defineProperty(t, k, { get: a[k], enumerable: true });
+  };
+  globalThis.__toCommonJS = function(m) {
+    return m;
+  };
+  globalThis.__shMask = 0;
+  globalThis.__shardProps = {};
+  var __lazyInited = false;
+  globalThis.__slice_mark_lazy_inited = function() { __lazyInited = true; };
   function __loadShard(id) {
-    if ((id === 1 || id === 3 || id === 7 || id === 8) && (__shMask & 4) === 0) {
+    if (!__lazyInited) {
+      if (
+        (id === 1 && globalThis.Request) ||
+        (id === 2 && globalThis.TextEncoder) ||
+        (id === 3 && globalThis.ReadableStream) ||
+        (id === 4 && globalThis.crypto) ||
+        (id === 5 && globalThis.Buffer) ||
+        (id === 7 && globalThis.WebSocket) ||
+        (id === 8 && globalThis.Worker) ||
+        (id === 9 && globalThis.WebAssembly) ||
+        (id === 10 && globalThis.fetch)
+      ) {
+        globalThis.__shMask |= (1 << id);
+        return;
+      }
+    }
+    if ((id === 3 || id === 7 || id === 8) && (globalThis.__shMask & 4) === 0 && ( __lazyInited || !globalThis.TextEncoder )) {
       __loadShard(2);
     }
+    if (id === 10 && (globalThis.__shMask & 2) === 0 && ( __lazyInited || !globalThis.Request )) {
+      __loadShard(1);
+    }
     var bit = 1 << id;
-    if ((__shMask & bit) === 0) {
-      __shMask |= bit;
-      var ns = __shardProps[id];
+    if ((globalThis.__shMask & bit) === 0) {
+      globalThis.__shMask |= bit;
+      var ns = globalThis.__shardProps[id];
       if (ns) {
         for (var i = 0; i < ns.length; i++) {
           Object.defineProperty(globalThis, ns[i], {
@@ -26,120 +53,6 @@
     }
   }
   globalThis.__slice_ensure_shard = __loadShard;
-
-  function __defLazy(names, shardId) {
-    __shardProps[shardId] = names;
-    for (var i = 0; i < names.length; i++) {
-      (function(prop) {
-        Object.defineProperty(globalThis, prop, {
-          configurable: true,
-          enumerable: false,
-          get: function() {
-            __loadShard(shardId);
-            return globalThis[prop];
-          },
-          set: function(val) {
-            Object.defineProperty(globalThis, prop, {
-              value: val,
-              writable: true,
-              enumerable: false,
-              configurable: true
-            });
-          }
-        });
-      })(names[i]);
-    }
-  }
-
-  var __lazyInited = false;
-  globalThis.__slice_init_lazy_getters = function() {
-    if (__lazyInited) return;
-    __lazyInited = true;
-    if ((__shMask & 2) === 0) {
-      __defLazy([
-        "URLSearchParams",
-        "URL",
-        "Headers",
-        "Request",
-        "Response",
-        "AbortSignal",
-        "AbortController",
-        "fetch",
-        "__slice_make_web_request"
-      ], 1);
-    }
-    if ((__shMask & 4) === 0) {
-      __defLazy([
-        "btoa",
-        "atob",
-        "TextEncoder",
-        "TextDecoder",
-        "Event",
-        "CustomEvent",
-        "EventTarget"
-      ], 2);
-    }
-    if ((__shMask & 8) === 0) {
-      __defLazy([
-        "ReadableStream",
-        "WritableStream",
-        "TransformStream",
-        "TextEncoderStream",
-        "TextDecoderStream",
-        "Blob",
-        "File",
-        "FormData"
-      ], 3);
-    }
-    if ((__shMask & 16) === 0) {
-      __defLazy([
-        "crypto",
-        "CryptoKey",
-        "structuredClone"
-      ], 4);
-    }
-    if ((__shMask & 32) === 0) {
-      __defLazy(["Buffer"], 5);
-    }
-    if ((__shMask & 64) === 0) {
-      var __cMethods = [
-        "dir", "dirxml", "table", "trace", "assert", "clear",
-        "count", "countReset", "group", "groupCollapsed", "groupEnd",
-        "time", "timeLog", "timeEnd"
-      ];
-      for (var c = 0; c < __cMethods.length; c++) {
-        (function(m) {
-          globalThis.console[m] = function() {
-            __loadShard(6);
-            return globalThis.console[m].apply(globalThis.console, arguments);
-          };
-        })(__cMethods[c]);
-      }
-    }
-    if ((__shMask & 128) === 0) {
-      __defLazy([
-        "WebSocket",
-        "MessageEvent",
-        "CloseEvent",
-        "__slice_dispatch_server_ws"
-      ], 7);
-    }
-    if ((__shMask & 256) === 0) {
-      __defLazy([
-        "Worker",
-        "MessageChannel",
-        "MessagePort",
-        "__slice_receiveMessageOnPort",
-        "__slice_wintertc_connect",
-        "__slice_init_worker_self_env",
-        "__slice_worker_host_deliver",
-        "__slice_worker_self_deliver"
-      ], 8);
-    }
-    if ((__shMask & 512) === 0) {
-      __defLazy(["WebAssembly"], 9);
-    }
-  };
 
   globalThis.__slice_dispatch_fetch = function(h) {
     if (!__slice_http_is_active()) return;
@@ -391,15 +304,15 @@
       );
     },
     streamSSE: function(src, init) {
-      __loadShard(1);
+      __loadShard(10);
       return globalThis.Slice.streamSSE(src, init);
     },
     fetchSync: function(input, init) {
-      __loadShard(1);
+      __loadShard(10);
       return globalThis.Slice.fetchSync(input, init);
     },
     mockFetch: function(a, b, c) {
-      __loadShard(1);
+      __loadShard(10);
       return globalThis.Slice.mockFetch(a, b, c);
     },
     mockWebSocket: function(urlPattern, handlerOrSpec) {
@@ -448,5 +361,29 @@
     return __slice_builtins[id] || __slice_load_builtin(id);
   };
   globalThis.require = __slice_cjs_require;
+  globalThis.escape = function(str) {
+    var s = String(str), out = "";
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if ((c >= 48 && c <= 57) || (c >= 64 && c <= 90) || (c >= 97 && c <= 122) || c === 42 || c === 43 || c === 45 || c === 46 || c === 47 || c === 95) {
+        out += s.charAt(i);
+      } else if (c < 256) {
+        var h = c.toString(16).toUpperCase();
+        out += "%" + (h.length < 2 ? "0" + h : h);
+      } else {
+        var u = c.toString(16).toUpperCase();
+        while (u.length < 4) u = "0" + u;
+        out += "%u" + u;
+      }
+    }
+    return out;
+  };
+  globalThis.unescape = function(str) {
+    var s = String(str);
+    if (s.indexOf("%") === -1) return s;
+    return s.replace(/%u([0-9a-fA-F]{4})|%([0-9a-fA-F]{2})/g, function(_, u4, x2) {
+      return String.fromCharCode(parseInt(u4 || x2, 16));
+    });
+  };
 })();
 

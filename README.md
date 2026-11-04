@@ -52,8 +52,10 @@
 | `20-node-compat-and-edge-router` (`Uint8Array` `Buffer` + Node Core + AST Bundler) | `67.095 ms` | `40.664 ms` | `16.395 ms` | **`23.428 ms`** (`1.74x` Deno) | **`0.44 ms`** (`36.8x` Bun) |
 | `21-websocket-realtime-and-security-guard` (RFC 6455 `WebSocket` + 5-Ring Guard) | `107.602 ms` | `51.800 ms` | `22.976 ms` | **`25.210 ms`** (`2.05x` Deno) | **`2.81 ms`** (`8.18x` Bun) |
 | `22-worker-threads-and-raw-sockets` (3 Worker Threads + TCP/UDP + 5-Ring Sec) | `98.820 ms` | `109.267 ms` | `44.236 ms` | **`28.081 ms`** (`1.58x` Bun) | **`2.00 ms`** (`22.1x` Bun) |
-| `23-wasm-crypto-and-simd-kernel` (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | `57.055 ms` | `38.410 ms` | `18.798 ms` | **`17.603 ms`** (`1.07x` Bun) | **`1.82 ms`** (`10.3x` Bun) |
-| `24-tsx-ssr-and-wasm-edge-pipeline` (`WebAssembly` SLA Scorer + SSR Pipeline) | `63.228 ms` | `38.347 ms` | `17.284 ms` | **`14.489 ms`** (`1.19x` Bun) | **`1.60 ms`** (`10.8x` Bun) |
+| `23-wasm-crypto-and-simd-kernel` (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | `57.055 ms` | `38.410 ms` | `18.798 ms` | **`16.693 ms`** (`1.13x` Bun) | **`1.82 ms`** (`10.3x` Bun) |
+| `24-tsx-ssr-and-wasm-edge-pipeline` (`WebAssembly` SLA Scorer + SSR Pipeline) | `63.228 ms` | `38.347 ms` | `17.284 ms` | **`13.621 ms`** (`1.27x` Bun) | **`1.60 ms`** (`10.8x` Bun) |
+| `frameworks/01-hono-edge-microservice` (`hono@4.6.20` + `hono/cookie` + `ms`) | `94.402 ms` | `50.341 ms` | `18.829 ms` | **`17.534 ms`** (`1.07x` Bun) | **`2.31 ms`** (`8.15x` Bun) |
+| `frameworks/02-itty-router-unjs-nitro-stack` (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | `84.550 ms` | `44.211 ms` | `18.018 ms` | **`16.680 ms`** (`1.08x` Bun) | **`2.07 ms`** (`8.70x` Bun) |
 
 ---
 
@@ -201,7 +203,7 @@ Disassemble `SLICESNP` bytecode and inspect the BLAKE3 Radix resolution table:
 
 ```bash
 slice inspect ./bundle.cas
-slice inspect ./benchmarks/workloads/cold_start.ts
+slice inspect ./tests/apps/01-fintech-checkout
 ```
 
 ### 7. Interactive SES Sandbox Shell (`slice repl`) & Kernel Diagnostics (`slice doctor`)
@@ -260,7 +262,7 @@ SERVICE_STAGE = "production"
 
 In addition to synthetic microbenchmarks, [`tests/`](file:///p:/opensource/slice/tests/README.md) runs **24 folder-based multi-module production TypeScript applications** (with standard WinterTC `Request`/`Response`/`Headers`/`URL`/`URLSearchParams`/`ReadableStream`/`TransformStream`/`TextEncoder`/`TextDecoder`/`crypto.subtle`/`Blob`/`File`/`FormData`/`structuredClone`/`EventTarget`/`AbortSignal`/`WebAssembly` APIs, pure-Rust `wasmi` WebAssembly execution with unified CPU fuel & linear memory cages, real `Uint8Array`-backed `Buffer` and `node:*` Core Tier-1 modules, OCap-guarded outbound HTTP/1.1 & HTTPS TLS 1.3 `fetch()` with Keep-Alive pooling, hop-by-hop redirect guard, Cloud Metadata SSRF Shield, and Egress DLP, `Slice.streamSSE` / `Response.sse`, zero-stat BLAKE3 `ETag` `304 Not Modified` static asset delivery, real external `node_modules/` packages `semver@7.6.3`, `ms@2.1.3`, `ini@4.1.3`, `fast-querystring@1.1.2`, `cookie@0.6.0`/`1.0.2`, `bytes@3.1.2`, `flatted@3.3.1`, `dlv@1.1.3`, `dset@3.1.3`, `mitt@3.0.1`, FIPS-180-4 SHA-256/SHA-512 & RFC-2104 HMAC `node:crypto`, and `node:fs` disk I/O) and verifies **100% byte-for-byte identical JSON output** against the **absolute latest releases** of Bun (`v1.4.4`), Deno (`v2.9.8`), and Node.js (`v27.0.0-alpha`):
 
-| Folder-Based Production App (Linux Docker `x86_64`) | Slice (`v0.9.2`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) |
+| Folder-Based Production App (Linux Docker `x86_64`) | Slice (`v0.9.3`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) |
 | :--- | :--- | :--- | :--- | :--- |
 | **App 1: `01-fintech-checkout`** (Multi-File TS + SHA-256, 50 orders) | **5.297 ms** (`0.67 ms` warm isolate) | 12.729 ms | 34.766 ms | 63.778 ms |
 | **App 2: `02-npm-ecosystem-suite`** (`semver` + `ms` + `ini` from `node_modules`) | **6.766 ms** (`0.27 ms` warm isolate) | 20.048 ms | 54.156 ms | 75.895 ms |
@@ -284,17 +286,20 @@ In addition to synthetic microbenchmarks, [`tests/`](file:///p:/opensource/slice
 | **App 20: `20-node-compat-and-edge-router`** (`Uint8Array` `Buffer` + Node Core + AST Bundler) | **23.428 ms** (`0.44 ms` warm isolate) | 16.395 ms | 40.664 ms | 67.095 ms |
 | **App 21: `21-websocket-realtime-and-security-guard`** (RFC 6455 `WebSocket` + 5-Ring Guard) | **25.210 ms** (`2.81 ms` warm isolate) | 22.976 ms | 51.800 ms | 107.602 ms |
 | **App 22: `22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** (`2.00 ms` warm isolate) | 44.236 ms | 109.267 ms | 98.820 ms |
-| **App 23: `23-wasm-crypto-and-simd-kernel`** (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | **17.603 ms** (`1.82 ms` warm isolate) | 18.798 ms | 38.410 ms | 57.055 ms |
-| **App 24: `24-tsx-ssr-and-wasm-edge-pipeline`** (`WebAssembly` SLA Scorer + SSR Pipeline) | **14.489 ms** (`1.60 ms` warm isolate) | 17.284 ms | 38.347 ms | 63.228 ms |
+| **App 23: `23-wasm-crypto-and-simd-kernel`** (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | **16.693 ms** (`1.82 ms` warm isolate) | 18.798 ms | 38.410 ms | 57.055 ms |
+| **App 24: `24-tsx-ssr-and-wasm-edge-pipeline`** (`WebAssembly` SLA Scorer + SSR Pipeline) | **13.621 ms** (`1.60 ms` warm isolate) | 17.284 ms | 38.347 ms | 63.228 ms |
+| **FW 1: `frameworks/01-hono-edge-microservice`** (`hono@4.6.20` + `hono/cookie` + `ms`) | **17.534 ms** (`2.31 ms` warm isolate) | 18.829 ms | 50.341 ms | 94.402 ms |
+| **FW 2: `frameworks/02-itty-router-unjs-nitro-stack`** (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | **16.680 ms** (`2.07 ms` warm isolate) | 18.018 ms | 44.211 ms | 84.550 ms |
 | **Peak Memory Footprint: NPM Ecosystem App (Max RSS)** | **13.25 MB (`13,568 KB`)** | 30.50 MB (`31,232 KB`) | 46.87 MB (`47,992 KB`) | 71.09 MB (`72,796 KB`) |
 | **Peak Memory Footprint: Pure-Rust WASM App 23 (Max RSS)** | **16.38 MB (`16,768 KB`)** | 30.25 MB (`30,976 KB`) | 46.97 MB (`48,100 KB`) | 78.00 MB (`79,872 KB`) |
 | **Peak Memory Footprint: WASM + SSR App 24 (Max RSS)** | **14.12 MB (`14,464 KB`)** | 29.38 MB (`30,080 KB`) | 46.88 MB (`48,000 KB`) | 78.50 MB (`80,384 KB`) |
+| **Peak Memory Footprint: Hono v4 & UnJS/Nitro Frameworks (Max RSS)** | **13.35 MB (`13,672 KB`)** | 29.62 MB (`30,336 KB`) | 46.74 MB (`47,860 KB`) | 84.88 MB (`86,920 KB`) |
 | **Peak Memory Footprint: Workers + Sockets App 22 (Max RSS)** | **17.75 MB (`18,176 KB`)** | 39.86 MB (`40,816 KB`) | 61.88 MB (`63,360 KB`) | 90.86 MB (`93,036 KB`) |
 | **`slice serve` HTTP/1.1 Keep-Alive (Tier-0 CAS, `--workers=8`)** | **162,946 req/s (`6.14 us/req`)** | 100,692 req/s (`9.93 us`) | 98,361 req/s (`10.17 us`) | 56,398 req/s (`17.73 us`) |
 | **`slice serve` HTTP/1.1 Keep-Alive (Tier-1 WinterTC, `--workers=8`)** | **106,260 req/s (`9.41 us/req`)** | 100,692 req/s (`9.93 us`) | 98,361 req/s (`10.17 us`) | 56,398 req/s (`17.73 us`) |
 | **1,000-Tenant MicroVM Isolate Cold-Start (Min / Swarm)** | **0.99 us (`1.52 ms` / 1,000 tenants)** | N/A | N/A | N/A |
 
-Run the full Docker benchmark suite or filter by tags (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `f2`, `f3`, `f4`, `serve`, `swarm`):
+Run the full Docker benchmark suite or filter by tags (`all`, `apps`, `frameworks`, `n1`, `n2`, `n3`, `f1`, `f2`, `f3`, `f4`, `wasm`, `serve`, `swarm`):
 
 ```powershell
 docker build -f tests/Dockerfile -t slice-realworld-bench .

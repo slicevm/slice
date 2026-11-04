@@ -556,7 +556,7 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
     if source.starts_with("var __slice_modules =") {
         return source.to_string();
     }
-    let has_jsx = source_contains_jsx(source);
+    let has_jsx = is_ts && source_contains_jsx(source);
     if !is_ts && !has_jsx && !source.contains("interface ") {
         return strip_js_comments(source);
     }

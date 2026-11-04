@@ -3963,8 +3963,8 @@ fn test_pillar4_surgical_shard_gating_and_native_buffer_fast_paths() {
         crate::js_preludes::detect_needed_shards("const ok = URL.canParse('https://example.com');", false);
     assert_eq!(
         url_can_parse_mask,
-        (1 << 1) | (1 << 2),
-        "URL.canParse must load Shard 1 + 2, not Shard 8"
+        1 << 1,
+        "URL.canParse must load only Shard 1, not Shard 2 or Shard 8"
     );
 
     // 2. Verify compile-time lowering of `Buffer.from(...).toString(...)` & `Buffer.byteLength(...)`

@@ -163,16 +163,13 @@ pub(crate) fn create_warm_boa_realm() -> WarmBoaRealm {
     register_slice_native_host_functions(&mut ctx);
 
     let _ = ctx.eval(boa_engine::Source::from_bytes(ULTRA_CORE_PRELUDE));
-    let ses_check_fn = ctx
-        .eval(boa_engine::Source::from_bytes(
-            b"globalThis.__slice_check_ses",
-        ))
+    let global = ctx.global_object();
+    let ses_check_fn = global
+        .get(boa_engine::js_string!("__slice_check_ses"), &mut ctx)
         .ok()
         .and_then(|v| v.as_object());
-    let ensure_shard_fn = ctx
-        .eval(boa_engine::Source::from_bytes(
-            b"globalThis.__slice_ensure_shard",
-        ))
+    let ensure_shard_fn = global
+        .get(boa_engine::js_string!("__slice_ensure_shard"), &mut ctx)
         .ok()
         .and_then(|v| v.as_object());
     WarmBoaRealm {
@@ -193,35 +190,43 @@ pub(crate) fn ensure_realm_shards(
 ) {
     let missing = needed_mask & !realm.loaded_shards_mask;
     if init_lazy_getters && (realm.loaded_shards_mask & 1) == 0 {
-        let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-            b"globalThis.__slice_init_lazy_getters();",
-        ));
+        let _ = realm
+            .ctx
+            .eval(boa_engine::Source::from_bytes(crate::js_preludes::LAZY_GETTERS_INIT_PRELUDE));
         realm.loaded_shards_mask |= 1;
     }
     if missing == 0 {
         return;
     }
-    if let Some(ref ensure_fn) = realm.ensure_shard_fn {
-        for shard_id in [2u16, 1, 3, 4, 5, 6, 7, 8, 9] {
-            let bit = 1u16 << shard_id;
-            if (missing & bit) != 0 {
-                let _ = ensure_fn.call(
-                    &boa_engine::JsValue::undefined(),
-                    &[boa_engine::JsValue::from(shard_id as i32)],
+    let lazy_getters_active = (realm.loaded_shards_mask & 1) != 0;
+    for shard_id in [2u16, 1, 10, 3, 4, 5, 6, 7, 8, 9] {
+        let bit = 1u16 << shard_id;
+        if (missing & bit) != 0 {
+            if lazy_getters_active {
+                if let Some(ref ensure_fn) = realm.ensure_shard_fn {
+                    let _ = ensure_fn.call(
+                        &boa_engine::JsValue::undefined(),
+                        &[boa_engine::JsValue::from(shard_id as i32)],
+                        &mut realm.ctx,
+                    );
+                }
+            } else {
+                let _ = crate::js_preludes::eval_lazy_prelude_shard(
+                    shard_id as u32,
                     &mut realm.ctx,
                 );
-                realm.loaded_shards_mask |= bit;
-                if shard_id == 8 && realm.init_worker_self_fn.is_none() {
-                    realm.init_worker_self_fn = realm
-                        .ctx
-                        .global_object()
-                        .get(
-                            boa_engine::js_string!("__slice_init_worker_self_env"),
-                            &mut realm.ctx,
-                        )
-                        .ok()
-                        .and_then(|v| v.as_object());
-                }
+            }
+            realm.loaded_shards_mask |= bit;
+            if shard_id == 8 && realm.init_worker_self_fn.is_none() {
+                realm.init_worker_self_fn = realm
+                    .ctx
+                    .global_object()
+                    .get(
+                        boa_engine::js_string!("__slice_init_worker_self_env"),
+                        &mut realm.ctx,
+                    )
+                    .ok()
+                    .and_then(|v| v.as_object());
             }
         }
     }

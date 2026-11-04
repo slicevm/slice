@@ -1198,7 +1198,9 @@ pub(crate) fn compact_js_for_boa_bytecode(js: &str) -> String {
 /// Combines **Oxc** production TypeScript transpilation, **Tier-0/Tier-2** fast-path SIMD intrinsics,
 /// and **Boa (`boa_engine`)** full-spec ES2024+ execution for classes, closures, RegExp, Map/Set, and OOP.
 pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
-    if raw_source.starts_with("var __slice_modules =") {
+    if raw_source.starts_with("var __slice_modules =")
+        || raw_source.contains("\nvar __slice_modules =")
+    {
         let compacted = compact_js_for_boa_bytecode(raw_source);
         let mut bytes = Vec::with_capacity(12 + compacted.len());
         bytes.extend_from_slice(b"SLICEBOA{\n");
@@ -1271,6 +1273,8 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains("TextEncoder")
         || source.contains("TextDecoder")
         || source.contains("btoa(")
+        || source.contains("escape(")
+        || source.contains("unescape(")
         || source.contains("atob(")
         || source.contains("crypto.")
         || source.contains("EventTarget")

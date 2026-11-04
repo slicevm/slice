@@ -710,9 +710,18 @@ fn try_transform_esm_to_cjs_ast(
         }
     }
 
-    let uses_crypto_obj = body_lines.iter().any(|l| l.contains("crypto."));
+    let uses_crypto_obj = body_lines.iter().any(|l| {
+        !l.contains("require(\"node:crypto\")")
+            && (l.contains("crypto.")
+                || l.contains("createHash(")
+                || l.contains("createHmac(")
+                || l.contains("randomBytes(")
+                || l.contains("randomUUID(")
+                || l.contains("getRandomValues(")
+                || l.contains("timingSafeEqual("))
+    });
     if !uses_crypto_obj {
-        body_lines.retain(|l| l.trim() != "const crypto = require(\"node:crypto\");");
+        body_lines.retain(|l| !l.contains("require(\"node:crypto\")"));
     }
 
     if has_default_export || !deferred_exports.is_empty() {
@@ -939,9 +948,18 @@ pub(crate) fn transform_module_to_cjs(
         body_lines.push(rewritten_line);
     }
 
-    let uses_crypto_obj = body_lines.iter().any(|l| l.contains("crypto."));
+    let uses_crypto_obj = body_lines.iter().any(|l| {
+        !l.contains("require(\"node:crypto\")")
+            && (l.contains("crypto.")
+                || l.contains("createHash(")
+                || l.contains("createHmac(")
+                || l.contains("randomBytes(")
+                || l.contains("randomUUID(")
+                || l.contains("getRandomValues(")
+                || l.contains("timingSafeEqual("))
+    });
     if !uses_crypto_obj {
-        body_lines.retain(|l| l.trim() != "const crypto = require(\"node:crypto\");");
+        body_lines.retain(|l| !l.contains("require(\"node:crypto\")"));
     }
 
     if body_lines.iter().any(|l| l.trim() == "module.exports = {") {

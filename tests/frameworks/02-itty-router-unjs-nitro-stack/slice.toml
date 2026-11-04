@@ -1,0 +1,12 @@
+[package]
+name = "02-itty-router-unjs-nitro-stack"
+version = "1.0.0"
+entrypoint = "./src/index.ts"
+
+[runtime]
+fuel_limit = 50000000
+memory_limit_mb = 32
+
+[capabilities]
+allow_env = ["NODE_ENV"]
+

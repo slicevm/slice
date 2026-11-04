@@ -73,6 +73,8 @@ APP21_DIR="$APPS_DIR/21-websocket-realtime-and-security-guard"
 APP22_DIR="$APPS_DIR/22-worker-threads-and-raw-sockets"
 APP23_DIR="$APPS_DIR/23-wasm-crypto-and-simd-kernel"
 APP24_DIR="$APPS_DIR/24-tsx-ssr-and-wasm-edge-pipeline"
+APP25_DIR="$FRAMEWORKS_DIR/01-hono-edge-microservice"
+APP26_DIR="$FRAMEWORKS_DIR/02-itty-router-unjs-nitro-stack"
 
 UPSTREAM_F3_PID=""
 UPSTREAM_WC_PID=""
@@ -184,16 +186,16 @@ echo "========================================================================="
 echo "  RUNTIME VERSIONS (LINUX DOCKER x86_64 - LATEST RELEASES)"
 echo "  Active Benchmark Tags: $BENCH_TAGS"
 echo "========================================================================="
-echo "  Slice   : v0.9.2 (Oxc TS Compiler + Boa ES2024 VM + Zero-Stat CAS)"
+echo "  Slice   : v0.9.3 (Oxc TS Compiler + Boa ES2024 VM + Zero-Stat CAS)"
 echo "  Node.js : $(node -v)"
 echo "  Bun     : v$(bun -v)"
 echo "  Deno    : $(deno -V)"
 
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  [TAG: apps] PACKING & COMPILING ALL 24 FOLDER-BASED APPS (OXC + CAS)"
+echo "  [TAG: apps] PACKING & COMPILING ALL 26 APPS & FRAMEWORK SUITES (OXC + CAS)"
 echo "========================================================================="
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26; do
     eval "dir=\$APP${i}_DIR"
     "$SLICE_BIN" pack "$dir" "/tmp/app${i}.cas"
     "$SLICE_BIN" compile "/tmp/app${i}.cas" -o "/tmp/app${i}_bin"
@@ -261,6 +263,8 @@ verify_app_parity "App 21: 21-websocket-realtime-and-security-guard (RFC 6455 WS
 verify_app_parity "App 22: 22-worker-threads-and-raw-sockets (Worker Threads + TCP/UDP + 5-Ring Sec)" "$APP22_DIR" "/tmp/app22.cas" "-A"
 verify_app_parity "App 23: 23-wasm-crypto-and-simd-kernel (Pure-Rust WebAssembly + 5-Ring WASM Sec)" "$APP23_DIR" "/tmp/app23.cas" "-A"
 verify_app_parity "App 24: 24-tsx-ssr-and-wasm-edge-pipeline (WebAssembly SLA Scorer + SSR Pipeline)" "$APP24_DIR" "/tmp/app24.cas" "-A"
+verify_app_parity "Framework 1 (App 25): 01-hono-edge-microservice (Hono v4.6.20 + hono/cookie + cookie + ms)" "$APP25_DIR" "/tmp/app25.cas" "-A"
+verify_app_parity "Framework 2 (App 26): 02-itty-router-unjs-nitro-stack (itty-router v5 + ufo + destr + ohash + radix3)" "$APP26_DIR" "/tmp/app26.cas" "-A"
 fi
 
 measure_ms() {
@@ -344,6 +348,8 @@ bench_app 21 "21-WEBSOCKET-REALTIME-AND-SECURITY-GUARD (RFC 6455 WS + N-Sec Hard
 bench_app 22 "22-WORKER-THREADS-AND-RAW-SOCKETS (Worker Threads + TCP/UDP + 5-Ring Sec)" "$APP22_DIR" "-A"
 bench_app 23 "23-WASM-CRYPTO-AND-SIMD-KERNEL (Pure-Rust WebAssembly + 5-Ring WASM Sec)" "$APP23_DIR" "-A"
 bench_app 24 "24-TSX-SSR-AND-WASM-EDGE-PIPELINE (WebAssembly SLA Scorer + SSR Pipeline)" "$APP24_DIR" "-A"
+bench_app 25 "FRAMEWORK 1: 01-HONO-EDGE-MICROSERVICE (Hono v4.6.20 + hono/cookie + cookie + ms)" "$APP25_DIR" "-A"
+bench_app 26 "FRAMEWORK 2: 02-ITTY-ROUTER-UNJS-NITRO-STACK (itty-router v5 + ufo + destr + ohash + radix3)" "$APP26_DIR" "-A"
 
 echo "========================================================================="
 echo "  PEAK MEMORY FOOTPRINT (MAX RSS) ACROSS REPRESENTATIVE APPS"
@@ -372,16 +378,26 @@ measure_rss_kb "Slice (App 23: Pure-Rust WASM)"     "$SLICE_BIN" run "/tmp/app23
 measure_rss_kb "Bun (App 23: Pure-Rust WASM)"       bun run "$APP23_DIR/src/index.ts"
 measure_rss_kb "Deno (App 23: Pure-Rust WASM)"      deno run -A "$APP23_DIR/src/index.ts"
 measure_rss_kb "Node (App 23: Pure-Rust WASM)"      node "$APP23_DIR/src/index.ts"
+echo "-------------------------------------------------------------------------"
+measure_rss_kb "Slice (FW 1: Hono v4 Microservice)" "$SLICE_BIN" run "/tmp/app25.cas" --quiet
+measure_rss_kb "Bun (FW 1: Hono v4 Microservice)"   bun run "$APP25_DIR/src/index.ts"
+measure_rss_kb "Deno (FW 1: Hono v4 Microservice)"  deno run -A "$APP25_DIR/src/index.ts"
+measure_rss_kb "Node (FW 1: Hono v4 Microservice)"  node "$APP25_DIR/src/index.ts"
+echo "-------------------------------------------------------------------------"
+measure_rss_kb "Slice (FW 2: itty-router + UnJS)"   "$SLICE_BIN" run "/tmp/app26.cas" --quiet
+measure_rss_kb "Bun (FW 2: itty-router + UnJS)"     bun run "$APP26_DIR/src/index.ts"
+measure_rss_kb "Deno (FW 2: itty-router + UnJS)"    deno run -A "$APP26_DIR/src/index.ts"
+measure_rss_kb "Node (FW 2: itty-router + UnJS)"    node "$APP26_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 24 APPS (COLD VS WARM POOL)"
+echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 26 APPS (COLD VS WARM POOL)"
 echo "========================================================================="
 echo "  --- Cold Realm Telemetry ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --quiet --metrics
 done
 echo "  --- Pre-Warmed Boa Pool Telemetry (--warm) ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --warm --quiet --metrics
 done
 fi
@@ -990,6 +1006,37 @@ echo "  --- Apps 23 & 24 Cold vs Warm Isolate Telemetry ---"
 "$SLICE_BIN" run "/tmp/app24.cas" --warm --quiet --metrics
 echo "  [Live slice test --watch-once (notify inotify/kqueue) on App 24]"
 "$SLICE_BIN" test "$APP24_DIR" --watch-once
+fi
+
+if should_run_tag "frameworks"; then
+echo "========================================================================="
+echo "  [TAG: frameworks] WAVE E REAL-WORLD FRAMEWORK SUITES (HONO & ITTY+UNJS)"
+echo "========================================================================="
+"$SLICE_BIN" pack "$APP25_DIR" "/tmp/app25.cas" >/dev/null
+"$SLICE_BIN" compile "/tmp/app25.cas" -o "/tmp/app25_bin" >/dev/null
+"$SLICE_BIN" pack "$APP26_DIR" "/tmp/app26.cas" >/dev/null
+"$SLICE_BIN" compile "/tmp/app26.cas" -o "/tmp/app26_bin" >/dev/null
+verify_app_parity "Framework 1 (App 25): 01-hono-edge-microservice" "$APP25_DIR" "/tmp/app25.cas" "-A"
+verify_app_parity "Framework 2 (App 26): 02-itty-router-unjs-nitro-stack" "$APP26_DIR" "/tmp/app26.cas" "-A"
+bench_app 25 "FRAMEWORK 1: 01-HONO-EDGE-MICROSERVICE (Hono v4.6.20 + hono/cookie + cookie + ms)" "$APP25_DIR" "-A"
+bench_app 26 "FRAMEWORK 2: 02-ITTY-ROUTER-UNJS-NITRO-STACK (itty-router v5 + ufo + destr + ohash + radix3)" "$APP26_DIR" "-A"
+measure_rss_kb "Slice (FW 1: Hono v4 Microservice)" "$SLICE_BIN" run "/tmp/app25.cas" --quiet
+measure_rss_kb "Bun (FW 1: Hono v4 Microservice)"   bun run "$APP25_DIR/src/index.ts"
+measure_rss_kb "Deno (FW 1: Hono v4 Microservice)"  deno run -A "$APP25_DIR/src/index.ts"
+measure_rss_kb "Node (FW 1: Hono v4 Microservice)"  node "$APP25_DIR/src/index.ts"
+echo "-------------------------------------------------------------------------"
+measure_rss_kb "Slice (FW 2: itty-router + UnJS)"   "$SLICE_BIN" run "/tmp/app26.cas" --quiet
+measure_rss_kb "Bun (FW 2: itty-router + UnJS)"     bun run "$APP26_DIR/src/index.ts"
+measure_rss_kb "Deno (FW 2: itty-router + UnJS)"    deno run -A "$APP26_DIR/src/index.ts"
+measure_rss_kb "Node (FW 2: itty-router + UnJS)"    node "$APP26_DIR/src/index.ts"
+echo "  --- Frameworks 1 & 2 Cold vs Warm Isolate Telemetry ---"
+"$SLICE_BIN" run "/tmp/app25.cas" --quiet --metrics
+"$SLICE_BIN" run "/tmp/app25.cas" --warm --quiet --metrics
+"$SLICE_BIN" run "/tmp/app26.cas" --quiet --metrics
+"$SLICE_BIN" run "/tmp/app26.cas" --warm --quiet --metrics
+echo "  [Live slice test Runner Verification on Framework Suites]"
+"$SLICE_BIN" test "$APP25_DIR"
+"$SLICE_BIN" test "$APP26_DIR"
 fi
 
 if should_run_tag "swarm"; then

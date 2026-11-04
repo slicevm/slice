@@ -34,6 +34,10 @@ const PRELUDE_SPECS: &[(&str, &str)] = &[
         "src/preludes/08_workers_sockets.js",
     ),
     ("WASM_PRELUDE", "src/preludes/09_wasm.js"),
+    (
+        "OUTBOUND_FETCH_SSE_PRELUDE",
+        "src/preludes/10_outbound_fetch_sse.js",
+    ),
 ];
 
 fn main() {

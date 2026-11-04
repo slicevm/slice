@@ -173,12 +173,14 @@ docker run --rm -e SLICE_BENCH_TAGS=apps,wasm,serve,swarm slice-realworld-bench
 | **`20-node-compat-and-edge-router`** (`Uint8Array` `Buffer` + Node Core + AST Bundler) | **23.428 ms** | **0.445 ms** (`0.03 us` init) | 16.395 ms | 40.664 ms | 67.095 ms | **36.8x Warm vs Bun / 2.86x Node** |
 | **`21-websocket-realtime-and-security-guard`** (RFC 6455 `WebSocket` + 5-Ring Guard) | **25.210 ms** | **2.810 ms** (`0.16 us` init) | 22.976 ms | 51.800 ms | 107.602 ms | **2.05x Deno / 4.27x Node** |
 | **`22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** | **2.001 ms** (`0.06 us` init) | 44.236 ms | 109.267 ms | 98.820 ms | **1.58x-1.98x Bun / 3.52x Node** |
-| **`23-wasm-crypto-and-simd-kernel`** (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | **17.603 ms** | **1.822 ms** (`0.05 us` init) | 18.798 ms | 38.410 ms | 57.055 ms | **1.07x Cold / 10.3x Warm vs Bun** |
-| **`24-tsx-ssr-and-wasm-edge-pipeline`** (`WebAssembly` SLA Scorer + SSR Pipeline) | **14.489 ms** | **1.601 ms** (`0.03 us` init) | 17.284 ms | 38.347 ms | 63.228 ms | **1.19x Cold / 10.8x Warm vs Bun** |
+| **`23-wasm-crypto-and-simd-kernel`** (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | **16.693 ms** | **1.822 ms** (`0.05 us` init) | 18.798 ms | 38.410 ms | 57.055 ms | **1.13x Cold / 10.3x Warm vs Bun** |
+| **`24-tsx-ssr-and-wasm-edge-pipeline`** (`WebAssembly` SLA Scorer + SSR Pipeline) | **13.621 ms** | **1.601 ms** (`0.03 us` init) | 17.284 ms | 38.347 ms | 63.228 ms | **1.27x Cold / 10.8x Warm vs Bun** |
+| **`frameworks/01-hono-edge-microservice`** (`hono@4.6.20` + `hono/cookie` + `ms`) | **17.534 ms** | **2.312 ms** (`0.08 us` init) | 18.829 ms | 50.341 ms | 94.402 ms | **1.07x Cold / 8.15x Warm vs Bun** |
+| **`frameworks/02-itty-router-unjs-nitro-stack`** (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | **16.680 ms** | **2.073 ms** (`0.03 us` init) | 18.018 ms | 44.211 ms | 84.550 ms | **1.08x Cold / 8.70x Warm vs Bun** |
 
 ### 4.2 HTTP Server (`slice serve`), Sharded KV & 1,000-Tenant MicroVM Benchmarks
 
-| Workload | Slice (`v0.9.2`) | Deno (`v2.9.8`) | Bun (`v1.4.4`) | Node.js (`v26.12.1`) |
+| Workload | Slice (`v0.9.3`) | Deno (`v2.9.8`) | Bun (`v1.4.4`) | Node.js (`v26.12.1`) |
 | :--- | :--- | :--- | :--- | :--- |
 | **`slice serve` Tier-0 CAS (`--workers=8`, Keep-Alive)** | **`152,376 req/s` (`6.56 us/req`)** | 102,481 req/s | 88,132 req/s | 55,810 req/s |
 | **`slice serve` Tier-1 WinterTC (`--workers=8`, Keep-Alive)** | **`107,274 req/s` (`9.32 us/req`)** | 102,481 req/s | 88,132 req/s | 55,810 req/s |

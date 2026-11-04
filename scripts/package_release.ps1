@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 $RootDir = Split-Path -Parent $PSScriptRoot
 Set-Location $RootDir
 
-Write-Host "[1/4] Building Slice v0.9.2 Release Binary (LTO=fat, opt-level=3)..."
+Write-Host "[1/4] Building Slice v0.9.3 Release Binary (LTO=fat, opt-level=3)..."
 cargo build --release
 
 $DistDir = Join-Path $RootDir "dist"
@@ -21,7 +21,7 @@ Write-Host "[2/4] Running Production Doctor & Security Audit..."
 
 Write-Host "[3/4] Testing Standalone Binary Compiler (slice compile)..."
 $SampleApp = Join-Path $DistDir "edge-demo-standalone.exe"
-& $SliceExe compile (Join-Path $RootDir "benchmarks\workloads\cold_start.ts") -o $SampleApp
+& $SliceExe compile (Join-Path $RootDir "tests\apps\01-fintech-checkout") -o $SampleApp
 $StandaloneOut = & $SampleApp --metrics
 Write-Host "  Standalone Output: $StandaloneOut"
 

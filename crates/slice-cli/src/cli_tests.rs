@@ -2135,3 +2135,89 @@ describe("wasm watch suite", () => {
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
+#[test]
+fn test_wave_e_hono_and_itty_unjs_framework_suites() {
+    // 1. Verify Annex B escape() / unescape() used by UnJS ohash UTF-8 parser
+    let annex_b_js = r#"
+        const raw = "slice edge?key=val&unicode=\u2603";
+        const enc = escape(raw);
+        const dec = unescape(enc);
+        const utf8Roundtrip = unescape(encodeURIComponent("Hono+UnJS:100%"));
+        console.log(JSON.stringify({ enc, match: dec === raw, utf8Roundtrip }));
+    "#;
+    let bc = compile_source_to_bytecode(annex_b_js);
+    let mut iso = SliceIsolate::spawn(
+        "wave-e-annex-b",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(
+        m.stdout[0],
+        r#"{"enc":"slice%20edge%3Fkey%3Dval%26unicode%3D%u2603","match":true,"utf8Roundtrip":"Hono+UnJS:100%"}"#
+    );
+
+    // 2. Verify multi-module bundle containing Object.prototype.hasOwnProperty with prepended test harness lines
+    iso.reset_for_request("wave-e-annex-b", 2, 5_000_000, 16 * 1024 * 1024);
+    let wrapped_bundle = "globalThis.__slice_test_filter = \"\";\nvar __slice_modules = {};\nconst hasOwn = Object.prototype.hasOwnProperty.call({ a: 1 }, \"a\");\nconsole.log(String(hasOwn));\n";
+    let wrapped_bc = compile_source_to_bytecode(wrapped_bundle);
+    assert!(wrapped_bc.starts_with(b"SLICEBOA{\n"));
+    let m2 = iso.execute_bytecode(&wrapped_bc, None).unwrap();
+    assert_eq!(m2.stdout[0], "true");
+
+    // 3. Verify framework suite structure under tests/frameworks/ (and full execution when node_modules is installed)
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let fw1_dir = repo_root
+        .join("tests")
+        .join("frameworks")
+        .join("01-hono-edge-microservice");
+    let fw2_dir = repo_root
+        .join("tests")
+        .join("frameworks")
+        .join("02-itty-router-unjs-nitro-stack");
+
+    assert!(fw1_dir.join("slice.toml").is_file());
+    assert!(fw1_dir.join("src/index.ts").is_file());
+    assert!(fw2_dir.join("slice.toml").is_file());
+    assert!(fw2_dir.join("src/index.ts").is_file());
+
+    if fw1_dir.join("node_modules/hono").is_dir() {
+        let bundled1 = slice_cas::bundle_entrypoint_with_deps(&fw1_dir.join("src/index.ts")).unwrap();
+        let bc1 = compile_source_to_bytecode(&bundled1);
+        let mut iso1 = SliceIsolate::spawn(
+            "wave-e-hono",
+            1,
+            CapabilityToken::pure_compute(),
+            20_000_000,
+            32 * 1024 * 1024,
+        );
+        let out1 = iso1.execute_bytecode(&bc1, None).unwrap();
+        assert!(out1.stdout[0].contains(r#""framework":"01-hono-edge-microservice""#));
+        assert!(out1.stdout[0].contains(r#""totalRequestsDispatched":12"#));
+        assert!(out1.stdout[0].contains(r#""healthStatus":"healthy:Hono-v4""#));
+    }
+
+    if fw2_dir.join("node_modules/itty-router").is_dir() {
+        let bundled2 = slice_cas::bundle_entrypoint_with_deps(&fw2_dir.join("src/index.ts")).unwrap();
+        let bc2 = compile_source_to_bytecode(&bundled2);
+        let mut iso2 = SliceIsolate::spawn(
+            "wave-e-unjs",
+            1,
+            CapabilityToken::pure_compute(),
+            20_000_000,
+            32 * 1024 * 1024,
+        );
+        let out2 = iso2.execute_bytecode(&bc2, None).unwrap();
+        assert!(out2.stdout[0].contains(r#""framework":"02-itty-router-unjs-nitro-stack""#));
+        assert!(out2.stdout[0].contains(r#""totalRequestsDispatched":12"#));
+        assert!(out2.stdout[0].contains(r#""status304Count":2"#));
+    }
+}
+
+

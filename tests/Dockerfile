@@ -36,7 +36,6 @@ ENV PATH="/root/.deno/bin:${PATH}"
 
 WORKDIR /app
 COPY --from=builder /workspace/target/release/slice /app/target/release/slice
-COPY benchmarks /app/benchmarks
 COPY scripts /app/scripts
 COPY tests /app/tests
 
@@ -62,7 +61,9 @@ RUN bun install --cwd /app/tests/apps/02-npm-ecosystem-suite \
     && bun install --cwd /app/tests/apps/22-worker-threads-and-raw-sockets \
     && bun install --cwd /app/tests/apps/23-wasm-crypto-and-simd-kernel \
     && bun install --cwd /app/tests/apps/24-tsx-ssr-and-wasm-edge-pipeline \
-    && sed -i 's/\r$//' /app/scripts/benchmark_linux.sh /app/tests/run_real_stack_benchmarks.sh \
-    && chmod +x /app/scripts/benchmark_linux.sh /app/tests/run_real_stack_benchmarks.sh
+    && bun install --cwd /app/tests/frameworks/01-hono-edge-microservice \
+    && bun install --cwd /app/tests/frameworks/02-itty-router-unjs-nitro-stack \
+    && sed -i 's/\r$//' /app/tests/run_real_stack_benchmarks.sh \
+    && chmod +x /app/tests/run_real_stack_benchmarks.sh
 
 CMD ["/app/tests/run_real_stack_benchmarks.sh"]

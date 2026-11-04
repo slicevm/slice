@@ -149,323 +149,6 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     );
 
     let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_fs_read_file_sync"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let path = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            if !check_boa_fs_read_ocap(&path) {
-                return Ok(BoaVal::from(js_string!("")));
-            }
-            let norm = norm_vfs_path(&path);
-            let content = BOA_VFS_CACHE
-                .with(|c| c.borrow().get(&norm).cloned())
-                .unwrap_or_else(|| std::fs::read_to_string(&path).unwrap_or_default());
-            Ok(BoaVal::from(js_string!(content)))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_fs_write_file_sync"),
-        2,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let path = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            if !check_boa_fs_write_ocap(&path) {
-                return Ok(BoaVal::undefined());
-            }
-            let data = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            let norm = norm_vfs_path(&path);
-            if let Some(idx) = norm.rfind('/') {
-                let parent = &norm[..idx];
-                BOA_VFS_DIRS.with(|d| {
-                    d.borrow_mut().insert(parent.to_string());
-                });
-            }
-            BOA_VFS_CACHE.with(|c| {
-                c.borrow_mut().insert(norm, data);
-            });
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_fs_append_file_sync"),
-        2,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let path = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            if !check_boa_fs_write_ocap(&path) {
-                return Ok(BoaVal::undefined());
-            }
-            let data = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            let norm = norm_vfs_path(&path);
-            BOA_VFS_CACHE.with(|c| {
-                let mut map = c.borrow_mut();
-                let entry = map
-                    .entry(norm)
-                    .or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_default());
-                entry.push_str(&data);
-            });
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_fs_exists_sync"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let path = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            if !check_boa_fs_read_ocap(&path) {
-                return Ok(BoaVal::from(false));
-            }
-            let norm = norm_vfs_path(&path);
-            let exists = BOA_VFS_CACHE.with(|c| c.borrow().contains_key(&norm))
-                || BOA_VFS_DIRS.with(|d| d.borrow().contains(&norm))
-                || std::path::Path::new(&path).exists();
-            Ok(BoaVal::from(exists))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_fs_mkdir_sync"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let path = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            if !check_boa_fs_write_ocap(&path) {
-                return Ok(BoaVal::undefined());
-            }
-            let norm = norm_vfs_path(&path);
-            BOA_VFS_DIRS.with(|d| {
-                d.borrow_mut().insert(norm);
-            });
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_fs_readdir_sync"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let path = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            if !check_boa_fs_read_ocap(&path) {
-                return Ok(BoaVal::from(js_string!("[]")));
-            }
-            let norm_dir = norm_vfs_path(&path);
-            let prefix = format!("{}/", norm_dir);
-            let mut entries_set = std::collections::BTreeSet::new();
-            BOA_VFS_CACHE.with(|c| {
-                for k in c.borrow().keys() {
-                    if let Some(rest) = k.strip_prefix(&prefix) {
-                        if !rest.contains('/') && !rest.is_empty() {
-                            entries_set.insert(rest.to_string());
-                        }
-                    }
-                }
-            });
-            if let Ok(rd) = std::fs::read_dir(&path) {
-                for entry in rd.flatten() {
-                    entries_set.insert(entry.file_name().to_string_lossy().to_string());
-                }
-            }
-            let entries: Vec<String> = entries_set.into_iter().collect();
-            let json = serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string());
-            Ok(BoaVal::from(js_string!(json)))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_fs_stat_sync"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let path = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            if !check_boa_fs_read_ocap(&path) {
-                return Ok(BoaVal::from(0));
-            }
-            let norm = norm_vfs_path(&path);
-            let size = BOA_VFS_CACHE
-                .with(|c| c.borrow().get(&norm).map(|v| v.len() as u64))
-                .unwrap_or_else(|| std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0));
-            Ok(BoaVal::from(size as f64))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_fs_is_dir_sync"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let path = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            if !check_boa_fs_read_ocap(&path) {
-                return Ok(BoaVal::from(false));
-            }
-            let norm = norm_vfs_path(&path);
-            let prefix = format!("{}/", norm);
-            let is_dir = BOA_VFS_DIRS.with(|d| d.borrow().contains(&norm))
-                || BOA_VFS_CACHE.with(|c| c.borrow().keys().any(|k| k.starts_with(&prefix)))
-                || std::path::Path::new(&path).is_dir();
-            Ok(BoaVal::from(is_dir))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_fs_copy_file_sync"),
-        2,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let src = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            let dest = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            if !check_boa_fs_read_ocap(&src) || !check_boa_fs_write_ocap(&dest) {
-                return Ok(BoaVal::undefined());
-            }
-            let norm_src = norm_vfs_path(&src);
-            let norm_dest = norm_vfs_path(&dest);
-            let content = BOA_VFS_CACHE
-                .with(|c| c.borrow().get(&norm_src).cloned())
-                .unwrap_or_else(|| std::fs::read_to_string(&src).unwrap_or_default());
-            if let Some(idx) = norm_dest.rfind('/') {
-                let parent = &norm_dest[..idx];
-                BOA_VFS_DIRS.with(|d| {
-                    d.borrow_mut().insert(parent.to_string());
-                });
-            }
-            BOA_VFS_CACHE.with(|c| {
-                c.borrow_mut().insert(norm_dest, content);
-            });
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_fs_rename_sync"),
-        2,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let old_p = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            let new_p = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            if !check_boa_fs_read_ocap(&old_p) || !check_boa_fs_write_ocap(&new_p) {
-                return Ok(BoaVal::undefined());
-            }
-            let norm_old = norm_vfs_path(&old_p);
-            let norm_new = norm_vfs_path(&new_p);
-            let content = BOA_VFS_CACHE
-                .with(|c| c.borrow_mut().remove(&norm_old))
-                .unwrap_or_else(|| std::fs::read_to_string(&old_p).unwrap_or_default());
-            if let Some(idx) = norm_new.rfind('/') {
-                let parent = &norm_new[..idx];
-                BOA_VFS_DIRS.with(|d| {
-                    d.borrow_mut().insert(parent.to_string());
-                });
-            }
-            BOA_VFS_CACHE.with(|c| {
-                c.borrow_mut().insert(norm_new, content);
-            });
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_fs_rm_sync"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let path = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            if !check_boa_fs_write_ocap(&path) {
-                return Ok(BoaVal::undefined());
-            }
-            let norm = norm_vfs_path(&path);
-            let prefix = format!("{}/", norm);
-            BOA_VFS_CACHE.with(|c| {
-                let mut map = c.borrow_mut();
-                map.remove(&norm);
-                map.retain(|k, _| !k.starts_with(&prefix));
-            });
-            BOA_VFS_DIRS.with(|d| {
-                let mut dirs = d.borrow_mut();
-                dirs.remove(&norm);
-                dirs.retain(|k| !k.starts_with(&prefix));
-            });
-            let p = std::path::Path::new(&path);
-            if p.exists() {
-                if p.is_dir() {
-                    let _ = std::fs::remove_dir_all(p);
-                } else {
-                    let _ = std::fs::remove_file(p);
-                }
-            }
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_os_tmpdir"),
         0,
         NativeFunction::from_fn_ptr(|_this, _args, _context| {
@@ -1183,31 +866,6 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     );
 
     let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_mock_fetch"),
-        2,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let key = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            let payload = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            if !key.is_empty() && !payload.is_empty() {
-                BOA_FETCH_MOCKS.with(|m| {
-                    m.borrow_mut().insert(key, payload);
-                });
-            }
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_env_get"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
@@ -1241,92 +899,6 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
             let json = BOA_ENV_MAP
                 .with(|m| serde_json::to_string(&*m.borrow()).unwrap_or_else(|_| "{}".to_string()));
             Ok(BoaVal::from(js_string!(json)))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_fetch_sync"),
-        5,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let url = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            let method = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped().to_ascii_uppercase())
-                .unwrap_or_else(|| "GET".to_string());
-            let headers_json = args
-                .get(2)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_else(|| "[]".to_string());
-            let body = args
-                .get(3)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            let redirect_mode = args
-                .get(4)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_else(|| "follow".to_string());
-
-            let Some(parts) = parse_outbound_http_url(&url) else {
-                let err_json =
-                    serde_json::json!({ "__error": format!("Invalid outbound URL: {}", url) })
-                        .to_string();
-                return Ok(BoaVal::from(js_string!(err_json)));
-            };
-
-            if let Err(err_msg) =
-                check_boa_outbound_fetch_ocap_and_dlp(&parts, &url, &headers_json, &body)
-            {
-                let err_json = serde_json::json!({ "__error": err_msg }).to_string();
-                return Ok(BoaVal::from(js_string!(err_json)));
-            }
-
-            let method_url_key = format!("{} {}", method, url);
-            if let Some(mock_json) = BOA_FETCH_MOCKS.with(|m| {
-                let map = m.borrow();
-                map.get(&method_url_key).or_else(|| map.get(&url)).cloned()
-            }) {
-                return Ok(BoaVal::from(js_string!(mock_json)));
-            }
-
-            let cassette_key = format!("fetch_cassette:{}:{}", method, url);
-            let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-            if let Some(cassette_json) = edge_kv_get(&tenant_id, &cassette_key) {
-                return Ok(BoaVal::from(js_string!(cassette_json)));
-            }
-
-            let req_headers: Vec<(String, String)> =
-                serde_json::from_str(&headers_json).unwrap_or_default();
-            match execute_outbound_fetch_with_redirects(
-                &url,
-                &method,
-                &req_headers,
-                &body,
-                &redirect_mode,
-            ) {
-                Ok(resp_json) => {
-                    if BOA_DET_STATE.with(|s| s.get().is_some()) {
-                        edge_kv_set(&tenant_id, &cassette_key, &resp_json, 0);
-                    }
-                    Ok(BoaVal::from(js_string!(resp_json)))
-                }
-                Err(err_msg) => {
-                    let err_json = serde_json::json!({ "__error": err_msg }).to_string();
-                    Ok(BoaVal::from(js_string!(err_json)))
-                }
-            }
         }),
     );
 
@@ -1415,6 +987,130 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
         NativeFunction::from_fn_ptr(|_this, _args, context| {
             drive_event_loop_to_completion(context);
             Ok(BoaVal::undefined())
+        }),
+    );
+
+    register_wintertc_phase_n3_host_functions(ctx);
+}
+
+pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_fetch_try_fast"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_mock_fetch"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let key = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let payload = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !key.is_empty() && !payload.is_empty() {
+                BOA_FETCH_MOCKS.with(|m| {
+                    m.borrow_mut().insert(key, payload);
+                });
+            }
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fetch_sync"),
+        5,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let url = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let method = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped().to_ascii_uppercase())
+                .unwrap_or_else(|| "GET".to_string());
+            let headers_json = args
+                .get(2)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "[]".to_string());
+            let body = args
+                .get(3)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let redirect_mode = args
+                .get(4)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "follow".to_string());
+
+            let Some(parts) = parse_outbound_http_url(&url) else {
+                let err_json =
+                    serde_json::json!({ "__error": format!("Invalid outbound URL: {}", url) })
+                        .to_string();
+                return Ok(BoaVal::from(js_string!(err_json)));
+            };
+
+            if let Err(err_msg) =
+                check_boa_outbound_fetch_ocap_and_dlp(&parts, &url, &headers_json, &body)
+            {
+                let err_json = serde_json::json!({ "__error": err_msg }).to_string();
+                return Ok(BoaVal::from(js_string!(err_json)));
+            }
+
+            let method_url_key = format!("{} {}", method, url);
+            if let Some(mock_json) = BOA_FETCH_MOCKS.with(|m| {
+                let map = m.borrow();
+                map.get(&method_url_key).or_else(|| map.get(&url)).cloned()
+            }) {
+                return Ok(BoaVal::from(js_string!(mock_json)));
+            }
+
+            let cassette_key = format!("fetch_cassette:{}:{}", method, url);
+            let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+            if let Some(cassette_json) = edge_kv_get(&tenant_id, &cassette_key) {
+                return Ok(BoaVal::from(js_string!(cassette_json)));
+            }
+
+            let req_headers: Vec<(String, String)> =
+                serde_json::from_str(&headers_json).unwrap_or_default();
+            match execute_outbound_fetch_with_redirects(
+                &url,
+                &method,
+                &req_headers,
+                &body,
+                &redirect_mode,
+            ) {
+                Ok(resp_json) => {
+                    if BOA_DET_STATE.with(|s| s.get().is_some()) {
+                        edge_kv_set(&tenant_id, &cassette_key, &resp_json, 0);
+                    }
+                    Ok(BoaVal::from(js_string!(resp_json)))
+                }
+                Err(err_msg) => {
+                    let err_json = serde_json::json!({ "__error": err_msg }).to_string();
+                    Ok(BoaVal::from(js_string!(err_json)))
+                }
+            }
         }),
     );
 
@@ -1542,8 +1238,6 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
             Ok(BoaVal::from(id as f64))
         }),
     );
-
-    register_wintertc_phase_n3_host_functions(ctx);
 }
 
 fn extract_buffer_source_bytes(
@@ -1834,6 +1528,413 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
             }
         }),
     );
+}
+
+pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_fs_read_file_sync"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_read_file_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&path) {
+                return Ok(BoaVal::from(js_string!("")));
+            }
+            let norm = norm_vfs_path(&path);
+            let content = BOA_VFS_CACHE
+                .with(|c| c.borrow().get(&norm).cloned())
+                .unwrap_or_else(|| std::fs::read_to_string(&path).unwrap_or_default());
+            Ok(BoaVal::from(js_string!(content)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_write_file_sync"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_write_ocap(&path) {
+                return Ok(BoaVal::undefined());
+            }
+            let data = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let norm = norm_vfs_path(&path);
+            if let Some(idx) = norm.rfind('/') {
+                let parent = &norm[..idx];
+                BOA_VFS_DIRS.with(|d| {
+                    d.borrow_mut().insert(parent.to_string());
+                });
+            }
+            BOA_VFS_CACHE.with(|c| {
+                c.borrow_mut().insert(norm, data);
+            });
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_append_file_sync"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_write_ocap(&path) {
+                return Ok(BoaVal::undefined());
+            }
+            let data = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let norm = norm_vfs_path(&path);
+            BOA_VFS_CACHE.with(|c| {
+                let mut map = c.borrow_mut();
+                let entry = map
+                    .entry(norm)
+                    .or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_default());
+                entry.push_str(&data);
+            });
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_exists_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&path) {
+                return Ok(BoaVal::from(false));
+            }
+            let norm = norm_vfs_path(&path);
+            let exists = BOA_VFS_CACHE.with(|c| c.borrow().contains_key(&norm))
+                || BOA_VFS_DIRS.with(|d| d.borrow().contains(&norm))
+                || std::path::Path::new(&path).exists();
+            Ok(BoaVal::from(exists))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_mkdir_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_write_ocap(&path) {
+                return Ok(BoaVal::undefined());
+            }
+            let norm = norm_vfs_path(&path);
+            BOA_VFS_DIRS.with(|d| {
+                d.borrow_mut().insert(norm);
+            });
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_readdir_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&path) {
+                return Ok(BoaVal::from(js_string!("[]")));
+            }
+            let norm_dir = norm_vfs_path(&path);
+            let prefix = format!("{}/", norm_dir);
+            let mut entries_set = std::collections::BTreeSet::new();
+            BOA_VFS_CACHE.with(|c| {
+                for k in c.borrow().keys() {
+                    if let Some(rest) = k.strip_prefix(&prefix) {
+                        if !rest.contains('/') && !rest.is_empty() {
+                            entries_set.insert(rest.to_string());
+                        }
+                    }
+                }
+            });
+            if let Ok(rd) = std::fs::read_dir(&path) {
+                for entry in rd.flatten() {
+                    entries_set.insert(entry.file_name().to_string_lossy().to_string());
+                }
+            }
+            let entries: Vec<String> = entries_set.into_iter().collect();
+            let json = serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string());
+            Ok(BoaVal::from(js_string!(json)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_stat_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&path) {
+                return Ok(BoaVal::from(0));
+            }
+            let norm = norm_vfs_path(&path);
+            let size = BOA_VFS_CACHE
+                .with(|c| c.borrow().get(&norm).map(|v| v.len() as u64))
+                .unwrap_or_else(|| std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0));
+            Ok(BoaVal::from(size as f64))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_is_dir_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&path) {
+                return Ok(BoaVal::from(false));
+            }
+            let norm = norm_vfs_path(&path);
+            let prefix = format!("{}/", norm);
+            let is_dir = BOA_VFS_DIRS.with(|d| d.borrow().contains(&norm))
+                || BOA_VFS_CACHE.with(|c| c.borrow().keys().any(|k| k.starts_with(&prefix)))
+                || std::path::Path::new(&path).is_dir();
+            Ok(BoaVal::from(is_dir))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_copy_file_sync"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let src = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let dest = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&src) || !check_boa_fs_write_ocap(&dest) {
+                return Ok(BoaVal::undefined());
+            }
+            let norm_src = norm_vfs_path(&src);
+            let norm_dest = norm_vfs_path(&dest);
+            let content = BOA_VFS_CACHE
+                .with(|c| c.borrow().get(&norm_src).cloned())
+                .unwrap_or_else(|| std::fs::read_to_string(&src).unwrap_or_default());
+            if let Some(idx) = norm_dest.rfind('/') {
+                let parent = &norm_dest[..idx];
+                BOA_VFS_DIRS.with(|d| {
+                    d.borrow_mut().insert(parent.to_string());
+                });
+            }
+            BOA_VFS_CACHE.with(|c| {
+                c.borrow_mut().insert(norm_dest, content);
+            });
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_rename_sync"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let old_p = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let new_p = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_read_ocap(&old_p) || !check_boa_fs_write_ocap(&new_p) {
+                return Ok(BoaVal::undefined());
+            }
+            let norm_old = norm_vfs_path(&old_p);
+            let norm_new = norm_vfs_path(&new_p);
+            let content = BOA_VFS_CACHE
+                .with(|c| c.borrow_mut().remove(&norm_old))
+                .unwrap_or_else(|| std::fs::read_to_string(&old_p).unwrap_or_default());
+            if let Some(idx) = norm_new.rfind('/') {
+                let parent = &norm_new[..idx];
+                BOA_VFS_DIRS.with(|d| {
+                    d.borrow_mut().insert(parent.to_string());
+                });
+            }
+            BOA_VFS_CACHE.with(|c| {
+                c.borrow_mut().insert(norm_new, content);
+            });
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_rm_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_write_ocap(&path) {
+                return Ok(BoaVal::undefined());
+            }
+            let norm = norm_vfs_path(&path);
+            let prefix = format!("{}/", norm);
+            BOA_VFS_CACHE.with(|c| {
+                let mut map = c.borrow_mut();
+                map.remove(&norm);
+                map.retain(|k, _| !k.starts_with(&prefix));
+            });
+            BOA_VFS_DIRS.with(|d| {
+                let mut dirs = d.borrow_mut();
+                dirs.remove(&norm);
+                dirs.retain(|k| !k.starts_with(&prefix));
+            });
+            let p = std::path::Path::new(&path);
+            if p.exists() {
+                if p.is_dir() {
+                    let _ = std::fs::remove_dir_all(p);
+                } else {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+            Ok(BoaVal::undefined())
+        }),
+    );
+}
+
+pub(crate) fn register_buffer_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_bytes_to_hex"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_bytes_to_hex"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let Some(first) = args.first() else {
+                return Ok(BoaVal::from(js_string!("")));
+            };
+            let bytes = extract_buffer_source_bytes(first, context)?;
+            Ok(BoaVal::from(js_string!(bytes_to_hex(&bytes))))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_base64_decode_bytes"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let s = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|js| js.to_std_string_escaped())
+                .unwrap_or_default();
+            let decoded = base64_decode(&s);
+            bytes_to_js_uint8_array(&decoded, context)
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_base64_encode_bytes"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let Some(first) = args.first() else {
+                return Ok(BoaVal::from(js_string!("")));
+            };
+            let url_safe = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(false);
+            let bytes = extract_buffer_source_bytes(first, context)?;
+            Ok(BoaVal::from(js_string!(base64_encode(&bytes, url_safe))))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_hex_decode"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let s = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|js| js.to_std_string_escaped())
+                .unwrap_or_default();
+            let decoded = hex_decode_bytes(&s);
+            bytes_to_js_uint8_array(&decoded, context)
+        }),
+    );
+}
+
+pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::object::builtins::JsArrayBuffer;
+    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    register_buffer_host_functions(ctx);
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_crypto_random_uuid"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_crypto_random_uuid"),
@@ -2067,61 +2168,6 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
     );
 
     let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_bytes_to_hex"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let Some(first) = args.first() else {
-                return Ok(BoaVal::from(js_string!("")));
-            };
-            let bytes = extract_buffer_source_bytes(first, context)?;
-            Ok(BoaVal::from(js_string!(bytes_to_hex(&bytes))))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_base64_decode_bytes"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let s = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|js| js.to_std_string_escaped())
-                .unwrap_or_default();
-            let decoded = base64_decode(&s);
-            bytes_to_js_uint8_array(&decoded, context)
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_base64_encode_bytes"),
-        2,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let Some(first) = args.first() else {
-                return Ok(BoaVal::from(js_string!("")));
-            };
-            let url_safe = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(false);
-            let bytes = extract_buffer_source_bytes(first, context)?;
-            Ok(BoaVal::from(js_string!(base64_encode(&bytes, url_safe))))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_hex_decode"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let s = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|js| js.to_std_string_escaped())
-                .unwrap_or_default();
-            let decoded = hex_decode_bytes(&s);
-            bytes_to_js_uint8_array(&decoded, context)
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_crypto_random_bytes"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
@@ -2203,6 +2249,17 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
             bytes_to_js_uint8_array(&mac, context)
         }),
     );
+}
+
+pub(crate) fn register_shard7_websocket_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_ws_connect"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_ws_mock"),
@@ -2358,10 +2415,17 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
             }
         }),
     );
+}
 
-    // =========================================================================
-    // Wave C: OCap Raw TCP / TLS (`startTls`) / UDP Sockets & MicroVM Workers
-    // =========================================================================
+pub(crate) fn register_shard8_workers_sockets_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_tcp_connect"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_socket_mock"),
@@ -2740,6 +2804,17 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
             Ok(BoaVal::undefined())
         }),
     );
+}
+
+pub(crate) fn register_shard9_wasm_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_wasm_compile"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_wasm_validate"),

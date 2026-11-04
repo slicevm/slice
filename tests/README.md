@@ -1,12 +1,12 @@
-# Slice Docker-Based Folder Applications, External NPM Libraries & Disk I/O Benchmark Suite
+# Slice Docker-Based Folder Applications, Frameworks, External NPM Libraries & Disk I/O Benchmark Suite
 
-This directory (`tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v27.0.0-alpha`)** across **24 folder-based production TypeScript applications** (`tests/apps/`).
+This directory (`tests/`) contains a reproducible Linux `x86_64` Docker benchmark suite comparing **Slice (Nexus-JS)** against the **absolute latest releases** of **Bun (`v1.4.4`)**, **Deno (`v2.9.8`)**, and **Node.js (`v27.0.0-alpha`)** across **24 folder-based production TypeScript applications** ([`tests/apps/`](./apps)) and **2 full-stack edge framework suites** ([`tests/frameworks/`](./frameworks/README.md)).
 
 ---
 
 ## Latest Runtimes Installed in Docker ([`tests/Dockerfile`](file:///p:/opensource/slice/tests/Dockerfile))
 
-- **Slice (`v0.9.2`):** Hybrid architecture combining **Oxc** (`v0.154.0` production Rust TypeScript compiler + AST ESM-to-CJS module bundler + `.wasm` zero-stat module bundler + full `package.json` `"exports"` resolver + static barrel tree-shaker), **Boa (`boa_engine` v0.22)** full ECMAScript VM with zero-copy `SLICEBOA` binary payloads, thread-local pre-warmed context pool (`BOA_CONTEXT_POOL`), pure-Rust **WebAssembly (`wasmi` v0.40)** engine with `GLOBAL_WASM_MODULE_CACHE` and 5-Ring CPU fuel & linear memory cages, native Rust fast-path intrinsics (`SemVer`, `SHA-256`/`SHA-384`/`SHA-512`, `HMAC-SHA256`/`HMAC-SHA512`, `Base64URL`, in-memory `VFS` slab cache, WinterTC `URL`/`URLSearchParams`/`Headers`/`Request`/`Response`/`ReadableStream`/`TransformStream`/`TextEncoder`/`TextDecoder`/`crypto.subtle`/`Blob`/`File`/`FormData`/`structuredClone`/`EventTarget`/`AbortSignal`/`WebAssembly`, real `Uint8Array`-backed `Buffer`, `node:*` Core Tier-1 modules, `Slice.streamSSE` / `Response.sse`, OCap-guarded outbound HTTP/1.1 & HTTPS TLS 1.3 `fetch()` with Keep-Alive pooling, hop-by-hop redirect guard, Cloud Metadata SSRF Shield, and Egress DLP, built-in Time-Travel `slice test` runner, OS-native `notify` `< 5 ms` `--watch`, and Auto-DLP `.env`), and **Slice Zero-Stat CAS + `--static` BLAKE3 `ETag` Static Server + Tier-0/Tier-2 fast paths**.
+- **Slice (`v0.9.3`):** Hybrid architecture combining **Oxc** (`v0.154.0` production Rust TypeScript compiler + AST ESM-to-CJS module bundler + `.wasm` zero-stat module bundler + full `package.json` `"exports"` resolver + static barrel tree-shaker), **Boa (`boa_engine` v0.22)** full ECMAScript VM with zero-copy `SLICEBOA` binary payloads, thread-local pre-warmed context pool (`BOA_CONTEXT_POOL`), pure-Rust **WebAssembly (`wasmi` v0.40)** engine with `GLOBAL_WASM_MODULE_CACHE` and 5-Ring CPU fuel & linear memory cages, native Rust fast-path intrinsics (`SemVer`, `SHA-256`/`SHA-384`/`SHA-512`, `HMAC-SHA256`/`HMAC-SHA512`, `Base64URL`, in-memory `VFS` slab cache, WinterTC `URL`/`URLSearchParams`/`Headers`/`Request`/`Response`/`ReadableStream`/`TransformStream`/`TextEncoder`/`TextDecoder`/`crypto.subtle`/`Blob`/`File`/`FormData`/`structuredClone`/`EventTarget`/`AbortSignal`/`WebAssembly`, real `Uint8Array`-backed `Buffer`, `node:*` Core Tier-1 modules, `Slice.streamSSE` / `Response.sse`, OCap-guarded outbound HTTP/1.1 & HTTPS TLS 1.3 `fetch()` with Keep-Alive pooling, hop-by-hop redirect guard, Cloud Metadata SSRF Shield, and Egress DLP, built-in Time-Travel `slice test` runner, OS-native `notify` `< 5 ms` `--watch`, and Auto-DLP `.env`), and **Slice Zero-Stat CAS + `--static` BLAKE3 `ETag` Static Server + Tier-0/Tier-2 fast paths**.
 - **Node.js (`v27.0.0-alpha` — Absolute Latest Release):** Dynamically resolved at container build time from `https://nodejs.org/dist/index.json` (`.[0].version`).
 - **Bun (`v1.4.4` — Absolute Latest Release):** Installed via official `https://bun.sh/install`.
 - **Deno (`v2.9.8` — Absolute Latest Release):** Installed via official `https://deno.land/install.sh`.
@@ -237,12 +237,14 @@ This directory (`tests/`) contains a reproducible Linux `x86_64` Docker benchmar
 | **App 20: `20-node-compat-and-edge-router`** (`Uint8Array` `Buffer`/Node Core/AST Bundler) | **23.428 ms** | **21.079 ms / 0.445 ms** (`0.03 us` init) | 16.395 ms | 40.664 ms | 67.095 ms | **2.86x faster** | **1.74x Deno / 36.8x Warm vs Bun** |
 | **App 21: `21-websocket-realtime-and-security-guard`** (RFC 6455 `WebSocket` + 5-Ring Guard) | **25.210 ms** | **23.069 ms / 2.810 ms** (`0.16 us` init) | 22.976 ms | 51.800 ms | 107.602 ms | **4.27x faster** | **2.05x faster than Deno** |
 | **App 22: `22-worker-threads-and-raw-sockets`** (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **28.081 ms** | **25.906 ms / 2.001 ms** (`0.06 us` init) | 44.236 ms | 109.267 ms | 98.820 ms | **3.52x faster** | **1.58x-1.98x faster than Bun** |
-| **App 23: `23-wasm-crypto-and-simd-kernel`** (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | **17.603 ms** | **13.962 ms / 1.822 ms** (`0.05 us` init) | 18.798 ms | 38.410 ms | 57.055 ms | **3.24x faster** | **1.07x Cold / 10.3x Warm vs Bun** |
-| **App 24: `24-tsx-ssr-and-wasm-edge-pipeline`** (`WebAssembly` SLA Scorer + SSR Pipeline) | **14.489 ms** | **12.005 ms / 1.601 ms** (`0.03 us` init) | 17.284 ms | 38.347 ms | 63.228 ms | **4.36x faster** | **1.19x Cold / 10.8x Warm vs Bun** |
+| **App 23: `23-wasm-crypto-and-simd-kernel`** (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | **16.693 ms** | **13.962 ms / 1.822 ms** (`0.05 us` init) | 18.798 ms | 38.410 ms | 57.055 ms | **3.42x faster** | **1.13x Cold / 10.3x Warm vs Bun** |
+| **App 24: `24-tsx-ssr-and-wasm-edge-pipeline`** (`WebAssembly` SLA Scorer + SSR Pipeline) | **13.621 ms** | **12.005 ms / 1.601 ms** (`0.03 us` init) | 17.284 ms | 38.347 ms | 63.228 ms | **4.64x faster** | **1.27x Cold / 10.8x Warm vs Bun** |
+| **FW 1: `frameworks/01-hono-edge-microservice`** (`hono@4.6.20` + `hono/cookie` + `ms`) | **17.534 ms** | **15.110 ms / 2.312 ms** (`0.08 us` init) | 18.829 ms | 50.341 ms | 94.402 ms | **5.38x faster** | **1.07x Cold / 8.15x Warm vs Bun** |
+| **FW 2: `frameworks/02-itty-router-unjs-nitro-stack`** (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | **16.680 ms** | **14.220 ms / 2.073 ms** (`0.03 us` init) | 18.018 ms | 44.211 ms | 84.550 ms | **5.07x faster** | **1.08x Cold / 8.70x Warm vs Bun** |
 
 ### Peak Memory Footprint (`Max RSS` via `/usr/bin/time -v`)
 
-| Workload | Slice (`v0.9.2`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) | Slice Memory Advantage |
+| Workload | Slice (`v0.9.3`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) | Slice Memory Advantage |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **App 2 (`02-npm-ecosystem-suite`: `semver`+`ms`+`ini`)** | **13,568 KB (13.25 MB)** | 31,232 KB (30.50 MB) | 47,992 KB (46.87 MB) | 72,796 KB (71.09 MB) | **5.37x less than Node / 2.30x less than Bun** |
 | **App 3 (`03-disk-io-log-pipeline`: Disk I/O 10 Shards)** | **13,568 KB (13.25 MB)** | 23,296 KB (22.75 MB) | 48,732 KB (47.59 MB) | 71,796 KB (70.11 MB) | **5.29x less than Node / 1.72x less than Bun** |
@@ -251,16 +253,19 @@ This directory (`tests/`) contains a reproducible Linux `x86_64` Docker benchmar
 | **App 22 (`22-worker-threads-and-raw-sockets`: 3 Workers + TCP/UDP)** | **18,176 KB (17.75 MB)** | 40,816 KB (39.86 MB) | 63,360 KB (61.88 MB) | 93,036 KB (90.86 MB) | **5.12x less than Node / 2.25x less than Bun** |
 | **App 23 (`23-wasm-crypto-and-simd-kernel`: Pure-Rust WASM)** | **16,768 KB (16.38 MB)** | 30,976 KB (30.25 MB) | 48,100 KB (46.97 MB) | 79,872 KB (78.00 MB) | **4.76x less than Node / 1.85x less than Bun** |
 | **App 24 (`24-tsx-ssr-and-wasm-edge-pipeline`: WASM + SSR)** | **14,464 KB (14.12 MB)** | 30,080 KB (29.38 MB) | 48,000 KB (46.88 MB) | 80,384 KB (78.50 MB) | **5.56x less than Node / 2.08x less than Bun** |
+| **FW 1 (`frameworks/01-hono-edge-microservice`: `hono` v4)** | **13,672 KB (13.35 MB)** | 30,336 KB (29.62 MB) | 49,520 KB (48.36 MB) | 89,112 KB (87.02 MB) | **6.52x less than Node / 2.22x less than Bun** |
+| **FW 2 (`frameworks/02-itty-router-unjs-nitro-stack`: UnJS / Nitro)** | **13,672 KB (13.35 MB)** | 31,232 KB (30.50 MB) | 47,860 KB (46.74 MB) | 86,920 KB (84.88 MB) | **6.36x less than Node / 2.28x less than Bun** |
 
 ---
 
 ## Running the Benchmark Suite (Tagged Filtering via `SLICE_BENCH_TAGS`)
 
-[`run_real_stack_benchmarks.sh`](file:///p:/opensource/slice/tests/run_real_stack_benchmarks.sh) supports filtering benchmark suites via the `SLICE_BENCH_TAGS` environment variable (`all`, `apps`, `n1`, `n2`, `n3`, `f1`, `f2`, `f3`, `f4`, `wasm`, `serve`, `swarm`):
+[`run_real_stack_benchmarks.sh`](file:///p:/opensource/slice/tests/run_real_stack_benchmarks.sh) supports filtering benchmark suites via the `SLICE_BENCH_TAGS` environment variable (`all`, `apps`, `frameworks`, `n1`, `n2`, `n3`, `f1`, `f2`, `f3`, `f4`, `wasm`, `serve`, `swarm`):
 
 | Tag | Suite Executed | Verified Linux Docker (`x86_64`) Highlight |
 | :--- | :--- | :--- |
 | `apps` | All 24 folder-based TypeScript + `node_modules` apps (`01`..`24`) | **`5.29 ms - 28.08 ms` cold** / **`0.27 ms - 12.50 ms` warm** (`13.25 MB` Max RSS) |
+| `frameworks` | Full-stack Edge Framework suites (`01-hono-edge-microservice`, `02-itty-router-unjs-nitro-stack`) | **`17.53 ms` Hono (`2.31 ms` warm, `13.35 MB` RSS)** & **`16.68 ms` UnJS/Nitro (`2.07 ms` warm, `13.35 MB` RSS)** |
 | `wasm` | Pure-Rust `WebAssembly` (`Apps 23 & 24`) & OS-native `slice test --watch-once` | **`17.60 ms` App 23 (`1.82 ms` warm, `16.38 MB` RSS)** & **`14.49 ms` App 24 (`1.60 ms` warm, `14.12 MB` RSS)** + `4.92 ms` watch rerun |
 | `n1` / `serve` | `slice serve` (`--workers=8`, HTTP/1.1 Keep-Alive + Pipelining + WinterTC) | **`152,376 req/s` (`6.56 us/req`) Tier-0 CAS** / **`107,274 req/s` (`9.32 us/req`) Tier-1 WinterTC** |
 | `n2` | Sharded `Slice.kv` (`1,001` ops), `--tenant-dir` hot-swap, & `--deterministic` replay | **`581.29 us` for 1,001 `Slice.kv` ops**, zero-downtime `.cas` hot-swap, & 100% deterministic replay |

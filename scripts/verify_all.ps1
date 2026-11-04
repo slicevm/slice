@@ -16,14 +16,11 @@ cargo test --workspace
 Write-Host "[2/5] Building optimized release binary..."
 cargo build --release
 
-Write-Host "[3/5] Running Windows Local Benchmark Suite..."
-powershell -ExecutionPolicy Bypass -File .\scripts\benchmark_windows.ps1
+Write-Host "[3/4] Running Local MicroVM Swarm & Security Containment Verification..."
+& (Join-Path $RootDir "target\release\slice.exe") microvm-bench --tenants=1000
+& (Join-Path $RootDir "target\release\slice.exe") verify-security
 
-Write-Host "[4/5] Building and Running Linux Docker Synthetic & MicroVM Benchmark Suite..."
-docker build -t slice-linux-bench .
-docker run --rm --privileged slice-linux-bench
-
-Write-Host "[5/5] Building and Running Linux Docker Folder-Apps, Frameworks, NPM & Disk I/O Suite..."
+Write-Host "[4/4] Building and Running Linux Docker Applications & Frameworks Suite..."
 docker build -f tests/Dockerfile -t slice-real-stack-bench .
 docker run --rm slice-real-stack-bench
 
