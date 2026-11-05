@@ -25,7 +25,7 @@ pub(crate) struct WarmBoaRealm {
     pub(crate) ses_check_fn: Option<boa_engine::JsObject>,
     pub(crate) ensure_shard_fn: Option<boa_engine::JsObject>,
     pub(crate) init_worker_self_fn: Option<boa_engine::JsObject>,
-    pub(crate) loaded_shards_mask: u16,
+    pub(crate) loaded_shards_mask: u32,
 }
 
 pub(crate) type ActiveBoaCaps = (String, Vec<String>, Vec<String>);
@@ -258,7 +258,7 @@ pub(crate) fn create_warm_boa_realm() -> WarmBoaRealm {
 #[inline]
 pub(crate) fn ensure_realm_shards(
     realm: &mut WarmBoaRealm,
-    needed_mask: u16,
+    needed_mask: u32,
     init_lazy_getters: bool,
 ) {
     let missing = needed_mask & !realm.loaded_shards_mask;
@@ -272,8 +272,10 @@ pub(crate) fn ensure_realm_shards(
         return;
     }
     let lazy_getters_active = (realm.loaded_shards_mask & 1) != 0;
-    for shard_id in [2u16, 1, 10, 3, 4, 5, 6, 7, 8, 9] {
-        let bit = 1u16 << shard_id;
+    for shard_id in [
+        2u32, 13, 1, 11, 12, 10, 3, 14, 15, 4, 16, 5, 17, 6, 7, 8, 9,
+    ] {
+        let bit = 1u32 << shard_id;
         if (missing & bit) != 0 {
             if lazy_getters_active {
                 if let Some(ref ensure_fn) = realm.ensure_shard_fn {
@@ -284,10 +286,7 @@ pub(crate) fn ensure_realm_shards(
                     );
                 }
             } else {
-                let _ = crate::js_preludes::eval_lazy_prelude_shard(
-                    shard_id as u32,
-                    &mut realm.ctx,
-                );
+                let _ = crate::js_preludes::eval_lazy_prelude_shard(shard_id, &mut realm.ctx);
             }
             realm.loaded_shards_mask |= bit;
             if shard_id == 8 && realm.init_worker_self_fn.is_none() {

@@ -3143,10 +3143,16 @@ ws.onclose = (ev) => {{
 fn test_compile_time_prelude_minifier_and_lazy_sharded_globals() {
     use crate::js_minifier::minify_js_source;
     use crate::js_preludes::{
-        CONSOLE_EXT_PRELUDE, CONSOLE_EXT_PRELUDE_SRC, ENCODING_EVENTS_PRELUDE,
-        ENCODING_EVENTS_PRELUDE_SRC, FULL_BUFFER_PRELUDE, FULL_BUFFER_PRELUDE_SRC,
-        STREAMS_FORMDATA_PRELUDE, STREAMS_FORMDATA_PRELUDE_SRC, ULTRA_CORE_PRELUDE,
-        ULTRA_CORE_PRELUDE_SRC, WEBCRYPTO_CLONE_PRELUDE, WEBCRYPTO_CLONE_PRELUDE_SRC,
+        BLOB_FORMDATA_PRELUDE, BLOB_FORMDATA_PRELUDE_SRC, BUFFER_BINARY_RW_PRELUDE,
+        BUFFER_BINARY_RW_PRELUDE_SRC, CONSOLE_EXT_PRELUDE, CONSOLE_EXT_PRELUDE_SRC,
+        DOM_EVENTS_PRELUDE, DOM_EVENTS_PRELUDE_SRC, ENCODING_EVENTS_PRELUDE,
+        ENCODING_EVENTS_PRELUDE_SRC, FETCH_HEADERS_REQ_RES_PRELUDE,
+        FETCH_HEADERS_REQ_RES_PRELUDE_SRC, FULL_BUFFER_PRELUDE, FULL_BUFFER_PRELUDE_SRC,
+        OUTBOUND_FETCH_SSE_PRELUDE, OUTBOUND_FETCH_SSE_PRELUDE_SRC, STREAMS_FORMDATA_PRELUDE,
+        STREAMS_FORMDATA_PRELUDE_SRC, STRUCTURED_CLONE_PRELUDE, STRUCTURED_CLONE_PRELUDE_SRC,
+        TRANSFORM_COMPRESSION_STREAMS_PRELUDE, TRANSFORM_COMPRESSION_STREAMS_PRELUDE_SRC,
+        ULTRA_CORE_PRELUDE, ULTRA_CORE_PRELUDE_SRC, URL_PATTERN_PRELUDE, URL_PATTERN_PRELUDE_SRC,
+        WASM_PRELUDE, WASM_PRELUDE_SRC, WEBCRYPTO_CLONE_PRELUDE, WEBCRYPTO_CLONE_PRELUDE_SRC,
         WEBSOCKET_PRELUDE, WEBSOCKET_PRELUDE_SRC, WEB_FETCH_URL_PRELUDE, WEB_FETCH_URL_PRELUDE_SRC,
         WORKERS_SOCKETS_PRELUDE, WORKERS_SOCKETS_PRELUDE_SRC,
     };
@@ -3190,13 +3196,54 @@ fn test_compile_time_prelude_minifier_and_lazy_sharded_globals() {
             WORKERS_SOCKETS_PRELUDE_SRC,
             WORKERS_SOCKETS_PRELUDE,
         ),
+        ("09_wasm.js", WASM_PRELUDE_SRC, WASM_PRELUDE),
+        (
+            "10_outbound_fetch_sse.js",
+            OUTBOUND_FETCH_SSE_PRELUDE_SRC,
+            OUTBOUND_FETCH_SSE_PRELUDE,
+        ),
+        (
+            "11_fetch_headers_req_res.js",
+            FETCH_HEADERS_REQ_RES_PRELUDE_SRC,
+            FETCH_HEADERS_REQ_RES_PRELUDE,
+        ),
+        (
+            "12_url_pattern.js",
+            URL_PATTERN_PRELUDE_SRC,
+            URL_PATTERN_PRELUDE,
+        ),
+        (
+            "13_dom_events.js",
+            DOM_EVENTS_PRELUDE_SRC,
+            DOM_EVENTS_PRELUDE,
+        ),
+        (
+            "14_transform_compression_streams.js",
+            TRANSFORM_COMPRESSION_STREAMS_PRELUDE_SRC,
+            TRANSFORM_COMPRESSION_STREAMS_PRELUDE,
+        ),
+        (
+            "15_blob_formdata.js",
+            BLOB_FORMDATA_PRELUDE_SRC,
+            BLOB_FORMDATA_PRELUDE,
+        ),
+        (
+            "16_structured_clone.js",
+            STRUCTURED_CLONE_PRELUDE_SRC,
+            STRUCTURED_CLONE_PRELUDE,
+        ),
+        (
+            "17_buffer_binary_rw.js",
+            BUFFER_BINARY_RW_PRELUDE_SRC,
+            BUFFER_BINARY_RW_PRELUDE,
+        ),
     ];
 
     let mut total_src_bytes = 0usize;
     let mut total_min_bytes = 0usize;
     for &(name, src, minified) in pairs {
         assert!(
-            src.lines().count() > 40,
+            src.lines().count() > 25,
             "{} should be human-readable multi-line source",
             name
         );
@@ -3951,20 +3998,87 @@ fn test_pillar4_surgical_shard_gating_and_native_buffer_fast_paths() {
     );
     assert_eq!(
         worker_mask,
-        (1 << 8) | (1 << 2),
-        "Worker-only scripts must not eagerly load Shard 1 (URL/Fetch) or Shard 3 (Streams)"
+        (1 << 8) | (1 << 13) | (1 << 2),
+        "Worker-only scripts must not eagerly load Shard 1 (URL), Shard 11 (Fetch), or Shard 3 (Streams)"
     );
 
     let wintertc_sock_mask =
         crate::js_preludes::detect_needed_shards("const sock = Slice.connect('127.0.0.1:6379');", false);
-    assert_eq!(wintertc_sock_mask, (1 << 8) | (1 << 3) | (1 << 2));
+    assert_eq!(
+        wintertc_sock_mask,
+        (1 << 8) | (1 << 14) | (1 << 3) | (1 << 13) | (1 << 2)
+    );
 
     let url_can_parse_mask =
         crate::js_preludes::detect_needed_shards("const ok = URL.canParse('https://example.com');", false);
     assert_eq!(
         url_can_parse_mask,
         1 << 1,
-        "URL.canParse must load only Shard 1, not Shard 2 or Shard 8"
+        "URL.canParse must load only Shard 1 (URL/URLSearchParams), not Shard 11 (Fetch) or Shard 12 (URLPattern)"
+    );
+
+    let fetch_req_res_mask =
+        crate::js_preludes::detect_needed_shards("const r = new Response('ok', { headers: new Headers() });", false);
+    assert_eq!(
+        fetch_req_res_mask,
+        1 << 11,
+        "Headers/Request/Response must load only Shard 11, not Shard 1 (URL) or Shard 12 (URLPattern)"
+    );
+
+    let url_pattern_mask =
+        crate::js_preludes::detect_needed_shards("const p = new URLPattern({ pathname: '/users/:id' });", false);
+    assert_eq!(
+        url_pattern_mask,
+        1 << 12,
+        "URLPattern must load only Shard 12, not Shard 1 (URL) or Shard 11 (Fetch)"
+    );
+
+    let text_encoder_mask =
+        crate::js_preludes::detect_needed_shards("const u8 = new TextEncoder().encode('hi');", false);
+    assert_eq!(
+        text_encoder_mask,
+        1 << 2,
+        "TextEncoder/TextDecoder/btoa/atob must load only Shard 2, not Shard 13 (DOM Events)"
+    );
+
+    let dom_events_mask =
+        crate::js_preludes::detect_needed_shards("const et = new EventTarget(); et.dispatchEvent(new Event('ping'));", false);
+    assert_eq!(
+        dom_events_mask,
+        1 << 13,
+        "Event/CustomEvent/EventTarget must load only Shard 13, not Shard 2 (Encoding)"
+    );
+
+    let readable_stream_mask =
+        crate::js_preludes::detect_needed_shards("const rs = new ReadableStream({ start(c) { c.close(); } });", false);
+    assert_eq!(
+        readable_stream_mask,
+        1 << 3,
+        "ReadableStream must load only Shard 3, not Shard 14 (Transform/Compression) or Shard 15 (Blob/FormData)"
+    );
+
+    let blob_formdata_mask =
+        crate::js_preludes::detect_needed_shards("const fd = new FormData(); fd.append('a', new Blob(['x']));", false);
+    assert_eq!(
+        blob_formdata_mask,
+        1 << 15,
+        "Blob/File/FormData must load only Shard 15, not Shard 3 (ReadableStream) or Shard 14 (Transform/Compression)"
+    );
+
+    let structured_clone_mask =
+        crate::js_preludes::detect_needed_shards("const copy = structuredClone({ a: 1 });", false);
+    assert_eq!(
+        structured_clone_mask,
+        1 << 16,
+        "structuredClone must load only Shard 16, not Shard 4 (WebCrypto)"
+    );
+
+    let core_buffer_mask =
+        crate::js_preludes::detect_needed_shards("const b = Buffer.concat([Buffer.alloc(4)]);", false);
+    assert_eq!(
+        core_buffer_mask,
+        1 << 5,
+        "Core Buffer must load only Shard 5, not Shard 17 (Binary Integer R/W)"
     );
 
     // 2. Verify compile-time lowering of `Buffer.from(...).toString(...)` & `Buffer.byteLength(...)`
@@ -4762,6 +4876,158 @@ runWaveJ().catch((e) => console.log(JSON.stringify({ __err: String(e && e.stack 
     assert_eq!(out["urlPattern"]["p3NumericMatch"], true);
     assert_eq!(out["urlPattern"]["p3AlphaReject"], true);
     assert_eq!(out["urlPattern"]["p3HasRegExp"], true);
+}
+
+#[test]
+fn test_web_primitives_rust_url_search_params_and_sub_shards_compat() {
+    use crate::web_primitives::{
+        can_parse_whatwg_url, normalize_url_pathname, parse_whatwg_url, usp_decode_component,
+        usp_encode_component, usp_parse_query, usp_stringify_pairs,
+    };
+
+    // 1. Direct Rust `web_primitives` unit tests
+    assert_eq!(normalize_url_pathname("/a/b/../c/./d"), "/a/c/d");
+    assert_eq!(normalize_url_pathname("a/../../b/"), "/b/");
+    assert_eq!(usp_encode_component("hello world+100%"), "hello+world%2B100%25");
+    assert_eq!(
+        usp_decode_component("hello+world%2B100%25"),
+        "hello world+100%"
+    );
+    let parsed_pairs = usp_parse_query("?a=1&b=hello+world&c=%E2%9C%93&empty");
+    assert_eq!(
+        parsed_pairs,
+        vec![
+            ("a".to_string(), "1".to_string()),
+            ("b".to_string(), "hello world".to_string()),
+            ("c".to_string(), "\u{2713}".to_string()),
+            ("empty".to_string(), String::new()),
+        ]
+    );
+    assert_eq!(
+        usp_stringify_pairs(&parsed_pairs),
+        "a=1&b=hello+world&c=%E2%9C%93&empty="
+    );
+
+    let u1 = parse_whatwg_url(
+        "https://user:pass@Example.COM:443/api/v1/../v2/items?sort=asc&tag=a+b#top",
+        None,
+    )
+    .expect("parse_whatwg_url https");
+    assert_eq!(u1.protocol, "https:");
+    assert_eq!(u1.username, "user");
+    assert_eq!(u1.password, "pass");
+    assert_eq!(u1.hostname, "example.com");
+    assert_eq!(u1.port, "");
+    assert_eq!(u1.host, "example.com");
+    assert_eq!(u1.origin, "https://example.com");
+    assert_eq!(u1.pathname, "/api/v2/items");
+    assert_eq!(u1.search, "?sort=asc&tag=a+b");
+    assert_eq!(u1.hash, "#top");
+    assert_eq!(
+        u1.href,
+        "https://user:pass@example.com/api/v2/items?sort=asc&tag=a+b#top"
+    );
+
+    let u2 = parse_whatwg_url("../other?x=1", Some("https://example.com:8443/a/b/c"))
+        .expect("parse_whatwg_url relative");
+    assert_eq!(u2.href, "https://example.com:8443/a/other?x=1");
+    assert_eq!(u2.origin, "https://example.com:8443");
+    assert!(can_parse_whatwg_url("/rel", Some("https://example.com")));
+    assert!(!can_parse_whatwg_url("/rel", None));
+
+    // 2. End-to-end JS compatibility across sub-shards (`1`, `11`, `13`, `15`, `16`, `5`, `17`)
+    //    and `node:crypto` base64/base64url fast paths
+    let js = r#"
+import crypto from "node:crypto";
+
+const u = new URL("/v1/./users/../posts?q=hello+world&tag=a&tag=b#sec", "https://Api.Example.com:443/base");
+u.searchParams.append("extra", "100%");
+u.searchParams.sort();
+
+const h = new Headers({ "Content-Type": "application/json", "X-Custom": "One" });
+h.append("x-custom", "Two");
+h.append("Set-Cookie", "a=1");
+h.append("Set-Cookie", "b=2");
+
+const shaB64 = crypto.createHash("sha256").update("slice-fast").digest("base64");
+const shaB64Url = crypto.createHash("sha256").update("slice-fast").digest("base64url");
+const hmacB64Url = crypto.createHmac("sha256", "k").update("m").digest("base64url");
+
+const buf = Buffer.alloc(8);
+const shard17BeforeWrite = Boolean(Buffer.prototype._hasBinRW);
+buf.writeUInt32BE(0x12345678, 0);
+buf.writeInt32LE(-42, 4);
+const shard17AfterWrite = Boolean(Buffer.prototype._hasBinRW);
+
+const cloned = structuredClone({
+    nested: { a: [1, 2, 3] },
+    map: new Map([["k", "v"]])
+});
+
+console.log(JSON.stringify({
+    href: u.href,
+    origin: u.origin,
+    pathname: u.pathname,
+    tags: u.searchParams.getAll("tag"),
+    extra: u.searchParams.get("extra"),
+    ct: h.get("content-type"),
+    xCustom: h.get("X-Custom"),
+    cookies: h.getSetCookie(),
+    shaB64,
+    shaB64Url,
+    hmacB64Url,
+    shard17BeforeWrite,
+    shard17AfterWrite,
+    u32: buf.readUInt32BE(0),
+    i32: buf.readInt32LE(4),
+    clonedMapVal: cloned.map.get("k")
+}));
+"#;
+    let m = run_source_isolated(
+        "web-primitives-compat-tenant",
+        js,
+        CapabilityToken::pure_compute(),
+        500_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert!(
+        !m.stdout.is_empty(),
+        "Expected stdout, return_value was: {}",
+        m.return_value
+    );
+    let v: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(
+        v["href"],
+        "https://api.example.com/v1/posts?extra=100%25&q=hello+world&tag=a&tag=b#sec"
+    );
+    assert_eq!(v["origin"], "https://api.example.com");
+    assert_eq!(v["pathname"], "/v1/posts");
+    assert_eq!(v["tags"], serde_json::json!(["a", "b"]));
+    assert_eq!(v["extra"], "100%");
+    assert_eq!(v["ct"], "application/json");
+    assert_eq!(v["xCustom"], "One, Two");
+    assert_eq!(v["cookies"], serde_json::json!(["a=1", "b=2"]));
+    assert_eq!(
+        v["shaB64"],
+        crate::intrinsics::base64_encode(&crate::intrinsics::sha256_bytes(b"slice-fast"), false)
+    );
+    assert_eq!(
+        v["shaB64Url"],
+        crate::intrinsics::base64_encode(&crate::intrinsics::sha256_bytes(b"slice-fast"), true)
+    );
+    assert_eq!(
+        v["hmacB64Url"],
+        crate::intrinsics::base64_encode(
+            &crate::intrinsics::hmac_sha256_bytes(b"k", b"m"),
+            true
+        )
+    );
+    assert_eq!(v["shard17BeforeWrite"], false);
+    assert_eq!(v["shard17AfterWrite"], true);
+    assert_eq!(v["u32"], 0x12345678);
+    assert_eq!(v["i32"], -42);
+    assert_eq!(v["clonedMapVal"], "v");
 }
 
 

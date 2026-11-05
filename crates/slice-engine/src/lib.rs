@@ -39,6 +39,7 @@ pub mod sockets;
 pub mod state_and_kv;
 pub mod value_and_ast;
 pub mod wasm;
+pub mod web_primitives;
 pub mod websocket;
 pub mod workers;
 

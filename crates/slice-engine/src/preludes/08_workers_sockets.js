@@ -1,7 +1,8 @@
 // Slice (Nexus-JS) Prelude Shard 8: MicroVM Web Workers (`Worker`, `MessageChannel`, `MessagePort`)
 // and Zero-Trust OCap TCP/TLS Sockets (`connect` / `Slice.connect` / `Slice.mockSocket`).
 (function() {
-  __slice_ensure_shard(2);
+  if (!globalThis.EventTarget) __slice_ensure_shard(13);
+  if (!globalThis.TextEncoder) __slice_ensure_shard(2);
 
   function __serReplacer(_k, v) {
     if (v instanceof Uint8Array) {
@@ -542,7 +543,8 @@
   }
 
   function __makeWinterTcSocket(sockId, meta, origHostname, secureTransportMode) {
-    __slice_ensure_shard(3);
+    if (!globalThis.ReadableStream) __slice_ensure_shard(3);
+    if (!globalThis.WritableStream) __slice_ensure_shard(14);
     var closedResolved = false;
     var resolveClosed, rejectClosed;
     var closedPromise = new Promise(function(res, rej) {

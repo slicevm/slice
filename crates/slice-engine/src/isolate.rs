@@ -834,7 +834,7 @@ impl SliceIsolate {
             });
         }
         let mut realm = acquire_warm_boa_realm();
-        ensure_realm_shards(&mut realm, (1 << 2) | (1 << 7), false);
+        ensure_realm_shards(&mut realm, (1 << 13) | (1 << 7), false);
         if has_env_keys {
             let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
                 b"__slice_sync_process_env(true);",
@@ -1758,6 +1758,12 @@ impl SliceIsolate {
                 b"__slice_sync_process_env(true);",
             ));
         }
+        if self.deterministic_seed.is_some() {
+            crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_set_det_mode(true);",
+            ));
+        }
         let has_next_tick = js_code.contains("nextTick");
         if has_next_tick {
             let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
@@ -1765,7 +1771,7 @@ impl SliceIsolate {
             ));
         }
         if is_worker {
-            ensure_realm_shards(&mut realm, (1 << 8) | (1 << 2), false);
+            ensure_realm_shards(&mut realm, (1 << 8) | (1 << 13) | (1 << 2), false);
             if let Some(ref init_fn) = realm.init_worker_self_fn {
                 let _ = init_fn.call(
                     &boa_engine::JsValue::undefined(),
@@ -1806,8 +1812,8 @@ impl SliceIsolate {
         // `fn_obj.call()` directly in Rust with ZERO JS source lexing, parsing, or `ctx.eval` overhead.
         let eval_res = if let Some((rc_key_u64, hex_bytes)) = rc_key_opt {
             if let Some(fn_obj) = realm.loaded_bundles.get(&rc_key_u64).cloned() {
-                if is_http_req && (realm.loaded_shards_mask & (1 << 1)) == 0 {
-                    ensure_realm_shards(&mut realm, (1 << 1) | (1 << 2), false);
+                if is_http_req && (realm.loaded_shards_mask & (1 << 11)) == 0 {
+                    ensure_realm_shards(&mut realm, 1 << 11, false);
                 }
                 fn_obj.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
             } else {
@@ -1896,6 +1902,9 @@ impl SliceIsolate {
         }
 
         if self.deterministic_seed.is_some() {
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_set_det_mode(false);",
+            ));
             BOA_DET_STATE.with(|s| s.set(None));
         }
         if has_fs_restrictions {

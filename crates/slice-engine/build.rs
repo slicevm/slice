@@ -38,6 +38,25 @@ const PRELUDE_SPECS: &[(&str, &str)] = &[
         "OUTBOUND_FETCH_SSE_PRELUDE",
         "src/preludes/10_outbound_fetch_sse.js",
     ),
+    (
+        "FETCH_HEADERS_REQ_RES_PRELUDE",
+        "src/preludes/11_fetch_headers_req_res.js",
+    ),
+    ("URL_PATTERN_PRELUDE", "src/preludes/12_url_pattern.js"),
+    ("DOM_EVENTS_PRELUDE", "src/preludes/13_dom_events.js"),
+    (
+        "TRANSFORM_COMPRESSION_STREAMS_PRELUDE",
+        "src/preludes/14_transform_compression_streams.js",
+    ),
+    ("BLOB_FORMDATA_PRELUDE", "src/preludes/15_blob_formdata.js"),
+    (
+        "STRUCTURED_CLONE_PRELUDE",
+        "src/preludes/16_structured_clone.js",
+    ),
+    (
+        "BUFFER_BINARY_RW_PRELUDE",
+        "src/preludes/17_buffer_binary_rw.js",
+    ),
 ];
 
 fn main() {

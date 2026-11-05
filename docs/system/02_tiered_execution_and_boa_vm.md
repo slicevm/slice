@@ -25,25 +25,35 @@
 - [`bundle_entrypoint_with_deps`](file:///p:/opensource/slice/crates/slice-cas/src/lib.rs) emits a 16-hex-char BLAKE3 fingerprint header (`//__SLICE_RC:<16_hex_chars>`) and caches evaluated `node_modules` exports (`__slice_cache`) plus the compiled entrypoint closure in `globalThis.__slice_rc`.
 - On warm hits (`slice serve` or `slice run --warm`), [`WarmBoaRealm::loaded_bundles`](file:///p:/opensource/slice/crates/slice-engine/src/boa_realm.rs) stores the compiled `boa_engine::JsObject` entrypoint function handle and invokes `fn_obj.call(...)` directly in Rust with **0 JS parser passes** and **0 `node_modules` CJS factory re-evaluations**, cutting warm isolate execution down to **`272 us` (`0.27 ms`)** on `02-npm-ecosystem-suite`, **`600 us` (`0.60 ms`)** on `02-itty-router-unjs-nitro-stack`, and **`900 us` (`0.90 ms`)** on `01-hono-edge-microservice`.
 
-### 2.3 Compile-Time Minified Sharded Preludes (`00_ultra_core.js` .. `10_annex_b_escape.js`)
-- Implemented in [`crates/slice-engine/build.rs`](file:///p:/opensource/slice/crates/slice-engine/build.rs) and [`crates/slice-engine/src/js_preludes.rs`](file:///p:/opensource/slice/crates/slice-engine/src/js_preludes.rs):
-  - Instead of evaluating a monolithic ~48 KB JS prelude on every cold process launch, `00_ultra_core.js` (`~6 KB` minified) registers self-replacing `Object.defineProperty` lazy getters (`__defLazy(names, shardId)`) on `globalThis` for 10 specialized shards:
-    - **Shard 1 (`01_web_fetch_url.js`):** `URL`, `URLSearchParams`, `URLPattern`, `Headers`, `Request`, `Response`.
-    - **Shard 2 (`02_encoding_events.js`):** `TextEncoder`, `TextDecoder`, `Event`, `CustomEvent`, `EventTarget`, `btoa`, `atob`.
-    - **Shard 3 (`03_streams_formdata.js`):** `ReadableStream`, `WritableStream`, `TransformStream`, `TextEncoderStream`, `TextDecoderStream`, `CompressionStream`, `DecompressionStream`, `Blob`, `File`, `FormData`.
-    - **Shard 4 (`04_webcrypto_clone.js`):** `crypto`, `CryptoKey`, `SubtleCrypto`, `structuredClone`.
-    - **Shard 5 (`05_full_buffer.js`):** Full `Uint8Array`-backed `Buffer` with `DataView` integer readers/writers.
-    - **Shard 6 (`06_console_ext.js`):** Extended WHATWG `console.table`, `time`, `group`, `dir`, `count`, `assert`, `trace`.
+### 2.3 Compile-Time Minified 17-Shard Surgical Preludes (`00_ultra_core.js` + Shards `1..=17`)
+- Implemented in [`crates/slice-engine/build.rs`](file:///p:/opensource/slice/crates/slice-engine/build.rs), [`crates/slice-engine/src/js_preludes.rs`](file:///p:/opensource/slice/crates/slice-engine/src/js_preludes.rs), and [`crates/slice-engine/src/boa_realm.rs`](file:///p:/opensource/slice/crates/slice-engine/src/boa_realm.rs) (`WarmBoaRealm::loaded_shards_mask: u32`):
+  - Instead of evaluating a monolithic ~48 KB JS prelude on every cold process launch, `00_ultra_core.js` (`~6 KB` minified, preserving native Boa `Date.now` and `Math.random` fast paths unless `--deterministic` is active) registers self-replacing `Object.defineProperty` lazy getters (`__defLazy(names, shardId)`) on `globalThis` across **17 orthogonal sub-shards**:
+    - **Shard 1 (`01_web_fetch_url.js`):** `URL` and `URLSearchParams` (backed by native Rust [`web_primitives.rs`](file:///p:/opensource/slice/crates/slice-engine/src/web_primitives.rs)).
+    - **Shard 2 (`02_encoding_events.js`):** `TextEncoder`, `TextDecoder`, `btoa`, `atob`.
+    - **Shard 3 (`03_streams_formdata.js`):** `ReadableStream`.
+    - **Shard 4 (`04_webcrypto_clone.js`):** `crypto`, `CryptoKey`, `crypto.subtle`, `randomUUID`, `getRandomValues`.
+    - **Shard 5 (`05_full_buffer.js`):** Core `Uint8Array`-backed `Buffer` (`from`, `alloc`, `concat`, `byteLength`, `compare`, `toString`, `subarray`, `equals`) with lazy Shard 17 prototype forwarders.
+    - **Shard 6 (`06_console_ext.js`):** `AbortController`, `AbortSignal` (`timeout`, `any`, `abort`), `DOMException`.
     - **Shard 7 (`07_websocket.js`):** `WebSocket`, `MessageEvent`, `CloseEvent`.
     - **Shard 8 (`08_workers_sockets.js`):** `Worker`, `MessageChannel`, `MessagePort`, `Slice.connect`.
     - **Shard 9 (`09_wasm.js`):** `WebAssembly` (`Module`, `Instance`, `Memory`, `Table`, `Global`, `compile`, `instantiate`).
-    - **Shard 10 (`10_outbound_fetch_sse.js`):** `fetch`, `AbortController`, `AbortSignal`, `Slice.streamSSE`, `Response.sse`.
+    - **Shard 10 (`10_outbound_fetch_sse.js`):** `fetch`, `EventSource`, `Slice.streamSSE`, `Response.sse`.
+    - **Shard 11 (`11_fetch_headers_req_res.js`):** `Headers` (with `_isHeaders` fast copy, O(1) lowercase `get()`, and `getSetCookie()`), `Request`, `Response`, `__slice_make_web_request`.
+    - **Shard 12 (`12_url_pattern.js`):** `URLPattern`.
+    - **Shard 13 (`13_dom_events.js`):** `Event`, `CustomEvent`, `EventTarget`.
+    - **Shard 14 (`14_transform_compression_streams.js`):** `WritableStream`, `TransformStream`, `TextEncoderStream`, `TextDecoderStream`, `CompressionStream`, `DecompressionStream`.
+    - **Shard 15 (`15_blob_formdata.js`):** `Blob`, `File`, `FormData`.
+    - **Shard 16 (`16_structured_clone.js`):** `structuredClone`.
+    - **Shard 17 (`17_buffer_binary_rw.js`):** `Buffer.prototype` binary integer readers/writers (`readUInt*`, `readInt*`, `readBig*`, `writeUInt*`, `writeInt*`, `writeBig*`) and slice mutators (`copy`, `fill`, `write`, `compare`, `toJSON`).
 
 ---
 
-## 3. Native Rust Fast-Path Intrinsics (`SHA-NI`, `SemVer`, `Base64URL`, `DEFLATE`/`Gzip`, `AsyncLocalStorage`, & In-Memory VFS Slab)
+## 3. Native Rust Fast-Path Intrinsics (`web_primitives`, `SHA-NI`, `SemVer`, `Base64URL`, `DEFLATE`/`Gzip`, `AsyncLocalStorage`, & In-Memory VFS Slab)
 
-Implemented in [`crates/slice-engine/src/intrinsics.rs`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs), [`crates/slice-engine/src/boa_realm.rs`](file:///p:/opensource/slice/crates/slice-engine/src/boa_realm.rs), and [`crates/slice-engine/src/host_bindings.rs`](file:///p:/opensource/slice/crates/slice-engine/src/host_bindings.rs):
+Implemented in [`crates/slice-engine/src/web_primitives.rs`](file:///p:/opensource/slice/crates/slice-engine/src/web_primitives.rs), [`crates/slice-engine/src/intrinsics.rs`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs), [`crates/slice-engine/src/boa_realm.rs`](file:///p:/opensource/slice/crates/slice-engine/src/boa_realm.rs), and [`crates/slice-engine/src/host_bindings.rs`](file:///p:/opensource/slice/crates/slice-engine/src/host_bindings.rs):
+
+0. **Native Rust WHATWG `URL` & `URLSearchParams` Primitives ([`crates/slice-engine/src/web_primitives.rs`](file:///p:/opensource/slice/crates/slice-engine/src/web_primitives.rs)):**
+   - Provides [`parse_whatwg_url`](file:///p:/opensource/slice/crates/slice-engine/src/web_primitives.rs), [`can_parse_whatwg_url`](file:///p:/opensource/slice/crates/slice-engine/src/web_primitives.rs), [`normalize_url_pathname`](file:///p:/opensource/slice/crates/slice-engine/src/web_primitives.rs), [`usp_encode_component`](file:///p:/opensource/slice/crates/slice-engine/src/web_primitives.rs), [`usp_decode_component`](file:///p:/opensource/slice/crates/slice-engine/src/web_primitives.rs), and [`usp_parse_query`](file:///p:/opensource/slice/crates/slice-engine/src/web_primitives.rs), exposed to Shard 1 via `__slice_url_can_parse`, `__slice_usp_encode`, and `__slice_usp_decode`.
 
 1. **Hardware `SHA-NI` Block Compression ([`Sha256State::compress_block_sha_ni`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs)):**
    - Uses Intel/AMD `SHA-NI` instructions (`_mm_sha256rnds2_epu32`, `_mm_sha256msg1_epu32`, `_mm_sha256msg2_epu32`) with cached `AtomicU8` runtime feature detection (`sha,sse4.1,ssse3`) and automatic fallback to [`Sha256State::compress_block_soft`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs).

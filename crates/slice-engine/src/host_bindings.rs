@@ -113,52 +113,6 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     );
 
     let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_path_join"),
-        2,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let mut out = String::with_capacity(64);
-            for (idx, arg) in args.iter().enumerate() {
-                let s = arg.to_string(context)?.to_std_string_escaped();
-                if s.is_empty() {
-                    continue;
-                }
-                let normalized = if s.contains('\\') {
-                    s.replace('\\', "/")
-                } else {
-                    s
-                };
-                let mut seg = normalized.as_str();
-                if !out.is_empty() {
-                    seg = seg.trim_start_matches('/');
-                }
-                if idx + 1 < args.len() && seg.len() > 1 {
-                    seg = seg.trim_end_matches('/');
-                }
-                if seg.is_empty() {
-                    continue;
-                }
-                if !out.is_empty() && !out.ends_with('/') {
-                    out.push('/');
-                }
-                out.push_str(seg);
-            }
-            if out.is_empty() {
-                out.push('.');
-            }
-            Ok(BoaVal::from(js_string!(out)))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_os_tmpdir"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| {
-            let tmp = std::env::temp_dir().to_string_lossy().replace('\\', "/");
-            Ok(BoaVal::from(js_string!(tmp)))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_os_platform"),
         0,
         NativeFunction::from_fn_ptr(|_this, _args, _context| {
@@ -196,13 +150,30 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_crypto_sha256"),
-        1,
+        2,
         NativeFunction::from_fn_ptr(|_this, args, context| {
+            let enc = args
+                .get(1)
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "hex".to_string());
+            let encode_digest = |raw: &[u8]| -> String {
+                if enc.eq_ignore_ascii_case("base64") {
+                    base64_encode(raw, false)
+                } else if enc.eq_ignore_ascii_case("base64url") {
+                    base64_encode(raw, true)
+                } else {
+                    bytes_to_hex(raw)
+                }
+            };
             if let Some(first) = args.first() {
                 if first.is_object() {
                     if let Ok(bytes) = extract_buffer_source_bytes(first, context) {
-                        let hex = sha256_hex(&bytes);
-                        return Ok(BoaVal::from(js_string!(hex)));
+                        if enc.eq_ignore_ascii_case("hex") {
+                            return Ok(BoaVal::from(js_string!(sha256_hex(&bytes))));
+                        }
+                        let digest = sha256_bytes(&bytes);
+                        return Ok(BoaVal::from(js_string!(encode_digest(&digest))));
                     }
                 }
             }
@@ -212,14 +183,17 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            let hex = sha256_hex(input.as_bytes());
-            Ok(BoaVal::from(js_string!(hex)))
+            if enc.eq_ignore_ascii_case("hex") {
+                return Ok(BoaVal::from(js_string!(sha256_hex(input.as_bytes()))));
+            }
+            let digest = sha256_bytes(input.as_bytes());
+            Ok(BoaVal::from(js_string!(encode_digest(&digest))))
         }),
     );
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_crypto_hmac_sha256"),
-        2,
+        3,
         NativeFunction::from_fn_ptr(|_this, args, context| {
             let key = args
                 .first()
@@ -233,6 +207,19 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            let enc = args
+                .get(2)
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "hex".to_string());
+            if enc.eq_ignore_ascii_case("base64") {
+                let mac = hmac_sha256_bytes(key.as_bytes(), msg.as_bytes());
+                return Ok(BoaVal::from(js_string!(base64_encode(&mac, false))));
+            }
+            if enc.eq_ignore_ascii_case("base64url") {
+                let mac = hmac_sha256_bytes(key.as_bytes(), msg.as_bytes());
+                return Ok(BoaVal::from(js_string!(base64_encode(&mac, true))));
+            }
             let hex = hmac_sha256_hex(key.as_bytes(), msg.as_bytes());
             Ok(BoaVal::from(js_string!(hex)))
         }),
@@ -334,40 +321,6 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 }
             }
             Ok(BoaVal::from(s.len() as f64))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_det_random"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| {
-            let val = BOA_DET_STATE.with(|s| {
-                if let Some((mut prng, clk)) = s.get() {
-                    let r = splitmix64_next_f64(&mut prng);
-                    s.set(Some((prng, clk)));
-                    r
-                } else {
-                    -1.0
-                }
-            });
-            Ok(BoaVal::from(val))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_det_now"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| {
-            let val = BOA_DET_STATE.with(|s| {
-                if let Some((prng, clk)) = s.get() {
-                    let next_clk = clk.wrapping_add(1);
-                    s.set(Some((prng, next_clk)));
-                    next_clk as f64
-                } else {
-                    -1.0
-                }
-            });
-            Ok(BoaVal::from(val))
         }),
     );
 
@@ -479,24 +432,6 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     );
 
     let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_clear_timers"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| {
-            clear_event_loop_state();
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_drain_event_loop"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, context| {
-            drive_event_loop_to_completion(context);
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_http_is_active"),
         0,
         NativeFunction::from_fn_ptr(|_this, _args, _context| {
@@ -524,6 +459,89 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 Some(v) => v.to_string(context)?.to_std_string_escaped(),
             };
             bytes_to_js_uint8_array(s.as_bytes(), context)
+        }),
+    );
+}
+
+pub(crate) fn register_deterministic_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_det_random"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_det_random"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let val = BOA_DET_STATE.with(|s| {
+                if let Some((mut prng, clk)) = s.get() {
+                    let r = splitmix64_next_f64(&mut prng);
+                    s.set(Some((prng, clk)));
+                    r
+                } else {
+                    -1.0
+                }
+            });
+            Ok(BoaVal::from(val))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_det_now"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let val = BOA_DET_STATE.with(|s| {
+                if let Some((prng, clk)) = s.get() {
+                    let next_clk = clk.wrapping_add(1);
+                    s.set(Some((prng, next_clk)));
+                    next_clk as f64
+                } else {
+                    -1.0
+                }
+            });
+            Ok(BoaVal::from(val))
+        }),
+    );
+}
+
+pub(crate) fn register_os_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_os_tmpdir"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_os_tmpdir"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let tmp = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+            Ok(BoaVal::from(js_string!(tmp)))
+        }),
+    );
+}
+
+pub(crate) fn register_node_crypto_bootstrap_host_function(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_init_crypto_ext"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_init_crypto_ext"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, context| {
+            register_webcrypto_host_functions(context);
+            Ok(BoaVal::undefined())
         }),
     );
 }
@@ -836,6 +854,24 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
     {
         return;
     }
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_clear_timers"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            clear_event_loop_state();
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_drain_event_loop"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, context| {
+            drive_event_loop_to_completion(context);
+            Ok(BoaVal::undefined())
+        }),
+    );
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_kv_get"),

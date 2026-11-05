@@ -15,7 +15,7 @@
   function __loadShard(id) {
     if (!__lazyInited) {
       if (
-        (id === 1 && globalThis.Request) ||
+        (id === 1 && globalThis.URL) ||
         (id === 2 && globalThis.TextEncoder) ||
         (id === 3 && globalThis.ReadableStream) ||
         (id === 4 && globalThis.crypto) ||
@@ -23,17 +23,33 @@
         (id === 7 && globalThis.WebSocket) ||
         (id === 8 && globalThis.Worker) ||
         (id === 9 && globalThis.WebAssembly) ||
-        (id === 10 && globalThis.fetch)
+        (id === 10 && globalThis.fetch) ||
+        (id === 11 && globalThis.Request) ||
+        (id === 12 && globalThis.URLPattern) ||
+        (id === 13 && globalThis.EventTarget) ||
+        (id === 14 && globalThis.TransformStream) ||
+        (id === 15 && globalThis.FormData) ||
+        (id === 16 && globalThis.structuredClone) ||
+        (id === 17 && globalThis.Buffer && globalThis.Buffer.prototype._hasBinRW)
       ) {
         globalThis.__shMask |= (1 << id);
         return;
       }
     }
-    if ((id === 3 || id === 7 || id === 8) && (globalThis.__shMask & 4) === 0 && ( __lazyInited || !globalThis.TextEncoder )) {
+    if ((id === 7 || id === 8) && (globalThis.__shMask & (1 << 13)) === 0 && (__lazyInited || !globalThis.EventTarget)) {
+      __loadShard(13);
+    }
+    if (id === 8 && (globalThis.__shMask & 4) === 0 && (__lazyInited || !globalThis.TextEncoder)) {
       __loadShard(2);
     }
-    if (id === 10 && (globalThis.__shMask & 2) === 0 && ( __lazyInited || !globalThis.Request )) {
-      __loadShard(1);
+    if (id === 10 && (globalThis.__shMask & (1 << 11)) === 0 && (__lazyInited || !globalThis.Request)) {
+      __loadShard(11);
+    }
+    if (id === 14 && (globalThis.__shMask & 8) === 0 && (__lazyInited || !globalThis.ReadableStream)) {
+      __loadShard(3);
+    }
+    if (id === 17 && (globalThis.__shMask & 32) === 0 && (__lazyInited || !globalThis.Buffer)) {
+      __loadShard(5);
     }
     var bit = 1 << id;
     if ((globalThis.__shMask & bit) === 0) {
@@ -56,7 +72,7 @@
 
   globalThis.__slice_dispatch_fetch = function(h) {
     if (!__slice_http_is_active()) return;
-    __loadShard(1);
+    __loadShard(11);
     return globalThis.__slice_dispatch_fetch(h);
   };
 
@@ -118,18 +134,30 @@
 
   var __orand = Math.random;
   var __onow = Date.now;
-  Math.random = function() {
-    var v = __slice_det_random();
-    return v >= 0 ? v : __orand();
-  };
-  Date.now = function() {
-    var v = __slice_det_now();
-    return v >= 0 ? v : __onow();
-  };
+  function __perfNowNative() {
+    return __onow() - 1700000000000;
+  }
   globalThis.performance = {
-    now: function() {
-      var v = __slice_det_now();
-      return v >= 0 ? (v - 1700000000000) : (__onow() - 1700000000000);
+    now: __perfNowNative
+  };
+  globalThis.__slice_set_det_mode = function(on) {
+    if (on) {
+      Math.random = function() {
+        var v = __slice_det_random();
+        return v >= 0 ? v : __orand();
+      };
+      Date.now = function() {
+        var v = __slice_det_now();
+        return v >= 0 ? v : __onow();
+      };
+      globalThis.performance.now = function() {
+        var v = __slice_det_now();
+        return (v >= 0 ? v : __onow()) - 1700000000000;
+      };
+    } else {
+      Math.random = __orand;
+      Date.now = __onow;
+      globalThis.performance.now = __perfNowNative;
     }
   };
 

@@ -134,6 +134,7 @@
     return out;
   }
 
+  if (!globalThis.Response) __slice_ensure_shard(11);
   var Response = globalThis.Response;
   var Headers = globalThis.Headers;
   var Request = globalThis.Request;

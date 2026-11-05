@@ -1,5 +1,6 @@
 // Slice (Nexus-JS) Lazy Prelude Shard 7: RFC 6455 `WebSocket`, `MessageEvent`, `CloseEvent`, Server Upgrade (`07_websocket.js`)
 (function() {
+  if (!globalThis.EventTarget) __slice_ensure_shard(13);
   var _Event = globalThis.Event;
   var _EventTarget = globalThis.EventTarget;
 
@@ -45,6 +46,7 @@
           } else if (ws.binaryType === "uint8array") {
             msgData = u8;
           } else {
+            if (!globalThis.Blob) __slice_ensure_shard(15);
             msgData = new globalThis.Blob([u8]);
           }
         }
@@ -189,6 +191,7 @@
       if (handlerOrOpts) {
         globalThis.__slice_ws_server_handler = handlerOrOpts;
       }
+      if (!globalThis.Response) __slice_ensure_shard(11);
       __slice_http_respond("", 101, "text/plain", JSON.stringify([["Upgrade", "websocket"]]));
       return new globalThis.Response("", {
         status: 101,
