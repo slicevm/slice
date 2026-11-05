@@ -243,10 +243,9 @@ pub(crate) fn parse_outbound_http_url(raw_url: &str) -> Option<OutboundUrlParts>
     let without_hash = trimmed.split('#').next().unwrap_or(trimmed);
     let (is_https, default_port, rest) = if let Some(r) = without_hash.strip_prefix("http://") {
         (false, 80u16, r)
-    } else if let Some(r) = without_hash.strip_prefix("https://") {
-        (true, 443u16, r)
     } else {
-        return None;
+        let r = without_hash.strip_prefix("https://")?;
+        (true, 443u16, r)
     };
     let (authority, path_and_query) = match rest.find('/') {
         Some(idx) => (&rest[..idx], &rest[idx..]),

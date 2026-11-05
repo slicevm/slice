@@ -59,13 +59,20 @@ pub fn apply_websocket_mask_in_place(payload: &mut [u8], mask_key: [u8; 4]) {
         return;
     }
     let key_u32 = u32::from_ne_bytes(mask_key);
-    let mut chunks = payload.chunks_exact_mut(4);
-    for chunk in &mut chunks {
-        let word = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) ^ key_u32;
-        chunk.copy_from_slice(&word.to_ne_bytes());
+    let len = payload.len();
+    let mut idx = 0;
+    while idx + 4 <= len {
+        let word = u32::from_ne_bytes([
+            payload[idx],
+            payload[idx + 1],
+            payload[idx + 2],
+            payload[idx + 3],
+        ]) ^ key_u32;
+        payload[idx..idx + 4].copy_from_slice(&word.to_ne_bytes());
+        idx += 4;
     }
-    for (i, byte) in chunks.into_remainder().iter_mut().enumerate() {
-        *byte ^= mask_key[i & 3];
+    for (rem_idx, byte) in payload[idx..].iter_mut().enumerate() {
+        *byte ^= mask_key[rem_idx & 3];
     }
 }
 
@@ -935,7 +942,7 @@ pub(crate) fn ws_client_send(
             }
         }
 
-        let events: Vec<WireWsEvent> = ws.queued_events.drain(..).collect();
+        let events: Vec<WireWsEvent> = std::mem::take(&mut ws.queued_events);
         serde_json::to_string(&events).map_err(|e| e.to_string())
     })
 }
@@ -950,7 +957,7 @@ pub(crate) fn ws_client_poll(ws_id: u32) -> Result<String, String> {
         if !ws.closed {
             drain_available_live_frames(ws, Duration::from_millis(15), false);
         }
-        let events: Vec<WireWsEvent> = ws.queued_events.drain(..).collect();
+        let events: Vec<WireWsEvent> = std::mem::take(&mut ws.queued_events);
         serde_json::to_string(&events).map_err(|e| e.to_string())
     })
 }
@@ -985,7 +992,7 @@ pub(crate) fn ws_client_close(ws_id: u32, code: u16, reason: &str) -> Result<Str
                 });
             }
         }
-        let events: Vec<WireWsEvent> = ws.queued_events.drain(..).collect();
+        let events: Vec<WireWsEvent> = std::mem::take(&mut ws.queued_events);
         serde_json::to_string(&events).map_err(|e| e.to_string())
     })
 }
@@ -1021,6 +1028,6 @@ pub(crate) fn ws_server_queue_close(code: u16, reason: &str) -> Result<(), Strin
 
 /// Drains all server-to-client WebSocket frames queued during the most recent isolate callback.
 pub fn drain_server_ws_outbox() -> Vec<ServerWsOutFrame> {
-    BOA_WS_SERVER_OUTBOX.with(|q| q.borrow_mut().drain(..).collect())
+    BOA_WS_SERVER_OUTBOX.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
