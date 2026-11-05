@@ -81,5 +81,6 @@ jobs:
 
       - name: Verify time-travel deterministic test runner
         run: |
+          (cd ./tests/apps/15-time-travel-test-suite && npm install --no-audit --no-fund)
           ./target/debug/slice test ./tests/apps/15-time-travel-test-suite
 
