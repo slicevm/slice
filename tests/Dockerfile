@@ -2,6 +2,7 @@ FROM rust:latest AS builder
 
 WORKDIR /workspace
 COPY Cargo.toml Cargo.lock ./
+COPY vendor ./vendor
 COPY crates ./crates
 
 RUN cargo build --release

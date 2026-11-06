@@ -521,4 +521,156 @@ mod tests {
 
         set_thread_exper_boacas_override(None);
     }
+
+    #[test]
+    fn test_boacas_codeblock_edge_cases_bigint_utf16_closures_handlers_and_corruption_fallback() {
+        set_thread_exper_boacas_override(Some(true));
+        let edge_src = r#"
+            const big = 9007199254740993n * 2n;
+            const utf16 = "αβγδ-λ-Ω";
+            function makeAdder(base) {
+                let acc = base;
+                return function(step) {
+                    try {
+                        if (step < 0) throw new Error("neg:" + step);
+                        acc += step;
+                        return acc;
+                    } catch (e) {
+                        return -1;
+                    } finally {
+                        acc += 1;
+                    }
+                };
+            }
+            class Boxed {
+                constructor(v) { this._v = v; }
+                get val() { return this._v; }
+            }
+            const add = makeAdder(10);
+            const r1 = add(5);
+            const r2 = add(-3);
+            const r3 = new Boxed(add(0)).val;
+            Promise.resolve(utf16.length).then((uLen) => {
+                console.log(big.toString() + "|" + utf16 + "|" + uLen + "|" + r1 + "," + r2 + "," + r3);
+            });
+        "#;
+        let bc = compile_source_to_bytecode(edge_src);
+        assert_eq!(&bc[0..8], BOACAS_MAGIC);
+
+        // 1. Cold bare-realm execution of precompiled CodeBlock with BigInt, UTF-16, closures, and try/catch/finally
+        crate::boa_realm::BOA_CONTEXT_POOL.with(|pool| pool.borrow_mut().clear());
+        let mut iso_cold = SliceIsolate::spawn(
+            "boacas-edge-cold",
+            1,
+            CapabilityToken::pure_compute(),
+            100_000,
+            8 * 1024 * 1024,
+        );
+        let m_cold = iso_cold.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(
+            m_cold.stdout,
+            vec!["18014398509481986|αβγδ-λ-Ω|8|15,-1,17"]
+        );
+
+        // 2. Corrupt the inner SLCB\x01 magic inside precompiled_slice and verify graceful fallback to fallback_js
+        let mut corrupted_bc = bc.clone();
+        corrupted_bc[BOACAS_HEADER_LEN] ^= 0xFF;
+        crate::boa_realm::BOA_CONTEXT_POOL.with(|pool| pool.borrow_mut().clear());
+        let mut iso_corrupt = SliceIsolate::spawn(
+            "boacas-edge-corrupt",
+            1,
+            CapabilityToken::pure_compute(),
+            100_000,
+            8 * 1024 * 1024,
+        );
+        let m_corrupt = iso_corrupt.execute_bytecode(&corrupted_bc, None).unwrap();
+        assert_eq!(
+            m_corrupt.stdout,
+            vec!["18014398509481986|αβγδ-λ-Ω|8|15,-1,17"]
+        );
+
+        // 3. Truncated header returns None from BoaCasHeader::decode
+        assert!(BoaCasHeader::decode(&bc[..16]).is_none());
+
+        set_thread_exper_boacas_override(None);
+    }
+
+    #[test]
+    fn test_boacas_prefused_node_builtins_and_deferred_module_spans() {
+        set_thread_exper_boacas_override(Some(true));
+
+        let tmp_dir = std::env::temp_dir().join("slice_boacas_edge_node_modules");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let nm_dir = tmp_dir.join("node_modules");
+        std::fs::create_dir_all(nm_dir.join("hot-pkg")).unwrap();
+        std::fs::create_dir_all(nm_dir.join("cold-pkg")).unwrap();
+        std::fs::write(
+            nm_dir.join("hot-pkg").join("index.js"),
+            "const path = require('node:path');\nexports.tag = function(a, b) { return path.posix.join(a, b); };\n",
+        )
+        .unwrap();
+        std::fs::write(
+            nm_dir.join("cold-pkg").join("index.js"),
+            "exports.neverCalled = function() { return 'COLD_PKG_LOADED'; };\n",
+        )
+        .unwrap();
+        let entry_path = tmp_dir.join("index.js");
+        std::fs::write(
+            &entry_path,
+            r#"
+            const hot = require("hot-pkg");
+            const crypto = require("node:crypto");
+            const assert = require("node:assert");
+            function unusedHelper() {
+                return require("cold-pkg").neverCalled();
+            }
+            const joined = hot.tag("edge", "v1");
+            assert.strictEqual(joined, "edge/v1");
+            const digest = crypto.createHash("sha256").update(joined).digest("hex").slice(0, 8);
+            console.log(joined + ":" + digest);
+            "#,
+        )
+        .unwrap();
+
+        let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_path).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        // Verify Branch A's Oxc AST deferred function span optimization turned cold-pkg into a lazy string literal
+        assert!(
+            bundled.contains("= \"exports.neverCalled"),
+            "Expected cold-pkg inside unusedHelper() to be deferred as a lazy string literal"
+        );
+
+        let bc = compile_source_to_bytecode(&bundled);
+        let (hdr, _, _) = BoaCasHeader::decode(&bc).expect("Valid SLICEBCv1 header");
+        assert_ne!(hdr.shards_mask & (1 << 18), 0, "Expected node:crypto bit 18");
+        assert_ne!(hdr.shards_mask & (1 << 20), 0, "Expected node:path bit 20");
+        assert_ne!(hdr.shards_mask & (1 << 24), 0, "Expected node:assert bit 24");
+        assert_ne!(hdr.feature_flags & BOACAS_FLAG_IS_RC_BUNDLE, 0);
+
+        crate::boa_realm::BOA_CONTEXT_POOL.with(|pool| pool.borrow_mut().clear());
+        let mut iso_cold = SliceIsolate::spawn(
+            "boacas-node-cold",
+            1,
+            CapabilityToken::pure_compute(),
+            100_000,
+            8 * 1024 * 1024,
+        );
+        let m_cold = iso_cold.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(m_cold.stdout.len(), 1);
+        assert!(m_cold.stdout[0].starts_with("edge/v1:"));
+
+        // Second execution hits the warm __slice_rc cached function handle
+        let mut iso_warm = SliceIsolate::spawn(
+            "boacas-node-warm",
+            1,
+            CapabilityToken::pure_compute(),
+            100_000,
+            8 * 1024 * 1024,
+        );
+        let m_warm = iso_warm.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(m_warm.stdout, m_cold.stdout);
+
+        set_thread_exper_boacas_override(None);
+    }
 }

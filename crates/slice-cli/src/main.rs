@@ -663,16 +663,23 @@ fn cmd_pack(args: &[String]) -> Result<()> {
     let mut entrypoint = String::from("./index.ts");
     let mut static_dir_opt: Option<PathBuf> = None;
 
+    let mut exper_override: Option<bool> = None;
+
     for arg in &args[2..] {
         if let Some(e) = arg.strip_prefix("--entry=") {
             entrypoint = e.to_string();
         } else if let Some(sd) = arg.strip_prefix("--static=") {
             static_dir_opt = Some(PathBuf::from(sd));
         } else if arg == "--exper-boacas" {
-            slice_engine::set_exper_boacas_override(Some(true));
+            exper_override = Some(true);
         } else if arg == "--no-exper-boacas" {
-            slice_engine::set_exper_boacas_override(Some(false));
+            exper_override = Some(false);
         }
+    }
+    if let Some(ov) = exper_override {
+        slice_engine::set_exper_boacas_override(Some(ov));
+    } else if std::env::var("SLICE_EXPER_BOACAS").is_err() {
+        slice_engine::set_exper_boacas_override(Some(true));
     }
 
     let start = Instant::now();
@@ -704,6 +711,8 @@ fn cmd_compile(args: &[String]) -> Result<()> {
     let mut entrypoint = String::from("./index.ts");
     let mut static_dir_opt: Option<PathBuf> = None;
 
+    let mut exper_override: Option<bool> = None;
+
     let mut i = 1;
     while i < args.len() {
         if args[i] == "-o" || args[i] == "--output" {
@@ -719,11 +728,16 @@ fn cmd_compile(args: &[String]) -> Result<()> {
         } else if let Some(sd) = args[i].strip_prefix("--static=") {
             static_dir_opt = Some(PathBuf::from(sd));
         } else if args[i] == "--exper-boacas" {
-            slice_engine::set_exper_boacas_override(Some(true));
+            exper_override = Some(true);
         } else if args[i] == "--no-exper-boacas" {
-            slice_engine::set_exper_boacas_override(Some(false));
+            exper_override = Some(false);
         }
         i += 1;
+    }
+    if let Some(ov) = exper_override {
+        slice_engine::set_exper_boacas_override(Some(ov));
+    } else if std::env::var("SLICE_EXPER_BOACAS").is_err() {
+        slice_engine::set_exper_boacas_override(Some(true));
     }
 
     let default_name = input_path

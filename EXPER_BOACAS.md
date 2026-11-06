@@ -192,3 +192,5 @@ All 3 experimental branches (`exper/boacas-a-fused-lazy`, `exper/boacas-b-ast-de
    - Combining Branch C's `CodeBlock` bytecode serializer with Branch A's Oxc AST deferred top-level function module spans (`collect_eager_module_indices`) gives Slice both **sub-millisecond cold starts on active code** and **zero compile/serialize cost for unused `node_modules` subtrees**.
 2. **Retire Branch B (`exper/boacas-b-ast-deser`, `3.0 / 10`)**:
    - Branch B served its scientific purpose by exposing `boa_ast`'s `#[serde(flatten)]` incompatibility with binary serializers (`postcard`/`bincode`) and demonstrating that skipping `boa_parser` alone while still running JSON AST deserialization + `analyze_scope` + `ByteCompiler` at runtime yields only `1.16x–1.19x` at `28x` the file size.
+3. **System Patch Documentation**:
+   - See [`vendor/boa_engine/SLICE_PATCH.md`](file:///p:/opensource/slice/vendor/boa_engine/SLICE_PATCH.md) for the complete specification of `Script::compile_to_slicebc`, `Script::from_slicebc_bytes`, the `SLCB\x01` binary `CodeBlock` wire format, and the upstream upgrade checklist.
