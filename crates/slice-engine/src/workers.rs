@@ -9,9 +9,9 @@
 //! - Lock-free `mpsc` bidirectional message channels integrated directly into `event_loop.rs`
 
 use crate::boa_realm::{
-    BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_ENV_MAP,
-    BOA_FETCH_MOCKS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VIOLATION, BOA_VFS_CACHE,
-    BOA_VFS_DIRS, check_boa_fs_read_ocap, norm_vfs_path,
+    check_boa_fs_read_ocap, norm_vfs_path, BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_DET_STATE,
+    BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_FETCH_MOCKS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
+    BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VIOLATION,
 };
 use crate::intrinsics::base64_decode;
 use crate::isolate::SliceIsolate;
@@ -333,8 +333,12 @@ fn resolve_worker_script_source(specifier_or_code: &str, is_eval: bool) -> Resul
     }
 
     // 2. Fallback to host filesystem if OCap permits
-    std::fs::read_to_string(raw_path)
-        .map_err(|e| format!("WorkerError: Cannot read worker module '{}': {}", raw_path, e))
+    std::fs::read_to_string(raw_path).map_err(|e| {
+        format!(
+            "WorkerError: Cannot read worker module '{}': {}",
+            raw_path, e
+        )
+    })
 }
 
 fn build_attenuated_worker_caps(
@@ -360,9 +364,7 @@ fn build_attenuated_worker_caps(
         } else {
             for req in req_reads {
                 let norm_req = norm_vfs_path(req);
-                if parent_reads.is_empty()
-                    || parent_reads.iter().any(|p| norm_req.starts_with(p))
-                {
+                if parent_reads.is_empty() || parent_reads.iter().any(|p| norm_req.starts_with(p)) {
                     child_caps = child_caps.with_read_prefix(norm_req);
                 }
             }
@@ -383,8 +385,7 @@ fn build_attenuated_worker_caps(
         } else {
             for req in req_writes {
                 let norm_req = norm_vfs_path(req);
-                if parent_writes.is_empty()
-                    || parent_writes.iter().any(|p| norm_req.starts_with(p))
+                if parent_writes.is_empty() || parent_writes.iter().any(|p| norm_req.starts_with(p))
                 {
                     child_caps = child_caps.with_write_prefix(norm_req);
                 }
@@ -944,7 +945,10 @@ pub fn worker_self_set_listening(listening: bool, exit_code: Option<i32>) {
 
 /// Polls any pending messages sent from the parent isolate to this worker isolate, and dispatches them into JS.
 /// Returns `true` if any message was dispatched.
-pub(crate) fn poll_worker_self_inbox_and_dispatch(ctx: &mut Context, wait_timeout: Option<Duration>) -> bool {
+pub(crate) fn poll_worker_self_inbox_and_dispatch(
+    ctx: &mut Context,
+    wait_timeout: Option<Duration>,
+) -> bool {
     let is_worker = WORKER_SELF_ENV.with(|env| env.borrow().is_worker_thread);
     if !is_worker {
         return false;

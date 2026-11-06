@@ -211,7 +211,10 @@ pub(crate) fn semver_parse_strict_xyz(input: &str) -> Option<(u64, u64, u64)> {
         return None;
     }
     for p in [p1, p2, p3] {
-        if p.is_empty() || (p.len() > 1 && p.starts_with('0')) || !p.bytes().all(|b| b.is_ascii_digit()) {
+        if p.is_empty()
+            || (p.len() > 1 && p.starts_with('0'))
+            || !p.bytes().all(|b| b.is_ascii_digit())
+        {
             return None;
         }
     }
@@ -241,7 +244,11 @@ pub(crate) fn semver_coerce_xyz(input: &str) -> Option<(u64, u64, u64)> {
             i += 1;
         }
         min = input[start_min..i].parse().ok()?;
-        if i < bytes.len() && bytes[i] == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+        if i < bytes.len()
+            && bytes[i] == b'.'
+            && i + 1 < bytes.len()
+            && bytes[i + 1].is_ascii_digit()
+        {
             i += 1;
             let start_pat = i;
             while i < bytes.len() && bytes[i].is_ascii_digit() {
@@ -330,8 +337,8 @@ impl Sha256State {
     pub(crate) fn new() -> Self {
         Self {
             h: [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
             ],
             buf: [0u8; 64],
             buf_len: 0,
@@ -353,7 +360,10 @@ impl Sha256State {
                 let detected = std::arch::is_x86_feature_detected!("sha")
                     && std::arch::is_x86_feature_detected!("sse4.1")
                     && std::arch::is_x86_feature_detected!("ssse3");
-                SHA_NI_STATUS.store(if detected { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+                SHA_NI_STATUS.store(
+                    if detected { 1 } else { 2 },
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 detected
             };
             if use_sha_ni {
@@ -395,71 +405,170 @@ impl Sha256State {
 
         macro_rules! sha256_4rounds {
             ($msg:expr, $k3:expr, $k2:expr, $k1:expr, $k0:expr) => {{
-                let msg_k = _mm_add_epi32($msg, _mm_set_epi32($k3 as i32, $k2 as i32, $k1 as i32, $k0 as i32));
+                let msg_k = _mm_add_epi32(
+                    $msg,
+                    _mm_set_epi32($k3 as i32, $k2 as i32, $k1 as i32, $k0 as i32),
+                );
                 state1 = _mm_sha256rnds2_epu32(state1, state0, msg_k);
                 state0 = _mm_sha256rnds2_epu32(state0, state1, _mm_srli_si128(msg_k, 8));
             }};
         }
 
         // Rounds 0..15
-        sha256_4rounds!(msg0, 0xe9b5dba5u32, 0xb5c0fbcfu32, 0x71374491u32, 0x428a2f98u32);
-        sha256_4rounds!(msg1, 0xab1c5ed5u32, 0x923f82a4u32, 0x59f111f1u32, 0x3956c25bu32);
+        sha256_4rounds!(
+            msg0,
+            0xe9b5dba5u32,
+            0xb5c0fbcfu32,
+            0x71374491u32,
+            0x428a2f98u32
+        );
+        sha256_4rounds!(
+            msg1,
+            0xab1c5ed5u32,
+            0x923f82a4u32,
+            0x59f111f1u32,
+            0x3956c25bu32
+        );
         msg0 = _mm_sha256msg1_epu32(msg0, msg1);
-        sha256_4rounds!(msg2, 0x550c7dc3u32, 0x243185beu32, 0x12835b01u32, 0xd807aa98u32);
+        sha256_4rounds!(
+            msg2,
+            0x550c7dc3u32,
+            0x243185beu32,
+            0x12835b01u32,
+            0xd807aa98u32
+        );
         msg1 = _mm_sha256msg1_epu32(msg1, msg2);
         msg0 = _mm_add_epi32(msg0, _mm_alignr_epi8(msg3, msg2, 4));
         msg0 = _mm_sha256msg2_epu32(msg0, msg3);
-        sha256_4rounds!(msg3, 0xc19bf174u32, 0x9bdc06a7u32, 0x80deb1feu32, 0x72be5d74u32);
+        sha256_4rounds!(
+            msg3,
+            0xc19bf174u32,
+            0x9bdc06a7u32,
+            0x80deb1feu32,
+            0x72be5d74u32
+        );
         msg2 = _mm_sha256msg1_epu32(msg2, msg3);
         msg1 = _mm_add_epi32(msg1, _mm_alignr_epi8(msg0, msg3, 4));
         msg1 = _mm_sha256msg2_epu32(msg1, msg0);
 
         // Rounds 16..31
-        sha256_4rounds!(msg0, 0x240ca1ccu32, 0x0fc19dc6u32, 0xefbe4786u32, 0xe49b69c1u32);
+        sha256_4rounds!(
+            msg0,
+            0x240ca1ccu32,
+            0x0fc19dc6u32,
+            0xefbe4786u32,
+            0xe49b69c1u32
+        );
         msg3 = _mm_sha256msg1_epu32(msg3, msg0);
         msg2 = _mm_add_epi32(msg2, _mm_alignr_epi8(msg1, msg0, 4));
         msg2 = _mm_sha256msg2_epu32(msg2, msg1);
-        sha256_4rounds!(msg1, 0x76f988dau32, 0x5cb0a9dcu32, 0x4a7484aau32, 0x2de92c6fu32);
+        sha256_4rounds!(
+            msg1,
+            0x76f988dau32,
+            0x5cb0a9dcu32,
+            0x4a7484aau32,
+            0x2de92c6fu32
+        );
         msg0 = _mm_sha256msg1_epu32(msg0, msg1);
         msg3 = _mm_add_epi32(msg3, _mm_alignr_epi8(msg2, msg1, 4));
         msg3 = _mm_sha256msg2_epu32(msg3, msg2);
-        sha256_4rounds!(msg2, 0xbf597fc7u32, 0xb00327c8u32, 0xa831c66du32, 0x983e5152u32);
+        sha256_4rounds!(
+            msg2,
+            0xbf597fc7u32,
+            0xb00327c8u32,
+            0xa831c66du32,
+            0x983e5152u32
+        );
         msg1 = _mm_sha256msg1_epu32(msg1, msg2);
         msg0 = _mm_add_epi32(msg0, _mm_alignr_epi8(msg3, msg2, 4));
         msg0 = _mm_sha256msg2_epu32(msg0, msg3);
-        sha256_4rounds!(msg3, 0x14292967u32, 0x06ca6351u32, 0xd5a79147u32, 0xc6e00bf3u32);
+        sha256_4rounds!(
+            msg3,
+            0x14292967u32,
+            0x06ca6351u32,
+            0xd5a79147u32,
+            0xc6e00bf3u32
+        );
         msg2 = _mm_sha256msg1_epu32(msg2, msg3);
         msg1 = _mm_add_epi32(msg1, _mm_alignr_epi8(msg0, msg3, 4));
         msg1 = _mm_sha256msg2_epu32(msg1, msg0);
 
         // Rounds 32..47
-        sha256_4rounds!(msg0, 0x53380d13u32, 0x4d2c6dfcu32, 0x2e1b2138u32, 0x27b70a85u32);
+        sha256_4rounds!(
+            msg0,
+            0x53380d13u32,
+            0x4d2c6dfcu32,
+            0x2e1b2138u32,
+            0x27b70a85u32
+        );
         msg3 = _mm_sha256msg1_epu32(msg3, msg0);
         msg2 = _mm_add_epi32(msg2, _mm_alignr_epi8(msg1, msg0, 4));
         msg2 = _mm_sha256msg2_epu32(msg2, msg1);
-        sha256_4rounds!(msg1, 0x92722c85u32, 0x81c2c92eu32, 0x766a0abbu32, 0x650a7354u32);
+        sha256_4rounds!(
+            msg1,
+            0x92722c85u32,
+            0x81c2c92eu32,
+            0x766a0abbu32,
+            0x650a7354u32
+        );
         msg0 = _mm_sha256msg1_epu32(msg0, msg1);
         msg3 = _mm_add_epi32(msg3, _mm_alignr_epi8(msg2, msg1, 4));
         msg3 = _mm_sha256msg2_epu32(msg3, msg2);
-        sha256_4rounds!(msg2, 0xc76c51a3u32, 0xc24b8b70u32, 0xa81a664bu32, 0xa2bfe8a1u32);
+        sha256_4rounds!(
+            msg2,
+            0xc76c51a3u32,
+            0xc24b8b70u32,
+            0xa81a664bu32,
+            0xa2bfe8a1u32
+        );
         msg1 = _mm_sha256msg1_epu32(msg1, msg2);
         msg0 = _mm_add_epi32(msg0, _mm_alignr_epi8(msg3, msg2, 4));
         msg0 = _mm_sha256msg2_epu32(msg0, msg3);
-        sha256_4rounds!(msg3, 0x106aa070u32, 0xf40e3585u32, 0xd6990624u32, 0xd192e819u32);
+        sha256_4rounds!(
+            msg3,
+            0x106aa070u32,
+            0xf40e3585u32,
+            0xd6990624u32,
+            0xd192e819u32
+        );
         msg2 = _mm_sha256msg1_epu32(msg2, msg3);
         msg1 = _mm_add_epi32(msg1, _mm_alignr_epi8(msg0, msg3, 4));
         msg1 = _mm_sha256msg2_epu32(msg1, msg0);
 
         // Rounds 48..63
-        sha256_4rounds!(msg0, 0x34b0bcb5u32, 0x2748774cu32, 0x1e376c08u32, 0x19a4c116u32);
+        sha256_4rounds!(
+            msg0,
+            0x34b0bcb5u32,
+            0x2748774cu32,
+            0x1e376c08u32,
+            0x19a4c116u32
+        );
         msg3 = _mm_sha256msg1_epu32(msg3, msg0);
         msg2 = _mm_add_epi32(msg2, _mm_alignr_epi8(msg1, msg0, 4));
         msg2 = _mm_sha256msg2_epu32(msg2, msg1);
-        sha256_4rounds!(msg1, 0x682e6ff3u32, 0x5b9cca4fu32, 0x4ed8aa4au32, 0x391c0cb3u32);
+        sha256_4rounds!(
+            msg1,
+            0x682e6ff3u32,
+            0x5b9cca4fu32,
+            0x4ed8aa4au32,
+            0x391c0cb3u32
+        );
         msg3 = _mm_add_epi32(msg3, _mm_alignr_epi8(msg2, msg1, 4));
         msg3 = _mm_sha256msg2_epu32(msg3, msg2);
-        sha256_4rounds!(msg2, 0x8cc70208u32, 0x84c87814u32, 0x78a5636fu32, 0x748f82eeu32);
-        sha256_4rounds!(msg3, 0xc67178f2u32, 0xbef9a3f7u32, 0xa4506cebu32, 0x90befffau32);
+        sha256_4rounds!(
+            msg2,
+            0x8cc70208u32,
+            0x84c87814u32,
+            0x78a5636fu32,
+            0x748f82eeu32
+        );
+        sha256_4rounds!(
+            msg3,
+            0xc67178f2u32,
+            0xbef9a3f7u32,
+            0xa4506cebu32,
+            0x90befffau32
+        );
 
         state0 = _mm_add_epi32(state0, abef_save);
         state1 = _mm_add_epi32(state1, cdgh_save);
@@ -476,14 +585,16 @@ impl Sha256State {
     #[inline]
     pub(crate) fn compress_block_soft(h: &mut [u32; 8], chunk: &[u8]) {
         const K: [u32; 64] = [
-            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-            0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-            0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-            0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-            0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+            0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+            0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+            0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+            0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+            0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+            0xc67178f2,
         ];
 
         let mut w = [0u32; 64];
@@ -651,8 +762,10 @@ pub(crate) fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
 }
 
 pub(crate) fn base64_encode(data: &[u8], url_safe: bool) -> String {
-    const STD_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    const URL_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const STD_TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const URL_TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let table = if url_safe { URL_TABLE } else { STD_TABLE };
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
@@ -700,7 +813,6 @@ pub(crate) fn base64_decode(input: &str) -> Vec<u8> {
     }
     out
 }
-
 
 /// Fast Lookup-Table (`HEX_LUT`) hex encoder for arbitrary byte slices.
 #[inline]
@@ -961,26 +1073,86 @@ impl Sha512State {
     #[inline]
     fn compress_block(h: &mut [u64; 8], chunk: &[u8]) {
         const K: [u64; 80] = [
-            0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
-            0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
-            0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
-            0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694,
-            0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
-            0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5,
-            0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4,
-            0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70,
-            0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df,
-            0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
-            0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30,
-            0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8,
-            0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8,
-            0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3,
-            0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,
-            0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b,
-            0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178,
-            0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b,
-            0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c,
-            0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817,
+            0x428a2f98d728ae22,
+            0x7137449123ef65cd,
+            0xb5c0fbcfec4d3b2f,
+            0xe9b5dba58189dbbc,
+            0x3956c25bf348b538,
+            0x59f111f1b605d019,
+            0x923f82a4af194f9b,
+            0xab1c5ed5da6d8118,
+            0xd807aa98a3030242,
+            0x12835b0145706fbe,
+            0x243185be4ee4b28c,
+            0x550c7dc3d5ffb4e2,
+            0x72be5d74f27b896f,
+            0x80deb1fe3b1696b1,
+            0x9bdc06a725c71235,
+            0xc19bf174cf692694,
+            0xe49b69c19ef14ad2,
+            0xefbe4786384f25e3,
+            0x0fc19dc68b8cd5b5,
+            0x240ca1cc77ac9c65,
+            0x2de92c6f592b0275,
+            0x4a7484aa6ea6e483,
+            0x5cb0a9dcbd41fbd4,
+            0x76f988da831153b5,
+            0x983e5152ee66dfab,
+            0xa831c66d2db43210,
+            0xb00327c898fb213f,
+            0xbf597fc7beef0ee4,
+            0xc6e00bf33da88fc2,
+            0xd5a79147930aa725,
+            0x06ca6351e003826f,
+            0x142929670a0e6e70,
+            0x27b70a8546d22ffc,
+            0x2e1b21385c26c926,
+            0x4d2c6dfc5ac42aed,
+            0x53380d139d95b3df,
+            0x650a73548baf63de,
+            0x766a0abb3c77b2a8,
+            0x81c2c92e47edaee6,
+            0x92722c851482353b,
+            0xa2bfe8a14cf10364,
+            0xa81a664bbc423001,
+            0xc24b8b70d0f89791,
+            0xc76c51a30654be30,
+            0xd192e819d6ef5218,
+            0xd69906245565a910,
+            0xf40e35855771202a,
+            0x106aa07032bbd1b8,
+            0x19a4c116b8d2d0c8,
+            0x1e376c085141ab53,
+            0x2748774cdf8eeb99,
+            0x34b0bcb5e19b48a8,
+            0x391c0cb3c5c95a63,
+            0x4ed8aa4ae3418acb,
+            0x5b9cca4f7763e373,
+            0x682e6ff3d6b2b8a3,
+            0x748f82ee5defb2fc,
+            0x78a5636f43172f60,
+            0x84c87814a1f0ab72,
+            0x8cc702081a6439ec,
+            0x90befffa23631e28,
+            0xa4506cebde82bde9,
+            0xbef9a3f7b2c67915,
+            0xc67178f2e372532b,
+            0xca273eceea26619c,
+            0xd186b8c721c0c207,
+            0xeada7dd6cde0eb1e,
+            0xf57d4f7fee6ed178,
+            0x06f067aa72176fba,
+            0x0a637dc5a2c898a6,
+            0x113f9804bef90dae,
+            0x1b710b35131c471b,
+            0x28db77f523047d84,
+            0x32caab7b40c72493,
+            0x3c9ebe0a15c9bebc,
+            0x431d67c49c100d4c,
+            0x4cc5d4becb3e42b6,
+            0x597f299cfc657e2a,
+            0x5fcb6fab3ad6faec,
+            0x6c44198c4a475817,
         ];
 
         let mut w = [0u64; 80];
@@ -1212,18 +1384,17 @@ pub(crate) fn whatwg_atob(input: &str) -> Result<String, &'static str> {
         if pad_count > 0 {
             return Err("InvalidCharacterError: Characters found after base64 padding.");
         }
-        let val = match b {
-            b'A'..=b'Z' => b - b'A',
-            b'a'..=b'z' => b - b'a' + 26,
-            b'0'..=b'9' => b - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => {
-                return Err(
+        let val =
+            match b {
+                b'A'..=b'Z' => b - b'A',
+                b'a'..=b'z' => b - b'a' + 26,
+                b'0'..=b'9' => b - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => return Err(
                     "InvalidCharacterError: The string to be decoded contains invalid characters.",
-                )
-            }
-        };
+                ),
+            };
         buf = (buf << 6) | (val as u32);
         bits += 6;
         if bits >= 8 {
@@ -1317,8 +1488,8 @@ pub(crate) fn generate_uuid_v4(det_prng: Option<&mut u64>) -> String {
 const MAX_DECOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
 
 const LENGTH_BASE: [u16; 29] = [
-    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
-    131, 163, 195, 227, 258,
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
+    163, 195, 227, 258,
 ];
 const LENGTH_EXTRA: [u8; 29] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
@@ -1328,8 +1499,8 @@ const DIST_BASE: [u16; 30] = [
     2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
 ];
 const DIST_EXTRA: [u8; 30] = [
-    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
-    13, 13,
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13,
 ];
 const CL_ORDER: [usize; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
@@ -1458,9 +1629,7 @@ impl DeflateBitWriter {
 
 #[inline]
 fn lz77_hash3(bytes: &[u8], pos: usize) -> usize {
-    let v = (bytes[pos] as u32)
-        | ((bytes[pos + 1] as u32) << 8)
-        | ((bytes[pos + 2] as u32) << 16);
+    let v = (bytes[pos] as u32) | ((bytes[pos + 1] as u32) << 8) | ((bytes[pos + 2] as u32) << 16);
     ((v.wrapping_mul(0x1E35_A7BD)) >> 20) as usize & 0xFFF
 }
 
@@ -1838,12 +2007,8 @@ pub(crate) fn zlib_decompress_bytes(input: &[u8], format: &str) -> Result<Vec<u8
             }
             let end = input.len() - 4;
             let out = inflate_raw_decompress(&input[start..end])?;
-            let expected_adler = u32::from_be_bytes([
-                input[end],
-                input[end + 1],
-                input[end + 2],
-                input[end + 3],
-            ]);
+            let expected_adler =
+                u32::from_be_bytes([input[end], input[end + 1], input[end + 2], input[end + 3]]);
             if adler32_checksum(&out) != expected_adler {
                 return Err("Zlib Adler-32 checksum mismatch");
             }
@@ -1885,12 +2050,8 @@ pub(crate) fn zlib_decompress_bytes(input: &[u8], format: &str) -> Result<Vec<u8
             }
             let end = input.len() - 8;
             let out = inflate_raw_decompress(&input[pos..end])?;
-            let expected_crc = u32::from_le_bytes([
-                input[end],
-                input[end + 1],
-                input[end + 2],
-                input[end + 3],
-            ]);
+            let expected_crc =
+                u32::from_le_bytes([input[end], input[end + 1], input[end + 2], input[end + 3]]);
             let expected_isize = u32::from_le_bytes([
                 input[end + 4],
                 input[end + 5],

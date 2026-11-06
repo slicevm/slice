@@ -94,9 +94,10 @@ pub fn usp_decode_component(s: &str) -> Cow<'_, str> {
             raw.push(b' ');
             i += 1;
         } else if b == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) =
-                (decode_hex_nibble(bytes[i + 1]), decode_hex_nibble(bytes[i + 2]))
-            {
+            if let (Some(hi), Some(lo)) = (
+                decode_hex_nibble(bytes[i + 1]),
+                decode_hex_nibble(bytes[i + 2]),
+            ) {
                 raw.push((hi << 4) | lo);
                 i += 3;
             } else {
@@ -319,7 +320,10 @@ pub fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<ParsedWhatwgU
     } else {
         String::new()
     };
-    let href = format!("{}//{}{}{}{}{}", protocol, auth, host, pathname, search, hash);
+    let href = format!(
+        "{}//{}{}{}{}{}",
+        protocol, auth, host, pathname, search, hash
+    );
 
     Some(ParsedWhatwgUrl {
         href,
@@ -362,9 +366,7 @@ pub(crate) fn register_url_and_usp_host_functions(ctx: &mut boa_engine::Context)
             };
             let input = first.to_string(context)?.to_std_string_escaped();
             let base = match args.get(1) {
-                Some(v) if !v.is_undefined() => {
-                    Some(v.to_string(context)?.to_std_string_escaped())
-                }
+                Some(v) if !v.is_undefined() => Some(v.to_string(context)?.to_std_string_escaped()),
                 _ => None,
             };
             Ok(BoaVal::from(can_parse_whatwg_url(&input, base.as_deref())))

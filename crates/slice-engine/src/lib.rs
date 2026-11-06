@@ -56,10 +56,16 @@ pub use outbound_http::{
     is_valid_request_target, outbound_pool_reuse_count, parse_chunked_body,
     register_custom_root_cert_der, MAX_OUTBOUND_BODY_BYTES, MAX_OUTBOUND_HEADER_BYTES,
 };
-pub use parser_and_compiler::{compile_source_to_bytecode, disassemble_bytecode};
+pub use parser_and_compiler::{
+    compile_source_to_bytecode, disassemble_bytecode, is_tier0_slicesnp_compatible_ast,
+};
 pub use value_and_ast::{
     BinOp, BytecodeModule, BytecodeOp, ExecutionTier, Expr, JsFunction, JsValue, Stmt, UnaryOp,
     SNAPSHOT_MAGIC, TIER1_PROMOTION_THRESHOLD,
+};
+pub use wasm::{
+    clear_thread_wasm_state, reset_wasm_telemetry, wasm_module_cache_hits, MAX_WASM_BINARY_BYTES,
+    MAX_WASM_MEMORY_PAGES, WASM_PAGE_BYTES,
 };
 pub use websocket::{
     apply_websocket_mask_in_place, build_close_frame_payload, clear_thread_websocket_state,
@@ -71,8 +77,4 @@ pub use websocket::{
 pub use workers::{
     prewarm_worker_pool_sync, reset_worker_pool_telemetry, speculative_prewarm_worker_pool,
     worker_pool_reuse_count, worker_script_cache_hits,
-};
-pub use wasm::{
-    clear_thread_wasm_state, reset_wasm_telemetry, wasm_module_cache_hits, MAX_WASM_BINARY_BYTES,
-    MAX_WASM_MEMORY_PAGES, WASM_PAGE_BYTES,
 };

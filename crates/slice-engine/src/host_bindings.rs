@@ -1,14 +1,14 @@
 //! Native Rust Host Callbacks (`__slice_*`) Registered into `boa_engine::Context`.
 
 use crate::boa_realm::{
-    check_boa_fs_read_ocap, check_boa_fs_write_ocap, norm_vfs_path, BOA_ACTIVE_CAPS,
-    BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, BOA_EGRESS_SECRETS,
-    BOA_ENV_MAP, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET,
-    BOA_NET_HOSTS, BOA_STDOUT, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
+    check_boa_fs_read_ocap, check_boa_fs_write_ocap, norm_vfs_path, SavedIsolateContextGuard,
+    BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, BOA_ENV_MAP, BOA_FETCH_MOCKS,
+    BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_STDOUT, BOA_VFS_CACHE, BOA_VFS_DIRS,
+    BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
 };
 use crate::event_loop::{
     cancel_timer, clear_event_loop_state, drive_event_loop_to_completion, enqueue_async_fetch,
-    restore_event_loop_state, save_and_reset_event_loop_state, schedule_immediate, schedule_timer,
+    schedule_immediate, schedule_timer,
 };
 use crate::intrinsics::{
     base64_decode, base64_encode, bytes_to_hex, constant_time_eq, fast_format_bytes,
@@ -1015,23 +1015,10 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 .unwrap_or_else(|| "{}".to_string());
             let opts: SandboxEvalOptions = serde_json::from_str(&opts_json).unwrap_or_default();
 
-            let saved_stdout = BOA_STDOUT.with(|out| std::mem::take(&mut *out.borrow_mut()));
-            let saved_violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
-            let saved_tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-            let saved_caps = BOA_ACTIVE_CAPS.with(|c| c.borrow_mut().take());
-            let saved_net_hosts = BOA_NET_HOSTS.with(|h| std::mem::take(&mut *h.borrow_mut()));
-            let saved_egress_secrets =
-                BOA_EGRESS_SECRETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
-            let saved_fetch_mocks = BOA_FETCH_MOCKS.with(|m| m.borrow().clone());
-            let saved_ws_mocks = BOA_WS_MOCKS.with(|m| m.borrow().clone());
-            let saved_sock_mocks = crate::sockets::BOA_SOCKET_MOCKS.with(|m| m.borrow().clone());
-            let saved_kv_budget = BOA_KV_MEM_BUDGET.with(|m| m.get());
-            let saved_fuel_budget = BOA_FUEL_BUDGET.with(|f| f.get());
-            let saved_det = BOA_DET_STATE.with(|s| s.get());
-            let saved_ev_loop = save_and_reset_event_loop_state();
+            let scope_guard = SavedIsolateContextGuard::enter();
 
             let mut parent_caps = CapabilityToken::pure_compute();
-            if let Some((_, ref r_prefs, ref w_prefs)) = saved_caps {
+            if let Some((_, ref r_prefs, ref w_prefs)) = scope_guard.saved_caps {
                 for r in r_prefs {
                     parent_caps = parent_caps.with_read_prefix(r.clone());
                 }
@@ -1039,35 +1026,28 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                     parent_caps = parent_caps.with_write_prefix(w.clone());
                 }
             }
-            for nh in &saved_net_hosts {
+            for nh in &scope_guard.saved_net_hosts {
                 parent_caps = parent_caps.with_net_host(nh.clone());
             }
-            let parent_rem_mem = saved_kv_budget.1.saturating_sub(saved_kv_budget.0);
+            for (ek, ev) in &scope_guard.saved_env_map {
+                parent_caps = parent_caps.with_env(ek.clone(), ev.clone());
+            }
+            let parent_rem_mem = scope_guard
+                .saved_kv_budget
+                .1
+                .saturating_sub(scope_guard.saved_kv_budget.0);
             let mut proxy_parent = SliceIsolate::spawn(
-                saved_tenant.clone(),
+                scope_guard.saved_tenant.clone(),
                 98,
                 parent_caps,
                 5_000_000,
                 parent_rem_mem.max(65536),
             );
-            for sec in &saved_egress_secrets {
+            for sec in &scope_guard.saved_egress_secrets {
                 proxy_parent.add_egress_audit_secret(sec.clone());
             }
             let outcome = proxy_parent.eval_sandbox(&code, opts);
-
-            restore_event_loop_state(saved_ev_loop);
-            BOA_STDOUT.with(|out| *out.borrow_mut() = saved_stdout);
-            BOA_VIOLATION.with(|v| *v.borrow_mut() = saved_violation);
-            BOA_ACTIVE_TENANT.with(|t| *t.borrow_mut() = saved_tenant);
-            BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = saved_caps);
-            BOA_NET_HOSTS.with(|h| *h.borrow_mut() = saved_net_hosts);
-            BOA_EGRESS_SECRETS.with(|s| *s.borrow_mut() = saved_egress_secrets);
-            BOA_FETCH_MOCKS.with(|m| *m.borrow_mut() = saved_fetch_mocks);
-            BOA_WS_MOCKS.with(|m| *m.borrow_mut() = saved_ws_mocks);
-            crate::sockets::BOA_SOCKET_MOCKS.with(|m| *m.borrow_mut() = saved_sock_mocks);
-            BOA_KV_MEM_BUDGET.with(|m| m.set(saved_kv_budget));
-            BOA_FUEL_BUDGET.with(|f| f.set(saved_fuel_budget));
-            BOA_DET_STATE.with(|s| s.set(saved_det));
+            drop(scope_guard);
 
             let json = serde_json::to_string(&outcome).unwrap_or_else(|_| "{}".to_string());
             Ok(BoaVal::from(js_string!(json)))

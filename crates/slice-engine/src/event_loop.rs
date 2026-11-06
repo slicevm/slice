@@ -159,8 +159,8 @@ pub(crate) struct SavedEventLoopSnapshot {
 
 pub(crate) fn save_and_reset_event_loop_state() -> SavedEventLoopSnapshot {
     let active_items = ACTIVE_ASYNC_ITEMS.with(|c| c.replace(0));
-    let state = EVENT_LOOP_STATE
-        .with(|st| std::mem::replace(&mut *st.borrow_mut(), EventLoopState::new()));
+    let state =
+        EVENT_LOOP_STATE.with(|st| std::mem::replace(&mut *st.borrow_mut(), EventLoopState::new()));
     SavedEventLoopSnapshot {
         state,
         active_items,
@@ -313,9 +313,7 @@ fn is_signal_aborted(signal_opt: &Option<JsObject>, ctx: &mut Context) -> Option
             .get(js_string!("reason"), ctx)
             .ok()
             .filter(|v| !v.is_undefined())
-            .unwrap_or_else(|| {
-                JsValue::from(js_string!("AbortError: The operation was aborted"))
-            });
+            .unwrap_or_else(|| JsValue::from(js_string!("AbortError: The operation was aborted")));
         Some(reason)
     } else {
         None
@@ -525,8 +523,7 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                             &redirect_mode,
                         );
                         let violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
-                        let reused_conns =
-                            outbound_pool_reuse_count().saturating_sub(reuse_before);
+                        let reused_conns = outbound_pool_reuse_count().saturating_sub(reuse_before);
 
                         let _ = tx.send(CompletedAsyncFetch {
                             id: fid,
@@ -709,8 +706,7 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                 None => MAX_CONCURRENT_FETCH_WAIT,
             };
 
-            let recv_opt = EVENT_LOOP_STATE
-                .with(|st| st.borrow().fetch_rx.recv_timeout(wait_dur));
+            let recv_opt = EVENT_LOOP_STATE.with(|st| st.borrow().fetch_rx.recv_timeout(wait_dur));
             match recv_opt {
                 Ok(done) => {
                     record_outbound_pool_reuses(done.reused_conns);

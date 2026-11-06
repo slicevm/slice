@@ -71,4 +71,3 @@ pub(crate) fn eval_lazy_builtin_module(
     };
     context.eval(boa_engine::Source::from_bytes(snippet))
 }
-

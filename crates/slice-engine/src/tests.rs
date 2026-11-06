@@ -5122,3 +5122,97 @@ console.log(JSON.stringify({
     assert_eq!(v["afterRestore0Vfs"], "depth0");
     assert_eq!(v["afterRestore0Kv"], "0");
 }
+
+#[test]
+fn test_coverage_plan_p0_ast_tier0_eligibility_and_nested_sandbox_scope_guard() {
+    use crate::is_tier0_slicesnp_compatible_ast;
+
+    // 1. Verify AST-based Tier-0 (`SLICESNP`) vs Tier-1 (`SLICEBOA`) routing:
+    // Pure numeric / simple AST expressions are Tier-0 compatible:
+    assert!(is_tier0_slicesnp_compatible_ast(
+        "const x = 21 * 2; return x;"
+    ));
+    assert!(is_tier0_slicesnp_compatible_ast(
+        "function fib(n) { if (n <= 1) return n; return fib(n - 1) + fib(n - 2); } console.log(fib(10));"
+    ));
+
+    // Expressions using ES2024 features not in Tier-0 (e.g., `.find`, `.sort`, `Object.values`,
+    // `for..of`, destructuring, template interpolations, nested closures) must be rejected by
+    // `is_tier0_slicesnp_compatible_ast` and compiled to `SLICEBOA`:
+    for es2024_snippet in [
+        "const found = [10, 20, 30].find((x) => x > 15); console.log(found);",
+        "const sorted = [3, 1, 2].sort((a, b) => a - b); console.log(sorted.join(','));",
+        "const vals = Object.values({ a: 1, b: 2 }); console.log(vals.length);",
+        "let sum = 0; for (const x of [1, 2, 3, 4]) { sum += x; } console.log(sum);",
+        "const { a, b } = { a: 10, b: 32 }; console.log(a + b);",
+        "const name = 'Slice'; console.log(`Hello ${name}!`);",
+        "function makeAdder(k) { return (x) => x + k; } console.log(makeAdder(5)(37));",
+    ] {
+        assert!(
+            !is_tier0_slicesnp_compatible_ast(es2024_snippet),
+            "Expected ES2024 snippet to route to SLICEBOA: {}",
+            es2024_snippet
+        );
+        let bc = compile_source_to_bytecode(es2024_snippet);
+        assert_eq!(
+            &bc[0..8],
+            b"SLICEBOA",
+            "Expected SLICEBOA header for: {}",
+            es2024_snippet
+        );
+    }
+
+    // 2. Verify `SavedIsolateContextGuard` preserves parent HTTP request, deterministic PRNG/clock,
+    //    and CPU fuel budget across nested `Slice.evalSandbox` calls:
+    let handler_js = r#"
+const reqBefore = Slice.request();
+const tBefore = Date.now();
+const r1 = Slice.evalSandbox(`
+    const items = [{ id: 1, score: 40 }, { id: 2, score: 95 }, { id: 3, score: 70 }];
+    const best = items.filter(x => Boolean(x)).sort((a, b) => b.score - a.score).find(x => x.score > 50);
+    JSON.stringify({ bestId: best.id, now: Date.now() })
+`, { fuel: 15000, deterministicSeed: 999 });
+const reqAfter = Slice.request();
+const tAfter = Date.now();
+let heavySum = 0;
+for (let i = 0; i < 25000; i++) {
+    heavySum += i;
+}
+Slice.respond(200, JSON.stringify({
+    childOk: r1.ok,
+    childRet: JSON.parse(r1.returnValue),
+    pathPreserved: reqBefore.path === "/v1/nested-check" && reqAfter.path === "/v1/nested-check",
+    tBefore,
+    tAfter,
+    heavySum
+}), "application/json");
+"#;
+    let bc = compile_source_to_bytecode(handler_js);
+    let mut isolate = SliceIsolate::spawn(
+        "nested-guard-tenant",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        16 * 1024 * 1024,
+    );
+    isolate.set_deterministic_seed(Some(42));
+    let req_ctx = HttpRequestContext {
+        method: "POST",
+        path: "/v1/nested-check",
+        query: "mode=strict",
+        tenant_id: "nested-guard-tenant",
+        headers: &[("X-Test", "1")],
+        body: "{}",
+    };
+    let outcome = isolate.execute_http_request(&bc, None, &req_ctx).unwrap();
+    assert_eq!(outcome.status_code, 200);
+    let parsed: serde_json::Value = serde_json::from_str(&outcome.response_body).unwrap();
+    assert_eq!(parsed["childOk"], true);
+    assert_eq!(parsed["childRet"]["bestId"], 2);
+    assert_eq!(parsed["pathPreserved"], true);
+    assert_eq!(
+        parsed["tBefore"].as_u64().unwrap() + 1,
+        parsed["tAfter"].as_u64().unwrap()
+    );
+    assert_eq!(parsed["heavySum"], 312_487_500);
+}

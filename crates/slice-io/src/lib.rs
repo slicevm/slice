@@ -50,7 +50,9 @@ impl RegisteredBufferPool {
 /// Operation submitted to the Direct Completion Ring.
 #[derive(Debug, Clone)]
 pub enum IoSubmission {
-    Nop { user_data: u64 },
+    Nop {
+        user_data: u64,
+    },
     ReadFixed {
         fd: i64,
         buf_index: u16,
@@ -225,9 +227,8 @@ impl CompletionRingEngine {
                     for op in ops {
                         match *op {
                             IoSubmission::Nop { user_data } => {
-                                let entry = io_uring::opcode::Nop::new()
-                                    .build()
-                                    .user_data(user_data);
+                                let entry =
+                                    io_uring::opcode::Nop::new().build().user_data(user_data);
                                 let _ = sq.push(&entry);
                             }
                             IoSubmission::ReadFixed {
@@ -295,12 +296,8 @@ impl CompletionRingEngine {
                             core::ptr::null_mut(),
                         );
                     },
-                    IoSubmission::ReadFixed {
-                        len, user_data, ..
-                    }
-                    | IoSubmission::WriteFixed {
-                        len, user_data, ..
-                    } => unsafe {
+                    IoSubmission::ReadFixed { len, user_data, .. }
+                    | IoSubmission::WriteFixed { len, user_data, .. } => unsafe {
                         win_iocp::PostQueuedCompletionStatus(
                             self.iocp_handle,
                             len,
@@ -401,4 +398,3 @@ mod tests {
         assert_eq!(idx_reused, 0);
     }
 }
-

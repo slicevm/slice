@@ -1194,12 +1194,542 @@ pub(crate) fn compact_js_for_boa_bytecode(js: &str) -> String {
     out
 }
 
-/// Compiles JavaScript/TypeScript source into a compact binary `SLICESNP` bytecode buffer.
-/// Combines **Oxc** production TypeScript transpilation, **Tier-0/Tier-2** fast-path SIMD intrinsics,
-/// and **Boa (`boa_engine`)** full-spec ES2024+ execution for classes, closures, RegExp, Map/Set, and OOP.
+/// AST-verified Tier-0 (`SLICESNP`) compatibility analyzer using `oxc::parser::Parser`.
+///
+/// Instead of maintaining a fragile ~95-substring denylist (`uses_full_es_vm`), Slice defaults
+/// full ECMAScript/TypeScript execution to `SLICEBOA` (Boa ES2024 VM) and routes a single-file
+/// script to the lightweight Tier-0/Tier-2 `SLICESNP` register/AST engine **only** when 100% of
+/// statements, expressions, operators, and built-in calls in the Oxc AST belong to the exact
+/// subset supported by `SLICESNP` (`eval_stmt` / `eval_expr` / `NumericFuncIr`).
+pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
+    // Fast SIMD rejections for multi-module bundles or internal host intrinsics
+    let src_bytes = source.as_bytes();
+    if memchr::memmem::find(src_bytes, b"var __slice_modules =").is_some()
+        || memchr::memmem::find(src_bytes, b"__slice_").is_some()
+        || memchr::memmem::find(src_bytes, b"node:").is_some()
+        || memchr::memmem::find(src_bytes, b"cloudflare:").is_some()
+        || memchr::memmem::find(src_bytes, b"slice:").is_some()
+    {
+        return false;
+    }
+
+    let allocator = oxc::allocator::Allocator::default();
+    let parse_opts = oxc::parser::ParseOptions {
+        allow_return_outside_function: true,
+        ..Default::default()
+    };
+    let source_type = oxc::span::SourceType::ts().with_module(true);
+    let parsed = oxc::parser::Parser::new(&allocator, source, source_type)
+        .with_options(parse_opts)
+        .parse();
+    let program = if !parsed.diagnostics.is_empty() {
+        let parsed_script = oxc::parser::Parser::new(
+            &allocator,
+            source,
+            oxc::span::SourceType::ts().with_module(false),
+        )
+        .with_options(parse_opts)
+        .parse();
+        if !parsed_script.diagnostics.is_empty() || parsed_script.program.body.is_empty() {
+            return false;
+        }
+        parsed_script.program
+    } else {
+        if parsed.program.body.is_empty() {
+            return false;
+        }
+        parsed.program
+    };
+
+    use oxc::ast::ast::{
+        Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentOperator, AssignmentTarget,
+        BinaryOperator, BindingPattern, Declaration, Expression, ForStatementInit,
+        FormalParameters, LogicalOperator, ObjectPropertyKind, PropertyKey, SimpleAssignmentTarget,
+        Statement, UnaryOperator,
+    };
+
+    fn params_are_simple(params: &FormalParameters<'_>) -> bool {
+        if params.rest.is_some() {
+            return false;
+        }
+        params
+            .items
+            .iter()
+            .all(|p| matches!(p.pattern, BindingPattern::BindingIdentifier(_)))
+    }
+
+    fn static_member_chain(expr: &Expression<'_>) -> Option<String> {
+        match expr {
+            Expression::Identifier(id) => Some(id.name.to_string()),
+            Expression::StaticMemberExpression(m) if !m.optional => {
+                let prefix = static_member_chain(&m.object)?;
+                Some(format!("{}.{}", prefix, m.property.name.as_str()))
+            }
+            _ => None,
+        }
+    }
+
+    fn is_supported_call(
+        callee: &Expression<'_>,
+        args: &[Argument<'_>],
+        in_function_depth: usize,
+    ) -> bool {
+        for arg in args {
+            let Some(arg_expr) = arg.as_expression() else {
+                return false;
+            };
+            if !is_supported_expr(arg_expr, in_function_depth) {
+                return false;
+            }
+        }
+
+        match callee {
+            Expression::Identifier(id) => {
+                let name = id.name.as_str();
+                // Reject global Web/Node constructors or test runner globals not in Tier-0
+                !matches!(
+                    name,
+                    "setTimeout"
+                        | "setInterval"
+                        | "setImmediate"
+                        | "clearTimeout"
+                        | "clearInterval"
+                        | "clearImmediate"
+                        | "queueMicrotask"
+                        | "structuredClone"
+                        | "btoa"
+                        | "atob"
+                        | "escape"
+                        | "unescape"
+                        | "eval"
+                        | "Function"
+                        | "Symbol"
+                        | "BigInt"
+                        | "RegExp"
+                        | "Map"
+                        | "Set"
+                        | "WeakMap"
+                        | "WeakSet"
+                        | "Promise"
+                        | "Proxy"
+                        | "Reflect"
+                        | "Date"
+                        | "Error"
+                        | "TypeError"
+                        | "RangeError"
+                        | "SyntaxError"
+                        | "URL"
+                        | "URLSearchParams"
+                        | "URLPattern"
+                        | "Headers"
+                        | "Request"
+                        | "Response"
+                        | "TextEncoder"
+                        | "TextDecoder"
+                        | "AbortController"
+                        | "AbortSignal"
+                        | "Event"
+                        | "CustomEvent"
+                        | "MessageEvent"
+                        | "CloseEvent"
+                        | "EventTarget"
+                        | "WebSocket"
+                        | "Worker"
+                        | "MessageChannel"
+                        | "MessagePort"
+                        | "Blob"
+                        | "File"
+                        | "FormData"
+                        | "ReadableStream"
+                        | "WritableStream"
+                        | "TransformStream"
+                        | "CompressionStream"
+                        | "DecompressionStream"
+                        | "Buffer"
+                        | "Uint8Array"
+                        | "Int32Array"
+                        | "Float64Array"
+                        | "ArrayBuffer"
+                        | "DataView"
+                        | "WebAssembly"
+                        | "describe"
+                        | "it"
+                        | "test"
+                        | "expect"
+                        | "beforeEach"
+                        | "afterEach"
+                        | "require"
+                )
+            }
+            Expression::StaticMemberExpression(member) if !member.optional => {
+                let prop = member.property.name.as_str();
+                if let Some(chain) = static_member_chain(&member.object) {
+                    match chain.as_str() {
+                        "console" => {
+                            return matches!(prop, "log" | "info" | "warn" | "error");
+                        }
+                        "Math" => {
+                            return matches!(
+                                prop,
+                                "abs"
+                                    | "floor"
+                                    | "ceil"
+                                    | "round"
+                                    | "sqrt"
+                                    | "pow"
+                                    | "sin"
+                                    | "cos"
+                                    | "max"
+                                    | "min"
+                            );
+                        }
+                        "JSON" => {
+                            return matches!(prop, "stringify" | "parse") && args.len() == 1;
+                        }
+                        "Object" => {
+                            return matches!(prop, "keys" | "freeze") && args.len() == 1;
+                        }
+                        "Array" => {
+                            return prop == "isArray" && args.len() == 1;
+                        }
+                        "fs" => {
+                            return matches!(prop, "readFileSync" | "read") && args.len() == 1;
+                        }
+                        "WinterTC" => {
+                            return prop == "route";
+                        }
+                        "Slice" => {
+                            return prop == "numericLoop" && args.len() == 1;
+                        }
+                        "crypto.subtle" => {
+                            return prop == "digest";
+                        }
+                        "crypto" | "process" | "Buffer" | "Response" | "URL" | "WebAssembly"
+                        | "Reflect" | "Date" | "performance" | "Number" | "String" | "Promise"
+                        | "globalThis" | "self" => {
+                            return false;
+                        }
+                        _ => {}
+                    }
+                }
+                if matches!(prop, "push" | "pop") {
+                    return matches!(member.object, Expression::Identifier(_));
+                }
+                if matches!(
+                    prop,
+                    "join"
+                        | "includes"
+                        | "map"
+                        | "filter"
+                        | "reduce"
+                        | "toUpperCase"
+                        | "toLowerCase"
+                        | "trim"
+                        | "split"
+                ) {
+                    return is_supported_expr(&member.object, in_function_depth);
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn is_supported_expr(expr: &Expression<'_>, in_function_depth: usize) -> bool {
+        match expr {
+            Expression::NumericLiteral(_)
+            | Expression::StringLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_) => true,
+            Expression::TemplateLiteral(tpl) => tpl.expressions.is_empty() && tpl.quasis.len() == 1,
+            Expression::Identifier(id) => !matches!(
+                id.name.as_str(),
+                "arguments"
+                    | "globalThis"
+                    | "window"
+                    | "self"
+                    | "process"
+                    | "Buffer"
+                    | "WebAssembly"
+                    | "Symbol"
+                    | "Proxy"
+                    | "Reflect"
+            ),
+            Expression::ParenthesizedExpression(p) => {
+                is_supported_expr(&p.expression, in_function_depth)
+            }
+            Expression::UnaryExpression(u) => {
+                matches!(
+                    u.operator,
+                    UnaryOperator::UnaryNegation
+                        | UnaryOperator::UnaryPlus
+                        | UnaryOperator::LogicalNot
+                        | UnaryOperator::Typeof
+                ) && is_supported_expr(&u.argument, in_function_depth)
+            }
+            Expression::UpdateExpression(u) => {
+                matches!(
+                    u.argument,
+                    SimpleAssignmentTarget::AssignmentTargetIdentifier(_)
+                )
+            }
+            Expression::BinaryExpression(b) => {
+                matches!(
+                    b.operator,
+                    BinaryOperator::Addition
+                        | BinaryOperator::Subtraction
+                        | BinaryOperator::Multiplication
+                        | BinaryOperator::Division
+                        | BinaryOperator::Remainder
+                        | BinaryOperator::Exponential
+                        | BinaryOperator::Equality
+                        | BinaryOperator::Inequality
+                        | BinaryOperator::StrictEquality
+                        | BinaryOperator::StrictInequality
+                        | BinaryOperator::LessThan
+                        | BinaryOperator::LessEqualThan
+                        | BinaryOperator::GreaterThan
+                        | BinaryOperator::GreaterEqualThan
+                        | BinaryOperator::BitwiseAnd
+                        | BinaryOperator::BitwiseOR
+                        | BinaryOperator::BitwiseXOR
+                        | BinaryOperator::ShiftLeft
+                        | BinaryOperator::ShiftRight
+                ) && is_supported_expr(&b.left, in_function_depth)
+                    && is_supported_expr(&b.right, in_function_depth)
+            }
+            Expression::LogicalExpression(l) => {
+                matches!(l.operator, LogicalOperator::And | LogicalOperator::Or)
+                    && is_supported_expr(&l.left, in_function_depth)
+                    && is_supported_expr(&l.right, in_function_depth)
+            }
+            Expression::ConditionalExpression(c) => {
+                is_supported_expr(&c.test, in_function_depth)
+                    && is_supported_expr(&c.consequent, in_function_depth)
+                    && is_supported_expr(&c.alternate, in_function_depth)
+            }
+            Expression::AssignmentExpression(a) => {
+                if !is_supported_expr(&a.right, in_function_depth) {
+                    return false;
+                }
+                let op_ok = matches!(
+                    a.operator,
+                    AssignmentOperator::Assign
+                        | AssignmentOperator::Addition
+                        | AssignmentOperator::Subtraction
+                        | AssignmentOperator::Multiplication
+                        | AssignmentOperator::Division
+                );
+                if !op_ok {
+                    return false;
+                }
+                match &a.left {
+                    AssignmentTarget::AssignmentTargetIdentifier(_) => true,
+                    AssignmentTarget::StaticMemberExpression(m) if !m.optional => {
+                        a.operator == AssignmentOperator::Assign
+                            && static_member_chain(&m.object).is_some()
+                    }
+                    AssignmentTarget::ComputedMemberExpression(m) if !m.optional => {
+                        a.operator == AssignmentOperator::Assign
+                            && matches!(m.object, Expression::Identifier(_))
+                            && is_supported_expr(&m.expression, in_function_depth)
+                    }
+                    _ => false,
+                }
+            }
+            Expression::ArrayExpression(arr) => arr.elements.iter().all(|el| match el {
+                ArrayExpressionElement::SpreadElement(_) | ArrayExpressionElement::Elision(_) => {
+                    false
+                }
+                _ => el
+                    .as_expression()
+                    .is_some_and(|e| is_supported_expr(e, in_function_depth)),
+            }),
+            Expression::ObjectExpression(obj) => obj.properties.iter().all(|prop| match prop {
+                ObjectPropertyKind::ObjectProperty(p) => {
+                    if p.method || p.computed {
+                        return false;
+                    }
+                    let key_ok = matches!(
+                        p.key,
+                        PropertyKey::StaticIdentifier(_)
+                            | PropertyKey::StringLiteral(_)
+                            | PropertyKey::NumericLiteral(_)
+                    );
+                    key_ok && is_supported_expr(&p.value, in_function_depth)
+                }
+                ObjectPropertyKind::SpreadProperty(_) => false,
+            }),
+            Expression::ArrowFunctionExpression(arrow) => {
+                // Disallow nested closures (arrow inside function/arrow) since Tier-0 has flat env_vars
+                if arrow.r#async || in_function_depth > 0 || !params_are_simple(&arrow.params) {
+                    return false;
+                }
+                match &arrow.body {
+                    ArrowFunctionBody::FunctionBody(fb) => fb
+                        .statements
+                        .iter()
+                        .all(|s| is_supported_stmt(s, in_function_depth + 1)),
+                    _ => arrow
+                        .body
+                        .as_expression()
+                        .is_some_and(|e| is_supported_expr(e, in_function_depth + 1)),
+                }
+            }
+            Expression::FunctionExpression(func) => {
+                if func.r#async
+                    || func.generator
+                    || in_function_depth > 0
+                    || !params_are_simple(&func.params)
+                {
+                    return false;
+                }
+                func.body.as_ref().is_some_and(|fb| {
+                    fb.statements
+                        .iter()
+                        .all(|s| is_supported_stmt(s, in_function_depth + 1))
+                })
+            }
+            Expression::StaticMemberExpression(m) => {
+                if m.optional {
+                    return false;
+                }
+                if let Expression::Identifier(obj_id) = &m.object {
+                    if obj_id.name.as_str() == "Math" {
+                        return matches!(m.property.name.as_str(), "PI" | "E");
+                    }
+                }
+                is_supported_expr(&m.object, in_function_depth)
+            }
+            Expression::ComputedMemberExpression(m) => {
+                !m.optional
+                    && is_supported_expr(&m.object, in_function_depth)
+                    && is_supported_expr(&m.expression, in_function_depth)
+            }
+            Expression::CallExpression(call) => {
+                !call.optional
+                    && is_supported_call(&call.callee, &call.arguments, in_function_depth)
+            }
+            _ => false,
+        }
+    }
+
+    fn is_supported_var_decl(
+        vd: &oxc::ast::ast::VariableDeclaration<'_>,
+        in_function_depth: usize,
+    ) -> bool {
+        if vd.declarations.len() != 1 {
+            return false;
+        }
+        let decl = &vd.declarations[0];
+        if !matches!(decl.id, BindingPattern::BindingIdentifier(_)) {
+            return false;
+        }
+        decl.init
+            .as_ref()
+            .is_none_or(|init| is_supported_expr(init, in_function_depth))
+    }
+
+    fn is_supported_stmt(stmt: &Statement<'_>, in_function_depth: usize) -> bool {
+        match stmt {
+            Statement::EmptyStatement(_)
+            | Statement::BreakStatement(_)
+            | Statement::ContinueStatement(_)
+            | Statement::TSInterfaceDeclaration(_)
+            | Statement::TSTypeAliasDeclaration(_) => true,
+            Statement::BlockStatement(b) => b
+                .body
+                .iter()
+                .all(|s| is_supported_stmt(s, in_function_depth)),
+            Statement::VariableDeclaration(vd) => is_supported_var_decl(vd, in_function_depth),
+            Statement::FunctionDeclaration(fd) => {
+                if fd.r#async
+                    || fd.generator
+                    || in_function_depth > 0
+                    || !params_are_simple(&fd.params)
+                {
+                    return false;
+                }
+                fd.body.as_ref().is_some_and(|fb| {
+                    fb.statements
+                        .iter()
+                        .all(|s| is_supported_stmt(s, in_function_depth + 1))
+                })
+            }
+            Statement::ExpressionStatement(es) => {
+                is_supported_expr(&es.expression, in_function_depth)
+            }
+            Statement::IfStatement(ifs) => {
+                is_supported_expr(&ifs.test, in_function_depth)
+                    && is_supported_stmt(&ifs.consequent, in_function_depth)
+                    && ifs
+                        .alternate
+                        .as_ref()
+                        .is_none_or(|alt| is_supported_stmt(alt, in_function_depth))
+            }
+            Statement::WhileStatement(ws) => {
+                is_supported_expr(&ws.test, in_function_depth)
+                    && is_supported_stmt(&ws.body, in_function_depth)
+            }
+            Statement::ForStatement(fs) => {
+                let init_ok = match &fs.init {
+                    None => true,
+                    Some(ForStatementInit::VariableDeclaration(vd)) => {
+                        is_supported_var_decl(vd, in_function_depth)
+                    }
+                    Some(other) => other
+                        .as_expression()
+                        .is_some_and(|e| is_supported_expr(e, in_function_depth)),
+                };
+                let test_ok = fs
+                    .test
+                    .as_ref()
+                    .is_none_or(|t| is_supported_expr(t, in_function_depth));
+                let update_ok = fs
+                    .update
+                    .as_ref()
+                    .is_none_or(|u| is_supported_expr(u, in_function_depth));
+                init_ok && test_ok && update_ok && is_supported_stmt(&fs.body, in_function_depth)
+            }
+            Statement::ReturnStatement(rs) => rs
+                .argument
+                .as_ref()
+                .is_none_or(|arg| is_supported_expr(arg, in_function_depth)),
+            Statement::ImportDeclaration(_) => in_function_depth == 0,
+            Statement::ExportDeclaration(exp) => match &exp.declaration {
+                Declaration::VariableDeclaration(vd) => {
+                    is_supported_var_decl(vd, in_function_depth)
+                }
+                Declaration::FunctionDeclaration(fd) => {
+                    !fd.r#async
+                        && !fd.generator
+                        && in_function_depth == 0
+                        && params_are_simple(&fd.params)
+                        && fd.body.as_ref().is_some_and(|fb| {
+                            fb.statements
+                                .iter()
+                                .all(|s| is_supported_stmt(s, in_function_depth + 1))
+                        })
+                }
+                Declaration::TSInterfaceDeclaration(_) | Declaration::TSTypeAliasDeclaration(_) => {
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    program.body.iter().all(|stmt| is_supported_stmt(stmt, 0))
+}
+
+/// Compiles JavaScript/TypeScript source into a compact binary `SLICESNP` or `SLICEBOA` bytecode buffer.
+/// Combines **Oxc** production TypeScript transpilation, **Tier-0/Tier-2** fast-path SIMD intrinsics
+/// (selected via AST-verified `is_tier0_slicesnp_compatible_ast`), and **Boa (`boa_engine`)**
+/// full-spec ES2024+ execution as the default for general ECMAScript programs.
 pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
     if raw_source.starts_with("var __slice_modules =")
-        || raw_source.contains("\nvar __slice_modules =")
+        || memchr::memmem::find(raw_source.as_bytes(), b"\nvar __slice_modules =").is_some()
     {
         let compacted = compact_js_for_boa_bytecode(raw_source);
         let mut bytes = Vec::with_capacity(12 + compacted.len());
@@ -1209,124 +1739,17 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         return bytes;
     }
     let source = strip_typescript_and_normalize(raw_source, true);
+    let src_bytes = source.as_bytes();
 
-    // Check if the Oxc-transpiled code uses full ES2024+ OOP/runtime features (`class `, `new `,
-    // `try `, `catch`, `switch `, `RegExp`, `Map`, `Set`, `Promise`, `Symbol`, `.some(`, `Math.round`)
-    let uses_full_es_vm = source.contains("class ")
-        || source.contains("this.")
-        || source.contains("var __slice_modules =")
-        || source.contains("node:")
-        || source.contains("__slice_cjs_require(")
-        || source.contains("createHash(")
-        || source.contains("try ")
-        || source.contains("try{")
-        || source.contains("switch ")
-        || source.contains("new Map")
-        || source.contains("new Set")
-        || source.contains("new RegExp")
-        || source.contains(".some(")
-        || source.contains(".every(")
-        || source.contains(".sort(")
-        || source.contains("Boolean(")
-        || source.contains("instanceof ")
-        || source.contains("__slice_semver_")
-        || source.contains("__slice_fast_")
-        || source.contains("__slice_crypto_")
-        || source.contains("__slice_base64_")
-        || source.contains("Buffer.")
-        || source.contains("Slice.")
-        || source.contains("__slice_http_")
-        || source.contains("new URL(")
-        || source.contains("new URLPattern(")
-        || source.contains("new URLSearchParams(")
-        || source.contains("new CompressionStream(")
-        || source.contains("new DecompressionStream(")
-        || source.contains("new Headers(")
-        || source.contains("new Request(")
-        || source.contains("new Response(")
-        || source.contains("Response.json(")
-        || source.contains("Response.redirect(")
-        || source.contains("await ")
-        || source.contains("async ")
-        || source.contains(".then(")
-        || source.contains("setTimeout(")
-        || source.contains("setInterval(")
-        || source.contains("setImmediate(")
-        || source.contains("clearImmediate(")
-        || source.contains("queueMicrotask(")
-        || source.contains("process.nextTick(")
-        || source.contains("console.table(")
-        || source.contains("console.time(")
-        || source.contains("console.timeLog(")
-        || source.contains("console.timeEnd(")
-        || source.contains("console.group(")
-        || source.contains("console.groupCollapsed(")
-        || source.contains("console.groupEnd(")
-        || source.contains("console.count(")
-        || source.contains("console.countReset(")
-        || source.contains("console.dir(")
-        || source.contains("console.dirxml(")
-        || source.contains("console.assert(")
-        || source.contains("console.trace(")
-        || source.contains("console.debug(")
-        || source.contains("console.clear(")
-        || source.contains("renderToString(")
-        || source.contains("slice:jsx")
-        || source.contains("jsx-runtime")
-        || source.contains("AbortController")
-        || source.contains("AbortSignal")
-        || source.contains("TextEncoder")
-        || source.contains("TextDecoder")
-        || source.contains("btoa(")
-        || source.contains("escape(")
-        || source.contains("unescape(")
-        || source.contains("atob(")
-        || source.contains("crypto.")
-        || source.contains("EventTarget")
-        || source.contains("CustomEvent")
-        || source.contains("MessageEvent")
-        || source.contains("CloseEvent")
-        || source.contains("WebSocket")
-        || source.contains("Worker")
-        || source.contains("worker_threads")
-        || source.contains("MessageChannel")
-        || source.contains("MessagePort")
-        || source.contains("parentPort")
-        || source.contains("workerData")
-        || source.contains("onmessage")
-        || source.contains("postMessage")
-        || source.contains("self.")
-        || source.contains("cloudflare:")
-        || source.contains("createObjectURL")
-        || source.contains("canParse")
-        || source.contains("new Event(")
-        || source.contains("structuredClone(")
-        || source.contains("new Blob(")
-        || source.contains("new File(")
-        || source.contains("new FormData(")
-        || source.contains("ReadableStream")
-        || source.contains("WritableStream")
-        || source.contains("TransformStream")
-        || source.contains("new Buffer(")
-        || source.contains("Uint8Array")
-        || source.contains("EventEmitter")
-        || source.contains("Math.random(")
-        || source.contains("Date.now(")
-        || source.contains("performance.now(")
-        || source.contains("process.env")
-        || source.contains("describe(")
-        || source.contains("expect(")
-        || source.contains("WebAssembly")
-        || source.contains("globalThis");
+    let has_direct_intrinsic_attack = (memchr::memmem::find(src_bytes, b"Object.prototype.")
+        .is_some()
+        || memchr::memmem::find(src_bytes, b"Array.prototype.").is_some()
+        || memchr::memmem::find(src_bytes, b"while (true)").is_some()
+        || memchr::memmem::find(src_bytes, b"while(true)").is_some())
+        && memchr::memmem::find(src_bytes, b"Slice.evalSandbox(").is_none()
+        && memchr::memmem::find(src_bytes, b"Worker").is_none();
 
-    let has_direct_intrinsic_attack = (source.contains("Object.prototype.")
-        || source.contains("Array.prototype.")
-        || source.contains("while (true)")
-        || source.contains("while(true)"))
-        && !source.contains("Slice.evalSandbox(")
-        && !source.contains("Worker");
-
-    if uses_full_es_vm && !has_direct_intrinsic_attack {
+    if !has_direct_intrinsic_attack && !is_tier0_slicesnp_compatible_ast(&source) {
         let compacted = compact_js_for_boa_bytecode(&source);
         let mut bytes = Vec::with_capacity(12 + compacted.len());
         bytes.extend_from_slice(b"SLICEBOA{\n");

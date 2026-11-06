@@ -16,7 +16,7 @@ use crate::boa_realm::{
 use crate::intrinsics::{base64_decode, base64_encode, fill_random_bytes, sha1_bytes};
 use crate::outbound_http::{
     check_boa_outbound_fetch_ocap_and_dlp, dial_fresh_outbound_stream, is_valid_http_header_value,
-     is_valid_request_target, parse_outbound_http_url, resolve_and_verify_ssrf_socket_addrs,
+    is_valid_request_target, parse_outbound_http_url, resolve_and_verify_ssrf_socket_addrs,
     OutboundStream, MAX_OUTBOUND_HEADER_BYTES,
 };
 use crate::state_and_kv::verify_egress_secrets_slice;
@@ -86,15 +86,14 @@ pub fn encode_websocket_frame(
     payload: &[u8],
 ) -> Vec<u8> {
     let len = payload.len();
-    let header_len = 2
-        + if len <= 125 {
+    let header_len =
+        2 + if len <= 125 {
             0
         } else if len <= 65535 {
             2
         } else {
             8
-        }
-        + if mask_key.is_some() { 4 } else { 0 };
+        } + if mask_key.is_some() { 4 } else { 0 };
 
     let mut frame = Vec::with_capacity(header_len + len);
     let b0 = (if fin { 0x80 } else { 0x00 }) | (opcode & 0x0F);
@@ -162,7 +161,9 @@ pub fn decode_websocket_frame(
     // RFC 6455 Section 5.5: Control frames (opcode >= 0x8) MUST NOT be fragmented and MUST have payload <= 125 bytes
     if opcode >= 0x8 {
         if !fin {
-            return Err("WebSocketProtocolError: fragmented control frame is forbidden".to_string());
+            return Err(
+                "WebSocketProtocolError: fragmented control frame is forbidden".to_string(),
+            );
         }
         if len_code > 125 {
             return Err(
@@ -355,9 +356,7 @@ pub fn read_websocket_message_from_stream<S: Read + Write>(
                     if pending_buf.is_empty() && frag_opcode.is_none() {
                         return Ok(None);
                     }
-                    return Err(
-                        "WebSocketReadError: unexpected EOF mid-frame".to_string(),
-                    );
+                    return Err("WebSocketReadError: unexpected EOF mid-frame".to_string());
                 }
                 if pending_buf.len().saturating_add(n) > max_message_bytes.saturating_add(16) {
                     return Err(format!(
@@ -514,8 +513,12 @@ struct WsConnectOutcome {
 /// Connects a client WebSocket (`ws://` or `wss://`), enforcing OCap `allow_net`, DNS Resolved-IP SSRF,
 /// Outbound Egress DLP, and RFC 6455 `101 Switching Protocols` + `Sec-WebSocket-Accept` verification.
 pub(crate) fn ws_client_connect(raw_url: &str, protocols: &str) -> Result<String, String> {
-    let http_equiv = normalize_ws_url_to_http(raw_url)
-        .ok_or_else(|| format!("Invalid WebSocket URL '{}': must start with ws:// or wss://", raw_url))?;
+    let http_equiv = normalize_ws_url_to_http(raw_url).ok_or_else(|| {
+        format!(
+            "Invalid WebSocket URL '{}': must start with ws:// or wss://",
+            raw_url
+        )
+    })?;
     let parts = parse_outbound_http_url(&http_equiv)
         .ok_or_else(|| format!("Invalid WebSocket URL authority: {}", raw_url))?;
 
@@ -548,12 +551,7 @@ pub(crate) fn ws_client_connect(raw_url: &str, protocols: &str) -> Result<String
     });
 
     if let Some(mock_mode) = matched_mock {
-        let selected_proto = protocols
-            .split(',')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let selected_proto = protocols.split(',').next().unwrap_or("").trim().to_string();
         CLIENT_WEBSOCKETS.with(|map| {
             map.borrow_mut().insert(
                 ws_id,
@@ -589,7 +587,11 @@ pub(crate) fn ws_client_connect(raw_url: &str, protocols: &str) -> Result<String
         parts.path_and_query, parts.host_header, sec_key
     );
     if !protocols.trim().is_empty() {
-        let _ = write!(&mut req_buf, "Sec-WebSocket-Protocol: {}\r\n", protocols.trim());
+        let _ = write!(
+            &mut req_buf,
+            "Sec-WebSocket-Protocol: {}\r\n",
+            protocols.trim()
+        );
     }
     req_buf.extend_from_slice(b"\r\n");
 
@@ -612,7 +614,9 @@ pub(crate) fn ws_client_connect(raw_url: &str, protocols: &str) -> Result<String
             .read(&mut scratch)
             .map_err(|e| format!("WebSocket handshake read failed: {}", e))?;
         if n == 0 {
-            return Err("WebSocketHandshakeError: peer closed connection during handshake".to_string());
+            return Err(
+                "WebSocketHandshakeError: peer closed connection during handshake".to_string(),
+            );
         }
         raw_resp.extend_from_slice(&scratch[..n]);
     };
@@ -709,12 +713,8 @@ fn drain_available_live_frames(
                     match frame.opcode {
                         WS_OPCODE_PING => {
                             let mask = Some(next_ws_mask_key());
-                            let pong = encode_websocket_frame(
-                                true,
-                                WS_OPCODE_PONG,
-                                mask,
-                                &frame.payload,
-                            );
+                            let pong =
+                                encode_websocket_frame(true, WS_OPCODE_PONG, mask, &frame.payload);
                             let _ = stream.write_all(&pong);
                             let _ = stream.flush();
                         }
@@ -888,7 +888,9 @@ pub(crate) fn ws_client_send(
                 limit: max_bytes,
             });
         });
-        return Err("MemoryCeilingExceeded: outbound WebSocket frame exceeds memory ceiling".to_string());
+        return Err(
+            "MemoryCeilingExceeded: outbound WebSocket frame exceeds memory ceiling".to_string(),
+        );
     }
 
     CLIENT_WEBSOCKETS.with(|map| {
@@ -962,7 +964,6 @@ pub(crate) fn ws_client_poll(ws_id: u32) -> Result<String, String> {
     })
 }
 
-
 /// Sends an RFC 6455 `Close` (`0x8`) frame and closes the client WebSocket session.
 pub(crate) fn ws_client_close(ws_id: u32, code: u16, reason: &str) -> Result<String, String> {
     CLIENT_WEBSOCKETS.with(|map| {
@@ -1030,4 +1031,3 @@ pub(crate) fn ws_server_queue_close(code: u16, reason: &str) -> Result<(), Strin
 pub fn drain_server_ws_outbox() -> Vec<ServerWsOutFrame> {
     BOA_WS_SERVER_OUTBOX.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
-

@@ -139,7 +139,9 @@ struct ActiveBoaCtxGuard {
 impl ActiveBoaCtxGuard {
     fn enter(ctx: &mut Context, mem_ab: Option<&JsObject>) -> Self {
         let prev_ctx = ACTIVE_BOA_CTX_PTR.with(|p| p.replace(ctx as *mut Context));
-        let ab_ptr = mem_ab.map(|o| o as *const JsObject).unwrap_or(std::ptr::null());
+        let ab_ptr = mem_ab
+            .map(|o| o as *const JsObject)
+            .unwrap_or(std::ptr::null());
         let prev_ab = ACTIVE_MEM_AB_PTR.with(|p| p.replace(ab_ptr));
         Self { prev_ctx, prev_ab }
     }
@@ -302,7 +304,9 @@ pub fn wasm_compile_module(bytes: &[u8]) -> Result<u32, String> {
     let (consumed, limit) = BOA_FUEL_BUDGET.with(|f| f.get());
     if consumed.saturating_add(10) > limit {
         record_wasm_fuel_violation();
-        return Err("RuntimeError: CPU instruction fuel exhausted during WebAssembly.compile".to_string());
+        return Err(
+            "RuntimeError: CPU instruction fuel exhausted during WebAssembly.compile".to_string(),
+        );
     }
     BOA_FUEL_BUDGET.with(|f| f.set((consumed.saturating_add(10), limit)));
 
@@ -370,7 +374,10 @@ pub fn wasm_module_imports_json(mod_id: u32) -> Result<String, String> {
 }
 
 /// Extracts custom sections matching `section_name` from the raw `.wasm` binary.
-pub fn wasm_module_custom_sections(mod_id: u32, section_name: &str) -> Result<Vec<Vec<u8>>, String> {
+pub fn wasm_module_custom_sections(
+    mod_id: u32,
+    section_name: &str,
+) -> Result<Vec<Vec<u8>>, String> {
     WASM_STATE.with(|st| {
         let s = st.borrow();
         let entry = s
@@ -397,7 +404,8 @@ pub fn wasm_module_custom_sections(mod_id: u32, section_name: &str) -> Result<Ve
                     let name_start = name_hdr_len;
                     let name_end = name_start.saturating_add(name_len as usize);
                     if name_end <= sec_slice.len() {
-                        if let Ok(name_str) = std::str::from_utf8(&sec_slice[name_start..name_end]) {
+                        if let Ok(name_str) = std::str::from_utf8(&sec_slice[name_start..name_end])
+                        {
                             if name_str == section_name {
                                 out.push(sec_slice[name_end..].to_vec());
                             }
@@ -455,11 +463,7 @@ pub fn wasm_create_memory(initial_pages: u32, max_pages: Option<u32>) -> Result<
 
 /// Grows a standalone `WebAssembly.Memory` or instance-bound memory by `delta_pages`.
 /// Returns `Ok(previous_pages)` or `Err(...)` (or `-1` if soft max_pages reached).
-pub fn wasm_grow_memory(
-    mem_id: u32,
-    inst_id: u32,
-    delta_pages: u32,
-) -> Result<i32, String> {
+pub fn wasm_grow_memory(mem_id: u32, inst_id: u32, delta_pages: u32) -> Result<i32, String> {
     if inst_id > 0 {
         return WASM_STATE.with(|st| {
             let mut s = st.borrow_mut();
@@ -521,11 +525,7 @@ pub fn wasm_grow_memory(
 /// Synchronizes modified bytes from a JS `ArrayBuffer` (`ab_slice`) into WASM linear memory
 /// (`wasm_slice`) using 8-byte word comparisons against `shadow_mem`.
 #[inline]
-fn sync_js_array_buffer_to_wasm(
-    ab_slice: &[u8],
-    wasm_slice: &mut [u8],
-    shadow_mem: &mut [u8],
-) {
+fn sync_js_array_buffer_to_wasm(ab_slice: &[u8], wasm_slice: &mut [u8], shadow_mem: &mut [u8]) {
     let len = ab_slice.len().min(wasm_slice.len()).min(shadow_mem.len());
     let word_count = len / 8;
     for i in 0..word_count {
@@ -552,11 +552,7 @@ fn sync_js_array_buffer_to_wasm(
 /// Synchronizes modified bytes from WASM linear memory (`wasm_slice`) back into the JS `ArrayBuffer`
 /// (`ab_slice`) and updates `shadow_mem`.
 #[inline]
-fn sync_wasm_to_js_array_buffer(
-    wasm_slice: &[u8],
-    ab_slice: &mut [u8],
-    shadow_mem: &mut [u8],
-) {
+fn sync_wasm_to_js_array_buffer(wasm_slice: &[u8], ab_slice: &mut [u8], shadow_mem: &mut [u8]) {
     let len = wasm_slice.len().min(ab_slice.len()).min(shadow_mem.len());
     let word_count = len / 8;
     for i in 0..word_count {
@@ -633,12 +629,7 @@ pub fn wasm_instantiate_module(
     import_obj_opt: Option<&JsObject>,
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let module = WASM_STATE.with(|st| {
-        st.borrow()
-            .modules
-            .get(&mod_id)
-            .map(|e| e.module.clone())
-    });
+    let module = WASM_STATE.with(|st| st.borrow().modules.get(&mod_id).map(|e| e.module.clone()));
     let Some(module) = module else {
         return Err(JsNativeError::typ()
             .with_message("WebAssembly.Instance(): argument 0 must be a WebAssembly.Module")
@@ -672,7 +663,9 @@ pub fn wasm_instantiate_module(
     if avail_fuel == 0 {
         record_wasm_fuel_violation();
         return Err(JsNativeError::error()
-            .with_message("RuntimeError: CPU instruction fuel exhausted before WebAssembly.instantiate")
+            .with_message(
+                "RuntimeError: CPU instruction fuel exhausted before WebAssembly.instantiate",
+            )
             .into());
     }
     let _ = store.set_fuel(avail_fuel);
@@ -732,7 +725,10 @@ pub fn wasm_instantiate_module(
                 let host_func = Func::new(
                     &mut store,
                     f_ty,
-                    move |mut caller: Caller<'_, WasmStoreData>, params: &[Val], results: &mut [Val]| -> Result<(), WasmiError> {
+                    move |mut caller: Caller<'_, WasmStoreData>,
+                          params: &[Val],
+                          results: &mut [Val]|
+                          -> Result<(), WasmiError> {
                         let ctx_ptr = ACTIVE_BOA_CTX_PTR.with(|p| p.get());
                         if ctx_ptr.is_null() {
                             return Err(WasmiError::host(WasmHostError(
@@ -754,7 +750,8 @@ pub fn wasm_instantiate_module(
                             }
                         }
 
-                        let js_fn = WASM_STATE.with(|st| st.borrow().import_funcs.get(&fn_id).cloned());
+                        let js_fn =
+                            WASM_STATE.with(|st| st.borrow().import_funcs.get(&fn_id).cloned());
                         let Some(js_fn) = js_fn else {
                             return Err(WasmiError::host(WasmHostError(
                                 "Imported JS function handle missing".to_string(),
@@ -832,9 +829,12 @@ pub fn wasm_instantiate_module(
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
                 let m_ty = MemoryType::new(actual_pages, max_pages.or(Some(MAX_WASM_MEMORY_PAGES)))
-                    .map_err(|e| JsNativeError::error().with_message(format!("LinkError: {}", e)))?;
-                let mem = Memory::new(&mut store, m_ty)
-                    .map_err(|e| JsNativeError::range().with_message(format!("RangeError: {}", e)))?;
+                    .map_err(|e| {
+                        JsNativeError::error().with_message(format!("LinkError: {}", e))
+                    })?;
+                let mem = Memory::new(&mut store, m_ty).map_err(|e| {
+                    JsNativeError::range().with_message(format!("RangeError: {}", e))
+                })?;
                 if let Some(ref b_obj) = js_mem_buf_obj {
                     if let Ok(ab) = JsArrayBuffer::from_object(b_obj.clone()) {
                         if let Some(d) = ab.data() {
@@ -863,8 +863,9 @@ pub fn wasm_instantiate_module(
             }
             ExternType::Table(tab_ty) => {
                 let init_val = default_val_for_type(tab_ty.element());
-                let tab = wasmi::Table::new(&mut store, *tab_ty, init_val)
-                    .map_err(|e| JsNativeError::error().with_message(format!("LinkError: {}", e)))?;
+                let tab = wasmi::Table::new(&mut store, *tab_ty, init_val).map_err(|e| {
+                    JsNativeError::error().with_message(format!("LinkError: {}", e))
+                })?;
                 let _ = linker.define(mod_name, field_name, tab);
             }
         }
@@ -885,9 +886,9 @@ pub fn wasm_instantiate_module(
             context,
             imported_memory.as_ref().and_then(|(_, _, o)| o.as_ref()),
         );
-        let pre = linker.instantiate(&mut store, &module).map_err(|e| {
-            JsNativeError::error().with_message(format!("LinkError: {}", e))
-        })?;
+        let pre = linker
+            .instantiate(&mut store, &module)
+            .map_err(|e| JsNativeError::error().with_message(format!("LinkError: {}", e)))?;
         match pre.start(&mut store) {
             Ok(inst) => inst,
             Err(e) => {
@@ -895,7 +896,9 @@ pub fn wasm_instantiate_module(
                 let used = avail_fuel.saturating_sub(left).max(1);
                 BOA_FUEL_BUDGET.with(|f| f.set((consumed_fuel.saturating_add(used), fuel_limit)));
                 let err_str = e.to_string();
-                if err_str.contains("fuel") || e.as_trap_code() == Some(wasmi::core::TrapCode::OutOfFuel) {
+                if err_str.contains("fuel")
+                    || e.as_trap_code() == Some(wasmi::core::TrapCode::OutOfFuel)
+                {
                     record_wasm_fuel_violation();
                 }
                 return Err(JsNativeError::error()
@@ -1004,7 +1007,12 @@ pub fn wasm_instantiate_module(
     });
 
     let res_obj = JsObject::with_object_proto(context.intrinsics());
-    let _ = res_obj.set(js_string!("instId"), JsValue::from(inst_id as f64), false, context);
+    let _ = res_obj.set(
+        js_string!("instId"),
+        JsValue::from(inst_id as f64),
+        false,
+        context,
+    );
     let _ = res_obj.set(
         js_string!("exportsJson"),
         JsValue::from(js_string!(
@@ -1023,10 +1031,7 @@ pub fn wasm_instantiate_module(
 }
 
 /// Copies the initial linear memory of `inst_id` into the provided JS `ArrayBuffer` (`ab_obj`).
-pub fn wasm_sync_initial_memory_to_ab(
-    inst_id: u32,
-    ab_obj: &JsObject,
-) -> Result<(), String> {
+pub fn wasm_sync_initial_memory_to_ab(inst_id: u32, ab_obj: &JsObject) -> Result<(), String> {
     let ab = JsArrayBuffer::from_object(ab_obj.clone())
         .map_err(|e| format!("TypeError: Expected ArrayBuffer: {}", e))?;
     WASM_STATE.with(|st| {
@@ -1096,7 +1101,10 @@ pub fn wasm_call_export(
         let js_v = js_args.get(idx).cloned().unwrap_or_else(JsValue::undefined);
         wasm_params.push(js_val_to_wasm_val(&js_v, *pt, context)?);
     }
-    let mut wasm_results: Vec<Val> = result_types.iter().map(|rt| default_val_for_type(*rt)).collect();
+    let mut wasm_results: Vec<Val> = result_types
+        .iter()
+        .map(|rt| default_val_for_type(*rt))
+        .collect();
 
     let (consumed_fuel, fuel_limit) = BOA_FUEL_BUDGET.with(|f| f.get());
     let avail_fuel = fuel_limit.saturating_sub(consumed_fuel);
@@ -1149,8 +1157,7 @@ pub fn wasm_call_export(
             return Err(JsNativeError::error().with_message(h_err).into());
         }
         let err_str = err.to_string();
-        if err_str.contains("fuel")
-            || err.as_trap_code() == Some(wasmi::core::TrapCode::OutOfFuel)
+        if err_str.contains("fuel") || err.as_trap_code() == Some(wasmi::core::TrapCode::OutOfFuel)
         {
             record_wasm_fuel_violation();
         }
@@ -1183,7 +1190,10 @@ pub fn wasm_get_global(inst_id: u32, export_name: &str) -> JsResult<JsValue> {
         };
         let Some(g) = inst.instance.get_global(&inst.store, export_name) else {
             return Err(JsNativeError::typ()
-                .with_message(format!("Export '{}' is not a WebAssembly.Global", export_name))
+                .with_message(format!(
+                    "Export '{}' is not a WebAssembly.Global",
+                    export_name
+                ))
                 .into());
         };
         Ok(wasm_val_to_js_val(&g.get(&inst.store)))
@@ -1199,15 +1209,18 @@ pub fn wasm_set_global(
 ) -> JsResult<()> {
     let vt = WASM_STATE.with(|st| {
         let s = st.borrow();
-        let inst = s.instances.get(&inst_id).ok_or_else(|| {
-            JsNativeError::typ().with_message("Invalid WebAssembly.Instance")
-        })?;
+        let inst = s
+            .instances
+            .get(&inst_id)
+            .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Instance"))?;
         let g = inst
             .instance
             .get_global(&inst.store, export_name)
             .ok_or_else(|| {
-                JsNativeError::typ()
-                    .with_message(format!("Export '{}' is not a WebAssembly.Global", export_name))
+                JsNativeError::typ().with_message(format!(
+                    "Export '{}' is not a WebAssembly.Global",
+                    export_name
+                ))
             })?;
         let ty: GlobalType = g.ty(&inst.store);
         if matches!(ty.mutability(), Mutability::Const) {

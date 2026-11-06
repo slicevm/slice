@@ -149,8 +149,7 @@ pub(crate) fn detect_needed_shards(raw_js_code: &str, is_http: bool) -> u32 {
         active_storage = raw_js_code
             .lines()
             .filter(|l| {
-                !(l.starts_with("__slice_modules[")
-                    && (l.contains("] = \"") || l.contains("]=\"")))
+                !(l.starts_with("__slice_modules[") && (l.contains("] = \"") || l.contains("]=\"")))
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -256,7 +255,8 @@ pub(crate) fn detect_needed_shards(raw_js_code: &str, is_http: bool) -> u32 {
         || js_code.contains("readInt")
         || js_code.contains("writeBig")
         || js_code.contains("readBig");
-    if needs_buf_bin || js_code.contains("Buffer.from")
+    if needs_buf_bin
+        || js_code.contains("Buffer.from")
         || js_code.contains("Buffer.alloc")
         || js_code.contains("Buffer.byteLength")
         || js_code.contains("Buffer.isBuffer")

@@ -48,8 +48,7 @@ pub fn is_valid_http_header_name(name: &str) -> bool {
 /// Validates an HTTP header field value (blocks `\r`, `\n`, `\0`, and ASCII control characters except HTAB `\t`).
 #[inline]
 pub fn is_valid_http_header_value(val: &str) -> bool {
-    val.bytes()
-        .all(|b| b == b'\t' || (b >= 0x20 && b != 0x7F))
+    val.bytes().all(|b| b == b'\t' || (b >= 0x20 && b != 0x7F))
 }
 
 /// Validates an HTTP request target (`path_and_query`) to prevent request line splitting via spaces or control chars.
@@ -300,11 +299,7 @@ fn resolve_redirect_url(
     if loc.starts_with("http://") || loc.starts_with("https://") {
         return Some(loc.to_string());
     }
-    let scheme = if base_parts.is_https {
-        "https"
-    } else {
-        "http"
-    };
+    let scheme = if base_parts.is_https { "https" } else { "http" };
     if let Some(scheme_rel) = loc.strip_prefix("//") {
         return Some(format!("{}:{}", scheme, scheme_rel));
     }
@@ -312,11 +307,7 @@ fn resolve_redirect_url(
     if loc.starts_with('/') {
         return Some(format!("{}{}", origin, loc));
     }
-    let base_path = base_parts
-        .path_and_query
-        .split('?')
-        .next()
-        .unwrap_or("/");
+    let base_path = base_parts.path_and_query.split('?').next().unwrap_or("/");
     let dir = match base_path.rfind('/') {
         Some(idx) => &base_path[..=idx],
         None => "/",
@@ -416,7 +407,10 @@ pub(crate) fn resolve_and_verify_ssrf_socket_addrs(
         .collect();
 
     if addrs.is_empty() {
-        return Err(format!("No socket address resolved for {}", parts.host_port));
+        return Err(format!(
+            "No socket address resolved for {}",
+            parts.host_port
+        ));
     }
 
     for addr in &addrs {
@@ -730,7 +724,9 @@ fn send_and_read_framed_http11(
                     break String::from_utf8_lossy(&decoded).into_owned();
                 }
                 Ok(None) => {
-                    if raw_resp.len().saturating_sub(body_start) > effective_max_body.saturating_add(65536) {
+                    if raw_resp.len().saturating_sub(body_start)
+                        > effective_max_body.saturating_add(65536)
+                    {
                         return Err(trap_outbound_memory_exceeded(
                             raw_resp.len().saturating_sub(body_start),
                             effective_max_body,
@@ -818,7 +814,10 @@ fn execute_single_http11_hop(
 ) -> Result<RawHttpResponse, String> {
     // N-Sec-2: Strictly validate method, request target, Host header, and all custom headers against CRLF / control char injection
     if !is_valid_http_header_name(method) {
-        return Err(format!("InvalidMethod: '{}' contains invalid token characters", method));
+        return Err(format!(
+            "InvalidMethod: '{}' contains invalid token characters",
+            method
+        ));
     }
     if !is_valid_request_target(&parts.path_and_query) {
         return Err("InvalidRequestTarget: URL path/query contains forbidden whitespace or control characters".to_string());
@@ -862,11 +861,18 @@ fn execute_single_http11_hop(
     let tenant_id = current_tenant_id();
 
     // 1. Try tenant-scoped warm Keep-Alive stream from `SHARED_OUTBOUND_CONN_POOL` first (`N-Sec-7`)
-    if let Some(mut pooled_stream) = take_pooled_stream(&tenant_id, parts.is_https, &parts.host_port) {
+    if let Some(mut pooled_stream) =
+        take_pooled_stream(&tenant_id, parts.is_https, &parts.host_port)
+    {
         if let Ok(resp) = send_and_read_framed_http11(&mut pooled_stream, &req_buf, method) {
             OUTBOUND_POOL_REUSE_COUNT.with(|c| c.set(c.get() + 1));
             if !resp.peer_closed {
-                return_pooled_stream(tenant_id, parts.is_https, parts.host_port.clone(), pooled_stream);
+                return_pooled_stream(
+                    tenant_id,
+                    parts.is_https,
+                    parts.host_port.clone(),
+                    pooled_stream,
+                );
             }
             return Ok(resp);
         }
@@ -878,7 +884,12 @@ fn execute_single_http11_hop(
     let resp = send_and_read_framed_http11(&mut fresh_stream, &req_buf, method)
         .map_err(|e| format!("HTTP/1.1 exchange failed with {}: {}", parts.host_port, e))?;
     if !resp.peer_closed {
-        return_pooled_stream(tenant_id, parts.is_https, parts.host_port.clone(), fresh_stream);
+        return_pooled_stream(
+            tenant_id,
+            parts.is_https,
+            parts.host_port.clone(),
+            fresh_stream,
+        );
     }
     Ok(resp)
 }

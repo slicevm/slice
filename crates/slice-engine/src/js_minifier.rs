@@ -158,8 +158,9 @@ pub fn minify_js_source(src: &str) -> String {
                 Some(ws) if ws <= out.len() && is_id_char(prev_sig) => &out[ws..],
                 _ => &[][..],
             };
-            let is_regex =
-                prev_sig == 0 || is_regex_preceding_punct(prev_sig) || is_regex_preceding_keyword(prev_word);
+            let is_regex = prev_sig == 0
+                || is_regex_preceding_punct(prev_sig)
+                || is_regex_preceding_keyword(prev_word);
 
             if is_regex {
                 last_word_start = None;
@@ -206,4 +207,3 @@ pub fn minify_js_source(src: &str) -> String {
     // Input `src` is valid UTF-8 and we only stripped ASCII whitespace/comments.
     String::from_utf8(out).unwrap_or_else(|_| src.to_string())
 }
-

@@ -7,7 +7,7 @@ use crate::value_and_ast::BytecodeModule;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slice_sandbox::SandboxViolation;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct ActiveBoaHttpReq {
     pub(crate) active: bool,
     pub(crate) method: String,
@@ -143,15 +143,7 @@ impl boa_engine::job::JobExecutor for SliceJobExecutor {
 
 #[inline]
 pub(crate) fn norm_vfs_path(p: &str) -> String {
-    let mut s = if p.as_bytes().contains(&b'\\') {
-        p.replace('\\', "/")
-    } else {
-        p.to_string()
-    };
-    while s.len() > 1 && s.ends_with('/') {
-        s.pop();
-    }
-    s
+    slice_sandbox::normalize_vfs_path_lexical(p)
 }
 
 #[cold]
@@ -166,35 +158,32 @@ pub(crate) fn record_boa_fs_violation(tenant_id: &str, path: &str) -> bool {
     false
 }
 
-#[inline]
-fn prefix_matches_vfs_path(prefix: &str, norm_path: &str) -> bool {
-    if norm_path.starts_with(prefix) {
-        return true;
-    }
-    if prefix == "/tmp" {
-        let os_tmp = norm_vfs_path(&std::env::temp_dir().to_string_lossy());
-        if !os_tmp.is_empty() && norm_path.starts_with(&os_tmp) {
-            return true;
-        }
-    }
+#[cold]
+#[inline(never)]
+pub(crate) fn record_boa_fs_write_violation(tenant_id: &str, path: &str) -> bool {
+    BOA_VIOLATION.with(|v| {
+        *v.borrow_mut() = Some(SandboxViolation::FsWriteDenied {
+            tenant_id: tenant_id.to_string(),
+            path: path.to_string(),
+        });
+    });
     false
 }
 
 #[inline]
 pub(crate) fn check_boa_fs_read_ocap(path: &str) -> bool {
-    if path.contains("..") {
+    if memchr::memmem::find(path.as_bytes(), b"..").is_some() {
         let tenant = BOA_ACTIVE_CAPS
             .with(|c| c.borrow().as_ref().map(|t| t.0.clone()))
             .unwrap_or_else(|| "boa-tenant".to_string());
         return record_boa_fs_violation(&tenant, path);
     }
-    let norm = norm_vfs_path(path);
     BOA_ACTIVE_CAPS.with(|c| {
         if let Some((tenant_id, read_prefixes, _)) = &*c.borrow() {
             if !read_prefixes.is_empty()
                 && !read_prefixes
                     .iter()
-                    .any(|prefix| prefix_matches_vfs_path(prefix, &norm))
+                    .any(|prefix| slice_sandbox::vfs_prefix_matches(path, prefix))
             {
                 return record_boa_fs_violation(tenant_id, path);
             }
@@ -205,21 +194,20 @@ pub(crate) fn check_boa_fs_read_ocap(path: &str) -> bool {
 
 #[inline]
 pub(crate) fn check_boa_fs_write_ocap(path: &str) -> bool {
-    if path.contains("..") {
+    if memchr::memmem::find(path.as_bytes(), b"..").is_some() {
         let tenant = BOA_ACTIVE_CAPS
             .with(|c| c.borrow().as_ref().map(|t| t.0.clone()))
             .unwrap_or_else(|| "boa-tenant".to_string());
-        return record_boa_fs_violation(&tenant, path);
+        return record_boa_fs_write_violation(&tenant, path);
     }
-    let norm = norm_vfs_path(path);
     BOA_ACTIVE_CAPS.with(|c| {
         if let Some((tenant_id, _, write_prefixes)) = &*c.borrow() {
             if !write_prefixes.is_empty()
                 && !write_prefixes
                     .iter()
-                    .any(|prefix| prefix_matches_vfs_path(prefix, &norm))
+                    .any(|prefix| slice_sandbox::vfs_prefix_matches(path, prefix))
             {
-                return record_boa_fs_violation(tenant_id, path);
+                return record_boa_fs_write_violation(tenant_id, path);
             }
         }
         true
@@ -316,5 +304,113 @@ pub(crate) fn ensure_realm_shards(
                     .and_then(|v| v.as_object());
             }
         }
+    }
+}
+
+/// RAII execution scope guard that snapshots all per-invocation thread-local isolate state
+/// before a nested execution (`Slice.evalSandbox`, recursive sandbox invocation) and restores
+/// every field on `Drop` (including on early return or panic), preventing any child sandbox
+/// state (fuel budget, deterministic PRNG/clock, HTTP request/response, AsyncLocalStorage,
+/// OCap capabilities, DLP secrets, or mock cassettes) from leaking into the parent isolate.
+pub(crate) struct SavedIsolateContextGuard {
+    pub(crate) saved_stdout: Vec<String>,
+    pub(crate) saved_violation: Option<SandboxViolation>,
+    pub(crate) saved_tenant: String,
+    pub(crate) saved_caps: Option<ActiveBoaCaps>,
+    pub(crate) saved_net_hosts: FxHashSet<String>,
+    pub(crate) saved_egress_secrets: Vec<String>,
+    pub(crate) saved_env_map: FxHashMap<String, String>,
+    pub(crate) saved_fetch_mocks: FxHashMap<String, String>,
+    pub(crate) saved_ws_mocks: FxHashMap<String, String>,
+    pub(crate) saved_sock_mocks: FxHashMap<String, String>,
+    pub(crate) saved_kv_budget: (usize, usize),
+    pub(crate) saved_fuel_budget: (u64, u64),
+    pub(crate) saved_det: Option<(u64, u64)>,
+    pub(crate) saved_als_active: bool,
+    pub(crate) saved_als_snap: boa_engine::JsValue,
+    pub(crate) saved_http_req: ActiveBoaHttpReq,
+    pub(crate) saved_http_res: Option<CapturedBoaHttpRes>,
+    pub(crate) saved_wait_until_count: usize,
+    pub(crate) saved_ev_loop: Option<crate::event_loop::SavedEventLoopSnapshot>,
+}
+
+impl SavedIsolateContextGuard {
+    pub(crate) fn enter() -> Self {
+        let saved_stdout = BOA_STDOUT.with(|out| std::mem::take(&mut *out.borrow_mut()));
+        let saved_violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
+        let saved_tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+        let saved_caps = BOA_ACTIVE_CAPS.with(|c| c.borrow_mut().take());
+        let saved_net_hosts = BOA_NET_HOSTS.with(|h| std::mem::take(&mut *h.borrow_mut()));
+        let saved_egress_secrets =
+            BOA_EGRESS_SECRETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
+        let saved_env_map = BOA_ENV_MAP.with(|m| m.borrow().clone());
+        let saved_fetch_mocks = BOA_FETCH_MOCKS.with(|m| m.borrow().clone());
+        let saved_ws_mocks = crate::websocket::BOA_WS_MOCKS.with(|m| m.borrow().clone());
+        let saved_sock_mocks = crate::sockets::BOA_SOCKET_MOCKS.with(|m| m.borrow().clone());
+        let saved_kv_budget = BOA_KV_MEM_BUDGET.with(|m| m.get());
+        let saved_fuel_budget = BOA_FUEL_BUDGET.with(|f| f.get());
+        let saved_det = BOA_DET_STATE.with(|s| s.get());
+        let saved_als_active = BOA_ALS_ACTIVE.with(|a| a.replace(false));
+        let saved_als_snap = BOA_ALS_SNAP.with(|s| s.replace(boa_engine::JsValue::undefined()));
+        let saved_http_req = BOA_HTTP_REQ.with(|r| {
+            let mut borrow = r.borrow_mut();
+            let cloned = borrow.clone();
+            borrow.active = false;
+            cloned
+        });
+        let saved_http_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
+        let saved_wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.replace(0));
+        let saved_ev_loop = Some(crate::event_loop::save_and_reset_event_loop_state());
+
+        Self {
+            saved_stdout,
+            saved_violation,
+            saved_tenant,
+            saved_caps,
+            saved_net_hosts,
+            saved_egress_secrets,
+            saved_env_map,
+            saved_fetch_mocks,
+            saved_ws_mocks,
+            saved_sock_mocks,
+            saved_kv_budget,
+            saved_fuel_budget,
+            saved_det,
+            saved_als_active,
+            saved_als_snap,
+            saved_http_req,
+            saved_http_res,
+            saved_wait_until_count,
+            saved_ev_loop,
+        }
+    }
+}
+
+impl Drop for SavedIsolateContextGuard {
+    fn drop(&mut self) {
+        if let Some(ev) = self.saved_ev_loop.take() {
+            crate::event_loop::restore_event_loop_state(ev);
+        }
+        BOA_STDOUT.with(|out| *out.borrow_mut() = std::mem::take(&mut self.saved_stdout));
+        BOA_VIOLATION.with(|v| *v.borrow_mut() = self.saved_violation.take());
+        BOA_ACTIVE_TENANT.with(|t| *t.borrow_mut() = std::mem::take(&mut self.saved_tenant));
+        BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = self.saved_caps.take());
+        BOA_NET_HOSTS.with(|h| *h.borrow_mut() = std::mem::take(&mut self.saved_net_hosts));
+        BOA_EGRESS_SECRETS
+            .with(|s| *s.borrow_mut() = std::mem::take(&mut self.saved_egress_secrets));
+        BOA_ENV_MAP.with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_env_map));
+        BOA_FETCH_MOCKS.with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_fetch_mocks));
+        crate::websocket::BOA_WS_MOCKS
+            .with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_ws_mocks));
+        crate::sockets::BOA_SOCKET_MOCKS
+            .with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_sock_mocks));
+        BOA_KV_MEM_BUDGET.with(|m| m.set(self.saved_kv_budget));
+        BOA_FUEL_BUDGET.with(|f| f.set(self.saved_fuel_budget));
+        BOA_DET_STATE.with(|s| s.set(self.saved_det));
+        BOA_ALS_ACTIVE.with(|a| a.set(self.saved_als_active));
+        BOA_ALS_SNAP.with(|s| *s.borrow_mut() = self.saved_als_snap.clone());
+        BOA_HTTP_REQ.with(|r| *r.borrow_mut() = std::mem::take(&mut self.saved_http_req));
+        BOA_HTTP_RES.with(|res| *res.borrow_mut() = self.saved_http_res.take());
+        BOA_WAIT_UNTIL_COUNT.with(|c| c.set(self.saved_wait_until_count));
     }
 }

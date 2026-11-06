@@ -112,9 +112,8 @@ pub(crate) fn current_epoch_ms() -> u64 {
 
 #[inline]
 pub(crate) fn edge_kv_shard(tenant_id: &str, key: &str) -> &'static std::sync::Mutex<KvShardMap> {
-    let shards = EDGE_KV_SLAB.get_or_init(|| {
-        std::array::from_fn(|_| std::sync::Mutex::new(FxHashMap::default()))
-    });
+    let shards = EDGE_KV_SLAB
+        .get_or_init(|| std::array::from_fn(|_| std::sync::Mutex::new(FxHashMap::default())));
     use std::hash::{Hash, Hasher};
     let mut hasher = rustc_hash::FxHasher::default();
     tenant_id.hash(&mut hasher);
@@ -199,4 +198,3 @@ pub(crate) fn splitmix64_next_f64(state: &mut u64) -> f64 {
     z ^= z >> 31;
     ((z >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
 }
-

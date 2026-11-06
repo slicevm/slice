@@ -207,7 +207,7 @@ impl SliceIsolate {
             for req_prefix in &opts.allow_read {
                 if parent_reads
                     .iter()
-                    .any(|p| p == "*" || p == "/" || req_prefix.starts_with(p))
+                    .any(|p| slice_sandbox::vfs_prefix_matches(req_prefix, p))
                 {
                     child_caps = child_caps.with_read_prefix(req_prefix.clone());
                 }
@@ -226,7 +226,7 @@ impl SliceIsolate {
             for req_prefix in &opts.allow_write {
                 if parent_writes
                     .iter()
-                    .any(|p| p == "*" || p == "/" || req_prefix.starts_with(p))
+                    .any(|p| slice_sandbox::vfs_prefix_matches(req_prefix, p))
                 {
                     child_caps = child_caps.with_write_prefix(req_prefix.clone());
                 }

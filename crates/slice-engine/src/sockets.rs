@@ -40,10 +40,7 @@ const DEFAULT_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 
 enum TcpConnectionBackend {
     Live(OutboundStream),
-    Mock {
-        rx_queue: Vec<u8>,
-        spec: String,
-    },
+    Mock { rx_queue: Vec<u8>, spec: String },
 }
 
 struct ActiveTcpSocket {
@@ -83,8 +80,8 @@ pub(crate) fn close_all_active_sockets() {
 }
 
 fn next_socket_handle_id() -> Result<u32, String> {
-    let active_count = TCP_SOCKET_TABLE.with(|t| t.borrow().len())
-        + UDP_SOCKET_TABLE.with(|u| u.borrow().len());
+    let active_count =
+        TCP_SOCKET_TABLE.with(|t| t.borrow().len()) + UDP_SOCKET_TABLE.with(|u| u.borrow().len());
     if active_count >= MAX_OPEN_SOCKETS_PER_ISOLATE {
         return Err(format!(
             "SocketError: Maximum concurrent open sockets ({}) exceeded",
@@ -179,7 +176,10 @@ fn verify_socket_egress_dlp(payload: &[u8], target_label: &str) -> Result<(), St
 /// Returns `Ok(has_explicit_match)`.
 fn verify_raw_socket_ocap(host: &str, port: u16) -> Result<bool, String> {
     if host.is_empty() || port == 0 {
-        return Err(format!("SocketError: Invalid socket address '{}:{}'", host, port));
+        return Err(format!(
+            "SocketError: Invalid socket address '{}:{}'",
+            host, port
+        ));
     }
     let clean_host = slice_sandbox::extract_clean_hostname(&host.trim().to_ascii_lowercase());
     let host_port = format!("{}:{}", clean_host, port);
@@ -232,7 +232,10 @@ fn verify_raw_socket_ocap(host: &str, port: u16) -> Result<bool, String> {
 
     // Reject non-canonical IPv4 literals (octal 0177.0.0.1, hex 0x7f.0.0.1, dword 2130706433) unconditionally
     if slice_sandbox::is_private_or_loopback_ssrf_target(&clean_host)
-        && !matches!(clean_host.as_str(), "127.0.0.1" | "localhost" | "::1" | "0.0.0.0")
+        && !matches!(
+            clean_host.as_str(),
+            "127.0.0.1" | "localhost" | "::1" | "0.0.0.0"
+        )
         && !clean_host.starts_with("10.")
         && !clean_host.starts_with("192.168.")
         && !clean_host.starts_with("172.")
@@ -550,8 +553,7 @@ pub fn tcp_socket_read(id: u32, max_bytes: usize, timeout_ms: u64) -> Result<Str
                         .to_string())
                     }
                     Err(e)
-                        if e.kind() == ErrorKind::WouldBlock
-                            || e.kind() == ErrorKind::TimedOut =>
+                        if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut =>
                     {
                         Ok(serde_json::json!({
                             "bytesRead": 0,
@@ -594,9 +596,8 @@ pub fn tcp_socket_starttls(id: u32, server_name_override: Option<&str>) -> Resul
                 let TcpConnectionBackend::Live(OutboundStream::Plain(tcp)) = removed.backend else {
                     return Err("SocketError: Cannot upgrade non-plain TCP stream".to_string());
                 };
-                let server_name = ServerName::try_from(sni_host.clone()).map_err(|e| {
-                    format!("TLS Invalid DNS ServerName '{}': {}", sni_host, e)
-                })?;
+                let server_name = ServerName::try_from(sni_host.clone())
+                    .map_err(|e| format!("TLS Invalid DNS ServerName '{}': {}", sni_host, e))?;
                 let tls_conn = rustls::ClientConnection::new(
                     crate::outbound_http::get_tls_client_config(),
                     server_name,
@@ -652,7 +653,11 @@ pub fn tcp_socket_close(id: u32, half_close_write: bool) -> Result<String, Strin
 pub fn udp_socket_bind(family: &str, address: &str, port: u16) -> Result<String, String> {
     let is_v6 = family.eq_ignore_ascii_case("udp6") || address.contains(':');
     let bind_host = if address.is_empty() {
-        if is_v6 { "::1" } else { "127.0.0.1" }
+        if is_v6 {
+            "::1"
+        } else {
+            "127.0.0.1"
+        }
     } else {
         address.trim()
     };
@@ -678,8 +683,8 @@ pub fn udp_socket_bind(family: &str, address: &str, port: u16) -> Result<String,
     } else {
         format!("{}:{}", bind_host, port)
     };
-    let sock = UdpSocket::bind(&bind_spec)
-        .map_err(|e| format!("UdpBindError ({}): {}", bind_spec, e))?;
+    let sock =
+        UdpSocket::bind(&bind_spec).map_err(|e| format!("UdpBindError ({}): {}", bind_spec, e))?;
     let _ = sock.set_read_timeout(Some(DEFAULT_SOCKET_TIMEOUT));
     let _ = sock.set_write_timeout(Some(DEFAULT_SOCKET_TIMEOUT));
 
