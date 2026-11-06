@@ -3,7 +3,7 @@
 //! Replaces readiness-based `libuv` thread pools with lockless Submission Queue (SQ)
 //! and Completion Queue (CQ) rings backed by pre-registered, page-aligned fixed buffers.
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{ensure, Result};
 use std::collections::VecDeque;
 use std::pin::Pin;
 
@@ -224,7 +224,7 @@ impl CompletionRingEngine {
                 win_iocp::CreateIoCompletionPort(win_iocp::INVALID_HANDLE_VALUE, 0, 0, 0)
             };
             if handle == 0 {
-                bail!("Failed to initialize Windows IOCP completion ring");
+                anyhow::bail!("Failed to initialize Windows IOCP completion ring");
             }
             Ok(Self {
                 buffer_pool,
