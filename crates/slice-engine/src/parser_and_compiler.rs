@@ -1226,6 +1226,8 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || source.contains("new RegExp")
         || source.contains(".some(")
         || source.contains(".every(")
+        || source.contains(".sort(")
+        || source.contains("Boolean(")
         || source.contains("instanceof ")
         || source.contains("__slice_semver_")
         || source.contains("__slice_fast_")

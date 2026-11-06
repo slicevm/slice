@@ -39,6 +39,7 @@ cd "$ROOT_DIR"
 SLICE_BIN="$ROOT_DIR/target/release/slice"
 APPS_DIR="$ROOT_DIR/tests/apps"
 FRAMEWORKS_DIR="$ROOT_DIR/tests/frameworks"
+CASE_STUDIES_DIR="$ROOT_DIR/tests/case_studies"
 BENCH_TAGS="${1:-${SLICE_BENCH_TAGS:-all}}"
 
 should_run_tag() {
@@ -75,6 +76,12 @@ APP23_DIR="$APPS_DIR/23-wasm-crypto-and-simd-kernel"
 APP24_DIR="$APPS_DIR/24-tsx-ssr-and-wasm-edge-pipeline"
 APP25_DIR="$FRAMEWORKS_DIR/01-hono-edge-microservice"
 APP26_DIR="$FRAMEWORKS_DIR/02-itty-router-unjs-nitro-stack"
+APP27_DIR="$CASE_STUDIES_DIR/01-tot-autonomous-sre-agent"
+APP28_DIR="$CASE_STUDIES_DIR/02-mcp-code-mode-orchestrator"
+APP29_DIR="$CASE_STUDIES_DIR/03-multi-tenant-saas-plugin-mesh"
+APP30_DIR="$CASE_STUDIES_DIR/04-wasm-zero-trust-cdr-pipeline"
+APP31_DIR="$CASE_STUDIES_DIR/05-time-travel-chaos-fuzzer-payments"
+WORKBENCH_DIR="$CASE_STUDIES_DIR/workbench"
 
 UPSTREAM_F3_PID=""
 UPSTREAM_WC_PID=""
@@ -1037,6 +1044,57 @@ echo "  --- Frameworks 1 & 2 Cold vs Warm Isolate Telemetry ---"
 echo "  [Live slice test Runner Verification on Framework Suites]"
 "$SLICE_BIN" test "$APP25_DIR"
 "$SLICE_BIN" test "$APP26_DIR"
+fi
+
+if should_run_tag "case_studies"; then
+echo "========================================================================="
+echo "  [TAG: case_studies] FLAGSHIP PRODUCTION CASE STUDIES & WORKBENCH (CS 01-05)"
+echo "========================================================================="
+for cs_num in 27 28 29 30 31; do
+    cs_var="APP${cs_num}_DIR"
+    cs_dir="${!cs_var}"
+    "$SLICE_BIN" pack "$cs_dir" "/tmp/app${cs_num}.cas" >/dev/null
+    "$SLICE_BIN" compile "/tmp/app${cs_num}.cas" -o "/tmp/app${cs_num}_bin" >/dev/null
+done
+
+verify_app_parity "Case Study 1 (App 27): 01-tot-autonomous-sre-agent" "$APP27_DIR" "/tmp/app27.cas" "-A"
+verify_app_parity "Case Study 2 (App 28): 02-mcp-code-mode-orchestrator" "$APP28_DIR" "/tmp/app28.cas" "-A"
+verify_app_parity "Case Study 3 (App 29): 03-multi-tenant-saas-plugin-mesh" "$APP29_DIR" "/tmp/app29.cas" "-A"
+verify_app_parity "Case Study 4 (App 30): 04-wasm-zero-trust-cdr-pipeline" "$APP30_DIR" "/tmp/app30.cas" "-A"
+verify_app_parity "Case Study 5 (App 31): 05-time-travel-chaos-fuzzer-payments" "$APP31_DIR" "/tmp/app31.cas" "-A"
+
+bench_app 27 "CS 1: 01-TOT-AUTONOMOUS-SRE-AGENT (Depth-4 ToT + 16 <5us Rollbacks + DLP/SES/Fuel)" "$APP27_DIR" "-A"
+bench_app 28 "CS 2: 02-MCP-CODE-MODE-ORCHESTRATOR (40 MCP RPCs vs 1 Code Mode Pass, -98.4% Tokens)" "$APP28_DIR" "-A"
+bench_app 29 "CS 3: 03-MULTI-TENANT-SAAS-PLUGIN-MESH (12 Tenants, 120 Events, Noisy-Neighbor + Hot-Swap)" "$APP29_DIR" "-A"
+bench_app 30 "CS 4: 04-WASM-ZERO-TRUST-CDR-PIPELINE (Pure-Rust Wasm SimHash + PII Vault + Gzip)" "$APP30_DIR" "-A"
+bench_app 31 "CS 5: 05-TIME-TRAVEL-CHAOS-FUZZER-PAYMENTS (48 Payment Sagas, 18 Rollbacks, 0-Cent Drift)" "$APP31_DIR" "-A"
+
+for cs_num in 27 28 29 30 31; do
+    cs_var="APP${cs_num}_DIR"
+    cs_dir="${!cs_var}"
+    cs_name="$(basename "$cs_dir")"
+    echo "-------------------------------------------------------------------------"
+    measure_rss_kb "Slice ($cs_name)" "$SLICE_BIN" run "/tmp/app${cs_num}.cas" --quiet
+    measure_rss_kb "Bun   ($cs_name)" bun run "$cs_dir/src/index.ts"
+    measure_rss_kb "Deno  ($cs_name)" deno run -A "$cs_dir/src/index.ts"
+    measure_rss_kb "Node  ($cs_name)" node "$cs_dir/src/index.ts"
+done
+
+echo "  --- Case Studies 1..5 Cold vs Warm Isolate Telemetry ---"
+for cs_num in 27 28 29 30 31; do
+    "$SLICE_BIN" run "/tmp/app${cs_num}.cas" --quiet --metrics
+    "$SLICE_BIN" run "/tmp/app${cs_num}.cas" --warm --quiet --metrics
+done
+
+echo "  [Live slice test Runner Verification on All 5 Case Studies]"
+for cs_num in 27 28 29 30 31; do
+    cs_var="APP${cs_num}_DIR"
+    cs_dir="${!cs_var}"
+    "$SLICE_BIN" test "$cs_dir"
+done
+
+echo "  [Live Interactive Workbench HTTP Server Smoke Verification]"
+"$SLICE_BIN" serve "$WORKBENCH_DIR" --port=18091 --smoke-test
 fi
 
 if should_run_tag "swarm"; then

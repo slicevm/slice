@@ -84,3 +84,16 @@ jobs:
           (cd ./tests/apps/15-time-travel-test-suite && npm install --no-audit --no-fund)
           ./target/debug/slice test ./tests/apps/15-time-travel-test-suite
 
+      - name: Verify Flagship Case Studies & Workbench (CS 01-05)
+        run: |
+          for cs in 01-tot-autonomous-sre-agent 02-mcp-code-mode-orchestrator 03-multi-tenant-saas-plugin-mesh 04-wasm-zero-trust-cdr-pipeline 05-time-travel-chaos-fuzzer-payments workbench; do
+            (cd "./tests/case_studies/$cs" && npm install --no-audit --no-fund)
+          done
+          ./target/debug/slice test ./tests/case_studies/01-tot-autonomous-sre-agent --allow-read=/tmp --allow-write=/tmp
+          ./target/debug/slice test ./tests/case_studies/02-mcp-code-mode-orchestrator --allow-read=/tmp --allow-write=/tmp
+          ./target/debug/slice test ./tests/case_studies/03-multi-tenant-saas-plugin-mesh --allow-read=/tmp --allow-write=/tmp
+          ./target/debug/slice test ./tests/case_studies/04-wasm-zero-trust-cdr-pipeline --allow-read=/tmp --allow-write=/tmp
+          ./target/debug/slice test ./tests/case_studies/05-time-travel-chaos-fuzzer-payments --allow-read=/tmp --allow-write=/tmp
+          ./target/debug/slice serve ./tests/case_studies/workbench --port=18090 --allow-read=/tmp --allow-write=/tmp --smoke-test
+
+

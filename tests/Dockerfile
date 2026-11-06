@@ -63,6 +63,12 @@ RUN bun install --cwd /app/tests/apps/02-npm-ecosystem-suite \
     && bun install --cwd /app/tests/apps/24-tsx-ssr-and-wasm-edge-pipeline \
     && bun install --cwd /app/tests/frameworks/01-hono-edge-microservice \
     && bun install --cwd /app/tests/frameworks/02-itty-router-unjs-nitro-stack \
+    && bun install --cwd /app/tests/case_studies/01-tot-autonomous-sre-agent \
+    && bun install --cwd /app/tests/case_studies/02-mcp-code-mode-orchestrator \
+    && bun install --cwd /app/tests/case_studies/03-multi-tenant-saas-plugin-mesh \
+    && bun install --cwd /app/tests/case_studies/04-wasm-zero-trust-cdr-pipeline \
+    && bun install --cwd /app/tests/case_studies/05-time-travel-chaos-fuzzer-payments \
+    && bun install --cwd /app/tests/case_studies/workbench \
     && sed -i 's/\r$//' /app/tests/run_real_stack_benchmarks.sh \
     && chmod +x /app/tests/run_real_stack_benchmarks.sh
 

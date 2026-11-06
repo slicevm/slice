@@ -1,0 +1,14 @@
+{
+  "name": "05-time-travel-chaos-fuzzer-payments",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "dlv": "1.1.3",
+    "dset": "3.1.3",
+    "mitt": "3.0.1",
+    "ms": "2.1.3"
+  }
+}
+

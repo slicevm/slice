@@ -4,11 +4,33 @@ use crate::config_and_watch::{
 use anyhow::{Context, Result};
 use slice_cas::MappedCasArchive;
 use slice_engine::{compile_source_to_bytecode, SliceIsolate};
-use slice_sandbox::CapabilityToken;
+use slice_sandbox::{CapabilityToken, SliceManifest};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+#[cfg(windows)]
+mod win_ctrlc {
+    extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+
+    unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        std::process::exit(0);
+    }
+
+    pub fn install() {
+        unsafe {
+            let _ = SetConsoleCtrlHandler(Some(ctrl_handler), 1);
+        }
+    }
+}
 
 pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
     let mut port: u16 = 3000;
@@ -21,6 +43,8 @@ pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
         .map(|n| n.get().clamp(1, 8))
         .unwrap_or(4);
     let mut target_opt: Option<String> = None;
+    let mut cli_fuel_opt: Option<u64> = None;
+    let mut cli_mem_opt: Option<usize> = None;
 
     for arg in args {
         if let Some(p) = arg.strip_prefix("--port=") {
@@ -33,6 +57,10 @@ pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
             tenant_dir_opt = Some(PathBuf::from(td));
         } else if let Some(sd) = arg.strip_prefix("--static=") {
             static_dir_opt = Some(PathBuf::from(sd));
+        } else if let Some(f) = arg.strip_prefix("--fuel=") {
+            cli_fuel_opt = f.parse().ok();
+        } else if let Some(mem) = arg.strip_prefix("--memory=") {
+            cli_mem_opt = mem.parse().ok();
         } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
             deterministic_seed = Some(seed_str.parse().unwrap_or(42));
         } else if arg == "--deterministic" {
@@ -44,7 +72,7 @@ pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
         }
     }
 
-    let (mut caps, fuel_limit, mem_limit) = load_manifest_or_default();
+    let (mut caps, mut fuel_limit, mut mem_limit) = load_manifest_or_default();
     for arg in args {
         if let Some(host) = arg.strip_prefix("--allow-net=") {
             for h in host.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -68,6 +96,9 @@ console.log(route_res);
         if target.ends_with(".cas") {
             let archive = MappedCasArchive::open(p)?;
             if let Some(toml_str) = archive.get_manifest_toml() {
+                let m = SliceManifest::parse_toml(toml_str);
+                fuel_limit = m.fuel_limit;
+                mem_limit = m.memory_limit_kb * 1024;
                 merge_manifest_toml_into_caps(toml_str, &mut caps);
             }
             static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
@@ -78,6 +109,9 @@ console.log(route_res);
         } else {
             if let Some(manifest_file) = find_project_manifest_path(p) {
                 if let Ok(raw) = std::fs::read_to_string(&manifest_file) {
+                    let m = SliceManifest::parse_toml(&raw);
+                    fuel_limit = m.fuel_limit;
+                    mem_limit = m.memory_limit_kb * 1024;
                     merge_manifest_toml_into_caps(&raw, &mut caps);
                 }
             }
@@ -87,6 +121,9 @@ console.log(route_res);
         }
     } else if let Ok(Some(archive)) = MappedCasArchive::open_embedded_self() {
         if let Some(toml_str) = archive.get_manifest_toml() {
+            let m = SliceManifest::parse_toml(toml_str);
+            fuel_limit = m.fuel_limit;
+            mem_limit = m.memory_limit_kb * 1024;
             merge_manifest_toml_into_caps(toml_str, &mut caps);
         }
         static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
@@ -98,6 +135,13 @@ console.log(route_res);
     } else {
         compile_source_to_bytecode(default_handler_src)
     });
+
+    if let Some(f) = cli_fuel_opt {
+        fuel_limit = f;
+    }
+    if let Some(m) = cli_mem_opt {
+        mem_limit = m;
+    }
 
     if let Some(static_dir) = &static_dir_opt {
         static_table.extend_from_directory(static_dir)?;
@@ -158,12 +202,16 @@ console.log(route_res);
         return Ok(());
     }
 
+    #[cfg(windows)]
+    win_ctrlc::install();
+
     let addr = format!("0.0.0.0:{}", port);
     let listener = std::sync::Arc::new(TcpListener::bind(&addr)?);
     println!(
         "[Slice Edge Server] Listening on http://127.0.0.1:{} (Workers: {}, HTTP/1.1 Keep-Alive + Pre-Warmed __slice_rc)",
         port, workers
     );
+    let _ = std::io::Write::flush(&mut std::io::stdout());
 
     let req_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let tenant_dir_arc = tenant_dir_opt.map(std::sync::Arc::new);
@@ -327,11 +375,7 @@ pub(crate) fn http_status_reason(code: u16) -> &'static str {
     }
 }
 
-fn write_http_error_and_close(
-    stream: &mut TcpStream,
-    status: u16,
-    json_body: &str,
-) -> Result<()> {
+fn write_http_error_and_close(stream: &mut TcpStream, status: u16, json_body: &str) -> Result<()> {
     let mut resp = Vec::with_capacity(256 + json_body.len());
     let _ = write!(
         &mut resp,
@@ -359,12 +403,9 @@ fn flush_server_ws_frames(
                 None,
                 s.as_bytes(),
             ),
-            slice_engine::ServerWsOutFrame::Binary(ref b) => slice_engine::encode_websocket_frame(
-                true,
-                slice_engine::WS_OPCODE_BINARY,
-                None,
-                b,
-            ),
+            slice_engine::ServerWsOutFrame::Binary(ref b) => {
+                slice_engine::encode_websocket_frame(true, slice_engine::WS_OPCODE_BINARY, None, b)
+            }
             slice_engine::ServerWsOutFrame::Close(code, ref reason) => {
                 should_close = true;
                 let payload = slice_engine::build_close_frame_payload(code, reason);
@@ -713,7 +754,11 @@ pub(crate) fn serve_connection_keep_alive(
         let conn_hdr = if keep_alive { "keep-alive" } else { "close" };
         let has_more_pipelined = keep_alive
             && body_end < filled
-            && find_http_header_end(&after_hdr_buf[body_end.saturating_sub(body_offset)..filled.saturating_sub(body_offset)]).is_some();
+            && find_http_header_end(
+                &after_hdr_buf
+                    [body_end.saturating_sub(body_offset)..filled.saturating_sub(body_offset)],
+            )
+            .is_some();
 
         // Phase F2: Zero-Stat CAS / In-Memory Static Asset Fast-Path (`< 2 us`, 0 JS VM spinup, 0 disk syscalls)
         if !is_ws_upgrade {
@@ -802,7 +847,11 @@ pub(crate) fn serve_connection_keep_alive(
         match isolate.execute_http_request(active_bytecode, None, &req_ctx) {
             Ok(outcome) => {
                 // Check for RFC 6455 Server-Side WebSocket Upgrade (`Upgrade: websocket` + `Sec-WebSocket-Key`)
-                if is_ws_upgrade && !sec_websocket_key.is_empty() && outcome.status_code != 403 && outcome.status_code != 400 {
+                if is_ws_upgrade
+                    && !sec_websocket_key.is_empty()
+                    && outcome.status_code != 403
+                    && outcome.status_code != 400
+                {
                     let accept_key = slice_engine::compute_websocket_accept_key(&sec_websocket_key);
                     write_buf.clear();
                     let _ = write!(
@@ -858,13 +907,9 @@ pub(crate) fn serve_connection_keep_alive(
                             }
                             Ok(Some((opcode, payload))) => {
                                 let is_bin = opcode == slice_engine::WS_OPCODE_BINARY;
-                                match isolate.execute_websocket_event(
-                                    "message",
-                                    is_bin,
-                                    &payload,
-                                    0,
-                                    "",
-                                ) {
+                                match isolate
+                                    .execute_websocket_event("message", is_bin, &payload, 0, "")
+                                {
                                     Ok(out_frames) => {
                                         if flush_server_ws_frames(&mut stream, out_frames)? {
                                             break;

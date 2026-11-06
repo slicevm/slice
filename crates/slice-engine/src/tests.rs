@@ -1569,11 +1569,15 @@ runTls();
 "#,
         port = tls_port
     );
-    let tls_caps =
-        CapabilityToken::pure_compute().with_net_host(format!("localhost:{}", tls_port));
-    let tls_metrics =
-        run_source_isolated("n1-tls-tenant", &tls_js, tls_caps, 2_000_000, 4 * 1024 * 1024)
-            .unwrap();
+    let tls_caps = CapabilityToken::pure_compute().with_net_host(format!("localhost:{}", tls_port));
+    let tls_metrics = run_source_isolated(
+        "n1-tls-tenant",
+        &tls_js,
+        tls_caps,
+        2_000_000,
+        4 * 1024 * 1024,
+    )
+    .unwrap();
     let _ = tls_server_handle.join();
     assert_eq!(tls_metrics.stdout[0], r#"{"s1":1,"s2":2,"ok":true}"#);
     assert!(
@@ -1640,7 +1644,9 @@ runTls();
                     let resp = "HTTP/1.1 302 Found\r\nLocation: /hop2\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
                     let _ = stream.write_all(resp.as_bytes());
                 } else if first_line.contains("/hop2") {
-                    let has_auth = req_str.to_lowercase().contains("authorization: bearer same-origin-token");
+                    let has_auth = req_str
+                        .to_lowercase()
+                        .contains("authorization: bearer same-origin-token");
                     let body = format!(r#"{{"hop2":true,"sameOriginAuth":{}}}"#, has_auth);
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: {}\r\n\r\n{}",
@@ -2014,7 +2020,6 @@ setInterval(() => {
     }
 }
 
-
 #[test]
 fn test_phase_n3_wintertc_encoding_webcrypto_streams_and_cloning() {
     let script = r#"
@@ -2232,10 +2237,7 @@ fn test_phase_n3_wintertc_encoding_webcrypto_streams_and_cloning() {
     assert_eq!(out["btoaNonLatin1Threw"], true);
     assert_eq!(out["quotaThrew"], true);
     // NIST FIPS 180-4 test vectors for "abc"
-    assert_eq!(
-        out["sha1Hex"],
-        "a9993e364706816aba3e25717850c26c9cd0d89d"
-    );
+    assert_eq!(out["sha1Hex"], "a9993e364706816aba3e25717850c26c9cd0d89d");
     assert_eq!(
         out["sha256Hex"],
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
@@ -2245,7 +2247,10 @@ fn test_phase_n3_wintertc_encoding_webcrypto_streams_and_cloning() {
     assert_eq!(out["verifiedOk"], true);
     assert_eq!(out["verifiedTampered"], false);
     assert_eq!(out["timingEq"], true);
-    assert_eq!(out["eventsLog"], serde_json::json!(["once:first", "sig:first"]));
+    assert_eq!(
+        out["eventsLog"],
+        serde_json::json!(["once:first", "sig:first"])
+    );
     assert_eq!(out["combinedAborted"], true);
     assert_eq!(out["combinedAbortedReason"], "ac2-triggered");
     assert_eq!(out["fileSize"], 12);
@@ -2412,8 +2417,7 @@ main();
     let m2 = iso2.execute_bytecode(&bc, None).unwrap();
 
     assert_eq!(m1.stdout[0], m2.stdout[0]);
-    let out: serde_json::Value =
-        serde_json::from_str(&m1.stdout[0]).expect(&m1.stdout[0]);
+    let out: serde_json::Value = serde_json::from_str(&m1.stdout[0]).expect(&m1.stdout[0]);
     assert_eq!(out["ok"], true);
     assert_eq!(out["hexStr"], "536c696365e282ac");
     assert_eq!(out["sha512Prefix"], "ddaf35a193617aba");
@@ -2533,7 +2537,9 @@ console.table([
     iso_console.set_deterministic_seed(Some(20261105));
     let m_console = iso_console.execute_bytecode(&bc_console, None).unwrap();
     let joined_console = m_console.stdout.join("\n");
-    assert!(joined_console.contains("OuterGroup\n  inside-outer\n  InnerGroup\n    hits: 1\n    hits: 2\n    hits: 1"));
+    assert!(joined_console.contains(
+        "OuterGroup\n  inside-outer\n  InnerGroup\n    hits: 1\n    hits: 2\n    hits: 1"
+    ));
     assert!(joined_console.contains("db-query: 1.000ms rows=2"));
     assert!(joined_console.contains("db-query: 2.000ms"));
     assert!(joined_console.contains("Assertion failed: bad-invariant 404"));
@@ -2640,12 +2646,11 @@ fn test_wave_b_network_security_hardening_and_rfc6455_websocket_engine() {
     // Reject non-zero RSV bits and oversized frames before allocation
     let bad_rsv = [0x91u8, 0x00];
     assert!(crate::decode_websocket_frame(&bad_rsv, 1024).is_err());
-    let oversized_hdr = crate::encode_websocket_frame(true, crate::WS_OPCODE_TEXT, None, &[b'a'; 200]);
-    assert!(
-        crate::decode_websocket_frame(&oversized_hdr, 64)
-            .unwrap_err()
-            .contains("MemoryCeilingExceeded")
-    );
+    let oversized_hdr =
+        crate::encode_websocket_frame(true, crate::WS_OPCODE_TEXT, None, &[b'a'; 200]);
+    assert!(crate::decode_websocket_frame(&oversized_hdr, 64)
+        .unwrap_err()
+        .contains("MemoryCeilingExceeded"));
 
     // 3. Verify N-Sec-2 (CRLF / tchar header validators) and N-Sec-5 (checked chunked body parser)
     assert!(crate::is_valid_http_header_name("X-Custom-Token"));
@@ -2728,14 +2733,10 @@ fn test_wave_b_network_security_hardening_and_rfc6455_websocket_engine() {
 
             let mut pending = Vec::new();
             // 1) Read text frame from client, send a PING first, verify client PONG, then send text reply
-            let (op1, msg1) = crate::read_websocket_message_from_stream(
-                &mut stream,
-                &mut pending,
-                true,
-                65536,
-            )
-            .unwrap()
-            .unwrap();
+            let (op1, msg1) =
+                crate::read_websocket_message_from_stream(&mut stream, &mut pending, true, 65536)
+                    .unwrap()
+                    .unwrap();
             assert_eq!(op1, crate::WS_OPCODE_TEXT);
             assert_eq!(msg1, b"hello-slice-ws");
 
@@ -2752,14 +2753,10 @@ fn test_wave_b_network_security_hardening_and_rfc6455_websocket_engine() {
             stream.flush().unwrap();
 
             // 2) Read binary frame from client (`read_websocket_message_from_stream` consumes client's PONG automatically)
-            let (op2, msg2) = crate::read_websocket_message_from_stream(
-                &mut stream,
-                &mut pending,
-                true,
-                65536,
-            )
-            .unwrap()
-            .unwrap();
+            let (op2, msg2) =
+                crate::read_websocket_message_from_stream(&mut stream, &mut pending, true, 65536)
+                    .unwrap()
+                    .unwrap();
             assert_eq!(op2, crate::WS_OPCODE_BINARY);
             assert_eq!(msg2, vec![10, 20, 30, 40]);
 
@@ -2773,21 +2770,13 @@ fn test_wave_b_network_security_hardening_and_rfc6455_websocket_engine() {
             stream.flush().unwrap();
 
             // 3) Read CLOSE frame from client and echo CLOSE
-            let (op3, close_payload) = crate::read_websocket_message_from_stream(
-                &mut stream,
-                &mut pending,
-                true,
-                65536,
-            )
-            .unwrap()
-            .unwrap();
+            let (op3, close_payload) =
+                crate::read_websocket_message_from_stream(&mut stream, &mut pending, true, 65536)
+                    .unwrap()
+                    .unwrap();
             assert_eq!(op3, crate::WS_OPCODE_CLOSE);
-            let close_reply = crate::encode_websocket_frame(
-                true,
-                crate::WS_OPCODE_CLOSE,
-                None,
-                &close_payload,
-            );
+            let close_reply =
+                crate::encode_websocket_frame(true, crate::WS_OPCODE_CLOSE, None, &close_payload);
             let _ = stream.write_all(&close_reply);
             let _ = stream.flush();
         }
@@ -2822,8 +2811,7 @@ ws.onclose = (ev) => {{
 "#,
         ws_port = ws_port
     );
-    let ws_caps =
-        CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", ws_port));
+    let ws_caps = CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", ws_port));
     let ws_metrics = run_source_isolated(
         "wave-b-ws-client",
         &ws_client_js,
@@ -2924,12 +2912,25 @@ main();
     );
     let caps = CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", port));
 
-    let m_alpha = run_source_isolated("tenant-alpha", &js, caps.clone(), 2_000_000, 4 * 1024 * 1024).unwrap();
-    assert_eq!(m_alpha.stdout[0], r#"[{"conn":1,"req":1},{"conn":1,"req":2}]"#);
+    let m_alpha = run_source_isolated(
+        "tenant-alpha",
+        &js,
+        caps.clone(),
+        2_000_000,
+        4 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        m_alpha.stdout[0],
+        r#"[{"conn":1,"req":1},{"conn":1,"req":2}]"#
+    );
     assert_eq!(accept_count.load(Ordering::SeqCst), 1);
 
     let m_beta = run_source_isolated("tenant-beta", &js, caps, 2_000_000, 4 * 1024 * 1024).unwrap();
-    assert_eq!(m_beta.stdout[0], r#"[{"conn":2,"req":1},{"conn":2,"req":2}]"#);
+    assert_eq!(
+        m_beta.stdout[0],
+        r#"[{"conn":2,"req":1},{"conn":2,"req":2}]"#
+    );
     assert_eq!(accept_count.load(Ordering::SeqCst), 2);
     let _ = srv.join();
 
@@ -3008,15 +3009,21 @@ fn test_wave_b_rfc6455_fragmented_continuation_interleaved_ping_and_frame_limits
     // 1. Verify extended 16-bit (126) and 64-bit (127) payload lengths + 4-byte u32 XOR masking
     let mask = [0x12, 0x34, 0x56, 0x78];
     let payload_16bit = vec![0xABu8; 2048];
-    let encoded_16 = crate::encode_websocket_frame(true, crate::WS_OPCODE_BINARY, Some(mask), &payload_16bit);
-    let decoded_16 = crate::decode_websocket_frame(&encoded_16, 8192).unwrap().unwrap();
+    let encoded_16 =
+        crate::encode_websocket_frame(true, crate::WS_OPCODE_BINARY, Some(mask), &payload_16bit);
+    let decoded_16 = crate::decode_websocket_frame(&encoded_16, 8192)
+        .unwrap()
+        .unwrap();
     assert_eq!(decoded_16.opcode, crate::WS_OPCODE_BINARY);
     assert_eq!(decoded_16.payload.len(), 2048);
     assert!(decoded_16.payload.iter().all(|&b| b == 0xAB));
 
     let payload_64bit = vec![0x5Cu8; 70_000];
-    let encoded_64 = crate::encode_websocket_frame(true, crate::WS_OPCODE_BINARY, Some(mask), &payload_64bit);
-    let decoded_64 = crate::decode_websocket_frame(&encoded_64, 100_000).unwrap().unwrap();
+    let encoded_64 =
+        crate::encode_websocket_frame(true, crate::WS_OPCODE_BINARY, Some(mask), &payload_64bit);
+    let decoded_64 = crate::decode_websocket_frame(&encoded_64, 100_000)
+        .unwrap()
+        .unwrap();
     assert_eq!(decoded_64.opcode, crate::WS_OPCODE_BINARY);
     assert_eq!(decoded_64.payload.len(), 70_000);
     assert!(decoded_64.payload.iter().all(|&b| b == 0x5C));
@@ -3024,26 +3031,20 @@ fn test_wave_b_rfc6455_fragmented_continuation_interleaved_ping_and_frame_limits
     // 2. Verify RFC 6455 protocol violation checks:
     //    - Non-zero RSV bits (`0x40` RSV1 set) -> Err
     let bad_rsv = [0x81 | 0x40, 0x01, b'a'];
-    assert!(
-        crate::decode_websocket_frame(&bad_rsv, 1024)
-            .unwrap_err()
-            .contains("non-zero RSV bits")
-    );
+    assert!(crate::decode_websocket_frame(&bad_rsv, 1024)
+        .unwrap_err()
+        .contains("non-zero RSV bits"));
     //    - Fragmented control frame (`FIN=0` with opcode `0x9` PING) -> Err
     let frag_ping = [0x09, 0x02, b'h', b'i'];
-    assert!(
-        crate::decode_websocket_frame(&frag_ping, 1024)
-            .unwrap_err()
-            .contains("fragmented control frame")
-    );
+    assert!(crate::decode_websocket_frame(&frag_ping, 1024)
+        .unwrap_err()
+        .contains("fragmented control frame"));
     //    - Control frame > 125 bytes -> Err
     let mut huge_ping = vec![0x89, 126, 0x00, 126];
     huge_ping.extend_from_slice(&[b'x'; 126]);
-    assert!(
-        crate::decode_websocket_frame(&huge_ping, 1024)
-            .unwrap_err()
-            .contains("exceeds 125 bytes")
-    );
+    assert!(crate::decode_websocket_frame(&huge_ping, 1024)
+        .unwrap_err()
+        .contains("exceeds 125 bytes"));
 
     // 3. Verify live Client WebSocket reassembling multi-frame fragmented messages (`FIN=0` + interleaved `PING` + `0x0` continuation + `FIN=1`)
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3082,10 +3083,16 @@ fn test_wave_b_rfc6455_fragmented_continuation_interleaved_ping_and_frame_limits
             assert_eq!(msg, b"send-fragmented");
 
             // Send 3 fragments of a single text message with an interleaved PING in the middle!
-            let frag1 = crate::encode_websocket_frame(false, crate::WS_OPCODE_TEXT, None, b"part1-");
-            let ping = crate::encode_websocket_frame(true, crate::WS_OPCODE_PING, None, b"mid-frag-ping");
-            let frag2 =
-                crate::encode_websocket_frame(false, crate::WS_OPCODE_CONTINUATION, None, b"part2-");
+            let frag1 =
+                crate::encode_websocket_frame(false, crate::WS_OPCODE_TEXT, None, b"part1-");
+            let ping =
+                crate::encode_websocket_frame(true, crate::WS_OPCODE_PING, None, b"mid-frag-ping");
+            let frag2 = crate::encode_websocket_frame(
+                false,
+                crate::WS_OPCODE_CONTINUATION,
+                None,
+                b"part2-",
+            );
             let frag3 =
                 crate::encode_websocket_frame(true, crate::WS_OPCODE_CONTINUATION, None, b"part3!");
             let mut combined = Vec::new();
@@ -3159,7 +3166,11 @@ fn test_compile_time_prelude_minifier_and_lazy_sharded_globals() {
 
     // 1. Verify all 9 readable `.js` prelude sources are preserved and compile-time minified
     let pairs: &[(&str, &str, &[u8])] = &[
-        ("00_ultra_core.js", ULTRA_CORE_PRELUDE_SRC, ULTRA_CORE_PRELUDE),
+        (
+            "00_ultra_core.js",
+            ULTRA_CORE_PRELUDE_SRC,
+            ULTRA_CORE_PRELUDE,
+        ),
         (
             "01_web_fetch_url.js",
             WEB_FETCH_URL_PRELUDE_SRC,
@@ -3621,7 +3632,10 @@ fn test_raw_socket_5_ring_security_ocap_ssrf_and_egress_dlp() {
     .unwrap_err()
     .downcast::<SandboxViolation>()
     .unwrap();
-    assert!(matches!(err_no_cap, SandboxViolation::NetAccessDenied { .. }));
+    assert!(matches!(
+        err_no_cap,
+        SandboxViolation::NetAccessDenied { .. }
+    ));
 
     // 2. Ring 1: Privileged port (< 1024 except 80/443) blocked under wildcard allow_net = ["*"]
     let err_priv_port = run_source_isolated(
@@ -3783,8 +3797,8 @@ main();
     let caps = CapabilityToken::pure_compute()
         .with_read_prefix("/tmp")
         .with_write_prefix("/tmp");
-    let m = run_source_isolated("pillar1-pool-test", code, caps, 2_000_000, 16 * 1024 * 1024)
-        .unwrap();
+    let m =
+        run_source_isolated("pillar1-pool-test", code, caps, 2_000_000, 16 * 1024 * 1024).unwrap();
     assert_eq!(
         m.stdout[0],
         r#"{"r1":{"id":1,"leakedFile":false,"wroteVfs":true,"leakedGlobal":false},"r2":{"id":2,"leakedFile":false,"wroteVfs":true,"leakedGlobal":false},"r3":{"id":3,"leakedFile":false,"wroteVfs":false,"leakedGlobal":false},"writeBlockedOn4":true}"#
@@ -3888,8 +3902,8 @@ main().catch((e) => console.log("ERR:" + (e && e.message || e)));
     );
 
     let caps = CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", port));
-    let m = run_source_isolated("pillar2-net-test", &code, caps, 2_000_000, 16 * 1024 * 1024)
-        .unwrap();
+    let m =
+        run_source_isolated("pillar2-net-test", &code, caps, 2_000_000, 16 * 1024 * 1024).unwrap();
     assert!(
         !m.stdout.is_empty(),
         "pillar2 produced no stdout! return_value={}",
@@ -4002,63 +4016,79 @@ fn test_pillar4_surgical_shard_gating_and_native_buffer_fast_paths() {
         "Worker-only scripts must not eagerly load Shard 1 (URL), Shard 11 (Fetch), or Shard 3 (Streams)"
     );
 
-    let wintertc_sock_mask =
-        crate::js_preludes::detect_needed_shards("const sock = Slice.connect('127.0.0.1:6379');", false);
+    let wintertc_sock_mask = crate::js_preludes::detect_needed_shards(
+        "const sock = Slice.connect('127.0.0.1:6379');",
+        false,
+    );
     assert_eq!(
         wintertc_sock_mask,
         (1 << 8) | (1 << 14) | (1 << 3) | (1 << 13) | (1 << 2)
     );
 
-    let url_can_parse_mask =
-        crate::js_preludes::detect_needed_shards("const ok = URL.canParse('https://example.com');", false);
+    let url_can_parse_mask = crate::js_preludes::detect_needed_shards(
+        "const ok = URL.canParse('https://example.com');",
+        false,
+    );
     assert_eq!(
         url_can_parse_mask,
         1 << 1,
         "URL.canParse must load only Shard 1 (URL/URLSearchParams), not Shard 11 (Fetch) or Shard 12 (URLPattern)"
     );
 
-    let fetch_req_res_mask =
-        crate::js_preludes::detect_needed_shards("const r = new Response('ok', { headers: new Headers() });", false);
+    let fetch_req_res_mask = crate::js_preludes::detect_needed_shards(
+        "const r = new Response('ok', { headers: new Headers() });",
+        false,
+    );
     assert_eq!(
         fetch_req_res_mask,
         1 << 11,
         "Headers/Request/Response must load only Shard 11, not Shard 1 (URL) or Shard 12 (URLPattern)"
     );
 
-    let url_pattern_mask =
-        crate::js_preludes::detect_needed_shards("const p = new URLPattern({ pathname: '/users/:id' });", false);
+    let url_pattern_mask = crate::js_preludes::detect_needed_shards(
+        "const p = new URLPattern({ pathname: '/users/:id' });",
+        false,
+    );
     assert_eq!(
         url_pattern_mask,
         1 << 12,
         "URLPattern must load only Shard 12, not Shard 1 (URL) or Shard 11 (Fetch)"
     );
 
-    let text_encoder_mask =
-        crate::js_preludes::detect_needed_shards("const u8 = new TextEncoder().encode('hi');", false);
+    let text_encoder_mask = crate::js_preludes::detect_needed_shards(
+        "const u8 = new TextEncoder().encode('hi');",
+        false,
+    );
     assert_eq!(
         text_encoder_mask,
         1 << 2,
         "TextEncoder/TextDecoder/btoa/atob must load only Shard 2, not Shard 13 (DOM Events)"
     );
 
-    let dom_events_mask =
-        crate::js_preludes::detect_needed_shards("const et = new EventTarget(); et.dispatchEvent(new Event('ping'));", false);
+    let dom_events_mask = crate::js_preludes::detect_needed_shards(
+        "const et = new EventTarget(); et.dispatchEvent(new Event('ping'));",
+        false,
+    );
     assert_eq!(
         dom_events_mask,
         1 << 13,
         "Event/CustomEvent/EventTarget must load only Shard 13, not Shard 2 (Encoding)"
     );
 
-    let readable_stream_mask =
-        crate::js_preludes::detect_needed_shards("const rs = new ReadableStream({ start(c) { c.close(); } });", false);
+    let readable_stream_mask = crate::js_preludes::detect_needed_shards(
+        "const rs = new ReadableStream({ start(c) { c.close(); } });",
+        false,
+    );
     assert_eq!(
         readable_stream_mask,
         1 << 3,
         "ReadableStream must load only Shard 3, not Shard 14 (Transform/Compression) or Shard 15 (Blob/FormData)"
     );
 
-    let blob_formdata_mask =
-        crate::js_preludes::detect_needed_shards("const fd = new FormData(); fd.append('a', new Blob(['x']));", false);
+    let blob_formdata_mask = crate::js_preludes::detect_needed_shards(
+        "const fd = new FormData(); fd.append('a', new Blob(['x']));",
+        false,
+    );
     assert_eq!(
         blob_formdata_mask,
         1 << 15,
@@ -4073,8 +4103,10 @@ fn test_pillar4_surgical_shard_gating_and_native_buffer_fast_paths() {
         "structuredClone must load only Shard 16, not Shard 4 (WebCrypto)"
     );
 
-    let core_buffer_mask =
-        crate::js_preludes::detect_needed_shards("const b = Buffer.concat([Buffer.alloc(4)]);", false);
+    let core_buffer_mask = crate::js_preludes::detect_needed_shards(
+        "const b = Buffer.concat([Buffer.alloc(4)]);",
+        false,
+    );
     assert_eq!(
         core_buffer_mask,
         1 << 5,
@@ -4462,8 +4494,14 @@ console.log(JSON.stringify({
     let caps = CapabilityToken::pure_compute()
         .with_read_prefix("/workspace")
         .with_write_prefix("/workspace");
-    let m = run_source_isolated("wave-g-binary-vfs", vfs_script, caps, 1_000_000, 16 * 1024 * 1024)
-        .expect("wave-g-binary-vfs execution");
+    let m = run_source_isolated(
+        "wave-g-binary-vfs",
+        vfs_script,
+        caps,
+        1_000_000,
+        16 * 1024 * 1024,
+    )
+    .expect("wave-g-binary-vfs execution");
     let parsed: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
     assert_eq!(
         parsed["bytes"],
@@ -4829,8 +4867,7 @@ async function runWaveJ() {
 runWaveJ().catch((e) => console.log(JSON.stringify({ __err: String(e && e.stack || e) })));
 "#;
 
-    let test_dir =
-        std::env::temp_dir().join(format!("slice_wave_j_test_{}", std::process::id()));
+    let test_dir = std::env::temp_dir().join(format!("slice_wave_j_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&test_dir);
     std::fs::create_dir_all(&test_dir).unwrap();
     let entry_path = test_dir.join("index.ts");
@@ -4862,7 +4899,10 @@ runWaveJ().catch((e) => console.log(JSON.stringify({ __err: String(e && e.stack 
     assert_eq!(out["als"]["outsideIsUndefined"], true);
 
     for fmt in ["gzip", "deflate", "deflate-raw"] {
-        assert_eq!(out["compression"]["streamResults"][fmt]["compressedSmaller"], true);
+        assert_eq!(
+            out["compression"]["streamResults"][fmt]["compressedSmaller"],
+            true
+        );
         assert_eq!(out["compression"]["streamResults"][fmt]["matches"], true);
     }
     assert_eq!(out["compression"]["zlibOk"], true);
@@ -4888,7 +4928,10 @@ fn test_web_primitives_rust_url_search_params_and_sub_shards_compat() {
     // 1. Direct Rust `web_primitives` unit tests
     assert_eq!(normalize_url_pathname("/a/b/../c/./d"), "/a/c/d");
     assert_eq!(normalize_url_pathname("a/../../b/"), "/b/");
-    assert_eq!(usp_encode_component("hello world+100%"), "hello+world%2B100%25");
+    assert_eq!(
+        usp_encode_component("hello world+100%"),
+        "hello+world%2B100%25"
+    );
     assert_eq!(
         usp_decode_component("hello+world%2B100%25"),
         "hello world+100%"
@@ -5018,10 +5061,7 @@ console.log(JSON.stringify({
     );
     assert_eq!(
         v["hmacB64Url"],
-        crate::intrinsics::base64_encode(
-            &crate::intrinsics::hmac_sha256_bytes(b"k", b"m"),
-            true
-        )
+        crate::intrinsics::base64_encode(&crate::intrinsics::hmac_sha256_bytes(b"k", b"m"), true)
     );
     assert_eq!(v["shard17BeforeWrite"], false);
     assert_eq!(v["shard17AfterWrite"], true);
@@ -5030,11 +5070,55 @@ console.log(JSON.stringify({
     assert_eq!(v["clonedMapVal"], "v");
 }
 
+#[test]
+fn test_case_studies_tot_checkpoints_code_mode_and_plugin_mesh_primitives() {
+    let js = r#"
+const fs = require("node:fs");
+fs.writeFileSync("/tmp/cs_tot_state.txt", "depth0");
+Slice.kv.set("cs:depth", "0", 0);
+const snap0 = Slice.checkpoint();
 
+// Depth 1 commit
+fs.writeFileSync("/tmp/cs_tot_state.txt", "depth1");
+Slice.kv.set("cs:depth", "1", 0);
+const snap1 = Slice.checkpoint();
 
+// Depth 2 failed branch (DLP trap + dirty VFS) -> rollback to snap1
+fs.writeFileSync("/tmp/cs_tot_state.txt", "corrupted-by-d2");
+Slice.kv.set("cs:depth", "99", 0);
+const b64Secret = Buffer.from("sk_live_tot_canary_99", "utf8").toString("base64");
+const dlpProbe = Slice.evalSandbox(`const leak = "${b64Secret}"; leak`, {
+    fuel: 20000,
+    memoryBytes: 2 * 1024 * 1024,
+    auditSecret: "sk_live_tot_canary_99"
+});
+if (!dlpProbe.ok) {
+    Slice.restore(snap1);
+}
+const afterRestore1Vfs = fs.readFileSync("/tmp/cs_tot_state.txt", "utf8");
+const afterRestore1Kv = Slice.kv.get("cs:depth");
 
+// Full rollback to snap0
+Slice.restore(snap0);
+const afterRestore0Vfs = fs.readFileSync("/tmp/cs_tot_state.txt", "utf8");
+const afterRestore0Kv = Slice.kv.get("cs:depth");
 
-
-
-
-
+console.log(JSON.stringify({
+    dlpTrapped: !dlpProbe.ok && String(dlpProbe.violation || dlpProbe.error).includes("EGRESS_SECRET_LEAK_BLOCKED"),
+    afterRestore1Vfs,
+    afterRestore1Kv,
+    afterRestore0Vfs,
+    afterRestore0Kv
+}));
+"#;
+    let cap = CapabilityToken::pure_compute()
+        .with_read_prefix("/tmp".to_string())
+        .with_write_prefix("/tmp".to_string());
+    let m = run_source_isolated("cs-tot-tenant", js, cap, 500_000, 16 * 1024 * 1024).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(v["dlpTrapped"], true);
+    assert_eq!(v["afterRestore1Vfs"], "depth1");
+    assert_eq!(v["afterRestore1Kv"], "1");
+    assert_eq!(v["afterRestore0Vfs"], "depth0");
+    assert_eq!(v["afterRestore0Kv"], "0");
+}

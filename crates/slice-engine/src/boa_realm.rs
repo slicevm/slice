@@ -80,10 +80,7 @@ thread_local! {
 
 struct SliceJobExecutor {
     promise_jobs: std::cell::RefCell<
-        std::collections::VecDeque<(
-            boa_engine::job::PromiseJob,
-            Option<boa_engine::JsValue>,
-        )>,
+        std::collections::VecDeque<(boa_engine::job::PromiseJob, Option<boa_engine::JsValue>)>,
     >,
     fallback: std::rc::Rc<boa_engine::job::SimpleJobExecutor>,
 }
@@ -170,6 +167,20 @@ pub(crate) fn record_boa_fs_violation(tenant_id: &str, path: &str) -> bool {
 }
 
 #[inline]
+fn prefix_matches_vfs_path(prefix: &str, norm_path: &str) -> bool {
+    if norm_path.starts_with(prefix) {
+        return true;
+    }
+    if prefix == "/tmp" {
+        let os_tmp = norm_vfs_path(&std::env::temp_dir().to_string_lossy());
+        if !os_tmp.is_empty() && norm_path.starts_with(&os_tmp) {
+            return true;
+        }
+    }
+    false
+}
+
+#[inline]
 pub(crate) fn check_boa_fs_read_ocap(path: &str) -> bool {
     if path.contains("..") {
         let tenant = BOA_ACTIVE_CAPS
@@ -177,10 +188,13 @@ pub(crate) fn check_boa_fs_read_ocap(path: &str) -> bool {
             .unwrap_or_else(|| "boa-tenant".to_string());
         return record_boa_fs_violation(&tenant, path);
     }
+    let norm = norm_vfs_path(path);
     BOA_ACTIVE_CAPS.with(|c| {
         if let Some((tenant_id, read_prefixes, _)) = &*c.borrow() {
             if !read_prefixes.is_empty()
-                && !read_prefixes.iter().any(|prefix| path.starts_with(prefix))
+                && !read_prefixes
+                    .iter()
+                    .any(|prefix| prefix_matches_vfs_path(prefix, &norm))
             {
                 return record_boa_fs_violation(tenant_id, path);
             }
@@ -197,10 +211,13 @@ pub(crate) fn check_boa_fs_write_ocap(path: &str) -> bool {
             .unwrap_or_else(|| "boa-tenant".to_string());
         return record_boa_fs_violation(&tenant, path);
     }
+    let norm = norm_vfs_path(path);
     BOA_ACTIVE_CAPS.with(|c| {
         if let Some((tenant_id, _, write_prefixes)) = &*c.borrow() {
             if !write_prefixes.is_empty()
-                && !write_prefixes.iter().any(|prefix| path.starts_with(prefix))
+                && !write_prefixes
+                    .iter()
+                    .any(|prefix| prefix_matches_vfs_path(prefix, &norm))
             {
                 return record_boa_fs_violation(tenant_id, path);
             }
@@ -263,18 +280,16 @@ pub(crate) fn ensure_realm_shards(
 ) {
     let missing = needed_mask & !realm.loaded_shards_mask;
     if init_lazy_getters && (realm.loaded_shards_mask & 1) == 0 {
-        let _ = realm
-            .ctx
-            .eval(boa_engine::Source::from_bytes(crate::js_preludes::LAZY_GETTERS_INIT_PRELUDE));
+        let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+            crate::js_preludes::LAZY_GETTERS_INIT_PRELUDE,
+        ));
         realm.loaded_shards_mask |= 1;
     }
     if missing == 0 {
         return;
     }
     let lazy_getters_active = (realm.loaded_shards_mask & 1) != 0;
-    for shard_id in [
-        2u32, 13, 1, 11, 12, 10, 3, 14, 15, 4, 16, 5, 17, 6, 7, 8, 9,
-    ] {
+    for shard_id in [2u32, 13, 1, 11, 12, 10, 3, 14, 15, 4, 16, 5, 17, 6, 7, 8, 9] {
         let bit = 1u32 << shard_id;
         if (missing & bit) != 0 {
             if lazy_getters_active {

@@ -3,8 +3,8 @@
 use crate::boa_realm::{
     check_boa_fs_read_ocap, check_boa_fs_write_ocap, norm_vfs_path, BOA_ACTIVE_CAPS,
     BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, BOA_EGRESS_SECRETS,
-    BOA_ENV_MAP, BOA_FETCH_MOCKS, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
-    BOA_STDOUT, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
+    BOA_ENV_MAP, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET,
+    BOA_NET_HOSTS, BOA_STDOUT, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
 };
 use crate::event_loop::{
     cancel_timer, clear_event_loop_state, drive_event_loop_to_completion, enqueue_async_fetch,
@@ -25,28 +25,27 @@ use crate::outbound_http::{
     check_boa_outbound_fetch_ocap_and_dlp, execute_outbound_fetch_with_redirects,
     parse_outbound_http_url,
 };
-use crate::state_and_kv::{
-    checkpoint_tenant_state, edge_kv_del, edge_kv_get, edge_kv_incr, edge_kv_set,
-    restore_tenant_state, splitmix64_next_f64,
-};
-use crate::websocket::{
-    ws_client_close, ws_client_connect, ws_client_poll, ws_client_send, ws_server_queue_close,
-    ws_server_queue_send, BOA_WS_MOCKS,
-};
 use crate::sockets::{
     classify_ip_literal, register_socket_mock, tcp_socket_close, tcp_socket_connect,
     tcp_socket_read, tcp_socket_starttls, tcp_socket_write, tcp_socket_write_bytes,
     udp_socket_bind, udp_socket_close, udp_socket_send, udp_socket_send_bytes,
 };
-use crate::workers::{
-    worker_post_message_to_child, worker_self_meta_json, worker_self_post_message,
-    worker_self_set_listening, worker_set_child_ref, worker_spawn, worker_terminate_child,
+use crate::state_and_kv::{
+    checkpoint_tenant_state, edge_kv_del, edge_kv_get, edge_kv_incr, edge_kv_set,
+    restore_tenant_state, splitmix64_next_f64,
 };
 use crate::wasm::{
     wasm_call_export, wasm_compile_module, wasm_create_memory, wasm_get_global, wasm_grow_memory,
     wasm_instantiate_module, wasm_module_custom_sections, wasm_module_exports_json,
-    wasm_module_imports_json, wasm_set_global, wasm_sync_initial_memory_to_ab,
-    wasm_validate_bytes,
+    wasm_module_imports_json, wasm_set_global, wasm_sync_initial_memory_to_ab, wasm_validate_bytes,
+};
+use crate::websocket::{
+    ws_client_close, ws_client_connect, ws_client_poll, ws_client_send, ws_server_queue_close,
+    ws_server_queue_send, BOA_WS_MOCKS,
+};
+use crate::workers::{
+    worker_post_message_to_child, worker_self_meta_json, worker_self_post_message,
+    worker_self_set_listening, worker_set_child_ref, worker_spawn, worker_terminate_child,
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
@@ -1027,6 +1026,7 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             let saved_ws_mocks = BOA_WS_MOCKS.with(|m| m.borrow().clone());
             let saved_sock_mocks = crate::sockets::BOA_SOCKET_MOCKS.with(|m| m.borrow().clone());
             let saved_kv_budget = BOA_KV_MEM_BUDGET.with(|m| m.get());
+            let saved_fuel_budget = BOA_FUEL_BUDGET.with(|f| f.get());
             let saved_det = BOA_DET_STATE.with(|s| s.get());
             let saved_ev_loop = save_and_reset_event_loop_state();
 
@@ -1066,6 +1066,7 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             BOA_WS_MOCKS.with(|m| *m.borrow_mut() = saved_ws_mocks);
             crate::sockets::BOA_SOCKET_MOCKS.with(|m| *m.borrow_mut() = saved_sock_mocks);
             BOA_KV_MEM_BUDGET.with(|m| m.set(saved_kv_budget));
+            BOA_FUEL_BUDGET.with(|f| f.set(saved_fuel_budget));
             BOA_DET_STATE.with(|s| s.set(saved_det));
 
             let json = serde_json::to_string(&outcome).unwrap_or_else(|_| "{}".to_string());
@@ -1356,7 +1357,9 @@ fn extract_buffer_source_bytes(
                     .map(|n| n.max(0.0) as usize);
                 if let Some(data) = ab.data() {
                     let start = offset.min(data.len());
-                    let end = len.map(|l| (start + l).min(data.len())).unwrap_or(data.len());
+                    let end = len
+                        .map(|l| (start + l).min(data.len()))
+                        .unwrap_or(data.len());
                     return Ok(data[start..end].to_vec());
                 }
             }
@@ -1524,7 +1527,12 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
             }
 
             let res_obj = boa_engine::JsObject::with_object_proto(context.intrinsics());
-            let _ = res_obj.set(js_string!("read"), BoaVal::from(read_utf16 as f64), false, context);
+            let _ = res_obj.set(
+                js_string!("read"),
+                BoaVal::from(read_utf16 as f64),
+                false,
+                context,
+            );
             let _ = res_obj.set(
                 js_string!("written"),
                 BoaVal::from(written_utf8 as f64),
@@ -3271,4 +3279,3 @@ pub(crate) fn register_shard9_wasm_host_functions(ctx: &mut boa_engine::Context)
         }),
     );
 }
-

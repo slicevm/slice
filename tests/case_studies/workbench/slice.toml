@@ -1,0 +1,17 @@
+[package]
+name = "slice-case-studies-workbench"
+version = "1.0.0"
+entrypoint = "./src/index.ts"
+
+[limits]
+fuel = 500_000_000
+memory_kb = 65536
+
+[capabilities]
+allow_read = ["/tmp"]
+allow_write = ["/tmp"]
+
+[capabilities.env]
+SLICE_VISUAL = "1"
+SLICE_LOAD_SCALE = "1"
+

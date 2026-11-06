@@ -743,12 +743,66 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
     strip_js_comments(&code)
 }
 
+fn update_backtick_state_on_line(line: &str, mut in_backtick: bool) -> bool {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+    while i < len {
+        let b = bytes[i];
+        if b == b'\\' {
+            i += 2;
+            continue;
+        }
+        if in_backtick {
+            if b == b'`' {
+                in_backtick = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'\'' || b == b'"' {
+            let q = b;
+            let mut j = i + 1;
+            let mut found_close = None;
+            while j < len {
+                if bytes[j] == b'\\' {
+                    j += 2;
+                    continue;
+                }
+                if bytes[j] == q {
+                    found_close = Some(j);
+                    break;
+                }
+                j += 1;
+            }
+            if let Some(close_idx) = found_close {
+                i = close_idx + 1;
+                continue;
+            }
+        } else if b == b'`' {
+            in_backtick = true;
+        }
+        i += 1;
+    }
+    in_backtick
+}
+
 /// Strips JSDoc/license block comments (`/* ... */`), full-line `//` comments, and blank lines
-/// at `slice pack` compile time so `boa_engine` does not spend cold-start CPU cycles lexing comments.
+/// at `slice pack` compile time so `boa_engine` does not spend cold-start CPU cycles lexing comments,
+/// while preserving multi-line backtick template literals verbatim.
 pub(crate) fn strip_js_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut in_block_comment = false;
+    let mut in_backtick = false;
     for line in source.lines() {
+        if in_backtick {
+            out.push_str(line);
+            out.push('\n');
+            if line.as_bytes().contains(&b'`') {
+                in_backtick = update_backtick_state_on_line(line, in_backtick);
+            }
+            continue;
+        }
         let trimmed = line.trim();
         if in_block_comment {
             if let Some(pos) = trimmed.find("*/") {
@@ -757,6 +811,9 @@ pub(crate) fn strip_js_comments(source: &str) -> String {
                 if !rem.is_empty() && !rem.starts_with("//") {
                     out.push_str(rem);
                     out.push('\n');
+                    if rem.as_bytes().contains(&b'`') {
+                        in_backtick = update_backtick_state_on_line(rem, in_backtick);
+                    }
                 }
             }
             continue;
@@ -770,6 +827,9 @@ pub(crate) fn strip_js_comments(source: &str) -> String {
                 if !rem.is_empty() && !rem.starts_with("//") {
                     out.push_str(rem);
                     out.push('\n');
+                    if rem.as_bytes().contains(&b'`') {
+                        in_backtick = update_backtick_state_on_line(rem, in_backtick);
+                    }
                 }
             } else {
                 in_block_comment = true;
@@ -778,6 +838,9 @@ pub(crate) fn strip_js_comments(source: &str) -> String {
         }
         out.push_str(line);
         out.push('\n');
+        if line.as_bytes().contains(&b'`') {
+            in_backtick = update_backtick_state_on_line(line, in_backtick);
+        }
     }
     if out.contains("Buffer.") {
         crate::esm_cjs_linker::rewrite_buffer_fast_paths_ast(&out)
@@ -834,4 +897,3 @@ pub(crate) fn rewrite_cjs_require(source: &str) -> String {
     }
     source.replace("require(", "__slice_cjs_require(")
 }
-
