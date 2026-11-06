@@ -34,14 +34,18 @@ pub const BOACAS_FLAG_IS_RC_BUNDLE: u16 = 1 << 7;
 /// Precomputed feature flag: `fallback_js` starts with `{`.
 pub const BOACAS_FLAG_STARTS_WITH_BRACE: u16 = 1 << 8;
 
-/// Process-wide override set via CLI flags (`--exper-boacas` -> `1`, `--no-exper-boacas` -> `2`, unset -> `0`).
+/// Process-wide override set via CLI flags (`--boacas` / `--exper-boacas` -> `1`, `--no-boacas` / `--no-exper-boacas` -> `2`, unset -> `0`).
 static EXPER_BOACAS_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+/// Process-wide execution tier override (`--tier=1` -> `1`, `--tier=0` -> `2`, unset/auto -> `0`).
+static TIER_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 thread_local! {
     static THREAD_EXPER_BOACAS_OVERRIDE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static THREAD_TIER_OVERRIDE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
-/// Sets or clears the process-wide `--exper-boacas` / `--no-exper-boacas` override.
+/// Sets or clears the process-wide `--boacas` / `--no-boacas` (`--exper-boacas` / `--no-exper-boacas`) override.
 #[inline]
 pub fn set_exper_boacas_override(enabled: Option<bool>) {
     let code = match enabled {
@@ -52,7 +56,7 @@ pub fn set_exper_boacas_override(enabled: Option<bool>) {
     EXPER_BOACAS_OVERRIDE.store(code, Ordering::Relaxed);
 }
 
-/// Sets or clears a thread-local `--exper-boacas` / `--no-exper-boacas` override (safe for parallel tests).
+/// Sets or clears a thread-local `--boacas` / `--no-boacas` override (safe for parallel tests and one-shot overrides).
 #[inline]
 pub fn set_thread_exper_boacas_override(enabled: Option<bool>) {
     let code = match enabled {
@@ -63,8 +67,53 @@ pub fn set_thread_exper_boacas_override(enabled: Option<bool>) {
     THREAD_EXPER_BOACAS_OVERRIDE.with(|c| c.set(code));
 }
 
-/// Returns `true` when `slice pack` / `slice compile` should emit `SLICEBC\x01` precompiled containers
-/// instead of raw `SLICEBOA` source blobs.
+/// Sets or clears the process-wide execution tier override (`Some(1)` = Tier 1 Boa, `Some(0)` = Tier 0 SLICESNP, `None` = default/auto).
+#[inline]
+pub fn set_tier_override(tier: Option<u8>) {
+    let code = match tier {
+        Some(1) => 1,
+        Some(0) => 2,
+        _ => 0,
+    };
+    TIER_OVERRIDE.store(code, Ordering::Relaxed);
+}
+
+/// Sets or clears a thread-local execution tier override (`Some(1)` = Tier 1 Boa, `Some(0)` = Tier 0 SLICESNP, `None` = default/auto).
+#[inline]
+pub fn set_thread_tier_override(tier: Option<u8>) {
+    let code = match tier {
+        Some(1) => 1,
+        Some(0) => 2,
+        _ => 0,
+    };
+    THREAD_TIER_OVERRIDE.with(|c| c.set(code));
+}
+
+/// Returns the active execution tier override (`Some(1)` = force Tier 1 Boa, `Some(0)` = force Tier 0 SLICESNP, `None` = default optimal Tier 1 with Tier 0/2 kernels).
+#[inline]
+pub fn active_tier_override() -> Option<u8> {
+    let tl = THREAD_TIER_OVERRIDE.with(|c| c.get());
+    if tl == 1 {
+        return Some(1);
+    } else if tl == 2 {
+        return Some(0);
+    }
+    match TIER_OVERRIDE.load(Ordering::Relaxed) {
+        1 => return Some(1),
+        2 => return Some(0),
+        _ => {}
+    }
+    if let Ok(val) = std::env::var("SLICE_TIER") {
+        if let Some(parsed) = slice_sandbox::parse_tier_setting(&val) {
+            return parsed;
+        }
+    }
+    None
+}
+
+/// Returns `true` when `slice pack` / `slice compile` / `compile_source_to_bytecode` should emit
+/// `SLICEBC\x01` precompiled Boa `CodeBlock` containers (enabled by default unless disabled via
+/// `--no-boacas`, `--no-exper-boacas`, `SLICE_BOACAS=0`, `SLICE_EXPER_BOACAS=0`, or `boacas = false`).
 #[inline]
 pub fn is_exper_boacas_build_enabled() -> bool {
     let tl = THREAD_EXPER_BOACAS_OVERRIDE.with(|c| c.get());
@@ -78,16 +127,17 @@ pub fn is_exper_boacas_build_enabled() -> bool {
         2 => return false,
         _ => {}
     }
-    if let Ok(val) = std::env::var("SLICE_EXPER_BOACAS") {
-        let norm = val.trim();
-        return matches!(norm, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON");
+    if let Ok(val) = std::env::var("SLICE_BOACAS").or_else(|_| std::env::var("SLICE_EXPER_BOACAS")) {
+        if let Some(b) = slice_sandbox::parse_bool_setting(&val) {
+            return b;
+        }
     }
-    false
+    true
 }
 
-/// Returns `true` when `slice run` should execute the precompiled fast-path inside a `SLICEBC\x01`
-/// archive (enabled by default whenever a `SLICEBC\x01` archive is loaded, unless explicitly
-/// disabled via `--no-exper-boacas` or `SLICE_EXPER_BOACAS=0`).
+/// Returns `true` when `slice run` / `slice serve` should execute the precompiled `CodeBlock` fast-path
+/// inside a `SLICEBC\x01` archive (enabled by default unless disabled via `--no-boacas`,
+/// `--no-exper-boacas`, `SLICE_BOACAS=0`, or `SLICE_EXPER_BOACAS=0`).
 #[inline]
 pub fn is_exper_boacas_runtime_enabled() -> bool {
     let tl = THREAD_EXPER_BOACAS_OVERRIDE.with(|c| c.get());
@@ -101,10 +151,9 @@ pub fn is_exper_boacas_runtime_enabled() -> bool {
         2 => return false,
         _ => {}
     }
-    if let Ok(val) = std::env::var("SLICE_EXPER_BOACAS") {
-        let norm = val.trim();
-        if matches!(norm, "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF") {
-            return false;
+    if let Ok(val) = std::env::var("SLICE_BOACAS").or_else(|_| std::env::var("SLICE_EXPER_BOACAS")) {
+        if let Some(b) = slice_sandbox::parse_bool_setting(&val) {
+            return b;
         }
     }
     true

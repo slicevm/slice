@@ -121,7 +121,7 @@ impl SliceIsolate {
         Self {
             compartment,
             cas_modules_resolved: 0,
-            current_tier: ExecutionTier::Tier0LLIntSnapshot,
+            current_tier: ExecutionTier::Tier1Baseline,
             env_vars: FxHashMap::default(),
             stdout: Vec::new(),
             deterministic_seed: None,
@@ -372,7 +372,7 @@ impl SliceIsolate {
         self.compartment.memory_limit_bytes = memory_limit_bytes;
         self.compartment.memory_used_bytes = 0;
         self.cas_modules_resolved = 0;
-        self.current_tier = ExecutionTier::Tier0LLIntSnapshot;
+        self.current_tier = ExecutionTier::Tier1Baseline;
         self.env_vars.clear();
         self.stdout.clear();
         if let Some(s) = self.deterministic_seed {
@@ -458,6 +458,7 @@ impl SliceIsolate {
         }
 
         let module = decode_slicesnp_cached(bytecode);
+        self.current_tier = ExecutionTier::Tier0LLIntSnapshot;
 
         let instantiate_ns = start.elapsed().as_nanos() as u64;
         let exec_start = Instant::now();
@@ -1649,6 +1650,64 @@ impl SliceIsolate {
     /// Persistent Realm Module Cache (`globalThis.__slice_rc`) for `bytecode`, so subsequent
     /// warm isolate executions skip `100%` of JS lexing/parsing and `node_modules` CJS evaluation.
     pub fn prewarm_boa_bundle(bytecode: &[u8]) {
+        if let Some((hdr, precompiled_slice, fallback_js)) =
+            crate::boacas::BoaCasHeader::decode(bytecode)
+        {
+            if crate::boacas::is_exper_boacas_runtime_enabled() {
+                if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_HAS_WORKER) != 0 {
+                    crate::workers::prewarm_worker_pool_sync(1);
+                }
+                if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_IS_RC_BUNDLE) != 0 {
+                    let (mut realm, is_cold_bare_realm) =
+                        match crate::boa_realm::try_acquire_pooled_boa_realm() {
+                            Some(r) => (r, false),
+                            None => (crate::boa_realm::create_bare_boa_realm(), true),
+                        };
+                    if !realm.loaded_bundles.contains_key(&hdr.rc_key) {
+                        if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_HAS_SEMVER_FAST) != 0 {
+                            crate::host_bindings::register_semver_and_fast_intrinsics_host_functions(
+                                &mut realm.ctx,
+                            );
+                        }
+                        if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX) != 0 {
+                            crate::host_bindings::register_kv_and_sandbox_host_functions(
+                                &mut realm.ctx,
+                            );
+                        }
+                        let total_end = crate::boacas::BOACAS_HEADER_LEN
+                            + (hdr.precompiled_len as usize)
+                            + (hdr.fallback_js_len as usize);
+                        let contiguous_payload =
+                            &bytecode[crate::boacas::BOACAS_HEADER_LEN..total_end];
+                        let _ = crate::boacas::eval_boacas_on_realm(
+                            &mut realm,
+                            &hdr,
+                            precompiled_slice,
+                            fallback_js,
+                            contiguous_payload,
+                            false,
+                            is_cold_bare_realm,
+                        );
+                        let _ = realm.ctx.run_jobs();
+                        clear_event_loop_state();
+                        crate::websocket::clear_thread_websocket_state();
+                        crate::sockets::clear_thread_socket_state();
+                        crate::workers::clear_thread_worker_state();
+                        if BOA_WAIT_UNTIL_COUNT.with(|c| c.get()) > 0 {
+                            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                                b"if(globalThis.__slice_wu)globalThis.__slice_wu.length=0;",
+                            ));
+                        }
+                        BOA_STDOUT.with(|out| out.borrow_mut().clear());
+                        BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
+                        BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
+                    }
+                    release_warm_boa_realm(realm);
+                    return;
+                }
+            }
+        }
+
         Self::prewarm_boa_pool(1);
         let js_slice_opt = if bytecode.starts_with(b"SLICEBOA") {
             std::str::from_utf8(&bytecode[8..]).ok()

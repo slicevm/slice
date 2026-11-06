@@ -1723,16 +1723,28 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
     program.body.iter().all(|stmt| is_supported_stmt(stmt, 0))
 }
 
-/// Compiles JavaScript/TypeScript source into a compact binary `SLICESNP` or `SLICEBOA` bytecode buffer.
-/// Combines **Oxc** production TypeScript transpilation, **Tier-0/Tier-2** fast-path SIMD intrinsics
-/// (selected via AST-verified `is_tier0_slicesnp_compatible_ast`), and **Boa (`boa_engine`)**
-/// full-spec ES2024+ execution as the default for general ECMAScript programs.
+/// Compiles JavaScript/TypeScript source into a compact binary `SLICEBC\x01`, `SLICEBOA`, or `SLICESNP` bytecode buffer.
+/// Combines **Oxc** production TypeScript transpilation, **Tier-1 `SLICEBC\x01` Precompiled Boa `CodeBlock`**
+/// as the default optimal execution path, and **Tier-0/Tier-2** fast-path SIMD intrinsics
+/// (selected via AST-verified `is_tier0_slicesnp_compatible_ast` unless `--tier=1` forces pure Tier-1 Boa).
 pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
+    let inline_dirs = if raw_source.starts_with("//") || raw_source.starts_with("#!") {
+        slice_sandbox::parse_inline_directives(raw_source)
+    } else {
+        slice_sandbox::InlineDirectives::default()
+    };
+    let use_boacas = inline_dirs
+        .boacas
+        .unwrap_or_else(crate::boacas::is_exper_boacas_build_enabled);
+    let tier_ov = inline_dirs
+        .tier
+        .unwrap_or_else(crate::boacas::active_tier_override);
+
     if raw_source.starts_with("var __slice_modules =")
         || memchr::memmem::find(raw_source.as_bytes(), b"\nvar __slice_modules =").is_some()
     {
         let compacted = compact_js_for_boa_bytecode(raw_source);
-        if crate::boacas::is_exper_boacas_build_enabled() {
+        if use_boacas {
             return crate::boacas::pack_boacas_container(&compacted);
         }
         let mut bytes = Vec::with_capacity(12 + compacted.len());
@@ -1752,9 +1764,15 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         && memchr::memmem::find(src_bytes, b"Slice.evalSandbox(").is_none()
         && memchr::memmem::find(src_bytes, b"Worker").is_none();
 
-    if !has_direct_intrinsic_attack && !is_tier0_slicesnp_compatible_ast(&source) {
+    let route_to_tier1_boa = match tier_ov {
+        Some(1) => !has_direct_intrinsic_attack,
+        Some(0) => false,
+        _ => !has_direct_intrinsic_attack && !is_tier0_slicesnp_compatible_ast(&source),
+    };
+
+    if route_to_tier1_boa {
         let compacted = compact_js_for_boa_bytecode(&source);
-        if crate::boacas::is_exper_boacas_build_enabled() {
+        if use_boacas {
             return crate::boacas::pack_boacas_container(&compacted);
         }
         let mut bytes = Vec::with_capacity(12 + compacted.len());

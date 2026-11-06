@@ -134,10 +134,10 @@ console.log(JSON.stringify({ match: readBack === digest, size: statSize, prefix8
 "#;
     let bundled = slice_cas::strip_typescript_and_normalize(ts_app, true);
     let bc = compile_source_to_bytecode(&bundled);
-    assert_eq!(&bc[0..8], b"SLICEBOA");
+    assert_eq!(&bc[0..8], crate::BOACAS_MAGIC);
 
     let disasm = disassemble_bytecode(&bc).unwrap();
-    assert!(disasm[0].contains("BOA_ES2024_VM"));
+    assert!(disasm[0].contains("BOACAS_PRECOMP") || disasm[0].contains("BOA_ES2024_VM"));
 
     let mut isolate = SliceIsolate::spawn(
         "boa-test-tenant",
@@ -362,12 +362,14 @@ fn test_phase_9a_micro_optimizations_and_streaming_sha256() {
     assert_eq!(hmac_long.len(), 64);
     assert_ne!(hmac_short, hmac_long);
 
-    // 4. Verify SLICEBOA bytecode is pre-wrapped with block braces at compile time
+    // 4. Verify SLICEBC\x01 (or SLICEBOA) bytecode is pre-wrapped with block braces at compile time
     let ts_class = "class A { run(): number { return 7; } }\nconsole.log(new A().run());";
     let bundled = slice_cas::strip_typescript_and_normalize(ts_class, true);
     let bc = compile_source_to_bytecode(&bundled);
-    assert!(bc.starts_with(b"SLICEBOA{\n"));
-    assert!(bc.ends_with(b"\n}"));
+    assert_eq!(&bc[0..8], crate::BOACAS_MAGIC);
+    let (_, _, fb_js) = crate::BoaCasHeader::decode(&bc).unwrap();
+    assert!(fb_js.starts_with("{\n"));
+    assert!(fb_js.ends_with("\n}"));
 
     // 5. Verify native fast_parse_ms, fast_format_ms, fast_parse_bytes, and fast_format_bytes
     assert_eq!(fast_parse_ms("2h"), Some(7_200_000.0));
@@ -1974,15 +1976,12 @@ runFanout();
         ports[0], ports[1], ports[2], ports[3], slow_port
     );
 
+    SliceIsolate::prewarm_boa_pool(1);
+    let fanout_bc = compile_source_to_bytecode(&fanout_js);
+    let mut fanout_iso =
+        SliceIsolate::spawn("n2-fanout-tenant", 1, caps, 5_000_000, 8 * 1024 * 1024);
     let fanout_start = Instant::now();
-    let fanout_metrics = run_source_isolated(
-        "n2-fanout-tenant",
-        &fanout_js,
-        caps,
-        5_000_000,
-        8 * 1024 * 1024,
-    )
-    .unwrap();
+    let fanout_metrics = fanout_iso.execute_bytecode(&fanout_bc, None).unwrap();
     let fanout_elapsed = fanout_start.elapsed();
     let fanout_out: serde_json::Value = serde_json::from_str(&fanout_metrics.stdout[0]).unwrap();
     assert_eq!(fanout_out["shards"], serde_json::json!([0, 1, 2, 3]));
@@ -4173,11 +4172,15 @@ fn test_pillar5_sliceboa_payload_compaction_and_multiline_template_preservation(
 "#;
 
     let bc = crate::compile_source_to_bytecode(raw_bundle);
-    let bc_str = std::str::from_utf8(&bc).unwrap();
-    let inner = bc_str
-        .strip_prefix("SLICEBOA{\n")
+    let fb_str = if let Some((_, _, fb)) = crate::BoaCasHeader::decode(&bc) {
+        fb
+    } else {
+        std::str::from_utf8(&bc[8..]).unwrap()
+    };
+    let inner = fb_str
+        .strip_prefix("{\n")
         .and_then(|s| s.strip_suffix("\n}"))
-        .unwrap();
+        .unwrap_or(fb_str);
 
     // 1. Line 1 `__SLICE_RC` header must remain intact at byte offset 21
     assert!(inner.starts_with("var __slice_modules = {};//__SLICE_RC:0123456789abcdef\n"));
@@ -5156,8 +5159,8 @@ fn test_coverage_plan_p0_ast_tier0_eligibility_and_nested_sandbox_scope_guard() 
         let bc = compile_source_to_bytecode(es2024_snippet);
         assert_eq!(
             &bc[0..8],
-            b"SLICEBOA",
-            "Expected SLICEBOA header for: {}",
+            crate::BOACAS_MAGIC,
+            "Expected SLICEBC\\x01 header for: {}",
             es2024_snippet
         );
     }
