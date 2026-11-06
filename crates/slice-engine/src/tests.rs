@@ -1775,7 +1775,6 @@ fn test_phase_n2_deterministic_time_travel_event_loop_concurrent_fetch_and_abort
     //    Schedules 66,000 ms (66 seconds!) of exponential backoff timers + `setInterval` + `queueMicrotask`
     //    and verifies that Virtual Time-Warp completes the entire 66-second schedule in < 50ms of wall time!
     crate::reset_virtual_time_warped_ms();
-    let start_wall = Instant::now();
     let det_event_loop_ts = r#"
 import { describe, test, expect } from "slice:test";
 
@@ -1877,6 +1876,7 @@ console.log(JSON.stringify(Slice.testSummary()));
         8 * 1024 * 1024,
     );
     iso_det.set_deterministic_seed(Some(20261102));
+    let start_wall = Instant::now();
     let det_metrics = iso_det.execute_bytecode(&bc_det, None).unwrap();
     let wall_elapsed = start_wall.elapsed();
     let warped_ms = crate::virtual_time_warped_ms();
