@@ -123,6 +123,15 @@ pub(crate) fn register_shard_host_functions_for_mask(
     if (shards_mask & (1 << 11)) != 0 {
         crate::host_bindings::register_http_bridge_host_functions(context);
     }
+    if (shards_mask & (1 << 18)) != 0 {
+        crate::host_bindings::register_node_crypto_bootstrap_host_function(context);
+    }
+    if (shards_mask & (1 << 19)) != 0 {
+        crate::host_bindings::register_fs_host_functions(context);
+    }
+    if (shards_mask & (1 << 22)) != 0 {
+        crate::host_bindings::register_os_host_functions(context);
+    }
 }
 
 /// Builds the single-pass fused prelude prefix (`ULTRA_CORE_PRELUDE`, all set shards in
@@ -158,6 +167,15 @@ pub(crate) fn build_fused_prelude_prefix(
         out.extend_from_slice(b"globalThis.__shMask|=");
         out.extend_from_slice(mask_buf.format(active_mask).as_bytes());
         out.extend_from_slice(b";\n");
+    }
+    for builtin_bit in 18..=27u32 {
+        if (shards_mask & (1u32 << builtin_bit)) != 0 {
+            let b_bytes = crate::node_builtins::builtin_snippet_for_bit(builtin_bit);
+            if !b_bytes.is_empty() {
+                out.extend_from_slice(b_bytes);
+                out.push(b'\n');
+            }
+        }
     }
     if init_lazy_getters {
         out.extend_from_slice(LAZY_GETTERS_INIT_PRELUDE);
@@ -343,6 +361,7 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ("_hasBinRW", ShardTriggerAction::HasBinRwMarker),
     ("Buffer.from", ShardTriggerAction::Mask(1 << 5)),
     ("Buffer.alloc", ShardTriggerAction::Mask(1 << 5)),
+    ("globalThis.Buffer", ShardTriggerAction::Mask(1 << 5)),
     ("Buffer.byteLength", ShardTriggerAction::Mask(1 << 5)),
     ("Buffer.isBuffer", ShardTriggerAction::Mask(1 << 5)),
     ("Buffer.isEncoding", ShardTriggerAction::Mask(1 << 5)),

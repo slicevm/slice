@@ -231,6 +231,36 @@ pub fn compute_boacas_metadata(js_code: &str) -> (u16, u32, u64) {
     if (flags & BOACAS_FLAG_HAS_HTTP_BRIDGE) != 0 || js_code.contains("__slice_dispatch_fetch") {
         shards_mask |= 1 << 11;
     }
+    if js_code.contains("node:crypto") || js_code.contains("\"crypto\"") || js_code.contains("'crypto'") {
+        shards_mask |= 1 << 18;
+    }
+    if js_code.contains("node:fs") || js_code.contains("\"fs\"") || js_code.contains("'fs'") || js_code.contains("fs/promises") {
+        shards_mask |= 1 << 19;
+    }
+    if js_code.contains("node:path") || js_code.contains("\"path\"") || js_code.contains("'path'") {
+        shards_mask |= 1 << 20;
+    }
+    if js_code.contains("node:events") || js_code.contains("\"events\"") || js_code.contains("'events'") {
+        shards_mask |= 1 << 21;
+    }
+    if js_code.contains("node:os") || js_code.contains("\"os\"") || js_code.contains("'os'") {
+        shards_mask |= 1 << 22;
+    }
+    if js_code.contains("node:util") || js_code.contains("\"util\"") || js_code.contains("'util'") {
+        shards_mask |= 1 << 23;
+    }
+    if js_code.contains("node:assert") || js_code.contains("\"assert\"") || js_code.contains("'assert'") {
+        shards_mask |= 1 << 24;
+    }
+    if js_code.contains("node:buffer") || js_code.contains("\"buffer\"") || js_code.contains("'buffer'") {
+        shards_mask |= (1 << 25) | (1 << 5);
+    }
+    if js_code.contains("node:url") || js_code.contains("\"url\"") || js_code.contains("'url'") {
+        shards_mask |= (1 << 26) | (1 << 1);
+    }
+    if js_code.contains("node:timers") || js_code.contains("\"timers\"") || js_code.contains("'timers'") {
+        shards_mask |= 1 << 27;
+    }
     (flags, shards_mask, rc_key)
 }
 
