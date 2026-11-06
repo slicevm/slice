@@ -123,18 +123,28 @@ pub(crate) fn register_shard_host_functions_for_mask(
     if (shards_mask & (1 << 11)) != 0 {
         crate::host_bindings::register_http_bridge_host_functions(context);
     }
+    if (shards_mask & (1 << 18)) != 0 {
+        crate::host_bindings::register_node_crypto_bootstrap_host_function(context);
+    }
+    if (shards_mask & (1 << 19)) != 0 {
+        crate::host_bindings::register_fs_host_functions(context);
+    }
+    if (shards_mask & (1 << 22)) != 0 {
+        crate::host_bindings::register_os_host_functions(context);
+    }
 }
 
-/// Concatenates `ULTRA_CORE_PRELUDE`, all set shards in `shards_mask` (in topological `SHARD_LOAD_ORDER`),
-/// `globalThis.__shMask`, optional `LAZY_GETTERS_INIT_PRELUDE`, and `js_code` into a single contiguous
-/// ECMAScript compilation unit so `boa_engine` parses and compiles everything in one pass.
-#[allow(dead_code)]
-pub(crate) fn build_fused_prelude_and_bundle(
-    js_code: &str,
+/// Builds the single-pass fused prelude prefix (`ULTRA_CORE_PRELUDE`, all set shards in
+/// `shards_mask` in topological `SHARD_LOAD_ORDER`, `globalThis.__shMask`, optional
+/// `LAZY_GETTERS_INIT_PRELUDE`, and boot-flag hooks) so that when placed immediately before
+/// `fallback_js` in `SLICEBC\x01`, the entire `[precompiled_prefix .. fallback_js]` region is a
+/// single contiguous zero-copy ECMAScript program in memory.
+pub(crate) fn build_fused_prelude_prefix(
     shards_mask: u32,
     init_lazy_getters: bool,
+    has_next_tick: bool,
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(ULTRA_CORE_PRELUDE.len() + js_code.len() + 16_384);
+    let mut out = Vec::with_capacity(ULTRA_CORE_PRELUDE.len() + 8192);
     out.extend_from_slice(ULTRA_CORE_PRELUDE);
     out.push(b'\n');
     let mut active_mask: u32 = 0;
@@ -149,16 +159,48 @@ pub(crate) fn build_fused_prelude_and_bundle(
             }
         }
     }
+    if init_lazy_getters {
+        active_mask |= 1;
+    }
     if active_mask != 0 {
         let mut mask_buf = itoa::Buffer::new();
         out.extend_from_slice(b"globalThis.__shMask|=");
         out.extend_from_slice(mask_buf.format(active_mask).as_bytes());
         out.extend_from_slice(b";\n");
     }
+    for builtin_bit in 18..=27u32 {
+        if (shards_mask & (1u32 << builtin_bit)) != 0 {
+            let b_bytes = crate::node_builtins::builtin_snippet_for_bit(builtin_bit);
+            if !b_bytes.is_empty() {
+                out.extend_from_slice(b_bytes);
+                out.push(b'\n');
+            }
+        }
+    }
     if init_lazy_getters {
         out.extend_from_slice(LAZY_GETTERS_INIT_PRELUDE);
         out.push(b'\n');
     }
+    if has_next_tick {
+        out.extend_from_slice(b"__slice_set_next_tick_hook(true);\n");
+    }
+    out.extend_from_slice(
+        b"if(globalThis.__slice_bf){if(globalThis.__slice_bf&1)__slice_sync_process_env(true);if(globalThis.__slice_bf&2)__slice_set_det_mode(true);if(globalThis.__slice_bf&4)globalThis.__slice_init_worker_self_env(true);}\n",
+    );
+    out
+}
+
+/// Concatenates `build_fused_prelude_prefix` and `js_code` into a single contiguous
+/// ECMAScript compilation unit so `boa_engine` parses and compiles everything in one pass.
+#[allow(dead_code)]
+pub(crate) fn build_fused_prelude_and_bundle(
+    js_code: &str,
+    shards_mask: u32,
+    init_lazy_getters: bool,
+    has_next_tick: bool,
+) -> Vec<u8> {
+    let mut out = build_fused_prelude_prefix(shards_mask, init_lazy_getters, has_next_tick);
+    out.reserve(js_code.len() + 4);
     if js_code.starts_with('{') {
         out.extend_from_slice(js_code.as_bytes());
     } else {
@@ -319,6 +361,7 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ("_hasBinRW", ShardTriggerAction::HasBinRwMarker),
     ("Buffer.from", ShardTriggerAction::Mask(1 << 5)),
     ("Buffer.alloc", ShardTriggerAction::Mask(1 << 5)),
+    ("globalThis.Buffer", ShardTriggerAction::Mask(1 << 5)),
     ("Buffer.byteLength", ShardTriggerAction::Mask(1 << 5)),
     ("Buffer.isBuffer", ShardTriggerAction::Mask(1 << 5)),
     ("Buffer.isEncoding", ShardTriggerAction::Mask(1 << 5)),

@@ -227,16 +227,49 @@ pub fn compute_boacas_metadata(js_code: &str) -> (u16, u32, u64) {
     if js_code.starts_with('{') {
         flags |= BOACAS_FLAG_STARTS_WITH_BRACE;
     }
-    let shards_mask = detect_needed_shards(js_code, false);
+    let mut shards_mask = detect_needed_shards(js_code, false);
+    if (flags & BOACAS_FLAG_HAS_HTTP_BRIDGE) != 0 || js_code.contains("__slice_dispatch_fetch") {
+        shards_mask |= 1 << 11;
+    }
+    if js_code.contains("node:crypto") || js_code.contains("\"crypto\"") || js_code.contains("'crypto'") {
+        shards_mask |= 1 << 18;
+    }
+    if js_code.contains("node:fs") || js_code.contains("\"fs\"") || js_code.contains("'fs'") || js_code.contains("fs/promises") {
+        shards_mask |= 1 << 19;
+    }
+    if js_code.contains("node:path") || js_code.contains("\"path\"") || js_code.contains("'path'") {
+        shards_mask |= 1 << 20;
+    }
+    if js_code.contains("node:events") || js_code.contains("\"events\"") || js_code.contains("'events'") {
+        shards_mask |= 1 << 21;
+    }
+    if js_code.contains("node:os") || js_code.contains("\"os\"") || js_code.contains("'os'") {
+        shards_mask |= 1 << 22;
+    }
+    if js_code.contains("node:util") || js_code.contains("\"util\"") || js_code.contains("'util'") {
+        shards_mask |= 1 << 23;
+    }
+    if js_code.contains("node:assert") || js_code.contains("\"assert\"") || js_code.contains("'assert'") {
+        shards_mask |= 1 << 24;
+    }
+    if js_code.contains("node:buffer") || js_code.contains("\"buffer\"") || js_code.contains("'buffer'") {
+        shards_mask |= (1 << 25) | (1 << 5);
+    }
+    if js_code.contains("node:url") || js_code.contains("\"url\"") || js_code.contains("'url'") {
+        shards_mask |= (1 << 26) | (1 << 1);
+    }
+    if js_code.contains("node:timers") || js_code.contains("\"timers\"") || js_code.contains("'timers'") {
+        shards_mask |= 1 << 27;
+    }
     (flags, shards_mask, rc_key)
 }
 
-/// Packs a compacted JavaScript bundle into a `SLICEBC\x01` binary container.
+/// Packs a compacted JavaScript bundle into a `SLICEBC\x01` binary container (`Approach C`: `approach_kind = 3`).
 ///
-/// On `main` (`approach_kind = 0`), this embeds the precomputed 32-byte `BoaCasHeader`
-/// (`feature_flags`, `shards_mask`, `rc_key`) with an empty `precompiled` section and
-/// the `{\n<compacted_js>\n}` fallback payload. Experimental branches (`A`, `B`, `C`)
-/// populate the branch-specific `precompiled` payload.
+/// Fuses `ULTRA_CORE_PRELUDE` + topological `shards_mask` shards + `fallback_js`, parses and compiles
+/// the entire program into a `boa_engine::vm::CodeBlock` tree at build time (`Script::compile_to_slicebc`),
+/// and embeds the serialized bytecode tree into `precompiled`.
+/// At cold runtime, `boa_lexer`, `boa_parser`, `Scope::analyze_scope`, and `ByteCompiler` are 100% bypassed.
 pub fn pack_boacas_container(compacted_js: &str) -> Vec<u8> {
     let mut fallback_js = String::with_capacity(compacted_js.len() + 4);
     fallback_js.push_str("{\n");
@@ -244,10 +277,30 @@ pub fn pack_boacas_container(compacted_js: &str) -> Vec<u8> {
     fallback_js.push_str("\n}");
 
     let (feature_flags, shards_mask, rc_key) = compute_boacas_metadata(&fallback_js);
-    let precompiled: &[u8] = &[];
+    let init_lazy = (feature_flags & BOACAS_FLAG_NEEDS_LAZY_GETTERS) != 0;
+    let has_next_tick = (feature_flags & BOACAS_FLAG_HAS_NEXT_TICK) != 0;
+    let fused_bytes = crate::js_preludes::build_fused_prelude_and_bundle(
+        &fallback_js,
+        shards_mask,
+        init_lazy,
+        has_next_tick,
+    );
+
+    let mut compiler_ctx = boa_engine::Context::default();
+    let precompiled = if let Ok(script) = boa_engine::Script::parse(
+        boa_engine::Source::from_bytes(&fused_bytes),
+        None,
+        &mut compiler_ctx,
+    ) {
+        script
+            .compile_to_slicebc(&mut compiler_ctx)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     let header = BoaCasHeader {
-        approach_kind: 0,
+        approach_kind: 3,
         feature_flags,
         shards_mask,
         rc_key,
@@ -257,19 +310,25 @@ pub fn pack_boacas_container(compacted_js: &str) -> Vec<u8> {
 
     let mut out = Vec::with_capacity(BOACAS_HEADER_LEN + precompiled.len() + fallback_js.len());
     header.encode_into(&mut out);
-    out.extend_from_slice(precompiled);
+    out.extend_from_slice(&precompiled);
     out.extend_from_slice(fallback_js.as_bytes());
     out
 }
 
-/// Evaluates a decoded `SLICEBC\x01` payload on `realm` using the precomputed `BoaCasHeader`
-/// metadata (skipping all 18 runtime substring scans and runtime Aho-Corasick shard detection).
+/// Evaluates a decoded `SLICEBC\x01` (`Approach C`) payload on `realm`.
+///
+/// When `is_cold_bare_realm` is `true` and `header.approach_kind == 3`, reconstructs the precompiled
+/// `Gc<CodeBlock>` tree directly from `precompiled_slice` via `boa_engine::Script::from_slicebc_bytes`
+/// and calls `script.evaluate(&mut realm.ctx)` — skipping `boa_lexer`, `boa_parser`, `Scope::analyze_scope`,
+/// and `ByteCompiler` at runtime.
 pub(crate) fn eval_boacas_on_realm(
     realm: &mut WarmBoaRealm,
     header: &BoaCasHeader,
-    _precompiled_slice: &[u8],
+    precompiled_slice: &[u8],
     fallback_js: &str,
+    _full_contiguous_payload: &[u8],
     is_http_req: bool,
+    is_cold_bare_realm: bool,
 ) -> (boa_engine::JsResult<boa_engine::JsValue>, bool) {
     let effective_shards = if is_http_req {
         header.shards_mask | (1 << 11)
@@ -277,6 +336,66 @@ pub(crate) fn eval_boacas_on_realm(
         header.shards_mask
     };
     let init_lazy = (header.feature_flags & BOACAS_FLAG_NEEDS_LAZY_GETTERS) != 0;
+
+    if is_cold_bare_realm && header.approach_kind == 3 && !precompiled_slice.is_empty() {
+        crate::js_preludes::register_shard_host_functions_for_mask(
+            effective_shards,
+            &mut realm.ctx,
+        );
+        if let Some(script) =
+            boa_engine::Script::from_slicebc_bytes(precompiled_slice, &mut realm.ctx)
+        {
+            let res = script.evaluate(&mut realm.ctx);
+            realm.loaded_shards_mask = effective_shards | if init_lazy { 1 } else { 0 };
+            crate::boa_realm::populate_realm_cached_handles(realm);
+            if (effective_shards & !header.shards_mask) != 0 {
+                ensure_realm_shards(realm, effective_shards & !header.shards_mask, false);
+            }
+            if (effective_shards & (1 << 8)) != 0 && realm.init_worker_self_fn.is_none() {
+                realm.init_worker_self_fn = realm
+                    .ctx
+                    .global_object()
+                    .get(
+                        boa_engine::js_string!("__slice_init_worker_self_env"),
+                        &mut realm.ctx,
+                    )
+                    .ok()
+                    .and_then(|v| v.as_object());
+            }
+            if (header.feature_flags & BOACAS_FLAG_IS_RC_BUNDLE) != 0
+                && res.is_ok()
+                && BOA_VIOLATION.with(|v| v.borrow().is_none())
+            {
+                let mut hex_buf = [0u8; 16];
+                let _ = std::io::Write::write_fmt(
+                    &mut (&mut hex_buf[..]),
+                    format_args!("{:016x}", header.rc_key),
+                );
+                if let Ok(hex_str) = std::str::from_utf8(&hex_buf) {
+                    let global = realm.ctx.global_object();
+                    if let Ok(rc_val) =
+                        global.get(boa_engine::js_string!("__slice_rc"), &mut realm.ctx)
+                    {
+                        if let Some(rc_obj) = rc_val.as_object() {
+                            if let Ok(val) =
+                                rc_obj.get(boa_engine::js_string!(hex_str), &mut realm.ctx)
+                            {
+                                if let Some(obj) = val.as_object() {
+                                    realm.loaded_bundles.insert(header.rc_key, obj.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return (res, true);
+        }
+        // Fallback if CodeBlock deserialization fails
+        let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+            crate::js_preludes::ULTRA_CORE_PRELUDE,
+        ));
+        crate::boa_realm::populate_realm_cached_handles(realm);
+    }
 
     if (header.feature_flags & BOACAS_FLAG_IS_RC_BUNDLE) != 0 {
         if let Some(fn_obj) = realm.loaded_bundles.get(&header.rc_key).cloned() {
@@ -346,7 +465,15 @@ mod tests {
         let bc = compile_source_to_bytecode(ts_src);
         assert_eq!(&bc[0..8], BOACAS_MAGIC);
 
-        let (hdr, _pre, fb_js) = BoaCasHeader::decode(&bc).expect("Valid SLICEBCv1 header");
+        let (hdr, pre, fb_js) = BoaCasHeader::decode(&bc).expect("Valid SLICEBCv1 header");
+        assert_eq!(
+            hdr.approach_kind, 3,
+            "Expected Approach C (precompiled CodeBlock bytecode)"
+        );
+        assert!(
+            !pre.is_empty(),
+            "Expected non-empty precompiled CodeBlock bytecode"
+        );
         assert_ne!(hdr.shards_mask & (1 << 1), 0, "Expected URL shard bit set");
         assert_ne!(
             hdr.shards_mask & (1 << 2),
@@ -355,9 +482,12 @@ mod tests {
         );
         assert!(fb_js.contains("URLSearchParams") || fb_js.contains("new URL"));
 
-        // Execute with --exper-boacas enabled
+        // Clear thread-local pool so iso1 takes the cold bare realm precompiled CodeBlock path
+        crate::boa_realm::BOA_CONTEXT_POOL.with(|pool| pool.borrow_mut().clear());
+
+        // Execute with --exper-boacas enabled (cold precompiled CodeBlock)
         let mut iso1 = SliceIsolate::spawn(
-            "boacas-t1",
+            "boacas-c-t1",
             1,
             CapabilityToken::pure_compute(),
             100_000,
@@ -366,10 +496,21 @@ mod tests {
         let m1 = iso1.execute_bytecode(&bc, None).unwrap();
         assert_eq!(m1.stdout, vec!["10:9"]);
 
+        // Execute a second time on the warm pooled realm
+        let mut iso_warm = SliceIsolate::spawn(
+            "boacas-c-warm",
+            1,
+            CapabilityToken::pure_compute(),
+            100_000,
+            4 * 1024 * 1024,
+        );
+        let m_warm = iso_warm.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(m_warm.stdout, vec!["10:9"]);
+
         // Execute the exact same SLICEBC\x01 buffer with --no-exper-boacas (fallback path)
         set_thread_exper_boacas_override(Some(false));
         let mut iso2 = SliceIsolate::spawn(
-            "boacas-t2",
+            "boacas-c-t2",
             1,
             CapabilityToken::pure_compute(),
             100_000,
@@ -381,4 +522,3 @@ mod tests {
         set_thread_exper_boacas_override(None);
     }
 }
-

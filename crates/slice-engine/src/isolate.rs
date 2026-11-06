@@ -404,7 +404,17 @@ impl SliceIsolate {
                     crate::boacas::BoaCasHeader::decode(bytecode)
                 {
                     if crate::boacas::is_exper_boacas_runtime_enabled() {
-                        self.exec_boacas_vm(&hdr, precompiled_slice, fallback_js)?
+                        let total_end = crate::boacas::BOACAS_HEADER_LEN
+                            + (hdr.precompiled_len as usize)
+                            + (hdr.fallback_js_len as usize);
+                        let contiguous_payload =
+                            &bytecode[crate::boacas::BOACAS_HEADER_LEN..total_end];
+                        self.exec_boacas_vm(
+                            &hdr,
+                            precompiled_slice,
+                            fallback_js,
+                            contiguous_payload,
+                        )?
                     } else {
                         self.exec_boa_full_es_vm(fallback_js)?
                     }
@@ -2053,7 +2063,9 @@ impl SliceIsolate {
         header: &crate::boacas::BoaCasHeader,
         precompiled_slice: &[u8],
         fallback_js: &str,
+        contiguous_payload: &[u8],
     ) -> Result<JsValue, SandboxViolation> {
+        use crate::boa_realm::{create_bare_boa_realm, try_acquire_pooled_boa_realm};
         use crate::boacas::{
             BOACAS_FLAG_HAS_HTTP_BRIDGE, BOACAS_FLAG_HAS_KV_SANDBOX, BOACAS_FLAG_HAS_NEXT_TICK,
             BOACAS_FLAG_HAS_SEMVER_FAST, BOACAS_FLAG_HAS_WORKER, BOACAS_FLAG_NEEDS_SES_CHECK,
@@ -2118,7 +2130,10 @@ impl SliceIsolate {
             crate::workers::speculative_prewarm_worker_pool(1);
         }
 
-        let mut realm = acquire_warm_boa_realm();
+        let (mut realm, is_cold_bare_realm) = match try_acquire_pooled_boa_realm() {
+            Some(r) => (r, false),
+            None => (create_bare_boa_realm(), true),
+        };
         let remaining_fuel = self
             .compartment
             .fuel_limit
@@ -2131,35 +2146,69 @@ impl SliceIsolate {
             .set_loop_iteration_limit(remaining_fuel);
         realm.ctx.runtime_limits_mut().set_recursion_limit(512);
 
-        if has_env_keys {
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"__slice_sync_process_env(true);",
-            ));
-        }
-        if self.deterministic_seed.is_some() {
-            crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"__slice_set_det_mode(true);",
-            ));
-        }
         let has_next_tick = (header.feature_flags & BOACAS_FLAG_HAS_NEXT_TICK) != 0;
-        if has_next_tick {
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"__slice_set_next_tick_hook(true);",
-            ));
-        }
-        if is_worker {
-            ensure_realm_shards(&mut realm, (1 << 8) | (1 << 13) | (1 << 2), false);
-            if let Some(ref init_fn) = realm.init_worker_self_fn {
-                let _ = init_fn.call(
-                    &boa_engine::JsValue::undefined(),
-                    &[boa_engine::JsValue::from(true)],
+        if is_cold_bare_realm && header.approach_kind >= 1 && !precompiled_slice.is_empty() {
+            if self.deterministic_seed.is_some() {
+                crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
+            }
+            let mut boot_flags: i32 = 0;
+            if has_env_keys {
+                boot_flags |= 1;
+            }
+            if self.deterministic_seed.is_some() {
+                boot_flags |= 2;
+            }
+            if is_worker {
+                boot_flags |= 4;
+                crate::js_preludes::register_shard_host_functions_for_mask(
+                    (1 << 8) | (1 << 13) | (1 << 2),
                     &mut realm.ctx,
                 );
-            } else {
+            }
+            if boot_flags != 0 {
+                let _ = realm.ctx.global_object().set(
+                    boa_engine::js_string!("__slice_bf"),
+                    boa_engine::JsValue::from(boot_flags),
+                    false,
+                    &mut realm.ctx,
+                );
+            }
+        } else {
+            if is_cold_bare_realm {
                 let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                    b"globalThis.__slice_init_worker_self_env(true);",
+                    crate::js_preludes::ULTRA_CORE_PRELUDE,
                 ));
+                crate::boa_realm::populate_realm_cached_handles(&mut realm);
+            }
+            if has_env_keys {
+                let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                    b"__slice_sync_process_env(true);",
+                ));
+            }
+            if self.deterministic_seed.is_some() {
+                crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
+                let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                    b"__slice_set_det_mode(true);",
+                ));
+            }
+            if has_next_tick {
+                let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                    b"__slice_set_next_tick_hook(true);",
+                ));
+            }
+            if is_worker {
+                ensure_realm_shards(&mut realm, (1 << 8) | (1 << 13) | (1 << 2), false);
+                if let Some(ref init_fn) = realm.init_worker_self_fn {
+                    let _ = init_fn.call(
+                        &boa_engine::JsValue::undefined(),
+                        &[boa_engine::JsValue::from(true)],
+                        &mut realm.ctx,
+                    );
+                } else {
+                    let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                        b"globalThis.__slice_init_worker_self_env(true);",
+                    ));
+                }
             }
         }
         let is_http_req = BOA_HTTP_REQ.with(|r| r.borrow().active);
@@ -2180,7 +2229,9 @@ impl SliceIsolate {
             header,
             precompiled_slice,
             fallback_js,
+            contiguous_payload,
             is_http_req,
+            is_cold_bare_realm,
         );
 
         if (!is_worker || eval_res.is_ok())
