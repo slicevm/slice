@@ -187,7 +187,7 @@ With **`SLICEBC\x01` Precompiled Boa `CodeBlock` CAS** enabled by default, Slice
 
 ### 4.2 HTTP Server (`slice serve`), Sharded KV & 1,000-Tenant MicroVM Benchmarks
 
-| Workload | Slice (`v0.9.9`) | Deno (`v2.7.5`) | Bun (`v1.3.10`) | Node.js (`v25.8.1`) |
+| Workload | Slice (`v0.9.91`) | Deno (`v2.7.5`) | Bun (`v1.3.10`) | Node.js (`v25.8.1`) |
 | :--- | :--- | :--- | :--- | :--- |
 | **`slice serve` Tier-0 CAS (`--workers=8`, Keep-Alive)** | **`154,348 req/s` (`6.48 us/req`)** | 126,184 req/s | 97,361 req/s | 58,926 req/s |
 | **`slice serve` Tier-1 WinterTC (`--workers=8`, Keep-Alive)** | **`126,566 req/s` (`7.90 us/req`)** | 126,184 req/s | 97,361 req/s | 58,926 req/s |

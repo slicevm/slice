@@ -1,6 +1,6 @@
 # Chapter 01: Installation, Upgrading, Quickstart, `slice.toml` & Complete CLI Reference
 
-This chapter is your complete day-one guide to installing, upgrading, configuring, and operating **Slice (Nexus-JS)** (`v0.9.9`). By the end of this chapter, you will know how to install and update Slice on any operating system, scaffold a new TypeScript project, configure your `slice.toml` manifest and `.env` vault, run live development with `< 3 ms` `--watch` reloads, use the interactive `slice repl` shell, and master all 13 CLI commands.
+This chapter is your complete day-one guide to installing, upgrading, configuring, and operating **Slice (Nexus-JS)** (`v0.9.91`). By the end of this chapter, you will know how to install and update Slice on any operating system, scaffold a new TypeScript project, configure your `slice.toml` manifest and `.env` vault, run live development with `< 3 ms` `--watch` reloads, use the interactive `slice repl` shell, and master all 13 CLI commands.
 
 ---
 
@@ -518,7 +518,7 @@ Launches an interactive **SES-Locked TypeScript/JavaScript Compartment Shell** w
 **Example REPL Session:**
 ```text
 $ slice repl
-Slice (Nexus-JS) v0.9.9 Interactive SES-Locked Compartment Shell
+Slice (Nexus-JS) v0.9.91 Interactive SES-Locked Compartment Shell
 Commands: :help, :metrics, :caps, :vars, :reset, :quit
 slice(ses)> const price: number = 250 * 4;
 => 1000
