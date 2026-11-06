@@ -272,20 +272,21 @@ pub(crate) fn resolve_tenant_bytecode_hotswap(
 
 #[inline]
 pub(crate) fn find_http_header_end(buf: &[u8]) -> Option<(usize, usize)> {
-    if buf.len() < 4 {
-        return None;
+    if let Some(i) = memchr::memmem::find(buf, b"\r\n\r\n") {
+        return Some((i, i + 4));
     }
-    for i in 0..=buf.len() - 4 {
-        if buf[i] == b'\r' && buf[i + 1] == b'\n' && buf[i + 2] == b'\r' && buf[i + 3] == b'\n' {
-            return Some((i, i + 4));
-        }
-    }
-    for i in 0..=buf.len().saturating_sub(2) {
-        if buf[i] == b'\n' && buf[i + 1] == b'\n' {
-            return Some((i, i + 2));
-        }
+    if let Some(i) = memchr::memmem::find(buf, b"\n\n") {
+        return Some((i, i + 2));
     }
     None
+}
+
+#[inline]
+fn contains_ascii_ignore_case(haystack: &str, needle_lower: &[u8]) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle_lower.len())
+        .any(|w| w.eq_ignore_ascii_case(needle_lower))
 }
 
 /// Maximum allowed inbound HTTP request body size (`4 MB`).
@@ -488,7 +489,7 @@ pub(crate) fn serve_connection_keep_alive(
         let mut has_transfer_encoding = false;
         let mut is_chunked_te = false;
         let mut is_ws_upgrade = false;
-        let mut sec_websocket_key: String = String::new();
+        let mut sec_websocket_key: &str = "";
         let mut if_none_match: &str = "";
         let mut path = raw_path;
         let mut tenant_id: &str = "tenant-default";
@@ -543,15 +544,15 @@ pub(crate) fn serve_connection_keep_alive(
             if k.eq_ignore_ascii_case("x-slice-tenant") && !v.is_empty() {
                 tenant_id = v;
             } else if k.eq_ignore_ascii_case("connection") {
-                if v.to_ascii_lowercase().contains("close") {
+                if contains_ascii_ignore_case(v, b"close") {
                     keep_alive = false;
-                } else if v.to_ascii_lowercase().contains("keep-alive") {
+                } else if contains_ascii_ignore_case(v, b"keep-alive") {
                     keep_alive = true;
                 }
             } else if k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket") {
                 is_ws_upgrade = true;
             } else if k.eq_ignore_ascii_case("sec-websocket-key") {
-                sec_websocket_key = v.to_string();
+                sec_websocket_key = v;
             } else if k.eq_ignore_ascii_case("transfer-encoding") {
                 // N-Sec-3: Reject requests with both Transfer-Encoding and Content-Length (CL.TE / TE.CL smuggling)
                 if seen_content_length.is_some() {
@@ -562,7 +563,7 @@ pub(crate) fn serve_connection_keep_alive(
                     );
                 }
                 has_transfer_encoding = true;
-                if v.to_ascii_lowercase().contains("chunked") {
+                if contains_ascii_ignore_case(v, b"chunked") {
                     is_chunked_te = true;
                 } else {
                     return write_http_error_and_close(
