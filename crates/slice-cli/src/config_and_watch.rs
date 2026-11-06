@@ -34,18 +34,34 @@ pub(crate) fn install_ctrlc_handler() {
     win_ctrlc::install();
 }
 
-/// Unified execution configuration (`CapabilityToken`, `fuel_limit`, `mem_limit`, `audit_secrets`)
-/// resolved across defaults, `./slice.toml`, target subdirectory `slice.toml`, `.cas` embedded
-/// manifests, `--env-file`, and explicit CLI flags (`--fuel=`, `--memory=`, `--allow-*`).
+/// Unified execution configuration (`CapabilityToken`, `fuel_limit`, `mem_limit`, `audit_secrets`,
+/// `warm_pool`, `deterministic_seed`, `server_port`, `server_workers`, `static_dir`, `tier`, `boacas`)
+/// resolved across:
+/// 1. Built-in Optimal Defaults (`Tier 1`, `boacas = true`, `fuel = 50_000_000`, `mem = 16 MB`)
+/// 2. `./slice.toml`, target subdirectory `slice.toml`, or `.cas` embedded manifest
+/// 3. Top-of-file inline source directives (`// @slice-...`)
+/// 4. `SLICE_*` environment variables
+/// 5. Explicit CLI inline flags (`--tier=`, `--boacas`, `--fuel=`, `--memory=`, `--allow-*`, etc.)
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedExecutionConfig {
     pub(crate) caps: CapabilityToken,
     pub(crate) fuel_limit: u64,
     pub(crate) mem_limit: usize,
     pub(crate) audit_secrets: Vec<String>,
+    pub(crate) warm_pool: bool,
+    pub(crate) deterministic_seed: Option<u64>,
+    pub(crate) server_port: Option<u16>,
+    pub(crate) server_workers: Option<usize>,
+    pub(crate) static_dir: Option<PathBuf>,
     pub(crate) cli_fuel_override: Option<u64>,
     pub(crate) cli_mem_override: Option<usize>,
     pub(crate) cli_boacas_override: Option<bool>,
+    pub(crate) cli_tier_override: Option<Option<u8>>,
+    pub(crate) cli_warm_override: Option<bool>,
+    pub(crate) cli_det_override: Option<Option<u64>>,
+    pub(crate) cli_port_override: Option<u16>,
+    pub(crate) cli_workers_override: Option<usize>,
+    pub(crate) cli_static_override: Option<PathBuf>,
 }
 
 impl ResolvedExecutionConfig {
@@ -53,14 +69,48 @@ impl ResolvedExecutionConfig {
         let (mut caps, mut fuel_limit, mut mem_limit) = load_manifest_or_default();
         let mut audit_secrets = Vec::new();
         let mut env_files = Vec::new();
+        let mut warm_pool = false;
+        let mut deterministic_seed = None;
+        let mut server_port = None;
+        let mut server_workers = None;
+        let mut static_dir = None;
+
         let mut cli_fuel_override = None;
         let mut cli_mem_override = None;
         let mut cli_boacas_override = None;
+        let mut cli_tier_override = None;
+        let mut cli_warm_override = None;
+        let mut cli_det_override = None;
+        let mut cli_port_override = None;
+        let mut cli_workers_override = None;
+        let mut cli_static_override = None;
 
-        // Also capture DLP secrets from `./slice.toml` if present in cwd
+        // 1. Apply `./slice.toml` if present in cwd
         let cwd_manifest = Path::new("slice.toml");
         if cwd_manifest.exists() {
             if let Ok(raw) = std::fs::read_to_string(cwd_manifest) {
+                let m = SliceManifest::parse_toml(&raw);
+                if let Some(w) = m.warm_pool {
+                    warm_pool = w;
+                }
+                if let Some(s) = m.deterministic_seed {
+                    deterministic_seed = Some(s);
+                }
+                if let Some(p) = m.server_port {
+                    server_port = Some(p);
+                }
+                if let Some(wk) = m.server_workers {
+                    server_workers = Some(wk);
+                }
+                if let Some(sd) = m.static_dir {
+                    static_dir = Some(PathBuf::from(sd));
+                }
+                if let Some(b) = m.exper_boacas {
+                    slice_engine::set_exper_boacas_override(Some(b));
+                }
+                if let Some(t) = m.tier {
+                    slice_engine::set_tier_override(Some(t));
+                }
                 merge_manifest_toml_into_caps_and_dlp(
                     &raw,
                     Some(Path::new(".")),
@@ -70,6 +120,129 @@ impl ResolvedExecutionConfig {
             }
         }
 
+        // 2. Apply `SLICE_*` environment variables (override slice.toml, overridden by CLI flags)
+        if let Ok(v) = std::env::var("SLICE_FUEL") {
+            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
+            if let Ok(parsed) = digits.parse::<u64>() {
+                fuel_limit = parsed;
+                cli_fuel_override = Some(parsed);
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_MEMORY_KB") {
+            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
+            if let Ok(parsed) = digits.parse::<usize>() {
+                let bytes = parsed.saturating_mul(1024);
+                mem_limit = bytes;
+                cli_mem_override = Some(bytes);
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_MEMORY") {
+            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
+            if let Ok(parsed) = digits.parse::<usize>() {
+                mem_limit = parsed;
+                cli_mem_override = Some(parsed);
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_ALLOW_READ") {
+            for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                caps = caps.with_read_prefix(item);
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_ALLOW_WRITE") {
+            for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                caps = caps.with_write_prefix(item);
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_ALLOW_NET") {
+            for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                caps = caps.with_net_host(item);
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_ALLOW_ENV") {
+            for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some((k, val)) = item.split_once('=') {
+                    if val.len() >= 6
+                        && slice_sandbox::is_sensitive_env_key(k)
+                        && !audit_secrets.contains(&val.to_string())
+                    {
+                        audit_secrets.push(val.to_string());
+                    }
+                    caps = caps.with_env(k.trim(), val.trim());
+                } else {
+                    let env_val = std::env::var(item).unwrap_or_default();
+                    if env_val.len() >= 6
+                        && slice_sandbox::is_sensitive_env_key(item)
+                        && !audit_secrets.contains(&env_val)
+                    {
+                        audit_secrets.push(env_val.clone());
+                    }
+                    caps = caps.with_env(item, env_val);
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_ENV_FILE") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                env_files.push(PathBuf::from(trimmed));
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_AUDIT_EGRESS") {
+            for sec in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                if !audit_secrets.contains(&sec.to_string()) {
+                    audit_secrets.push(sec.to_string());
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_WARM") {
+            if let Some(b) = slice_sandbox::parse_bool_setting(&v) {
+                warm_pool = b;
+                cli_warm_override = Some(b);
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_DETERMINISTIC_SEED") {
+            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
+            if let Ok(seed) = digits.parse::<u64>() {
+                deterministic_seed = Some(seed);
+                cli_det_override = Some(Some(seed));
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_PORT") {
+            if let Ok(p) = v.trim().parse::<u16>() {
+                server_port = Some(p);
+                cli_port_override = Some(p);
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_WORKERS") {
+            if let Ok(w) = v.trim().parse::<usize>() {
+                let wk = w.max(1);
+                server_workers = Some(wk);
+                cli_workers_override = Some(wk);
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_STATIC_DIR") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                let p = PathBuf::from(trimmed);
+                static_dir = Some(p.clone());
+                cli_static_override = Some(p);
+            }
+        }
+        if let Ok(v) =
+            std::env::var("SLICE_BOACAS").or_else(|_| std::env::var("SLICE_EXPER_BOACAS"))
+        {
+            if let Some(b) = slice_sandbox::parse_bool_setting(&v) {
+                cli_boacas_override = Some(b);
+                slice_engine::set_exper_boacas_override(Some(b));
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_TIER") {
+            if let Some(t) = slice_sandbox::parse_tier_setting(&v) {
+                cli_tier_override = Some(t);
+                slice_engine::set_tier_override(t);
+            }
+        }
+
+        // 3. Apply explicit CLI inline flags (highest precedence)
         for arg in args {
             if let Some(prefix) = arg.strip_prefix("--allow-read=") {
                 caps = caps.with_read_prefix(prefix);
@@ -88,6 +261,16 @@ impl ResolvedExecutionConfig {
                         audit_secrets.push(v.to_string());
                     }
                     caps = caps.with_env(k, v);
+                } else {
+                    let k = kv.trim();
+                    let v = std::env::var(k).unwrap_or_default();
+                    if v.len() >= 6
+                        && slice_sandbox::is_sensitive_env_key(k)
+                        && !audit_secrets.contains(&v)
+                    {
+                        audit_secrets.push(v.clone());
+                    }
+                    caps = caps.with_env(k, v);
                 }
             } else if let Some(ef) = arg.strip_prefix("--env-file=") {
                 if !ef.is_empty() {
@@ -98,21 +281,74 @@ impl ResolvedExecutionConfig {
                     audit_secrets.push(sec.to_string());
                 }
             } else if let Some(f) = arg.strip_prefix("--fuel=") {
-                if let Ok(parsed) = f.parse::<u64>() {
+                let digits: String = f.chars().filter(|c| c.is_ascii_digit()).collect();
+                if let Ok(parsed) = digits.parse::<u64>() {
                     fuel_limit = parsed;
                     cli_fuel_override = Some(parsed);
                 }
             } else if let Some(m) = arg.strip_prefix("--memory=") {
-                if let Ok(parsed) = m.parse::<usize>() {
+                let digits: String = m.chars().filter(|c| c.is_ascii_digit()).collect();
+                if let Ok(parsed) = digits.parse::<usize>() {
                     mem_limit = parsed;
                     cli_mem_override = Some(parsed);
                 }
-            } else if arg == "--exper-boacas" {
+            } else if let Some(mkb) = arg.strip_prefix("--memory-kb=") {
+                let digits: String = mkb.chars().filter(|c| c.is_ascii_digit()).collect();
+                if let Ok(parsed) = digits.parse::<usize>() {
+                    let bytes = parsed.saturating_mul(1024);
+                    mem_limit = bytes;
+                    cli_mem_override = Some(bytes);
+                }
+            } else if arg == "--boacas" || arg == "--exper-boacas" {
                 cli_boacas_override = Some(true);
                 slice_engine::set_exper_boacas_override(Some(true));
-            } else if arg == "--no-exper-boacas" {
+            } else if arg == "--no-boacas" || arg == "--no-exper-boacas" {
                 cli_boacas_override = Some(false);
                 slice_engine::set_exper_boacas_override(Some(false));
+            } else if let Some(b_str) = arg
+                .strip_prefix("--boacas=")
+                .or_else(|| arg.strip_prefix("--exper-boacas="))
+            {
+                if let Some(b) = slice_sandbox::parse_bool_setting(b_str) {
+                    cli_boacas_override = Some(b);
+                    slice_engine::set_exper_boacas_override(Some(b));
+                }
+            } else if let Some(t_str) = arg.strip_prefix("--tier=") {
+                if let Some(t) = slice_sandbox::parse_tier_setting(t_str) {
+                    cli_tier_override = Some(t);
+                    slice_engine::set_tier_override(t);
+                }
+            } else if arg == "--warm" {
+                warm_pool = true;
+                cli_warm_override = Some(true);
+            } else if arg == "--no-warm" {
+                warm_pool = false;
+                cli_warm_override = Some(false);
+            } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
+                let s = seed_str.parse().unwrap_or(42);
+                deterministic_seed = Some(s);
+                cli_det_override = Some(Some(s));
+            } else if arg == "--deterministic" {
+                deterministic_seed = Some(42);
+                cli_det_override = Some(Some(42));
+            } else if arg == "--no-deterministic" {
+                deterministic_seed = None;
+                cli_det_override = Some(None);
+            } else if let Some(p_str) = arg.strip_prefix("--port=") {
+                if let Ok(p) = p_str.parse::<u16>() {
+                    server_port = Some(p);
+                    cli_port_override = Some(p);
+                }
+            } else if let Some(w_str) = arg.strip_prefix("--workers=") {
+                if let Ok(w) = w_str.parse::<usize>() {
+                    let wk = w.max(1);
+                    server_workers = Some(wk);
+                    cli_workers_override = Some(wk);
+                }
+            } else if let Some(sd_str) = arg.strip_prefix("--static=") {
+                let p = PathBuf::from(sd_str);
+                static_dir = Some(p.clone());
+                cli_static_override = Some(p);
             }
         }
 
@@ -125,15 +361,25 @@ impl ResolvedExecutionConfig {
             fuel_limit,
             mem_limit,
             audit_secrets,
+            warm_pool,
+            deterministic_seed,
+            server_port,
+            server_workers,
+            static_dir,
             cli_fuel_override,
             cli_mem_override,
             cli_boacas_override,
+            cli_tier_override,
+            cli_warm_override,
+            cli_det_override,
+            cli_port_override,
+            cli_workers_override,
+            cli_static_override,
         })
     }
 
     /// Merges a target project's `slice.toml` or embedded `.cas` manifest TOML into this
-    /// configuration, updating `fuel_limit` and `mem_limit` from `[limits]` unless overridden
-    /// on the command line via `--fuel=` or `--memory=`.
+    /// configuration, updating settings unless already overridden by `SLICE_*` env vars or CLI flags.
     pub(crate) fn apply_manifest_toml(&mut self, raw_toml: &str, base_dir: Option<&Path>) {
         let m = SliceManifest::parse_toml(raw_toml);
         if self.cli_fuel_override.is_none() {
@@ -147,12 +393,133 @@ impl ResolvedExecutionConfig {
                 slice_engine::set_exper_boacas_override(Some(b));
             }
         }
+        if self.cli_tier_override.is_none() {
+            if let Some(t) = m.tier {
+                slice_engine::set_tier_override(Some(t));
+            }
+        }
+        if self.cli_warm_override.is_none() {
+            if let Some(w) = m.warm_pool {
+                self.warm_pool = w;
+            }
+        }
+        if self.cli_det_override.is_none() {
+            if let Some(s) = m.deterministic_seed {
+                self.deterministic_seed = Some(s);
+            }
+        }
+        if self.cli_port_override.is_none() {
+            if let Some(p) = m.server_port {
+                self.server_port = Some(p);
+            }
+        }
+        if self.cli_workers_override.is_none() {
+            if let Some(w) = m.server_workers {
+                self.server_workers = Some(w);
+            }
+        }
+        if self.cli_static_override.is_none() {
+            if let Some(sd) = m.static_dir {
+                let p = match base_dir {
+                    Some(dir) => dir.join(&sd),
+                    None => PathBuf::from(&sd),
+                };
+                self.static_dir = Some(p);
+            }
+        }
         merge_manifest_toml_into_caps_and_dlp(
             raw_toml,
             base_dir,
             &mut self.caps,
             &mut self.audit_secrets,
         );
+    }
+
+    /// Applies top-of-file inline source directives (`// @slice-...`) from an entrypoint script,
+    /// overriding `slice.toml` defaults while respecting `SLICE_*` env vars and CLI flags.
+    pub(crate) fn apply_inline_directives(&mut self, source: &str, base_dir: Option<&Path>) {
+        if !source.starts_with("//") && !source.starts_with("#!") {
+            return;
+        }
+        let dirs = slice_sandbox::parse_inline_directives(source);
+        if self.cli_fuel_override.is_none() {
+            if let Some(f) = dirs.fuel_limit {
+                self.fuel_limit = f;
+            }
+        }
+        if self.cli_mem_override.is_none() {
+            if let Some(m) = dirs.memory_limit_bytes {
+                self.mem_limit = m;
+            }
+        }
+        if self.cli_boacas_override.is_none() {
+            if let Some(b) = dirs.boacas {
+                slice_engine::set_exper_boacas_override(Some(b));
+            }
+        }
+        if self.cli_tier_override.is_none() {
+            if let Some(t) = dirs.tier {
+                slice_engine::set_tier_override(t);
+            }
+        }
+        if self.cli_warm_override.is_none() {
+            if let Some(w) = dirs.warm {
+                self.warm_pool = w;
+            }
+        }
+        if self.cli_det_override.is_none() {
+            if let Some(s) = dirs.deterministic_seed {
+                self.deterministic_seed = Some(s);
+            }
+        }
+        if self.cli_port_override.is_none() {
+            if let Some(p) = dirs.port {
+                self.server_port = Some(p);
+            }
+        }
+        if self.cli_workers_override.is_none() {
+            if let Some(w) = dirs.workers {
+                self.server_workers = Some(w);
+            }
+        }
+        for r in dirs.allow_read {
+            if !self.caps.allowed_read_prefixes.contains(&r) {
+                self.caps.allowed_read_prefixes.push(r);
+            }
+        }
+        for w in dirs.allow_write {
+            if !self.caps.allowed_write_prefixes.contains(&w) {
+                self.caps.allowed_write_prefixes.push(w);
+            }
+        }
+        for nh in dirs.allow_net {
+            self.caps.allowed_net_hosts.insert(nh);
+        }
+        for (k, v) in dirs.allow_env {
+            if v.len() >= 6
+                && slice_sandbox::is_sensitive_env_key(&k)
+                && !self.audit_secrets.contains(&v)
+            {
+                self.audit_secrets.push(v.clone());
+            }
+            self.caps.allowed_env_keys.entry(k).or_insert(v);
+        }
+        for sec in dirs.audit_egress {
+            if !sec.is_empty() && !self.audit_secrets.contains(&sec) {
+                self.audit_secrets.push(sec);
+            }
+        }
+        if let Some(ef) = dirs.env_file {
+            let env_path = match base_dir {
+                Some(dir) => dir.join(&ef),
+                None => PathBuf::from(&ef),
+            };
+            let _ = apply_dotenv_file_to_caps_and_dlp(
+                &env_path,
+                &mut self.caps,
+                &mut self.audit_secrets,
+            );
+        }
     }
 
     /// Discovers and applies `slice.toml` for `target_path` (if one exists in `target_path`,
@@ -212,6 +579,11 @@ pub(crate) fn merge_manifest_toml_into_caps_and_dlp(
             audit_secrets.push(v.clone());
         }
         caps.allowed_env_keys.entry(k).or_insert(v);
+    }
+    for sec in m.audit_egress {
+        if !sec.is_empty() && !audit_secrets.contains(&sec) {
+            audit_secrets.push(sec);
+        }
     }
     if let Some(env_file_rel) = m.env_file {
         let env_path = match base_dir {

@@ -160,7 +160,7 @@ fn print_usage() {
     println!("  slice serve [target] [--port=N] [--smoke-test] Launch multi-tenant WinterTC HTTP MicroVM server");
     println!("  slice pack <input> <output.cas>                Pack a file or folder app into a Zero-Stat BLAKE3 .cas archive");
     println!("  slice compile <input> -o <binary>              Compile a script, folder app, or .cas into a standalone binary");
-    println!("  slice inspect <bundle.cas|script.ts|dir>       Disassemble SLICESNP/SLICEBOA bytecode and inspect CAS Radix table");
+    println!("  slice inspect <bundle.cas|script.ts|dir>       Disassemble SLICEBC/SLICEBOA/SLICESNP bytecode and inspect CAS Radix table");
     println!("  slice mcp [--smoke-test] [--audit-egress=SEC]  Start built-in Model Context Protocol (MCP) JSON-RPC 2.0 server");
     println!("  slice repl                                     Start interactive SES-Locked TypeScript/JS shell");
     println!("  slice doctor                                   Audit host OS kernel io_uring/IOCP, MPK, Warm Pool, and OCap");
@@ -182,11 +182,11 @@ fn cmd_info() -> Result<()> {
         io_engine.status.backend_name
     );
     println!(
-        "  Zero-Stat CAS Format  : SLICE_CAS v{} (64-byte aligned BLAKE3 mmap + SLICEEXE)",
+        "  Zero-Stat CAS Format  : SLICE_CAS v{} (64-byte aligned BLAKE3 mmap + SLICEEXE + SLICEBC\\x01)",
         slice_cas::CAS_VERSION
     );
     println!("  TypeScript & JSX/TSX  : Oxc v0.152.0 AOT Compiler + Built-In SSR (`slice:jsx`) + Tree-Shaking");
-    println!("  Execution Pipeline    : Tier-0 SLICESNP -> Tier-1 Zero-Copy SLICEBOA (Warm Pool) -> Tier-2 SIMD");
+    println!("  Execution Pipeline    : Tier-1 Precompiled Boa CodeBlock (`SLICEBC\\x01` Default) + Tier-2 SIMD + Tier-0 SLICESNP");
     println!("  Native Fast Intrinsics: FIPS-180-4 SHA-256 / RFC-2104 HMAC / SemVer / In-Memory VFS Slab");
     println!(
         "  Security Architecture : SES Lockdown + TC39 OCap Compartments + Hardware PKEY/Cage"
@@ -490,23 +490,15 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     let mut exec_cfg = ResolvedExecutionConfig::from_cli_args(args)?;
     let mut quiet = false;
     let mut print_metrics = false;
-    let mut prewarm_pool = false;
-    let mut deterministic_seed: Option<u64> = None;
     let mut watch_mode = false;
     let mut watch_once = false;
     let mut target_opt: Option<String> = None;
 
     for arg in args {
-        if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
-            deterministic_seed = Some(seed_str.parse().unwrap_or(42));
-        } else if arg == "--deterministic" {
-            deterministic_seed = Some(42);
-        } else if arg == "--quiet" || arg == "-q" {
+        if arg == "--quiet" || arg == "-q" {
             quiet = true;
         } else if arg == "--metrics" {
             print_metrics = true;
-        } else if arg == "--warm" {
-            prewarm_pool = true;
         } else if arg == "--watch" {
             watch_mode = true;
         } else if arg == "--watch-once" {
@@ -538,6 +530,8 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         if let Some(toml_str) = archive.get_manifest_toml() {
             exec_cfg.apply_manifest_toml(toml_str, path.parent());
         }
+        let prewarm_pool = exec_cfg.warm_pool;
+        let deterministic_seed = exec_cfg.deterministic_seed;
         let entry = archive
             .entrypoint_blob()
             .context("CAS archive has no valid entrypoint blob")?;
@@ -568,8 +562,19 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     } else {
         exec_cfg.apply_target_path_manifest(path);
         let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
+        if let Ok(raw_entry) = std::fs::read_to_string(&entry_file) {
+            exec_cfg.apply_inline_directives(&raw_entry, entry_file.parent());
+        }
+        let prewarm_pool = exec_cfg.warm_pool;
+        let deterministic_seed = exec_cfg.deterministic_seed;
         let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
+        if !prewarm_pool && exec_cfg.cli_boacas_override.is_none() {
+            slice_engine::set_thread_exper_boacas_override(Some(false));
+        }
         let bytecode = compile_source_to_bytecode(&bundled_source);
+        if !prewarm_pool && exec_cfg.cli_boacas_override.is_none() {
+            slice_engine::set_thread_exper_boacas_override(None);
+        }
         bundled_for_sourcemap = bundled_source;
         let mut isolate = SliceIsolate::spawn(
             "tenant-cli",
@@ -633,7 +638,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
                 exec_cfg.fuel_limit,
                 exec_cfg.mem_limit,
             );
-            isolate.set_deterministic_seed(deterministic_seed);
+            isolate.set_deterministic_seed(exec_cfg.deterministic_seed);
             for sec in &exec_cfg.audit_secrets {
                 isolate.add_egress_audit_secret(sec.clone());
             }
@@ -670,16 +675,23 @@ fn cmd_pack(args: &[String]) -> Result<()> {
             entrypoint = e.to_string();
         } else if let Some(sd) = arg.strip_prefix("--static=") {
             static_dir_opt = Some(PathBuf::from(sd));
-        } else if arg == "--exper-boacas" {
+        } else if arg == "--boacas" || arg == "--exper-boacas" {
             exper_override = Some(true);
-        } else if arg == "--no-exper-boacas" {
+        } else if arg == "--no-boacas" || arg == "--no-exper-boacas" {
             exper_override = Some(false);
+        } else if let Some(b_str) = arg
+            .strip_prefix("--boacas=")
+            .or_else(|| arg.strip_prefix("--exper-boacas="))
+        {
+            exper_override = slice_sandbox::parse_bool_setting(b_str);
+        } else if let Some(t_str) = arg.strip_prefix("--tier=") {
+            if let Some(t) = slice_sandbox::parse_tier_setting(t_str) {
+                slice_engine::set_tier_override(t);
+            }
         }
     }
     if let Some(ov) = exper_override {
         slice_engine::set_exper_boacas_override(Some(ov));
-    } else if std::env::var("SLICE_EXPER_BOACAS").is_err() {
-        slice_engine::set_exper_boacas_override(Some(true));
     }
 
     let start = Instant::now();
@@ -727,17 +739,24 @@ fn cmd_compile(args: &[String]) -> Result<()> {
             entrypoint = e.to_string();
         } else if let Some(sd) = args[i].strip_prefix("--static=") {
             static_dir_opt = Some(PathBuf::from(sd));
-        } else if args[i] == "--exper-boacas" {
+        } else if args[i] == "--boacas" || args[i] == "--exper-boacas" {
             exper_override = Some(true);
-        } else if args[i] == "--no-exper-boacas" {
+        } else if args[i] == "--no-boacas" || args[i] == "--no-exper-boacas" {
             exper_override = Some(false);
+        } else if let Some(b_str) = args[i]
+            .strip_prefix("--boacas=")
+            .or_else(|| args[i].strip_prefix("--exper-boacas="))
+        {
+            exper_override = slice_sandbox::parse_bool_setting(b_str);
+        } else if let Some(t_str) = args[i].strip_prefix("--tier=") {
+            if let Some(t) = slice_sandbox::parse_tier_setting(t_str) {
+                slice_engine::set_tier_override(t);
+            }
         }
         i += 1;
     }
     if let Some(ov) = exper_override {
         slice_engine::set_exper_boacas_override(Some(ov));
-    } else if std::env::var("SLICE_EXPER_BOACAS").is_err() {
-        slice_engine::set_exper_boacas_override(Some(true));
     }
 
     let default_name = input_path

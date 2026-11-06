@@ -759,6 +759,20 @@ pub struct SliceManifest {
     pub capabilities: CapabilityToken,
     #[serde(default)]
     pub exper_boacas: Option<bool>,
+    #[serde(default)]
+    pub tier: Option<u8>,
+    #[serde(default)]
+    pub warm_pool: Option<bool>,
+    #[serde(default)]
+    pub deterministic_seed: Option<u64>,
+    #[serde(default)]
+    pub audit_egress: Vec<String>,
+    #[serde(default)]
+    pub server_port: Option<u16>,
+    #[serde(default)]
+    pub server_workers: Option<usize>,
+    #[serde(default)]
+    pub static_dir: Option<String>,
 }
 
 impl Default for SliceManifest {
@@ -772,8 +786,207 @@ impl Default for SliceManifest {
             env_file: None,
             capabilities: CapabilityToken::pure_compute(),
             exper_boacas: None,
+            tier: None,
+            warm_pool: None,
+            deterministic_seed: None,
+            audit_egress: Vec::new(),
+            server_port: None,
+            server_workers: None,
+            static_dir: None,
         }
     }
+}
+
+/// Parses a boolean setting string (`true`/`1`/`yes`/`on` vs `false`/`0`/`no`/`off`).
+#[inline]
+pub fn parse_bool_setting(raw: &str) -> Option<bool> {
+    let norm = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    if matches!(
+        norm,
+        "true" | "TRUE" | "1" | "yes" | "YES" | "on" | "ON" | "enabled"
+    ) {
+        Some(true)
+    } else if matches!(
+        norm,
+        "false" | "FALSE" | "0" | "no" | "NO" | "off" | "OFF" | "disabled"
+    ) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Parses an execution tier setting (`"1"`/`"tier1"`/`"boa"` -> `Some(1)`,
+/// `"0"`/`"tier0"`/`"snp"`/`"slicesnp"` -> `Some(0)`, `"auto"`/`"default"` -> `None`).
+#[inline]
+pub fn parse_tier_setting(raw: &str) -> Option<Option<u8>> {
+    let norm = raw
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_ascii_lowercase();
+    match norm.as_str() {
+        "1" | "tier1" | "tier-1" | "boa" | "baseline" => Some(Some(1)),
+        "0" | "tier0" | "tier-0" | "snp" | "slicesnp" => Some(Some(0)),
+        "auto" | "default" | "optimal" => Some(None),
+        _ => None,
+    }
+}
+
+/// Top-of-file inline source directives (`// @slice-<key>: <value>` or `// @slice-<key>=<value>`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InlineDirectives {
+    pub tier: Option<Option<u8>>,
+    pub boacas: Option<bool>,
+    pub warm: Option<bool>,
+    pub deterministic_seed: Option<u64>,
+    pub fuel_limit: Option<u64>,
+    pub memory_limit_bytes: Option<usize>,
+    pub allow_read: Vec<String>,
+    pub allow_write: Vec<String>,
+    pub allow_net: Vec<String>,
+    pub allow_env: Vec<(String, String)>,
+    pub env_file: Option<String>,
+    pub audit_egress: Vec<String>,
+    pub port: Option<u16>,
+    pub workers: Option<usize>,
+}
+
+/// Scans leading comment lines (`// @slice-...`) at the top of a TypeScript/JavaScript source string
+/// in `O(header lines)` without allocating on the body.
+pub fn parse_inline_directives(source: &str) -> InlineDirectives {
+    let mut dirs = InlineDirectives::default();
+    for line in source.lines().take(64) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("#!") {
+            continue;
+        }
+        let Some(comment_body) = trimmed.strip_prefix("//") else {
+            if trimmed.starts_with("/*") {
+                continue;
+            }
+            break;
+        };
+        let body = comment_body.trim();
+        let Some(rest) = body.strip_prefix("@slice-") else {
+            continue;
+        };
+        if rest == "no-boacas" || rest == "no-exper-boacas" {
+            dirs.boacas = Some(false);
+            continue;
+        } else if rest == "boacas" || rest == "exper-boacas" {
+            dirs.boacas = Some(true);
+            continue;
+        } else if rest == "warm" {
+            dirs.warm = Some(true);
+            continue;
+        } else if rest == "no-warm" {
+            dirs.warm = Some(false);
+            continue;
+        }
+        let Some((raw_k, raw_v)) = rest.split_once(':').or_else(|| rest.split_once('=')) else {
+            continue;
+        };
+        let key = raw_k.trim();
+        let val = raw_v.trim().trim_matches('"').trim_matches('\'').trim();
+        match key {
+            "tier" => {
+                if let Some(t) = parse_tier_setting(val) {
+                    dirs.tier = Some(t);
+                }
+            }
+            "boacas" | "exper-boacas" => {
+                if let Some(b) = parse_bool_setting(val) {
+                    dirs.boacas = Some(b);
+                }
+            }
+            "warm" | "warm-pool" => {
+                if let Some(b) = parse_bool_setting(val) {
+                    dirs.warm = Some(b);
+                }
+            }
+            "deterministic" | "deterministic-seed" | "seed" => {
+                let digits: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
+                if let Ok(n) = digits.parse::<u64>() {
+                    dirs.deterministic_seed = Some(n);
+                }
+            }
+            "fuel" => {
+                let digits: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
+                if let Ok(n) = digits.parse::<u64>() {
+                    dirs.fuel_limit = Some(n);
+                }
+            }
+            "memory-kb" | "memory_kb" => {
+                let digits: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
+                if let Ok(n) = digits.parse::<usize>() {
+                    dirs.memory_limit_bytes = Some(n.saturating_mul(1024));
+                }
+            }
+            "memory-mb" | "memory_mb" => {
+                let digits: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
+                if let Ok(n) = digits.parse::<usize>() {
+                    dirs.memory_limit_bytes = Some(n.saturating_mul(1024 * 1024));
+                }
+            }
+            "memory" | "memory-bytes" => {
+                let digits: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
+                if let Ok(n) = digits.parse::<usize>() {
+                    dirs.memory_limit_bytes = Some(n);
+                }
+            }
+            "allow-read" | "allow_read" => {
+                for item in parse_toml_string_array(val) {
+                    dirs.allow_read.push(item);
+                }
+            }
+            "allow-write" | "allow_write" => {
+                for item in parse_toml_string_array(val) {
+                    dirs.allow_write.push(item);
+                }
+            }
+            "allow-net" | "allow_net" => {
+                for item in parse_toml_string_array(val) {
+                    dirs.allow_net.push(item);
+                }
+            }
+            "allow-env" | "allow_env" => {
+                for item in parse_toml_string_array(val) {
+                    if let Some((ek, ev)) = item.split_once('=') {
+                        dirs.allow_env
+                            .push((ek.trim().to_string(), ev.trim().to_string()));
+                    } else {
+                        let ek = item.trim();
+                        let ev = std::env::var(ek).unwrap_or_default();
+                        dirs.allow_env.push((ek.to_string(), ev));
+                    }
+                }
+            }
+            "env-file" | "env_file" => {
+                if !val.is_empty() {
+                    dirs.env_file = Some(val.to_string());
+                }
+            }
+            "audit-egress" | "audit_egress" => {
+                for item in parse_toml_string_array(val) {
+                    dirs.audit_egress.push(item);
+                }
+            }
+            "port" => {
+                if let Ok(p) = val.parse::<u16>() {
+                    dirs.port = Some(p);
+                }
+            }
+            "workers" => {
+                if let Ok(w) = val.parse::<usize>() {
+                    dirs.workers = Some(w.max(1));
+                }
+            }
+            _ => {}
+        }
+    }
+    dirs
 }
 
 impl SliceManifest {
@@ -793,7 +1006,12 @@ impl SliceManifest {
             }
             if let Some((k, v)) = trimmed.split_once('=') {
                 let key = k.trim();
-                let val = v.trim();
+                let mut val = v.trim();
+                if !val.starts_with('"') && !val.starts_with('\'') && !val.starts_with('[') {
+                    if let Some((before_comment, _)) = val.split_once('#') {
+                        val = before_comment.trim();
+                    }
+                }
                 match (current_section, key) {
                     ("package", "name") => {
                         manifest.name = val.trim_matches('"').trim_matches('\'').to_string();
@@ -814,6 +1032,18 @@ impl SliceManifest {
                         let digits: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
                         if let Ok(n) = digits.parse::<usize>() {
                             manifest.memory_limit_kb = n;
+                        }
+                    }
+                    ("limits", "memory_mb") => {
+                        let digits: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
+                        if let Ok(n) = digits.parse::<usize>() {
+                            manifest.memory_limit_kb = n.saturating_mul(1024);
+                        }
+                    }
+                    ("limits", "memory_bytes") => {
+                        let digits: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
+                        if let Ok(n) = digits.parse::<usize>() {
+                            manifest.memory_limit_kb = (n / 1024).max(1);
                         }
                     }
                     ("capabilities", "allow_read") => {
@@ -854,6 +1084,11 @@ impl SliceManifest {
                             manifest.env_file = Some(ef);
                         }
                     }
+                    ("capabilities", "audit_egress") | ("security", "audit_egress") => {
+                        for item in parse_toml_string_array(val) {
+                            manifest.audit_egress.push(item);
+                        }
+                    }
                     ("capabilities.env", _) => {
                         let env_val = val.trim_matches('"').trim_matches('\'').to_string();
                         manifest
@@ -861,12 +1096,50 @@ impl SliceManifest {
                             .allowed_env_keys
                             .insert(key.to_string(), env_val);
                     }
-                    ("experiments", "boacas") => {
-                        let norm = val.trim_matches('"').trim_matches('\'').trim();
-                        if matches!(norm, "true" | "1" | "yes" | "on") {
-                            manifest.exper_boacas = Some(true);
-                        } else if matches!(norm, "false" | "0" | "no" | "off") {
-                            manifest.exper_boacas = Some(false);
+                    ("engine", "boacas")
+                    | ("runtime", "boacas")
+                    | ("experiments", "boacas") => {
+                        if let Some(b) = parse_bool_setting(val) {
+                            manifest.exper_boacas = Some(b);
+                        }
+                    }
+                    ("engine", "tier") | ("runtime", "tier") => {
+                        if let Some(t) = parse_tier_setting(val) {
+                            manifest.tier = t;
+                        }
+                    }
+                    ("engine", "warm")
+                    | ("engine", "warm_pool")
+                    | ("runtime", "warm")
+                    | ("runtime", "warm_pool") => {
+                        if let Some(b) = parse_bool_setting(val) {
+                            manifest.warm_pool = Some(b);
+                        }
+                    }
+                    ("engine", "deterministic_seed")
+                    | ("engine", "deterministic")
+                    | ("runtime", "deterministic_seed") => {
+                        let digits: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
+                        if let Ok(n) = digits.parse::<u64>() {
+                            manifest.deterministic_seed = Some(n);
+                        }
+                    }
+                    ("server", "port") => {
+                        let digits: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
+                        if let Ok(p) = digits.parse::<u16>() {
+                            manifest.server_port = Some(p);
+                        }
+                    }
+                    ("server", "workers") => {
+                        let digits: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
+                        if let Ok(w) = digits.parse::<usize>() {
+                            manifest.server_workers = Some(w.max(1));
+                        }
+                    }
+                    ("server", "static_dir") | ("server", "static") => {
+                        let sd = val.trim_matches('"').trim_matches('\'').trim().to_string();
+                        if !sd.is_empty() {
+                            manifest.static_dir = Some(sd);
                         }
                     }
                     _ => {}
@@ -885,6 +1158,12 @@ impl SliceManifest {
 name = "{}"
 version = "0.1.0"
 entrypoint = "./src/index.ts"
+
+[engine]
+# Default optimal execution tier ("tier1" = Precompiled Boa ES2024+ with Tier-2 SIMD intrinsics)
+tier = "tier1"
+# Precompiled Boa CodeBlock CAS container (`SLICEBC\x01`, enabled by default)
+boacas = true
 
 [limits]
 # Deterministic CPU instruction fuel ceiling per tenant invocation
@@ -1381,5 +1660,97 @@ env_file = ".env.production"
             assert!(vfs_prefix_matches(&abs_in_cwd.to_string_lossy(), "."));
             assert!(vfs_prefix_matches("Cargo.toml", &cwd.to_string_lossy()));
         }
+    }
+
+    #[test]
+    fn test_manifest_engine_server_and_inline_directives_parsing() {
+        let toml = r#"
+[package]
+name = "edge-worker"
+version = "1.2.0"
+
+[engine]
+tier = "tier1"
+boacas = true
+warm = true
+deterministic_seed = 42
+
+[limits]
+fuel = 25_000_000
+memory_mb = 32
+
+[capabilities]
+allow_read = ["/app", "./data"]
+allow_write = ["/tmp"]
+allow_net = ["api.example.com:443"]
+env_file = ".env.prod"
+audit_egress = ["sk_live_secret_12345"]
+
+[capabilities.env]
+NODE_ENV = "production"
+
+[server]
+port = 8080
+workers = 4
+static_dir = "./public"
+"#;
+        let m = SliceManifest::parse_toml(toml);
+        assert_eq!(m.name, "edge-worker");
+        assert_eq!(m.version, "1.2.0");
+        assert_eq!(m.tier, Some(1));
+        assert_eq!(m.exper_boacas, Some(true));
+        assert_eq!(m.warm_pool, Some(true));
+        assert_eq!(m.deterministic_seed, Some(42));
+        assert_eq!(m.fuel_limit, 25_000_000);
+        assert_eq!(m.memory_limit_kb, 32 * 1024);
+        assert_eq!(
+            m.capabilities.allowed_read_prefixes,
+            vec!["/app".to_string(), "./data".to_string()]
+        );
+        assert_eq!(
+            m.capabilities.allowed_write_prefixes,
+            vec!["/tmp".to_string()]
+        );
+        assert!(m.capabilities.allowed_net_hosts.contains("api.example.com:443"));
+        assert_eq!(
+            m.capabilities.allowed_env_keys.get("NODE_ENV").map(|s| s.as_str()),
+            Some("production")
+        );
+        assert_eq!(m.env_file.as_deref(), Some(".env.prod"));
+        assert_eq!(m.audit_egress, vec!["sk_live_secret_12345".to_string()]);
+        assert_eq!(m.server_port, Some(8080));
+        assert_eq!(m.server_workers, Some(4));
+        assert_eq!(m.static_dir.as_deref(), Some("./public"));
+
+        let src = r#"#!/usr/bin/env slice
+// @slice-tier: tier1
+// @slice-boacas: false
+// @slice-warm: true
+// @slice-deterministic: 1337
+// @slice-fuel: 10_000_000
+// @slice-memory-kb: 8192
+// @slice-allow-read: ["/tmp", "./fixtures"]
+// @slice-allow-write: "/tmp"
+// @slice-allow-net: ["127.0.0.1:3000"]
+// @slice-allow-env: ["API_MODE=test"]
+// @slice-audit-egress: ["top_secret_token"]
+// @slice-port: 9090
+// @slice-workers: 2
+const x = 1 + 2;
+"#;
+        let dirs = parse_inline_directives(src);
+        assert_eq!(dirs.tier, Some(Some(1)));
+        assert_eq!(dirs.boacas, Some(false));
+        assert_eq!(dirs.warm, Some(true));
+        assert_eq!(dirs.deterministic_seed, Some(1337));
+        assert_eq!(dirs.fuel_limit, Some(10_000_000));
+        assert_eq!(dirs.memory_limit_bytes, Some(8192 * 1024));
+        assert_eq!(dirs.allow_read, vec!["/tmp".to_string(), "./fixtures".to_string()]);
+        assert_eq!(dirs.allow_write, vec!["/tmp".to_string()]);
+        assert_eq!(dirs.allow_net, vec!["127.0.0.1:3000".to_string()]);
+        assert_eq!(dirs.allow_env, vec![("API_MODE".to_string(), "test".to_string())]);
+        assert_eq!(dirs.audit_egress, vec!["top_secret_token".to_string()]);
+        assert_eq!(dirs.port, Some(9090));
+        assert_eq!(dirs.workers, Some(2));
     }
 }

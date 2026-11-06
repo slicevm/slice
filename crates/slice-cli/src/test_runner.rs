@@ -76,10 +76,6 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
     let target_str = target_opt.unwrap_or_else(|| ".".to_string());
     let target_path = Path::new(&target_str);
     exec_cfg.apply_target_path_manifest(target_path);
-    let caps = exec_cfg.caps;
-    let fuel_limit = exec_cfg.fuel_limit;
-    let mem_limit = exec_cfg.mem_limit;
-    let audit_secrets = exec_cfg.audit_secrets;
 
     let test_files = discover_test_files(target_path)?;
     if test_files.is_empty() {
@@ -97,6 +93,10 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
     let mut all_results: Vec<serde_json::Value> = Vec::new();
 
     for test_file in &test_files {
+        let mut file_cfg = exec_cfg.clone();
+        if let Ok(raw_test) = std::fs::read_to_string(test_file) {
+            file_cfg.apply_inline_directives(&raw_test, test_file.parent());
+        }
         let bundled = slice_cas::bundle_entrypoint_with_deps(test_file)?;
         let filter_js = match &filter_opt {
             Some(flt) => format!(
@@ -111,10 +111,15 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
         );
         let bytecode = compile_source_to_bytecode(&wrapped_js);
 
-        let mut isolate =
-            SliceIsolate::spawn("slice-test-runner", 1, caps.clone(), fuel_limit, mem_limit);
-        isolate.set_deterministic_seed(deterministic_seed);
-        for sec in &audit_secrets {
+        let mut isolate = SliceIsolate::spawn(
+            "slice-test-runner",
+            1,
+            file_cfg.caps,
+            file_cfg.fuel_limit,
+            file_cfg.mem_limit,
+        );
+        isolate.set_deterministic_seed(deterministic_seed.or(file_cfg.deterministic_seed));
+        for sec in &file_cfg.audit_secrets {
             isolate.add_egress_audit_secret(sec.clone());
         }
         let metrics = isolate.execute_bytecode(&bytecode, None)?;
@@ -199,6 +204,10 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
             let mut rerun_passed = 0usize;
             let mut rerun_failed = 0usize;
             for test_file in &discover_test_files(target_path)? {
+                let mut file_cfg = exec_cfg.clone();
+                if let Ok(raw_test) = std::fs::read_to_string(test_file) {
+                    file_cfg.apply_inline_directives(&raw_test, test_file.parent());
+                }
                 let bundled = slice_cas::bundle_entrypoint_with_deps(test_file)?;
                 let filter_js = match &filter_opt {
                     Some(flt) => format!(
@@ -212,10 +221,15 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
                     filter_js, bundled
                 );
                 let bytecode = compile_source_to_bytecode(&wrapped_js);
-                let mut isolate =
-                    SliceIsolate::spawn("slice-test-watch", 1, caps.clone(), fuel_limit, mem_limit);
-                isolate.set_deterministic_seed(deterministic_seed);
-                for sec in &audit_secrets {
+                let mut isolate = SliceIsolate::spawn(
+                    "slice-test-watch",
+                    1,
+                    file_cfg.caps,
+                    file_cfg.fuel_limit,
+                    file_cfg.mem_limit,
+                );
+                isolate.set_deterministic_seed(deterministic_seed.or(file_cfg.deterministic_seed));
+                for sec in &file_cfg.audit_secrets {
                     isolate.add_egress_audit_secret(sec.clone());
                 }
                 let metrics = isolate.execute_bytecode(&bytecode, None)?;

@@ -10,32 +10,16 @@ use std::time::Instant;
 
 pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
     let mut exec_cfg = ResolvedExecutionConfig::from_cli_args(args)?;
-    let mut port: u16 = 3000;
     let mut smoke_test = false;
     let mut max_requests_opt: Option<usize> = None;
     let mut tenant_dir_opt: Option<PathBuf> = None;
-    let mut static_dir_opt: Option<PathBuf> = None;
-    let mut deterministic_seed: Option<u64> = None;
-    let mut workers: usize = std::thread::available_parallelism()
-        .map(|n| n.get().clamp(1, 8))
-        .unwrap_or(4);
     let mut target_opt: Option<String> = None;
 
     for arg in args {
-        if let Some(p) = arg.strip_prefix("--port=") {
-            port = p.parse().unwrap_or(3000);
-        } else if let Some(w) = arg.strip_prefix("--workers=") {
-            workers = w.parse().unwrap_or(4).max(1);
-        } else if let Some(m) = arg.strip_prefix("--max-requests=") {
+        if let Some(m) = arg.strip_prefix("--max-requests=") {
             max_requests_opt = m.parse().ok();
         } else if let Some(td) = arg.strip_prefix("--tenant-dir=") {
             tenant_dir_opt = Some(PathBuf::from(td));
-        } else if let Some(sd) = arg.strip_prefix("--static=") {
-            static_dir_opt = Some(PathBuf::from(sd));
-        } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
-            deterministic_seed = Some(seed_str.parse().unwrap_or(42));
-        } else if arg == "--deterministic" {
-            deterministic_seed = Some(42);
         } else if arg == "--smoke-test" || arg == "--once" {
             smoke_test = true;
         } else if !arg.starts_with('-') && target_opt.is_none() {
@@ -64,6 +48,9 @@ console.log(route_res);
         } else {
             exec_cfg.apply_target_path_manifest(p);
             let entry_file = slice_cas::resolve_project_entrypoint(p, None)?;
+            if let Ok(raw_entry) = std::fs::read_to_string(&entry_file) {
+                exec_cfg.apply_inline_directives(&raw_entry, entry_file.parent());
+            }
             let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
             compile_source_to_bytecode(&bundled)
         }
@@ -81,6 +68,14 @@ console.log(route_res);
         compile_source_to_bytecode(default_handler_src)
     });
 
+    let port: u16 = exec_cfg.server_port.unwrap_or(3000);
+    let workers: usize = exec_cfg.server_workers.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get().clamp(1, 8))
+            .unwrap_or(4)
+    });
+    let static_dir_opt = exec_cfg.static_dir;
+    let deterministic_seed = exec_cfg.deterministic_seed;
     let caps = exec_cfg.caps;
     let fuel_limit = exec_cfg.fuel_limit;
     let mem_limit = exec_cfg.mem_limit;

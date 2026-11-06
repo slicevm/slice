@@ -2163,7 +2163,10 @@ fn test_wave_e_hono_and_itty_unjs_framework_suites() {
     iso.reset_for_request("wave-e-annex-b", 2, 5_000_000, 16 * 1024 * 1024);
     let wrapped_bundle = "globalThis.__slice_test_filter = \"\";\nvar __slice_modules = {};\nconst hasOwn = Object.prototype.hasOwnProperty.call({ a: 1 }, \"a\");\nconsole.log(String(hasOwn));\n";
     let wrapped_bc = compile_source_to_bytecode(wrapped_bundle);
-    assert!(wrapped_bc.starts_with(b"SLICEBOA{\n"));
+    assert!(
+        wrapped_bc.starts_with(slice_engine::BOACAS_MAGIC)
+            || wrapped_bc.starts_with(b"SLICEBOA{\n")
+    );
     let m2 = iso.execute_bytecode(&wrapped_bc, None).unwrap();
     assert_eq!(m2.stdout[0], "true");
 
@@ -2305,6 +2308,71 @@ allow_env = ["STRIPE_SECRET_KEY=sk_live_subdir_manifest_998877"]
         .caps
         .allowed_read_prefixes
         .contains(&"/tmp".to_string()));
+
+    // 3. Verify 4-layer precedence: Defaults (Tier 1, boacas=true) < slice.toml < Inline Directives < CLI Flags
+    let inline_source = r#"// @slice-tier: tier1
+// @slice-boacas: false
+// @slice-warm: true
+// @slice-deterministic: 9001
+// @slice-fuel: 12000000
+// @slice-memory-kb: 4096
+// @slice-allow-read: ["/inline_read"]
+// @slice-port: 4567
+// @slice-workers: 3
+console.log("hi");
+"#;
+    let mut cfg_inline = ResolvedExecutionConfig::from_cli_args(&[]).unwrap();
+    assert!(slice_engine::is_exper_boacas_build_enabled());
+    assert_eq!(slice_engine::active_tier_override(), None);
+    let default_iso =
+        SliceIsolate::spawn("tier-check", 1, CapabilityToken::pure_compute(), 1000, 1024);
+    assert_eq!(
+        default_iso.current_tier,
+        slice_engine::ExecutionTier::Tier1Baseline
+    );
+    cfg_inline.apply_target_path_manifest(&entry_path);
+    cfg_inline.apply_inline_directives(inline_source, Some(&src_dir));
+    assert_eq!(slice_engine::active_tier_override(), Some(1));
+    assert!(!slice_engine::is_exper_boacas_build_enabled());
+    assert!(cfg_inline.warm_pool);
+    assert_eq!(cfg_inline.deterministic_seed, Some(9001));
+    assert_eq!(cfg_inline.fuel_limit, 12_000_000);
+    assert_eq!(cfg_inline.mem_limit, 4096 * 1024);
+    assert!(cfg_inline
+        .caps
+        .allowed_read_prefixes
+        .contains(&"/inline_read".to_string()));
+    assert_eq!(cfg_inline.server_port, Some(4567));
+    assert_eq!(cfg_inline.server_workers, Some(3));
+
+    // Explicit CLI flags win over inline directives
+    let cli_win_args = vec![
+        "--boacas".to_string(),
+        "--fuel=99000000".to_string(),
+        "--port=7777".to_string(),
+    ];
+    let mut cfg_cli_win = ResolvedExecutionConfig::from_cli_args(&cli_win_args).unwrap();
+    cfg_cli_win.apply_target_path_manifest(&entry_path);
+    cfg_cli_win.apply_inline_directives(inline_source, Some(&src_dir));
+    assert!(slice_engine::is_exper_boacas_build_enabled());
+    assert_eq!(cfg_cli_win.fuel_limit, 99_000_000);
+    assert_eq!(cfg_cli_win.server_port, Some(7777));
+
+    // Reset global overrides back to default and verify `compile_source_to_bytecode` honors inline `// @slice-boacas: false` vs default `SLICEBC\x01`
+    slice_engine::set_exper_boacas_override(None);
+    slice_engine::set_thread_exper_boacas_override(None);
+    slice_engine::set_tier_override(None);
+    slice_engine::set_thread_tier_override(None);
+    let bc_default =
+        compile_source_to_bytecode("class App { run() { return 1 + 2; } } console.log(new App().run());\n");
+    assert!(bc_default.starts_with(slice_engine::BOACAS_MAGIC));
+    let bc_no_boacas = compile_source_to_bytecode(
+        "// @slice-boacas: false\nclass App { run() { return 1 + 2; } } console.log(new App().run());\n",
+    );
+    assert!(bc_no_boacas.starts_with(b"SLICEBOA"));
+    let bc_tier1_forced =
+        compile_source_to_bytecode("// @slice-tier: 1\nconsole.log(1 + 2);\n");
+    assert!(bc_tier1_forced.starts_with(slice_engine::BOACAS_MAGIC));
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
