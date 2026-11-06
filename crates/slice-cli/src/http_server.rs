@@ -789,7 +789,7 @@ pub(crate) fn serve_connection_keep_alive(
                     && outcome.status_code != 403
                     && outcome.status_code != 400
                 {
-                    let accept_key = slice_engine::compute_websocket_accept_key(&sec_websocket_key);
+                    let accept_key = slice_engine::compute_websocket_accept_key(sec_websocket_key);
                     write_buf.clear();
                     let _ = write!(
                         write_buf,
