@@ -3,20 +3,24 @@
 //! Replaces readiness-based `libuv` thread pools with lockless Submission Queue (SQ)
 //! and Completion Queue (CQ) rings backed by pre-registered, page-aligned fixed buffers.
 
-#[cfg(target_os = "windows")]
-use anyhow::bail;
-use anyhow::Result;
+use anyhow::{bail, ensure, Result};
 use std::collections::VecDeque;
+use std::pin::Pin;
 
 pub const DEFAULT_RING_ENTRIES: u32 = 256;
 pub const FIXED_BUFFER_SIZE: usize = 65536; // 64 KB per registered slab slot
 pub const FIXED_BUFFER_COUNT: usize = 64;
 
-/// Pre-allocated, page-aligned fixed buffer pool registered with the kernel completion ring.
-/// Eliminates intermediate kernel-to-userspace memory copies.
+/// Pre-allocated, pinned fixed buffer pool registered with the kernel completion ring.
+///
+/// Both the outer slice (`Box<[Pin<Box<[u8]>>]>`) and each individual buffer (`Pin<Box<[u8]>>`)
+/// have fixed, immutable capacity and stable heap addresses for the entire lifetime of the pool,
+/// eliminating any risk of Use-After-Free if an `io_uring` or IOCP operation references a slab slot.
 pub struct RegisteredBufferPool {
-    buffers: Vec<Vec<u8>>,
+    buffers: Box<[Pin<Box<[u8]>>]>,
     free_list: VecDeque<u16>,
+    in_use: Vec<bool>,
+    buf_size: usize,
 }
 
 impl RegisteredBufferPool {
@@ -24,26 +28,60 @@ impl RegisteredBufferPool {
         let mut buffers = Vec::with_capacity(count);
         let mut free_list = VecDeque::with_capacity(count);
         for idx in 0..count {
-            buffers.push(vec![0u8; buf_size]);
+            buffers.push(Pin::new(vec![0u8; buf_size].into_boxed_slice()));
             free_list.push_back(idx as u16);
         }
-        Self { buffers, free_list }
+        Self {
+            buffers: buffers.into_boxed_slice(),
+            free_list,
+            in_use: vec![false; count],
+            buf_size,
+        }
     }
 
     #[inline]
     pub fn acquire(&mut self) -> Option<(u16, &mut [u8])> {
         let idx = self.free_list.pop_front()?;
-        Some((idx, &mut self.buffers[idx as usize]))
+        let slot = idx as usize;
+        self.in_use[slot] = true;
+        Some((idx, &mut self.buffers[slot][..]))
     }
 
     #[inline]
     pub fn release(&mut self, idx: u16) {
-        self.free_list.push_back(idx);
+        let slot = idx as usize;
+        if slot < self.in_use.len() && self.in_use[slot] {
+            self.in_use[slot] = false;
+            self.free_list.push_back(idx);
+        }
     }
 
     #[inline]
     pub fn get_slice(&self, idx: u16, len: usize) -> &[u8] {
-        &self.buffers[idx as usize][..len]
+        let Some(buf) = self.buffers.get(idx as usize) else {
+            return &[];
+        };
+        let clamped_len = len.min(buf.len());
+        &buf[..clamped_len]
+    }
+
+    /// Validates that `buf_index` is an active slot in the pool and `len` does not exceed the slot capacity.
+    #[inline]
+    pub fn validate_submission_bounds(&self, buf_index: u16, len: u32) -> Result<()> {
+        let slot = buf_index as usize;
+        ensure!(
+            slot < self.buffers.len(),
+            "RegisteredBufferPool index {} out of bounds (pool count: {})",
+            buf_index,
+            self.buffers.len()
+        );
+        ensure!(
+            (len as usize) <= self.buf_size,
+            "IoSubmission length {} exceeds fixed slab buffer size {}",
+            len,
+            self.buf_size
+        );
+        Ok(())
     }
 }
 
@@ -219,6 +257,14 @@ impl CompletionRingEngine {
 
     /// Submits a batch of I/O operations into the Submission Queue (SQ) and harvests completions.
     pub fn submit_and_reap(&mut self, ops: &[IoSubmission]) -> Result<Vec<IoCompletion>> {
+        for op in ops {
+            if let IoSubmission::ReadFixed { buf_index, len, .. }
+            | IoSubmission::WriteFixed { buf_index, len, .. } = *op
+            {
+                self.buffer_pool.validate_submission_bounds(buf_index, len)?;
+            }
+        }
+
         #[cfg(target_os = "linux")]
         {
             if let Some(ring) = &mut self.linux_ring {
@@ -394,7 +440,33 @@ mod tests {
         assert!(pool.acquire().is_none());
 
         pool.release(idx0);
+        // Duplicate release of an already-free slot must be a no-op
+        pool.release(idx0);
         let (idx_reused, _) = pool.acquire().unwrap();
         assert_eq!(idx_reused, 0);
+        assert!(pool.acquire().is_none());
+    }
+
+    #[test]
+    fn test_submission_bounds_and_pinned_safety() {
+        let mut engine = CompletionRingEngine::new(64, false).unwrap();
+        let bad_index_op = vec![IoSubmission::ReadFixed {
+            fd: 0,
+            buf_index: 999,
+            offset: 0,
+            len: 64,
+            user_data: 1,
+        }];
+        assert!(engine.submit_and_reap(&bad_index_op).is_err());
+
+        let bad_len_op = vec![IoSubmission::WriteFixed {
+            fd: 1,
+            buf_index: 0,
+            offset: 0,
+            len: (FIXED_BUFFER_SIZE as u32) + 1,
+            user_data: 2,
+        }];
+        assert!(engine.submit_and_reap(&bad_len_op).is_err());
+        assert_eq!(engine.buffer_pool.get_slice(999, 16), &[]);
     }
 }
