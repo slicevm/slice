@@ -2953,10 +2953,41 @@ pub(crate) fn collect_eager_module_indices(
                     Statement::ClassDeclaration(cd) => {
                         collect_class_deferred(cd, &mut deferred_spans)
                     }
+                    Statement::FunctionDeclaration(fd) => {
+                        if let (Some(id), Some(body)) = (&fd.id, &fd.body) {
+                            let call_pat = format!("{}(", id.name);
+                            let start = fd.span.start as usize;
+                            let end = fd.span.end as usize;
+                            if !code[..start].contains(&call_pat)
+                                && !code[end..].contains(&call_pat)
+                            {
+                                deferred_spans.push((body.span.start as usize, body.span.end as usize));
+                            }
+                        }
+                    }
                     Statement::VariableDeclaration(vd) => {
                         for decl in &vd.declarations {
                             if let Some(Expression::ClassExpression(ce)) = &decl.init {
                                 collect_class_deferred(ce, &mut deferred_spans);
+                            } else if matches!(
+                                &decl.init,
+                                Some(
+                                    Expression::FunctionExpression(_)
+                                        | Expression::ArrowFunctionExpression(_)
+                                )
+                            ) {
+                                if let oxc::ast::ast::BindingPattern::BindingIdentifier(id) =
+                                    &decl.id
+                                {
+                                    let call_pat = format!("{}(", id.name);
+                                    let start = decl.span.start as usize;
+                                    let end = decl.span.end as usize;
+                                    if !code[..start].contains(&call_pat)
+                                        && !code[end..].contains(&call_pat)
+                                    {
+                                        deferred_spans.push((start, end));
+                                    }
+                                }
                             }
                         }
                     }

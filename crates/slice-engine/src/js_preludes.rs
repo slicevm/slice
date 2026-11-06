@@ -125,16 +125,17 @@ pub(crate) fn register_shard_host_functions_for_mask(
     }
 }
 
-/// Concatenates `ULTRA_CORE_PRELUDE`, all set shards in `shards_mask` (in topological `SHARD_LOAD_ORDER`),
-/// `globalThis.__shMask`, optional `LAZY_GETTERS_INIT_PRELUDE`, and `js_code` into a single contiguous
-/// ECMAScript compilation unit so `boa_engine` parses and compiles everything in one pass.
-#[allow(dead_code)]
-pub(crate) fn build_fused_prelude_and_bundle(
-    js_code: &str,
+/// Builds the single-pass fused prelude prefix (`ULTRA_CORE_PRELUDE`, all set shards in
+/// `shards_mask` in topological `SHARD_LOAD_ORDER`, `globalThis.__shMask`, optional
+/// `LAZY_GETTERS_INIT_PRELUDE`, and boot-flag hooks) so that when placed immediately before
+/// `fallback_js` in `SLICEBC\x01`, the entire `[precompiled_prefix .. fallback_js]` region is a
+/// single contiguous zero-copy ECMAScript program in memory.
+pub(crate) fn build_fused_prelude_prefix(
     shards_mask: u32,
     init_lazy_getters: bool,
+    has_next_tick: bool,
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(ULTRA_CORE_PRELUDE.len() + js_code.len() + 16_384);
+    let mut out = Vec::with_capacity(ULTRA_CORE_PRELUDE.len() + 8192);
     out.extend_from_slice(ULTRA_CORE_PRELUDE);
     out.push(b'\n');
     let mut active_mask: u32 = 0;
@@ -149,6 +150,9 @@ pub(crate) fn build_fused_prelude_and_bundle(
             }
         }
     }
+    if init_lazy_getters {
+        active_mask |= 1;
+    }
     if active_mask != 0 {
         let mut mask_buf = itoa::Buffer::new();
         out.extend_from_slice(b"globalThis.__shMask|=");
@@ -159,6 +163,26 @@ pub(crate) fn build_fused_prelude_and_bundle(
         out.extend_from_slice(LAZY_GETTERS_INIT_PRELUDE);
         out.push(b'\n');
     }
+    if has_next_tick {
+        out.extend_from_slice(b"__slice_set_next_tick_hook(true);\n");
+    }
+    out.extend_from_slice(
+        b"if(globalThis.__slice_bf){if(globalThis.__slice_bf&1)__slice_sync_process_env(true);if(globalThis.__slice_bf&2)__slice_set_det_mode(true);if(globalThis.__slice_bf&4)globalThis.__slice_init_worker_self_env(true);}\n",
+    );
+    out
+}
+
+/// Concatenates `build_fused_prelude_prefix` and `js_code` into a single contiguous
+/// ECMAScript compilation unit so `boa_engine` parses and compiles everything in one pass.
+#[allow(dead_code)]
+pub(crate) fn build_fused_prelude_and_bundle(
+    js_code: &str,
+    shards_mask: u32,
+    init_lazy_getters: bool,
+    has_next_tick: bool,
+) -> Vec<u8> {
+    let mut out = build_fused_prelude_prefix(shards_mask, init_lazy_getters, has_next_tick);
+    out.reserve(js_code.len() + 4);
     if js_code.starts_with('{') {
         out.extend_from_slice(js_code.as_bytes());
     } else {
