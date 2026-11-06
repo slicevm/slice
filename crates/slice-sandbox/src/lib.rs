@@ -104,7 +104,10 @@ impl HardwareProtectionDomain {
             // SYS_pkey_alloc on x86_64 Linux is 330
             let pkey = unsafe { libc::syscall(330, 0usize, 0usize) as i32 };
             if pkey > 0 && pkey < 16 {
-                let mask = !(0b11u32 << (pkey * 2));
+                // Keep PKEY 0 (bits 0..1, default kernel stack/heap key) and the active tenant's
+                // PKEY (bits 2*pkey..2*pkey+1) set to 0b00 (read/write allowed), while setting
+                // all other tenant keys (1..15) to 0b11 (PKEY_DISABLE_ACCESS | PKEY_DISABLE_WRITE).
+                let mask = !(0b11u32 | (0b11u32 << (pkey * 2)));
                 return Self {
                     pkey,
                     pkru_mask: mask,
@@ -113,7 +116,7 @@ impl HardwareProtectionDomain {
             }
         }
 
-        let mask = !(0b11u32 << (domain_slot * 2));
+        let mask = !(0b11u32 | (0b11u32 << (domain_slot * 2)));
         Self {
             pkey: domain_slot,
             pkru_mask: mask,
@@ -149,8 +152,18 @@ impl HardwareProtectionDomain {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         {
             if self.hardware_enforced && self.pkey > 0 {
-                // SYS_pkey_free on x86_64 Linux is 331
                 unsafe {
+                    let default_pkru: u32 = 0;
+                    core::arch::asm!(
+                        "xor ecx, ecx",
+                        "xor edx, edx",
+                        "wrpkru",
+                        in("eax") default_pkru,
+                        out("ecx") _,
+                        out("edx") _,
+                        options(nomem, nostack)
+                    );
+                    // SYS_pkey_free on x86_64 Linux is 331
                     let _ = libc::syscall(331, self.pkey as usize);
                 }
             }

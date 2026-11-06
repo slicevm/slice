@@ -39,20 +39,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 fn main() -> Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        let builder = std::thread::Builder::new()
-            .name("slice-main".to_string())
-            .stack_size(16 * 1024 * 1024);
-        let handle = builder.spawn(cli_entrypoint)?;
-        match handle.join() {
-            Ok(res) => res,
-            Err(_) => bail!("Slice main thread panicked"),
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        cli_entrypoint()
+    let builder = std::thread::Builder::new()
+        .name("slice-main".to_string())
+        .stack_size(16 * 1024 * 1024);
+    let handle = builder.spawn(cli_entrypoint)?;
+    match handle.join() {
+        Ok(res) => res,
+        Err(_) => bail!("Slice main thread panicked"),
     }
 }
 
