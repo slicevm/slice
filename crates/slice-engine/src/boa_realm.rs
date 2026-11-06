@@ -78,7 +78,7 @@ thread_local! {
         const { std::cell::RefCell::new(boa_engine::JsValue::undefined()) };
 }
 
-struct SliceJobExecutor {
+pub(crate) struct SliceJobExecutor {
     promise_jobs: std::cell::RefCell<
         std::collections::VecDeque<(boa_engine::job::PromiseJob, Option<boa_engine::JsValue>)>,
     >,
@@ -86,7 +86,7 @@ struct SliceJobExecutor {
 }
 
 impl SliceJobExecutor {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             promise_jobs: std::cell::RefCell::new(std::collections::VecDeque::with_capacity(16)),
             fallback: std::rc::Rc::new(boa_engine::job::SimpleJobExecutor::new()),
@@ -214,10 +214,13 @@ pub(crate) fn check_boa_fs_write_ocap(path: &str) -> bool {
     })
 }
 
+#[inline]
+pub(crate) fn try_acquire_pooled_boa_realm() -> Option<WarmBoaRealm> {
+    BOA_CONTEXT_POOL.with(|pool| pool.borrow_mut().pop())
+}
+
 pub(crate) fn acquire_warm_boa_realm() -> WarmBoaRealm {
-    BOA_CONTEXT_POOL
-        .with(|pool| pool.borrow_mut().pop())
-        .unwrap_or_else(create_warm_boa_realm)
+    try_acquire_pooled_boa_realm().unwrap_or_else(create_warm_boa_realm)
 }
 
 pub(crate) fn release_warm_boa_realm(realm: WarmBoaRealm) {
@@ -229,35 +232,58 @@ pub(crate) fn release_warm_boa_realm(realm: WarmBoaRealm) {
     });
 }
 
-/// Creates a warm `boa_engine::Context` initialized with Slice's native host functions,
-/// WinterTC /WHATWG globals (`console.*`, `fetch`, `URL`, `Headers`, `Request`, `Response`,
-/// `ReadableStream`, `WritableStream`, `TransformStream`, `WebCrypto`, `Buffer`, `structuredClone`),
-/// and microtask/macrotask schedulers (`process.nextTick`, `queueMicrotask`, `setImmediate`, `setTimeout`).
-pub(crate) fn create_warm_boa_realm() -> WarmBoaRealm {
+/// Creates a bare `boa_engine::Context` with `SliceJobExecutor` and core native Rust host functions
+/// registered, without evaluating `ULTRA_CORE_PRELUDE` yet (used when executing pre-fused or
+/// pre-compiled `SLICEBC\x01` payloads on cold start).
+pub(crate) fn create_bare_boa_realm() -> WarmBoaRealm {
     let mut ctx = boa_engine::context::ContextBuilder::new()
         .job_executor(std::rc::Rc::new(SliceJobExecutor::new()))
         .build()
         .unwrap_or_else(|_| boa_engine::Context::default());
     register_slice_native_host_functions(&mut ctx);
-
-    let _ = ctx.eval(boa_engine::Source::from_bytes(ULTRA_CORE_PRELUDE));
-    let global = ctx.global_object();
-    let ses_check_fn = global
-        .get(boa_engine::js_string!("__slice_check_ses"), &mut ctx)
-        .ok()
-        .and_then(|v| v.as_object());
-    let ensure_shard_fn = global
-        .get(boa_engine::js_string!("__slice_ensure_shard"), &mut ctx)
-        .ok()
-        .and_then(|v| v.as_object());
     WarmBoaRealm {
         ctx,
         loaded_bundles: FxHashMap::default(),
-        ses_check_fn,
-        ensure_shard_fn,
+        ses_check_fn: None,
+        ensure_shard_fn: None,
         init_worker_self_fn: None,
         loaded_shards_mask: 0,
     }
+}
+
+/// Refreshes the cached JS function handles (`__slice_check_ses`, `__slice_ensure_shard`) on `realm`
+/// after `ULTRA_CORE_PRELUDE` has been evaluated.
+#[inline]
+pub(crate) fn populate_realm_cached_handles(realm: &mut WarmBoaRealm) {
+    let global = realm.ctx.global_object();
+    if realm.ses_check_fn.is_none() {
+        realm.ses_check_fn = global
+            .get(boa_engine::js_string!("__slice_check_ses"), &mut realm.ctx)
+            .ok()
+            .and_then(|v| v.as_object());
+    }
+    if realm.ensure_shard_fn.is_none() {
+        realm.ensure_shard_fn = global
+            .get(
+                boa_engine::js_string!("__slice_ensure_shard"),
+                &mut realm.ctx,
+            )
+            .ok()
+            .and_then(|v| v.as_object());
+    }
+}
+
+/// Creates a warm `boa_engine::Context` initialized with Slice's native host functions,
+/// WinterTC /WHATWG globals (`console.*`, `fetch`, `URL`, `Headers`, `Request`, `Response`,
+/// `ReadableStream`, `WritableStream`, `TransformStream`, `WebCrypto`, `Buffer`, `structuredClone`),
+/// and microtask/macrotask schedulers (`process.nextTick`, `queueMicrotask`, `setImmediate`, `setTimeout`).
+pub(crate) fn create_warm_boa_realm() -> WarmBoaRealm {
+    let mut realm = create_bare_boa_realm();
+    let _ = realm
+        .ctx
+        .eval(boa_engine::Source::from_bytes(ULTRA_CORE_PRELUDE));
+    populate_realm_cached_handles(&mut realm);
+    realm
 }
 
 #[inline]

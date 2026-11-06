@@ -45,6 +45,7 @@ pub(crate) struct ResolvedExecutionConfig {
     pub(crate) audit_secrets: Vec<String>,
     pub(crate) cli_fuel_override: Option<u64>,
     pub(crate) cli_mem_override: Option<usize>,
+    pub(crate) cli_boacas_override: Option<bool>,
 }
 
 impl ResolvedExecutionConfig {
@@ -54,6 +55,7 @@ impl ResolvedExecutionConfig {
         let mut env_files = Vec::new();
         let mut cli_fuel_override = None;
         let mut cli_mem_override = None;
+        let mut cli_boacas_override = None;
 
         // Also capture DLP secrets from `./slice.toml` if present in cwd
         let cwd_manifest = Path::new("slice.toml");
@@ -105,6 +107,12 @@ impl ResolvedExecutionConfig {
                     mem_limit = parsed;
                     cli_mem_override = Some(parsed);
                 }
+            } else if arg == "--exper-boacas" {
+                cli_boacas_override = Some(true);
+                slice_engine::set_exper_boacas_override(Some(true));
+            } else if arg == "--no-exper-boacas" {
+                cli_boacas_override = Some(false);
+                slice_engine::set_exper_boacas_override(Some(false));
             }
         }
 
@@ -119,6 +127,7 @@ impl ResolvedExecutionConfig {
             audit_secrets,
             cli_fuel_override,
             cli_mem_override,
+            cli_boacas_override,
         })
     }
 
@@ -132,6 +141,11 @@ impl ResolvedExecutionConfig {
         }
         if self.cli_mem_override.is_none() {
             self.mem_limit = m.memory_limit_kb * 1024;
+        }
+        if self.cli_boacas_override.is_none() {
+            if let Some(b) = m.exper_boacas {
+                slice_engine::set_exper_boacas_override(Some(b));
+            }
         }
         merge_manifest_toml_into_caps_and_dlp(
             raw_toml,
@@ -374,6 +388,17 @@ pub(crate) fn build_cas_archive_with_static(
     entrypoint: &str,
     static_dir_opt: Option<&Path>,
 ) -> Result<slice_cas::CasIndexHeader> {
+    let manifest_toml_opt = find_project_manifest_path(input_path)
+        .and_then(|mf| std::fs::read_to_string(&mf).ok());
+    if let Some(ref raw_toml) = manifest_toml_opt {
+        let m = SliceManifest::parse_toml(raw_toml);
+        if let Some(b) = m.exper_boacas {
+            if std::env::var("SLICE_EXPER_BOACAS").is_err() {
+                slice_engine::set_exper_boacas_override(Some(b));
+            }
+        }
+    }
+
     let is_folder_app = input_path.is_dir()
         && (input_path.join("package.json").is_file()
             || input_path.join("slice.toml").is_file()
@@ -397,10 +422,8 @@ pub(crate) fn build_cas_archive_with_static(
         b
     };
 
-    if let Some(manifest_file) = find_project_manifest_path(input_path) {
-        if let Ok(raw_toml) = std::fs::read_to_string(&manifest_file) {
-            builder.embed_manifest_toml(&raw_toml);
-        }
+    if let Some(ref raw_toml) = manifest_toml_opt {
+        builder.embed_manifest_toml(raw_toml);
     }
 
     if let Some(static_dir) = static_dir_opt {

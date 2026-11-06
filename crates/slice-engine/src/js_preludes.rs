@@ -54,67 +54,132 @@ pub const BUFFER_BINARY_RW_PRELUDE_SRC: &str = include_str!("preludes/17_buffer_
 /// `needs_lazy_global_getters(js_code)` is true (`globalThis.*` dynamic probes).
 pub(crate) const LAZY_GETTERS_INIT_PRELUDE: &[u8] = br#"(function(){var __loadShard=globalThis.__slice_ensure_shard,__shardProps=globalThis.__shardProps,__shMask=globalThis.__shMask;globalThis.__slice_mark_lazy_inited();function __defLazy(names,shardId){__shardProps[shardId]=names;for(var i=0;i<names.length;i++){(function(prop){Object.defineProperty(globalThis,prop,{configurable:true,enumerable:false,get:function(){__loadShard(shardId);return globalThis[prop];},set:function(val){Object.defineProperty(globalThis,prop,{value:val,writable:true,enumerable:false,configurable:true});}});})(names[i]);}}if((__shMask&2)===0)__defLazy(["URLSearchParams","URL"],1);if((__shMask&2048)===0)__defLazy(["Headers","Request","Response","__slice_make_web_request"],11);if((__shMask&4096)===0)__defLazy(["URLPattern"],12);if((__shMask&1024)===0)__defLazy(["AbortSignal","AbortController","fetch"],10);if((__shMask&4)===0)__defLazy(["btoa","atob","TextEncoder","TextDecoder"],2);if((__shMask&8192)===0)__defLazy(["Event","CustomEvent","EventTarget"],13);if((__shMask&8)===0)__defLazy(["ReadableStream"],3);if((__shMask&16384)===0)__defLazy(["WritableStream","TransformStream","TextEncoderStream","TextDecoderStream","CompressionStream","DecompressionStream"],14);if((__shMask&32768)===0)__defLazy(["Blob","File","FormData"],15);if((__shMask&16)===0)__defLazy(["crypto","CryptoKey"],4);if((__shMask&65536)===0)__defLazy(["structuredClone"],16);if((__shMask&32)===0)__defLazy(["Buffer"],5);if((__shMask&64)===0){var __cMethods=["dir","dirxml","table","trace","assert","clear","count","countReset","group","groupCollapsed","groupEnd","time","timeLog","timeEnd"];for(var c=0;c<__cMethods.length;c++){(function(m){globalThis.console[m]=function(){__loadShard(6);return globalThis.console[m].apply(globalThis.console,arguments);};})(__cMethods[c]);}}if((__shMask&128)===0)__defLazy(["WebSocket","MessageEvent","CloseEvent","__slice_dispatch_server_ws"],7);if((__shMask&256)===0)__defLazy(["Worker","MessageChannel","MessagePort","__slice_receiveMessageOnPort","__slice_wintertc_connect","__slice_init_worker_self_env","__slice_worker_host_deliver","__slice_worker_self_deliver"],8);if((__shMask&512)===0)__defLazy(["WebAssembly"],9);})();"#;
 
+/// Canonical topological order for loading prelude shards (`1..=17`) so base dependencies
+/// (`TextEncoder`, `EventTarget`, `URL`, `Request`/`Response`, `ReadableStream`, `Buffer`) are
+/// always initialized before dependent shards (`fetch`, `TransformStream`, `WebSocket`, `Worker`).
+#[allow(dead_code)]
+pub(crate) const SHARD_LOAD_ORDER: [u32; 17] =
+    [2, 13, 1, 11, 12, 10, 3, 14, 15, 4, 16, 5, 17, 6, 7, 8, 9];
+
+/// Returns the compile-time minified JS source bytes for `shard_id` (`1..=17`).
+#[inline]
+pub(crate) fn shard_prelude_bytes(shard_id: u32) -> &'static [u8] {
+    match shard_id {
+        1 => WEB_FETCH_URL_PRELUDE,
+        2 => ENCODING_EVENTS_PRELUDE,
+        3 => STREAMS_FORMDATA_PRELUDE,
+        4 => WEBCRYPTO_CLONE_PRELUDE,
+        5 => FULL_BUFFER_PRELUDE,
+        6 => CONSOLE_EXT_PRELUDE,
+        7 => WEBSOCKET_PRELUDE,
+        8 => WORKERS_SOCKETS_PRELUDE,
+        9 => WASM_PRELUDE,
+        10 => OUTBOUND_FETCH_SSE_PRELUDE,
+        11 => FETCH_HEADERS_REQ_RES_PRELUDE,
+        12 => URL_PATTERN_PRELUDE,
+        13 => DOM_EVENTS_PRELUDE,
+        14 => TRANSFORM_COMPRESSION_STREAMS_PRELUDE,
+        15 => BLOB_FORMDATA_PRELUDE,
+        16 => STRUCTURED_CLONE_PRELUDE,
+        17 => BUFFER_BINARY_RW_PRELUDE,
+        _ => b"",
+    }
+}
+
+/// Registers all native Rust host bindings required by `shards_mask` onto `context`,
+/// deduplicating shared host function groups (`wintertc_phase_n3`, `buffer`) so each native
+/// group is registered at most once per realm.
+pub(crate) fn register_shard_host_functions_for_mask(
+    shards_mask: u32,
+    context: &mut boa_engine::Context,
+) {
+    if shards_mask == 0 {
+        return;
+    }
+    if (shards_mask & (1 << 1)) != 0 {
+        crate::web_primitives::register_url_and_usp_host_functions(context);
+    }
+    if (shards_mask & ((1 << 2) | (1 << 5) | (1 << 14) | (1 << 15))) != 0 {
+        crate::host_bindings::register_wintertc_phase_n3_host_functions(context);
+    }
+    if (shards_mask & (1 << 4)) != 0 {
+        crate::host_bindings::register_webcrypto_host_functions(context);
+    }
+    if (shards_mask & ((1 << 5) | (1 << 7))) != 0 {
+        crate::host_bindings::register_buffer_host_functions(context);
+    }
+    if (shards_mask & (1 << 7)) != 0 {
+        crate::host_bindings::register_shard7_websocket_host_functions(context);
+    }
+    if (shards_mask & (1 << 8)) != 0 {
+        crate::host_bindings::register_shard8_workers_sockets_host_functions(context);
+    }
+    if (shards_mask & (1 << 9)) != 0 {
+        crate::host_bindings::register_shard9_wasm_host_functions(context);
+    }
+    if (shards_mask & (1 << 10)) != 0 {
+        crate::host_bindings::register_shard10_outbound_fetch_host_functions(context);
+    }
+    if (shards_mask & (1 << 11)) != 0 {
+        crate::host_bindings::register_http_bridge_host_functions(context);
+    }
+}
+
+/// Concatenates `ULTRA_CORE_PRELUDE`, all set shards in `shards_mask` (in topological `SHARD_LOAD_ORDER`),
+/// `globalThis.__shMask`, optional `LAZY_GETTERS_INIT_PRELUDE`, and `js_code` into a single contiguous
+/// ECMAScript compilation unit so `boa_engine` parses and compiles everything in one pass.
+#[allow(dead_code)]
+pub(crate) fn build_fused_prelude_and_bundle(
+    js_code: &str,
+    shards_mask: u32,
+    init_lazy_getters: bool,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ULTRA_CORE_PRELUDE.len() + js_code.len() + 16_384);
+    out.extend_from_slice(ULTRA_CORE_PRELUDE);
+    out.push(b'\n');
+    let mut active_mask: u32 = 0;
+    for shard_id in SHARD_LOAD_ORDER {
+        let bit = 1u32 << shard_id;
+        if (shards_mask & bit) != 0 {
+            let shard_bytes = shard_prelude_bytes(shard_id);
+            if !shard_bytes.is_empty() {
+                out.extend_from_slice(shard_bytes);
+                out.push(b'\n');
+                active_mask |= bit;
+            }
+        }
+    }
+    if active_mask != 0 {
+        let mut mask_buf = itoa::Buffer::new();
+        out.extend_from_slice(b"globalThis.__shMask|=");
+        out.extend_from_slice(mask_buf.format(active_mask).as_bytes());
+        out.extend_from_slice(b";\n");
+    }
+    if init_lazy_getters {
+        out.extend_from_slice(LAZY_GETTERS_INIT_PRELUDE);
+        out.push(b'\n');
+    }
+    if js_code.starts_with('{') {
+        out.extend_from_slice(js_code.as_bytes());
+    } else {
+        out.extend_from_slice(b"{\n");
+        out.extend_from_slice(js_code.as_bytes());
+        out.extend_from_slice(b"\n}");
+    }
+    out
+}
+
 /// Evaluates a compile-time minified lazy prelude shard (`1..=17`) on demand inside `context`.
 #[inline]
 pub(crate) fn eval_lazy_prelude_shard(
     shard_id: u32,
     context: &mut boa_engine::Context,
 ) -> boa_engine::JsResult<boa_engine::JsValue> {
-    let bytes: &[u8] = match shard_id {
-        1 => {
-            crate::web_primitives::register_url_and_usp_host_functions(context);
-            WEB_FETCH_URL_PRELUDE
-        }
-        2 => {
-            crate::host_bindings::register_wintertc_phase_n3_host_functions(context);
-            ENCODING_EVENTS_PRELUDE
-        }
-        3 => STREAMS_FORMDATA_PRELUDE,
-        4 => {
-            crate::host_bindings::register_webcrypto_host_functions(context);
-            WEBCRYPTO_CLONE_PRELUDE
-        }
-        5 => {
-            crate::host_bindings::register_wintertc_phase_n3_host_functions(context);
-            crate::host_bindings::register_buffer_host_functions(context);
-            FULL_BUFFER_PRELUDE
-        }
-        6 => CONSOLE_EXT_PRELUDE,
-        7 => {
-            crate::host_bindings::register_buffer_host_functions(context);
-            crate::host_bindings::register_shard7_websocket_host_functions(context);
-            WEBSOCKET_PRELUDE
-        }
-        8 => {
-            crate::host_bindings::register_shard8_workers_sockets_host_functions(context);
-            WORKERS_SOCKETS_PRELUDE
-        }
-        9 => {
-            crate::host_bindings::register_shard9_wasm_host_functions(context);
-            WASM_PRELUDE
-        }
-        10 => {
-            crate::host_bindings::register_shard10_outbound_fetch_host_functions(context);
-            OUTBOUND_FETCH_SSE_PRELUDE
-        }
-        11 => {
-            crate::host_bindings::register_http_bridge_host_functions(context);
-            FETCH_HEADERS_REQ_RES_PRELUDE
-        }
-        12 => URL_PATTERN_PRELUDE,
-        13 => DOM_EVENTS_PRELUDE,
-        14 => {
-            crate::host_bindings::register_wintertc_phase_n3_host_functions(context);
-            TRANSFORM_COMPRESSION_STREAMS_PRELUDE
-        }
-        15 => {
-            crate::host_bindings::register_wintertc_phase_n3_host_functions(context);
-            BLOB_FORMDATA_PRELUDE
-        }
-        16 => STRUCTURED_CLONE_PRELUDE,
-        17 => BUFFER_BINARY_RW_PRELUDE,
-        _ => return Ok(boa_engine::JsValue::undefined()),
-    };
+    if !(1..=17).contains(&shard_id) {
+        return Ok(boa_engine::JsValue::undefined());
+    }
+    register_shard_host_functions_for_mask(1u32 << shard_id, context);
+    let bytes = shard_prelude_bytes(shard_id);
     context.eval(boa_engine::Source::from_bytes(bytes))
 }
 

@@ -532,7 +532,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     };
 
     let path = Path::new(&target);
-    let bundled_for_sourcemap: String;
+    let mut bundled_for_sourcemap = String::new();
     let metrics = if target.ends_with(".cas") {
         let archive = MappedCasArchive::open(path)?;
         if let Some(toml_str) = archive.get_manifest_toml() {
@@ -541,7 +541,6 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         let entry = archive
             .entrypoint_blob()
             .context("CAS archive has no valid entrypoint blob")?;
-        bundled_for_sourcemap = archive.reconstruct_annotated_source(entry);
         let bytecode = archive.get_bytecode_slice(entry);
         let mut isolate = SliceIsolate::spawn(
             "tenant-cli",
@@ -561,7 +560,11 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             isolate.restore(snap);
             isolate.reset_for_request("tenant-cli", 1, exec_cfg.fuel_limit, exec_cfg.mem_limit);
         }
-        isolate.execute_bytecode(bytecode, Some(&archive))?
+        let m = isolate.execute_bytecode(bytecode, Some(&archive))?;
+        if m.return_value.starts_with("Uncaught ") {
+            bundled_for_sourcemap = archive.reconstruct_annotated_source(entry);
+        }
+        m
     } else {
         exec_cfg.apply_target_path_manifest(path);
         let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
@@ -665,6 +668,10 @@ fn cmd_pack(args: &[String]) -> Result<()> {
             entrypoint = e.to_string();
         } else if let Some(sd) = arg.strip_prefix("--static=") {
             static_dir_opt = Some(PathBuf::from(sd));
+        } else if arg == "--exper-boacas" {
+            slice_engine::set_exper_boacas_override(Some(true));
+        } else if arg == "--no-exper-boacas" {
+            slice_engine::set_exper_boacas_override(Some(false));
         }
     }
 
@@ -711,6 +718,10 @@ fn cmd_compile(args: &[String]) -> Result<()> {
             entrypoint = e.to_string();
         } else if let Some(sd) = args[i].strip_prefix("--static=") {
             static_dir_opt = Some(PathBuf::from(sd));
+        } else if args[i] == "--exper-boacas" {
+            slice_engine::set_exper_boacas_override(Some(true));
+        } else if args[i] == "--no-exper-boacas" {
+            slice_engine::set_exper_boacas_override(Some(false));
         }
         i += 1;
     }

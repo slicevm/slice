@@ -757,6 +757,8 @@ pub struct SliceManifest {
     pub memory_limit_kb: usize,
     pub env_file: Option<String>,
     pub capabilities: CapabilityToken,
+    #[serde(default)]
+    pub exper_boacas: Option<bool>,
 }
 
 impl Default for SliceManifest {
@@ -769,6 +771,7 @@ impl Default for SliceManifest {
             memory_limit_kb: 4096,
             env_file: None,
             capabilities: CapabilityToken::pure_compute(),
+            exper_boacas: None,
         }
     }
 }
@@ -857,6 +860,14 @@ impl SliceManifest {
                             .capabilities
                             .allowed_env_keys
                             .insert(key.to_string(), env_val);
+                    }
+                    ("experiments", "boacas") => {
+                        let norm = val.trim_matches('"').trim_matches('\'').trim();
+                        if matches!(norm, "true" | "1" | "yes" | "on") {
+                            manifest.exper_boacas = Some(true);
+                        } else if matches!(norm, "false" | "0" | "no" | "off") {
+                            manifest.exper_boacas = Some(false);
+                        }
                     }
                     _ => {}
                 }

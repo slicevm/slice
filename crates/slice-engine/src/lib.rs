@@ -25,6 +25,7 @@
 //! - [`outbound_http`]: Outbound `fetch()` HTTP/1.1 socket engine, OCap host allowlist, and Cloud Metadata SSRF shield.
 
 pub mod boa_realm;
+pub mod boacas;
 pub mod event_loop;
 pub mod host_bindings;
 pub mod intrinsics;
@@ -46,6 +47,10 @@ pub mod workers;
 #[cfg(test)]
 mod tests;
 
+pub use boacas::{
+    is_exper_boacas_build_enabled, is_exper_boacas_runtime_enabled, pack_boacas_container,
+    set_exper_boacas_override, BoaCasHeader, BOACAS_HEADER_LEN, BOACAS_MAGIC,
+};
 pub use event_loop::{reset_virtual_time_warped_ms, virtual_time_warped_ms};
 pub use isolate::{
     run_source_isolated, ExecutionMetrics, HttpExecutionOutcome, HttpRequestContext,

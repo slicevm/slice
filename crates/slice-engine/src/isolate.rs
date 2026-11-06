@@ -390,14 +390,31 @@ impl SliceIsolate {
         let start = Instant::now();
         self.compartment.pkey_domain.enter_domain();
 
-        // Zero-copy fast path for SLICEBOA raw ECMAScript bundles
-        if bytecode.len() >= 8 && &bytecode[0..8] == b"SLICEBOA" {
+        // Zero-copy fast path for SLICEBC\x01 precompiled Boa containers and SLICEBOA raw ECMAScript bundles
+        if bytecode.len() >= 8
+            && (&bytecode[0..8] == b"SLICEBOA"
+                || &bytecode[0..8] == crate::boacas::BOACAS_MAGIC)
+        {
             let instantiate_ns = start.elapsed().as_nanos() as u64;
             let exec_start = Instant::now();
             self.compartment.consume_fuel(25)?;
             self.current_tier = ExecutionTier::Tier1Baseline;
-            let js_code = std::str::from_utf8(&bytecode[8..]).unwrap_or_default();
-            let last_val = self.exec_boa_full_es_vm(js_code)?;
+            let last_val = if &bytecode[0..8] == crate::boacas::BOACAS_MAGIC {
+                if let Some((hdr, precompiled_slice, fallback_js)) =
+                    crate::boacas::BoaCasHeader::decode(bytecode)
+                {
+                    if crate::boacas::is_exper_boacas_runtime_enabled() {
+                        self.exec_boacas_vm(&hdr, precompiled_slice, fallback_js)?
+                    } else {
+                        self.exec_boa_full_es_vm(fallback_js)?
+                    }
+                } else {
+                    JsValue::Undefined
+                }
+            } else {
+                let js_code = std::str::from_utf8(&bytecode[8..]).unwrap_or_default();
+                self.exec_boa_full_es_vm(js_code)?
+            };
             if !self.egress_audit_secrets.is_empty() {
                 for line in &self.stdout {
                     self.verify_egress_not_leaked(line)?;
@@ -655,7 +672,10 @@ impl SliceIsolate {
         cas: Option<&MappedCasArchive>,
         req: &HttpRequestContext<'_>,
     ) -> Result<HttpExecutionOutcome, SandboxViolation> {
-        if bytecode.len() >= 8 && &bytecode[0..8] == b"SLICEBOA" {
+        if bytecode.len() >= 8
+            && (&bytecode[0..8] == b"SLICEBOA"
+                || &bytecode[0..8] == crate::boacas::BOACAS_MAGIC)
+        {
             BOA_HTTP_REQ.with(|r| {
                 let mut borrow = r.borrow_mut();
                 borrow.active = true;
@@ -1620,8 +1640,14 @@ impl SliceIsolate {
     /// warm isolate executions skip `100%` of JS lexing/parsing and `node_modules` CJS evaluation.
     pub fn prewarm_boa_bundle(bytecode: &[u8]) {
         Self::prewarm_boa_pool(1);
-        if bytecode.starts_with(b"SLICEBOA") {
-            let js_code = std::str::from_utf8(&bytecode[8..]).unwrap_or("");
+        let js_slice_opt = if bytecode.starts_with(b"SLICEBOA") {
+            std::str::from_utf8(&bytecode[8..]).ok()
+        } else if let Some((_, _, fallback_js)) = crate::boacas::BoaCasHeader::decode(bytecode) {
+            Some(fallback_js)
+        } else {
+            None
+        };
+        if let Some(js_code) = js_slice_opt {
             if js_code.contains("Worker") || js_code.contains("worker_threads") {
                 crate::workers::prewarm_worker_pool_sync(1);
             }
@@ -1983,6 +2009,278 @@ impl SliceIsolate {
         }
 
         // Harvest captured stdout lines directly from thread-local Rust Vec<String> (zero second eval, retains Vec capacity!)
+        BOA_STDOUT.with(|out| {
+            let mut captured = out.borrow_mut();
+            for line in captured.drain(..) {
+                if line.contains('\n') {
+                    for subline in line.lines() {
+                        self.stdout.push(subline.to_string());
+                    }
+                } else {
+                    self.stdout.push(line);
+                }
+            }
+        });
+
+        let result = match eval_res {
+            Ok(val) => {
+                if val.is_undefined() {
+                    Ok(JsValue::Undefined)
+                } else if val.is_null() {
+                    Ok(JsValue::Null)
+                } else if let Some(b) = val.as_boolean() {
+                    Ok(JsValue::Bool(b))
+                } else if let Some(n) = val.as_number() {
+                    Ok(JsValue::Number(n))
+                } else if let Ok(s) = val.to_string(&mut realm.ctx) {
+                    Ok(JsValue::str(s.to_std_string_escaped()))
+                } else {
+                    Ok(JsValue::Undefined)
+                }
+            }
+            Err(err) => Ok(JsValue::str(format!("Uncaught {}", err))),
+        };
+
+        release_warm_boa_realm(realm);
+        result
+    }
+
+    /// Executes a precompiled `SLICEBC\x01` container (`--exper-boacas`) using precomputed
+    /// `BoaCasHeader` metadata (eliminating all 18 runtime substring scans and runtime
+    /// `detect_needed_shards` Aho-Corasick passes).
+    fn exec_boacas_vm(
+        &mut self,
+        header: &crate::boacas::BoaCasHeader,
+        precompiled_slice: &[u8],
+        fallback_js: &str,
+    ) -> Result<JsValue, SandboxViolation> {
+        use crate::boacas::{
+            BOACAS_FLAG_HAS_HTTP_BRIDGE, BOACAS_FLAG_HAS_KV_SANDBOX, BOACAS_FLAG_HAS_NEXT_TICK,
+            BOACAS_FLAG_HAS_SEMVER_FAST, BOACAS_FLAG_HAS_WORKER, BOACAS_FLAG_NEEDS_SES_CHECK,
+        };
+
+        BOA_STDOUT.with(|out| out.borrow_mut().clear());
+        BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
+        BOA_ACTIVE_TENANT.with(|t| {
+            let mut b = t.borrow_mut();
+            b.clear();
+            b.push_str(&self.compartment.tenant_id);
+        });
+        let remaining_mem = self
+            .compartment
+            .memory_limit_bytes
+            .saturating_sub(self.compartment.memory_used_bytes);
+        BOA_KV_MEM_BUDGET.with(|m| m.set((0, remaining_mem)));
+        if let Some(seed) = self.deterministic_seed {
+            BOA_DET_STATE.with(|s| s.set(Some((seed ^ 0x9E37_79B9_7F4A_7C15, 1_700_000_000_000))));
+        }
+
+        let has_fs_restrictions = !self
+            .compartment
+            .capabilities
+            .allowed_read_prefixes
+            .is_empty()
+            || !self
+                .compartment
+                .capabilities
+                .allowed_write_prefixes
+                .is_empty();
+        if has_fs_restrictions {
+            BOA_ACTIVE_CAPS.with(|c| {
+                *c.borrow_mut() = Some((
+                    self.compartment.tenant_id.clone(),
+                    self.compartment.capabilities.allowed_read_prefixes.clone(),
+                    self.compartment.capabilities.allowed_write_prefixes.clone(),
+                ));
+            });
+        }
+        let has_net_hosts = !self.compartment.capabilities.allowed_net_hosts.is_empty();
+        if has_net_hosts {
+            BOA_NET_HOSTS.with(|h| {
+                *h.borrow_mut() = self.compartment.capabilities.allowed_net_hosts.clone();
+            });
+        }
+        let has_egress_secrets = !self.egress_audit_secrets.is_empty();
+        if has_egress_secrets {
+            BOA_EGRESS_SECRETS.with(|s| {
+                *s.borrow_mut() = self.egress_audit_secrets.clone();
+            });
+        }
+        let has_env_keys = !self.compartment.capabilities.allowed_env_keys.is_empty();
+        if has_env_keys {
+            BOA_ENV_MAP.with(|m| {
+                *m.borrow_mut() = self.compartment.capabilities.allowed_env_keys.clone();
+            });
+        }
+
+        let is_worker = crate::workers::is_worker_thread();
+        if !is_worker && (header.feature_flags & BOACAS_FLAG_HAS_WORKER) != 0 {
+            crate::workers::speculative_prewarm_worker_pool(1);
+        }
+
+        let mut realm = acquire_warm_boa_realm();
+        let remaining_fuel = self
+            .compartment
+            .fuel_limit
+            .saturating_sub(self.compartment.fuel_consumed)
+            .max(1);
+        BOA_FUEL_BUDGET.with(|f| f.set((0, remaining_fuel)));
+        realm
+            .ctx
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(remaining_fuel);
+        realm.ctx.runtime_limits_mut().set_recursion_limit(512);
+
+        if has_env_keys {
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_sync_process_env(true);",
+            ));
+        }
+        if self.deterministic_seed.is_some() {
+            crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_set_det_mode(true);",
+            ));
+        }
+        let has_next_tick = (header.feature_flags & BOACAS_FLAG_HAS_NEXT_TICK) != 0;
+        if has_next_tick {
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_set_next_tick_hook(true);",
+            ));
+        }
+        if is_worker {
+            ensure_realm_shards(&mut realm, (1 << 8) | (1 << 13) | (1 << 2), false);
+            if let Some(ref init_fn) = realm.init_worker_self_fn {
+                let _ = init_fn.call(
+                    &boa_engine::JsValue::undefined(),
+                    &[boa_engine::JsValue::from(true)],
+                    &mut realm.ctx,
+                );
+            } else {
+                let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                    b"globalThis.__slice_init_worker_self_env(true);",
+                ));
+            }
+        }
+        let is_http_req = BOA_HTTP_REQ.with(|r| r.borrow().active);
+        if is_http_req || (header.feature_flags & BOACAS_FLAG_HAS_HTTP_BRIDGE) != 0 {
+            crate::host_bindings::register_http_bridge_host_functions(&mut realm.ctx);
+        }
+        if (header.feature_flags & BOACAS_FLAG_HAS_SEMVER_FAST) != 0 {
+            crate::host_bindings::register_semver_and_fast_intrinsics_host_functions(
+                &mut realm.ctx,
+            );
+        }
+        if (header.feature_flags & BOACAS_FLAG_HAS_KV_SANDBOX) != 0 {
+            crate::host_bindings::register_kv_and_sandbox_host_functions(&mut realm.ctx);
+        }
+
+        let (eval_res, should_check_ses) = crate::boacas::eval_boacas_on_realm(
+            &mut realm,
+            header,
+            precompiled_slice,
+            fallback_js,
+            is_http_req,
+        );
+
+        if (!is_worker || eval_res.is_ok())
+            && (!BOA_HTTP_REQ.with(|r| r.borrow().active)
+                || BOA_HTTP_RES.with(|res| res.borrow().is_none())
+                || has_pending_event_loop_work())
+        {
+            drive_event_loop_to_completion(&mut realm.ctx);
+        }
+        clear_event_loop_state();
+
+        realm
+            .ctx
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(u64::MAX);
+
+        let mut ses_mutated_target = String::new();
+        if should_check_ses && (header.feature_flags & BOACAS_FLAG_NEEDS_SES_CHECK) != 0 {
+            if let Some(ref check_fn) = realm.ses_check_fn {
+                if let Ok(v) = check_fn.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
+                {
+                    if let Some(s) = v.as_string() {
+                        let st = s.to_std_string_escaped();
+                        if !st.is_empty() {
+                            ses_mutated_target = st;
+                        }
+                    }
+                }
+            }
+        }
+
+        if self.deterministic_seed.is_some() {
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_set_det_mode(false);",
+            ));
+            BOA_DET_STATE.with(|s| s.set(None));
+        }
+        if has_fs_restrictions {
+            BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = None);
+        }
+        if has_net_hosts {
+            BOA_NET_HOSTS.with(|h| h.borrow_mut().clear());
+        }
+        if has_egress_secrets {
+            BOA_EGRESS_SECRETS.with(|s| s.borrow_mut().clear());
+        }
+        if has_env_keys {
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_sync_process_env(false);",
+            ));
+            BOA_ENV_MAP.with(|m| m.borrow_mut().clear());
+        }
+        if has_next_tick {
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"__slice_set_next_tick_hook(false);",
+            ));
+        }
+        BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
+        crate::websocket::clear_thread_websocket_state();
+        crate::sockets::clear_thread_socket_state();
+        crate::workers::clear_thread_worker_state();
+        crate::wasm::clear_thread_wasm_state();
+        if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
+            release_warm_boa_realm(realm);
+            return Err(violation);
+        }
+        let wasm_fuel = BOA_FUEL_BUDGET.with(|f| f.get().0);
+        if wasm_fuel > 0 {
+            if let Err(v) = self.compartment.consume_fuel(wasm_fuel) {
+                release_warm_boa_realm(realm);
+                return Err(v);
+            }
+        }
+        if !ses_mutated_target.is_empty() {
+            drop(realm);
+            return Err(SandboxViolation::IntrinsicMutationBlocked {
+                tenant_id: self.compartment.tenant_id.clone(),
+                intrinsic: ses_mutated_target,
+            });
+        }
+        if let Err(ref err) = eval_res {
+            let msg = err.to_string();
+            if msg.contains("RuntimeLimitError")
+                || msg.contains("iteration loops")
+                || msg.contains("loop iteration limit")
+                || msg.contains("Maximum call stack")
+                || msg.contains("recursion limit")
+            {
+                release_warm_boa_realm(realm);
+                return Err(SandboxViolation::CpuFuelExhausted {
+                    tenant_id: self.compartment.tenant_id.clone(),
+                    limit: self.compartment.fuel_limit,
+                });
+            }
+        }
+        let kv_used = BOA_KV_MEM_BUDGET.with(|m| m.get().0);
+        if kv_used > 0 {
+            let _ = self.compartment.alloc_memory(kv_used);
+        }
+
         BOA_STDOUT.with(|out| {
             let mut captured = out.borrow_mut();
             for line in captured.drain(..) {

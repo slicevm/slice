@@ -1732,6 +1732,9 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
         || memchr::memmem::find(raw_source.as_bytes(), b"\nvar __slice_modules =").is_some()
     {
         let compacted = compact_js_for_boa_bytecode(raw_source);
+        if crate::boacas::is_exper_boacas_build_enabled() {
+            return crate::boacas::pack_boacas_container(&compacted);
+        }
         let mut bytes = Vec::with_capacity(12 + compacted.len());
         bytes.extend_from_slice(b"SLICEBOA{\n");
         bytes.extend_from_slice(compacted.trim_end().as_bytes());
@@ -1751,6 +1754,9 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
 
     if !has_direct_intrinsic_attack && !is_tier0_slicesnp_compatible_ast(&source) {
         let compacted = compact_js_for_boa_bytecode(&source);
+        if crate::boacas::is_exper_boacas_build_enabled() {
+            return crate::boacas::pack_boacas_container(&compacted);
+        }
         let mut bytes = Vec::with_capacity(12 + compacted.len());
         bytes.extend_from_slice(b"SLICEBOA{\n");
         bytes.extend_from_slice(compacted.trim_end().as_bytes());
@@ -1957,8 +1963,18 @@ pub(crate) fn extract_slice_rc_key(js_code: &str) -> Option<(u64, &[u8; 16])> {
     }
 }
 
-/// Disassembles a `SLICESNP` or `SLICEBOA` binary bytecode buffer into human-readable opcodes.
+/// Disassembles a `SLICESNP`, `SLICEBOA`, or `SLICEBC\x01` binary bytecode buffer into human-readable opcodes.
 pub fn disassemble_bytecode(bytecode: &[u8]) -> Result<Vec<String>> {
+    if let Some((hdr, _pre, _fallback)) = crate::boacas::BoaCasHeader::decode(bytecode) {
+        return Ok(vec![format!(
+            "0000  BOACAS_PRECOMP  [SLICEBCv1 Approach={} | Flags=0x{:04x} | Shards=0x{:05x} | Precompiled={} B | FallbackJS={} B]",
+            hdr.approach_kind,
+            hdr.feature_flags,
+            hdr.shards_mask,
+            hdr.precompiled_len,
+            hdr.fallback_js_len
+        )]);
+    }
     if bytecode.len() >= 8 && &bytecode[0..8] == b"SLICEBOA" {
         return Ok(vec![format!(
             "0000  BOA_ES2024_VM   [Zero-Copy Oxc Transpiled JS: {} bytes]",

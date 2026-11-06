@@ -255,7 +255,37 @@ impl CasBuilder {
                     data_payload.resize(data_payload.len() + (CACHE_LINE_ALIGN - rem), 0);
                 }
                 let source_bytes = normalized_source.as_bytes();
-                let (source_offset, source_len, bytecode_offset) = if bytecode.len() >= 12
+                let (source_offset, source_len, bytecode_offset) = if bytecode.len() >= 36
+                    && &bytecode[0..8] == b"SLICEBC\x01"
+                {
+                    let pre_len =
+                        u32::from_le_bytes([bytecode[24], bytecode[25], bytecode[26], bytecode[27]])
+                            as usize;
+                    let fb_len =
+                        u32::from_le_bytes([bytecode[28], bytecode[29], bytecode[30], bytecode[31]])
+                            as usize;
+                    if 32usize.saturating_add(pre_len).saturating_add(fb_len) == bytecode.len()
+                        && fb_len >= 4
+                    {
+                        let bc_off = data_payload.len() as u64;
+                        data_payload.extend_from_slice(bytecode);
+                        (
+                            bc_off + 32 + (pre_len as u64) + 2,
+                            (fb_len - 4) as u64,
+                            bc_off,
+                        )
+                    } else {
+                        let src_off = data_payload.len() as u64;
+                        data_payload.extend_from_slice(source_bytes);
+                        let rem_bc = data_payload.len() % CACHE_LINE_ALIGN;
+                        if rem_bc != 0 {
+                            data_payload.resize(data_payload.len() + (CACHE_LINE_ALIGN - rem_bc), 0);
+                        }
+                        let bc_off = data_payload.len() as u64;
+                        data_payload.extend_from_slice(bytecode);
+                        (src_off, source_bytes.len() as u64, bc_off)
+                    }
+                } else if bytecode.len() >= 12
                     && &bytecode[0..10] == b"SLICEBOA{\n"
                     && &bytecode[bytecode.len() - 2..] == b"\n}"
                 {
