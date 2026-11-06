@@ -4,6 +4,154 @@ use slice_engine::compile_source_to_bytecode;
 use slice_sandbox::{CapabilityToken, SliceManifest};
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+mod win_ctrlc {
+    extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+
+    unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        std::process::exit(0);
+    }
+
+    pub fn install() {
+        unsafe {
+            let _ = SetConsoleCtrlHandler(Some(ctrl_handler), 1);
+        }
+    }
+}
+
+/// Installs a cross-platform `Ctrl+C` / console termination signal handler so long-running
+/// subcommands (`slice serve`, `slice run --watch`, `slice test --watch`) flush stdio and exit
+/// cleanly without leaving worker threads blocked on sockets or freezing Windows consoles.
+pub(crate) fn install_ctrlc_handler() {
+    #[cfg(windows)]
+    win_ctrlc::install();
+}
+
+/// Unified execution configuration (`CapabilityToken`, `fuel_limit`, `mem_limit`, `audit_secrets`)
+/// resolved across defaults, `./slice.toml`, target subdirectory `slice.toml`, `.cas` embedded
+/// manifests, `--env-file`, and explicit CLI flags (`--fuel=`, `--memory=`, `--allow-*`).
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedExecutionConfig {
+    pub(crate) caps: CapabilityToken,
+    pub(crate) fuel_limit: u64,
+    pub(crate) mem_limit: usize,
+    pub(crate) audit_secrets: Vec<String>,
+    pub(crate) cli_fuel_override: Option<u64>,
+    pub(crate) cli_mem_override: Option<usize>,
+}
+
+impl ResolvedExecutionConfig {
+    pub(crate) fn from_cli_args(args: &[String]) -> Result<Self> {
+        let (mut caps, mut fuel_limit, mut mem_limit) = load_manifest_or_default();
+        let mut audit_secrets = Vec::new();
+        let mut env_files = Vec::new();
+        let mut cli_fuel_override = None;
+        let mut cli_mem_override = None;
+
+        // Also capture DLP secrets from `./slice.toml` if present in cwd
+        let cwd_manifest = Path::new("slice.toml");
+        if cwd_manifest.exists() {
+            if let Ok(raw) = std::fs::read_to_string(cwd_manifest) {
+                merge_manifest_toml_into_caps_and_dlp(
+                    &raw,
+                    Some(Path::new(".")),
+                    &mut caps,
+                    &mut audit_secrets,
+                );
+            }
+        }
+
+        for arg in args {
+            if let Some(prefix) = arg.strip_prefix("--allow-read=") {
+                caps = caps.with_read_prefix(prefix);
+            } else if let Some(prefix) = arg.strip_prefix("--allow-write=") {
+                caps = caps.with_write_prefix(prefix);
+            } else if let Some(host) = arg.strip_prefix("--allow-net=") {
+                for h in host.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    caps = caps.with_net_host(h);
+                }
+            } else if let Some(kv) = arg.strip_prefix("--allow-env=") {
+                if let Some((k, v)) = kv.split_once('=') {
+                    if v.len() >= 6
+                        && slice_sandbox::is_sensitive_env_key(k)
+                        && !audit_secrets.contains(&v.to_string())
+                    {
+                        audit_secrets.push(v.to_string());
+                    }
+                    caps = caps.with_env(k, v);
+                }
+            } else if let Some(ef) = arg.strip_prefix("--env-file=") {
+                if !ef.is_empty() {
+                    env_files.push(PathBuf::from(ef));
+                }
+            } else if let Some(sec) = arg.strip_prefix("--audit-egress=") {
+                if !sec.is_empty() && !audit_secrets.contains(&sec.to_string()) {
+                    audit_secrets.push(sec.to_string());
+                }
+            } else if let Some(f) = arg.strip_prefix("--fuel=") {
+                if let Ok(parsed) = f.parse::<u64>() {
+                    fuel_limit = parsed;
+                    cli_fuel_override = Some(parsed);
+                }
+            } else if let Some(m) = arg.strip_prefix("--memory=") {
+                if let Ok(parsed) = m.parse::<usize>() {
+                    mem_limit = parsed;
+                    cli_mem_override = Some(parsed);
+                }
+            }
+        }
+
+        for ef in &env_files {
+            apply_dotenv_file_to_caps_and_dlp(ef, &mut caps, &mut audit_secrets)?;
+        }
+
+        Ok(Self {
+            caps,
+            fuel_limit,
+            mem_limit,
+            audit_secrets,
+            cli_fuel_override,
+            cli_mem_override,
+        })
+    }
+
+    /// Merges a target project's `slice.toml` or embedded `.cas` manifest TOML into this
+    /// configuration, updating `fuel_limit` and `mem_limit` from `[limits]` unless overridden
+    /// on the command line via `--fuel=` or `--memory=`.
+    pub(crate) fn apply_manifest_toml(&mut self, raw_toml: &str, base_dir: Option<&Path>) {
+        let m = SliceManifest::parse_toml(raw_toml);
+        if self.cli_fuel_override.is_none() {
+            self.fuel_limit = m.fuel_limit;
+        }
+        if self.cli_mem_override.is_none() {
+            self.mem_limit = m.memory_limit_kb * 1024;
+        }
+        merge_manifest_toml_into_caps_and_dlp(
+            raw_toml,
+            base_dir,
+            &mut self.caps,
+            &mut self.audit_secrets,
+        );
+    }
+
+    /// Discovers and applies `slice.toml` for `target_path` (if one exists in `target_path`,
+    /// its parent directory, or its grandparent directory).
+    pub(crate) fn apply_target_path_manifest(&mut self, target_path: &Path) {
+        if let Some(manifest_file) = find_project_manifest_path(target_path) {
+            if let Ok(raw) = std::fs::read_to_string(&manifest_file) {
+                self.apply_manifest_toml(&raw, manifest_file.parent());
+            }
+        }
+    }
+}
+
 pub(crate) fn load_manifest_or_default() -> (CapabilityToken, u64, usize) {
     let manifest_path = Path::new("slice.toml");
     if manifest_path.exists() {
@@ -19,6 +167,7 @@ pub(crate) fn load_manifest_or_default() -> (CapabilityToken, u64, usize) {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn merge_manifest_toml_into_caps(raw_toml: &str, caps: &mut CapabilityToken) {
     let mut dummy_secrets = Vec::new();
     merge_manifest_toml_into_caps_and_dlp(raw_toml, None, caps, &mut dummy_secrets);
@@ -138,12 +287,13 @@ impl OsNativeFileWatcher {
         use notify::{RecursiveMode, Watcher};
         let prev_fp = collect_watch_fingerprint(target);
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut watcher_opt = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(ev) = res {
-                let _ = tx.send(ev);
-            }
-        })
-        .ok();
+        let mut watcher_opt =
+            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(ev) = res {
+                    let _ = tx.send(ev);
+                }
+            })
+            .ok();
         if let Some(ref mut w) = watcher_opt {
             let watch_root = if target.is_dir() {
                 target

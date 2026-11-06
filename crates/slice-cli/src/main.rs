@@ -23,14 +23,11 @@ mod test_runner;
 mod cli_tests;
 
 use crate::config_and_watch::{
-    apply_dotenv_file_to_caps_and_dlp, build_cas_archive_with_static, find_project_manifest_path,
-    load_manifest_or_default, merge_manifest_toml_into_caps, merge_manifest_toml_into_caps_and_dlp,
-    OsNativeFileWatcher,
+    build_cas_archive_with_static, install_ctrlc_handler, OsNativeFileWatcher,
+    ResolvedExecutionConfig,
 };
 use crate::http_server::cmd_serve;
-use crate::mcp_and_repl::{
-    cmd_doctor, cmd_mcp, cmd_microvm_bench, cmd_repl, cmd_verify_security,
-};
+use crate::mcp_and_repl::{cmd_doctor, cmd_mcp, cmd_microvm_bench, cmd_repl, cmd_verify_security};
 use crate::test_runner::cmd_test;
 use anyhow::{bail, Context, Result};
 use slice_cas::{embed_cas_into_executable, MappedCasArchive};
@@ -106,11 +103,20 @@ fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
         SliceIsolate::prewarm_boa_pool(1);
     }
 
-    let (mut caps, fuel_limit, mem_limit) = load_manifest_or_default();
+    let mut exec_cfg = ResolvedExecutionConfig::from_cli_args(&args[1..])?;
     if let Some(toml_str) = archive.get_manifest_toml() {
-        merge_manifest_toml_into_caps(toml_str, &mut caps);
+        exec_cfg.apply_manifest_toml(toml_str, None);
     }
-    let mut isolate = SliceIsolate::spawn("standalone-exe", 1, caps, fuel_limit, mem_limit);
+    let mut isolate = SliceIsolate::spawn(
+        "standalone-exe",
+        1,
+        exec_cfg.caps,
+        exec_cfg.fuel_limit,
+        exec_cfg.mem_limit,
+    );
+    for sec in &exec_cfg.audit_secrets {
+        isolate.add_egress_audit_secret(sec.clone());
+    }
     let entry = archive
         .entrypoint_blob()
         .context("Embedded CAS archive has no entrypoint blob")?;
@@ -481,43 +487,17 @@ console.log(route_response);
 }
 
 pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
-    let (mut caps, mut fuel_limit, mut mem_limit) = load_manifest_or_default();
+    let mut exec_cfg = ResolvedExecutionConfig::from_cli_args(args)?;
     let mut quiet = false;
     let mut print_metrics = false;
     let mut prewarm_pool = false;
     let mut deterministic_seed: Option<u64> = None;
-    let mut audit_secrets: Vec<String> = Vec::new();
-    let mut env_files: Vec<PathBuf> = Vec::new();
     let mut watch_mode = false;
     let mut watch_once = false;
     let mut target_opt: Option<String> = None;
 
     for arg in args {
-        if let Some(prefix) = arg.strip_prefix("--allow-read=") {
-            caps = caps.with_read_prefix(prefix);
-        } else if let Some(prefix) = arg.strip_prefix("--allow-write=") {
-            caps = caps.with_write_prefix(prefix);
-        } else if let Some(host) = arg.strip_prefix("--allow-net=") {
-            for h in host.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                caps = caps.with_net_host(h);
-            }
-        } else if let Some(kv) = arg.strip_prefix("--allow-env=") {
-            if let Some((k, v)) = kv.split_once('=') {
-                caps = caps.with_env(k, v);
-            }
-        } else if let Some(ef) = arg.strip_prefix("--env-file=") {
-            if !ef.is_empty() {
-                env_files.push(PathBuf::from(ef));
-            }
-        } else if let Some(sec) = arg.strip_prefix("--audit-egress=") {
-            if !sec.is_empty() {
-                audit_secrets.push(sec.to_string());
-            }
-        } else if let Some(f) = arg.strip_prefix("--fuel=") {
-            fuel_limit = f.parse().unwrap_or(fuel_limit);
-        } else if let Some(m) = arg.strip_prefix("--memory=") {
-            mem_limit = m.parse().unwrap_or(mem_limit);
-        } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
+        if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
             deterministic_seed = Some(seed_str.parse().unwrap_or(42));
         } else if arg == "--deterministic" {
             deterministic_seed = Some(42);
@@ -535,10 +515,6 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         } else if !arg.starts_with('-') && target_opt.is_none() {
             target_opt = Some(arg.clone());
         }
-    }
-
-    for ef in &env_files {
-        apply_dotenv_file_to_caps_and_dlp(ef, &mut caps, &mut audit_secrets)?;
     }
 
     let target = match target_opt {
@@ -560,21 +536,22 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     let metrics = if target.ends_with(".cas") {
         let archive = MappedCasArchive::open(path)?;
         if let Some(toml_str) = archive.get_manifest_toml() {
-            merge_manifest_toml_into_caps_and_dlp(
-                toml_str,
-                path.parent(),
-                &mut caps,
-                &mut audit_secrets,
-            );
+            exec_cfg.apply_manifest_toml(toml_str, path.parent());
         }
         let entry = archive
             .entrypoint_blob()
             .context("CAS archive has no valid entrypoint blob")?;
         bundled_for_sourcemap = archive.reconstruct_annotated_source(entry);
         let bytecode = archive.get_bytecode_slice(entry);
-        let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps.clone(), fuel_limit, mem_limit);
+        let mut isolate = SliceIsolate::spawn(
+            "tenant-cli",
+            1,
+            exec_cfg.caps.clone(),
+            exec_cfg.fuel_limit,
+            exec_cfg.mem_limit,
+        );
         isolate.set_deterministic_seed(deterministic_seed);
-        for sec in &audit_secrets {
+        for sec in &exec_cfg.audit_secrets {
             isolate.add_egress_audit_secret(sec.clone());
         }
         if prewarm_pool {
@@ -582,27 +559,24 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             let snap = isolate.checkpoint();
             let _ = isolate.execute_bytecode(bytecode, Some(&archive));
             isolate.restore(snap);
-            isolate.reset_for_request("tenant-cli", 1, fuel_limit, mem_limit);
+            isolate.reset_for_request("tenant-cli", 1, exec_cfg.fuel_limit, exec_cfg.mem_limit);
         }
         isolate.execute_bytecode(bytecode, Some(&archive))?
     } else {
-        if let Some(manifest_file) = find_project_manifest_path(path) {
-            if let Ok(raw) = std::fs::read_to_string(&manifest_file) {
-                merge_manifest_toml_into_caps_and_dlp(
-                    &raw,
-                    manifest_file.parent(),
-                    &mut caps,
-                    &mut audit_secrets,
-                );
-            }
-        }
+        exec_cfg.apply_target_path_manifest(path);
         let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
         let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
         let bytecode = compile_source_to_bytecode(&bundled_source);
         bundled_for_sourcemap = bundled_source;
-        let mut isolate = SliceIsolate::spawn("tenant-cli", 1, caps.clone(), fuel_limit, mem_limit);
+        let mut isolate = SliceIsolate::spawn(
+            "tenant-cli",
+            1,
+            exec_cfg.caps.clone(),
+            exec_cfg.fuel_limit,
+            exec_cfg.mem_limit,
+        );
         isolate.set_deterministic_seed(deterministic_seed);
-        for sec in &audit_secrets {
+        for sec in &exec_cfg.audit_secrets {
             isolate.add_egress_audit_secret(sec.clone());
         }
         if prewarm_pool {
@@ -610,7 +584,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             let snap = isolate.checkpoint();
             let _ = isolate.execute_bytecode(&bytecode, None);
             isolate.restore(snap);
-            isolate.reset_for_request("tenant-cli", 1, fuel_limit, mem_limit);
+            isolate.reset_for_request("tenant-cli", 1, exec_cfg.fuel_limit, exec_cfg.mem_limit);
         }
         isolate.execute_bytecode(&bytecode, None)?
     };
@@ -640,16 +614,24 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     }
 
     if watch_mode && !target.ends_with(".cas") {
+        if !watch_once {
+            install_ctrlc_handler();
+        }
         let mut watcher = OsNativeFileWatcher::new(path);
         while watcher.wait_for_change(watch_once) {
             let reload_start = Instant::now();
             let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
             let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
             let bytecode = compile_source_to_bytecode(&bundled_source);
-            let mut isolate =
-                SliceIsolate::spawn("tenant-cli-watch", 1, caps.clone(), fuel_limit, mem_limit);
+            let mut isolate = SliceIsolate::spawn(
+                "tenant-cli-watch",
+                1,
+                exec_cfg.caps.clone(),
+                exec_cfg.fuel_limit,
+                exec_cfg.mem_limit,
+            );
             isolate.set_deterministic_seed(deterministic_seed);
-            for sec in &audit_secrets {
+            for sec in &exec_cfg.audit_secrets {
                 isolate.add_egress_audit_secret(sec.clone());
             }
             let reload_metrics = isolate.execute_bytecode(&bytecode, None)?;

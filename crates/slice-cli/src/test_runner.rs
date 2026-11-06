@@ -1,6 +1,5 @@
 use crate::config_and_watch::{
-    apply_dotenv_file_to_caps_and_dlp, find_project_manifest_path, load_manifest_or_default,
-    merge_manifest_toml_into_caps_and_dlp, OsNativeFileWatcher,
+    install_ctrlc_handler, OsNativeFileWatcher, ResolvedExecutionConfig,
 };
 use anyhow::{bail, Result};
 use slice_engine::{compile_source_to_bytecode, SliceIsolate};
@@ -47,11 +46,9 @@ pub(crate) fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>> {
 }
 
 pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
-    let (mut caps, mut fuel_limit, mut mem_limit) = load_manifest_or_default();
+    let mut exec_cfg = ResolvedExecutionConfig::from_cli_args(args)?;
     let mut filter_opt: Option<String> = None;
     let mut deterministic_seed: Option<u64> = Some(20261024);
-    let mut audit_secrets: Vec<String> = Vec::new();
-    let mut env_files: Vec<PathBuf> = Vec::new();
     let mut json_output = false;
     let mut watch_mode = false;
     let mut watch_once = false;
@@ -60,30 +57,6 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
     for arg in args {
         if let Some(f) = arg.strip_prefix("--filter=") {
             filter_opt = Some(f.to_string());
-        } else if let Some(prefix) = arg.strip_prefix("--allow-read=") {
-            caps = caps.with_read_prefix(prefix);
-        } else if let Some(prefix) = arg.strip_prefix("--allow-write=") {
-            caps = caps.with_write_prefix(prefix);
-        } else if let Some(host) = arg.strip_prefix("--allow-net=") {
-            for h in host.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                caps = caps.with_net_host(h);
-            }
-        } else if let Some(kv) = arg.strip_prefix("--allow-env=") {
-            if let Some((k, v)) = kv.split_once('=') {
-                caps = caps.with_env(k, v);
-            }
-        } else if let Some(ef) = arg.strip_prefix("--env-file=") {
-            if !ef.is_empty() {
-                env_files.push(PathBuf::from(ef));
-            }
-        } else if let Some(sec) = arg.strip_prefix("--audit-egress=") {
-            if !sec.is_empty() {
-                audit_secrets.push(sec.to_string());
-            }
-        } else if let Some(f) = arg.strip_prefix("--fuel=") {
-            fuel_limit = f.parse().unwrap_or(fuel_limit);
-        } else if let Some(m) = arg.strip_prefix("--memory=") {
-            mem_limit = m.parse().unwrap_or(mem_limit);
         } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
             deterministic_seed = Some(seed_str.parse().unwrap_or(20261024));
         } else if arg == "--no-deterministic" {
@@ -100,22 +73,13 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
         }
     }
 
-    for ef in &env_files {
-        apply_dotenv_file_to_caps_and_dlp(ef, &mut caps, &mut audit_secrets)?;
-    }
-
     let target_str = target_opt.unwrap_or_else(|| ".".to_string());
     let target_path = Path::new(&target_str);
-    if let Some(manifest_file) = find_project_manifest_path(target_path) {
-        if let Ok(raw) = std::fs::read_to_string(&manifest_file) {
-            merge_manifest_toml_into_caps_and_dlp(
-                &raw,
-                manifest_file.parent(),
-                &mut caps,
-                &mut audit_secrets,
-            );
-        }
-    }
+    exec_cfg.apply_target_path_manifest(target_path);
+    let caps = exec_cfg.caps;
+    let fuel_limit = exec_cfg.fuel_limit;
+    let mem_limit = exec_cfg.mem_limit;
+    let audit_secrets = exec_cfg.audit_secrets;
 
     let test_files = discover_test_files(target_path)?;
     if test_files.is_empty() {
@@ -226,6 +190,9 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
     }
 
     if watch_mode {
+        if !watch_once {
+            install_ctrlc_handler();
+        }
         let mut watcher = OsNativeFileWatcher::new(target_path);
         while watcher.wait_for_change(watch_once) {
             let reload_start = Instant::now();
@@ -245,13 +212,8 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
                     filter_js, bundled
                 );
                 let bytecode = compile_source_to_bytecode(&wrapped_js);
-                let mut isolate = SliceIsolate::spawn(
-                    "slice-test-watch",
-                    1,
-                    caps.clone(),
-                    fuel_limit,
-                    mem_limit,
-                );
+                let mut isolate =
+                    SliceIsolate::spawn("slice-test-watch", 1, caps.clone(), fuel_limit, mem_limit);
                 isolate.set_deterministic_seed(deterministic_seed);
                 for sec in &audit_secrets {
                     isolate.add_egress_audit_secret(sec.clone());

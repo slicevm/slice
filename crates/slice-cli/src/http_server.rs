@@ -1,38 +1,15 @@
-use crate::config_and_watch::{
-    find_project_manifest_path, load_manifest_or_default, merge_manifest_toml_into_caps,
-};
+use crate::config_and_watch::{install_ctrlc_handler, ResolvedExecutionConfig};
 use anyhow::{Context, Result};
 use slice_cas::MappedCasArchive;
 use slice_engine::{compile_source_to_bytecode, SliceIsolate};
-use slice_sandbox::{CapabilityToken, SliceManifest};
+use slice_sandbox::CapabilityToken;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-#[cfg(windows)]
-mod win_ctrlc {
-    extern "system" {
-        fn SetConsoleCtrlHandler(
-            handler: Option<unsafe extern "system" fn(u32) -> i32>,
-            add: i32,
-        ) -> i32;
-    }
-
-    unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-        let _ = std::io::Write::flush(&mut std::io::stderr());
-        std::process::exit(0);
-    }
-
-    pub fn install() {
-        unsafe {
-            let _ = SetConsoleCtrlHandler(Some(ctrl_handler), 1);
-        }
-    }
-}
-
 pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
+    let mut exec_cfg = ResolvedExecutionConfig::from_cli_args(args)?;
     let mut port: u16 = 3000;
     let mut smoke_test = false;
     let mut max_requests_opt: Option<usize> = None;
@@ -43,8 +20,6 @@ pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
         .map(|n| n.get().clamp(1, 8))
         .unwrap_or(4);
     let mut target_opt: Option<String> = None;
-    let mut cli_fuel_opt: Option<u64> = None;
-    let mut cli_mem_opt: Option<usize> = None;
 
     for arg in args {
         if let Some(p) = arg.strip_prefix("--port=") {
@@ -57,10 +32,6 @@ pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
             tenant_dir_opt = Some(PathBuf::from(td));
         } else if let Some(sd) = arg.strip_prefix("--static=") {
             static_dir_opt = Some(PathBuf::from(sd));
-        } else if let Some(f) = arg.strip_prefix("--fuel=") {
-            cli_fuel_opt = f.parse().ok();
-        } else if let Some(mem) = arg.strip_prefix("--memory=") {
-            cli_mem_opt = mem.parse().ok();
         } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
             deterministic_seed = Some(seed_str.parse().unwrap_or(42));
         } else if arg == "--deterministic" {
@@ -69,19 +40,6 @@ pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
             smoke_test = true;
         } else if !arg.starts_with('-') && target_opt.is_none() {
             target_opt = Some(arg.clone());
-        }
-    }
-
-    let (mut caps, mut fuel_limit, mut mem_limit) = load_manifest_or_default();
-    for arg in args {
-        if let Some(host) = arg.strip_prefix("--allow-net=") {
-            for h in host.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                caps = caps.with_net_host(h);
-            }
-        } else if let Some(prefix) = arg.strip_prefix("--allow-read=") {
-            caps = caps.with_read_prefix(prefix);
-        } else if let Some(prefix) = arg.strip_prefix("--allow-write=") {
-            caps = caps.with_write_prefix(prefix);
         }
     }
 
@@ -96,10 +54,7 @@ console.log(route_res);
         if target.ends_with(".cas") {
             let archive = MappedCasArchive::open(p)?;
             if let Some(toml_str) = archive.get_manifest_toml() {
-                let m = SliceManifest::parse_toml(toml_str);
-                fuel_limit = m.fuel_limit;
-                mem_limit = m.memory_limit_kb * 1024;
-                merge_manifest_toml_into_caps(toml_str, &mut caps);
+                exec_cfg.apply_manifest_toml(toml_str, p.parent());
             }
             static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
             let entry = archive
@@ -107,24 +62,14 @@ console.log(route_res);
                 .context("Missing CAS entrypoint")?;
             archive.get_bytecode_slice(entry).to_vec()
         } else {
-            if let Some(manifest_file) = find_project_manifest_path(p) {
-                if let Ok(raw) = std::fs::read_to_string(&manifest_file) {
-                    let m = SliceManifest::parse_toml(&raw);
-                    fuel_limit = m.fuel_limit;
-                    mem_limit = m.memory_limit_kb * 1024;
-                    merge_manifest_toml_into_caps(&raw, &mut caps);
-                }
-            }
+            exec_cfg.apply_target_path_manifest(p);
             let entry_file = slice_cas::resolve_project_entrypoint(p, None)?;
             let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
             compile_source_to_bytecode(&bundled)
         }
     } else if let Ok(Some(archive)) = MappedCasArchive::open_embedded_self() {
         if let Some(toml_str) = archive.get_manifest_toml() {
-            let m = SliceManifest::parse_toml(toml_str);
-            fuel_limit = m.fuel_limit;
-            mem_limit = m.memory_limit_kb * 1024;
-            merge_manifest_toml_into_caps(toml_str, &mut caps);
+            exec_cfg.apply_manifest_toml(toml_str, None);
         }
         static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
         if let Some(entry) = archive.entrypoint_blob() {
@@ -136,12 +81,9 @@ console.log(route_res);
         compile_source_to_bytecode(default_handler_src)
     });
 
-    if let Some(f) = cli_fuel_opt {
-        fuel_limit = f;
-    }
-    if let Some(m) = cli_mem_opt {
-        mem_limit = m;
-    }
+    let caps = exec_cfg.caps;
+    let fuel_limit = exec_cfg.fuel_limit;
+    let mem_limit = exec_cfg.mem_limit;
 
     if let Some(static_dir) = &static_dir_opt {
         static_table.extend_from_directory(static_dir)?;
@@ -202,8 +144,7 @@ console.log(route_res);
         return Ok(());
     }
 
-    #[cfg(windows)]
-    win_ctrlc::install();
+    install_ctrlc_handler();
 
     let addr = format!("0.0.0.0:{}", port);
     let listener = std::sync::Arc::new(TcpListener::bind(&addr)?);

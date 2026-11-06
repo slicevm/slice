@@ -891,8 +891,13 @@ export default {
         merge_manifest_toml_into_caps(manifest_toml, &mut caps_det);
     }
     slice_engine::reset_virtual_time_warped_ms();
-    let mut iso_det =
-        SliceIsolate::spawn("app18-det-tenant", 1, caps_det, 50_000_000, 16 * 1024 * 1024);
+    let mut iso_det = SliceIsolate::spawn(
+        "app18-det-tenant",
+        1,
+        caps_det,
+        50_000_000,
+        16 * 1024 * 1024,
+    );
     iso_det.set_deterministic_seed(Some(20261102));
     let metrics_det = iso_det
         .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
@@ -909,8 +914,10 @@ export default {
 
     // 3B. Run in Live Concurrent Socket Fan-Out mode against the 4-worker WinterTC server
     let reuse_before = slice_engine::outbound_pool_reuse_count();
-    let mut caps_live = CapabilityToken::pure_compute()
-        .with_env("SLICE_FANOUT_UPSTREAM_BASE", format!("http://{}", host_port));
+    let mut caps_live = CapabilityToken::pure_compute().with_env(
+        "SLICE_FANOUT_UPSTREAM_BASE",
+        format!("http://{}", host_port),
+    );
     if let Some(manifest_toml) = archive.get_manifest_toml() {
         merge_manifest_toml_into_caps(manifest_toml, &mut caps_live);
     }
@@ -1249,8 +1256,7 @@ describe("TSX SSR & Event Loop Suite", () => {
     cmd_test(&test_args).unwrap();
 
     // 4. Verify `.tsx` HTTP Server SSR over TCP
-    let bundled =
-        slice_cas::bundle_entrypoint_with_deps(&tmp_dir.join("src/index.tsx")).unwrap();
+    let bundled = slice_cas::bundle_entrypoint_with_deps(&tmp_dir.join("src/index.tsx")).unwrap();
     let bytecode = Arc::new(compile_source_to_bytecode(&bundled));
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1304,10 +1310,7 @@ describe("TSX SSR & Event Loop Suite", () => {
 fn test_wave_b_http_server_security_hardening_and_websocket_upgrade_roundtrip() {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::{
-        atomic::AtomicUsize,
-        Arc,
-    };
+    use std::sync::{atomic::AtomicUsize, Arc};
 
     let handler_ts = r#"
 export default {
@@ -1409,13 +1412,15 @@ export default {
     // 3. N-Sec-3: Content-Length > 4MB -> 413 Payload Too Large
     {
         let mut c = TcpStream::connect(addr).unwrap();
-        c.write_all(
-            b"POST /huge HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9999999\r\n\r\n",
-        )
-        .unwrap();
+        c.write_all(b"POST /huge HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9999999\r\n\r\n")
+            .unwrap();
         let mut r = String::new();
         c.read_to_string(&mut r).unwrap();
-        assert!(r.starts_with("HTTP/1.1 413 Payload Too Large"), "Got: {}", r);
+        assert!(
+            r.starts_with("HTTP/1.1 413 Payload Too Large"),
+            "Got: {}",
+            r
+        );
     }
 
     // 4. N-Sec-6: > 64 request headers -> 431 Request Header Fields Too Large
@@ -1480,8 +1485,7 @@ ws.onclose = (ev) => {{
 "#,
             port = port
         );
-        let ws_caps =
-            CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", port));
+        let ws_caps = CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", port));
         let metrics = slice_engine::run_source_isolated(
             "wave-b-e2e-ws",
             &client_js,
@@ -1547,10 +1551,8 @@ export default {
     let bc_srv = Arc::clone(&bytecode);
     let counter_srv = Arc::clone(&counter);
 
-    let caps = CapabilityToken::pure_compute().with_env(
-        "WS_SERVER_MASTER_SECRET",
-        "sk_live_SERVER_WS_SECRET_999",
-    );
+    let caps = CapabilityToken::pure_compute()
+        .with_env("WS_SERVER_MASTER_SECRET", "sk_live_SERVER_WS_SECRET_999");
 
     // 3 connections:
     // 1) 100 KB POST payload (> 64 KB stack read_buf, exercising spillover_body) -> 200 OK
@@ -1602,10 +1604,8 @@ export default {
     // 2. N-Sec-2: Inbound header with control char (`\x07` BEL) -> 400 Bad Request
     {
         let mut c = TcpStream::connect(addr).unwrap();
-        c.write_all(
-            b"GET /bad-hdr HTTP/1.1\r\nHost: localhost\r\nX-Bell: ring\x07here\r\n\r\n",
-        )
-        .unwrap();
+        c.write_all(b"GET /bad-hdr HTTP/1.1\r\nHost: localhost\r\nX-Bell: ring\x07here\r\n\r\n")
+            .unwrap();
         let mut r = String::new();
         c.read_to_string(&mut r).unwrap();
         assert!(r.starts_with("HTTP/1.1 400 Bad Request"), "Got: {}", r);
@@ -1632,8 +1632,7 @@ ws.onclose = (ev) => {{
 "#,
             port = port
         );
-        let ws_caps =
-            CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", port));
+        let ws_caps = CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", port));
         let metrics = slice_engine::run_source_isolated(
             "wave-b-srv-ws-dlp-client",
             &client_js,
@@ -2057,7 +2056,8 @@ fn test_wave_d_wasm_import_bundling_and_os_native_watch_test_runner() {
         0x01, 0x07, 0x01, 0x60, 0x02, 0x7F, 0x7F, 0x01, 0x7F, // type 0: (i32, i32) -> i32
         0x03, 0x02, 0x01, 0x00, // func 0: type 0
         0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00, // export "add" -> func 0
-        0x0A, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6A, 0x0B, // local.get 0, local.get 1, i32.add
+        0x0A, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6A,
+        0x0B, // local.get 0, local.get 1, i32.add
     ];
     std::fs::write(tmp_dir.join("src/add.wasm"), add_wasm).unwrap();
 
@@ -2188,7 +2188,8 @@ fn test_wave_e_hono_and_itty_unjs_framework_suites() {
     assert!(fw2_dir.join("src/index.ts").is_file());
 
     if fw1_dir.join("node_modules/hono").is_dir() {
-        let bundled1 = slice_cas::bundle_entrypoint_with_deps(&fw1_dir.join("src/index.ts")).unwrap();
+        let bundled1 =
+            slice_cas::bundle_entrypoint_with_deps(&fw1_dir.join("src/index.ts")).unwrap();
         let bc1 = compile_source_to_bytecode(&bundled1);
         let mut iso1 = SliceIsolate::spawn(
             "wave-e-hono",
@@ -2204,7 +2205,8 @@ fn test_wave_e_hono_and_itty_unjs_framework_suites() {
     }
 
     if fw2_dir.join("node_modules/itty-router").is_dir() {
-        let bundled2 = slice_cas::bundle_entrypoint_with_deps(&fw2_dir.join("src/index.ts")).unwrap();
+        let bundled2 =
+            slice_cas::bundle_entrypoint_with_deps(&fw2_dir.join("src/index.ts")).unwrap();
         let bc2 = compile_source_to_bytecode(&bundled2);
         let mut iso2 = SliceIsolate::spawn(
             "wave-e-unjs",
@@ -2244,5 +2246,65 @@ fn test_wave_f_slice_init_generates_slice_d_ts_and_tsconfig() {
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
+#[test]
+fn test_resolved_execution_config_subdirectory_manifest_and_cli_override_precedence() {
+    use crate::config_and_watch::ResolvedExecutionConfig;
 
+    let tmp_dir = env::temp_dir().join("slice_cli_test_resolved_exec_cfg");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let src_dir = tmp_dir.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
 
+    let toml_content = r#"
+[package]
+name = "subdir-app"
+version = "0.1.0"
+entrypoint = "./src/index.ts"
+
+[limits]
+fuel = 250000000
+memory_kb = 65536
+
+[capabilities]
+allow_read = ["/tmp", "."]
+allow_write = ["/tmp"]
+allow_net = ["api.example.com:443"]
+allow_env = ["STRIPE_SECRET_KEY=sk_live_subdir_manifest_998877"]
+"#;
+    std::fs::write(tmp_dir.join("slice.toml"), toml_content).unwrap();
+    let entry_path = src_dir.join("index.ts");
+    std::fs::write(&entry_path, "console.log('ok');\n").unwrap();
+
+    // 1. Without CLI `--fuel` / `--memory` overrides, `apply_target_path_manifest` must load
+    //    both `[limits]` (`fuel = 250_000_000`, `memory_kb = 65536`) and `[capabilities]` + DLP secrets.
+    let mut cfg = ResolvedExecutionConfig::from_cli_args(&[]).unwrap();
+    cfg.apply_target_path_manifest(&entry_path);
+    assert_eq!(cfg.fuel_limit, 250_000_000);
+    assert_eq!(cfg.mem_limit, 65536 * 1024);
+    assert!(cfg.caps.allowed_read_prefixes.contains(&"/tmp".to_string()));
+    assert!(cfg.caps.allowed_net_hosts.contains("api.example.com:443"));
+    assert!(cfg
+        .audit_secrets
+        .contains(&"sk_live_subdir_manifest_998877".to_string()));
+
+    // 2. With explicit CLI `--fuel=` and `--memory=` flags, CLI overrides must win over `slice.toml` `[limits]`.
+    let args = vec![
+        "--fuel=777000".to_string(),
+        "--memory=8388608".to_string(),
+        "--allow-read=/custom".to_string(),
+    ];
+    let mut cfg_override = ResolvedExecutionConfig::from_cli_args(&args).unwrap();
+    cfg_override.apply_target_path_manifest(&entry_path);
+    assert_eq!(cfg_override.fuel_limit, 777_000);
+    assert_eq!(cfg_override.mem_limit, 8_388_608);
+    assert!(cfg_override
+        .caps
+        .allowed_read_prefixes
+        .contains(&"/custom".to_string()));
+    assert!(cfg_override
+        .caps
+        .allowed_read_prefixes
+        .contains(&"/tmp".to_string()));
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
