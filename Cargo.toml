@@ -33,6 +33,10 @@ webpki-roots = "1.0"
 rustls-pki-types = "1"
 wasmi = "0.40"
 notify = { version = "6.1", default-features = false, features = ["macos_kqueue"] }
+memchr = "2.8"
+cow-utils = "0.1"
+smallvec = "1.16"
+itoa = "1.0"
 
 [profile.release]
 opt-level = 3

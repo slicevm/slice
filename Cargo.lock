@@ -1822,11 +1822,15 @@ version = "0.9.9"
 dependencies = [
  "anyhow",
  "blake3",
+ "cow-utils",
+ "itoa",
+ "memchr",
  "memmap2",
  "oxc",
  "rustc-hash",
  "serde",
  "serde_json",
+ "smallvec",
  "thiserror 1.0.69",
 ]
 
@@ -1852,6 +1856,9 @@ dependencies = [
  "anyhow",
  "blake3",
  "boa_engine",
+ "cow-utils",
+ "itoa",
+ "memchr",
  "oxc",
  "rustc-hash",
  "rustls",
@@ -1861,6 +1868,7 @@ dependencies = [
  "slice-cas",
  "slice-io",
  "slice-sandbox",
+ "smallvec",
  "thiserror 1.0.69",
  "wasmi",
  "webpki-roots",
@@ -1882,9 +1890,12 @@ version = "0.9.9"
 dependencies = [
  "anyhow",
  "blake3",
+ "cow-utils",
  "libc",
+ "memchr",
  "rustc-hash",
  "serde",
+ "smallvec",
  "thiserror 1.0.69",
 ]
 

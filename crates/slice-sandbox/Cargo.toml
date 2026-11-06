@@ -10,4 +10,7 @@ serde.workspace = true
 libc.workspace = true
 blake3.workspace = true
 rustc-hash.workspace = true
+memchr.workspace = true
+cow-utils.workspace = true
+smallvec.workspace = true
 

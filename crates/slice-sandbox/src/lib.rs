@@ -9,7 +9,6 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use thiserror::Error;
 
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
@@ -208,7 +207,10 @@ fn parse_nonstandard_ipv4(h: &str) -> Option<std::net::Ipv4Addr> {
         }
         let val = if let Some(hex) = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
             u32::from_str_radix(hex, 16).ok()?
-        } else if part.len() > 1 && part.starts_with('0') && part.bytes().all(|b| b.is_ascii_digit()) {
+        } else if part.len() > 1
+            && part.starts_with('0')
+            && part.bytes().all(|b| b.is_ascii_digit())
+        {
             u32::from_str_radix(part, 8).ok()?
         } else {
             part.parse::<u32>().ok()?
@@ -348,6 +350,167 @@ pub fn is_private_or_loopback_ip(ip: std::net::IpAddr) -> bool {
                 || (segs[0] == 0x2001 && segs[1] == 0x0db8) // 2001:db8::/32 Documentation
         }
     }
+}
+
+/// Lexically normalizes a VFS or host filesystem path into a canonical forward-slash representation:
+/// - Converts Windows `\` separators to `/`.
+/// - Strips Win32 extended-length prefix (`//?/` or `\\?\`).
+/// - Normalizes Windows drive-letter casing to uppercase (`c:/` -> `C:/`).
+/// - Resolves `.` and `..` segments lexically on a stack-allocated `SmallVec` so path traversal
+///   sequences like `/tmp/../etc/passwd` resolve to `/etc/passwd` **before** any prefix check.
+pub fn normalize_vfs_path_lexical(raw: &str) -> String {
+    use cow_utils::CowUtils;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return ".".to_string();
+    }
+    let slash_cow = trimmed.cow_replace('\\', "/");
+    let mut s = slash_cow.as_ref();
+    if let Some(stripped) = s.strip_prefix("//?/") {
+        s = stripped;
+    }
+
+    let (root_prefix, rest, is_abs) =
+        if s.len() >= 2 && s.as_bytes()[0].is_ascii_alphabetic() && s.as_bytes()[1] == b':' {
+            let drive = (s.as_bytes()[0].to_ascii_uppercase()) as char;
+            let after_colon = &s[2..];
+            let after_slash = after_colon.trim_start_matches('/');
+            (Some(drive), after_slash, true)
+        } else if s.starts_with('/') {
+            (None, s.trim_start_matches('/'), true)
+        } else {
+            (None, s, false)
+        };
+
+    let mut stack: smallvec::SmallVec<[&str; 16]> = smallvec::SmallVec::new();
+    for seg in rest.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            if let Some(&last) = stack.last() {
+                if last != ".." {
+                    stack.pop();
+                    continue;
+                }
+            }
+            if !is_abs {
+                stack.push("..");
+            }
+        } else {
+            stack.push(seg);
+        }
+    }
+
+    let mut out = String::with_capacity(s.len().max(2));
+    if let Some(drive) = root_prefix {
+        out.push(drive);
+        out.push(':');
+        out.push('/');
+        for (i, seg) in stack.iter().enumerate() {
+            if i > 0 {
+                out.push('/');
+            }
+            out.push_str(seg);
+        }
+    } else if is_abs {
+        out.push('/');
+        for (i, seg) in stack.iter().enumerate() {
+            if i > 0 {
+                out.push('/');
+            }
+            out.push_str(seg);
+        }
+    } else if stack.is_empty() {
+        out.push('.');
+    } else {
+        for (i, seg) in stack.iter().enumerate() {
+            if i > 0 {
+                out.push('/');
+            }
+            out.push_str(seg);
+        }
+    }
+    out
+}
+
+#[inline]
+fn path_starts_with_dir_boundary(norm_candidate: &str, norm_prefix: &str) -> bool {
+    if norm_prefix == "*" || norm_prefix == "/" {
+        return true;
+    }
+    if norm_candidate == norm_prefix {
+        return true;
+    }
+    if let Some(rem) = norm_candidate.strip_prefix(norm_prefix) {
+        return norm_prefix.ends_with('/') || rem.starts_with('/');
+    }
+    false
+}
+
+/// Verifies whether `candidate_path` is authorized by `allowed_prefix` under OCap VFS rules:
+/// 1. Rejects any raw path containing `..` traversal segments immediately (`..` defense-in-depth).
+/// 2. Lexically normalizes both `candidate_path` and `allowed_prefix` via [`normalize_vfs_path_lexical`].
+/// 3. Enforces strict directory-boundary matching (`/tmp` matches `/tmp` and `/tmp/foo`, but NEVER `/tmp_evil`).
+/// 4. Maps `/tmp` <-> `std::env::temp_dir()` seamlessly across Windows, Linux, and macOS.
+/// 5. Resolves relative capability prefixes (`"."`, `"./data"`) or relative candidate paths against
+///    `std::env::current_dir()` when comparing relative and absolute paths.
+pub fn vfs_prefix_matches(candidate_path: &str, allowed_prefix: &str) -> bool {
+    if memchr::memmem::find(candidate_path.as_bytes(), b"..").is_some() {
+        return false;
+    }
+    if allowed_prefix == "*" || allowed_prefix == "/" {
+        return true;
+    }
+    let norm_cand = normalize_vfs_path_lexical(candidate_path);
+    let norm_pref = normalize_vfs_path_lexical(allowed_prefix);
+    if path_starts_with_dir_boundary(&norm_cand, &norm_pref) {
+        return true;
+    }
+
+    // Cross-platform `/tmp` <-> `std::env::temp_dir()` equivalence
+    if norm_pref == "/tmp" || norm_pref.starts_with("/tmp/") {
+        let os_tmp = normalize_vfs_path_lexical(&std::env::temp_dir().to_string_lossy());
+        if !os_tmp.is_empty() {
+            let mapped_pref = if norm_pref == "/tmp" {
+                os_tmp
+            } else {
+                format!("{}{}", os_tmp, &norm_pref[4..])
+            };
+            if path_starts_with_dir_boundary(&norm_cand, &mapped_pref) {
+                return true;
+            }
+        }
+    }
+
+    // Relative-vs-absolute workspace resolution against `current_dir()`
+    let cand_is_abs =
+        norm_cand.starts_with('/') || (norm_cand.len() >= 3 && norm_cand.as_bytes()[1] == b':');
+    let pref_is_abs =
+        norm_pref.starts_with('/') || (norm_pref.len() >= 3 && norm_pref.as_bytes()[1] == b':');
+    if cand_is_abs != pref_is_abs {
+        if let Ok(cwd) = std::env::current_dir() {
+            let norm_cwd = normalize_vfs_path_lexical(&cwd.to_string_lossy());
+            let abs_cand = if cand_is_abs {
+                norm_cand
+            } else if norm_cand == "." {
+                norm_cwd.clone()
+            } else {
+                normalize_vfs_path_lexical(&format!("{}/{}", norm_cwd, norm_cand))
+            };
+            let abs_pref = if pref_is_abs {
+                norm_pref
+            } else if norm_pref == "." {
+                norm_cwd
+            } else {
+                normalize_vfs_path_lexical(&format!("{}/{}", norm_cwd, norm_pref))
+            };
+            if path_starts_with_dir_boundary(&abs_cand, &abs_pref) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Zero-allocation static check for SES frozen intrinsics.
@@ -507,38 +670,30 @@ impl TenantCompartment {
         Ok(())
     }
 
-    /// Verifies attenuated VFS read capability for `path` using zero-copy `Cow` normalization.
+    /// Verifies attenuated VFS read capability for `path` using lexical path normalization
+    /// and strict directory-boundary matching.
     #[inline]
     pub fn verify_fs_read(&self, path: &str) -> Result<(), SandboxViolation> {
-        let normalized: Cow<'_, str> = if path.as_bytes().contains(&b'\\') {
-            Cow::Owned(path.replace('\\', "/"))
-        } else {
-            Cow::Borrowed(path)
-        };
-        if normalized.contains("..") {
+        if memchr::memmem::find(path.as_bytes(), b"..").is_some() {
             return Err(self.trap_fs_read(path));
         }
         for prefix in &self.capabilities.allowed_read_prefixes {
-            if normalized.starts_with(prefix) {
+            if vfs_prefix_matches(path, prefix) {
                 return Ok(());
             }
         }
         Err(self.trap_fs_read(path))
     }
 
-    /// Verifies attenuated VFS write capability for `path` using zero-copy `Cow` normalization.
+    /// Verifies attenuated VFS write capability for `path` using lexical path normalization
+    /// and strict directory-boundary matching.
     #[inline]
     pub fn verify_fs_write(&self, path: &str) -> Result<(), SandboxViolation> {
-        let normalized: Cow<'_, str> = if path.as_bytes().contains(&b'\\') {
-            Cow::Owned(path.replace('\\', "/"))
-        } else {
-            Cow::Borrowed(path)
-        };
-        if normalized.contains("..") {
+        if memchr::memmem::find(path.as_bytes(), b"..").is_some() {
             return Err(self.trap_fs_write(path));
         }
         for prefix in &self.capabilities.allowed_write_prefixes {
-            if normalized.starts_with(prefix) {
+            if vfs_prefix_matches(path, prefix) {
                 return Ok(());
             }
         }
@@ -671,6 +826,23 @@ impl SliceManifest {
                     ("capabilities", "allow_net") => {
                         for item in parse_toml_string_array(val) {
                             manifest.capabilities.allowed_net_hosts.insert(item);
+                        }
+                    }
+                    ("capabilities", "allow_env") => {
+                        for item in parse_toml_string_array(val) {
+                            if let Some((k, v)) = item.split_once('=') {
+                                manifest
+                                    .capabilities
+                                    .allowed_env_keys
+                                    .insert(k.trim().to_string(), v.trim().to_string());
+                            } else {
+                                let k = item.trim();
+                                let v = std::env::var(k).unwrap_or_default();
+                                manifest
+                                    .capabilities
+                                    .allowed_env_keys
+                                    .insert(k.to_string(), v);
+                            }
                         }
                     }
                     ("capabilities", "env_file") => {
@@ -878,7 +1050,9 @@ NODE_ENV = "production"
         assert!(tenant.verify_fs_read("/data/read/items.json").is_ok());
         assert!(tenant.verify_fs_write("/tmp/shards/shard_00.jsonl").is_ok());
         assert!(tenant.verify_fs_write("/etc/crontab").is_err());
-        assert!(tenant.verify_fs_write("/tmp/shards/../../etc/passwd").is_err());
+        assert!(tenant
+            .verify_fs_write("/tmp/shards/../../etc/passwd")
+            .is_err());
         assert_eq!(tenant.verify_env_read("NODE_ENV"), Ok("production"));
     }
 
@@ -916,7 +1090,9 @@ NODE_ENV = "production"
         let wildcard_tenant =
             TenantCompartment::new("tenant-wildcard", 4, wildcard_caps, 10_000, 65536);
 
-        assert!(wildcard_tenant.verify_net_connect("api.openai.com:443").is_ok());
+        assert!(wildcard_tenant
+            .verify_net_connect("api.openai.com:443")
+            .is_ok());
         assert!(wildcard_tenant.verify_net_connect("api.stripe.com").is_ok());
 
         // Cloud instance metadata endpoints must be unconditionally blocked even under `*`
@@ -968,7 +1144,9 @@ NODE_ENV = "production"
         let local_tenant = TenantCompartment::new("tenant-local", 5, local_caps, 10_000, 65536);
         assert!(local_tenant.verify_net_connect("127.0.0.1:18091").is_ok());
         assert!(local_tenant.verify_net_connect("127.0.0.1:6379").is_err());
-        assert!(local_tenant.verify_net_connect("169.254.169.254:80").is_err());
+        assert!(local_tenant
+            .verify_net_connect("169.254.169.254:80")
+            .is_err());
     }
 
     #[test]
@@ -983,7 +1161,10 @@ DB_PASSWORD='pg_super_secret_pw_f4'
 "#;
         let (pairs, secrets) = parse_dotenv_content(dotenv_raw);
         assert_eq!(pairs.len(), 5);
-        assert_eq!(pairs[0], ("SERVICE_REGION".to_string(), "us-east-1".to_string()));
+        assert_eq!(
+            pairs[0],
+            ("SERVICE_REGION".to_string(), "us-east-1".to_string())
+        );
         assert_eq!(
             pairs[1],
             (
@@ -1159,8 +1340,35 @@ env_file = ".env.production"
             );
         }
     }
+
+    #[test]
+    fn test_canonical_vfs_resolver_lexical_normalization_and_boundary_guards() {
+        assert_eq!(
+            normalize_vfs_path_lexical(r"\\?\c:\Users\slice\.\data\..\config.json"),
+            "C:/Users/slice/config.json"
+        );
+        assert_eq!(
+            normalize_vfs_path_lexical("/tmp/./sub/../etc/../../etc/passwd"),
+            "/etc/passwd"
+        );
+        assert_eq!(normalize_vfs_path_lexical("./a/b/../c/"), "a/c");
+
+        // 1. Directory boundary enforcement: `/tmp` allows `/tmp` and `/tmp/file.txt`,
+        //    but strictly blocks `/tmp_evil` and `/tmp/../etc/passwd`.
+        assert!(vfs_prefix_matches("/tmp", "/tmp"));
+        assert!(vfs_prefix_matches("/tmp/sub/file.txt", "/tmp"));
+        assert!(!vfs_prefix_matches("/tmp_evil/file.txt", "/tmp"));
+        assert!(!vfs_prefix_matches("/tmp/../etc/passwd", "/tmp"));
+
+        // 2. Cross-platform `/tmp` <-> `std::env::temp_dir()` equivalence
+        let os_tmp_child = std::env::temp_dir().join("slice_vfs_unit_check.txt");
+        assert!(vfs_prefix_matches(&os_tmp_child.to_string_lossy(), "/tmp"));
+
+        // 3. Relative `"."` prefix matching against workspace current_dir
+        if let Ok(cwd) = std::env::current_dir() {
+            let abs_in_cwd = cwd.join("Cargo.toml");
+            assert!(vfs_prefix_matches(&abs_in_cwd.to_string_lossy(), "."));
+            assert!(vfs_prefix_matches("Cargo.toml", &cwd.to_string_lossy()));
+        }
+    }
 }
-
-
-
-
