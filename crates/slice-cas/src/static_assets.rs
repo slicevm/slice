@@ -151,4 +151,3 @@ impl StaticAssetTable {
         self.by_path.get(url_path)
     }
 }
-

@@ -6,7 +6,7 @@ use crate::esm_cjs_linker::{
     has_top_level_await, inline_cold_method_requires_ast, prune_and_minify_cjs_module_ast,
     transform_module_to_cjs, UsedExports,
 };
-use crate::oxc_compiler::{source_contains_jsx, strip_typescript_raw};
+use crate::oxc_compiler::{source_contains_jsx, strip_typescript_raw_with_ext};
 use anyhow::{bail, Context, Result};
 use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
@@ -713,7 +713,8 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         }
 
         let is_ts = matches!(ext, "ts" | "tsx" | "jsx");
-        let js_stripped = strip_typescript_raw(&raw_src, is_ts);
+        let is_jsx_ext = matches!(ext, "tsx" | "jsx");
+        let js_stripped = strip_typescript_raw_with_ext(&raw_src, is_ts, is_jsx_ext);
         let from_dir = path.parent().unwrap_or_else(|| Path::new("."));
         let mut child_deps = Vec::new();
         let mut cjs_body =
@@ -796,10 +797,8 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         if !single_consumer_deps.is_empty() {
             for i in 0..visited_order.len() - 1 {
                 if visited_order[i].0.contains("/node_modules/") {
-                    visited_order[i].1 = inline_cold_method_requires_ast(
-                        &visited_order[i].1,
-                        &single_consumer_deps,
-                    );
+                    visited_order[i].1 =
+                        inline_cold_method_requires_ast(&visited_order[i].1, &single_consumer_deps);
                 }
             }
         }
@@ -824,11 +823,8 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
                 visited_order[i].1.clear();
             }
             UsedExports::Subset(used_set) => {
-                visited_order[i].1 = prune_and_minify_cjs_module_ast(
-                    &visited_order[i].1,
-                    Some(&used_set),
-                    false,
-                );
+                visited_order[i].1 =
+                    prune_and_minify_cjs_module_ast(&visited_order[i].1, Some(&used_set), false);
             }
             UsedExports::All => {}
         }
@@ -1011,8 +1007,8 @@ pub fn map_bundled_error_location(bundled_js: &str, error_msg: &str) -> String {
         }
         if !active_short.is_empty() && b_line > marker_line_idx {
             let rel_idx_0 = (b_line - marker_line_idx).saturating_sub(1);
-            let mut resolved_line =
-                lookup_embedded_line_map(active_line_map, rel_idx_0).unwrap_or(b_line - marker_line_idx);
+            let mut resolved_line = lookup_embedded_line_map(active_line_map, rel_idx_0)
+                .unwrap_or(b_line - marker_line_idx);
             if let Some(stmt_text) = lines.get(b_line - 1).map(|s| s.trim()) {
                 if !stmt_text.is_empty() {
                     if let Ok(orig_src) = std::fs::read_to_string(active_full) {
@@ -1098,5 +1094,3 @@ fn encode_wasm_base64(bytes: &[u8]) -> String {
     }
     out
 }
-
-

@@ -12,4 +12,8 @@ anyhow.workspace = true
 thiserror.workspace = true
 oxc.workspace = true
 rustc-hash.workspace = true
+memchr.workspace = true
+cow-utils.workspace = true
+smallvec.workspace = true
+itoa.workspace = true
 

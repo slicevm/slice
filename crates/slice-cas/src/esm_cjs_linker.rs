@@ -1197,13 +1197,15 @@ fn apply_cjs_lazy_barrel_getters(mut body_lines: Vec<String>) -> Vec<String> {
             if let Some(ident) = t.strip_suffix(',') {
                 let ident = ident.trim();
                 if let Some((decl_idx, req_expr)) = const_req_map.get(ident) {
-                    let used_elsewhere = body_lines.iter().enumerate().any(
-                        |(other_idx, other_line)| {
-                            other_idx != idx
-                                && other_idx != *decl_idx
-                                && other_line.contains(ident)
-                        },
-                    );
+                    let used_elsewhere =
+                        body_lines
+                            .iter()
+                            .enumerate()
+                            .any(|(other_idx, other_line)| {
+                                other_idx != idx
+                                    && other_idx != *decl_idx
+                                    && other_line.contains(ident)
+                            });
                     if !used_elsewhere {
                         to_remove_indices.insert(*decl_idx);
                         shorthand_replacements.insert(
@@ -1669,7 +1671,10 @@ pub(crate) fn transform_module_to_cjs(
             if let Some(after_star) = after_export.strip_prefix("* from ") {
                 if let Some((spec, _)) = extract_quoted_specifier(after_star) {
                     let resolved_id = resolve_spec_and_record(&spec, from_dir, deps_out);
-                    body_lines.push(format!("Object.assign(exports, require({:?}));", resolved_id));
+                    body_lines.push(format!(
+                        "Object.assign(exports, require({:?}));",
+                        resolved_id
+                    ));
                     continue;
                 }
             }
@@ -2132,10 +2137,7 @@ pub(crate) fn extract_referenced_identifiers(snippet: &str) -> FxHashSet<String>
         .collect()
 }
 
-fn is_require_call_for_target(
-    expr: &oxc::ast::ast::Expression<'_>,
-    target_mod_id: &str,
-) -> bool {
+fn is_require_call_for_target(expr: &oxc::ast::ast::Expression<'_>, target_mod_id: &str) -> bool {
     use oxc::ast::ast::{Argument, Expression};
     let Expression::CallExpression(call) = expr.without_parentheses() else {
         return false;
@@ -2169,8 +2171,8 @@ fn collect_member_accesses_on_var(
         if idx >= skip_span.0 && end <= skip_span.1 {
             continue;
         }
-        let valid_start = idx == 0
-            || (!is_js_ident_continue(bytes[idx - 1]) && bytes[idx - 1] != b'.');
+        let valid_start =
+            idx == 0 || (!is_js_ident_continue(bytes[idx - 1]) && bytes[idx - 1] != b'.');
         let valid_end = end == bytes.len() || !is_js_ident_continue(bytes[end]);
         if !valid_start || !valid_end {
             continue;
@@ -2400,8 +2402,7 @@ pub(crate) fn prune_and_minify_cjs_module_ast(
 
     if let Some(used_set) = used_exports {
         let has_named_export_stmts = program.body.iter().any(|s| {
-            match_exports_assignment_stmt(s, cjs_code)
-                .is_some_and(|(name, _)| name != "__esModule")
+            match_exports_assignment_stmt(s, cjs_code).is_some_and(|(name, _)| name != "__esModule")
         });
 
         if has_named_export_stmts {
@@ -2516,7 +2517,10 @@ pub(crate) fn prune_and_minify_cjs_module_ast(
                             let mut bound = Vec::new();
                             pattern_bound_names(&decl.id, &mut bound);
                             let is_destructured_req = matches!(&decl.id, BindingPattern::ObjectPattern(obj) if obj.rest.is_none())
-                                && decl.init.as_ref().is_some_and(|e| is_any_require_call(e).is_some());
+                                && decl
+                                    .init
+                                    .as_ref()
+                                    .is_some_and(|e| is_any_require_call(e).is_some());
                             let refs = if is_destructured_req {
                                 FxHashSet::default()
                             } else {
@@ -2629,8 +2633,8 @@ fn replace_whole_ident_in_slice(src: &str, ident: &str, replacement: &str) -> St
     while let Some(rel) = src[pos..].find(ident) {
         let idx = pos + rel;
         let end = idx + ilen;
-        let valid_start = idx == 0
-            || (!is_js_ident_continue(bytes[idx - 1]) && bytes[idx - 1] != b'.');
+        let valid_start =
+            idx == 0 || (!is_js_ident_continue(bytes[idx - 1]) && bytes[idx - 1] != b'.');
         let valid_end = end == bytes.len() || !is_js_ident_continue(bytes[end]);
         if valid_start && valid_end {
             out.push_str(&src[last..idx]);
@@ -2814,8 +2818,8 @@ pub(crate) fn inline_cold_method_requires_ast(
                 let idx = pos + rel;
                 let end = idx + b_len;
                 pos = end;
-                let valid_start = idx == 0
-                    || (!is_js_ident_continue(bytes[idx - 1]) && bytes[idx - 1] != b'.');
+                let valid_start =
+                    idx == 0 || (!is_js_ident_continue(bytes[idx - 1]) && bytes[idx - 1] != b'.');
                 let valid_end = end == bytes.len() || !is_js_ident_continue(bytes[end]);
                 if !valid_start || !valid_end {
                     continue;
@@ -2826,9 +2830,7 @@ pub(crate) fn inline_cold_method_requires_ast(
                 {
                     continue;
                 }
-                let in_cold_span = cold_method_spans
-                    .iter()
-                    .any(|&(s, e)| idx >= s && end <= e);
+                let in_cold_span = cold_method_spans.iter().any(|&(s, e)| idx >= s && end <= e);
                 if !in_cold_span {
                     eligible = false;
                     break;
@@ -2914,7 +2916,8 @@ pub(crate) fn collect_eager_module_indices(
                         ClassElement::MethodDefinition(md) => {
                             if md.kind != MethodDefinitionKind::Constructor {
                                 if let Some(b) = &md.value.body {
-                                    deferred_spans.push((b.span.start as usize, b.span.end as usize));
+                                    deferred_spans
+                                        .push((b.span.start as usize, b.span.end as usize));
                                 }
                             }
                         }
@@ -3003,5 +3006,3 @@ pub(crate) fn collect_eager_module_indices(
 
     eager_set
 }
-
-

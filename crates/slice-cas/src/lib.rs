@@ -12,7 +12,7 @@ pub(crate) mod static_assets;
 
 pub use oxc_compiler::{
     analyze_typescript_semantics, fuse_array_pipelines_ast, strip_typescript_and_normalize,
-    strip_typescript_raw, TypeDirectedHints,
+    strip_typescript_raw, strip_typescript_raw_with_ext, TypeDirectedHints,
 };
 pub use resolver::{
     bundle_entrypoint_with_deps, map_bundled_error_location, resolve_project_entrypoint,
@@ -751,10 +751,7 @@ const allPositive = orders.every((entry) => entry.qty > 0);
         let test_dir = std::env::temp_dir().join("slice_phase_n4_exports_and_ast_test");
         let _ = std::fs::remove_dir_all(&test_dir);
         let src_dir = test_dir.join("src");
-        let scoped_pkg_dir = test_dir
-            .join("node_modules")
-            .join("@edge")
-            .join("kit");
+        let scoped_pkg_dir = test_dir.join("node_modules").join("@edge").join("kit");
         let wildcard_pkg_dir = test_dir.join("node_modules").join("mini-hono");
         std::fs::create_dir_all(&src_dir).unwrap();
         std::fs::create_dir_all(scoped_pkg_dir.join("dist")).unwrap();
@@ -980,7 +977,10 @@ export function processOrder(order: OrderPayload, discount: number, active: bool
             !hints.interface_schemas.contains_key("JournalRecord"),
             "No hardcoded JournalRecord schema should be injected"
         );
-        let schema = hints.interface_schemas.get("OrderPayload").expect("OrderPayload schema");
+        let schema = hints
+            .interface_schemas
+            .get("OrderPayload")
+            .expect("OrderPayload schema");
         assert_eq!(
             schema,
             &vec![
@@ -1197,11 +1197,41 @@ console.log(APP_TITLE, INTERNAL_TAG, metaUrl, metaDir, cjsDir, dynMod.lazyBanner
         // Delete the entire source directory from disk to prove embedded line-map works offline
         let _ = std::fs::remove_dir_all(&test_dir);
 
-        let mapped = map_bundled_error_location(&bundled, "Uncaught Error: \"wave-i-exact-line-check\"");
+        let mapped =
+            map_bundled_error_location(&bundled, "Uncaught Error: \"wave-i-exact-line-check\"");
         assert!(
             mapped.contains("(src/index.ts:16)"),
             "Embedded #slice-source line map must resolve exact TypeScript line 16 without disk access, got: {}",
             mapped
+        );
+    }
+
+    #[test]
+    fn test_ts_generics_with_html_strings_and_template_comment_preservation() {
+        let ts_src = r#"
+export const identity = <T>(val: T): T => val;
+export const htmlTemplate = `<div class="panel">
+  // line inside template literal starting with double slash
+  /* block comment syntax inside template literal */
+  <span>Hello</span>
+</div>`;
+console.log(identity(htmlTemplate));
+"#;
+        let out = strip_typescript_raw_with_ext(ts_src, true, false);
+        assert!(
+            out.contains("// line inside template literal starting with double slash"),
+            "Template literal lines starting with // must be preserved verbatim:\n{}",
+            out
+        );
+        assert!(
+            out.contains("/* block comment syntax inside template literal */"),
+            "Template literal lines starting with /* must be preserved verbatim:\n{}",
+            out
+        );
+        assert!(
+            out.contains("identity = (val) => val"),
+            "TypeScript <T> generic arrow function must not be misparsed as JSX when HTML strings exist:\n{}",
+            out
         );
     }
 }

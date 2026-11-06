@@ -114,12 +114,29 @@ pub fn analyze_typescript_semantics(source: &str) -> TypeDirectedHints {
 
     let mut hints = TypeDirectedHints::default();
     let allocator = oxc::allocator::Allocator::default();
-    let source_type = if source_contains_jsx(source) {
-        oxc::span::SourceType::tsx().with_module(true)
-    } else {
-        oxc::span::SourceType::ts().with_module(true)
+    let parse_opts = oxc::parser::ParseOptions {
+        allow_return_outside_function: true,
+        ..Default::default()
     };
-    let parser_ret = oxc::parser::Parser::new(&allocator, source, source_type).parse();
+    let mut parser_ret = oxc::parser::Parser::new(
+        &allocator,
+        source,
+        oxc::span::SourceType::ts().with_module(true),
+    )
+    .with_options(parse_opts)
+    .parse();
+    if !parser_ret.diagnostics.is_empty() && source_contains_jsx(source) {
+        let retry_ret = oxc::parser::Parser::new(
+            &allocator,
+            source,
+            oxc::span::SourceType::tsx().with_module(true),
+        )
+        .with_options(parse_opts)
+        .parse();
+        if retry_ret.diagnostics.is_empty() {
+            parser_ret = retry_ret;
+        }
+    }
     let semantic_ret = oxc::semantic::SemanticBuilder::new().build(&parser_ret.program);
     hints.semantic_symbol_count = semantic_ret.semantic.scoping().symbols_len();
 
@@ -672,6 +689,57 @@ pub fn fuse_array_pipelines_ast(code: &str) -> String {
     result
 }
 
+/// Masks any top-level `return <expr>;` statements (identified via `oxc::parser::Parser` with
+/// `allow_return_outside_function: true`) as `__slice_top_ret_stmt = <expr>;` so that Oxc's
+/// `SemanticBuilder` and `Transformer` can erase TypeScript annotations without rejecting
+/// top-level returns. Returns `Cow::Borrowed` when no top-level `return` statement exists.
+fn mask_top_level_returns_for_oxc(source: &str) -> (std::borrow::Cow<'_, str>, bool) {
+    let allocator = oxc::allocator::Allocator::default();
+    let parse_opts = oxc::parser::ParseOptions {
+        allow_return_outside_function: true,
+        ..Default::default()
+    };
+    let parsed = oxc::parser::Parser::new(
+        &allocator,
+        source,
+        oxc::span::SourceType::ts().with_module(true),
+    )
+    .with_options(parse_opts)
+    .parse();
+
+    let mut top_ret_spans: smallvec::SmallVec<[(usize, usize, bool); 4]> =
+        smallvec::SmallVec::new();
+    for stmt in &parsed.program.body {
+        if let oxc::ast::ast::Statement::ReturnStatement(ret) = stmt {
+            let start = ret.span.start as usize;
+            let has_arg = ret.argument.is_some();
+            if start + 6 <= source.len() && &source[start..start + 6] == "return" {
+                top_ret_spans.push((start, start + 6, has_arg));
+            }
+        }
+    }
+    if top_ret_spans.is_empty() {
+        return (std::borrow::Cow::Borrowed(source), false);
+    }
+
+    let mut out = String::with_capacity(source.len() + top_ret_spans.len() * 18);
+    let mut cursor = 0usize;
+    for (start, end, has_arg) in top_ret_spans {
+        if start < cursor {
+            continue;
+        }
+        out.push_str(&source[cursor..start]);
+        if has_arg {
+            out.push_str("__slice_top_ret_stmt =");
+        } else {
+            out.push_str("__slice_top_ret_stmt");
+        }
+        cursor = end;
+    }
+    out.push_str(&source[cursor..]);
+    (std::borrow::Cow::Owned(out), true)
+}
+
 /// Production TypeScript & JSX/TSX Compiler powered by **Oxc** (The Oxidation Compiler).
 ///
 /// Uses `oxc::allocator::Allocator`, `oxc::parser::Parser`, `oxc::semantic::SemanticBuilder`,
@@ -679,30 +747,68 @@ pub fn fuse_array_pipelines_ast(code: &str) -> String {
 /// `oxc::codegen::Codegen` to lower TypeScript types, interfaces, enums, generics, and JSX/TSX
 /// elements into clean standard ECMAScript.
 pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
+    strip_typescript_raw_with_ext(source, is_ts, false)
+}
+
+/// Extension-aware Oxc TypeScript & JSX/TSX compiler:
+/// - When `is_jsx_ext` is `true` (`.tsx` or `.jsx`), parses directly as `SourceType::tsx()`.
+/// - When `is_jsx_ext` is `false` (`.ts` or inline TypeScript), parses as `SourceType::ts()` FIRST
+///   so TypeScript `<T>` generic arrow functions (like `const id = <T>(x: T): T => x`) are never
+///   misinterpreted as JSX tags even if the file also contains HTML strings (`"<div>...</div>"`),
+///   and only retries as `SourceType::tsx()` if `.ts` parsing reported syntax diagnostics.
+/// - Relies directly on `oxc::codegen::Codegen` (`CommentOptions::disabled()`) without running a
+///   redundant post-codegen line-by-line comment stripper.
+pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool) -> String {
     if source.starts_with("var __slice_modules =") {
         return source.to_string();
     }
-    let has_jsx = is_ts && source_contains_jsx(source);
-    if !is_ts && !has_jsx && !source.contains("interface ") {
+    let has_jsx_hint =
+        is_jsx_ext || (is_ts && memchr::memmem::find(source.as_bytes(), b"@jsx").is_some());
+    if !is_ts && !has_jsx_hint && memchr::memmem::find(source.as_bytes(), b"interface ").is_none() {
         return strip_js_comments(source);
     }
 
+    // If the source contains top-level `return ` statements (e.g., inside a Tier-0/Tier-2 snippet
+    // or function body fragment), temporarily mask `return` as `__slice_top_ret_stmt =` so Oxc's
+    // `SemanticBuilder` and `Transformer` erase all TypeScript annotations without rejecting
+    // top-level returns, then restore `return` in the generated JS.
+    let (parse_source_cow, had_top_return) = if memchr::memmem::find(source.as_bytes(), b"return ")
+        .is_some()
+        || memchr::memmem::find(source.as_bytes(), b"return;").is_some()
+    {
+        mask_top_level_returns_for_oxc(source)
+    } else {
+        (std::borrow::Cow::Borrowed(source), false)
+    };
+    let parse_source = parse_source_cow.as_ref();
+
     let allocator = oxc::allocator::Allocator::default();
-    let primary_source_type = if has_jsx {
+    let parse_opts = oxc::parser::ParseOptions {
+        allow_return_outside_function: true,
+        ..Default::default()
+    };
+    let primary_source_type = if has_jsx_hint {
         oxc::span::SourceType::tsx().with_module(true)
     } else {
         oxc::span::SourceType::ts().with_module(true)
     };
-    let mut parser_ret = oxc::parser::Parser::new(&allocator, source, primary_source_type).parse();
-    let mut active_path = if has_jsx { "module.tsx" } else { "module.ts" };
+    let mut parser_ret = oxc::parser::Parser::new(&allocator, parse_source, primary_source_type)
+        .with_options(parse_opts)
+        .parse();
+    let mut active_path = if has_jsx_hint {
+        "module.tsx"
+    } else {
+        "module.ts"
+    };
 
     // If `.ts` parsing had diagnostics, retry with `.tsx` in case JSX syntax was used
-    if !parser_ret.diagnostics.is_empty() && !has_jsx {
+    if !parser_ret.diagnostics.is_empty() && !has_jsx_hint {
         let retry_ret = oxc::parser::Parser::new(
             &allocator,
-            source,
+            parse_source,
             oxc::span::SourceType::tsx().with_module(true),
         )
+        .with_options(parse_opts)
         .parse();
         if retry_ret.diagnostics.is_empty() {
             parser_ret = retry_ret;
@@ -738,9 +844,36 @@ pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
         .build(&program)
         .code;
 
+    if had_top_return {
+        use cow_utils::CowUtils;
+        if let std::borrow::Cow::Owned(restored) =
+            code.cow_replace("__slice_top_ret_stmt = ", "return ")
+        {
+            code = restored;
+        }
+        if let std::borrow::Cow::Owned(restored) =
+            code.cow_replace("__slice_top_ret_stmt;", "return;")
+        {
+            code = restored;
+        }
+    }
+    if memchr::memmem::find(code.as_bytes(), b"export {").is_some() {
+        use cow_utils::CowUtils;
+        if let std::borrow::Cow::Owned(cleaned) = code.cow_replace("export {};", "") {
+            code = cleaned;
+        }
+        if let std::borrow::Cow::Owned(cleaned) = code.cow_replace("export { };", "") {
+            code = cleaned;
+        }
+    }
+
     code = fuse_array_pipelines_ast(&code);
 
-    strip_js_comments(&code)
+    if memchr::memmem::find(code.as_bytes(), b"Buffer.").is_some() {
+        crate::esm_cjs_linker::rewrite_buffer_fast_paths_ast(&code)
+    } else {
+        code
+    }
 }
 
 fn update_backtick_state_on_line(line: &str, mut in_backtick: bool) -> bool {
