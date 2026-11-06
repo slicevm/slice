@@ -5216,3 +5216,97 @@ Slice.respond(200, JSON.stringify({
     );
     assert_eq!(parsed["heavySum"], 312_487_500);
 }
+
+#[test]
+fn test_audit_neo_phase2_single_pass_shard_automaton_and_precomputed_dlp() {
+    use crate::js_preludes::detect_needed_shards;
+
+    // 1. Lazy stringified module lines (`__slice_modules[0] = "..."`) must be ignored in O(1)
+    //    without triggering false-positive shard activations:
+    let bundle_with_lazy_wasm_str = concat!(
+        "__slice_modules[0] = \"WebSocket WebAssembly CompressionStream subtle structuredClone\";\n",
+        "const u = new URL('https://edge.slice.dev/v1?x=1');\n"
+    );
+    let mask = detect_needed_shards(bundle_with_lazy_wasm_str, false);
+    assert_eq!(
+        mask,
+        1 << 1,
+        "Only Shard 1 (URL) should be activated when other tokens are inside __slice_modules[0] = \"...\", got mask: {:#b}",
+        mask
+    );
+
+    // 2. Overlapping patterns (`TextEncoderStream` -> Shards 2, 3, 14; `writeUInt` -> Shards 5, 17):
+    let stream_and_bin_js = "const s = new TextEncoderStream(); buf.writeUInt32BE(1, 0);";
+    let mask2 = detect_needed_shards(stream_and_bin_js, false);
+    assert_ne!(mask2 & (1 << 2), 0);
+    assert_ne!(mask2 & (1 << 3), 0);
+    assert_ne!(mask2 & (1 << 14), 0);
+    assert_ne!(mask2 & (1 << 5), 0);
+    assert_ne!(mask2 & (1 << 17), 0);
+
+    // 3. Pre-computed Base64 & Base64URL DLP secret blocking with zero per-call encoding allocations:
+    let mut iso = SliceIsolate::spawn(
+        "dlp-phase2-tenant",
+        1,
+        CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    );
+    iso.add_egress_audit_secret("sk_live_9988776655_secret");
+    // Must have pre-expanded raw + b64_std + b64_url (>= 2 entries) at registration time
+    assert!(iso.egress_audit_secrets.len() >= 2);
+    let b64_leak_code = r#"
+        const encoded = btoa("sk_live_9988776655_secret");
+        console.log("leaking:", encoded);
+    "#;
+    let bc = compile_source_to_bytecode(b64_leak_code);
+    let err = iso.execute_bytecode(&bc, None).unwrap_err();
+    assert!(err.to_string().contains("EGRESS_SECRET_LEAK_BLOCKED"));
+}
+
+#[test]
+fn test_audit_neo_phase3_zero_alloc_kv_counters_and_cow_vfs_checkpoints() {
+    let js = r#"
+        const fs = require("node:fs");
+        fs.writeFileSync("/tmp/cow_phase3.txt", "alpha");
+        Slice.kv.set("counter", "10");
+        const c1 = Slice.kv.incr("counter", 5);
+        const c2 = Slice.kv.incr("counter", -3);
+        const snap = Slice.checkpoint();
+
+        // Mutate both VFS (via CoW appendFileSync) and KV counter after checkpoint
+        fs.appendFileSync("/tmp/cow_phase3.txt", "-beta");
+        const c3 = Slice.kv.incr("counter", 100);
+        const mutatedVfs = fs.readFileSync("/tmp/cow_phase3.txt", "utf8");
+        const mutatedKv = Slice.kv.get("counter");
+
+        // Restore checkpoint: CoW Arc buffer in snapshot must remain untouched ("alpha")
+        Slice.restore(snap);
+        const restoredVfs = fs.readFileSync("/tmp/cow_phase3.txt", "utf8");
+        const restoredKv = Slice.kv.get("counter");
+
+        console.log(JSON.stringify({
+            c1, c2, c3,
+            mutatedVfs, mutatedKv,
+            restoredVfs, restoredKv
+        }));
+    "#;
+    let m = run_source_isolated(
+        "phase3-cow-kv-tenant",
+        js,
+        CapabilityToken::pure_compute()
+            .with_read_prefix("/tmp")
+            .with_write_prefix("/tmp"),
+        1_000_000,
+        8 * 1024 * 1024,
+    )
+    .unwrap();
+    let res: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(res["c1"], 15);
+    assert_eq!(res["c2"], 12);
+    assert_eq!(res["c3"], 112);
+    assert_eq!(res["mutatedVfs"], "alpha-beta");
+    assert_eq!(res["mutatedKv"], "112");
+    assert_eq!(res["restoredVfs"], "alpha");
+    assert_eq!(res["restoredKv"], "12");
+}

@@ -133,10 +133,23 @@ impl SliceIsolate {
 
     /// Registers a sensitive secret token to be guarded against egress exfiltration (`--audit-egress`).
     /// When no secrets are registered (default), the egress guard costs `0.00 ns`.
+    /// Pre-computes both standard Base64 and URL-safe Base64 encodings at registration time
+    /// so `verify_egress_secrets_slice` performs zero heap allocations on hot egress paths.
     pub fn add_egress_audit_secret(&mut self, secret: impl Into<String>) {
         let s = secret.into();
-        if !s.is_empty() && !self.egress_audit_secrets.contains(&s) {
+        if s.is_empty() {
+            return;
+        }
+        let b64_std = crate::intrinsics::base64_encode(s.as_bytes(), false);
+        let b64_url = crate::intrinsics::base64_encode(s.as_bytes(), true);
+        if !self.egress_audit_secrets.contains(&s) {
             self.egress_audit_secrets.push(s);
+        }
+        if !b64_std.is_empty() && !self.egress_audit_secrets.contains(&b64_std) {
+            self.egress_audit_secrets.push(b64_std);
+        }
+        if !b64_url.is_empty() && !self.egress_audit_secrets.contains(&b64_url) {
+            self.egress_audit_secrets.push(b64_url);
         }
     }
 
@@ -263,9 +276,7 @@ impl SliceIsolate {
         if let Some(seed) = opts.deterministic_seed.or(self.deterministic_seed) {
             child_iso.set_deterministic_seed(Some(seed));
         }
-        for sec in &self.egress_audit_secrets {
-            child_iso.add_egress_audit_secret(sec.clone());
-        }
+        child_iso.egress_audit_secrets = self.egress_audit_secrets.clone();
         if let Some(sec) = opts.audit_secret {
             child_iso.add_egress_audit_secret(sec);
         }

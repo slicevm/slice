@@ -60,7 +60,7 @@ struct WorkerJob {
     child_mem: usize,
     parent_det: Option<(u64, u64)>,
     parent_egress_secrets: Vec<String>,
-    parent_vfs_cache: FxHashMap<String, Vec<u8>>,
+    parent_vfs_cache: FxHashMap<String, Arc<Vec<u8>>>,
     parent_vfs_dirs: FxHashSet<String>,
     parent_fetch_mocks: FxHashMap<String, String>,
     parent_ws_mocks: FxHashMap<String, String>,

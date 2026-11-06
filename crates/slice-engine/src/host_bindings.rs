@@ -1686,9 +1686,11 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(js_string!("")));
             }
             let norm = norm_vfs_path(&path);
-            let bytes = BOA_VFS_CACHE
-                .with(|c| c.borrow().get(&norm).cloned())
-                .unwrap_or_else(|| std::fs::read(&path).unwrap_or_default());
+            if let Some(arc_bytes) = BOA_VFS_CACHE.with(|c| c.borrow().get(&norm).cloned()) {
+                let content = String::from_utf8_lossy(&arc_bytes).into_owned();
+                return Ok(BoaVal::from(js_string!(content)));
+            }
+            let bytes = std::fs::read(&path).unwrap_or_default();
             let content = String::from_utf8_lossy(&bytes).into_owned();
             Ok(BoaVal::from(js_string!(content)))
         }),
@@ -1708,9 +1710,10 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                 return bytes_to_js_uint8_array(&[], context);
             }
             let norm = norm_vfs_path(&path);
-            let bytes = BOA_VFS_CACHE
-                .with(|c| c.borrow().get(&norm).cloned())
-                .unwrap_or_else(|| std::fs::read(&path).unwrap_or_default());
+            if let Some(arc_bytes) = BOA_VFS_CACHE.with(|c| c.borrow().get(&norm).cloned()) {
+                return bytes_to_js_uint8_array(&arc_bytes, context);
+            }
+            let bytes = std::fs::read(&path).unwrap_or_default();
             bytes_to_js_uint8_array(&bytes, context)
         }),
     );
@@ -1745,7 +1748,7 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                 });
             }
             BOA_VFS_CACHE.with(|c| {
-                c.borrow_mut().insert(norm, data_bytes);
+                c.borrow_mut().insert(norm, std::sync::Arc::new(data_bytes));
             });
             Ok(BoaVal::undefined())
         }),
@@ -1778,8 +1781,8 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                 let mut map = c.borrow_mut();
                 let entry = map
                     .entry(norm)
-                    .or_insert_with(|| std::fs::read(&path).unwrap_or_default());
-                entry.extend_from_slice(&data_bytes);
+                    .or_insert_with(|| std::sync::Arc::new(std::fs::read(&path).unwrap_or_default()));
+                std::sync::Arc::make_mut(entry).extend_from_slice(&data_bytes);
             });
             Ok(BoaVal::undefined())
         }),
@@ -1957,7 +1960,7 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             let norm_dest = norm_vfs_path(&dest);
             let content = BOA_VFS_CACHE
                 .with(|c| c.borrow().get(&norm_src).cloned())
-                .unwrap_or_else(|| std::fs::read(&src).unwrap_or_default());
+                .unwrap_or_else(|| std::sync::Arc::new(std::fs::read(&src).unwrap_or_default()));
             if let Some(idx) = norm_dest.rfind('/') {
                 let parent = &norm_dest[..idx];
                 BOA_VFS_DIRS.with(|d| {
@@ -1994,7 +1997,7 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             let norm_new = norm_vfs_path(&new_p);
             let content = BOA_VFS_CACHE
                 .with(|c| c.borrow_mut().remove(&norm_old))
-                .unwrap_or_else(|| std::fs::read(&old_p).unwrap_or_default());
+                .unwrap_or_else(|| std::sync::Arc::new(std::fs::read(&old_p).unwrap_or_default()));
             if let Some(idx) = norm_new.rfind('/') {
                 let parent = &norm_new[..idx];
                 BOA_VFS_DIRS.with(|d| {

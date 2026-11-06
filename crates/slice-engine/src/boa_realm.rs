@@ -38,7 +38,7 @@ thread_local! {
         std::cell::RefCell::new(Vec::with_capacity(16));
     pub(crate) static BOA_CONTEXT_POOL: std::cell::RefCell<std::mem::ManuallyDrop<Vec<WarmBoaRealm>>> =
         const { std::cell::RefCell::new(std::mem::ManuallyDrop::new(Vec::new())) };
-    pub(crate) static BOA_VFS_CACHE: std::cell::RefCell<FxHashMap<String, Vec<u8>>> =
+    pub(crate) static BOA_VFS_CACHE: std::cell::RefCell<FxHashMap<String, std::sync::Arc<Vec<u8>>>> =
         std::cell::RefCell::new(FxHashMap::default());
     pub(crate) static BOA_VFS_DIRS: std::cell::RefCell<FxHashSet<String>> =
         std::cell::RefCell::new(FxHashSet::default());

@@ -83,7 +83,7 @@ fn decode_hex_nibble(b: u8) -> Option<u8> {
 #[inline]
 pub fn usp_decode_component(s: &str) -> Cow<'_, str> {
     let bytes = s.as_bytes();
-    if !bytes.contains(&b'+') && !bytes.contains(&b'%') {
+    if memchr::memchr2(b'+', b'%', bytes).is_none() {
         return Cow::Borrowed(s);
     }
     let mut raw = Vec::with_capacity(bytes.len());
@@ -169,7 +169,7 @@ pub fn normalize_url_pathname(p: &str) -> Cow<'_, str> {
         return Cow::Borrowed(p);
     }
     let trailing_slash = p.len() > 1 && p.ends_with('/');
-    let mut out: Vec<&str> = Vec::with_capacity(8);
+    let mut out: smallvec::SmallVec<[&str; 16]> = smallvec::SmallVec::new();
     for seg in p.split('/') {
         if seg.is_empty() || seg == "." {
             continue;

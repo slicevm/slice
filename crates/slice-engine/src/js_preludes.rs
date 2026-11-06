@@ -119,211 +119,292 @@ pub(crate) fn eval_lazy_prelude_shard(
 }
 
 #[inline]
-fn has_outbound_fetch_call(js_code: &str) -> bool {
+fn is_outbound_fetch_at(js_code: &str, idx: usize) -> bool {
     let bytes = js_code.as_bytes();
-    let mut pos = 0;
-    while let Some(rel) = js_code[pos..].find("fetch(") {
-        let idx = pos + rel;
-        let is_member = idx > 0 && bytes[idx - 1] == b'.';
-        let is_async_method = idx >= 6 && &bytes[idx - 6..idx] == b"async ";
-        let is_ident_suffix =
-            idx > 0 && (bytes[idx - 1].is_ascii_alphanumeric() || bytes[idx - 1] == b'_');
-        let is_sync_method = js_code[idx + 6..]
-            .find(')')
-            .is_some_and(|c| js_code[idx + 6 + c + 1..].trim_start().starts_with('{'));
-        if !is_member && !is_async_method && !is_ident_suffix && !is_sync_method {
-            return true;
-        }
-        pos = idx + 6;
-    }
-    false
+    let is_member = idx > 0 && bytes[idx - 1] == b'.';
+    let is_async_method = idx >= 6 && &bytes[idx - 6..idx] == b"async ";
+    let is_ident_suffix =
+        idx > 0 && (bytes[idx - 1].is_ascii_alphanumeric() || bytes[idx - 1] == b'_');
+    let is_sync_method = js_code[idx + 6..]
+        .find(')')
+        .is_some_and(|c| js_code[idx + 6 + c + 1..].trim_start().starts_with('{'));
+    !is_member && !is_async_method && !is_ident_suffix && !is_sync_method
 }
 
-/// Computes a bitmask of lazy prelude shards (`1..=17`) referenced by `js_code` so top-level
-/// execution can pre-load only the shards actually used by a script before entering async/generator
-/// frames, while scripts that don't use those globals pay 0 bytes of prelude evaluation cost.
+#[inline]
+fn is_in_lazy_string_module_line(bytes: &[u8], pos: usize) -> bool {
+    let line_start = memchr::memrchr(b'\n', &bytes[..pos]).map_or(0, |i| i + 1);
+    let line_rem = &bytes[line_start..];
+    if !line_rem.starts_with(b"__slice_modules[") {
+        return false;
+    }
+    let after_prefix = &line_rem[b"__slice_modules[".len()..];
+    let Some(close_bracket) = memchr::memchr(b']', after_prefix) else {
+        return false;
+    };
+    let after_bracket = &after_prefix[close_bracket + 1..];
+    after_bracket.starts_with(b" = \"") || after_bracket.starts_with(b"=\"")
+}
+
+#[derive(Clone, Copy)]
+enum ShardTriggerAction {
+    Mask(u32),
+    FetchCall,
+    BufBin,
+    HasBinRwMarker,
+}
+
+const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
+    // Outbound Fetch & SSE (`(1 << 10) | (1 << 11)`)
+    ("fetch(", ShardTriggerAction::FetchCall),
+    ("fetchSync", ShardTriggerAction::Mask((1 << 10) | (1 << 11))),
+    ("mockFetch", ShardTriggerAction::Mask((1 << 10) | (1 << 11))),
+    (
+        "streamSSE",
+        ShardTriggerAction::Mask((1 << 10) | (1 << 11) | (1 << 3)),
+    ),
+    (
+        "Response.sse",
+        ShardTriggerAction::Mask((1 << 10) | (1 << 11) | (1 << 3)),
+    ),
+    (
+        "AbortController",
+        ShardTriggerAction::Mask((1 << 10) | (1 << 11)),
+    ),
+    (
+        "AbortSignal",
+        ShardTriggerAction::Mask((1 << 10) | (1 << 11)),
+    ),
+    // HTTP Request / Response / Headers (`1 << 11`)
+    (".fetch(", ShardTriggerAction::Mask(1 << 11)),
+    ("new Request(", ShardTriggerAction::Mask(1 << 11)),
+    ("new Response(", ShardTriggerAction::Mask(1 << 11)),
+    ("Response.", ShardTriggerAction::Mask(1 << 11)),
+    ("new Headers(", ShardTriggerAction::Mask(1 << 11)),
+    ("Headers.", ShardTriggerAction::Mask(1 << 11)),
+    ("Request.", ShardTriggerAction::Mask(1 << 11)),
+    // URL & URLSearchParams (`1 << 1`)
+    ("new URL(", ShardTriggerAction::Mask(1 << 1)),
+    ("URL.", ShardTriggerAction::Mask(1 << 1)),
+    ("new URLSearchParams(", ShardTriggerAction::Mask(1 << 1)),
+    ("URLSearchParams.", ShardTriggerAction::Mask(1 << 1)),
+    ("node:url", ShardTriggerAction::Mask(1 << 1)),
+    ("createObjectURL", ShardTriggerAction::Mask(1 << 1)),
+    ("canParse", ShardTriggerAction::Mask(1 << 1)),
+    // URLPattern (`1 << 12`)
+    ("URLPattern", ShardTriggerAction::Mask(1 << 12)),
+    // TextEncoder / TextDecoder / Base64 (`1 << 2`)
+    ("TextEncoder", ShardTriggerAction::Mask(1 << 2)),
+    ("TextDecoder", ShardTriggerAction::Mask(1 << 2)),
+    ("btoa(", ShardTriggerAction::Mask(1 << 2)),
+    ("atob(", ShardTriggerAction::Mask(1 << 2)),
+    // Event / EventTarget (`1 << 13`)
+    ("new Event(", ShardTriggerAction::Mask(1 << 13)),
+    ("new CustomEvent(", ShardTriggerAction::Mask(1 << 13)),
+    ("EventTarget", ShardTriggerAction::Mask(1 << 13)),
+    // Streams (`(1 << 14) | (1 << 3)` and `1 << 3`)
+    (
+        "WritableStream",
+        ShardTriggerAction::Mask((1 << 14) | (1 << 3)),
+    ),
+    (
+        "TransformStream",
+        ShardTriggerAction::Mask((1 << 14) | (1 << 3)),
+    ),
+    (
+        "TextEncoderStream",
+        ShardTriggerAction::Mask((1 << 14) | (1 << 3) | (1 << 2)),
+    ),
+    (
+        "TextDecoderStream",
+        ShardTriggerAction::Mask((1 << 14) | (1 << 3) | (1 << 2)),
+    ),
+    (
+        "CompressionStream",
+        ShardTriggerAction::Mask((1 << 14) | (1 << 3)),
+    ),
+    (
+        "DecompressionStream",
+        ShardTriggerAction::Mask((1 << 14) | (1 << 3)),
+    ),
+    ("ReadableStream", ShardTriggerAction::Mask(1 << 3)),
+    // Blob / File / FormData (`1 << 15`)
+    ("new Blob(", ShardTriggerAction::Mask(1 << 15)),
+    ("new File(", ShardTriggerAction::Mask(1 << 15)),
+    ("new FormData(", ShardTriggerAction::Mask(1 << 15)),
+    ("FormData.", ShardTriggerAction::Mask(1 << 15)),
+    ("Blob.", ShardTriggerAction::Mask(1 << 15)),
+    ("File.", ShardTriggerAction::Mask(1 << 15)),
+    // WebCrypto (`1 << 4`)
+    ("subtle", ShardTriggerAction::Mask(1 << 4)),
+    ("getRandomValues", ShardTriggerAction::Mask(1 << 4)),
+    ("randomUUID", ShardTriggerAction::Mask(1 << 4)),
+    ("webcrypto", ShardTriggerAction::Mask(1 << 4)),
+    ("CryptoKey", ShardTriggerAction::Mask(1 << 4)),
+    ("crypto.", ShardTriggerAction::Mask(1 << 4)),
+    // structuredClone (`1 << 16`)
+    ("structuredClone", ShardTriggerAction::Mask(1 << 16)),
+    // Buffer & Binary R/W (`1 << 5` and `1 << 17`)
+    ("writeUInt", ShardTriggerAction::BufBin),
+    ("readUInt", ShardTriggerAction::BufBin),
+    ("writeInt", ShardTriggerAction::BufBin),
+    ("readInt", ShardTriggerAction::BufBin),
+    ("writeBig", ShardTriggerAction::BufBin),
+    ("readBig", ShardTriggerAction::BufBin),
+    ("_hasBinRW", ShardTriggerAction::HasBinRwMarker),
+    ("Buffer.from", ShardTriggerAction::Mask(1 << 5)),
+    ("Buffer.alloc", ShardTriggerAction::Mask(1 << 5)),
+    ("Buffer.byteLength", ShardTriggerAction::Mask(1 << 5)),
+    ("Buffer.isBuffer", ShardTriggerAction::Mask(1 << 5)),
+    ("Buffer.isEncoding", ShardTriggerAction::Mask(1 << 5)),
+    ("Buffer(", ShardTriggerAction::Mask(1 << 5)),
+    ("Buffer.concat", ShardTriggerAction::Mask(1 << 5)),
+    ("Buffer.compare", ShardTriggerAction::Mask(1 << 5)),
+    ("new Buffer(", ShardTriggerAction::Mask(1 << 5)),
+    ("node:buffer", ShardTriggerAction::Mask(1 << 5)),
+    ("instanceof Buffer", ShardTriggerAction::Mask(1 << 5)),
+    ("randomBytes", ShardTriggerAction::Mask(1 << 5)),
+    ("createHash(\"sha512\"", ShardTriggerAction::Mask(1 << 5)),
+    ("createHash('sha512'", ShardTriggerAction::Mask(1 << 5)),
+    ("createHash(\"sha384\"", ShardTriggerAction::Mask(1 << 5)),
+    ("createHash('sha384'", ShardTriggerAction::Mask(1 << 5)),
+    ("createHash(\"sha1\"", ShardTriggerAction::Mask(1 << 5)),
+    ("createHash('sha1'", ShardTriggerAction::Mask(1 << 5)),
+    ("createHmac(\"sha512\"", ShardTriggerAction::Mask(1 << 5)),
+    ("createHmac('sha512'", ShardTriggerAction::Mask(1 << 5)),
+    // Console Extended (`1 << 6`)
+    ("console.table", ShardTriggerAction::Mask(1 << 6)),
+    ("console.dir", ShardTriggerAction::Mask(1 << 6)),
+    ("console.group", ShardTriggerAction::Mask(1 << 6)),
+    ("console.time", ShardTriggerAction::Mask(1 << 6)),
+    ("console.trace", ShardTriggerAction::Mask(1 << 6)),
+    ("console.count", ShardTriggerAction::Mask(1 << 6)),
+    ("console.assert", ShardTriggerAction::Mask(1 << 6)),
+    ("console.clear", ShardTriggerAction::Mask(1 << 6)),
+    // WebSocket (`(1 << 7) | (1 << 13)`)
+    (
+        "WebSocket",
+        ShardTriggerAction::Mask((1 << 7) | (1 << 13)),
+    ),
+    (
+        "MessageEvent",
+        ShardTriggerAction::Mask((1 << 7) | (1 << 13)),
+    ),
+    (
+        "CloseEvent",
+        ShardTriggerAction::Mask((1 << 7) | (1 << 13)),
+    ),
+    (
+        "mockWebSocket",
+        ShardTriggerAction::Mask((1 << 7) | (1 << 13)),
+    ),
+    (
+        "onWebSocket",
+        ShardTriggerAction::Mask((1 << 7) | (1 << 13)),
+    ),
+    (
+        "upgradeWebSocket",
+        ShardTriggerAction::Mask((1 << 7) | (1 << 13)),
+    ),
+    // WinterTC Sockets & Workers (`1 << 8` etc.)
+    (
+        "cloudflare:sockets",
+        ShardTriggerAction::Mask((1 << 8) | (1 << 14) | (1 << 3) | (1 << 13) | (1 << 2)),
+    ),
+    (
+        "slice:sockets",
+        ShardTriggerAction::Mask((1 << 8) | (1 << 14) | (1 << 3) | (1 << 13) | (1 << 2)),
+    ),
+    (
+        "Slice.connect",
+        ShardTriggerAction::Mask((1 << 8) | (1 << 14) | (1 << 3) | (1 << 13) | (1 << 2)),
+    ),
+    (
+        "Worker",
+        ShardTriggerAction::Mask((1 << 8) | (1 << 13) | (1 << 2)),
+    ),
+    (
+        "worker_threads",
+        ShardTriggerAction::Mask((1 << 8) | (1 << 13) | (1 << 2)),
+    ),
+    (
+        "MessageChannel",
+        ShardTriggerAction::Mask((1 << 8) | (1 << 13) | (1 << 2)),
+    ),
+    (
+        "MessagePort",
+        ShardTriggerAction::Mask((1 << 8) | (1 << 13) | (1 << 2)),
+    ),
+    (
+        "parentPort",
+        ShardTriggerAction::Mask((1 << 8) | (1 << 13) | (1 << 2)),
+    ),
+    (
+        "workerData",
+        ShardTriggerAction::Mask((1 << 8) | (1 << 13) | (1 << 2)),
+    ),
+    (
+        "mockSocket",
+        ShardTriggerAction::Mask((1 << 8) | (1 << 13) | (1 << 2)),
+    ),
+    // WebAssembly (`1 << 9`)
+    ("WebAssembly", ShardTriggerAction::Mask(1 << 9)),
+];
+
+#[inline]
+fn shard_detector_automaton() -> &'static aho_corasick::AhoCorasick {
+    static AC: std::sync::OnceLock<aho_corasick::AhoCorasick> = std::sync::OnceLock::new();
+    AC.get_or_init(|| {
+        let patterns: Vec<&str> = SHARD_PATTERNS.iter().map(|(p, _)| *p).collect();
+        aho_corasick::AhoCorasick::builder()
+            .match_kind(aho_corasick::MatchKind::Standard)
+            .build(&patterns)
+            .expect("Valid SHARD_PATTERNS AhoCorasick automaton")
+    })
+}
+
+/// Computes a bitmask of lazy prelude shards (`1..=17`) referenced by `raw_js_code` in a single
+/// zero-allocation `O(N)` SIMD multi-pattern pass so top-level execution pre-loads only the shards
+/// actually used by a script before entering async/generator frames.
 #[inline]
 pub(crate) fn detect_needed_shards(raw_js_code: &str, is_http: bool) -> u32 {
-    let active_storage: String;
-    let js_code: &str = if raw_js_code.contains("] = \"") || raw_js_code.contains("]=\"") {
-        active_storage = raw_js_code
-            .lines()
-            .filter(|l| {
-                !(l.starts_with("__slice_modules[") && (l.contains("] = \"") || l.contains("]=\"")))
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        &active_storage
-    } else {
-        raw_js_code
-    };
-    let mut mask: u32 = 0;
+    let bytes = raw_js_code.as_bytes();
+    let has_lazy_string_modules = memchr::memmem::find(bytes, b"__slice_modules[").is_some()
+        && (memchr::memmem::find(bytes, b"] = \"").is_some()
+            || memchr::memmem::find(bytes, b"]=\"").is_some());
 
-    let needs_outbound_fetch_sse = has_outbound_fetch_call(js_code)
-        || js_code.contains("fetchSync")
-        || js_code.contains("mockFetch")
-        || js_code.contains("streamSSE")
-        || js_code.contains("Response.sse")
-        || js_code.contains("AbortController")
-        || js_code.contains("AbortSignal");
-    if needs_outbound_fetch_sse {
-        mask |= (1 << 10) | (1 << 11);
-    } else if is_http
-        || js_code.contains(".fetch(")
-        || js_code.contains("new Request(")
-        || js_code.contains("new Response(")
-        || js_code.contains("Response.")
-        || js_code.contains("new Headers(")
-        || js_code.contains("Headers.")
-        || js_code.contains("Request.")
-    {
-        mask |= 1 << 11;
-    }
+    let mut mask: u32 = if is_http { 1 << 11 } else { 0 };
+    let mut needs_buf_bin = false;
+    let mut has_bin_rw_marker = false;
 
-    if js_code.contains("new URL(")
-        || js_code.contains("URL.")
-        || js_code.contains("new URLSearchParams(")
-        || js_code.contains("URLSearchParams.")
-        || js_code.contains("node:url")
-        || js_code.contains("createObjectURL")
-        || js_code.contains("canParse")
-    {
-        mask |= 1 << 1;
-    }
-
-    if js_code.contains("URLPattern") {
-        mask |= 1 << 12;
-    }
-
-    if js_code.contains("TextEncoder")
-        || js_code.contains("TextDecoder")
-        || js_code.contains("btoa(")
-        || js_code.contains("atob(")
-    {
-        mask |= 1 << 2;
-    }
-
-    if js_code.contains("new Event(")
-        || js_code.contains("new CustomEvent(")
-        || js_code.contains("EventTarget")
-    {
-        mask |= 1 << 13;
-    }
-
-    if js_code.contains("WritableStream")
-        || js_code.contains("TransformStream")
-        || js_code.contains("TextEncoderStream")
-        || js_code.contains("TextDecoderStream")
-        || js_code.contains("CompressionStream")
-        || js_code.contains("DecompressionStream")
-    {
-        mask |= (1 << 14) | (1 << 3);
-    } else if js_code.contains("ReadableStream")
-        || js_code.contains("Response.sse")
-        || js_code.contains("streamSSE")
-    {
-        mask |= 1 << 3;
-    }
-
-    if js_code.contains("new Blob(")
-        || js_code.contains("new File(")
-        || js_code.contains("new FormData(")
-        || js_code.contains("FormData.")
-        || js_code.contains("Blob.")
-        || js_code.contains("File.")
-    {
-        mask |= 1 << 15;
-    }
-
-    if js_code.contains("subtle")
-        || js_code.contains("getRandomValues")
-        || js_code.contains("randomUUID")
-        || js_code.contains("webcrypto")
-        || js_code.contains("CryptoKey")
-        || js_code.contains("crypto.")
-    {
-        mask |= 1 << 4;
-    }
-
-    if js_code.contains("structuredClone") {
-        mask |= 1 << 16;
-    }
-
-    let needs_buf_bin = js_code.contains("writeUInt")
-        || js_code.contains("readUInt")
-        || js_code.contains("writeInt")
-        || js_code.contains("readInt")
-        || js_code.contains("writeBig")
-        || js_code.contains("readBig");
-    if needs_buf_bin
-        || js_code.contains("Buffer.from")
-        || js_code.contains("Buffer.alloc")
-        || js_code.contains("Buffer.byteLength")
-        || js_code.contains("Buffer.isBuffer")
-        || js_code.contains("Buffer.isEncoding")
-        || js_code.contains("Buffer(")
-        || js_code.contains("Buffer.concat")
-        || js_code.contains("Buffer.compare")
-        || js_code.contains("new Buffer(")
-        || js_code.contains("node:buffer")
-        || js_code.contains("instanceof Buffer")
-        || js_code.contains("randomBytes")
-        || js_code.contains("createHash(\"sha512\"")
-        || js_code.contains("createHash('sha512'")
-        || js_code.contains("createHash(\"sha384\"")
-        || js_code.contains("createHash('sha384'")
-        || js_code.contains("createHash(\"sha1\"")
-        || js_code.contains("createHash('sha1'")
-        || js_code.contains("createHmac(\"sha512\"")
-        || js_code.contains("createHmac('sha512'")
-    {
-        mask |= 1 << 5;
-        if needs_buf_bin && !js_code.contains("_hasBinRW") {
-            mask |= 1 << 17;
+    let ac = shard_detector_automaton();
+    for mat in ac.find_overlapping_iter(raw_js_code) {
+        if has_lazy_string_modules && is_in_lazy_string_module_line(bytes, mat.start()) {
+            continue;
+        }
+        match SHARD_PATTERNS[mat.pattern().as_usize()].1 {
+            ShardTriggerAction::Mask(bits) => {
+                mask |= bits;
+            }
+            ShardTriggerAction::FetchCall => {
+                if is_outbound_fetch_at(raw_js_code, mat.start()) {
+                    mask |= (1 << 10) | (1 << 11);
+                }
+            }
+            ShardTriggerAction::BufBin => {
+                mask |= 1 << 5;
+                needs_buf_bin = true;
+            }
+            ShardTriggerAction::HasBinRwMarker => {
+                has_bin_rw_marker = true;
+            }
         }
     }
 
-    if js_code.contains("console.table")
-        || js_code.contains("console.dir")
-        || js_code.contains("console.group")
-        || js_code.contains("console.time")
-        || js_code.contains("console.trace")
-        || js_code.contains("console.count")
-        || js_code.contains("console.assert")
-        || js_code.contains("console.clear")
-    {
-        mask |= 1 << 6;
+    if needs_buf_bin && !has_bin_rw_marker {
+        mask |= 1 << 17;
     }
 
-    if js_code.contains("WebSocket")
-        || js_code.contains("MessageEvent")
-        || js_code.contains("CloseEvent")
-        || js_code.contains("mockWebSocket")
-        || js_code.contains("onWebSocket")
-        || js_code.contains("upgradeWebSocket")
-    {
-        mask |= (1 << 7) | (1 << 13);
-    }
-
-    if js_code.contains("cloudflare:sockets")
-        || js_code.contains("slice:sockets")
-        || js_code.contains("Slice.connect")
-    {
-        mask |= (1 << 8) | (1 << 14) | (1 << 3) | (1 << 13) | (1 << 2);
-    } else if js_code.contains("Worker")
-        || js_code.contains("worker_threads")
-        || js_code.contains("MessageChannel")
-        || js_code.contains("MessagePort")
-        || js_code.contains("parentPort")
-        || js_code.contains("workerData")
-        || js_code.contains("mockSocket")
-    {
-        mask |= (1 << 8) | (1 << 13) | (1 << 2);
-    }
-
-    if js_code.contains("WebAssembly") {
-        mask |= 1 << 9;
-    }
     mask
 }
 

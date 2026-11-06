@@ -2,27 +2,28 @@
 //! Deterministic SplitMix64 PRNG, and Outbound Egress Secret DLP Guard.
 
 use crate::boa_realm::{BOA_VFS_CACHE, BOA_VFS_DIRS, CHECKPOINT_SLAB, NEXT_CHECKPOINT_ID};
-use crate::intrinsics::base64_encode;
+use compact_str::CompactString;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slice_sandbox::SandboxViolation;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub(crate) struct StateCheckpoint {
-    pub(crate) vfs_files: FxHashMap<String, Vec<u8>>,
+    pub(crate) vfs_files: FxHashMap<String, Arc<Vec<u8>>>,
     pub(crate) vfs_dirs: FxHashSet<String>,
-    pub(crate) tenant_kv: Vec<((String, String), KvEntry)>,
+    pub(crate) tenant_kv: [Option<KvTenantMap>; 16],
 }
 
 pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
     let vfs_files = BOA_VFS_CACHE.with(|c| c.borrow().clone());
     let vfs_dirs = BOA_VFS_DIRS.with(|d| d.borrow().clone());
-    let mut tenant_kv = Vec::new();
+    let mut tenant_kv: [Option<KvTenantMap>; 16] = std::array::from_fn(|_| None);
     if let Some(shards) = EDGE_KV_SLAB.get() {
-        for shard in shards {
-            let guard = shard.lock().unwrap();
-            for (k, v) in guard.iter() {
-                if k.0 == tenant_id {
-                    tenant_kv.push((k.clone(), v.clone()));
+        for (idx, shard) in shards.iter().enumerate() {
+            let guard = shard.read();
+            if let Some(t_map) = guard.get(tenant_id) {
+                if !t_map.is_empty() {
+                    tenant_kv[idx] = Some(t_map.clone());
                 }
             }
         }
@@ -52,15 +53,15 @@ pub(crate) fn restore_tenant_state(tenant_id: &str, checkpoint_id: u64) -> bool 
     };
     BOA_VFS_CACHE.with(|c| *c.borrow_mut() = snap.vfs_files);
     BOA_VFS_DIRS.with(|d| *d.borrow_mut() = snap.vfs_dirs);
-    if let Some(shards) = EDGE_KV_SLAB.get() {
-        for shard in shards {
-            let mut guard = shard.lock().unwrap();
-            guard.retain(|k, _| k.0 != tenant_id);
+    let shards = EDGE_KV_SLAB
+        .get_or_init(|| std::array::from_fn(|_| parking_lot::RwLock::new(FxHashMap::default())));
+    for (idx, shard_snap) in snap.tenant_kv.into_iter().enumerate() {
+        let mut guard = shards[idx].write();
+        if let Some(t_map) = shard_snap {
+            guard.insert(CompactString::new(tenant_id), t_map);
+        } else {
+            guard.remove(tenant_id);
         }
-    }
-    for ((t_id, key), entry) in snap.tenant_kv {
-        let shard = edge_kv_shard(&t_id, &key);
-        shard.lock().unwrap().insert((t_id, key), entry);
     }
     true
 }
@@ -72,16 +73,9 @@ pub(crate) fn verify_egress_secrets_slice(
     secrets: &[String],
     payload: &str,
 ) -> Result<(), SandboxViolation> {
-    for sec in secrets {
-        if sec.is_empty() {
-            continue;
-        }
-        let b64_std = base64_encode(sec.as_bytes(), false);
-        let b64_url = base64_encode(sec.as_bytes(), true);
-        if payload.contains(sec.as_str())
-            || (!b64_std.is_empty() && payload.contains(&b64_std))
-            || (!b64_url.is_empty() && payload.contains(&b64_url))
-        {
+    let payload_bytes = payload.as_bytes();
+    for pat in secrets {
+        if !pat.is_empty() && memchr::memmem::find(payload_bytes, pat.as_bytes()).is_some() {
             return Err(SandboxViolation::EnvAccessDenied {
                 tenant_id: tenant_id.to_string(),
                 key: "EGRESS_SECRET_LEAK_BLOCKED".to_string(),
@@ -92,14 +86,42 @@ pub(crate) fn verify_egress_secrets_slice(
 }
 
 #[derive(Clone, Debug)]
+pub(crate) enum KvValue {
+    Str(CompactString),
+    Int(i64),
+}
+
+impl KvValue {
+    #[inline]
+    pub(crate) fn to_std_string(&self) -> String {
+        match self {
+            Self::Str(s) => s.to_string(),
+            Self::Int(n) => {
+                let mut buf = itoa::Buffer::new();
+                buf.format(*n).to_string()
+            }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::Int(n) => Some(*n),
+            Self::Str(s) => s.parse::<i64>().ok(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct KvEntry {
-    pub(crate) val: String,
+    pub(crate) val: KvValue,
     pub(crate) expires_at_ms: Option<u64>,
 }
 
-pub(crate) type KvShardMap = FxHashMap<(String, String), KvEntry>;
+pub(crate) type KvTenantMap = FxHashMap<CompactString, KvEntry>;
+pub(crate) type KvShardMap = FxHashMap<CompactString, KvTenantMap>;
 
-pub(crate) static EDGE_KV_SLAB: std::sync::OnceLock<[std::sync::Mutex<KvShardMap>; 16]> =
+pub(crate) static EDGE_KV_SLAB: std::sync::OnceLock<[parking_lot::RwLock<KvShardMap>; 16]> =
     std::sync::OnceLock::new();
 
 #[inline]
@@ -111,9 +133,9 @@ pub(crate) fn current_epoch_ms() -> u64 {
 }
 
 #[inline]
-pub(crate) fn edge_kv_shard(tenant_id: &str, key: &str) -> &'static std::sync::Mutex<KvShardMap> {
+pub(crate) fn edge_kv_shard(tenant_id: &str, key: &str) -> &'static parking_lot::RwLock<KvShardMap> {
     let shards = EDGE_KV_SLAB
-        .get_or_init(|| std::array::from_fn(|_| std::sync::Mutex::new(FxHashMap::default())));
+        .get_or_init(|| std::array::from_fn(|_| parking_lot::RwLock::new(FxHashMap::default())));
     use std::hash::{Hash, Hasher};
     let mut hasher = rustc_hash::FxHasher::default();
     tenant_id.hash(&mut hasher);
@@ -123,16 +145,24 @@ pub(crate) fn edge_kv_shard(tenant_id: &str, key: &str) -> &'static std::sync::M
 
 pub(crate) fn edge_kv_get(tenant_id: &str, key: &str) -> Option<String> {
     let shard = edge_kv_shard(tenant_id, key);
-    let mut guard = shard.lock().unwrap();
-    let composite = (tenant_id.to_string(), key.to_string());
-    if let Some(entry) = guard.get(&composite) {
-        if let Some(exp) = entry.expires_at_ms {
-            if current_epoch_ms() >= exp {
-                guard.remove(&composite);
-                return None;
-            }
+    {
+        let guard = shard.read();
+        let entry = guard.get(tenant_id).and_then(|m| m.get(key))?;
+        if entry.expires_at_ms.is_none_or(|exp| current_epoch_ms() < exp) {
+            return Some(entry.val.to_std_string());
         }
-        return Some(entry.val.clone());
+    }
+    let mut guard = shard.write();
+    if let Some(t_map) = guard.get_mut(tenant_id) {
+        if let Some(entry) = t_map.get(key) {
+            if let Some(exp) = entry.expires_at_ms {
+                if current_epoch_ms() >= exp {
+                    t_map.remove(key);
+                    return None;
+                }
+            }
+            return Some(entry.val.to_std_string());
+        }
     }
     None
 }
@@ -144,48 +174,78 @@ pub(crate) fn edge_kv_set(tenant_id: &str, key: &str, val: &str, ttl_ms: u64) {
         None
     };
     let shard = edge_kv_shard(tenant_id, key);
-    let mut guard = shard.lock().unwrap();
-    guard.insert(
-        (tenant_id.to_string(), key.to_string()),
+    let mut guard = shard.write();
+    if let Some(t_map) = guard.get_mut(tenant_id) {
+        if let Some(entry) = t_map.get_mut(key) {
+            entry.val = KvValue::Str(CompactString::new(val));
+            entry.expires_at_ms = expires_at_ms;
+            return;
+        }
+        t_map.insert(
+            CompactString::new(key),
+            KvEntry {
+                val: KvValue::Str(CompactString::new(val)),
+                expires_at_ms,
+            },
+        );
+        return;
+    }
+    let mut t_map = FxHashMap::default();
+    t_map.insert(
+        CompactString::new(key),
         KvEntry {
-            val: val.to_string(),
+            val: KvValue::Str(CompactString::new(val)),
             expires_at_ms,
         },
     );
+    guard.insert(CompactString::new(tenant_id), t_map);
 }
 
 pub(crate) fn edge_kv_del(tenant_id: &str, key: &str) -> bool {
     let shard = edge_kv_shard(tenant_id, key);
-    let mut guard = shard.lock().unwrap();
+    let mut guard = shard.write();
     guard
-        .remove(&(tenant_id.to_string(), key.to_string()))
+        .get_mut(tenant_id)
+        .and_then(|t_map| t_map.remove(key))
         .is_some()
 }
 
 pub(crate) fn edge_kv_incr(tenant_id: &str, key: &str, delta: i64) -> i64 {
     let shard = edge_kv_shard(tenant_id, key);
-    let mut guard = shard.lock().unwrap();
-    let composite = (tenant_id.to_string(), key.to_string());
+    let mut guard = shard.write();
     let now = current_epoch_ms();
-    let current = guard
-        .get(&composite)
-        .and_then(|entry| {
-            if let Some(exp) = entry.expires_at_ms {
-                if now >= exp {
-                    return None;
-                }
-            }
-            entry.val.parse::<i64>().ok()
-        })
-        .unwrap_or(0);
-    let next = current.wrapping_add(delta);
-    guard.insert(
-        composite,
+    if let Some(t_map) = guard.get_mut(tenant_id) {
+        if let Some(entry) = t_map.get_mut(key) {
+            let current = if entry.expires_at_ms.is_some_and(|exp| now >= exp) {
+                0
+            } else {
+                entry.val.as_i64().unwrap_or(0)
+            };
+            let next = current.wrapping_add(delta);
+            entry.val = KvValue::Int(next);
+            entry.expires_at_ms = None;
+            return next;
+        }
+        let next = delta;
+        t_map.insert(
+            CompactString::new(key),
+            KvEntry {
+                val: KvValue::Int(next),
+                expires_at_ms: None,
+            },
+        );
+        return next;
+    }
+    let next = delta;
+    let mut t_map = FxHashMap::default();
+    t_map.insert(
+        CompactString::new(key),
         KvEntry {
-            val: next.to_string(),
+            val: KvValue::Int(next),
             expires_at_ms: None,
         },
     );
+    guard.insert(CompactString::new(tenant_id), t_map);
     next
 }
 
