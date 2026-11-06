@@ -8,9 +8,9 @@ This chapter explains how Slice executes your code across its three tiers, how t
 
 ---
 
-## 1. How Slice Runs Your Code: The Three Execution Tiers
+## 1. How Slice Runs Your Code: The Three Execution Tiers & Default `SLICEBC\x01` Precompiled CAS
 
-Whenever you run a script or bundle (`slice run`, `slice serve`, `slice test`, or a compiled binary), Slice automatically selects the fastest execution tier for your code:
+Whenever you run a script or bundle (`slice run`, `slice serve`, `slice test`, or a compiled binary), Slice defaults to **Tier 1 (`Tier1Baseline`) with Precompiled Boa `CodeBlock` (`SLICEBC\x01`) enabled** (`boacas = true`), while automatically engaging Tier-0 Snapshot fast paths (`SLICESNP`) on scalar scripts and Tier-2 Native SIMD kernels (`Tier2PeakNative`) on typed compute loops:
 
 ```text
 +-------------------------------------------------------------------------------------------------+
@@ -18,14 +18,17 @@ Whenever you run a script or bundle (`slice run`, `slice serve`, `slice test`, o
 |                                                                                                 |
 |  Your TypeScript / JavaScript / .cas Bundle                                                     |
 |         |                                                                                       |
-|         +---> [Tier 0: SLICESNP Snapshot VM] (`Tier0LLIntSnapshot`)                             |
-|         |       - Used for: Lightweight routing, scalar math, env(), static exports             |
-|         |       - Cold Start: ~0.98 microseconds | Memory: 4.0 KB                               |
-|         |                                                                                       |
-|         +---> [Tier 1: Full ES2024+ Warm Realm Pool] (`Tier1Baseline`)                          |
+|         +---> [Tier 1 (Default Optimal Path): Precompiled SLICEBC\x01 + Warm Realm Pool]        |
 |         |       - Used for: Full TypeScript/JS classes, closures, async/await, Map/Set,         |
 |         |         Request/Response/URL, node:* modules, Slice.kv, and npm packages              |
-|         |       - Cold Start: ~0.02 - 0.25 microseconds (from mmap .cas + --warm pool)          |
+|         |       - Build Time: Oxc AST deferred module spans + node:* pre-fusion +               |
+|         |         32-byte BoaCasHeader + SLICEBC1 recursive CodeBlock serialization             |
+|         |       - Cold Start: ~3.26 - 6.95 ms (0 runtime JS lexing/parsing!)                    |
+|         |       - Warm Pool (--warm / slice serve): ~0.18 - 0.56 ms (0.02 - 0.25 us instantiate)|
+|         |                                                                                       |
+|         +---> [Tier 0: SLICESNP Snapshot VM] (`Tier0LLIntSnapshot`)                             |
+|         |       - Used for: Lightweight scalar routing, arithmetic, env(), static exports       |
+|         |       - Cold Start: ~1.27 microseconds P50 | Memory: 4.0 KB                           |
 |         |                                                                                       |
 |         +---> [Tier 2: Peak Native SIMD & Typed Kernels] (`Tier2PeakNative`)                    |
 |                 - Used when: Your code runs typed `: number` loops, SHA-256 / HMAC-SHA256,      |
@@ -33,7 +36,7 @@ Whenever you run a script or bundle (`slice run`, `slice serve`, `slice test`, o
 +-------------------------------------------------------------------------------------------------+
 ```
 
-You never have to manually configure which tier to use — Slice inspects your code at compile time (`slice pack` / `slice compile` / `slice run`) and routes it automatically.
+You never have to manually configure which tier to use — Slice runs on its optimal **Tier 1 + `SLICEBC\x01`** path out of the box. If you ever want to override the tier or toggle `SLICEBC\x01` precompilation for a specific script or project, you can set it via `slice.toml` (`[engine] tier = "tier1"`, `boacas = true`), top-of-file inline directives (`// @slice-tier: tier1`, `// @slice-boacas: false`), environment variables (`SLICE_TIER`, `SLICE_BOACAS`), or CLI flags (`--tier=`, `--boacas` / `--no-boacas`).
 
 ---
 

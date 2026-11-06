@@ -193,7 +193,33 @@ slice compile . -o ./hello-slice-app
 
 ---
 
-## 5. Complete `slice.toml` Manifest Guide
+## 5. Unified 4-Layer Configuration System (`slice.toml`, Inline Directives, `SLICE_*` Env Vars, & CLI Flags)
+
+By default, Slice runs on its **optimal execution path (`Tier 1`, `boacas = true` `SLICEBC\x01` Precompiled Boa `CodeBlock` CAS)** with zero configuration required. When you want to customize engine behavior, resource limits, Object-Capability (`OCap`) permissions, or HTTP server settings, Slice resolves settings across **five well-defined precedence layers** (lowest to highest priority):
+
+```text
+1. Built-In Optimal Defaults (`tier = "tier1"`, `boacas = true`, `fuel = 50_000_000`, `memory = 16 MB`, zero ambient OCap)
+       |
+       v
+2. Project Manifest (`./slice.toml`, target folder `slice.toml`, or `.cas` embedded `manifest:/slice.toml`)
+       |
+       v
+3. Top-of-File Inline Source Directives (`// @slice-tier: ...`, `// @slice-fuel: ...`, `// @slice-allow-read: ...`)
+       |
+       v
+4. Host Environment Variables (`SLICE_TIER`, `SLICE_BOACAS`, `SLICE_FUEL`, `SLICE_ALLOW_READ`, `SLICE_PORT`, ...)
+       |
+       v
+5. Explicit CLI Flags (`--tier=`, `--boacas` / `--no-boacas`, `--fuel=`, `--memory=`, `--allow-read=`, `--port=`, ...)
+```
+
+> **Capability Merging vs. Scalar Overrides:**
+> - **Scalar settings** (`tier`, `boacas`, `warm`, `deterministic_seed`, `fuel`, `memory`, `port`, `workers`, `static_dir`) follow strict override precedence (a higher layer replaces a lower layer).
+> - **OCap permissions and DLP secrets** (`allow_read`, `allow_write`, `allow_net`, `allow_env`, `env_file`, `audit_egress`) are **additive** across layers so you can declare base permissions in `slice.toml` and append extra test/runtime permissions via inline directives, `SLICE_*` env vars, or CLI flags.
+
+---
+
+### 5.1 Layer 2: Complete `slice.toml` Manifest Reference
 
 When you run `slice run`, `slice serve`, `slice test`, `slice pack`, or `slice compile` inside a project directory, Slice automatically loads `slice.toml` (and embeds it inside `.cas` archives and compiled binaries!).
 
@@ -208,13 +234,23 @@ version = "1.2.0"
 # Default TypeScript or JavaScript entrypoint
 entrypoint = "./src/index.ts"
 
+[engine]
+# Default execution tier ("tier1" | "tier0" | "auto"). Defaults to "tier1".
+tier = "tier1"
+# Precompile JavaScript/TypeScript into SLICEBC\x01 Boa CodeBlock CAS containers (default: true).
+boacas = true
+# Pre-warm the thread-local Boa realm pool before execution (default: false for CLI run, true in serve).
+warm = true
+# Optional fixed seed for deterministic Math.random(), Date.now(), and performance.now().
+# deterministic_seed = 42
+
 [limits]
 # Maximum deterministic CPU instruction fuel per execution or HTTP request.
 # Protects your server against accidental infinite loops or ReDoS attacks.
 fuel = 50_000_000
 
 # Maximum per-tenant memory ceiling in kilobytes (16384 KB = 16 MB).
-# Enforced across isolate heap allocations and Slice.kv entries.
+# You can also specify `memory_mb = 16` or `memory_bytes = 16777216`.
 memory_kb = 16384
 
 [capabilities]
@@ -225,7 +261,7 @@ allow_read = ["/tmp", "./config", "./public"]
 # Allowed filesystem write/append/mkdir/unlink path prefixes.
 allow_write = ["/tmp"]
 
-# Allowed outbound network host:port endpoints for fetch() / Slice.fetchSync().
+# Allowed outbound network host:port endpoints for fetch() / Slice.fetchSync() / WebSockets / Sockets.
 # Use ["*"] to allow all public hosts (Cloud Metadata 169.254.169.254 and RFC1918 private IPs remain blocked!).
 allow_net = ["api.stripe.com:443", "127.0.0.1:18095"]
 
@@ -234,16 +270,71 @@ allow_net = ["api.stripe.com:443", "127.0.0.1:18095"]
 # (except PUBLIC_KEY / PUBLISHABLE_KEY) is automatically registered into the Egress DLP guard!
 env_file = ".env"
 
+# Explicit secrets to block in stdout, HTTP responses, SSE streams, and outbound fetch/sockets (raw + Base64 + Base64URL).
+audit_egress = ["sk_live_explicit_secret_token"]
+
 [capabilities.env]
-# Explicit non-secret environment variables injected into the isolate compartment
+# Explicit environment variables injected into the isolate compartment
 NODE_ENV = "production"
 SERVICE_REGION = "us-east-1"
 PUBLIC_KEY_ID = "pk_live_9001"
+
+[server]
+# Default HTTP listening port for `slice serve` (default: 3000)
+port = 8080
+# Number of shared-nothing HTTP worker threads for `slice serve`
+workers = 4
+# Optional static frontend directory served out of memory with BLAKE3 ETag 304 support
+static_dir = "./public"
 ```
 
-### How CLI Flags Interact with `slice.toml`
-- **Additive Capabilities:** Passing `--allow-read=/data`, `--allow-write=/tmp/out`, `--allow-net=example.com:443`, `--allow-env=FOO=bar`, or `--env-file=.env.local` on the command line **adds** those permissions to the capabilities declared in `slice.toml`.
-- **Limit Overrides:** Passing `--fuel=1000000` or `--memory=4194304` on the CLI overrides the `fuel` and `memory_kb` values from `slice.toml`.
+---
+
+### 5.2 Layer 3: Top-of-File Inline Source Directives (`// @slice-...`)
+
+For single-file scripts, benchmarks, or self-contained tests where you do not want a separate `slice.toml` file, you can place `// @slice-<key>: <value>` (or `// @slice-<key>=<value>`) comments in the first 64 comment lines at the top of your `.ts` or `.js` entrypoint:
+
+```typescript
+#!/usr/bin/env slice
+// @slice-tier: tier1
+// @slice-boacas: true
+// @slice-warm: true
+// @slice-deterministic: 42
+// @slice-fuel: 25_000_000
+// @slice-memory-kb: 8192
+// @slice-allow-read: ["/tmp", "./data"]
+// @slice-allow-write: ["/tmp"]
+// @slice-allow-net: ["api.example.com:443"]
+// @slice-allow-env: ["NODE_ENV=production"]
+// @slice-env-file: .env
+// @slice-audit-egress: ["sk_live_inline_secret"]
+// @slice-port: 8080
+// @slice-workers: 4
+
+console.log("Running with self-contained inline directives!");
+```
+
+---
+
+### 5.3 Layer 4 & 5: Complete Settings Matrix (`slice.toml` vs Inline vs `SLICE_*` Env vs CLI Flags)
+
+| Setting | Built-In Default | `slice.toml` Key | Inline Directive (`// @slice-...`) | Environment Variable | CLI Flag |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Execution Tier** | `tier1` (Optimal) | `[engine] tier = "tier1"` | `// @slice-tier: tier1` (`tier0`, `auto`) | `SLICE_TIER=tier1` | `--tier=tier1` (`--tier=0`, `--tier=auto`) |
+| **Precompiled Boa CAS** | `true` (`SLICEBC\x01`) | `[engine] boacas = true` | `// @slice-boacas: true` (`false`) | `SLICE_BOACAS=1` (`0`) | `--boacas` / `--no-boacas` |
+| **Warm Realm Pool** | `false` (`true` in `serve`) | `[engine] warm = true` | `// @slice-warm: true` | `SLICE_WARM=1` | `--warm` / `--no-warm` |
+| **Deterministic Seed** | Disabled (`None`) | `[engine] deterministic_seed = 42` | `// @slice-deterministic: 42` | `SLICE_DETERMINISTIC_SEED=42` | `--deterministic[=42]` / `--no-deterministic` |
+| **CPU Fuel Limit** | `50_000_000` | `[limits] fuel = 50_000_000` | `// @slice-fuel: 50_000_000` | `SLICE_FUEL=50000000` | `--fuel=50000000` |
+| **Memory Cage** | `16 MB` (`16384 KB`) | `[limits] memory_kb = 16384` (`memory_mb`) | `// @slice-memory-kb: 16384` (`memory-mb`) | `SLICE_MEMORY_KB=16384` (`SLICE_MEMORY`) | `--memory=16777216` / `--memory-kb=16384` |
+| **VFS Read Prefixes** | `[]` (Zero access) | `[capabilities] allow_read = [...]` | `// @slice-allow-read: ["/tmp"]` | `SLICE_ALLOW_READ=/tmp,./data` | `--allow-read=/tmp` |
+| **VFS Write Prefixes** | `[]` (Zero access) | `[capabilities] allow_write = [...]` | `// @slice-allow-write: ["/tmp"]` | `SLICE_ALLOW_WRITE=/tmp` | `--allow-write=/tmp` |
+| **Network Hosts** | `[]` (Zero access) | `[capabilities] allow_net = [...]` | `// @slice-allow-net: ["host:443"]` | `SLICE_ALLOW_NET=host:443` | `--allow-net=host:443` |
+| **Env Variables** | `{}` (Zero access) | `[capabilities.env] KEY = "VAL"` | `// @slice-allow-env: ["KEY=VAL"]` | `SLICE_ALLOW_ENV=KEY=VAL` | `--allow-env=KEY=VAL` |
+| **Dotenv Vault File** | `None` | `[capabilities] env_file = ".env"` | `// @slice-env-file: .env` | `SLICE_ENV_FILE=.env` | `--env-file=.env` |
+| **Egress DLP Secrets** | Auto from `.env` | `[capabilities] audit_egress = [...]` | `// @slice-audit-egress: ["sec"]` | `SLICE_AUDIT_EGRESS=sec1,sec2` | `--audit-egress=sec1` |
+| **HTTP Server Port** | `3000` | `[server] port = 3000` | `// @slice-port: 3000` | `SLICE_PORT=3000` | `--port=3000` |
+| **HTTP Worker Threads** | `clamp(cpus, 1, 8)` | `[server] workers = 4` | `// @slice-workers: 4` | `SLICE_WORKERS=4` | `--workers=4` |
+| **Static Asset Dir** | `None` | `[server] static_dir = "./public"` | *(Use `slice.toml` / CLI)* | `SLICE_STATIC_DIR=./public` | `--static=./public` |
 
 ---
 
@@ -281,8 +372,10 @@ Executes a `.ts`/`.js` file, a project folder (with `package.json`, `slice.toml`
 | `--env-file=<path>` | Load `.env` file into `process.env` / `env()` with automatic Egress DLP secret protection. |
 | `--audit-egress=<secret>` | Explicitly register `<secret>` into the Egress DLP guard (blocks raw, Base64, and Base64URL leaks). |
 | `--fuel=<u64>` | Set maximum CPU instruction fuel budget (default: `50,000,000`). |
-| `--memory=<bytes>` | Set maximum per-isolate memory ceiling in bytes (default: `16,777,216`). |
-| `--warm` | Pre-warm the thread-local `BOA_CONTEXT_POOL` and `__slice_rc` bundle closure before measurement. |
+| `--memory=<bytes>` / `--memory-kb=<kb>` | Set maximum per-isolate memory ceiling in bytes or kilobytes (default: `16,777,216` bytes / `16,384` KB). |
+| `--tier=<tier1\|tier0\|auto>` | Override execution tier (`tier1` default, `tier0` for SLICESNP snapshot VM, or `auto`). |
+| `--boacas` / `--no-boacas` | Enable (default) or disable Precompiled Boa `CodeBlock` (`SLICEBC\x01`) bytecode execution. |
+| `--warm` / `--no-warm` | Pre-warm the thread-local `BOA_CONTEXT_POOL` and `__slice_rc` bundle closure before measurement. |
 | `--watch` | Watch source files (`src/`, `slice.toml`, `.env`) and live-reload in `< 3 ms` on save. |
 | `--watch-once` | Run once, wait for a single file modification, re-execute in `< 3 ms`, and exit (ideal for CI/scripts). |
 | `--deterministic[=<seed>]` | Enable deterministic `Math.random()`, `Date.now()`, `performance.now()`, and `fetch()` cassette replay (default seed: `42`). |
@@ -334,17 +427,19 @@ slice test --json
 ---
 
 ### 7.4 `slice serve [target] [flags]`
-Launches the multi-tenant WinterTC HTTP/1.1 `Keep-Alive` and pipelined MicroVM web server (`152,376 req/s` Tier-0 CAS, `107,274 req/s` Tier-1 WinterTC).
+Launches the multi-tenant WinterTC HTTP/1.1 `Keep-Alive` and pipelined MicroVM web server (`154,348 req/s` Tier-0 CAS, `126,566 req/s` Tier-1 WinterTC).
 
 | Flag | Description |
 | :--- | :--- |
-| `--port=<u16>` | TCP listening port (default: `3000`). |
-| `--workers=<usize>` | Number of shared-nothing worker threads (default: `clamp(num_cpus, 1, 8)`). |
+| `--port=<u16>` | TCP listening port (default: `3000`, or `[server] port` in `slice.toml` / `SLICE_PORT`). |
+| `--workers=<usize>` | Number of shared-nothing worker threads (default: `clamp(num_cpus, 1, 8)`, or `[server] workers`). |
 | `--static=<dir>` | Ingest and serve static web assets from `<dir>` out of memory with BLAKE3 `ETag` `304` support (`< 2 us`). |
 | `--tenant-dir=<dir>` | Dynamically route `X-Slice-Tenant: <id>` or `/t/<id>/...` to `<dir>/<id>.cas` with zero-downtime live hot-swapping. |
 | `--env-file=<path>` | Load `.env` variables and register sensitive keys into the Egress DLP guard. |
 | `--audit-egress=<secret>` | Scan all HTTP responses, SSE streams, and outbound `fetch()` calls for raw/Base64 leaks of `<secret>`. |
 | `--deterministic[=<seed>]` | Enable deterministic PRNG, virtual clock, and `fetch()` cassette replay across served requests. |
+| `--tier=<tier1\|tier0\|auto>` | Override execution tier across HTTP worker threads. |
+| `--boacas` / `--no-boacas` | Enable (default) or disable Precompiled Boa `CodeBlock` (`SLICEBC\x01`) bytecode execution. |
 | `--max-requests=<usize>` | Exit cleanly after serving `<usize>` requests (ideal for automated load tests). |
 | `--smoke-test` / `--once` | Bind an ephemeral port, send 2 pipelined HTTP/1.1 `Keep-Alive` requests, print response headers/bodies, and exit. |
 
@@ -363,12 +458,13 @@ slice serve ./src/server.ts --smoke-test
 ---
 
 ### 7.5 `slice pack <input_file_or_dir> <output.cas> [flags]`
-Compiles TypeScript via Oxc, bundles transitive ESM/CommonJS/JSON modules from `src/` and `node_modules/`, tree-shakes unused barrel submodules, optionally embeds `--static` web assets and `slice.toml`, and writes a 64-byte cache-line aligned BLAKE3 `.cas` archive.
+Compiles TypeScript via Oxc, bundles transitive ESM/CommonJS/JSON modules from `src/` and `node_modules/`, tree-shakes unused barrel submodules, ahead-of-time compiles top-level scripts into **`SLICEBC\x01` Precompiled Boa `CodeBlock`** bytecode (with Oxc AST deferred function module spans and pre-fused `node:*` built-in bindings), optionally embeds `--static` web assets and `slice.toml`, and writes a 64-byte cache-line aligned BLAKE3 `.cas` archive.
 
 | Flag | Description |
 | :--- | :--- |
 | `--entry=<rel_path>` | Override the entrypoint file when packing a folder (e.g., `--entry=./src/worker.ts`). |
 | `--static=<dir>` | Embed an entire static asset directory (`HTML`/`CSS`/`JS`/`SVG`/`WASM`) into the `.cas` archive. |
+| `--boacas` / `--no-boacas` | Enable (default) or disable `SLICEBC\x01` precompiled `CodeBlock` emission. |
 
 **Examples:**
 ```bash
@@ -379,13 +475,14 @@ slice pack ./my-fullstack-app ./production.cas --static=./public
 ---
 
 ### 7.6 `slice compile <input_file_or_dir_or_cas> [-o <output_binary>] [flags]`
-Embeds a `.ts` script, folder application (including `node_modules/` and `slice.toml`), or `.cas` archive directly into a standalone, zero-dependency native executable (`SLICEEXE` format).
+Embeds a `.ts` script, folder application (including `node_modules/` and `slice.toml`), or `.cas` archive directly into a standalone, zero-dependency native executable (`SLICEEXE` format) with `SLICEBC\x01` Precompiled Boa `CodeBlock` bytecode enabled by default.
 
 | Flag | Description |
 | :--- | :--- |
 | `-o <path>` / `--output=<path>` | Output executable path (automatically appends `.exe` on Windows if omitted). |
 | `--entry=<rel_path>` | Override the entrypoint file when compiling a folder. |
 | `--static=<dir>` | Embed a static frontend directory directly into the standalone binary. |
+| `--boacas` / `--no-boacas` | Enable (default) or disable `SLICEBC\x01` precompiled `CodeBlock` emission. |
 
 **Examples:**
 ```bash
@@ -398,7 +495,7 @@ slice compile ./tests/apps/01-fintech-checkout -o ./fintech-service
 ### 7.7 `slice inspect <archive.cas | script.ts | folder>`
 Inspects the internal structure of any `.cas` archive, `.ts`/`.js` script, or project folder:
 - For `.cas` archives: Prints the CAS format version, entrypoint hash, embedded static asset count, and every module's BLAKE3 hash, 64-byte aligned byte offset, source size, and bytecode size, followed by the bytecode disassembly.
-- For `.ts`/`.js` files or folders: Compiles the source and disassembles the resulting `SLICESNP` opcodes (`CONST_NUM`, `MONO_FOR_T2`, `EXPORT_SYM`) or `SLICEBOA` bundle payload.
+- For `.ts`/`.js` files or folders: Compiles the source and disassembles the resulting `SLICEBC\x01` (`BOACAS_PRECOMP`), `SLICESNP` (`CONST_NUM`, `MONO_FOR_T2`, `EXPORT_SYM`), or `SLICEBOA` bundle payload.
 
 ```bash
 slice inspect ./production.cas

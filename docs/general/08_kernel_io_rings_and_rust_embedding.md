@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
     // 1. Pre-warm the thread-local Boa ES2024 realm pool once per worker thread
     SliceIsolate::prewarm_boa_pool(2);
 
-    // 2. Compile TypeScript source to bytecode once (produces SLICESNP or SLICEBOA)
+    // 2. Compile TypeScript source to bytecode once (produces SLICEBC\x01 Precompiled Boa CodeBlock by default, or SLICESNP)
     let ts_source = r#"
         interface Invoice { id: string; subtotal: number; tax: number; }
         const inv: Invoice = { id: "INV-9001", subtotal: 15000, tax: 1200 };
@@ -53,7 +53,7 @@ fn main() -> anyhow::Result<()> {
     let bytecode: Vec<u8> = compile_source_to_bytecode(ts_source);
 
     // 3. Pre-warm the compiled bundle closure in the worker's realm pool (optional, enables 0-parse calls)
-    SliceIsolate::prewarm_boa_bundle(&bytecode, 2);
+    SliceIsolate::prewarm_boa_bundle(&bytecode);
 
     // 4. Build an explicit Object-Capability (OCap) token for this tenant
     let caps = CapabilityToken::pure_compute()
@@ -149,7 +149,7 @@ fn handle_custom_http() -> anyhow::Result<()> {
         };
     "#;
     let bytecode = compile_source_to_bytecode(handler_ts);
-    SliceIsolate::prewarm_boa_bundle(&bytecode, 2);
+    SliceIsolate::prewarm_boa_bundle(&bytecode);
 
     let mut isolate = SliceIsolate::spawn(
         "tenant-http",

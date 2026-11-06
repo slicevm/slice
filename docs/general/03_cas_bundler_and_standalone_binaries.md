@@ -78,9 +78,13 @@ slice pack ./my-webapp ./webapp.cas --entry=./src/server.ts --static=./public
 3. **Static Barrel Tree-Shaking (`50%+` Smaller Bundles):**
    - Many popular npm packages (like `semver`) have an `index.js` barrel file that `require()`s 35+ submodules even if your app only calls `semver.satisfies()`.
    - Slice's bundler statically analyzes which exports your application actually uses and **prunes unused barrel submodules before reading them from disk**, cutting `.cas` bundle size in half.
-4. **Embedded `slice.toml` Security Manifest (`manifest:/slice.toml`):**
-   - If your project folder contains a `slice.toml` file, `slice pack` embeds it directly inside the `.cas` archive. When you run `slice run ./app.cas` or `slice serve ./app.cas`, Slice automatically applies your `allow_read`, `allow_write`, `allow_net`, `allow_env`, `fuel`, and `memory_kb` settings!
-5. **Memory-Mapped Execution (`0` `stat()` Syscalls):**
+4. **Ahead-of-Time `SLICEBC\x01` Precompiled Boa `CodeBlock` Serialization (Default):**
+   - By default (`boacas = true`), `slice pack` and `slice compile` compile your bundled JavaScript into a **32-byte `BoaCasHeader` + `SLICEBC1` binary `CodeBlock` container** ([`crates/slice-engine/src/boacas.rs`](file:///p:/opensource/slice/crates/slice-engine/src/boacas.rs), [`vendor/boa_engine/SLICE_PATCH.md`](file:///p:/opensource/slice/vendor/boa_engine/SLICE_PATCH.md)).
+   - Inner functions inside `__slice_modules = [function(...) { ... }]` are recorded via **Oxc AST deferred source spans** (`0x11` tag) so uncalled `node_modules` functions are never byte-compiled until invoked, while `node:*` core built-ins and runtime shards are pre-fused into a single `CodeBlock`.
+   - At runtime, `slice run ./app.cas` reconstructs `Gc<CodeBlock>` directly from the `mmap` slice in microseconds — skipping **100% of runtime JavaScript lexing, AST parsing, scope analysis, and bytecode compilation**.
+5. **Embedded `slice.toml` Security Manifest (`manifest:/slice.toml`):**
+   - If your project folder contains a `slice.toml` file, `slice pack` embeds it directly inside the `.cas` archive. When you run `slice run ./app.cas` or `slice serve ./app.cas`, Slice automatically applies your `[engine]`, `[limits]`, `[capabilities]`, and `[server]` settings!
+6. **Memory-Mapped Execution (`0` `stat()` Syscalls):**
    - At runtime, `slice run ./app.cas` maps the `.cas` file directly into virtual memory via `mmap(MAP_SHARED)` and executes with **zero filesystem `stat()` calls**.
 
 ---
@@ -147,8 +151,9 @@ Example output:
 ```bash
 slice inspect ./src/index.ts
 ```
+- For **Tier-1 Default (`SLICEBC\x01`)** bundles, `slice inspect` prints the precompiled `BOACAS_PRECOMP` header summary (`Approach=1`, feature flags, precomputed runtime shard mask, `SLICEBC1` `CodeBlock` byte size, and deferred module fallback source size).
 - For **Tier-0 / Tier-2 (`SLICESNP`)** scripts, `slice inspect` prints the disassembled instruction table (`CONST_NUM`, `CONST_STR`, `MONO_FOR_T2`, `AST_EXEC`, `EXPORT_SYM`).
-- For **Tier-1 (`SLICEBOA`)** bundles, `slice inspect` prints the bundled JavaScript payload, `// #slice-source:` error-mapping markers, and the `//__SLICE_RC:<hash>` persistent realm cache key.
+- For **Legacy Source-in-CAS (`SLICEBOA`, `--no-boacas`)** bundles, `slice inspect` prints the bundled JavaScript payload, `// #slice-source:` error-mapping markers, and the `//__SLICE_RC:<hash>` persistent realm cache key.
 
 ---
 

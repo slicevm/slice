@@ -27,10 +27,10 @@ slice pack ./my-edge-app ./service.cas
 slice pack ./src ./service.cas --entry=./index.ts
 ```
 * Strips all TypeScript type annotations at build time via **Oxc (`v0.152.0`)** and links transitive ESM (`import`/`export`) and CommonJS (`require`/`module.exports`) modules from `src/` and `node_modules/`.
-* Compiles every module into `SLICESNP` or zero-copy `SLICEBOA` binary bytecode.
+* Compiles every module into default **`SLICEBC\x01` Precompiled Boa `CodeBlock`** bytecode (with Oxc AST deferred function module spans and pre-fused `node:*` built-ins), `SLICESNP`, or legacy `SLICEBOA` bytecode.
 * Computes a 256-bit **BLAKE3** hash over the canonicalized source and bytecode.
 * Aligns every blob to a **64-byte CPU cache line** boundary.
-* At runtime (`slice run ./service.cas`), the file is mapped via `mmap(MAP_SHARED)` with **0 `stat()` syscalls** (`0.23 us` isolate instantiation).
+* At runtime (`slice run ./service.cas`), the file is mapped via `mmap(MAP_SHARED)` with **0 `stat()` syscalls** and **0 runtime JS lexing/parsing** (`0.05 us - 0.21 us` isolate instantiation).
 
 ### 2.2 Compiling a Self-Contained Binary (`slice compile`)
 When deploying to minimal container images (`FROM scratch` or `distroless`) or distributing CLI tools:
@@ -38,13 +38,25 @@ When deploying to minimal container images (`FROM scratch` or `distroless`) or d
 slice compile ./my-edge-app -o ./my-service
 ```
 * Appends the 64-byte aligned `.cas` archive directly to the `slice` runtime executable followed by a 24-byte `SLICEEXE` trailer (`[u64 cas_offset][u64 cas_len][b"SLICEEXE"]`).
-* When `./my-service` boots, it maps its own executable image via `mmap`, locates the `SLICEEXE` trailer in O(1) time, and executes the embedded `SLICESNP`/`SLICEBOA` snapshot without extracting any temporary files to disk.
+* When `./my-service` boots, it maps its own executable image via `mmap`, locates the `SLICEEXE` trailer in O(1) time, and executes the embedded `SLICEBC\x01`/`SLICESNP` snapshot without extracting any temporary files to disk.
+
+---
+
+## 2.3 Unified 4-Layer Configuration Precedence (`slice.toml`, Inline `// @slice-...`, `SLICE_*` Env Vars, & CLI Flags)
+
+Implemented in [`crates/slice-sandbox/src/lib.rs`](file:///p:/opensource/slice/crates/slice-sandbox/src/lib.rs) (`SliceManifest`, `InlineDirectives`, `parse_inline_directives`) and [`crates/slice-cli/src/config_and_watch.rs`](file:///p:/opensource/slice/crates/slice-cli/src/config_and_watch.rs) (`ResolvedExecutionConfig`):
+
+1. **Layer 1 — Built-In Optimal Defaults:** `tier = "tier1"`, `boacas = true` (`SLICEBC\x01`), `fuel = 50_000_000`, `memory = 16 MB`, `CapabilityToken::pure_compute()`.
+2. **Layer 2 — Project / Embedded `slice.toml` Manifest:** Supports `[package]` (`name`, `version`, `entrypoint`), `[engine]` (`tier`, `boacas`, `warm`, `deterministic_seed`), `[limits]` (`fuel`, `memory_kb`, `memory_mb`, `memory_bytes`), `[capabilities]` (`allow_read`, `allow_write`, `allow_net`, `allow_env`, `env_file`, `audit_egress`), `[capabilities.env]`, and `[server]` (`port`, `workers`, `static_dir`).
+3. **Layer 3 — Top-of-File Inline Source Directives (`// @slice-...`):** Leading comments in the first 64 lines of an entrypoint (`// @slice-tier: tier1`, `// @slice-boacas: true`, `// @slice-warm: true`, `// @slice-deterministic: 42`, `// @slice-fuel: 25_000_000`, `// @slice-memory-kb: 8192`, `// @slice-allow-read: [...]`, `// @slice-allow-write: [...]`, `// @slice-allow-net: [...]`, `// @slice-allow-env: [...]`, `// @slice-env-file: .env`, `// @slice-audit-egress: [...]`, `// @slice-port: 8080`, `// @slice-workers: 4`).
+4. **Layer 4 — Host Environment Variables (`SLICE_*`):** `SLICE_TIER`, `SLICE_BOACAS` (`SLICE_EXPER_BOACAS`), `SLICE_WARM`, `SLICE_DETERMINISTIC_SEED`, `SLICE_FUEL`, `SLICE_MEMORY_KB` (`SLICE_MEMORY`), `SLICE_ALLOW_READ`, `SLICE_ALLOW_WRITE`, `SLICE_ALLOW_NET`, `SLICE_ALLOW_ENV`, `SLICE_ENV_FILE`, `SLICE_AUDIT_EGRESS`, `SLICE_PORT`, `SLICE_WORKERS`, `SLICE_STATIC_DIR`.
+5. **Layer 5 — Explicit CLI Inline Flags (`--*`):** `--tier=`, `--boacas` / `--no-boacas`, `--warm` / `--no-warm`, `--deterministic[=<seed>]` / `--no-deterministic`, `--fuel=`, `--memory=` / `--memory-kb=`, `--allow-read=`, `--allow-write=`, `--allow-net=`, `--allow-env=`, `--env-file=`, `--audit-egress=`, `--port=`, `--workers=`, `--static=`.
 
 ---
 
 ## 3. Workflow 2: State-of-the-Art Multi-Tenant HTTP MicroVM Server (`slice serve`)
 
-`slice serve` runs a shared-nothing **Thread-Per-Core (`--workers=N`)** HTTP/1.1 `Keep-Alive` and pipelined edge server where **every incoming HTTP request** executes inside a hardware- and OCap-isolated `SliceIsolate` (`152,376 req/s` in Tier-0 CAS mode, `96,287 req/s` in Tier-1 WinterTC mode):
+`slice serve` runs a shared-nothing **Thread-Per-Core (`--workers=N`)** HTTP/1.1 `Keep-Alive` and pipelined edge server where **every incoming HTTP request** executes inside a hardware- and OCap-isolated `SliceIsolate` (`154,348 req/s` in Tier-0 CAS mode, `126,566 req/s` in Tier-1 WinterTC mode):
 
 ```bash
 slice serve ./service.cas --port=3000 --workers=8

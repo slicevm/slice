@@ -1,6 +1,6 @@
 # Guide 01: Building & Deploying Hono (`v4`) and UnJS Edge Microservices on Slice
 
-Because Slice implements the WinterTC Minimum Common Web Platform API (`Request`, `Response`, `Headers`, `URL`, `URLSearchParams`, `ReadableStream`, `crypto.subtle`, `TextEncoder`/`TextDecoder`, and `export default { fetch }`) and includes a general-purpose Oxc Semantic/AST dead-export tree-shaker, WinterTC frameworks like **Hono (`v4`)**, **`itty-router` (`v5`)**, and the **UnJS / Nitro ecosystem (`ufo`, `destr`, `ohash`, `radix3`, `cookie`)** run unmodified on Slice at **`6.26 ms - 6.76 ms` cold** and **`0.60 ms - 0.90 ms` warm** (`2.75x - 3.59x` faster cold than Bun and `10x - 11x` faster than Node.js).
+Because Slice implements the WinterTC Minimum Common Web Platform API (`Request`, `Response`, `Headers`, `URL`, `URLSearchParams`, `ReadableStream`, `crypto.subtle`, `TextEncoder`/`TextDecoder`, and `export default { fetch }`) and compiles bundles ahead-of-time into **`SLICEBC\x01` Precompiled Boa `CodeBlock` CAS** containers with Oxc AST deferred function module spans, WinterTC frameworks like **Hono (`v4`)**, **`itty-router` (`v5`)**, and the **UnJS / Nitro ecosystem (`ufo`, `destr`, `ohash`, `radix3`, `cookie`)** run unmodified on Slice at **`13.11 ms - 15.52 ms` cold** and **`0.55 ms - 0.56 ms` warm** (`2.54x - 2.65x` faster cold than Bun, `59x - 75x` faster warm than Bun, and `7.36x - 7.39x` faster cold than Node.js).
 
 ---
 

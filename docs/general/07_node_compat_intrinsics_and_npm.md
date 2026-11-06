@@ -253,13 +253,13 @@ In Slice, native performance extensions are written as **WebAssembly (`.wasm`)**
 - Import `.wasm` files directly (`import wasmBytes from "./kernel.wasm"`), which `slice-cas` embeds as zero-stat `Uint8Array` slices inside `.cas` archives and compiled binaries.
 - Every WASM instruction and `memory.grow()` call is metered against the tenant's deterministic CPU fuel and memory budget (`< 15 us` warm instantiation via `GLOBAL_WASM_MODULE_CACHE`).
 
-### 2.3 Verified Production NPM Packages & Edge Frameworks in Slice's 26-Workload Suite
-All 24 production applications in [`tests/apps/`](file:///p:/opensource/slice/tests/README.md) and 2 full-stack framework suites in [`tests/frameworks/`](file:///p:/opensource/slice/tests/README.md) bundle and execute unmodified third-party `node_modules` libraries and verify **100% byte-for-byte identical output** against Node.js, Deno, and Bun:
+### 2.3 Verified Production NPM Packages & Edge Frameworks in Slice's 31-Workload Suite
+All 25 production applications in [`tests/apps/`](file:///p:/opensource/slice/tests/README.md), 2 full-stack framework suites in [`tests/frameworks/`](file:///p:/opensource/slice/tests/frameworks/README.md), and 4 architectural differentiation case studies in [`tests/case_studies/`](file:///p:/opensource/slice/tests/case_studies/README.md) bundle and execute unmodified third-party `node_modules` libraries and verify **100% byte-for-byte identical output** against Node.js, Deno, and Bun:
 
 | NPM Package / Framework | Common Use Case | General-Purpose Slice Compiler / Runtime Mechanism Applied |
 | :--- | :--- | :--- |
-| **`hono`** (`@4.6.20`, `hono/cookie`) | Ultrafast WinterTC Edge Web Framework (`RegExpRouter`, middleware, cookies) | ESM-first `"exports"` + Oxc Semantic Dead-Export Tree-Shaking + Cold-Method `require` Inliner (`6.76 ms` cold / `0.90 ms` warm, **`3.59x` faster than Bun**) |
-| **`itty-router`** (`@5.0.18`) | Compact WinterTC `AutoRouter` & middleware pipeline | ESM-first `"exports"` + Oxc Semantic Dead-Export Tree-Shaking (`6.26 ms` cold / `0.60 ms` warm, **`2.75x` faster than Bun**) |
+| **`hono`** (`@4.6.20`, `hono/cookie`) | Ultrafast WinterTC Edge Web Framework (`RegExpRouter`, middleware, cookies) | `SLICEBC\x01` Precompiled `CodeBlock` CAS + Oxc AST Deferred Module Spans (`13.11 ms` cold / `0.56 ms` warm, **`2.54x` faster than Bun cold & `59x` faster warm**) |
+| **`itty-router`** (`@5.0.18`) | Compact WinterTC `AutoRouter` & middleware pipeline | `SLICEBC\x01` Precompiled `CodeBlock` CAS + Oxc AST Deferred Module Spans (`15.52 ms` cold / `0.55 ms` warm, **`2.65x` faster than Bun cold & `75x` faster warm**) |
 | **`ufo`** (`@1.5.4`), **`destr`** (`@2.0.3`), **`ohash`** (`@1.1.4`) | UnJS / Nitro URL normalization, safe JSON parsing, & MurmurHash3 ETag hashing | Oxc Semantic Scope-Resolved Dead-Export Pruning (prunes unused SHA-256 class in `ohash` when only `murmurHash` is imported) |
 | **`jose`** (`@5.9.6`) | Edge JWS (`HS256`), JWE (`A256GCM`), & JWKS cryptography | Conditional `"exports"` subpath resolution (`jose/jwt/sign`, `jose/flattened/encrypt`) + Native Rust `crypto.subtle` |
 | **`zod`** (`@3.23.8`) | TypeScript-first schema validation & transformation | Oxc AST ESM-to-CJS bundling + warm realm closure caching |

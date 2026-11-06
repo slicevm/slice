@@ -96,3 +96,14 @@ make -C tests/case_studies test
 make -C tests/case_studies bench-docker
 ```
 
+### Verified Linux Docker (`x86_64`) Case Study Benchmark Results (`SLICEBC\x01` Default, [`bench_latest.md`](../../bench_latest.md))
+
+| Case Study Workload | Slice Cold `.cas` (`SLICEBC\x01`) | Slice Standalone Bin (`SLICEBC\x01`) | Slice Warm (`--warm`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) | Slice Max RSS vs Bun / Node |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **CS 01: `01-tot-autonomous-sre-agent`** (20 ToT Sandboxes + 16 Rollbacks) | **`25.995 ms`** | **`25.069 ms`** | **`14.415 ms`** | `28.510 ms` | `73.275 ms` | `89.907 ms` | **`16.75 MB`** (`31.12 MB` Bun / `83.26 MB` Node) |
+| **CS 02: `02-mcp-code-mode-orchestrator`** (`-98.4%` Tokens, 4 Domains) | **`16.875 ms`** (`15.85 ms` Min) | **`16.968 ms`** | **`8.623 ms`** | `16.453 ms` | `43.902 ms` | `66.457 ms` | **`15.94 MB`** (`27.25 MB` Bun / `78.88 MB` Node) |
+| **CS 03: `03-multi-tenant-saas-plugin-mesh`** (12 Tenants, 120 Events, Hot-Swap) | **`11.400 ms`** | **`11.720 ms`** | **`5.625 ms`** | `16.897 ms` | `48.875 ms` | `85.829 ms` | **`14.25 MB`** (`26.00 MB` Bun / `85.88 MB` Node) |
+| **CS 04: `04-wasm-zero-trust-cdr-pipeline`** (Wasm SimHash CDR + PII Vault) | **`13.108 ms`** | **`13.425 ms`** | **`1.907 ms`** | `19.225 ms` | `45.358 ms` | `67.193 ms` | **`17.00 MB`** (`30.50 MB` Bun / `78.63 MB` Node) |
+| **CS 05: `05-time-travel-chaos-fuzzer-payments`** (48 Payment Chaos Sagas) | **`18.270 ms`** | **`18.938 ms`** | **`12.275 ms`** | `19.707 ms` | `63.327 ms` | `82.822 ms` | **`14.38 MB`** (`28.62 MB` Bun / `79.91 MB` Node) |
+
+

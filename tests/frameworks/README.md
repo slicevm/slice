@@ -33,19 +33,19 @@ General multi-file application and security benchmarks (`01-fintech-checkout` th
 
 ---
 
-### 3. Cold CLI Latency (20 Runs) & Warm Isolate Latency (`--warm`)
+### 3. Cold CLI Latency (20 Runs) & Warm Isolate Latency (`--warm`) — `SLICEBC\x01` Precompiled `CodeBlock` CAS Default
 
-| Framework Suite | Slice Cold `.cas` (Min / Avg) | Slice Standalone Bin (Min / Avg) | Slice Warm Isolate (`--warm`) | Bun `v1.4.4` (Min / Avg) | Deno `v2.9.8` (Min / Avg) | Node.js `v27.0.0-alpha` (Min / Avg) |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **FW 1: `01-hono-edge-microservice`** (`hono@4.6.20` + `cookie` + `ms`) | **28.212 ms / 29.229 ms** | **28.499 ms / 29.332 ms** | **6.560 ms** (`0.06 us` init) | 18.391 ms / 19.633 ms | 48.183 ms / 51.357 ms | 90.885 ms / 97.127 ms |
-| **FW 2: `02-itty-router-unjs-nitro-stack`** (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | **27.422 ms / 28.482 ms** | **27.554 ms / 29.443 ms** | **8.922 ms** (`0.05 us` init) | 17.925 ms / 19.030 ms | 43.899 ms / 47.855 ms | 82.748 ms / 87.404 ms |
+| Framework Suite | Slice Cold `.cas` (`SLICEBC\x01`) | Slice Standalone Bin (`SLICEBC\x01`) | Slice Warm Isolate (`--warm`) | Bun `v1.4.4` (Avg) | Deno `v2.9.8` (Avg) | Node.js `v27.0.0-alpha` (Avg) | Slice Speedup vs Bun |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **FW 1: `01-hono-edge-microservice`** (`hono@4.6.20` + `cookie` + `ms`) | **`13.107 ms`** | **`13.478 ms`** | **`6.719 ms` (`0.56 ms` P50)** | `20.227 ms` (`20.933 ms` cold) | `52.293 ms` | `93.408 ms` | **`1.60x faster than Bun` (`-57.4%` via `SLICEBC\x01`)** |
+| **FW 2: `02-itty-router-unjs-nitro-stack`** (`itty-router` + `ufo` + `destr` + `ohash` + `radix3`) | **`15.521 ms`** | **`16.177 ms`** | **`9.361 ms` (`0.55 ms` P50)** | `19.550 ms` (`19.585 ms` cold) | `46.454 ms` | `86.203 ms` | **`1.26x faster than Bun` (`-48.2%` via `SLICEBC\x01`)** |
 
 ### 4. Peak Process Memory Footprint (`Max RSS` via `/usr/bin/time -v`)
 
-| Framework Suite | Slice (`v0.9.9`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) | Slice Memory Advantage |
+| Framework Suite | Slice (`SLICEBC\x01` Default) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) | Slice Memory Advantage |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **FW 1: `01-hono-edge-microservice`** (`hono` v4) | **15,488 KB (15.12 MB)** | 30,720 KB (30.00 MB) | 49,008 KB (47.86 MB) | 89,116 KB (87.03 MB) | **5.75x less than Node / 1.98x less than Bun** |
-| **FW 2: `02-itty-router-unjs-nitro-stack`** (UnJS / Nitro) | **14,464 KB (14.12 MB)** | 31,744 KB (31.00 MB) | 48,760 KB (47.62 MB) | 86,924 KB (84.89 MB) | **6.01x less than Node / 2.19x less than Bun** |
+| **FW 1: `01-hono-edge-microservice`** (`hono` v4) | **14,336 KB (14.00 MB)** | 30,832 KB (30.11 MB) | 49,388 KB (48.23 MB) | 88,728 KB (86.65 MB) | **6.19x less than Node / 2.15x less than Bun** |
+| **FW 2: `02-itty-router-unjs-nitro-stack`** (UnJS / Nitro) | **13,824 KB (13.50 MB)** | 31,868 KB (31.12 MB) | 48,884 KB (47.74 MB) | 87,052 KB (85.01 MB) | **6.30x less than Node / 2.31x less than Bun** |
 
 ---
 

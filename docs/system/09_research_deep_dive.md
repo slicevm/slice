@@ -23,7 +23,7 @@ Our goal is to engineer **Slice (Nexus-JS)**: a microVM-grade, multi-tenant Java
 | **Google V8 (`v8` / `deno_core`)** | C++ | 5 ms - 40 ms | 20 MB - 50 MB | Very High (Maglev + TurboFan) | Heavy RSS, slow isolate spinup without huge snapshots, complex C++ build. |
 | **Apple JSC (`bun`)** | C++ / Zig | 5 ms - 15 ms | 10 MB - 25 MB | Very High (LLInt + DFG + FTL) | Monolithic process model, no fine-grained in-process multi-tenant OCap isolation. |
 | **QuickJS-NG (`rquickjs`)** | C + Rust | **80 us - 300 us** | **150 KB - 400 KB** | Moderate (Bytecode Interpreter) | Instant bytecode load (`eval_binary`), tiny heap, requires C compiler; weak on heavy loops unless paired with Native/Wasm JIT tier. |
-| **Boa (`boa_engine`)** | Pure Rust | 300 us - 1.5 ms | 500 KB - 1.5 MB | Low-Moderate (Bytecompiler + VM) | 100% pure Rust (zero C/C++ build friction), great AST/bytecode control, slower raw JS loop speed. |
+| **Boa (`boa_engine` + `SLICEBC\x01` Precompiled `CodeBlock`)** | Pure Rust | **0.99 us - 1.40 us** (Pooled / Snapshot) | **12.38 MB - 17.88 MB** (Process RSS) | High with Precompiled `CodeBlock` CAS + Native Rust Intrinsics | 100% pure Rust (zero C/C++ build friction), zero runtime `boa_parser` / `ByteCompiler` overhead via `SLICEBC\x01`, Oxc deferred function module spans (`0x11` tag), pre-fused `node:*` shards, and native Rust fast-path intrinsics. |
 | **Wasmtime / Cranelift** | Pure Rust | **5 us - 50 us** (precompiled `.cwasm`) | **50 KB - 200 KB** | Near-Native (AOT/JIT Cranelift) | Mathematical SFI bounds + MPK hardware keys, deterministic fuel metering. |
 | **Hermes V1 (Static Hermes)** | C++ | 200 us - 1 ms | 1 MB - 3 MB | High (Soundly typed AOT + Bytecode) | Optimized for mobile (React Native 0.84+), heavier FFI integration in Rust. |
 | **Porffor** | JS/Wasm AOT | < 100 us | < 100 KB | High on scalar code | Experimental JS-to-Wasm AOT compiler, incomplete ES spec coverage. |
@@ -32,10 +32,11 @@ Our goal is to engineer **Slice (Nexus-JS)**: a microVM-grade, multi-tenant Java
 
 To win on **all metrics** immediately on both Windows (local) and Linux (Docker) while building toward the ultimate microVM runtime:
 * **Build-Time Type Stripping & Bundling:** Use `oxc` (Oxidation Compiler) or zero-copy fast TypeScript stripping + static import flattening at package build time. Oxc strips TypeScript 3x-5x faster than SWC and 40x faster than `tsc`.
-* **Pre-Compiled Bytecode & Snapshots:** Never parse JS/TS source strings on the hot path. During `slice pack`, source graphs are stripped of types, resolved statically, and compiled into binary bytecode + pre-initialized state tables inside a single immutable `.cas` blob.
-* **Tiered Execution Core (Hybrid Engine):**
-  * **Tier 0 (Sub-100us Instant Micro-Isolate):** Bytecode-compiled VM with pre-allocated arena/slab memory and frozen intrinsics (SES `lockdown()`).
-  * **Tier 1 / Tier WASI (Native/Wasm JIT Acceleration):** Compute-intensive modules and hot loops are compiled to native machine code / precompiled WebAssembly (`.cwasm`) or SIMD-accelerated Rust host intrinsics (JSON, Crypto, Hashing, Routing, Regex), achieving both `< 100us` cold start AND native C/Rust throughput that beats V8/Bun on real-world server workloads.
+* **Pre-Compiled Bytecode & Snapshots (`SLICEBC\x01` Default):** Never parse JS/TS source strings on the hot path. During `slice pack` and `slice compile`, source graphs are stripped of types, resolved statically with Oxc AST deferred function module spans (`0x11` tag) and pre-fused `node:*` built-in shards, and compiled directly into binary `SLICEBC\x01` precompiled Boa `Gc<CodeBlock>` + global `Scope` containers (or Tier-0 `SLICESNP` register snapshots) inside a single immutable `.cas` blob (`vendor/boa_engine/SLICE_PATCH.md`).
+* **Tiered Execution Core (Hybrid Engine — Default Tier 1 + `boacas = true`):**
+  * **Tier 0 (`SLICESNP` Sub-1.5us Instant Micro-Isolate):** Register VM with pre-allocated stack/arena memory and frozen intrinsics (SES `lockdown()`).
+  * **Tier 1 (`SLICEBC\x01` Precompiled Boa `CodeBlock` — Default):** Full ECMAScript 2024+ + WinterTC + `node:*` execution engine that deserializes precompiled `Gc<CodeBlock>` bytecode directly into a `WarmBoaRealm` in microseconds without invoking `boa_parser` or `ByteCompiler`.
+  * **Tier 2 / Tier WASI (Native SIMD & Pure-Rust `wasmi` Acceleration):** Compute-intensive modules and hot loops execute on native Rust SIMD intrinsics (`SHA-256`/`SHA-512`, `HMAC`, `SemVer`, `URL`, `Buffer`, `zlib`) or pure-Rust `wasmi` WebAssembly kernels with deterministic CPU fuel and memory-page cages, beating Bun on `30 / 31` real-world multi-file workloads (`bench_latest.md`).
 
 ---
 

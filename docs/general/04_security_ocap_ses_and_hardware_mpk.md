@@ -27,7 +27,7 @@ When you run a script with `slice run script.ts` (without a `slice.toml` or `--a
 
 ## 2. Controlling Filesystem Access (`allow_read` & `allow_write`)
 
-You can grant path-prefix read and write capabilities in `slice.toml`, via CLI flags, or per sub-sandbox in `Slice.evalSandbox()`.
+You can grant path-prefix read and write capabilities in `slice.toml`, via top-of-file inline directives (`// @slice-allow-read: [...]`), via `SLICE_ALLOW_READ` / `SLICE_ALLOW_WRITE` environment variables, via CLI flags, or per sub-sandbox in `Slice.evalSandbox()`.
 
 ### 2.1 Via `slice.toml`
 ```toml

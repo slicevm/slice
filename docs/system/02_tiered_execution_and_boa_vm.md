@@ -4,13 +4,21 @@
 
 ---
 
-## 1. Zero-Copy `SLICEBOA` Bytecode Framing (`229 us` -> `0.02 us - 0.21 us` Instantiation)
+## 1. Default Tier-1 `SLICEBC\x01` Precompiled Boa `CodeBlock` CAS & Zero-Copy Framing (`0.02 us - 0.21 us` Instantiation)
 
-- **The Problem Eliminated:** Wrapping bundled JS inside a JSON-serialized `BytecodeModule` (`SLICESNP`) required `serde_json::from_slice` to allocate and unescape a 30 KB - 130 KB `String` on every isolate run (`~229 microseconds`).
-- **Implementation ([`compile_source_to_bytecode`](file:///p:/opensource/slice/crates/slice-engine/src/parser_and_compiler.rs) & [`execute_bytecode`](file:///p:/opensource/slice/crates/slice-engine/src/isolate.rs)):**
-  - When `compile_source_to_bytecode` detects an Oxc-bundled application (`var __slice_modules =`) or full ES2024+ OOP features (`class `, `new Map`, `try `, `node:`), it compacts the JS payload via `compact_js_for_boa_bytecode` and emits an 8-byte `b"SLICEBOA"` header followed immediately by the raw UTF-8 transpiled ECMAScript bytes.
-  - At runtime, `execute_bytecode` checks `&bytecode[0..8] == b"SLICEBOA"`, performs a zero-allocation `std::str::from_utf8(&bytecode[8..])` slice directly over the OS `mmap` buffer, and passes that `&str` straight to the VM.
-  - **Result:** Isolate instantiation time dropped by **1,000x**, from `229.66 us` down to **`0.02 us - 0.27 us`**.
+- **The Problem Eliminated:**
+  1. Wrapping bundled JS inside a JSON-serialized `BytecodeModule` (`SLICESNP`) required `serde_json::from_slice` to allocate and unescape a 30 KB - 130 KB `String` on every isolate run (`~229 microseconds`).
+  2. Even with raw UTF-8 `SLICEBOA` framing, `boa_engine::Context::eval` had to run the full ECMAScript lexer, recursive-descent AST parser, `ScopeAnalyzer` identifier resolution, and `ByteCompiler` on `ULTRA_CORE_PRELUDE`, needed feature shards, `node:*` built-in scripts, and the user's bundled JS on every cold process launch (`~4.5 ms - 12 ms` of pure parser overhead).
+- **Default `SLICEBC\x01` Precompiled `CodeBlock` Architecture ([`crates/slice-engine/src/boacas.rs`](file:///p:/opensource/slice/crates/slice-engine/src/boacas.rs) & [`vendor/boa_engine/SLICE_PATCH.md`](file:///p:/opensource/slice/vendor/boa_engine/SLICE_PATCH.md)):**
+  - By default (`boacas = true`), [`compile_source_to_bytecode`](file:///p:/opensource/slice/crates/slice-engine/src/parser_and_compiler.rs) calls [`pack_boacas_container`](file:///p:/opensource/slice/crates/slice-engine/src/boacas.rs), which emits a **32-byte `BoaCasHeader` (`b"SLICEBC\x01"`)** containing:
+    - `feature_flags: u16` (replacing all 18 runtime substring scans with a single build-time bitmask)
+    - `shards_mask: u32` (precomputed Aho-Corasick `detect_needed_shards` bitmask)
+    - `rc_key: u64` + `rc_key_hex: [u8; 16]` (pre-extracted persistent realm cache fingerprint)
+    - `precompiled_len: u32` (`SLICEBC1` binary `CodeBlock` payload) + `fallback_js_len: u32`
+  - **Pre-Fused Prelude + Shards + `node:*` Built-Ins:** At build time, `pack_boacas_container` fuses `ULTRA_CORE_PRELUDE`, all required runtime shards (`1..=17`), and all statically referenced `node:*` built-in modules (`globalThis.__slice_nb[...]`) directly with the user script into a **single unified `Gc<CodeBlock>`**, serialized via [`boa_engine::slice_precompile::compile_js_to_codeblock_bytes_with_deferred`](file:///p:/opensource/slice/vendor/boa_engine/src/slice_precompile.rs).
+  - **Oxc AST Deferred Function Module Spans (`0x11` Tag):** For multi-module bundles (`var __slice_modules = [function(module, exports, require){...}]`), [`extract_deferred_module_function_spans_oxc`](file:///p:/opensource/slice/crates/slice-engine/src/boacas.rs) locates top-level module factory functions via `oxc::parser::Parser` and records them as 16-byte deferred spans (`0x11` tag) in `SLICEBC1`. Uncalled `node_modules` functions are never byte-compiled until invoked at runtime via Boa's `Call`/`New` VM dispatch hook ([`vendor/boa_engine/src/vm/opcode/call/mod.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/vm/opcode/call/mod.rs)).
+  - **Zero-Parse Runtime Execution:** At runtime, [`SliceIsolate::exec_boacas_vm`](file:///p:/opensource/slice/crates/slice-engine/src/isolate.rs) creates a bare `boa_engine::Context` (`create_bare_boa_realm`), registers only the required native Rust host functions in a single pass, deserializes the `Gc<CodeBlock>` directly from the `mmap` slice, and executes it on the VM — eliminating **100% of runtime JS lexing and parsing** (`5.11 ms` cold / `0.21 ms` warm on `01-fintech-checkout`, `13.11 ms` cold / `0.56 ms` warm on `01-hono-edge-microservice`).
+  - **Legacy `SLICEBOA` Source-in-CAS Fallback (`--no-boacas`):** If `--no-boacas` (or `// @slice-boacas: false` / `SLICE_BOACAS=0` / `[engine] boacas = false`) is set, `compile_source_to_bytecode` emits the 8-byte `b"SLICEBOA"` header followed by raw UTF-8 transpiled JS.
 
 ---
 

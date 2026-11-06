@@ -14,13 +14,14 @@ Traditional JavaScript runtimes (**Node.js**, **Deno**, and **Bun**) were built 
 
 **Slice replaces that tradeoff with four developer-facing superpowers:**
 
-1. **Instant Cold Starts & Zero-Stat Packaging (`0.98 us` Isolate / `0` `stat()` Syscalls):**
-   - Run `.ts`, `.js`, or entire project folders directly (`slice run`), pack them into a 64-byte aligned BLAKE3 `.cas` archive (`slice pack`), or compile your backend + frontend UI into a **single zero-dependency native executable** (`slice compile`).
+1. **Instant Cold Starts & Precompiled `SLICEBC\x01` Packaging (`1.27 us` P50 Isolate / `0` `stat()` Syscalls):**
+   - Run `.ts`, `.js`, or entire project folders directly (`slice run`), pack them into a 64-byte aligned BLAKE3 `.cas` archive with ahead-of-time **Precompiled Boa `CodeBlock` (`SLICEBC\x01`)** bytecode (`slice pack`), or compile your backend + frontend UI into a **single zero-dependency native executable** (`slice compile`) — beating **Bun (`v1.3.10`)** on **30 out of 31** real-world application benchmarks (`5.11 ms` vs `25.19 ms` on App 01, `13.11 ms` vs `33.24 ms` on Hono v4).
 2. **True Multi-Tenant MicroVM Security in Microseconds:**
    - Every script or HTTP request executes inside a frozen Secure ECMAScript (`SES`) compartment with explicit **Object-Capability (OCap)** permissions (`allow_read`, `allow_write`, `allow_net`, `allow_env`), deterministic **CPU instruction fuel limits**, **byte-level memory cages**, a built-in **Cloud Metadata SSRF Firewall**, and **Outbound Egress DLP** that blocks raw, Base64, and Base64URL secret leaks.
-3. **Full-Stack Web & Edge Server Out of the Box (`152,376 req/s`):**
+3. **Full-Stack Web & Edge Server Out of the Box (`154,348 req/s` Tier-0 / `126,566 req/s` Tier-1):**
    - Write standard WinterTC / Cloudflare Workers / Bun / Deno `export default { fetch(req, env, ctx) }` handlers (`Request`, `Response`, `Headers`, `URL`, `URLSearchParams`, `ReadableStream`), stream **Server-Sent Events (`Response.sse`)**, use the built-in **16-way sharded `Slice.kv` store**, serve static frontend assets (`--static=./public`) with `< 2 us` BLAKE3 `ETag` `304` responses, and hot-swap tenant bundles (`--tenant-dir`) with zero downtime.
-4. **Next-Gen Developer Experience & AI Agent Primitives:**
+4. **Unified 4-Layer Configuration & AI Agent Primitives:**
+   - Configure every engine, limit, OCap permission, and server setting declaratively across **`slice.toml`**, **top-of-file inline directives (`// @slice-...`)**, **`SLICE_*` environment variables**, and **CLI flags (`--*`)**.
    - Run unit tests with **`slice test`**, where every `test()` block automatically snapshots (`Slice.checkpoint()`) and rolls back (`Slice.restore()`) both the filesystem (`node:fs`) and `Slice.kv` in `< 5 microseconds`.
    - Spawn nested, capability-attenuated sub-sandboxes in `~27 microseconds` with **`Slice.evalSandbox()`** or connect Claude Code / Cursor directly to **`slice mcp`**.
 
@@ -38,7 +39,7 @@ Traditional JavaScript runtimes (**Node.js**, **Deno**, and **Bun**) were built 
 | **[Chapter 06](file:///p:/opensource/slice/docs/general/06_ai_agent_sandbox_checkpoints_and_mcp.md)** | **AI Agents, Nested MicroVM Sandboxes (`Slice.evalSandbox`), `< 5 us` Checkpoints & `slice mcp`**<br>Execute untrusted LLM or user plugin code safely in microseconds, branch and roll back VFS + KV state with `Slice.checkpoint()` / `Slice.restore()`, and integrate `slice mcp` with Claude Code and Cursor. |
 | **[Chapter 07](file:///p:/opensource/slice/docs/general/07_node_compat_intrinsics_and_npm.md)** | **Node.js Compatibility (`node:*`), NPM Packages & Migration Guide (Node / Bun / Deno to Slice)**<br>Complete API reference for `node:fs`, `node:crypto`, `node:path`, `node:os`, `node:buffer`, `node:url`, `node:util`, `node:process`, and `node:test`, plus recipes for npm packages and step-by-step migration guides from Express/Fastify, Hono, Bun, and Deno. |
 | **[Chapter 08](file:///p:/opensource/slice/docs/general/08_kernel_io_rings_and_rust_embedding.md)** | **Embedding Slice in Rust Applications & High-Density MicroVM Swarms**<br>Embed `slice-engine`, `slice-cas`, `slice-sandbox`, and `slice-io` as a library inside your own Rust services to run thousands of isolated tenant scripts in a single process. |
-| **[Chapter 09](file:///p:/opensource/slice/docs/general/09_benchmarks_testing_and_docker_suite.md)** | **Time-Travel Testing (`slice test`), Deterministic Replay & Production Benchmarks**<br>Write rock-solid unit and security tests with `slice test` (`expect(...).toViolate()`, `.toStayWithinFuel()`, `< 5 us` VFS+KV rollbacks), replay bugs with `--deterministic`, and explore 20 real-world benchmark applications. |
+| **[Chapter 09](file:///p:/opensource/slice/docs/general/09_benchmarks_testing_and_docker_suite.md)** | **Time-Travel Testing (`slice test`), Deterministic Replay & Production Benchmarks**<br>Write rock-solid unit and security tests with `slice test` (`expect(...).toViolate()`, `.toStayWithinFuel()`, `< 5 us` VFS+KV rollbacks), replay bugs with `--deterministic`, and explore all 31 real-world benchmark applications and case studies. |
 | **[Compatibility Matrix](file:///p:/opensource/slice/docs/general/COMPATIBILITY.md)** | **WinterTC, Node.js (`node:*`), `Buffer` & NPM Bundler Compatibility Matrix**<br>Complete reference of supported WinterTC Web APIs, `Uint8Array`-backed `Buffer` methods, `node:*` core modules, and `package.json` `"exports"` bundler capabilities. |
 
 ---
@@ -83,6 +84,8 @@ Traditional JavaScript runtimes (**Node.js**, **Deno**, and **Bun**) were built 
   - [`docs/system/07_production_tooling_guide.md`](file:///p:/opensource/slice/docs/system/07_production_tooling_guide.md)
   - [`docs/system/08_benchmarks_and_comparisons.md`](file:///p:/opensource/slice/docs/system/08_benchmarks_and_comparisons.md)
   - [`docs/system/09_research_deep_dive.md`](file:///p:/opensource/slice/docs/system/09_research_deep_dive.md)
-- **Docker Application & Framework Test Suites (`tests/`):**
-  - [`tests/README.md`](file:///p:/opensource/slice/tests/README.md) (`tests/apps/`)
-  - [`tests/frameworks/README.md`](file:///p:/opensource/slice/tests/frameworks/README.md) (`tests/frameworks/`)
+  - [`vendor/boa_engine/SLICE_PATCH.md`](file:///p:/opensource/slice/vendor/boa_engine/SLICE_PATCH.md) (`SLICEBC1` Precompiled `CodeBlock` Vendor Patch Specification)
+- **Docker Application, Framework & Case Study Test Suites (`tests/`):**
+  - [`tests/README.md`](file:///p:/opensource/slice/tests/README.md) (`tests/apps/` — 25 Production Apps)
+  - [`tests/frameworks/README.md`](file:///p:/opensource/slice/tests/frameworks/README.md) (`tests/frameworks/` — Hono v4 & itty-router + UnJS)
+  - [`tests/case_studies/README.md`](file:///p:/opensource/slice/tests/case_studies/README.md) (`tests/case_studies/` — 4 Architectural Differentiation Workloads)
