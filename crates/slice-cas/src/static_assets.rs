@@ -34,13 +34,36 @@ pub fn detect_static_mime_type(path: &Path) -> &'static str {
     }
 }
 
+/// Zero-copy or heap-backed payload for a static web asset.
+#[derive(Clone, Debug)]
+pub enum StaticAssetPayload {
+    Owned(Arc<Vec<u8>>),
+    Mapped {
+        mmap: Arc<memmap2::Mmap>,
+        start: usize,
+        end: usize,
+    },
+}
+
+impl std::ops::Deref for StaticAssetPayload {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(v) => v.as_slice(),
+            Self::Mapped { mmap, start, end } => &mmap[*start..*end],
+        }
+    }
+}
+
 /// Pre-indexed zero-stat static web asset with cryptographic BLAKE3 `ETag`.
 #[derive(Clone, Debug)]
 pub struct StaticAssetEntry {
     pub url_path: String,
     pub content_type: String,
     pub etag_quoted: String,
-    pub payload: Arc<Vec<u8>>,
+    pub payload: StaticAssetPayload,
 }
 
 /// Zero-Stat in-memory / CAS-backed static asset lookup table (`O(1)` by URL path).
@@ -66,6 +89,21 @@ impl StaticAssetTable {
         content_type: String,
         etag_hex16: &str,
         payload: Arc<Vec<u8>>,
+    ) {
+        self.insert_asset_payload(
+            rel_url_path,
+            content_type,
+            etag_hex16,
+            StaticAssetPayload::Owned(payload),
+        );
+    }
+
+    pub fn insert_asset_payload(
+        &mut self,
+        rel_url_path: &str,
+        content_type: String,
+        etag_hex16: &str,
+        payload: StaticAssetPayload,
     ) {
         let clean_path = if rel_url_path.starts_with('/') {
             rel_url_path.to_string()
@@ -126,20 +164,27 @@ impl StaticAssetTable {
         Ok(count)
     }
 
-    /// Extracts all embedded `static:/...` blobs from a memory-mapped `.cas` archive.
+    /// Extracts all embedded `static:/...` blobs from a memory-mapped `.cas` archive
+    /// using zero-copy `mmap` slices (`StaticAssetPayload::Mapped`) with zero heap duplication.
     pub fn from_cas_archive(archive: &MappedCasArchive) -> Self {
         let mut table = Self::new();
         for (spec, hash_hex) in &archive.header.radix_resolution_map {
             if let Some(url_path) = spec.strip_prefix("static:") {
                 if let Some(blob) = archive.header.blobs.get(hash_hex) {
                     let mime = archive.get_source_slice(blob).to_string();
-                    let bytes = archive.get_bytecode_slice(blob).to_vec();
                     let etag_prefix = if blob.hash_hex.len() >= 16 {
                         &blob.hash_hex[..16]
                     } else {
                         blob.hash_hex.as_str()
                     };
-                    table.insert_asset(url_path, mime, etag_prefix, Arc::new(bytes));
+                    if let Some((mmap, start, end)) = archive.get_shared_bytecode_view(blob) {
+                        table.insert_asset_payload(
+                            url_path,
+                            mime,
+                            etag_prefix,
+                            StaticAssetPayload::Mapped { mmap, start, end },
+                        );
+                    }
                 }
             }
         }

@@ -2,14 +2,63 @@
 //! and Bundled Source-Map Error Location Translator.
 
 use crate::esm_cjs_linker::{
-    analyze_module_used_exports, canonical_mod_id, collect_eager_module_indices,
-    has_top_level_await, inline_cold_method_requires_ast, prune_and_minify_cjs_module_ast,
-    transform_module_to_cjs, UsedExports,
+    analyze_module_used_exports, canonical_mod_id, clear_canonical_mod_id_cache,
+    collect_eager_module_indices, has_top_level_await, inline_cold_method_requires_ast,
+    prune_and_minify_cjs_module_ast, transform_module_to_cjs, UsedExports,
 };
 use crate::oxc_compiler::{source_contains_jsx, strip_typescript_raw_with_ext};
 use anyhow::{bail, Context, Result};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+thread_local! {
+    static PACKAGE_JSON_CACHE: std::cell::RefCell<FxHashMap<PathBuf, Option<Arc<serde_json::Value>>>> =
+        std::cell::RefCell::new(FxHashMap::default());
+    static TSCONFIG_VALUE_CACHE: std::cell::RefCell<FxHashMap<PathBuf, Option<Arc<serde_json::Value>>>> =
+        std::cell::RefCell::new(FxHashMap::default());
+}
+
+struct ResolverCacheGuard;
+
+impl ResolverCacheGuard {
+    fn new() -> Self {
+        clear_canonical_mod_id_cache();
+        PACKAGE_JSON_CACHE.with(|c| c.borrow_mut().clear());
+        TSCONFIG_VALUE_CACHE.with(|c| c.borrow_mut().clear());
+        Self
+    }
+}
+
+impl Drop for ResolverCacheGuard {
+    fn drop(&mut self) {
+        clear_canonical_mod_id_cache();
+        PACKAGE_JSON_CACHE.with(|c| c.borrow_mut().clear());
+        TSCONFIG_VALUE_CACHE.with(|c| c.borrow_mut().clear());
+    }
+}
+
+#[inline]
+fn load_cached_package_json(pkg_json_path: &Path) -> Option<Arc<serde_json::Value>> {
+    PACKAGE_JSON_CACHE.with(|cache| {
+        if let Some(cached) = cache.borrow().get(pkg_json_path) {
+            return cached.clone();
+        }
+        let parsed = if pkg_json_path.is_file() {
+            std::fs::read_to_string(pkg_json_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .map(Arc::new)
+        } else {
+            None
+        };
+        cache
+            .borrow_mut()
+            .insert(pkg_json_path.to_path_buf(), parsed.clone());
+        parsed
+    })
+}
 
 /// Resolves a folder or file path to its concrete entrypoint script (`slice.toml`, `package.json`, `src/index.ts`, `src/index.tsx`, etc.).
 pub fn resolve_project_entrypoint(target: &Path, explicit_entry: Option<&str>) -> Result<PathBuf> {
@@ -132,24 +181,20 @@ pub(crate) fn try_file_with_extensions(base: &Path) -> Option<PathBuf> {
     }
     if base.is_dir() {
         let pkg_json = base.join("package.json");
-        if pkg_json.is_file() {
-            if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    if let Some(exports) = val.get("exports") {
-                        if let Some(found) = resolve_package_exports(base, exports, ".") {
-                            return Some(found);
-                        }
-                    }
-                    if let Some(mod_str) = val.get("module").and_then(|v| v.as_str()) {
-                        if let Some(found) = try_file_with_extensions(&base.join(mod_str)) {
-                            return Some(found);
-                        }
-                    }
-                    if let Some(main_str) = val.get("main").and_then(|v| v.as_str()) {
-                        if let Some(found) = try_file_with_extensions(&base.join(main_str)) {
-                            return Some(found);
-                        }
-                    }
+        if let Some(val) = load_cached_package_json(&pkg_json) {
+            if let Some(exports) = val.get("exports") {
+                if let Some(found) = resolve_package_exports(base, exports, ".") {
+                    return Some(found);
+                }
+            }
+            if let Some(mod_str) = val.get("module").and_then(|v| v.as_str()) {
+                if let Some(found) = try_file_with_extensions(&base.join(mod_str)) {
+                    return Some(found);
+                }
+            }
+            if let Some(main_str) = val.get("main").and_then(|v| v.as_str()) {
+                if let Some(found) = try_file_with_extensions(&base.join(main_str)) {
+                    return Some(found);
                 }
             }
         }
@@ -288,8 +333,14 @@ fn split_bare_package_specifier(spec: &str) -> (&str, String) {
     }
 }
 
-fn strip_jsonc(raw: &str) -> String {
+fn strip_jsonc(raw: &str) -> Cow<'_, str> {
     let bytes = raw.as_bytes();
+    let has_comments =
+        memchr::memmem::find(bytes, b"//").is_some() || memchr::memmem::find(bytes, b"/*").is_some();
+    if !has_comments && memchr::memchr(b',', bytes).is_none() {
+        return Cow::Borrowed(raw);
+    }
+
     let mut no_comments = Vec::with_capacity(bytes.len());
     let mut i = 0;
     let mut in_str = false;
@@ -371,7 +422,7 @@ fn strip_jsonc(raw: &str) -> String {
         out.push(b);
         j += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    Cow::Owned(String::from_utf8_lossy(&out).into_owned())
 }
 
 fn resolve_package_imports(
@@ -406,10 +457,30 @@ fn resolve_package_imports(
     None
 }
 
-fn load_tsconfig_value(config_path: &Path) -> Option<serde_json::Value> {
+fn load_tsconfig_value(config_path: &Path) -> Option<Arc<serde_json::Value>> {
+    TSCONFIG_VALUE_CACHE.with(|cache| {
+        if let Some(cached) = cache.borrow().get(config_path) {
+            return cached.clone();
+        }
+        let parsed = load_tsconfig_value_uncached(config_path).map(Arc::new);
+        cache
+            .borrow_mut()
+            .insert(config_path.to_path_buf(), parsed.clone());
+        parsed
+    })
+}
+
+fn load_tsconfig_value_uncached(config_path: &Path) -> Option<serde_json::Value> {
+    if !config_path.is_file() {
+        return None;
+    }
     let raw = std::fs::read_to_string(config_path).ok()?;
-    let cleaned = strip_jsonc(&raw);
-    let mut val = serde_json::from_str::<serde_json::Value>(&cleaned).ok()?;
+    let mut val = serde_json::from_str::<serde_json::Value>(&raw)
+        .or_else(|_| {
+            let cleaned = strip_jsonc(&raw);
+            serde_json::from_str::<serde_json::Value>(&cleaned)
+        })
+        .ok()?;
     if let Some(ext_str) = val
         .get("extends")
         .and_then(|v| v.as_str())
@@ -446,9 +517,6 @@ fn resolve_tsconfig_paths(from_dir: &Path, spec: &str) -> Option<PathBuf> {
     while let Some(dir) = curr {
         for cfg_name in ["tsconfig.json", "jsconfig.json"] {
             let cfg_path = dir.join(cfg_name);
-            if !cfg_path.is_file() {
-                continue;
-            }
             let Some(val) = load_tsconfig_value(&cfg_path) else {
                 continue;
             };
@@ -516,14 +584,10 @@ pub(crate) fn resolve_module_specifier(from_dir: &Path, spec: &str) -> Option<Pa
         let mut curr = Some(from_dir);
         while let Some(dir) = curr {
             let pkg_json = dir.join("package.json");
-            if pkg_json.is_file() {
-                if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                        if let Some(imports) = val.get("imports") {
-                            if let Some(found) = resolve_package_imports(dir, imports, spec) {
-                                return Some(found);
-                            }
-                        }
+            if let Some(val) = load_cached_package_json(&pkg_json) {
+                if let Some(imports) = val.get("imports") {
+                    if let Some(found) = resolve_package_imports(dir, imports, spec) {
+                        return Some(found);
                     }
                 }
             }
@@ -533,7 +597,10 @@ pub(crate) fn resolve_module_specifier(from_dir: &Path, spec: &str) -> Option<Pa
     }
 
     // 2. `tsconfig.json` / `jsconfig.json` `"paths"` & `"baseUrl"` (`@/*`, `~/*`, etc.)
-    if !from_dir.to_string_lossy().contains("node_modules") {
+    if !from_dir
+        .components()
+        .any(|c| c.as_os_str() == "node_modules")
+    {
         if let Some(found) = resolve_tsconfig_paths(from_dir, spec) {
             return Some(found);
         }
@@ -547,16 +614,10 @@ pub(crate) fn resolve_module_specifier(from_dir: &Path, spec: &str) -> Option<Pa
         let pkg_dir = dir.join("node_modules").join(pkg_name);
         if pkg_dir.is_dir() {
             let pkg_json = pkg_dir.join("package.json");
-            if pkg_json.is_file() {
-                if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                        if let Some(exports) = val.get("exports") {
-                            if let Some(found) =
-                                resolve_package_exports(&pkg_dir, exports, &subpath)
-                            {
-                                return Some(found);
-                            }
-                        }
+            if let Some(val) = load_cached_package_json(&pkg_json) {
+                if let Some(exports) = val.get("exports") {
+                    if let Some(found) = resolve_package_exports(&pkg_dir, exports, &subpath) {
+                        return Some(found);
                     }
                 }
             }
@@ -570,12 +631,21 @@ pub(crate) fn resolve_module_specifier(from_dir: &Path, spec: &str) -> Option<Pa
     None
 }
 
+#[inline]
+fn push_usize_csv(out: &mut String, n: usize) {
+    if !out.is_empty() {
+        out.push(',');
+    }
+    let mut buf = itoa::Buffer::new();
+    out.push_str(buf.format(n));
+}
+
 fn compute_source_line_map(raw_src: &str, cjs_body: &str) -> String {
     let orig_lines: Vec<&str> = raw_src.lines().collect();
     if orig_lines.is_empty() {
         return String::new();
     }
-    let mut mapped: Vec<String> = Vec::new();
+    let mut out = String::with_capacity((cjs_body.len() / 8).max(32));
     let mut search_cursor = 0usize;
 
     for raw_cjs_line in cjs_body.lines() {
@@ -594,7 +664,7 @@ fn compute_source_line_map(raw_src: &str, cjs_body: &str) -> String {
             || probe_raw.starts_with("var __filename =")
         {
             let fallback_line = (search_cursor + 1).min(orig_lines.len()).max(1);
-            mapped.push(fallback_line.to_string());
+            push_usize_csv(&mut out, fallback_line);
             continue;
         }
 
@@ -604,7 +674,8 @@ fn compute_source_line_map(raw_src: &str, cjs_body: &str) -> String {
             .filter(|r| r.len() >= 4);
 
         let mut found_idx: Option<usize> = None;
-        for (offset, orig_line) in orig_lines[search_cursor..].iter().enumerate() {
+        let forward_limit = (search_cursor + 128).min(orig_lines.len());
+        for (offset, orig_line) in orig_lines[search_cursor..forward_limit].iter().enumerate() {
             if orig_line.contains(probe_raw)
                 || rhs_probe.is_some_and(|rp| !rp.starts_with("require(") && orig_line.contains(rp))
             {
@@ -625,13 +696,47 @@ fn compute_source_line_map(raw_src: &str, cjs_body: &str) -> String {
         }
         if let Some(idx) = found_idx {
             search_cursor = idx;
-            mapped.push((idx + 1).to_string());
+            push_usize_csv(&mut out, idx + 1);
         } else {
             let next_guess = (search_cursor + 1).min(orig_lines.len()).max(1);
-            mapped.push(next_guess.to_string());
+            push_usize_csv(&mut out, next_guess);
         }
     }
-    mapped.join(",")
+    out
+}
+
+#[inline]
+fn entrypoint_needs_bundler_ac() -> &'static aho_corasick::AhoCorasick {
+    static AC: std::sync::OnceLock<aho_corasick::AhoCorasick> = std::sync::OnceLock::new();
+    AC.get_or_init(|| {
+        aho_corasick::AhoCorasick::new([
+            "import ",
+            "import(",
+            "import.meta",
+            "__dirname",
+            "__filename",
+            "throw ",
+            "require(",
+            "export ",
+            "class ",
+            "Slice.",
+            "Buffer.",
+            "new URL(",
+            "new URLPattern(",
+            "new URLSearchParams(",
+            "new CompressionStream(",
+            "new DecompressionStream(",
+            "new Headers(",
+            "new Request(",
+            "new Response(",
+            "Response.json(",
+            "Response.redirect(",
+            "Math.random(",
+            "Date.now(",
+            "performance.now(",
+        ])
+        .expect("Valid entrypoint_needs_bundler_ac")
+    })
 }
 
 /// Bundles a TypeScript/JavaScript/JSX/TSX entrypoint and its entire transitive dependency graph
@@ -647,35 +752,11 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     let is_jsx_entry = matches!(entry_ext, "tsx" | "jsx") || source_contains_jsx(&raw);
 
     // Fast path for single-file scripts with no imports/exports/requires/classes/JSX/WinterTC bridge
-    if !is_jsx_entry
-        && !raw.contains("import ")
-        && !raw.contains("import(")
-        && !raw.contains("import.meta")
-        && !raw.contains("__dirname")
-        && !raw.contains("__filename")
-        && !raw.contains("throw ")
-        && !raw.contains("require(")
-        && !raw.contains("export ")
-        && !raw.contains("class ")
-        && !raw.contains("Slice.")
-        && !raw.contains("Buffer.")
-        && !raw.contains("new URL(")
-        && !raw.contains("new URLPattern(")
-        && !raw.contains("new URLSearchParams(")
-        && !raw.contains("new CompressionStream(")
-        && !raw.contains("new DecompressionStream(")
-        && !raw.contains("new Headers(")
-        && !raw.contains("new Request(")
-        && !raw.contains("new Response(")
-        && !raw.contains("Response.json(")
-        && !raw.contains("Response.redirect(")
-        && !raw.contains("Math.random(")
-        && !raw.contains("Date.now(")
-        && !raw.contains("performance.now(")
-    {
+    if !is_jsx_entry && !entrypoint_needs_bundler_ac().is_match(&raw) {
         return Ok(raw);
     }
 
+    let _cache_guard = ResolverCacheGuard::new();
     let mut visited_order: Vec<(String, String)> = Vec::new();
     let mut seen: FxHashSet<String> = FxHashSet::default();
 
@@ -832,37 +913,26 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
 
     // Dense Integer Module IDs + Persistent Realm Module Cache (`__slice_rc`):
     let (_entry_mod_id, mut entry_body) = visited_order.pop().unwrap();
-    let id_replacements: Vec<(String, String, String)> = visited_order
-        .iter()
-        .enumerate()
-        .map(|(idx, (mod_id, _))| {
-            (
-                format!("require({:?})", mod_id),
-                format!("require('{}')", mod_id),
-                format!("require({})", idx),
-            )
-        })
-        .collect();
-
-    for (_, body) in &mut visited_order {
-        if body.is_empty() {
-            continue;
+    if !visited_order.is_empty() {
+        let mut patterns: Vec<String> = Vec::with_capacity(visited_order.len() * 2);
+        let mut replacements: Vec<String> = Vec::with_capacity(visited_order.len() * 2);
+        for (idx, (mod_id, _)) in visited_order.iter().enumerate() {
+            let mut idx_buf = itoa::Buffer::new();
+            let to_pat = format!("require({})", idx_buf.format(idx));
+            patterns.push(format!("require({:?})", mod_id));
+            replacements.push(to_pat.clone());
+            patterns.push(format!("require('{}')", mod_id));
+            replacements.push(to_pat);
         }
-        for (from_dq, from_sq, to_pat) in &id_replacements {
-            if body.contains(from_dq) {
-                *body = body.replace(from_dq, to_pat);
+        if let Ok(ac) = aho_corasick::AhoCorasick::new(&patterns) {
+            for (_, body) in &mut visited_order {
+                if !body.is_empty() && body.contains("require(") {
+                    *body = ac.replace_all(body, &replacements);
+                }
             }
-            if body.contains(from_sq) {
-                *body = body.replace(from_sq, to_pat);
+            if entry_body.contains("require(") {
+                entry_body = ac.replace_all(&entry_body, &replacements);
             }
-        }
-    }
-    for (from_dq, from_sq, to_pat) in &id_replacements {
-        if entry_body.contains(from_dq) {
-            entry_body = entry_body.replace(from_dq, to_pat);
-        }
-        if entry_body.contains(from_sq) {
-            entry_body = entry_body.replace(from_sq, to_pat);
         }
     }
 

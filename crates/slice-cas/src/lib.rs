@@ -17,7 +17,9 @@ pub use oxc_compiler::{
 pub use resolver::{
     bundle_entrypoint_with_deps, map_bundled_error_location, resolve_project_entrypoint,
 };
-pub use static_assets::{detect_static_mime_type, StaticAssetEntry, StaticAssetTable};
+pub use static_assets::{
+    detect_static_mime_type, StaticAssetEntry, StaticAssetPayload, StaticAssetTable,
+};
 
 use anyhow::{bail, Context, Result};
 use memmap2::Mmap;
@@ -343,31 +345,118 @@ pub struct MappedCasArchive {
 }
 
 impl MappedCasArchive {
+    /// Validates and constructs a `MappedCasArchive` from an already mapped `Arc<Mmap>` region
+    /// spanning `cas_offset..cas_offset + cas_len`.
+    ///
+    /// Performs full bounds and UTF-8 validation on the CAS header and every `CasBlobEntry`
+    /// once at open time so hot-path `get_source_slice` and `get_bytecode_slice` calls
+    /// are guaranteed in-bounds and valid UTF-8 with zero runtime overhead.
+    fn from_mmap_region(
+        mmap: Arc<Mmap>,
+        cas_offset: usize,
+        cas_len: usize,
+        display_label: &str,
+    ) -> Result<Self> {
+        let cas_end = cas_offset
+            .checked_add(cas_len)
+            .filter(|&end| end <= mmap.len() && cas_len >= 32)
+            .with_context(|| format!("Invalid CAS archive offset/length in {}", display_label))?;
+
+        let slice = &mmap[cas_offset..cas_end];
+        if &slice[0..8] != CAS_MAGIC {
+            bail!("Invalid SLICE_CAS magic header in {}", display_label);
+        }
+
+        let version = u32::from_le_bytes(slice[8..12].try_into()?);
+        if version != CAS_VERSION {
+            bail!("Unsupported SLICE_CAS version: {}", version);
+        }
+
+        let header_len = usize::try_from(u64::from_le_bytes(slice[16..24].try_into()?))
+            .context("CAS header length overflow")?;
+        let rel_data_start = usize::try_from(u64::from_le_bytes(slice[24..32].try_into()?))
+            .context("CAS data_start_offset overflow")?;
+
+        let header_end = 32usize
+            .checked_add(header_len)
+            .filter(|&end| end <= slice.len() && end <= rel_data_start)
+            .with_context(|| format!("Corrupted or truncated CAS header in {}", display_label))?;
+
+        let header: CasIndexHeader = serde_json::from_slice(&slice[32..header_end])
+            .with_context(|| format!("Malformed CAS index JSON in {}", display_label))?;
+
+        let data_start_offset = cas_offset
+            .checked_add(rel_data_start)
+            .filter(|&off| off <= cas_end)
+            .with_context(|| {
+                format!(
+                    "Invalid CAS data_start_offset out of bounds in {}",
+                    display_label
+                )
+            })?;
+
+        for (hash_key, entry) in &header.blobs {
+            let src_off = usize::try_from(entry.offset).context("CAS blob source offset overflow")?;
+            let src_len =
+                usize::try_from(entry.source_len).context("CAS blob source length overflow")?;
+            let src_start = data_start_offset
+                .checked_add(src_off)
+                .context("CAS blob source start overflow")?;
+            let src_end = src_start
+                .checked_add(src_len)
+                .filter(|&end| end <= cas_end)
+                .with_context(|| {
+                    format!(
+                        "CAS blob '{}' source range [{}..{}] out of bounds (archive end: {})",
+                        hash_key,
+                        src_start,
+                        src_start.saturating_add(src_len),
+                        cas_end
+                    )
+                })?;
+
+            if std::str::from_utf8(&mmap[src_start..src_end]).is_err() {
+                bail!(
+                    "CAS blob '{}' contains invalid UTF-8 in source slice",
+                    hash_key
+                );
+            }
+
+            let bc_off = usize::try_from(entry.bytecode_offset)
+                .context("CAS blob bytecode offset overflow")?;
+            let bc_len =
+                usize::try_from(entry.bytecode_len).context("CAS blob bytecode length overflow")?;
+            let bc_start = data_start_offset
+                .checked_add(bc_off)
+                .context("CAS blob bytecode start overflow")?;
+            let _bc_end = bc_start
+                .checked_add(bc_len)
+                .filter(|&end| end <= cas_end)
+                .with_context(|| {
+                    format!(
+                        "CAS blob '{}' bytecode range [{}..{}] out of bounds (archive end: {})",
+                        hash_key,
+                        bc_start,
+                        bc_start.saturating_add(bc_len),
+                        cas_end
+                    )
+                })?;
+        }
+
+        Ok(Self {
+            mmap,
+            header,
+            data_start_offset,
+        })
+    }
+
     /// Opens and memory-maps a `.cas` archive file with zero heap copies of module payloads.
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("Failed to open CAS archive {}", path.display()))?;
         let mmap = unsafe { Mmap::map(&file)? };
-
-        if mmap.len() < 32 || &mmap[0..8] != CAS_MAGIC {
-            bail!("Invalid SLICE_CAS magic header in {}", path.display());
-        }
-
-        let version = u32::from_le_bytes(mmap[8..12].try_into()?);
-        if version != CAS_VERSION {
-            bail!("Unsupported SLICE_CAS version: {}", version);
-        }
-
-        let header_len = u64::from_le_bytes(mmap[16..24].try_into()?) as usize;
-        let data_start_offset = u64::from_le_bytes(mmap[24..32].try_into()?) as usize;
-
-        let header: CasIndexHeader = serde_json::from_slice(&mmap[32..32 + header_len])?;
-
-        Ok(Self {
-            mmap: Arc::new(mmap),
-            header,
-            data_start_offset,
-        })
+        let len = mmap.len();
+        Self::from_mmap_region(Arc::new(mmap), 0, len, &path.display().to_string())
     }
 
     /// Resolves an import specifier in O(1) time without touching the OS filesystem.
@@ -387,17 +476,46 @@ impl MappedCasArchive {
     /// Returns a zero-copy slice to the normalized JavaScript source directly from the `mmap` region.
     #[inline]
     pub fn get_source_slice<'a>(&'a self, entry: &CasBlobEntry) -> &'a str {
-        let start = self.data_start_offset + entry.offset as usize;
-        let end = start + entry.source_len as usize;
-        unsafe { std::str::from_utf8_unchecked(&self.mmap[start..end]) }
+        let Some(start) = self.data_start_offset.checked_add(entry.offset as usize) else {
+            return "";
+        };
+        let Some(end) = start.checked_add(entry.source_len as usize) else {
+            return "";
+        };
+        let Some(bytes) = self.mmap.get(start..end) else {
+            return "";
+        };
+        std::str::from_utf8(bytes).unwrap_or("")
     }
 
     /// Returns a zero-copy slice to the pre-compiled bytecode directly from the `mmap` region.
     #[inline]
     pub fn get_bytecode_slice<'a>(&'a self, entry: &CasBlobEntry) -> &'a [u8] {
-        let start = self.data_start_offset + entry.bytecode_offset as usize;
-        let end = start + entry.bytecode_len as usize;
-        &self.mmap[start..end]
+        let Some(start) = self
+            .data_start_offset
+            .checked_add(entry.bytecode_offset as usize)
+        else {
+            return &[];
+        };
+        let Some(end) = start.checked_add(entry.bytecode_len as usize) else {
+            return &[];
+        };
+        self.mmap.get(start..end).unwrap_or(&[])
+    }
+
+    /// Returns a clone of the underlying `Arc<Mmap>` and the validated `(start, end)` byte range
+    /// for `entry`'s bytecode/payload so callers can share zero-copy `mmap` slices across threads.
+    #[inline]
+    pub fn get_shared_bytecode_view(&self, entry: &CasBlobEntry) -> Option<(Arc<Mmap>, usize, usize)> {
+        let start = self
+            .data_start_offset
+            .checked_add(entry.bytecode_offset as usize)?;
+        let end = start.checked_add(entry.bytecode_len as usize)?;
+        if end <= self.mmap.len() {
+            Some((Arc::clone(&self.mmap), start, end))
+        } else {
+            None
+        }
     }
 
     /// Returns the entrypoint blob entry.
@@ -441,32 +559,16 @@ impl MappedCasArchive {
         let file = File::open(path)
             .with_context(|| format!("Failed to open standalone binary {}", path.display()))?;
         let mmap = unsafe { Mmap::map(&file)? };
-
-        if cas_offset + cas_len > mmap.len() || cas_len < 32 {
-            bail!("Invalid embedded CAS offset/length in {}", path.display());
-        }
-        let slice = &mmap[cas_offset..cas_offset + cas_len];
-        if &slice[0..8] != CAS_MAGIC {
-            bail!("Invalid embedded SLICE_CAS magic header");
-        }
-
-        let version = u32::from_le_bytes(slice[8..12].try_into()?);
-        if version != CAS_VERSION {
-            bail!("Unsupported SLICE_CAS version: {}", version);
-        }
-
-        let header_len = u64::from_le_bytes(slice[16..24].try_into()?) as usize;
-        let rel_data_start = u64::from_le_bytes(slice[24..32].try_into()?) as usize;
-        let header: CasIndexHeader = serde_json::from_slice(&slice[32..32 + header_len])?;
-
-        Ok(Self {
-            mmap: Arc::new(mmap),
-            header,
-            data_start_offset: cas_offset + rel_data_start,
-        })
+        Self::from_mmap_region(
+            Arc::new(mmap),
+            cas_offset,
+            cas_len,
+            &path.display().to_string(),
+        )
     }
 
-    /// Checks if the current running executable has an embedded `SLICEEXE` trailer and maps it in O(1).
+    /// Checks if the current running executable has an embedded `SLICEEXE` trailer and maps it in O(1)
+    /// using a single `Mmap` call.
     pub fn open_embedded_self() -> Result<Option<Self>> {
         let exe_path = std::env::current_exe()?;
         let file = File::open(&exe_path)?;
@@ -478,11 +580,20 @@ impl MappedCasArchive {
         if &mmap[tail_start + 16..tail_start + 24] != b"SLICEEXE" {
             return Ok(None);
         }
-        let cas_offset = u64::from_le_bytes(mmap[tail_start..tail_start + 8].try_into()?) as usize;
-        let cas_len =
-            u64::from_le_bytes(mmap[tail_start + 8..tail_start + 16].try_into()?) as usize;
-        drop(mmap);
-        let archive = Self::open_from_offset(&exe_path, cas_offset, cas_len)?;
+        let cas_offset = usize::try_from(u64::from_le_bytes(
+            mmap[tail_start..tail_start + 8].try_into()?,
+        ))
+        .context("SLICEEXE cas_offset overflow")?;
+        let cas_len = usize::try_from(u64::from_le_bytes(
+            mmap[tail_start + 8..tail_start + 16].try_into()?,
+        ))
+        .context("SLICEEXE cas_len overflow")?;
+        let archive = Self::from_mmap_region(
+            Arc::new(mmap),
+            cas_offset,
+            cas_len,
+            &exe_path.display().to_string(),
+        )?;
         Ok(Some(archive))
     }
 }
@@ -1233,5 +1344,74 @@ console.log(identity(htmlTemplate));
             "TypeScript <T> generic arrow function must not be misparsed as JSX when HTML strings exist:\n{}",
             out
         );
+    }
+
+    #[test]
+    fn test_corrupted_cas_bounds_and_utf8_rejection() {
+        let temp_dir = std::env::temp_dir().join("slice_cas_safety_test");
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        // 1. Valid archive baseline
+        let valid_path = temp_dir.join("valid.cas");
+        let mut builder = CasBuilder::new("./index.js");
+        builder.add_module(
+            "./index.js",
+            PathBuf::from("index.js"),
+            "console.log('ok');",
+            |src| src.as_bytes().to_vec(),
+        );
+        builder.write_to_file(&valid_path).unwrap();
+        let valid_bytes = std::fs::read(&valid_path).unwrap();
+        let opened = MappedCasArchive::open(&valid_path).unwrap();
+        let entry = opened.entrypoint_blob().unwrap();
+        let src_byte_pos = opened.data_start_offset + (entry.offset as usize);
+        drop(opened);
+
+        // 2. Corrupted header_len exceeding file size must return Err, not panic
+        let mut bad_hdr = valid_bytes.clone();
+        bad_hdr[16..24].copy_from_slice(&(999_999u64).to_le_bytes());
+        let bad_hdr_path = temp_dir.join("bad_hdr.cas");
+        std::fs::write(&bad_hdr_path, &bad_hdr).unwrap();
+        assert!(MappedCasArchive::open(&bad_hdr_path).is_err());
+
+        // 3. Invalid UTF-8 inside source payload must return Err on open, preventing UB
+        let mut bad_utf8 = valid_bytes.clone();
+        bad_utf8[src_byte_pos] = 0xFF;
+        let bad_utf8_path = temp_dir.join("bad_utf8.cas");
+        std::fs::write(&bad_utf8_path, &bad_utf8).unwrap();
+        assert!(MappedCasArchive::open(&bad_utf8_path).is_err());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_audit_neo_phase4_zero_copy_static_mmap_and_resolver_cache() {
+        let temp_dir = std::env::temp_dir().join("slice_cas_phase4_test");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let static_dir = temp_dir.join("public");
+        std::fs::create_dir_all(&static_dir).unwrap();
+        std::fs::write(static_dir.join("index.html"), "<h1>Zero-Copy CAS Asset</h1>").unwrap();
+
+        let cas_path = temp_dir.join("static_test.cas");
+        let mut builder = CasBuilder::new("./index.js");
+        builder.add_module(
+            "./index.js",
+            PathBuf::from("index.js"),
+            "console.log('ready');",
+            |src| src.as_bytes().to_vec(),
+        );
+        builder.ingest_static_directory(&static_dir).unwrap();
+        builder.write_to_file(&cas_path).unwrap();
+
+        let archive = MappedCasArchive::open(&cas_path).unwrap();
+        let table = StaticAssetTable::from_cas_archive(&archive);
+        let root_asset = table.resolve("/").expect("Expected /index.html at /");
+        assert_eq!(&root_asset.payload[..], b"<h1>Zero-Copy CAS Asset</h1>");
+        assert!(
+            matches!(root_asset.payload, StaticAssetPayload::Mapped { .. }),
+            "Expected StaticAssetTable::from_cas_archive to use zero-copy StaticAssetPayload::Mapped"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

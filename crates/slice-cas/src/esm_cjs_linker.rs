@@ -72,13 +72,29 @@ pub(crate) fn normalize_builtin_specifier(spec: &str) -> String {
     }
 }
 
+thread_local! {
+    static CANONICAL_MOD_ID_CACHE: std::cell::RefCell<FxHashMap<PathBuf, String>> =
+        std::cell::RefCell::new(FxHashMap::default());
+}
+
+pub(crate) fn clear_canonical_mod_id_cache() {
+    CANONICAL_MOD_ID_CACHE.with(|c| c.borrow_mut().clear());
+}
+
 #[inline]
 pub(crate) fn canonical_mod_id(path: &Path) -> String {
-    let s = std::fs::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .replace('\\', "/");
-    s.strip_prefix("//?/").map(|r| r.to_string()).unwrap_or(s)
+    CANONICAL_MOD_ID_CACHE.with(|cache| {
+        if let Some(cached) = cache.borrow().get(path) {
+            return cached.clone();
+        }
+        let s = std::fs::canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .replace('\\', "/");
+        let id = s.strip_prefix("//?/").map(|r| r.to_string()).unwrap_or(s);
+        cache.borrow_mut().insert(path.to_path_buf(), id.clone());
+        id
+    })
 }
 
 fn collapse_multiline_imports_exports(code: &str) -> String {
