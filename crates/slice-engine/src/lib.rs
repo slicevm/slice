@@ -24,10 +24,11 @@
 //! - [`state_and_kv`]: 16-way sharded [`EDGE_KV_SLAB`](state_and_kv::EDGE_KV_SLAB) (`Slice.kv`), `< 5 us` VFS+KV checkpoints, SplitMix64 PRNG, and Egress DLP guard.
 //! - [`outbound_http`]: Outbound `fetch()` HTTP/1.1 socket engine, OCap host allowlist, and Cloud Metadata SSRF shield.
 
+pub mod bindings;
 pub mod boa_realm;
 pub mod boacas;
 pub mod event_loop;
-pub mod host_bindings;
+pub use bindings as host_bindings;
 pub mod intrinsics;
 pub mod isolate;
 pub mod js_minifier;

@@ -43,6 +43,24 @@ pub struct DataView {
 }
 
 impl DataView {
+    /// Zero-lookup fast path: calls `f` with the borrowed byte slice `[byte_offset .. byte_offset + byte_length]`
+    /// of this `DataView`'s underlying `ArrayBuffer` if backed by a non-detached `ArrayBuffer`.
+    #[inline]
+    pub fn with_bytes<R>(&self, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        let BufferObject::Buffer(buf) = &self.viewed_array_buffer else {
+            return None;
+        };
+        let borrow = buf.borrow();
+        let data = borrow.data().bytes()?;
+        if self.is_out_of_bounds(data.len()) {
+            return Some(f(&[]));
+        }
+        let len = self.byte_length(data.len()) as usize;
+        let start = (self.byte_offset as usize).min(data.len());
+        let end = (start + len).min(data.len());
+        Some(f(&data[start..end]))
+    }
+
     /// Abstract operation [`GetViewByteLength ( viewRecord )`][spec].
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-getviewbytelength

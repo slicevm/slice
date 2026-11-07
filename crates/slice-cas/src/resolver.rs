@@ -1198,7 +1198,9 @@ fn resolve_section_line(
     resolved_line
 }
 
-fn parse_raw_stack_frame(trimmed: &str) -> Option<(Option<&str>, Option<(usize, usize)>)> {
+type ParsedRawStackFrame<'a> = (Option<&'a str>, Option<(usize, usize)>);
+
+fn parse_raw_stack_frame(trimmed: &str) -> Option<ParsedRawStackFrame<'_>> {
     let after_at = trimmed.strip_prefix("at ")?.trim();
     let (fn_name_opt, loc_str) = if let Some((fn_part, rest)) = after_at.split_once(" (") {
         let fn_clean = fn_part.trim();
@@ -1265,7 +1267,7 @@ pub fn map_bundled_stack_trace(bundled_js: &str, raw_stack: &str) -> String {
     }
 
     let raw_lines: Vec<&str> = raw_stack.lines().collect();
-    let parsed_frames: Vec<Option<(Option<&str>, Option<(usize, usize)>)>> = raw_lines
+    let parsed_frames: Vec<Option<ParsedRawStackFrame<'_>>> = raw_lines
         .iter()
         .map(|l| parse_raw_stack_frame(l.trim()))
         .collect();

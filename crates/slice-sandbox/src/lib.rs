@@ -1096,15 +1096,11 @@ pub fn parse_inline_directives(source: &str) -> InlineDirectives {
                     dirs.workers = Some(w.max(1));
                 }
             }
-            "tls-cert" | "tls_cert" => {
-                if !val.is_empty() {
-                    dirs.tls_cert = Some(val.to_string());
-                }
+            "tls-cert" | "tls_cert" if !val.is_empty() => {
+                dirs.tls_cert = Some(val.to_string());
             }
-            "tls-key" | "tls_key" => {
-                if !val.is_empty() {
-                    dirs.tls_key = Some(val.to_string());
-                }
+            "tls-key" | "tls_key" if !val.is_empty() => {
+                dirs.tls_key = Some(val.to_string());
             }
             _ => {}
         }

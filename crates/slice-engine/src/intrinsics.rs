@@ -1385,9 +1385,9 @@ impl Md5State {
             0xeb86d391,
         ];
         let mut m = [0u32; 16];
-        for i in 0..16 {
+        for (i, item) in m.iter_mut().enumerate() {
             let off = i * 4;
-            m[i] = u32::from_le_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
+            *item = u32::from_le_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
         }
         let (mut a, mut b, mut c, mut d) = (s[0], s[1], s[2], s[3]);
         for i in 0..64 {
@@ -1614,6 +1614,7 @@ impl AesExpandedKey {
     }
 
     #[inline]
+    #[allow(clippy::needless_range_loop)]
     pub fn encrypt_block(&self, block: &mut [u8; 16]) {
         for i in 0..16 {
             block[i] ^= self.round_keys[0][i];
@@ -1669,6 +1670,7 @@ impl AesExpandedKey {
     }
 
     #[inline]
+    #[allow(clippy::needless_range_loop)]
     pub fn decrypt_block(&self, block: &mut [u8; 16]) {
         for i in 0..16 {
             block[i] ^= self.round_keys[self.rounds][i];
@@ -1998,9 +2000,9 @@ pub fn hkdf_derive_bytes(
 #[inline]
 fn salsa20_8_core(b: &mut [u8; 64]) {
     let mut x = [0u32; 16];
-    for i in 0..16 {
+    for (i, item) in x.iter_mut().enumerate() {
         let off = i * 4;
-        x[i] = u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]);
+        *item = u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]);
     }
     let mut w = x;
     for _ in 0..4 {
@@ -2358,8 +2360,10 @@ pub fn extract_ecdsa_pub(curve: &str, input: &[u8]) -> Result<Vec<u8>, &'static 
     }
 }
 
+pub type EcdsaGeneratedKeypair = (Vec<u8>, Vec<u8>, Vec<u8>);
+
 /// Generates a new ECDSA (`P-256` or `P-384`) keypair, returning `(pkcs8_bytes, d_bytes, pub_uncompressed_bytes)`.
-pub fn ecdsa_generate_keypair(curve: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), &'static str> {
+pub fn ecdsa_generate_keypair(curve: &str) -> Result<EcdsaGeneratedKeypair, &'static str> {
     let rng = ring::rand::SystemRandom::new();
     let alg = if curve.eq_ignore_ascii_case("P-256") || curve.eq_ignore_ascii_case("prime256v1") {
         &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING
@@ -2479,7 +2483,7 @@ pub fn ecdsa_verify_bytes(curve: &str, pub_uncompressed: &[u8], msg: &[u8], sign
 }
 
 /// Cached pre-expanded cryptographic key entry stored in the isolate-local / tenant-scoped slot table.
-#[allow(dead_code)]
+#[allow(dead_code, clippy::large_enum_variant)]
 pub(crate) enum CachedCryptoKeyMaterial {
     AesGcm {
         less_safe: ring::aead::LessSafeKey,
@@ -2590,6 +2594,9 @@ pub fn clear_cached_crypto_keys_for_tenant(tenant_id: &str) {
 /// Strict WhatWG `btoa`: encodes a Latin1 (`0x00..=0xFF`) string to standard Base64,
 /// returning `Err` if any code point exceeds `0xFF`.
 pub(crate) fn whatwg_btoa(input: &str) -> Result<String, &'static str> {
+    if input.is_ascii() {
+        return Ok(base64_encode(input.as_bytes(), false));
+    }
     let mut bytes = Vec::with_capacity(input.len());
     for ch in input.chars() {
         let code = ch as u32;
@@ -2604,10 +2611,19 @@ pub(crate) fn whatwg_btoa(input: &str) -> Result<String, &'static str> {
 /// Strict WhatWG `atob`: strips ASCII whitespace, validates Base64 alphabet and padding,
 /// and returns decoded Latin1 bytes (mapped 1:1 to `0x00..=0xFF` code points).
 pub(crate) fn whatwg_atob(input: &str) -> Result<String, &'static str> {
-    let cleaned: Vec<u8> = input
+    let cleaned: std::borrow::Cow<'_, [u8]> = if input
         .bytes()
-        .filter(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c))
-        .collect();
+        .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c))
+    {
+        std::borrow::Cow::Owned(
+            input
+                .bytes()
+                .filter(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c))
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(input.as_bytes())
+    };
     if cleaned.len() % 4 == 1 {
         return Err("InvalidCharacterError: The string to be decoded is not correctly encoded.");
     }
@@ -3078,8 +3094,16 @@ impl<'a> InflateBitReader<'a> {
 
 /// Decompresses a raw RFC 1951 DEFLATE stream (`BTYPE = 00`, `01`, or `10`).
 pub(crate) fn inflate_raw_decompress(input: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let effective_max = crate::boa_realm::BOA_KV_MEM_BUDGET.with(|m| {
+        let (used, limit) = m.get();
+        if limit > 0 {
+            limit.saturating_sub(used).min(MAX_DECOMPRESSED_BYTES)
+        } else {
+            MAX_DECOMPRESSED_BYTES
+        }
+    });
     let mut br = InflateBitReader::new(input);
-    let mut out = Vec::with_capacity(input.len().saturating_mul(2).min(65536));
+    let mut out = Vec::with_capacity(input.len().saturating_mul(2).min(65536).min(effective_max));
 
     loop {
         let bfinal = br.read_bits(1)?;
@@ -3092,8 +3116,8 @@ pub(crate) fn inflate_raw_decompress(input: &[u8]) -> Result<Vec<u8>, &'static s
                 if len != !nlen {
                     return Err("Corrupt stored DEFLATE block length complement");
                 }
-                if out.len().saturating_add(len as usize) > MAX_DECOMPRESSED_BYTES {
-                    return Err("Decompressed payload exceeds 64MB sandbox limit");
+                if out.len().saturating_add(len as usize) > effective_max {
+                    return Err("Decompressed payload exceeds sandbox memory limit");
                 }
                 for _ in 0..len {
                     out.push(br.read_bits(8)? as u8);
@@ -3161,8 +3185,8 @@ pub(crate) fn inflate_raw_decompress(input: &[u8]) -> Result<Vec<u8>, &'static s
                 loop {
                     let sym = br.decode_huffman(&lit_tree)?;
                     if sym < 256 {
-                        if out.len() >= MAX_DECOMPRESSED_BYTES {
-                            return Err("Decompressed payload exceeds 64MB sandbox limit");
+                        if out.len() >= effective_max {
+                            return Err("Decompressed payload exceeds sandbox memory limit");
                         }
                         out.push(sym as u8);
                     } else if sym == 256 {
@@ -3183,8 +3207,8 @@ pub(crate) fn inflate_raw_decompress(input: &[u8]) -> Result<Vec<u8>, &'static s
                         if dist == 0 || dist > out.len() {
                             return Err("DEFLATE back-reference distance out of bounds");
                         }
-                        if out.len().saturating_add(length) > MAX_DECOMPRESSED_BYTES {
-                            return Err("Decompressed payload exceeds 64MB sandbox limit");
+                        if out.len().saturating_add(length) > effective_max {
+                            return Err("Decompressed payload exceeds sandbox memory limit");
                         }
                         for _ in 0..length {
                             let b = out[out.len() - dist];

@@ -2081,28 +2081,23 @@ fn test_phase4_bounded_fetch_reactor_slab_reuse() {
                 workers.push(std::thread::spawn(move || {
                     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
                     let mut buf = [0u8; 2048];
-                    loop {
-                        let n = match stream.read(&mut buf) {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => n,
-                        };
-                        let req_s = String::from_utf8_lossy(&buf[..n]);
-                        let path = req_s
-                            .lines()
-                            .next()
-                            .and_then(|l| l.split_whitespace().nth(1))
-                            .unwrap_or("/0");
-                        let body = format!(r#"{{"ok":true,"path":"{}"}}"#, path);
-                        let resp = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        if stream.write_all(resp.as_bytes()).is_err() {
-                            break;
+                    if let Ok(n) = stream.read(&mut buf) {
+                        if n > 0 {
+                            let req_s = String::from_utf8_lossy(&buf[..n]);
+                            let path = req_s
+                                .lines()
+                                .next()
+                                .and_then(|l| l.split_whitespace().nth(1))
+                                .unwrap_or("/0");
+                            let body = format!(r#"{{"ok":true,"path":"{}"}}"#, path);
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = stream.write_all(resp.as_bytes());
+                            let _ = stream.flush();
                         }
-                        let _ = stream.flush();
-                        break;
                     }
                 }));
             }

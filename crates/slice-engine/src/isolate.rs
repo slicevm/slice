@@ -62,14 +62,15 @@ pub(crate) enum ControlFlow {
 pub struct SandboxEvalOptions {
     pub tenant_id: Option<String>,
     pub fuel: Option<u64>,
+    #[serde(alias = "maxMemoryBytes")]
     pub memory_bytes: Option<usize>,
-    #[serde(default)]
+    #[serde(default, alias = "readPrefixes", alias = "fsRead")]
     pub allow_read: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "writePrefixes", alias = "fsWrite")]
     pub allow_write: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "netHosts")]
     pub allow_net: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "execBinaries")]
     pub allow_exec: Vec<String>,
     pub deterministic_seed: Option<u64>,
     pub audit_secret: Option<String>,

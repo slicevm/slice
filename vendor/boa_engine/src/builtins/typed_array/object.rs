@@ -128,6 +128,47 @@ impl TypedArray {
         &self.viewed_array_buffer
     }
 
+    /// Zero-lookup fast path: calls `f` with the borrowed byte slice `[byte_offset .. byte_offset + byte_length]`
+    /// of this `TypedArray`'s underlying `ArrayBuffer` if backed by a non-detached `ArrayBuffer`.
+    #[inline]
+    pub fn with_bytes<R>(&self, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        let BufferObject::Buffer(buf) = &self.viewed_array_buffer else {
+            return None;
+        };
+        let borrow = buf.borrow();
+        let data = borrow.data().bytes()?;
+        let len = self.byte_length(data.len()) as usize;
+        let start = (self.byte_offset as usize).min(data.len());
+        let end = (start + len).min(data.len());
+        Some(f(&data[start..end]))
+    }
+
+    /// Zero-lookup fast path: calls `f` with the mutable byte slice `[byte_offset .. byte_offset + byte_length]`
+    /// of this `TypedArray`'s underlying `ArrayBuffer` if backed by a non-detached `ArrayBuffer`.
+    #[inline]
+    pub fn with_bytes_mut<R>(&self, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
+        let BufferObject::Buffer(buf) = &self.viewed_array_buffer else {
+            return None;
+        };
+        let mut borrow = buf.borrow_mut();
+        let data = borrow.data_mut().bytes_mut()?;
+        let len = self.byte_length(data.len()) as usize;
+        let start = (self.byte_offset as usize).min(data.len());
+        let end = (start + len).min(data.len());
+        Some(f(&mut data[start..end]))
+    }
+
+    /// Zero-lookup fast path: returns the `TypedArray`'s current byte length without invoking JS getters.
+    #[inline]
+    pub fn fast_byte_length(&self) -> Option<usize> {
+        let BufferObject::Buffer(buf) = &self.viewed_array_buffer else {
+            return None;
+        };
+        let borrow = buf.borrow();
+        let data = borrow.data().bytes()?;
+        Some(self.byte_length(data.len()) as usize)
+    }
+
     /// [`TypedArrayByteLength ( taRecord )`][spec].
     ///
     /// Get the `TypedArray` object's byte length.
