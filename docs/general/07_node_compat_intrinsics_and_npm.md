@@ -116,17 +116,35 @@ u.searchParams.sort();
 console.log(u.href); // "https://api.slice.dev/v2/search?q=slice&tag=edge&tag=rust"
 ```
 
-### 1.7 `node:util`, `node:util/types`, `node:assert`, `node:os`, & `node:process`
+### 1.7 `node:util`, `node:util/types`, `node:assert`, `node:os`, `node:process`, & Secondary `node:*` Modules (`perf_hooks`, `tty`, `module`, `vm`, `string_decoder`, `querystring`, `stream`)
 ```typescript
 import * as os from "node:os";
 import * as util from "node:util";
 import * as assert from "node:assert/strict";
 import process from "node:process";
+import { performance, PerformanceObserver } from "node:perf_hooks";
+import { createRequire, isBuiltin } from "node:module";
+import * as vm from "node:vm";
 
-const msg: string = util.format("Tenant %s processed %d items: %j", "alpha", 42, { ok: true });
-assert.strictEqual(util.types.isUint8Array(Buffer.alloc(4)), true);
-assert.deepStrictEqual({ a: [1, 2] }, { a: [1, 2] });
-const stage: string = process.env.NODE_ENV || "production";
+// CLI flag parsing, deep equality, ANSI styling, & MIME parsing in node:util:
+const { values, positionals } = util.parseArgs({
+    args: ["-v", "--port=8080", "app.ts"],
+    options: { verbose: { type: "boolean", short: "v" }, port: { type: "string" } },
+    allowPositionals: true,
+});
+assert.strictEqual(util.isDeepStrictEqual(values, { verbose: true, port: "8080" }), true);
+const colored = util.styleText(["bold", "green"], "READY");
+assert.strictEqual(util.stripVTControlCharacters(colored), "READY");
+const mime = new util.MIMEType("application/json; charset=utf-8");
+
+// Full process CLI surface (stdout/stderr/stdin, memoryUsage, hrtime.bigint, uptime, events):
+process.stdout.write(`Stage: ${process.env.NODE_ENV || "production"}\n`);
+const mem = process.memoryUsage(); // { rss, heapTotal, heapUsed, external, arrayBuffers }
+const t0: bigint = process.hrtime.bigint();
+
+// Sandboxed node:vm backed by Slice.evalSandbox (5-Ring OCap + fuel metered):
+const ctx = vm.createContext({ count: 10 });
+const vmOut = vm.runInContext("count += 32; count", ctx, { timeout: 50 }); // 42
 ```
 
 ### 1.8 `slice:test` / `node:test` / `bun:test`

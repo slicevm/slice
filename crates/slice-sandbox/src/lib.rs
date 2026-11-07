@@ -786,6 +786,8 @@ pub struct SliceManifest {
     pub server_workers: Option<usize>,
     #[serde(default)]
     pub static_dir: Option<String>,
+    #[serde(default)]
+    pub trust_directives: Option<bool>,
 }
 
 impl Default for SliceManifest {
@@ -806,6 +808,7 @@ impl Default for SliceManifest {
             server_port: None,
             server_workers: None,
             static_dir: None,
+            trust_directives: None,
         }
     }
 }
@@ -1100,6 +1103,14 @@ impl SliceManifest {
                     ("capabilities", "audit_egress") | ("security", "audit_egress") => {
                         for item in parse_toml_string_array(val) {
                             manifest.audit_egress.push(item);
+                        }
+                    }
+                    ("capabilities", "trust_directives")
+                    | ("security", "trust_directives")
+                    | ("engine", "trust_directives")
+                    | ("runtime", "trust_directives") => {
+                        if let Some(b) = parse_bool_setting(val) {
+                            manifest.trust_directives = Some(b);
                         }
                     }
                     ("capabilities.env", _) => {

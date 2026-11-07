@@ -49,9 +49,13 @@ pub mod workers;
 mod tests;
 
 pub use boacas::{
-    active_tier_override, is_exper_boacas_build_enabled, is_exper_boacas_runtime_enabled,
-    pack_boacas_container, set_exper_boacas_override, set_thread_exper_boacas_override,
-    set_thread_tier_override, set_tier_override, BoaCasHeader, BOACAS_HEADER_LEN, BOACAS_MAGIC,
+    active_tier_override, compute_boacas_metadata, is_exper_boacas_build_enabled,
+    is_exper_boacas_runtime_enabled, pack_boacas_container, set_exper_boacas_override,
+    set_thread_exper_boacas_override, set_thread_tier_override, set_tier_override, BoaCasHeader,
+    BOACAS_FLAG_HAS_HTTP_BRIDGE, BOACAS_FLAG_HAS_KV_SANDBOX, BOACAS_FLAG_HAS_NEXT_TICK,
+    BOACAS_FLAG_HAS_SEMVER_FAST, BOACAS_FLAG_HAS_WORKER, BOACAS_FLAG_IS_RC_BUNDLE,
+    BOACAS_FLAG_NEEDS_LAZY_GETTERS, BOACAS_FLAG_NEEDS_SES_CHECK, BOACAS_FLAG_STARTS_WITH_BRACE,
+    BOACAS_HEADER_LEN, BOACAS_MAGIC,
 };
 pub use event_loop::{reset_virtual_time_warped_ms, virtual_time_warped_ms};
 pub use isolate::{

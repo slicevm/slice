@@ -26,3 +26,15 @@ Every `SliceIsolate` executes inside a [`TenantCompartment`](file:///p:/opensour
    - Before evaluating code in [`SliceIsolate::exec_boa_full_es_vm`](file:///p:/opensource/slice/crates/slice-engine/src/isolate.rs), Slice configures `realm.ctx.runtime_limits_mut().set_loop_iteration_limit(remaining_fuel)` and `set_recursion_limit(512)`, translating loop or call-stack exhaustion inside `Boa` directly into `SandboxViolation::CpuFuelExhausted`.
    - On Linux `x86_64`, [`HardwareProtectionDomain`](file:///p:/opensource/slice/crates/slice-sandbox/src/lib.rs) allocates hardware memory protection keys via `SYS_pkey_alloc` (syscall 330) and switches page permissions in `< 20` CPU cycles using the unprivileged `WRPKRU` instruction.
 
+---
+
+## 2. Untrusted Entrypoint & AI Code-Mode Directive Lockdown (`// @slice-*`)
+
+Implemented in [`ResolvedExecutionConfig::apply_inline_directives`](file:///p:/opensource/slice/crates/slice-cli/src/config_and_watch.rs) and [`SliceManifest`](file:///p:/opensource/slice/crates/slice-sandbox/src/lib.rs):
+- **Default Monotonic Attenuation (`trust_directives == false`):** By default, top-of-file `// @slice-*` source directives parsed by [`parse_inline_directives`](file:///p:/opensource/slice/crates/slice-sandbox/src/lib.rs) cannot escalate privileges when executing untrusted or AI-generated entrypoints (`slice run agent_script.ts`):
+  - `fuel` and `memory_bytes` are clamped via `self.fuel_limit.min(f)` and `self.memory_limit_bytes.min(mb)` (cannot exceed host limits).
+  - `allow_read`, `allow_write`, `allow_net`, and `allow_env` are strictly intersected against existing host-granted capabilities in `self.caps` (`slice_sandbox::vfs_prefix_matches` for VFS prefixes, wildcard/exact host matching for `allowed_net_hosts`, and existing key membership for `allowed_env_keys`).
+  - `env_file`, `port`, and `workers` inline directives are ignored unless `trust_directives` is `true`, while `audit_egress` remains always-additive.
+- **Explicit Host Opt-In (`--trust-directives` / `SLICE_TRUST_DIRECTIVES=1` / `trust_directives = true`):** Only when the host explicitly enables `trust_directives` (via `[capabilities] trust_directives = true` in `slice.toml`, `SLICE_TRUST_DIRECTIVES=1`, or `--trust-directives`) do inline directives apply additively. Passing `--no-directives` or `--untrusted` bypasses `apply_inline_directives` altogether.
+- **In-Process `Slice.evalSandbox` & `slice mcp` Immunity:** [`SliceIsolate::eval_sandbox`](file:///p:/opensource/slice/crates/slice-engine/src/isolate.rs) and `slice_eval_ts` never call `apply_inline_directives`, guaranteeing that embedded `// @slice-allow-*` or `// @slice-fuel` comments inside sandboxed code snippets have zero effect on child `CapabilityToken` or resource budgets.
+

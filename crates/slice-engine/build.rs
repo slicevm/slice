@@ -57,6 +57,7 @@ const PRELUDE_SPECS: &[(&str, &str)] = &[
         "BUFFER_BINARY_RW_PRELUDE",
         "src/preludes/17_buffer_binary_rw.js",
     ),
+    ("INTL_PRELUDE", "src/preludes/18_intl.js"),
 ];
 
 fn main() {

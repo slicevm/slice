@@ -298,7 +298,9 @@ pub(crate) fn ensure_realm_shards(
         return;
     }
     let lazy_getters_active = (realm.loaded_shards_mask & 1) != 0;
-    for shard_id in [2u32, 13, 1, 11, 12, 10, 3, 14, 15, 4, 16, 5, 17, 6, 7, 8, 9] {
+    for shard_id in [
+        2u32, 13, 1, 11, 12, 10, 3, 14, 15, 4, 16, 5, 17, 6, 7, 8, 9, 18,
+    ] {
         let bit = 1u32 << shard_id;
         if (missing & bit) != 0 {
             if lazy_getters_active {

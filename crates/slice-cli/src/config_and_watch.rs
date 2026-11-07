@@ -53,6 +53,7 @@ pub(crate) struct ResolvedExecutionConfig {
     pub(crate) server_port: Option<u16>,
     pub(crate) server_workers: Option<usize>,
     pub(crate) static_dir: Option<PathBuf>,
+    pub(crate) trust_directives: bool,
     pub(crate) cli_fuel_override: Option<u64>,
     pub(crate) cli_mem_override: Option<usize>,
     pub(crate) cli_boacas_override: Option<bool>,
@@ -62,6 +63,7 @@ pub(crate) struct ResolvedExecutionConfig {
     pub(crate) cli_port_override: Option<u16>,
     pub(crate) cli_workers_override: Option<usize>,
     pub(crate) cli_static_override: Option<PathBuf>,
+    pub(crate) cli_trust_directives_override: Option<bool>,
 }
 
 impl ResolvedExecutionConfig {
@@ -74,6 +76,7 @@ impl ResolvedExecutionConfig {
         let mut server_port = None;
         let mut server_workers = None;
         let mut static_dir = None;
+        let mut trust_directives = false;
 
         let mut cli_fuel_override = None;
         let mut cli_mem_override = None;
@@ -84,6 +87,7 @@ impl ResolvedExecutionConfig {
         let mut cli_port_override = None;
         let mut cli_workers_override = None;
         let mut cli_static_override = None;
+        let mut cli_trust_directives_override = None;
 
         // 1. Apply `./slice.toml` if present in cwd
         let cwd_manifest = Path::new("slice.toml");
@@ -104,6 +108,9 @@ impl ResolvedExecutionConfig {
                 }
                 if let Some(sd) = m.static_dir {
                     static_dir = Some(PathBuf::from(sd));
+                }
+                if let Some(td) = m.trust_directives {
+                    trust_directives = td;
                 }
                 if let Some(b) = m.exper_boacas {
                     apply_boacas_override(Some(b));
@@ -241,6 +248,12 @@ impl ResolvedExecutionConfig {
                 apply_tier_override(t);
             }
         }
+        if let Ok(v) = std::env::var("SLICE_TRUST_DIRECTIVES") {
+            if let Some(b) = slice_sandbox::parse_bool_setting(&v) {
+                trust_directives = b;
+                cli_trust_directives_override = Some(b);
+            }
+        }
 
         // 3. Apply explicit CLI inline flags (highest precedence)
         for arg in args {
@@ -349,6 +362,20 @@ impl ResolvedExecutionConfig {
                 let p = PathBuf::from(sd_str);
                 static_dir = Some(p.clone());
                 cli_static_override = Some(p);
+            } else if arg == "--trust-directives" {
+                trust_directives = true;
+                cli_trust_directives_override = Some(true);
+            } else if arg == "--no-trust-directives"
+                || arg == "--no-directives"
+                || arg == "--untrusted"
+            {
+                trust_directives = false;
+                cli_trust_directives_override = Some(false);
+            } else if let Some(td_str) = arg.strip_prefix("--trust-directives=") {
+                if let Some(b) = slice_sandbox::parse_bool_setting(td_str) {
+                    trust_directives = b;
+                    cli_trust_directives_override = Some(b);
+                }
             }
         }
 
@@ -366,6 +393,7 @@ impl ResolvedExecutionConfig {
             server_port,
             server_workers,
             static_dir,
+            trust_directives,
             cli_fuel_override,
             cli_mem_override,
             cli_boacas_override,
@@ -375,6 +403,7 @@ impl ResolvedExecutionConfig {
             cli_port_override,
             cli_workers_override,
             cli_static_override,
+            cli_trust_directives_override,
         })
     }
 
@@ -427,6 +456,11 @@ impl ResolvedExecutionConfig {
                 self.static_dir = Some(p);
             }
         }
+        if self.cli_trust_directives_override.is_none() {
+            if let Some(td) = m.trust_directives {
+                self.trust_directives = td;
+            }
+        }
         merge_manifest_toml_into_caps_and_dlp(
             raw_toml,
             base_dir,
@@ -437,6 +471,14 @@ impl ResolvedExecutionConfig {
 
     /// Applies top-of-file inline source directives (`// @slice-...`) from an entrypoint script,
     /// overriding `slice.toml` defaults while respecting `SLICE_*` env vars and CLI flags.
+    ///
+    /// Security Boundary (`P33`):
+    /// - Safe tuning hints (`tier`, `boacas`, `warm`, `deterministic`, `port`, `workers`),
+    ///   extra DLP secrets (`audit-egress`), and monotonic self-attenuation (lowering `fuel`/`memory`
+    ///   or narrowing paths already granted by the host) are always active.
+    /// - Privilege-widening directives (`allow-read`, `allow-write`, `allow-net`, `allow-env`,
+    ///   `env-file`, or raising `fuel`/`memory` above the host ceiling) require explicit host opt-in
+    ///   via `--trust-directives` (`SLICE_TRUST_DIRECTIVES=1` or `trust_directives = true` in `slice.toml`).
     pub(crate) fn apply_inline_directives(&mut self, source: &str, base_dir: Option<&Path>) {
         if !source.starts_with("//") && !source.starts_with("#!") {
             return;
@@ -444,12 +486,20 @@ impl ResolvedExecutionConfig {
         let dirs = slice_sandbox::parse_inline_directives(source);
         if self.cli_fuel_override.is_none() {
             if let Some(f) = dirs.fuel_limit {
-                self.fuel_limit = f;
+                if self.trust_directives {
+                    self.fuel_limit = f;
+                } else {
+                    self.fuel_limit = self.fuel_limit.min(f);
+                }
             }
         }
         if self.cli_mem_override.is_none() {
             if let Some(m) = dirs.memory_limit_bytes {
-                self.mem_limit = m;
+                if self.trust_directives {
+                    self.mem_limit = m;
+                } else {
+                    self.mem_limit = self.mem_limit.min(m);
+                }
             }
         }
         if self.cli_boacas_override.is_none() {
@@ -482,43 +532,95 @@ impl ResolvedExecutionConfig {
                 self.server_workers = Some(w);
             }
         }
-        for r in dirs.allow_read {
-            if !self.caps.allowed_read_prefixes.contains(&r) {
-                self.caps.allowed_read_prefixes.push(r);
-            }
-        }
-        for w in dirs.allow_write {
-            if !self.caps.allowed_write_prefixes.contains(&w) {
-                self.caps.allowed_write_prefixes.push(w);
-            }
-        }
-        for nh in dirs.allow_net {
-            self.caps.allowed_net_hosts.insert(nh);
-        }
-        for (k, v) in dirs.allow_env {
-            if v.len() >= 6
-                && slice_sandbox::is_sensitive_env_key(&k)
-                && !self.audit_secrets.contains(&v)
-            {
-                self.audit_secrets.push(v.clone());
-            }
-            self.caps.allowed_env_keys.entry(k).or_insert(v);
-        }
         for sec in dirs.audit_egress {
             if !sec.is_empty() && !self.audit_secrets.contains(&sec) {
                 self.audit_secrets.push(sec);
             }
         }
-        if let Some(ef) = dirs.env_file {
-            let env_path = match base_dir {
-                Some(dir) => dir.join(&ef),
-                None => PathBuf::from(&ef),
-            };
-            let _ = apply_dotenv_file_to_caps_and_dlp(
-                &env_path,
-                &mut self.caps,
-                &mut self.audit_secrets,
-            );
+
+        if self.trust_directives {
+            for r in dirs.allow_read {
+                if !self.caps.allowed_read_prefixes.contains(&r) {
+                    self.caps.allowed_read_prefixes.push(r);
+                }
+            }
+            for w in dirs.allow_write {
+                if !self.caps.allowed_write_prefixes.contains(&w) {
+                    self.caps.allowed_write_prefixes.push(w);
+                }
+            }
+            for nh in dirs.allow_net {
+                self.caps.allowed_net_hosts.insert(nh);
+            }
+            for (k, v) in dirs.allow_env {
+                if v.len() >= 6
+                    && slice_sandbox::is_sensitive_env_key(&k)
+                    && !self.audit_secrets.contains(&v)
+                {
+                    self.audit_secrets.push(v.clone());
+                }
+                self.caps.allowed_env_keys.entry(k).or_insert(v);
+            }
+            if let Some(ef) = dirs.env_file {
+                let env_path = match base_dir {
+                    Some(dir) => dir.join(&ef),
+                    None => PathBuf::from(&ef),
+                };
+                let _ = apply_dotenv_file_to_caps_and_dlp(
+                    &env_path,
+                    &mut self.caps,
+                    &mut self.audit_secrets,
+                );
+            }
+        } else {
+            // Untrusted mode (default): monotonic capability attenuation only (never widens host caps)
+            if !dirs.allow_read.is_empty() && !self.caps.allowed_read_prefixes.is_empty() {
+                let narrowed: Vec<String> = dirs
+                    .allow_read
+                    .into_iter()
+                    .filter(|r| {
+                        self.caps
+                            .allowed_read_prefixes
+                            .iter()
+                            .any(|p| slice_sandbox::vfs_prefix_matches(r, p))
+                    })
+                    .collect();
+                if !narrowed.is_empty() {
+                    self.caps.allowed_read_prefixes = narrowed;
+                }
+            }
+            if !dirs.allow_write.is_empty() && !self.caps.allowed_write_prefixes.is_empty() {
+                let narrowed: Vec<String> = dirs
+                    .allow_write
+                    .into_iter()
+                    .filter(|w| {
+                        self.caps
+                            .allowed_write_prefixes
+                            .iter()
+                            .any(|p| slice_sandbox::vfs_prefix_matches(w, p))
+                    })
+                    .collect();
+                if !narrowed.is_empty() {
+                    self.caps.allowed_write_prefixes = narrowed;
+                }
+            }
+            if !dirs.allow_net.is_empty() && !self.caps.allowed_net_hosts.is_empty() {
+                let narrowed: Vec<String> = dirs
+                    .allow_net
+                    .into_iter()
+                    .filter(|nh| {
+                        !slice_sandbox::is_cloud_metadata_ssrf_target(nh)
+                            && (self.caps.allowed_net_hosts.contains(nh)
+                                || self.caps.allowed_net_hosts.contains("*"))
+                    })
+                    .collect();
+                if !narrowed.is_empty() {
+                    self.caps.allowed_net_hosts.clear();
+                    for nh in narrowed {
+                        self.caps.allowed_net_hosts.insert(nh);
+                    }
+                }
+            }
         }
     }
 

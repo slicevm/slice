@@ -60,6 +60,7 @@ A child sandbox spawned via `Slice.evalSandbox` can **never** escalate privilege
 - **Filesystem Intersection:** If the parent isolate only has `--allow-read=/workspace/tenant-a` and the child requests `allowRead: ["/etc", "/workspace/tenant-a/public"]`, Slice intersects the two sets so the child can **only** read `/workspace/tenant-a/public` (and `/etc` is denied!).
 - **Fuel & Memory Clamping:** The child's `fuel` and `memoryBytes` budgets are clamped to the parent's remaining fuel and memory, and all fuel consumed by the child is deducted from the parent's budget.
 - **Inherited Egress DLP Secrets:** Every secret registered on the parent isolate (via `--audit-egress` or `--env-file=.env`) is automatically enforced on the child sandbox's `stdout`, `returnValue`, and outbound `fetch()`.
+- **Inline Source Directive Lockdown (`// @slice-*`):** Any `// @slice-allow-read`, `// @slice-allow-write`, `// @slice-allow-net`, `// @slice-allow-env`, `// @slice-env-file`, `// @slice-fuel`, or `// @slice-memory-kb` comments embedded inside AI-generated code passed to `Slice.evalSandbox`, `slice mcp` (`slice_eval_ts`), or default CLI `slice run` (where `trust_directives = false` by default) can **never** escalate privileges or raise fuel/memory ceilings beyond what the host explicitly granted.
 
 ### 1.3 Example: Evaluating Customer Pricing Formulas Safely
 ```typescript

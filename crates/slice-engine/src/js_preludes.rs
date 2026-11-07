@@ -51,19 +51,22 @@ pub const BLOB_FORMDATA_PRELUDE_SRC: &str = include_str!("preludes/15_blob_formd
 pub const STRUCTURED_CLONE_PRELUDE_SRC: &str = include_str!("preludes/16_structured_clone.js");
 /// Human-readable source for Shard 17: `BUFFER_BINARY_RW_PRELUDE` (`src/preludes/17_buffer_binary_rw.js`).
 pub const BUFFER_BINARY_RW_PRELUDE_SRC: &str = include_str!("preludes/17_buffer_binary_rw.js");
+/// Human-readable source for Shard 18: `INTL_PRELUDE` (`src/preludes/18_intl.js`).
+pub const INTL_PRELUDE_SRC: &str = include_str!("preludes/18_intl.js");
 
 /// On-demand self-replacing lazy property getter registration (`__defLazy`) evaluated ONLY when
 /// `needs_lazy_global_getters(js_code)` is true (`globalThis.*` dynamic probes).
-pub(crate) const LAZY_GETTERS_INIT_PRELUDE: &[u8] = br#"(function(){var __loadShard=globalThis.__slice_ensure_shard,__shardProps=globalThis.__shardProps,__shMask=globalThis.__shMask;globalThis.__slice_mark_lazy_inited();function __defLazy(names,shardId){__shardProps[shardId]=names;for(var i=0;i<names.length;i++){(function(prop){Object.defineProperty(globalThis,prop,{configurable:true,enumerable:false,get:function(){__loadShard(shardId);return globalThis[prop];},set:function(val){Object.defineProperty(globalThis,prop,{value:val,writable:true,enumerable:false,configurable:true});}});})(names[i]);}}if((__shMask&2)===0)__defLazy(["URLSearchParams","URL"],1);if((__shMask&2048)===0)__defLazy(["Headers","Request","Response","__slice_make_web_request"],11);if((__shMask&4096)===0)__defLazy(["URLPattern"],12);if((__shMask&1024)===0)__defLazy(["AbortSignal","AbortController","fetch"],10);if((__shMask&4)===0)__defLazy(["btoa","atob","TextEncoder","TextDecoder"],2);if((__shMask&8192)===0)__defLazy(["Event","CustomEvent","EventTarget"],13);if((__shMask&8)===0)__defLazy(["ReadableStream"],3);if((__shMask&16384)===0)__defLazy(["WritableStream","TransformStream","TextEncoderStream","TextDecoderStream","CompressionStream","DecompressionStream"],14);if((__shMask&32768)===0)__defLazy(["Blob","File","FormData"],15);if((__shMask&16)===0)__defLazy(["crypto","CryptoKey"],4);if((__shMask&65536)===0)__defLazy(["structuredClone"],16);if((__shMask&32)===0)__defLazy(["Buffer"],5);if((__shMask&64)===0){var __cMethods=["dir","dirxml","table","trace","assert","clear","count","countReset","group","groupCollapsed","groupEnd","time","timeLog","timeEnd"];for(var c=0;c<__cMethods.length;c++){(function(m){globalThis.console[m]=function(){__loadShard(6);return globalThis.console[m].apply(globalThis.console,arguments);};})(__cMethods[c]);}}if((__shMask&128)===0)__defLazy(["WebSocket","MessageEvent","CloseEvent","__slice_dispatch_server_ws"],7);if((__shMask&256)===0)__defLazy(["Worker","MessageChannel","MessagePort","__slice_receiveMessageOnPort","__slice_wintertc_connect","__slice_init_worker_self_env","__slice_worker_host_deliver","__slice_worker_self_deliver"],8);if((__shMask&512)===0)__defLazy(["WebAssembly"],9);})();"#;
+pub(crate) const LAZY_GETTERS_INIT_PRELUDE: &[u8] = br#"(function(){var __loadShard=globalThis.__slice_ensure_shard,__shardProps=globalThis.__shardProps,__shMask=globalThis.__shMask;globalThis.__slice_mark_lazy_inited();function __defLazy(names,shardId){__shardProps[shardId]=names;for(var i=0;i<names.length;i++){(function(prop){Object.defineProperty(globalThis,prop,{configurable:true,enumerable:false,get:function(){__loadShard(shardId);return globalThis[prop];},set:function(val){Object.defineProperty(globalThis,prop,{value:val,writable:true,enumerable:false,configurable:true});}});})(names[i]);}}if((__shMask&2)===0)__defLazy(["URLSearchParams","URL"],1);if((__shMask&2048)===0)__defLazy(["Headers","Request","Response","__slice_make_web_request"],11);if((__shMask&4096)===0)__defLazy(["URLPattern"],12);if((__shMask&1024)===0)__defLazy(["AbortSignal","AbortController","fetch"],10);if((__shMask&4)===0)__defLazy(["btoa","atob","TextEncoder","TextDecoder"],2);if((__shMask&8192)===0)__defLazy(["Event","CustomEvent","EventTarget"],13);if((__shMask&8)===0)__defLazy(["ReadableStream"],3);if((__shMask&16384)===0)__defLazy(["WritableStream","TransformStream","TextEncoderStream","TextDecoderStream","CompressionStream","DecompressionStream"],14);if((__shMask&32768)===0)__defLazy(["Blob","File","FormData"],15);if((__shMask&16)===0)__defLazy(["crypto","CryptoKey"],4);if((__shMask&65536)===0)__defLazy(["structuredClone"],16);if((__shMask&32)===0)__defLazy(["Buffer"],5);if((__shMask&64)===0){var __cMethods=["dir","dirxml","table","trace","assert","clear","count","countReset","group","groupCollapsed","groupEnd","time","timeLog","timeEnd"];for(var c=0;c<__cMethods.length;c++){(function(m){globalThis.console[m]=function(){__loadShard(6);return globalThis.console[m].apply(globalThis.console,arguments);};})(__cMethods[c]);}}if((__shMask&128)===0)__defLazy(["WebSocket","MessageEvent","CloseEvent","__slice_dispatch_server_ws"],7);if((__shMask&256)===0)__defLazy(["Worker","MessageChannel","MessagePort","__slice_receiveMessageOnPort","__slice_wintertc_connect","__slice_init_worker_self_env","__slice_worker_host_deliver","__slice_worker_self_deliver"],8);if((__shMask&512)===0)__defLazy(["WebAssembly"],9);if((__shMask&262144)===0)__defLazy(["Intl","navigator","location"],18);})();"#;
 
-/// Canonical topological order for loading prelude shards (`1..=17`) so base dependencies
+/// Canonical topological order for loading prelude shards (`1..=18`) so base dependencies
 /// (`TextEncoder`, `EventTarget`, `URL`, `Request`/`Response`, `ReadableStream`, `Buffer`) are
-/// always initialized before dependent shards (`fetch`, `TransformStream`, `WebSocket`, `Worker`).
+/// always initialized before dependent shards (`fetch`, `TransformStream`, `WebSocket`, `Worker`, `Intl`).
 #[allow(dead_code)]
-pub(crate) const SHARD_LOAD_ORDER: [u32; 17] =
-    [2, 13, 1, 11, 12, 10, 3, 14, 15, 4, 16, 5, 17, 6, 7, 8, 9];
+pub(crate) const SHARD_LOAD_ORDER: [u32; 18] = [
+    2, 13, 1, 11, 12, 10, 3, 14, 15, 4, 16, 5, 17, 6, 7, 8, 9, 18,
+];
 
-/// Returns the compile-time minified JS source bytes for `shard_id` (`1..=17`).
+/// Returns the compile-time minified JS source bytes for `shard_id` (`1..=18`).
 #[inline]
 pub(crate) fn shard_prelude_bytes(shard_id: u32) -> &'static [u8] {
     match shard_id {
@@ -84,6 +87,7 @@ pub(crate) fn shard_prelude_bytes(shard_id: u32) -> &'static [u8] {
         15 => BLOB_FORMDATA_PRELUDE,
         16 => STRUCTURED_CLONE_PRELUDE,
         17 => BUFFER_BINARY_RW_PRELUDE,
+        18 => INTL_PRELUDE,
         _ => b"",
     }
 }
@@ -125,13 +129,13 @@ pub(crate) fn register_shard_host_functions_for_mask(
     if (shards_mask & (1 << 11)) != 0 {
         crate::host_bindings::register_http_bridge_host_functions(context);
     }
-    if (shards_mask & (1 << 18)) != 0 {
+    if (shards_mask & (1 << 19)) != 0 {
         crate::host_bindings::register_node_crypto_bootstrap_host_function(context);
     }
-    if (shards_mask & (1 << 19)) != 0 {
+    if (shards_mask & (1 << 20)) != 0 {
         crate::host_bindings::register_fs_host_functions(context);
     }
-    if (shards_mask & (1 << 22)) != 0 {
+    if (shards_mask & (1 << 23)) != 0 {
         crate::host_bindings::register_os_host_functions(context);
     }
 }
@@ -170,7 +174,7 @@ pub(crate) fn build_fused_prelude_prefix(
         out.extend_from_slice(mask_buf.format(active_mask).as_bytes());
         out.extend_from_slice(b";\n");
     }
-    for builtin_bit in 18..=27u32 {
+    for builtin_bit in 19..=28u32 {
         if (shards_mask & (1u32 << builtin_bit)) != 0 {
             let b_bytes = crate::node_builtins::builtin_snippet_for_bit(builtin_bit);
             if !b_bytes.is_empty() {
@@ -215,10 +219,33 @@ pub(crate) fn build_fused_prelude_and_bundle(
 
 static ULTRA_CORE_SLICEBC: OnceLock<Vec<u8>> = OnceLock::new();
 static LAZY_GETTERS_SLICEBC: OnceLock<Vec<u8>> = OnceLock::new();
-static SHARD_SLICEBC: [OnceLock<Vec<u8>>; 18] = [const { OnceLock::new() }; 18];
+static SHARD_SLICEBC: [OnceLock<Vec<u8>>; 19] = [const { OnceLock::new() }; 19];
 
 #[inline]
-fn compile_static_js_to_slicebc(bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn compile_static_js_to_slicebc(bytes: &[u8]) -> Vec<u8> {
+    if cfg!(debug_assertions) {
+        let owned = bytes.to_vec();
+        return std::thread::Builder::new()
+            .name("slicebc-static-compiler".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let mut compiler_ctx = boa_engine::Context::default();
+                if let Ok(script) = boa_engine::Script::parse(
+                    boa_engine::Source::from_bytes(&owned),
+                    None,
+                    &mut compiler_ctx,
+                ) {
+                    script
+                        .compile_to_slicebc(&mut compiler_ctx)
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            })
+            .expect("failed to spawn slicebc-static-compiler thread")
+            .join()
+            .expect("slicebc-static-compiler thread panicked");
+    }
     let mut compiler_ctx = boa_engine::Context::default();
     if let Ok(script) =
         boa_engine::Script::parse(boa_engine::Source::from_bytes(bytes), None, &mut compiler_ctx)
@@ -261,14 +288,14 @@ pub(crate) fn eval_lazy_getters_init_prelude(
     context.eval(boa_engine::Source::from_bytes(LAZY_GETTERS_INIT_PRELUDE))
 }
 
-/// Evaluates a compile-time minified lazy prelude shard (`1..=17`) on demand inside `context`
+/// Evaluates a compile-time minified lazy prelude shard (`1..=18`) on demand inside `context`
 /// using cached precompiled `SLICEBC\x01` `CodeBlock` bytecode.
 #[inline]
 pub(crate) fn eval_lazy_prelude_shard(
     shard_id: u32,
     context: &mut boa_engine::Context,
 ) -> boa_engine::JsResult<boa_engine::JsValue> {
-    if !(1..=17).contains(&shard_id) {
+    if !(1..=18).contains(&shard_id) {
         return Ok(boa_engine::JsValue::undefined());
     }
     register_shard_host_functions_for_mask(1u32 << shard_id, context);
@@ -314,9 +341,14 @@ fn is_in_lazy_string_module_line(bytes: &[u8], pos: usize) -> bool {
 #[derive(Clone, Copy)]
 enum ShardTriggerAction {
     Mask(u32),
+    Flags(u16),
+    MaskAndFlags(u32, u16),
+    BuiltinMask(u32),
     FetchCall,
     BufBin,
     HasBinRwMarker,
+    GlobalThisRef,
+    GetOwnPropDescRef,
 }
 
 const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
@@ -348,12 +380,15 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ("new Headers(", ShardTriggerAction::Mask(1 << 11)),
     ("Headers.", ShardTriggerAction::Mask(1 << 11)),
     ("Request.", ShardTriggerAction::Mask(1 << 11)),
-    // URL & URLSearchParams (`1 << 1`)
+    ("__slice_dispatch_fetch", ShardTriggerAction::BuiltinMask(1 << 11)),
+    // URL & URLSearchParams (`1 << 1` & builtin `1 << 27`)
     ("new URL(", ShardTriggerAction::Mask(1 << 1)),
     ("URL.", ShardTriggerAction::Mask(1 << 1)),
     ("new URLSearchParams(", ShardTriggerAction::Mask(1 << 1)),
     ("URLSearchParams.", ShardTriggerAction::Mask(1 << 1)),
-    ("node:url", ShardTriggerAction::Mask(1 << 1)),
+    ("node:url", ShardTriggerAction::Mask((1 << 1) | (1 << 27))),
+    ("\"url\"", ShardTriggerAction::BuiltinMask((1 << 1) | (1 << 27))),
+    ("'url'", ShardTriggerAction::BuiltinMask((1 << 1) | (1 << 27))),
     ("createObjectURL", ShardTriggerAction::Mask(1 << 1)),
     ("canParse", ShardTriggerAction::Mask(1 << 1)),
     // URLPattern (`1 << 12`)
@@ -409,7 +444,7 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ("crypto.", ShardTriggerAction::Mask(1 << 4)),
     // structuredClone (`1 << 16`)
     ("structuredClone", ShardTriggerAction::Mask(1 << 16)),
-    // Buffer & Binary R/W (`1 << 5` and `1 << 17`)
+    // Buffer & Binary R/W (`1 << 5`, `1 << 17`, & builtin `1 << 26`)
     ("writeUInt", ShardTriggerAction::BufBin),
     ("readUInt", ShardTriggerAction::BufBin),
     ("writeInt", ShardTriggerAction::BufBin),
@@ -427,7 +462,9 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ("Buffer.concat", ShardTriggerAction::Mask(1 << 5)),
     ("Buffer.compare", ShardTriggerAction::Mask(1 << 5)),
     ("new Buffer(", ShardTriggerAction::Mask(1 << 5)),
-    ("node:buffer", ShardTriggerAction::Mask(1 << 5)),
+    ("node:buffer", ShardTriggerAction::Mask((1 << 5) | (1 << 26))),
+    ("\"buffer\"", ShardTriggerAction::BuiltinMask((1 << 5) | (1 << 26))),
+    ("'buffer'", ShardTriggerAction::BuiltinMask((1 << 5) | (1 << 26))),
     ("instanceof Buffer", ShardTriggerAction::Mask(1 << 5)),
     ("randomBytes", ShardTriggerAction::Mask(1 << 5)),
     ("createHash(\"sha512\"", ShardTriggerAction::Mask(1 << 5)),
@@ -472,7 +509,7 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
         "upgradeWebSocket",
         ShardTriggerAction::Mask((1 << 7) | (1 << 13)),
     ),
-    // WinterTC Sockets & Workers (`1 << 8` etc.)
+    // WinterTC Sockets & Workers (`1 << 8` etc. + `BOACAS_FLAG_HAS_WORKER`)
     (
         "cloudflare:sockets",
         ShardTriggerAction::Mask((1 << 8) | (1 << 14) | (1 << 3) | (1 << 13) | (1 << 2)),
@@ -487,11 +524,17 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ),
     (
         "Worker",
-        ShardTriggerAction::Mask((1 << 8) | (1 << 13) | (1 << 2)),
+        ShardTriggerAction::MaskAndFlags(
+            (1 << 8) | (1 << 13) | (1 << 2),
+            crate::boacas::BOACAS_FLAG_HAS_WORKER,
+        ),
     ),
     (
         "worker_threads",
-        ShardTriggerAction::Mask((1 << 8) | (1 << 13) | (1 << 2)),
+        ShardTriggerAction::MaskAndFlags(
+            (1 << 8) | (1 << 13) | (1 << 2),
+            crate::boacas::BOACAS_FLAG_HAS_WORKER,
+        ),
     ),
     (
         "MessageChannel",
@@ -515,6 +558,135 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ),
     // WebAssembly (`1 << 9`)
     ("WebAssembly", ShardTriggerAction::Mask(1 << 9)),
+    // Shard 18: WinterTC `Intl`, `navigator`, `location`, & Complete `process` CLI Surface (`1 << 18`)
+    ("Intl", ShardTriggerAction::Mask(1 << 18)),
+    ("toLocaleString", ShardTriggerAction::Mask(1 << 18)),
+    ("toLocaleDateString", ShardTriggerAction::Mask(1 << 18)),
+    ("toLocaleTimeString", ShardTriggerAction::Mask(1 << 18)),
+    ("localeCompare", ShardTriggerAction::Mask(1 << 18)),
+    ("navigator", ShardTriggerAction::Mask(1 << 18)),
+    ("location.", ShardTriggerAction::Mask(1 << 18)),
+    ("globalThis.location", ShardTriggerAction::Mask(1 << 18)),
+    ("stdout", ShardTriggerAction::Mask(1 << 18)),
+    ("stderr", ShardTriggerAction::Mask(1 << 18)),
+    ("stdin", ShardTriggerAction::Mask(1 << 18)),
+    ("memoryUsage", ShardTriggerAction::Mask(1 << 18)),
+    ("hrtime", ShardTriggerAction::Mask(1 << 18)),
+    ("uptime", ShardTriggerAction::Mask(1 << 18)),
+    ("emitWarning", ShardTriggerAction::Mask(1 << 18)),
+    ("exitCode", ShardTriggerAction::Mask(1 << 18)),
+    ("argv0", ShardTriggerAction::Mask(1 << 18)),
+    ("execPath", ShardTriggerAction::Mask(1 << 18)),
+    ("ppid", ShardTriggerAction::Mask(1 << 18)),
+    ("process.exit", ShardTriggerAction::Mask(1 << 18)),
+    ("process.on", ShardTriggerAction::Mask(1 << 18)),
+    ("process.once", ShardTriggerAction::Mask(1 << 18)),
+    ("process.off", ShardTriggerAction::Mask(1 << 18)),
+    ("process.emit", ShardTriggerAction::Mask(1 << 18)),
+    ("process.listeners", ShardTriggerAction::Mask(1 << 18)),
+    ("process.removeListener", ShardTriggerAction::Mask(1 << 18)),
+    ("process.removeAllListeners", ShardTriggerAction::Mask(1 << 18)),
+    ("node:process", ShardTriggerAction::Mask(1 << 18)),
+    // Pre-fused `node:*` builtin module triggers (`19..=28`)
+    ("node:crypto", ShardTriggerAction::BuiltinMask(1 << 19)),
+    ("\"crypto\"", ShardTriggerAction::BuiltinMask(1 << 19)),
+    ("'crypto'", ShardTriggerAction::BuiltinMask(1 << 19)),
+    ("node:fs", ShardTriggerAction::BuiltinMask(1 << 20)),
+    ("\"fs\"", ShardTriggerAction::BuiltinMask(1 << 20)),
+    ("'fs'", ShardTriggerAction::BuiltinMask(1 << 20)),
+    ("fs/promises", ShardTriggerAction::BuiltinMask(1 << 20)),
+    ("node:path", ShardTriggerAction::BuiltinMask(1 << 21)),
+    ("\"path\"", ShardTriggerAction::BuiltinMask(1 << 21)),
+    ("'path'", ShardTriggerAction::BuiltinMask(1 << 21)),
+    ("node:events", ShardTriggerAction::BuiltinMask(1 << 22)),
+    ("\"events\"", ShardTriggerAction::BuiltinMask(1 << 22)),
+    ("'events'", ShardTriggerAction::BuiltinMask(1 << 22)),
+    ("node:os", ShardTriggerAction::BuiltinMask(1 << 23)),
+    ("\"os\"", ShardTriggerAction::BuiltinMask(1 << 23)),
+    ("'os'", ShardTriggerAction::BuiltinMask(1 << 23)),
+    ("node:util", ShardTriggerAction::BuiltinMask(1 << 24)),
+    ("\"util\"", ShardTriggerAction::BuiltinMask(1 << 24)),
+    ("'util'", ShardTriggerAction::BuiltinMask(1 << 24)),
+    ("node:assert", ShardTriggerAction::BuiltinMask(1 << 25)),
+    ("\"assert\"", ShardTriggerAction::BuiltinMask(1 << 25)),
+    ("'assert'", ShardTriggerAction::BuiltinMask(1 << 25)),
+    ("node:timers", ShardTriggerAction::BuiltinMask(1 << 28)),
+    ("\"timers\"", ShardTriggerAction::BuiltinMask(1 << 28)),
+    ("'timers'", ShardTriggerAction::BuiltinMask(1 << 28)),
+    // `SLICEBC\x01` feature flags (`BOACAS_FLAG_*`) folded into single-pass automaton
+    (
+        "nextTick",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_HAS_NEXT_TICK),
+    ),
+    (
+        "Slice.request",
+        ShardTriggerAction::MaskAndFlags(1 << 11, crate::boacas::BOACAS_FLAG_HAS_HTTP_BRIDGE),
+    ),
+    (
+        "Slice.respond",
+        ShardTriggerAction::MaskAndFlags(1 << 11, crate::boacas::BOACAS_FLAG_HAS_HTTP_BRIDGE),
+    ),
+    (
+        "__slice_http_",
+        ShardTriggerAction::MaskAndFlags(1 << 11, crate::boacas::BOACAS_FLAG_HAS_HTTP_BRIDGE),
+    ),
+    (
+        "__slice_semver_",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_HAS_SEMVER_FAST),
+    ),
+    (
+        "__slice_fast_",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_HAS_SEMVER_FAST),
+    ),
+    (
+        "Slice.kv",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX),
+    ),
+    (
+        "Slice.checkpoint",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX),
+    ),
+    (
+        "Slice.restore",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX),
+    ),
+    (
+        "Slice.evalSandbox",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX),
+    ),
+    (
+        "node:vm",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX),
+    ),
+    (
+        "\"vm\"",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX),
+    ),
+    (
+        "'vm'",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX),
+    ),
+    (
+        "prototype",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_NEEDS_SES_CHECK),
+    ),
+    (
+        "__proto__",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_NEEDS_SES_CHECK),
+    ),
+    (
+        "Reflect",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_NEEDS_SES_CHECK),
+    ),
+    (
+        "Object[",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_NEEDS_SES_CHECK),
+    ),
+    ("globalThis", ShardTriggerAction::GlobalThisRef),
+    (
+        "getOwnPropertyDescriptor",
+        ShardTriggerAction::GetOwnPropDescRef,
+    ),
 ];
 
 #[inline]
@@ -529,27 +701,56 @@ fn shard_detector_automaton() -> &'static aho_corasick::AhoCorasick {
     })
 }
 
-/// Computes a bitmask of lazy prelude shards (`1..=17`) referenced by `raw_js_code` in a single
-/// zero-allocation `O(N)` SIMD multi-pattern pass so top-level execution pre-loads only the shards
-/// actually used by a script before entering async/generator frames.
+/// Computes `(feature_flags, shards_mask)` in a single zero-allocation `O(N)` SIMD multi-pattern pass
+/// over `raw_js_code`, replacing 38 separate `.contains(...)` linear scans in `compute_boacas_metadata`.
 #[inline]
-pub(crate) fn detect_needed_shards(raw_js_code: &str, is_http: bool) -> u32 {
+pub(crate) fn detect_shards_and_boacas_flags(
+    raw_js_code: &str,
+    is_http: bool,
+    is_rc_bundle: bool,
+) -> (u16, u32) {
     let bytes = raw_js_code.as_bytes();
     let has_lazy_string_modules = memchr::memmem::find(bytes, b"__slice_modules[").is_some()
         && (memchr::memmem::find(bytes, b"] = \"").is_some()
             || memchr::memmem::find(bytes, b"]=\"").is_some());
 
+    let mut flags: u16 = 0;
     let mut mask: u32 = if is_http { 1 << 11 } else { 0 };
     let mut needs_buf_bin = false;
     let mut has_bin_rw_marker = false;
+    let mut has_global_this = false;
+    let mut has_get_own_prop_desc = false;
 
     let ac = shard_detector_automaton();
     for mat in ac.find_overlapping_iter(raw_js_code) {
+        let action = SHARD_PATTERNS[mat.pattern().as_usize()].1;
+        match action {
+            ShardTriggerAction::Flags(f) => {
+                flags |= f;
+                continue;
+            }
+            ShardTriggerAction::BuiltinMask(b_bits) => {
+                mask |= b_bits;
+                continue;
+            }
+            ShardTriggerAction::GlobalThisRef => {
+                has_global_this = true;
+                continue;
+            }
+            ShardTriggerAction::GetOwnPropDescRef => {
+                has_get_own_prop_desc = true;
+                continue;
+            }
+            ShardTriggerAction::MaskAndFlags(_, f) => {
+                flags |= f;
+            }
+            _ => {}
+        }
         if has_lazy_string_modules && is_in_lazy_string_module_line(bytes, mat.start()) {
             continue;
         }
-        match SHARD_PATTERNS[mat.pattern().as_usize()].1 {
-            ShardTriggerAction::Mask(bits) => {
+        match action {
+            ShardTriggerAction::Mask(bits) | ShardTriggerAction::MaskAndFlags(bits, _) => {
                 mask |= bits;
             }
             ShardTriggerAction::FetchCall => {
@@ -564,14 +765,32 @@ pub(crate) fn detect_needed_shards(raw_js_code: &str, is_http: bool) -> u32 {
             ShardTriggerAction::HasBinRwMarker => {
                 has_bin_rw_marker = true;
             }
+            _ => {}
         }
     }
 
     if needs_buf_bin && !has_bin_rw_marker {
         mask |= 1 << 17;
     }
+    let needs_lazy = if is_rc_bundle {
+        has_get_own_prop_desc
+    } else {
+        has_global_this
+    };
+    if needs_lazy {
+        flags |= crate::boacas::BOACAS_FLAG_NEEDS_LAZY_GETTERS;
+    }
 
-    mask
+    (flags, mask)
+}
+
+/// Computes a bitmask of lazy prelude shards (`1..=18`) referenced by `raw_js_code` in a single
+/// zero-allocation `O(N)` SIMD multi-pattern pass so top-level execution pre-loads only the shards
+/// actually used by a script before entering async/generator frames.
+#[inline]
+pub(crate) fn detect_needed_shards(raw_js_code: &str, is_http: bool) -> u32 {
+    let (_, mask) = detect_shards_and_boacas_flags(raw_js_code, is_http, false);
+    mask & ((1 << 19) - 1)
 }
 
 /// Returns `true` only when `js_code` may dynamically probe unreferenced `globalThis` shard properties

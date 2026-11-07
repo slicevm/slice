@@ -198,24 +198,25 @@ slice compile . -o ./hello-slice-app
 By default, Slice runs on its **optimal execution path (`Tier 1`, `boacas = true` `SLICEBC\x01` Precompiled Boa `CodeBlock` CAS)** with zero configuration required. When you want to customize engine behavior, resource limits, Object-Capability (`OCap`) permissions, or HTTP server settings, Slice resolves settings across **five well-defined precedence layers** (lowest to highest priority):
 
 ```text
-1. Built-In Optimal Defaults (`tier = "tier1"`, `boacas = true`, `fuel = 50_000_000`, `memory = 16 MB`, zero ambient OCap)
+1. Built-In Optimal Defaults (`tier = "tier1"`, `boacas = true`, `fuel = 50_000_000`, `memory = 16 MB`, `trust_directives = false`, zero ambient OCap)
        |
        v
 2. Project Manifest (`./slice.toml`, target folder `slice.toml`, or `.cas` embedded `manifest:/slice.toml`)
        |
        v
-3. Top-of-File Inline Source Directives (`// @slice-tier: ...`, `// @slice-fuel: ...`, `// @slice-allow-read: ...`)
+3. Top-of-File Inline Source Directives (`// @slice-...` — monotonically attenuated by default; full additive authority only when `--trust-directives` / `SLICE_TRUST_DIRECTIVES=1` / `[capabilities] trust_directives = true` is set)
        |
        v
-4. Host Environment Variables (`SLICE_TIER`, `SLICE_BOACAS`, `SLICE_FUEL`, `SLICE_ALLOW_READ`, `SLICE_PORT`, ...)
+4. Host Environment Variables (`SLICE_TIER`, `SLICE_BOACAS`, `SLICE_FUEL`, `SLICE_ALLOW_READ`, `SLICE_TRUST_DIRECTIVES`, `SLICE_PORT`, ...)
        |
        v
-5. Explicit CLI Flags (`--tier=`, `--boacas` / `--no-boacas`, `--fuel=`, `--memory=`, `--allow-read=`, `--port=`, ...)
+5. Explicit CLI Flags (`--tier=`, `--boacas` / `--no-boacas`, `--fuel=`, `--memory=`, `--allow-read=`, `--trust-directives` / `--no-directives`, `--port=`, ...)
 ```
 
-> **Capability Merging vs. Scalar Overrides:**
-> - **Scalar settings** (`tier`, `boacas`, `warm`, `deterministic_seed`, `fuel`, `memory`, `port`, `workers`, `static_dir`) follow strict override precedence (a higher layer replaces a lower layer).
-> - **OCap permissions and DLP secrets** (`allow_read`, `allow_write`, `allow_net`, `allow_env`, `env_file`, `audit_egress`) are **additive** across layers so you can declare base permissions in `slice.toml` and append extra test/runtime permissions via inline directives, `SLICE_*` env vars, or CLI flags.
+> **Capability Merging, Scalar Overrides, & Untrusted Script Privilege-Escalation Guard:**
+> - **Scalar settings** (`tier`, `boacas`, `warm`, `deterministic_seed`, `fuel`, `memory`, `port`, `workers`, `static_dir`) follow strict override precedence across trusted host layers (`slice.toml`, `SLICE_*` env vars, CLI flags).
+> - **OCap permissions and DLP secrets** (`allow_read`, `allow_write`, `allow_net`, `allow_env`, `env_file`, `audit_egress`) are **additive** across trusted host layers (`slice.toml`, `SLICE_*` env vars, CLI flags).
+> - **Untrusted Entrypoint Lockdown (`trust_directives = false` by default):** By default, top-of-file inline source directives (`// @slice-...`) inside a `.ts`/`.js` script can **only monotonically attenuate (narrow)** capabilities and resource limits already granted by the host (`slice.toml`, `SLICE_*` env vars, or CLI flags), and `// @slice-audit-egress` remains always-additive. An untrusted or AI-generated script can **never** self-grant new filesystem paths, network hosts, `.env` files, or higher fuel/memory ceilings unless the host explicitly opts in via `--trust-directives`, `SLICE_TRUST_DIRECTIVES=1`, or `[capabilities] trust_directives = true` in `slice.toml`. Passing `--no-directives` (or `--untrusted`) ignores inline directives completely.
 
 ---
 
@@ -272,6 +273,10 @@ env_file = ".env"
 
 # Explicit secrets to block in stdout, HTTP responses, SSE streams, and outbound fetch/sockets (raw + Base64 + Base64URL).
 audit_egress = ["sk_live_explicit_secret_token"]
+
+# Optional: trust top-of-file inline source directives (`// @slice-...`) to grant additive capabilities (default: false).
+# When false (default), inline directives can only narrow/attenuate host-granted capabilities and fuel/memory limits.
+trust_directives = false
 
 [capabilities.env]
 # Explicit environment variables injected into the isolate compartment
@@ -332,6 +337,7 @@ console.log("Running with self-contained inline directives!");
 | **Env Variables** | `{}` (Zero access) | `[capabilities.env] KEY = "VAL"` | `// @slice-allow-env: ["KEY=VAL"]` | `SLICE_ALLOW_ENV=KEY=VAL` | `--allow-env=KEY=VAL` |
 | **Dotenv Vault File** | `None` | `[capabilities] env_file = ".env"` | `// @slice-env-file: .env` | `SLICE_ENV_FILE=.env` | `--env-file=.env` |
 | **Egress DLP Secrets** | Auto from `.env` | `[capabilities] audit_egress = [...]` | `// @slice-audit-egress: ["sec"]` | `SLICE_AUDIT_EGRESS=sec1,sec2` | `--audit-egress=sec1` |
+| **Trust Inline Directives** | `false` (Attenuate only) | `[capabilities] trust_directives = true` | *(Host-only setting)* | `SLICE_TRUST_DIRECTIVES=1` (`0`) | `--trust-directives` / `--no-directives` |
 | **HTTP Server Port** | `3000` | `[server] port = 3000` | `// @slice-port: 3000` | `SLICE_PORT=3000` | `--port=3000` |
 | **HTTP Worker Threads** | `clamp(cpus, 1, 8)` | `[server] workers = 4` | `// @slice-workers: 4` | `SLICE_WORKERS=4` | `--workers=4` |
 | **Static Asset Dir** | `None` | `[server] static_dir = "./public"` | *(Use `slice.toml` / CLI)* | `SLICE_STATIC_DIR=./public` | `--static=./public` |
@@ -371,6 +377,8 @@ Executes a `.ts`/`.js` file, a project folder (with `package.json`, `slice.toml`
 | `--allow-env=<KEY=VAL>` | Inject `KEY=VAL` (or import `KEY` from host environment) into the isolate. |
 | `--env-file=<path>` | Load `.env` file into `process.env` / `env()` with automatic Egress DLP secret protection. |
 | `--audit-egress=<secret>` | Explicitly register `<secret>` into the Egress DLP guard (blocks raw, Base64, and Base64URL leaks). |
+| `--trust-directives` / `--no-trust-directives` | Allow (or forbid, default) top-of-file `// @slice-...` directives to grant additive OCap permissions and raise resource ceilings. |
+| `--no-directives` / `--untrusted` | Completely ignore all top-of-file `// @slice-...` inline source directives in the entrypoint. |
 | `--fuel=<u64>` | Set maximum CPU instruction fuel budget (default: `50,000,000`). |
 | `--memory=<bytes>` / `--memory-kb=<kb>` | Set maximum per-isolate memory ceiling in bytes or kilobytes (default: `16,777,216` bytes / `16,384` KB). |
 | `--tier=<tier1\|tier0\|auto>` | Override execution tier (`tier1` default, `tier0` for SLICESNP snapshot VM, or `auto`). |

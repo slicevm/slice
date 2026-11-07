@@ -38,6 +38,12 @@ pub(crate) fn is_builtin_module(spec: &str) -> bool {
             | "dgram"
             | "async_hooks"
             | "zlib"
+            | "perf_hooks"
+            | "tty"
+            | "module"
+            | "vm"
+            | "string_decoder"
+            | "querystring"
     )
 }
 

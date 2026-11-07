@@ -433,7 +433,15 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_http_is_active"),
         0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+        NativeFunction::from_fn_ptr(|_this, args, _context| {
+            if let Some(mode) = args.first().and_then(|v| v.as_number()) {
+                let (used, rem) = BOA_KV_MEM_BUDGET.with(|m| m.get());
+                if mode == 1.0 {
+                    return Ok(BoaVal::from(used as f64));
+                } else if mode == 2.0 {
+                    return Ok(BoaVal::from(rem as f64));
+                }
+            }
             let active = BOA_HTTP_REQ.with(|r| r.borrow().active);
             Ok(BoaVal::from(active))
         }),
@@ -1046,7 +1054,17 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             for sec in &scope_guard.saved_egress_secrets {
                 proxy_parent.add_egress_audit_secret(sec.clone());
             }
-            let outcome = proxy_parent.eval_sandbox(&code, opts);
+            let outcome = if cfg!(debug_assertions) {
+                std::thread::Builder::new()
+                    .name("slice-eval-sandbox".to_string())
+                    .stack_size(8 * 1024 * 1024)
+                    .spawn(move || proxy_parent.eval_sandbox(&code, opts))
+                    .expect("failed to spawn slice-eval-sandbox thread")
+                    .join()
+                    .expect("slice-eval-sandbox thread panicked")
+            } else {
+                proxy_parent.eval_sandbox(&code, opts)
+            };
             drop(scope_guard);
 
             let json = serde_json::to_string(&outcome).unwrap_or_else(|_| "{}".to_string());

@@ -862,3 +862,365 @@ console.log(html);
     );
 }
 
+#[test]
+fn test_phase1_process_cli_surface() {
+    let script = r#"
+import proc from "node:process";
+
+const t0 = proc.hrtime();
+const b0 = proc.hrtime.bigint();
+const diff = proc.hrtime(t0);
+const b1 = proc.hrtime.bigint();
+
+const mem = proc.memoryUsage();
+const rssVal = proc.memoryUsage.rss();
+
+let warningName = "";
+let warningMsg = "";
+proc.on("warning", (w: any) => {
+    warningName = w.name;
+    warningMsg = w.message;
+});
+proc.emitWarning("experimental CLI flag", "CustomWarning", "WARN_01");
+
+let exitEmitted = -1;
+proc.once("exit", (code: number) => {
+    exitEmitted = code;
+});
+let exitCaught = false;
+try {
+    proc.exit(7);
+} catch (e: any) {
+    exitCaught = (e && e.code === "ERR_PROCESS_EXIT" && e.exitCode === 7);
+}
+
+proc.stdout.write("stdout-line-1\n");
+proc.stderr.write("stderr-line-2\n");
+console.log(JSON.stringify({
+    argv0: proc.argv0,
+    execPath: proc.execPath,
+    ppid: proc.ppid,
+    isTTYOut: proc.stdout.isTTY,
+    isTTYIn: proc.stdin.isTTY,
+    hrValid: Array.isArray(diff) && diff.length === 2 && typeof b0 === "bigint" && b1 >= b0,
+    memValid: mem.rss > 0 && mem.heapUsed > 0 && mem.heapTotal >= mem.heapUsed && rssVal === mem.rss,
+    uptimeValid: typeof proc.uptime() === "number" && proc.uptime() >= 0,
+    warningName,
+    warningMsg,
+    exitEmitted,
+    exitCaught,
+    exitCode: proc.exitCode
+}));
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "phase1-proc-cli",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    iso.set_deterministic_seed(Some(20261106));
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(m.stdout[0], "stdout-line-1");
+    assert_eq!(m.stdout[1], "stderr-line-2");
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[2]).unwrap();
+    assert_eq!(out["argv0"], "slice");
+    assert_eq!(out["execPath"], "/usr/bin/slice");
+    assert_eq!(out["ppid"], 0);
+    assert_eq!(out["isTTYOut"], false);
+    assert_eq!(out["isTTYIn"], false);
+    assert_eq!(out["hrValid"], true);
+    assert_eq!(out["memValid"], true);
+    assert_eq!(out["uptimeValid"], true);
+    assert_eq!(out["warningName"], "CustomWarning");
+    assert_eq!(out["warningMsg"], "experimental CLI flag");
+    assert_eq!(out["exitEmitted"], 7);
+    assert_eq!(out["exitCaught"], true);
+    assert_eq!(out["exitCode"], 7);
+
+    // Also verify DLP egress firewall catches secrets written to `process.stdout.write`
+    let dlp_js = r#"process.stdout.write("leaked: sk_live_PROC_STDOUT_SECRET_777\n");"#;
+    let bc_dlp = compile_source_to_bytecode(dlp_js);
+    let mut iso_dlp = SliceIsolate::spawn(
+        "phase1-proc-dlp",
+        2,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        4 * 1024 * 1024,
+    );
+    iso_dlp.add_egress_audit_secret("sk_live_PROC_STDOUT_SECRET_777");
+    let err = iso_dlp.execute_bytecode(&bc_dlp, None).unwrap_err();
+    assert!(err.to_string().contains("EGRESS_SECRET_LEAK_BLOCKED"));
+}
+
+#[test]
+fn test_phase1_wintertc_navigator_location_and_intl() {
+    let script = r#"
+const ua = navigator.userAgent;
+const hc = navigator.hardwareConcurrency;
+const lang = navigator.language;
+const origin = location.origin;
+const href = location.href;
+
+const d = new Date(Date.UTC(2026, 10, 6, 14, 30, 5));
+const dtfUs = new Intl.DateTimeFormat("en-US", { year: "numeric", month: "short", day: "2-digit" }).format(d);
+const dtfIso = new Intl.DateTimeFormat("sv-SE", { year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+
+const nfDec = new Intl.NumberFormat("en-US").format(1234567.89);
+const nfUsd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(42.5);
+const nfPct = new Intl.NumberFormat("en-US", { style: "percent" }).format(0.85);
+const nfCompact = new Intl.NumberFormat("en-US", { notation: "compact" }).format(1500000);
+
+const colNum = new Intl.Collator("en-US", { numeric: true });
+const sortedFiles = ["file10.ts", "file2.ts", "file1.ts"].sort(colNum.compare);
+
+const prCard = new Intl.PluralRules("en-US");
+const prOrd = new Intl.PluralRules("en-US", { type: "ordinal" });
+
+const segWord = new Intl.Segmenter("en-US", { granularity: "word" });
+const words = Array.from(segWord.segment("Hello, Slice 2026!"))
+    .filter((s: any) => s.isWordLike)
+    .map((s: any) => s.segment);
+
+const canon = Intl.getCanonicalLocales(["en_us", "EN-GB", "en-US"]);
+
+console.log(JSON.stringify({
+    ua,
+    hc,
+    lang,
+    origin,
+    href,
+    dtfUs,
+    dtfIso,
+    nfDec,
+    nfUsd,
+    nfPct,
+    nfCompact,
+    sortedFiles,
+    card1: prCard.select(1),
+    card5: prCard.select(5),
+    ord1: prOrd.select(1),
+    ord2: prOrd.select(2),
+    ord3: prOrd.select(3),
+    ord11: prOrd.select(11),
+    words,
+    canon
+}));
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "phase1-wintertc-intl",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(out["ua"], "Slice-NexusJS/0.10.0");
+    assert_eq!(out["hc"], 4);
+    assert_eq!(out["lang"], "en-US");
+    assert_eq!(out["origin"], "http://localhost");
+    assert_eq!(out["href"], "http://localhost/");
+    assert_eq!(out["dtfUs"], "Nov 06, 2026");
+    assert_eq!(out["dtfIso"], "2026-11-06");
+    assert_eq!(out["nfDec"], "1,234,567.89");
+    assert_eq!(out["nfUsd"], "$42.50");
+    assert_eq!(out["nfPct"], "85%");
+    assert_eq!(out["nfCompact"], "1.5M");
+    assert_eq!(
+        out["sortedFiles"],
+        serde_json::json!(["file1.ts", "file2.ts", "file10.ts"])
+    );
+    assert_eq!(out["card1"], "one");
+    assert_eq!(out["card5"], "other");
+    assert_eq!(out["ord1"], "one");
+    assert_eq!(out["ord2"], "two");
+    assert_eq!(out["ord3"], "few");
+    assert_eq!(out["ord11"], "other");
+    assert_eq!(
+        out["words"],
+        serde_json::json!(["Hello", "Slice", "2026"])
+    );
+    assert_eq!(out["canon"], serde_json::json!(["en-US", "en-GB"]));
+}
+
+#[test]
+fn test_phase1_node_util_and_secondary_modules() {
+    let script = r#"
+import * as util from "node:util";
+import { performance, PerformanceObserver, monitorEventLoopDelay } from "node:perf_hooks";
+import * as tty from "node:tty";
+import Module, { createRequire, isBuiltin, builtinModules } from "node:module";
+import * as vm from "node:vm";
+import { StringDecoder } from "node:string_decoder";
+import * as qs from "node:querystring";
+
+// 1. node:util (parseArgs, isDeepStrictEqual, styleText, stripVTControlCharacters, MIMEType)
+const parsed = util.parseArgs({
+    args: ["-v", "--port=8080", "--tag", "edge", "--tag", "fast", "--", "pos1", "pos2"],
+    options: {
+        verbose: { type: "boolean", short: "v" },
+        port: { type: "string", short: "p" },
+        tag: { type: "string", multiple: true },
+        mode: { type: "string", default: "prod" }
+    },
+    allowPositionals: true
+});
+
+const eq1 = util.isDeepStrictEqual(
+    { a: [1, 2], m: new Map([["k", 42]]), s: new Set(["x"]) },
+    { a: [1, 2], m: new Map([["k", 42]]), s: new Set(["x"]) }
+);
+const eq2 = util.isDeepStrictEqual({ a: 1 }, { a: "1" });
+
+const styled = util.styleText(["bold", "green"], "PASS");
+const stripped = util.stripVTControlCharacters(styled);
+
+const mime = new util.MIMEType("text/html; charset=UTF-8; boundary=something");
+mime.params.set("q", "0.9");
+
+// 2. node:perf_hooks
+const obsEntries: string[] = [];
+const obs = new PerformanceObserver((list: any) => {
+    for (const e of list.getEntries()) obsEntries.push(`${e.entryType}:${e.name}`);
+});
+obs.observe({ entryTypes: ["mark", "measure"], buffered: true });
+performance.mark("m-start");
+performance.mark("m-end");
+const meas = performance.measure("m-span", "m-start", "m-end");
+const eld = monitorEventLoopDelay();
+eld.enable();
+
+// 3. node:tty & node:module
+const ttyFalse = tty.isatty(1);
+const req = createRequire("/app/index.ts");
+const pathMod = req("node:path");
+const builtinCheck = isBuiltin("node:fs") && isBuiltin("perf_hooks") && !isBuiltin("left-pad");
+
+// 4. node:string_decoder & node:querystring
+const sd = new StringDecoder("utf8");
+const decodedStr = sd.write(Buffer.from("Slice-UTF8"));
+const qsParsed = qs.parse("a=1&b=hello%20world&a=2");
+const qsStr = qs.stringify({ k: "v", n: 10 });
+
+// 5. node:vm (sandboxed via Slice.evalSandbox)
+const ctx = vm.createContext({ count: 10, prefix: "vm" });
+const vmRes = vm.runInContext("count += 32; prefix + ':' + count", ctx, { timeout: 50 });
+
+let vmBlocked = false;
+try {
+    vm.runInNewContext("const fs = require('node:fs'); fs.readFileSync('/etc/passwd');", {});
+} catch (e: any) {
+    vmBlocked = String(e && e.message || e).includes("filesystem read authority");
+}
+
+queueMicrotask(() => {
+    console.log(JSON.stringify({
+        parsedValues: parsed.values,
+        parsedPos: parsed.positionals,
+        eq1,
+        eq2,
+        hasAnsi: styled.includes("\x1b["),
+        stripped,
+        mimeEssence: mime.essence,
+        mimeCharset: mime.params.get("charset"),
+        mimeStr: mime.toString(),
+        measType: meas.entryType,
+        obsEntries,
+        ttyFalse,
+        pathJoin: pathMod.join("/a", "b"),
+        builtinCheck,
+        hasVmInBuiltins: builtinModules.includes("vm"),
+        decodedStr,
+        qsParsed,
+        qsStr,
+        vmRes,
+        ctxCount: ctx.count,
+        vmBlocked
+    }));
+});
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "phase1-node-util-mods",
+        1,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        16 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(out["parsedValues"]["verbose"], true);
+    assert_eq!(out["parsedValues"]["port"], "8080");
+    assert_eq!(
+        out["parsedValues"]["tag"],
+        serde_json::json!(["edge", "fast"])
+    );
+    assert_eq!(out["parsedValues"]["mode"], "prod");
+    assert_eq!(out["parsedPos"], serde_json::json!(["pos1", "pos2"]));
+    assert_eq!(out["eq1"], true);
+    assert_eq!(out["eq2"], false);
+    assert_eq!(out["hasAnsi"], true);
+    assert_eq!(out["stripped"], "PASS");
+    assert_eq!(out["mimeEssence"], "text/html");
+    assert_eq!(out["mimeCharset"], "UTF-8");
+    assert_eq!(
+        out["obsEntries"],
+        serde_json::json!(["mark:m-start", "mark:m-end", "measure:m-span"])
+    );
+    assert_eq!(out["ttyFalse"], false);
+    assert_eq!(out["pathJoin"], "/a/b");
+    assert_eq!(out["builtinCheck"], true);
+    assert_eq!(out["hasVmInBuiltins"], true);
+    assert_eq!(out["decodedStr"], "Slice-UTF8");
+    assert_eq!(
+        out["qsParsed"],
+        serde_json::json!({ "a": ["1", "2"], "b": "hello world" })
+    );
+    assert_eq!(out["qsStr"], "k=v&n=10");
+    assert_eq!(out["vmRes"], "vm:42");
+    assert_eq!(out["ctxCount"], 42);
+    assert_eq!(out["vmBlocked"], true);
+}
+
+#[test]
+fn test_phase1_boacas_single_pass_automaton() {
+    use crate::boacas::{
+        compute_boacas_metadata, BOACAS_FLAG_HAS_HTTP_BRIDGE, BOACAS_FLAG_HAS_KV_SANDBOX,
+        BOACAS_FLAG_HAS_NEXT_TICK, BOACAS_FLAG_HAS_SEMVER_FAST, BOACAS_FLAG_HAS_WORKER,
+        BOACAS_FLAG_IS_RC_BUNDLE, BOACAS_FLAG_NEEDS_LAZY_GETTERS, BOACAS_FLAG_NEEDS_SES_CHECK,
+        BOACAS_FLAG_STARTS_WITH_BRACE,
+    };
+
+    let sample = "{\nvar __slice_modules = {};//__SLICE_RC:0123456789abcdef\nconst u = new URL(\"https://example.com\");\nconst fmt = new Intl.NumberFormat(\"en-US\");\nconst fs = require(\"node:fs\");\nconst util = require(\"node:util\");\nprocess.nextTick(() => {});\nconst w = new Worker(\"w.js\");\nconst req = Slice.request();\nconst kvVal = Slice.kv.get(\"k\");\nconst sem = __slice_semver_valid(\"1.2.3\");\nconst desc = Object.getOwnPropertyDescriptor(Object.prototype, \"toString\");\n}";
+
+    let (flags, shards_mask, rc_key) = compute_boacas_metadata(sample);
+    assert_eq!(rc_key, 0x0123_4567_89ab_cdef);
+    assert_ne!(flags & BOACAS_FLAG_IS_RC_BUNDLE, 0);
+    assert_ne!(flags & BOACAS_FLAG_STARTS_WITH_BRACE, 0);
+    assert_ne!(flags & BOACAS_FLAG_HAS_WORKER, 0);
+    assert_ne!(flags & BOACAS_FLAG_HAS_NEXT_TICK, 0);
+    assert_ne!(flags & BOACAS_FLAG_HAS_HTTP_BRIDGE, 0);
+    assert_ne!(flags & BOACAS_FLAG_HAS_KV_SANDBOX, 0);
+    assert_ne!(flags & BOACAS_FLAG_HAS_SEMVER_FAST, 0);
+    assert_ne!(flags & BOACAS_FLAG_NEEDS_SES_CHECK, 0);
+    assert_ne!(flags & BOACAS_FLAG_NEEDS_LAZY_GETTERS, 0);
+
+    // URL (1 << 1), Worker (1 << 8), HTTP (1 << 11), Intl (1 << 18), node:fs (1 << 20), node:util (1 << 24)
+    assert_ne!(shards_mask & (1 << 1), 0);
+    assert_ne!(shards_mask & (1 << 8), 0);
+    assert_ne!(shards_mask & (1 << 11), 0);
+    assert_ne!(shards_mask & (1 << 18), 0);
+    assert_ne!(shards_mask & (1 << 20), 0);
+    assert_ne!(shards_mask & (1 << 24), 0);
+}
+
+

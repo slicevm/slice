@@ -30,7 +30,8 @@
         (id === 14 && globalThis.TransformStream) ||
         (id === 15 && globalThis.FormData) ||
         (id === 16 && globalThis.structuredClone) ||
-        (id === 17 && globalThis.Buffer && globalThis.Buffer.prototype._hasBinRW)
+        (id === 17 && globalThis.Buffer && globalThis.Buffer.prototype._hasBinRW) ||
+        (id === 18 && globalThis.Intl)
       ) {
         globalThis.__shMask |= (1 << id);
         return;

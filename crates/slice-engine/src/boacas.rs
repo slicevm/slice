@@ -5,7 +5,7 @@
 //! and execution hooks for the `EXPER_BOACAS` architecture.
 
 use crate::boa_realm::{ensure_realm_shards, WarmBoaRealm, BOA_VIOLATION};
-use crate::js_preludes::{detect_needed_shards, needs_lazy_global_getters};
+use crate::js_preludes::detect_shards_and_boacas_flags;
 use crate::parser_and_compiler::extract_slice_rc_key;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -231,84 +231,19 @@ impl BoaCasHeader {
     }
 }
 
-/// Computes `(feature_flags, shards_mask, rc_key)` once at build time so cold runtime execution
-/// performs zero linear substring scans or Aho-Corasick passes over `js_code`.
+/// Computes `(feature_flags, shards_mask, rc_key)` once at build time in a single `O(N)`
+/// Aho-Corasick pass over `js_code` (zero separate `.contains()` linear substring scans).
 pub fn compute_boacas_metadata(js_code: &str) -> (u16, u32, u64) {
-    let mut flags: u16 = 0;
-    if js_code.contains("Worker") || js_code.contains("worker_threads") {
-        flags |= BOACAS_FLAG_HAS_WORKER;
-    }
-    if js_code.contains("nextTick") {
-        flags |= BOACAS_FLAG_HAS_NEXT_TICK;
-    }
-    if js_code.contains("Slice.request")
-        || js_code.contains("Slice.respond")
-        || js_code.contains("__slice_http_")
-    {
-        flags |= BOACAS_FLAG_HAS_HTTP_BRIDGE;
-    }
-    if js_code.contains("__slice_semver_") || js_code.contains("__slice_fast_") {
-        flags |= BOACAS_FLAG_HAS_SEMVER_FAST;
-    }
-    if js_code.contains("Slice.kv")
-        || js_code.contains("Slice.checkpoint")
-        || js_code.contains("Slice.restore")
-        || js_code.contains("Slice.evalSandbox")
-    {
-        flags |= BOACAS_FLAG_HAS_KV_SANDBOX;
-    }
-    if needs_lazy_global_getters(js_code) {
-        flags |= BOACAS_FLAG_NEEDS_LAZY_GETTERS;
-    }
-    if js_code.contains("prototype")
-        || js_code.contains("__proto__")
-        || js_code.contains("Reflect")
-        || js_code.contains("Object[")
-    {
-        flags |= BOACAS_FLAG_NEEDS_SES_CHECK;
-    }
-    let rc_key = if let Some((k, _)) = extract_slice_rc_key(js_code) {
-        flags |= BOACAS_FLAG_IS_RC_BUNDLE;
-        k
-    } else {
-        0
+    let (rc_key, is_rc_bundle) = match extract_slice_rc_key(js_code) {
+        Some((k, _)) => (k, true),
+        None => (0, false),
     };
+    let (mut flags, shards_mask) = detect_shards_and_boacas_flags(js_code, false, is_rc_bundle);
+    if is_rc_bundle {
+        flags |= BOACAS_FLAG_IS_RC_BUNDLE;
+    }
     if js_code.starts_with('{') {
         flags |= BOACAS_FLAG_STARTS_WITH_BRACE;
-    }
-    let mut shards_mask = detect_needed_shards(js_code, false);
-    if (flags & BOACAS_FLAG_HAS_HTTP_BRIDGE) != 0 || js_code.contains("__slice_dispatch_fetch") {
-        shards_mask |= 1 << 11;
-    }
-    if js_code.contains("node:crypto") || js_code.contains("\"crypto\"") || js_code.contains("'crypto'") {
-        shards_mask |= 1 << 18;
-    }
-    if js_code.contains("node:fs") || js_code.contains("\"fs\"") || js_code.contains("'fs'") || js_code.contains("fs/promises") {
-        shards_mask |= 1 << 19;
-    }
-    if js_code.contains("node:path") || js_code.contains("\"path\"") || js_code.contains("'path'") {
-        shards_mask |= 1 << 20;
-    }
-    if js_code.contains("node:events") || js_code.contains("\"events\"") || js_code.contains("'events'") {
-        shards_mask |= 1 << 21;
-    }
-    if js_code.contains("node:os") || js_code.contains("\"os\"") || js_code.contains("'os'") {
-        shards_mask |= 1 << 22;
-    }
-    if js_code.contains("node:util") || js_code.contains("\"util\"") || js_code.contains("'util'") {
-        shards_mask |= 1 << 23;
-    }
-    if js_code.contains("node:assert") || js_code.contains("\"assert\"") || js_code.contains("'assert'") {
-        shards_mask |= 1 << 24;
-    }
-    if js_code.contains("node:buffer") || js_code.contains("\"buffer\"") || js_code.contains("'buffer'") {
-        shards_mask |= (1 << 25) | (1 << 5);
-    }
-    if js_code.contains("node:url") || js_code.contains("\"url\"") || js_code.contains("'url'") {
-        shards_mask |= (1 << 26) | (1 << 1);
-    }
-    if js_code.contains("node:timers") || js_code.contains("\"timers\"") || js_code.contains("'timers'") {
-        shards_mask |= 1 << 27;
     }
     (flags, shards_mask, rc_key)
 }
@@ -692,9 +627,9 @@ mod tests {
 
         let bc = compile_source_to_bytecode(&bundled);
         let (hdr, _, _) = BoaCasHeader::decode(&bc).expect("Valid SLICEBCv1 header");
-        assert_ne!(hdr.shards_mask & (1 << 18), 0, "Expected node:crypto bit 18");
-        assert_ne!(hdr.shards_mask & (1 << 20), 0, "Expected node:path bit 20");
-        assert_ne!(hdr.shards_mask & (1 << 24), 0, "Expected node:assert bit 24");
+        assert_ne!(hdr.shards_mask & (1 << 19), 0, "Expected node:crypto bit 19");
+        assert_ne!(hdr.shards_mask & (1 << 21), 0, "Expected node:path bit 21");
+        assert_ne!(hdr.shards_mask & (1 << 25), 0, "Expected node:assert bit 25");
         assert_ne!(hdr.feature_flags & BOACAS_FLAG_IS_RC_BUNDLE, 0);
 
         crate::boa_realm::BOA_CONTEXT_POOL.with(|pool| pool.borrow_mut().clear());

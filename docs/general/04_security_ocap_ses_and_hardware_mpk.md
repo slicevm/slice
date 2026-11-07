@@ -182,7 +182,26 @@ slice run ./untrusted_plugin.ts --fuel=100000 --memory=1048576
 
 ---
 
-## 6. Auditing Your Environment (`slice verify-security`)
+## 6. Untrusted Entrypoint & AI Code-Mode Directive Lockdown (`// @slice-*`)
+
+When running AI-generated scripts, user-submitted plugins, or downloaded snippets via `slice run <script.ts>`, an attacker or hallucinating LLM might place top-of-file inline source directives (`// @slice-allow-read: ["/"]`, `// @slice-allow-net: ["*"]`, `// @slice-env-file: .env`, `// @slice-fuel: 999999999999`) at the top of the file in an attempt to self-grant permissions.
+
+**Slice prevents inline directive privilege escalation by default (`trust_directives = false`):**
+1. **Default Monotonic Attenuation (`trust_directives = false`):**
+   - **Resource Limits (`// @slice-fuel`, `// @slice-memory-kb`, `// @slice-memory-mb`):** Clamped via `.min(...)` so an inline directive can only **reduce** (tighten) the host's configured CPU fuel or memory ceiling, never raise it.
+   - **Filesystem & Network Capabilities (`// @slice-allow-read`, `// @slice-allow-write`, `// @slice-allow-net`):** Strictly intersected against the capabilities already granted by `slice.toml`, `SLICE_*` environment variables, or CLI flags (`vfs_prefix_matches` / host allowlist intersection). If the host granted zero read paths, `// @slice-allow-read: ["/etc"]` results in zero read paths.
+   - **Environment Variables & `.env` Files (`// @slice-allow-env`, `// @slice-env-file`):** `// @slice-env-file` is ignored unless `trust_directives` is enabled, and `// @slice-allow-env` only permits keys already granted by the host.
+   - **Outbound Egress DLP (`// @slice-audit-egress`):** Always additive — a script can always register *additional* secrets to block from leaking.
+   - **Server Listener Settings (`// @slice-port`, `// @slice-workers`):** Ignored unless `trust_directives` is enabled.
+2. **Nested Sub-Sandboxes (`Slice.evalSandbox`) & `slice mcp` (`slice_eval_ts`):**
+   - `Slice.evalSandbox(code, opts)` and the MCP `slice_eval_ts` tool **never** apply capability-granting or limit-raising `// @slice-*` directives from `code`; child capabilities are determined exclusively by `parent_caps ∩ opts`.
+3. **Explicit Opt-In for Trusted Local Scripts (`--trust-directives`):**
+   - When writing trusted single-file local utility scripts (`#!/usr/bin/env slice`) where you intentionally want top-of-file `// @slice-allow-*` comments to grant permissions without a separate `slice.toml`, opt in via `--trust-directives`, `SLICE_TRUST_DIRECTIVES=1`, or `[capabilities] trust_directives = true` in `slice.toml`.
+   - Conversely, passing `--no-directives` (or `--untrusted`) ignores all `// @slice-*` comments completely.
+
+---
+
+## 7. Auditing Your Environment (`slice verify-security`)
 
 You can verify that all 5 security rings are active on your machine at any time by running:
 ```bash

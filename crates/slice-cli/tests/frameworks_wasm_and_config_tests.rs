@@ -312,12 +312,25 @@ console.log("hi");
     assert_eq!(cfg_inline.deterministic_seed, Some(9001));
     assert_eq!(cfg_inline.fuel_limit, 12_000_000);
     assert_eq!(cfg_inline.mem_limit, 4096 * 1024);
-    assert!(cfg_inline
+    assert!(
+        !cfg_inline
+            .caps
+            .allowed_read_prefixes
+            .contains(&"/inline_read".to_string()),
+        "Untrusted inline directive must not widen allowed_read_prefixes by default"
+    );
+    assert_eq!(cfg_inline.server_port, Some(4567));
+    assert_eq!(cfg_inline.server_workers, Some(3));
+
+    // When --trust-directives is explicitly passed, inline capability directives are trusted
+    let mut cfg_trusted =
+        ResolvedExecutionConfig::from_cli_args(&["--trust-directives".to_string()]).unwrap();
+    cfg_trusted.apply_target_path_manifest(&entry_path);
+    cfg_trusted.apply_inline_directives(inline_source, Some(&src_dir));
+    assert!(cfg_trusted
         .caps
         .allowed_read_prefixes
         .contains(&"/inline_read".to_string()));
-    assert_eq!(cfg_inline.server_port, Some(4567));
-    assert_eq!(cfg_inline.server_workers, Some(3));
 
     // Explicit CLI flags win over inline directives
     let cli_win_args = vec![
@@ -349,4 +362,111 @@ console.log("hi");
     assert!(bc_tier1_forced.starts_with(slice_engine::BOACAS_MAGIC));
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_phase1_untrusted_inline_directives_cannot_escalate_privileges() {
+    use crate::config_and_watch::ResolvedExecutionConfig;
+
+    let malicious_script = r#"// @slice-allow-read: ["/"]
+// @slice-allow-write: ["/tmp"]
+// @slice-allow-net: ["evil.example.com"]
+// @slice-allow-env: ["AWS_SECRET_ACCESS_KEY"]
+// @slice-fuel: 999999999999
+// @slice-memory-mb: 4096
+// @slice-audit-egress: ["AGENT_CANARY_TOKEN"]
+console.log("agent script");
+"#;
+
+    // 1. Default pure-compute config (trust_directives == false):
+    //    Cannot widen read/write/net/env, and cannot raise fuel/memory above defaults.
+    let mut cfg_default = ResolvedExecutionConfig::from_cli_args(&[]).unwrap();
+    let default_fuel = cfg_default.fuel_limit;
+    let default_mem = cfg_default.mem_limit;
+    assert!(!cfg_default.trust_directives);
+    cfg_default.apply_inline_directives(malicious_script, None);
+    assert!(cfg_default.caps.allowed_read_prefixes.is_empty());
+    assert!(cfg_default.caps.allowed_write_prefixes.is_empty());
+    assert!(cfg_default.caps.allowed_net_hosts.is_empty());
+    assert!(cfg_default.caps.allowed_env_keys.is_empty());
+    assert_eq!(cfg_default.fuel_limit, default_fuel);
+    assert_eq!(cfg_default.mem_limit, default_mem);
+    // Adding extra DLP secrets is always allowed as a defensive restriction
+    assert!(cfg_default
+        .audit_secrets
+        .contains(&"AGENT_CANARY_TOKEN".to_string()));
+
+    // 2. Monotonic attenuation: script CAN lower its own fuel/memory and narrow an already-granted prefix
+    let attenuating_script = r#"// @slice-allow-read: ["/data/public/reports", "/etc"]
+// @slice-allow-net: ["api.stripe.com", "evil.example.com"]
+// @slice-fuel: 50000
+// @slice-memory-kb: 2048
+console.log("attenuated");
+"#;
+    let mut cfg_attenuate = ResolvedExecutionConfig::from_cli_args(&[
+        "--allow-read=/data/public".to_string(),
+        "--allow-net=api.stripe.com,hooks.slack.com".to_string(),
+    ])
+    .unwrap();
+    cfg_attenuate.apply_inline_directives(attenuating_script, None);
+    assert_eq!(cfg_attenuate.fuel_limit, 50_000);
+    assert_eq!(cfg_attenuate.mem_limit, 2048 * 1024);
+    assert_eq!(
+        cfg_attenuate.caps.allowed_read_prefixes,
+        vec!["/data/public/reports".to_string()]
+    );
+    assert!(cfg_attenuate
+        .caps
+        .allowed_net_hosts
+        .contains("api.stripe.com"));
+    assert!(!cfg_attenuate
+        .caps
+        .allowed_net_hosts
+        .contains("hooks.slack.com"));
+    assert!(!cfg_attenuate
+        .caps
+        .allowed_net_hosts
+        .contains("evil.example.com"));
+
+    // 3. Explicit --trust-directives allows inline directives to grant capabilities and raise limits
+    let mut cfg_trusted =
+        ResolvedExecutionConfig::from_cli_args(&["--trust-directives".to_string()]).unwrap();
+    assert!(cfg_trusted.trust_directives);
+    cfg_trusted.apply_inline_directives(malicious_script, None);
+    assert!(cfg_trusted
+        .caps
+        .allowed_read_prefixes
+        .contains(&"/".to_string()));
+    assert!(cfg_trusted
+        .caps
+        .allowed_write_prefixes
+        .contains(&"/tmp".to_string()));
+    assert!(cfg_trusted
+        .caps
+        .allowed_net_hosts
+        .contains("evil.example.com"));
+    assert_eq!(cfg_trusted.fuel_limit, 999_999_999_999);
+    assert_eq!(cfg_trusted.mem_limit, 4096 * 1024 * 1024);
+}
+
+#[test]
+fn test_phase1_eval_sandbox_and_mcp_ignore_inline_directives() {
+    let ts_code = r#"
+        const outcome = Slice.evalSandbox(`// @slice-allow-read: ["/"]
+// @slice-fuel: 999999999
+const fs = require("node:fs");
+fs.readFileSync("/etc/passwd", "utf8");
+`, { fuel: 50000 });
+        console.log("ok:" + outcome.ok + "|violation:" + (outcome.violation || "").includes("filesystem read authority"));
+    "#;
+    let bc = compile_source_to_bytecode(ts_code);
+    let mut iso = SliceIsolate::spawn(
+        "sandbox-directive-guard",
+        1,
+        CapabilityToken::pure_compute(),
+        500_000,
+        16 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).expect("Parent isolate succeeds");
+    assert_eq!(m.stdout, vec!["ok:false|violation:true"]);
 }
