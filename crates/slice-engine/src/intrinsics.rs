@@ -1752,13 +1752,13 @@ pub fn aes_cbc_encrypt_with_expanded(
     }
     let mut prev = [0u8; 16];
     prev.copy_from_slice(iv);
-    for chunk in out.chunks_exact_mut(16) {
+    for chunk in out.as_chunks_mut::<16>().0 {
         let mut block = [0u8; 16];
         for i in 0..16 {
             block[i] = chunk[i] ^ prev[i];
         }
         expanded.encrypt_block(&mut block);
-        chunk.copy_from_slice(&block);
+        *chunk = block;
         prev = block;
     }
     Ok(out)
@@ -1783,9 +1783,8 @@ pub fn aes_cbc_decrypt_with_expanded(
     let mut out = ciphertext.to_vec();
     let mut prev = [0u8; 16];
     prev.copy_from_slice(iv);
-    for chunk in out.chunks_exact_mut(16) {
-        let mut next_prev = [0u8; 16];
-        next_prev.copy_from_slice(chunk);
+    for chunk in out.as_chunks_mut::<16>().0 {
+        let next_prev = *chunk;
         let mut block = next_prev;
         expanded.decrypt_block(&mut block);
         for i in 0..16 {
