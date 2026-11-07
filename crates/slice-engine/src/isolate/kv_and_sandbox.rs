@@ -1,0 +1,256 @@
+//! Tenant-Isolated `Slice.kv` Operations, Sub-5us State Checkpoints (`checkpoint`/`restore`),
+//! and Nested OCap Child Sandbox Attenuation (`eval_sandbox`).
+
+use crate::isolate::SliceIsolate;
+use crate::state_and_kv::{
+    checkpoint_tenant_state, edge_kv_del, edge_kv_get, edge_kv_incr, edge_kv_set,
+    restore_tenant_state,
+};
+use serde::{Deserialize, Serialize};
+use slice_sandbox::{CapabilityToken, SandboxViolation};
+use std::time::Instant;
+
+/// Options for spawning an attenuated nested child sandbox via `Slice.evalSandbox(code, opts)`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxEvalOptions {
+    pub tenant_id: Option<String>,
+    pub fuel: Option<u64>,
+    #[serde(alias = "maxMemoryBytes")]
+    pub memory_bytes: Option<usize>,
+    #[serde(default, alias = "readPrefixes", alias = "fsRead")]
+    pub allow_read: Vec<String>,
+    #[serde(default, alias = "writePrefixes", alias = "fsWrite")]
+    pub allow_write: Vec<String>,
+    #[serde(default, alias = "netHosts")]
+    pub allow_net: Vec<String>,
+    #[serde(default, alias = "execBinaries")]
+    pub allow_exec: Vec<String>,
+    #[serde(default, alias = "envKeys")]
+    pub allow_env: Vec<String>,
+    pub deterministic_seed: Option<u64>,
+    pub audit_secret: Option<String>,
+}
+
+/// Structured result returned by `Slice.evalSandbox(code, opts)` and `slice mcp` `slice_eval_ts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxEvalOutcome {
+    pub ok: bool,
+    pub stdout: Vec<String>,
+    pub return_value: String,
+    pub fuel_used: u64,
+    pub memory_used_bytes: usize,
+    pub total_time_us: f64,
+    pub violation: Option<String>,
+}
+
+impl SliceIsolate {
+    /// Creates an instant in-memory snapshot (`< 5 us`) of the current thread-local `node:fs` VFS slab
+    /// AND this tenant's `Slice.kv` partition, returning a monotonic checkpoint ID for `restore()`.
+    #[inline]
+    pub fn checkpoint(&self) -> u64 {
+        checkpoint_tenant_state(&self.compartment.tenant_id)
+    }
+
+    /// Restores the thread-local `node:fs` VFS slab and this tenant's `Slice.kv` partition to the
+    /// exact state captured by `checkpoint_id` in `< 5 us`.
+    #[inline]
+    pub fn restore(&self, checkpoint_id: u64) -> bool {
+        restore_tenant_state(&self.compartment.tenant_id, checkpoint_id)
+    }
+
+    /// Reads a value from this tenant's isolated partition in the 16-way sharded `Slice.kv` slab.
+    #[inline]
+    pub fn kv_get(&self, key: &str) -> Option<String> {
+        edge_kv_get(&self.compartment.tenant_id, key)
+    }
+
+    /// Writes a value (with optional TTL in milliseconds, `0` = no expiry) into this tenant's
+    /// isolated `Slice.kv` partition, charging byte growth against the compartment memory limit.
+    #[inline]
+    pub fn kv_set(&mut self, key: &str, val: &str, ttl_ms: u64) -> Result<(), SandboxViolation> {
+        let added = key.len().saturating_add(val.len());
+        self.compartment.alloc_memory(added)?;
+        edge_kv_set(&self.compartment.tenant_id, key, val, ttl_ms);
+        Ok(())
+    }
+
+    /// Deletes a key from this tenant's isolated `Slice.kv` partition.
+    #[inline]
+    pub fn kv_del(&self, key: &str) -> bool {
+        edge_kv_del(&self.compartment.tenant_id, key)
+    }
+
+    /// Atomically increments a 64-bit integer counter in this tenant's isolated `Slice.kv` partition.
+    #[inline]
+    pub fn kv_incr(&mut self, key: &str, delta: i64) -> Result<i64, SandboxViolation> {
+        self.compartment.alloc_memory(key.len().saturating_add(8))?;
+        Ok(edge_kv_incr(&self.compartment.tenant_id, key, delta))
+    }
+
+    /// Compiles (via Oxc) and executes untrusted TypeScript/JavaScript inside a nested child
+    /// `SliceIsolate` with strict capability attenuation (child permissions are intersected with
+    /// this parent's `CapabilityToken`, and child fuel/memory are bounded by and deducted from
+    /// this parent's remaining budget).
+    pub fn eval_sandbox(&mut self, code: &str, opts: SandboxEvalOptions) -> SandboxEvalOutcome {
+        let start = Instant::now();
+        let parent_rem_fuel = self
+            .compartment
+            .fuel_limit
+            .saturating_sub(self.compartment.fuel_consumed);
+        let parent_rem_mem = self
+            .compartment
+            .memory_limit_bytes
+            .saturating_sub(self.compartment.memory_used_bytes);
+        let child_fuel = opts.fuel.unwrap_or(parent_rem_fuel).min(parent_rem_fuel);
+        let child_mem = opts
+            .memory_bytes
+            .unwrap_or(parent_rem_mem)
+            .min(parent_rem_mem);
+
+        // Attenuate child CapabilityToken strictly against parent's capabilities (zero escalation)
+        let mut child_caps = CapabilityToken::pure_compute();
+        let parent_reads = &self.compartment.capabilities.allowed_read_prefixes;
+        if !opts.allow_read.is_empty() {
+            for req_prefix in &opts.allow_read {
+                if parent_reads
+                    .iter()
+                    .any(|p| slice_sandbox::vfs_prefix_matches(req_prefix, p))
+                {
+                    child_caps = child_caps.with_read_prefix(req_prefix.clone());
+                }
+            }
+        } else {
+            for p in parent_reads {
+                child_caps = child_caps.with_read_prefix(p.clone());
+            }
+        }
+        if child_caps.allowed_read_prefixes.is_empty() {
+            child_caps = child_caps.with_read_prefix("/__slice_denied__");
+        }
+
+        let parent_writes = &self.compartment.capabilities.allowed_write_prefixes;
+        if !opts.allow_write.is_empty() {
+            for req_prefix in &opts.allow_write {
+                if parent_writes
+                    .iter()
+                    .any(|p| slice_sandbox::vfs_prefix_matches(req_prefix, p))
+                {
+                    child_caps = child_caps.with_write_prefix(req_prefix.clone());
+                }
+            }
+        } else {
+            for p in parent_writes {
+                child_caps = child_caps.with_write_prefix(p.clone());
+            }
+        }
+        if child_caps.allowed_write_prefixes.is_empty() {
+            child_caps = child_caps.with_write_prefix("/__slice_denied__");
+        }
+
+        let parent_nets = &self.compartment.capabilities.allowed_net_hosts;
+        if !opts.allow_net.is_empty() {
+            for req_host in &opts.allow_net {
+                if !slice_sandbox::is_cloud_metadata_ssrf_target(req_host)
+                    && self.compartment.verify_net_connect(req_host).is_ok()
+                {
+                    child_caps = child_caps.with_net_host(req_host.clone());
+                }
+            }
+        } else {
+            for h in parent_nets {
+                child_caps = child_caps.with_net_host(h.clone());
+            }
+        }
+
+        let parent_execs = &self.compartment.capabilities.allowed_exec_binaries;
+        if !opts.allow_exec.is_empty() {
+            for req_bin in &opts.allow_exec {
+                if self.compartment.verify_exec_binary(req_bin).is_ok() {
+                    child_caps = child_caps.with_exec_binary(req_bin.clone());
+                }
+            }
+        } else {
+            for eb in parent_execs {
+                child_caps = child_caps.with_exec_binary(eb.clone());
+            }
+        }
+
+        if !opts.allow_env.is_empty() {
+            let parent_envs = &self.compartment.capabilities.allowed_env_keys;
+            for req_key in &opts.allow_env {
+                if let Some(val) = parent_envs.get(req_key) {
+                    child_caps = child_caps.with_env(req_key.clone(), val.clone());
+                }
+            }
+        }
+
+        let child_tenant = opts
+            .tenant_id
+            .unwrap_or_else(|| format!("{}:sub", self.compartment.tenant_id));
+        let mut child_iso =
+            SliceIsolate::spawn(child_tenant, 99, child_caps, child_fuel, child_mem);
+        if let Some(seed) = opts.deterministic_seed.or(self.deterministic_seed) {
+            child_iso.set_deterministic_seed(Some(seed));
+        }
+        child_iso.egress_audit_secrets = self.egress_audit_secrets.clone();
+        if let Some(sec) = opts.audit_secret {
+            child_iso.add_egress_audit_secret(sec);
+        }
+
+        let bc = crate::parser_and_compiler::compile_source_for_sandbox_eval(code);
+        let outcome = match child_iso.execute_bytecode(&bc, None) {
+            Ok(metrics) => {
+                let _ = self.compartment.consume_fuel(metrics.fuel_consumed.max(1));
+                let net_mem = metrics.memory_used_bytes.saturating_sub(4096);
+                if net_mem > 0 {
+                    let _ = self.compartment.alloc_memory(net_mem);
+                }
+                SandboxEvalOutcome {
+                    ok: true,
+                    stdout: metrics.stdout,
+                    return_value: metrics.return_value,
+                    fuel_used: metrics.fuel_consumed,
+                    memory_used_bytes: metrics.memory_used_bytes,
+                    total_time_us: start.elapsed().as_nanos() as f64 / 1_000.0,
+                    violation: None,
+                }
+            }
+            Err(violation) => {
+                let _ = self
+                    .compartment
+                    .consume_fuel(child_iso.compartment.fuel_consumed.max(1));
+                let net_mem = child_iso.compartment.memory_used_bytes.saturating_sub(4096);
+                if net_mem > 0 {
+                    let _ = self.compartment.alloc_memory(net_mem);
+                }
+                SandboxEvalOutcome {
+                    ok: false,
+                    stdout: Vec::new(),
+                    return_value: "undefined".to_string(),
+                    fuel_used: child_iso.compartment.fuel_consumed,
+                    memory_used_bytes: child_iso.compartment.memory_used_bytes,
+                    total_time_us: start.elapsed().as_nanos() as f64 / 1_000.0,
+                    violation: Some(violation.to_string()),
+                }
+            }
+        };
+        if crate::boa_realm::is_trace_recording_enabled() {
+            crate::boa_realm::record_trace_event(
+                "sandbox.eval",
+                "slice.ocap",
+                100,
+                start.elapsed().as_nanos() as u64,
+                serde_json::json!({
+                    "parent_tenant": self.compartment.tenant_id,
+                    "ok": outcome.ok,
+                    "fuel_used": outcome.fuel_used,
+                    "memory_used_bytes": outcome.memory_used_bytes,
+                    "violation": outcome.violation
+                }),
+            );
+        }
+        outcome
+    }
+}

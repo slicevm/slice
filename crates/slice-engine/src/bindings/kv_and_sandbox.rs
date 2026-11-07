@@ -202,6 +202,10 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             for eb in &scope_guard.saved_exec_bins {
                 parent_caps = parent_caps.with_exec_binary(eb.clone());
             }
+            let parent_rem_fuel = scope_guard
+                .saved_fuel_budget
+                .1
+                .saturating_sub(scope_guard.saved_fuel_budget.0);
             let parent_rem_mem = scope_guard
                 .saved_kv_budget
                 .1
@@ -210,12 +214,10 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 scope_guard.saved_tenant.clone(),
                 98,
                 parent_caps,
-                5_000_000,
-                parent_rem_mem.max(65536),
+                parent_rem_fuel,
+                parent_rem_mem.saturating_add(4096),
             );
-            for sec in &scope_guard.saved_egress_secrets {
-                proxy_parent.add_egress_audit_secret(sec.clone());
-            }
+            proxy_parent.egress_audit_secrets = scope_guard.saved_egress_secrets.clone();
             let parent_tenant_for_trace = scope_guard.saved_tenant.clone();
             let outcome = if cfg!(debug_assertions) {
                 let vfs_files = crate::boa_realm::BOA_VFS_CACHE.with(|c| c.borrow().clone());
@@ -241,6 +243,19 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 proxy_parent.eval_sandbox(&code, opts)
             };
             drop(scope_guard);
+            if outcome.fuel_used > 0 {
+                crate::boa_realm::BOA_FUEL_BUDGET.with(|f| {
+                    let (used, limit) = f.get();
+                    f.set((used.saturating_add(outcome.fuel_used), limit));
+                });
+            }
+            let child_net_mem = outcome.memory_used_bytes.saturating_sub(4096);
+            if child_net_mem > 0 {
+                crate::boa_realm::BOA_KV_MEM_BUDGET.with(|m| {
+                    let (used, limit) = m.get();
+                    m.set((used.saturating_add(child_net_mem), limit));
+                });
+            }
             if crate::boa_realm::is_trace_recording_enabled() {
                 crate::boa_realm::record_trace_event(
                     "sandbox.eval",

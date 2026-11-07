@@ -1782,7 +1782,7 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
         || memchr::memmem::find(src_bytes, b"Array.prototype.").is_some()
         || memchr::memmem::find(src_bytes, b"while (true)").is_some()
         || memchr::memmem::find(src_bytes, b"while(true)").is_some())
-        && memchr::memmem::find(src_bytes, b"Slice.evalSandbox(").is_none()
+        && memchr::memmem::find(src_bytes, b"Slice.").is_none()
         && memchr::memmem::find(src_bytes, b"Worker").is_none();
 
     let route_to_tier1_boa = match tier_ov {

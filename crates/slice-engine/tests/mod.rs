@@ -2,6 +2,7 @@
 
 mod async_webcrypto_and_node_tests;
 mod bindings_security_and_perf_tests;
+mod isolate_security_and_perf_tests;
 mod tier0_boacas_and_core_tests;
 mod wasm_vfs_and_module_resolution_tests;
 mod web_primitives_and_case_studies_tests;
