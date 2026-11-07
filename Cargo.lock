@@ -2034,6 +2034,8 @@ dependencies = [
  "libc",
  "memchr",
  "notify",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "slice-cas",

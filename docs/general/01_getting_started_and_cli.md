@@ -291,6 +291,9 @@ port = 8080
 workers = 4
 # Optional static frontend directory served out of memory with BLAKE3 ETag 304 support
 static_dir = "./public"
+# Optional PEM certificate chain and private key for Native TLS 1.3 termination in `slice serve`
+# tls_cert = "./certs/fullchain.pem"
+# tls_key = "./certs/privkey.pem"
 ```
 
 ---
@@ -341,6 +344,9 @@ console.log("Running with self-contained inline directives!");
 | **HTTP Server Port** | `3000` | `[server] port = 3000` | `// @slice-port: 3000` | `SLICE_PORT=3000` | `--port=3000` |
 | **HTTP Worker Threads** | `clamp(cpus, 1, 8)` | `[server] workers = 4` | `// @slice-workers: 4` | `SLICE_WORKERS=4` | `--workers=4` |
 | **Static Asset Dir** | `None` | `[server] static_dir = "./public"` | *(Use `slice.toml` / CLI)* | `SLICE_STATIC_DIR=./public` | `--static=./public` |
+| **TLS 1.3 Cert Chain** | `None` | `[server] tls_cert = "./cert.pem"` | `// @slice-tls-cert: ./cert.pem` (when `trust_directives = true`) | `SLICE_TLS_CERT=./cert.pem` | `--tls-cert=./cert.pem` |
+| **TLS 1.3 Private Key** | `None` | `[server] tls_key = "./key.pem"` | `// @slice-tls-key: ./key.pem` (when `trust_directives = true`) | `SLICE_TLS_KEY=./key.pem` | `--tls-key=./key.pem` |
+| **Outbound HTTP Proxy** | `None` | `[capabilities.env] HTTP_PROXY = "..."` | `// @slice-allow-env: ["HTTP_PROXY=..."]` | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | `--allow-env=HTTP_PROXY=...` |
 
 ---
 
@@ -442,6 +448,8 @@ Launches the multi-tenant WinterTC HTTP/1.1 `Keep-Alive` and pipelined MicroVM w
 | `--port=<u16>` | TCP listening port (default: `3000`, or `[server] port` in `slice.toml` / `SLICE_PORT`). |
 | `--workers=<usize>` | Number of shared-nothing worker threads (default: `clamp(num_cpus, 1, 8)`, or `[server] workers`). |
 | `--static=<dir>` | Ingest and serve static web assets from `<dir>` out of memory with BLAKE3 `ETag` `304` support (`< 2 us`). |
+| `--tls-cert=<path>` | PEM certificate chain path for native `rustls` TLS 1.3 termination (`[server] tls_cert` / `SLICE_TLS_CERT`). |
+| `--tls-key=<path>` | PEM private key path for native `rustls` TLS 1.3 termination (`[server] tls_key` / `SLICE_TLS_KEY`). |
 | `--tenant-dir=<dir>` | Dynamically route `X-Slice-Tenant: <id>` or `/t/<id>/...` to `<dir>/<id>.cas` with zero-downtime live hot-swapping. |
 | `--env-file=<path>` | Load `.env` variables and register sensitive keys into the Egress DLP guard. |
 | `--audit-egress=<secret>` | Scan all HTTP responses, SSE streams, and outbound `fetch()` calls for raw/Base64 leaks of `<secret>`. |

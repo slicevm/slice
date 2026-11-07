@@ -787,6 +787,10 @@ pub struct SliceManifest {
     #[serde(default)]
     pub static_dir: Option<String>,
     #[serde(default)]
+    pub tls_cert: Option<String>,
+    #[serde(default)]
+    pub tls_key: Option<String>,
+    #[serde(default)]
     pub trust_directives: Option<bool>,
 }
 
@@ -808,6 +812,8 @@ impl Default for SliceManifest {
             server_port: None,
             server_workers: None,
             static_dir: None,
+            tls_cert: None,
+            tls_key: None,
             trust_directives: None,
         }
     }
@@ -867,6 +873,8 @@ pub struct InlineDirectives {
     pub audit_egress: Vec<String>,
     pub port: Option<u16>,
     pub workers: Option<usize>,
+    pub tls_cert: Option<String>,
+    pub tls_key: Option<String>,
 }
 
 /// Scans leading comment lines (`// @slice-...`) at the top of a TypeScript/JavaScript source string
@@ -997,6 +1005,16 @@ pub fn parse_inline_directives(source: &str) -> InlineDirectives {
             "workers" => {
                 if let Ok(w) = val.parse::<usize>() {
                     dirs.workers = Some(w.max(1));
+                }
+            }
+            "tls-cert" | "tls_cert" => {
+                if !val.is_empty() {
+                    dirs.tls_cert = Some(val.to_string());
+                }
+            }
+            "tls-key" | "tls_key" => {
+                if !val.is_empty() {
+                    dirs.tls_key = Some(val.to_string());
                 }
             }
             _ => {}
@@ -1164,6 +1182,18 @@ impl SliceManifest {
                         let sd = val.trim_matches('"').trim_matches('\'').trim().to_string();
                         if !sd.is_empty() {
                             manifest.static_dir = Some(sd);
+                        }
+                    }
+                    ("server", "tls_cert") | ("server", "tls-cert") | ("server", "cert") => {
+                        let tc = val.trim_matches('"').trim_matches('\'').trim().to_string();
+                        if !tc.is_empty() {
+                            manifest.tls_cert = Some(tc);
+                        }
+                    }
+                    ("server", "tls_key") | ("server", "tls-key") | ("server", "key") => {
+                        let tk = val.trim_matches('"').trim_matches('\'').trim().to_string();
+                        if !tk.is_empty() {
+                            manifest.tls_key = Some(tk);
                         }
                     }
                     _ => {}

@@ -12,6 +12,7 @@ General multi-file application and security benchmarks (`01-fintech-checkout` th
 | :--- | :--- | :--- | :--- |
 | **FW 1 (`App 25`)** | [`01-hono-edge-microservice`](./01-hono-edge-microservice) | `hono@4.6.20`, `hono/cookie`, `cookie@0.6.0`, `ms@2.1.3` | Unmodified **Hono v4** `Hono` router, `app.use("*")` security/request-ID middleware, `app.use("/api/v1/tenants/:tenantId/*")` Bearer HMAC-SHA256 tenant guard (`401`), parameterized `GET /api/v1/tenants/:tenantId/orders/:orderId` (`200`), `POST /api/v1/tenants/:tenantId/checkout` (`201`), `getCookie`/`setCookie`, `app.notFound` (`404`), and `slice test` (`tests/hono.test.ts`). |
 | **FW 2 (`App 26`)** | [`02-itty-router-unjs-nitro-stack`](./02-itty-router-unjs-nitro-stack) | `itty-router@5.0.18`, `ufo@1.5.4`, `destr@2.0.3`, `ohash@1.1.4`, `radix3@1.1.2` | Unmodified **itty-router v5** (`AutoRouter`) + **UnJS / Nitro** toolkit (`ufo` URL/query normalization, `radix3` route policy matcher, `destr` prototype-pollution-safe JSON parser, `ohash` deterministic object hash & SHA-256 Base64 ETag generator, `If-None-Match` -> `304 Not Modified`), and `slice test` (`tests/unjs.test.ts`). |
+| **FW 3 (`App 27`)** | [`03-node-http-express-compat`](./03-node-http-express-compat) | `node:http`, `node:stream`, `node:stream/promises`, `node:crypto` | Express / Polka-compatible `http.createServer` + `app.use()` middleware chain (`req.params`, `req.query`, `res.status().json()`), `stream.Transform` + `stream/promises` `pipeline()`, and `http.request` / `http.get` client roundtrips + direct `slice serve` bridge (`export default { fetch }`). |
 
 ---
 
@@ -30,6 +31,12 @@ General multi-file application and security benchmarks (`01-fintech-checkout` th
   {"framework":"02-itty-router-unjs-nitro-stack","libraries":["destr@2.0.3","itty-router@5.0.18","ohash@1.1.4","radix3@1.1.2","ufo@1.5.4"],"totalRequestsDispatched":12,"status200Count":6,"status202Count":3,"status304Count":2,"status404Count":1,"radixPolicyMatches":11,"normalizedUrlsCount":12,"destrPayloadsParsed":3,"uniqueEtagsGenerated":5,"totalCatalogValueCents":24553135,"totalWebhookAmountCents":7500,"sampleCanonicalSearchUrl":"/v1/search?category=gpu&page=2&limit=25&sort=price_asc","auditDigest":"40f28432a68c05ac"}
   ```
 - **Time-Travel `slice test` Runner (`tests/unjs.test.ts`):** `2 passed, 0 failed` (`2 VFS+KV rollbacks in 13.98 ms`)
+
+### 3. [`03-node-http-express-compat`](./03-node-http-express-compat/src/index.ts) — `node:http` + `node:stream` Express / Polka Middleware & Pipeline Suite
+- **Identical Output Across All 4 Runtimes (`Slice`, `Bun v1.4.4`, `Deno v2.9.8`, `Node.js v27.0.0-alpha`):**
+  ```json
+  {"framework":"03-node-http-express-compat","totalRequestsDispatched":5,"status200Count":2,"status201Count":2,"status404Count":1,"streamedEventsCount":3,"totalOrderCents":9500,"middlewareHeadersVerified":true,"auditDigest":"eb7f023c67427dc4"}
+  ```
 
 ---
 

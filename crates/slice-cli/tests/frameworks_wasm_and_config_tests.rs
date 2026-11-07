@@ -158,11 +158,32 @@ fn test_wave_e_hono_and_itty_unjs_framework_suites() {
         .join("tests")
         .join("frameworks")
         .join("02-itty-router-unjs-nitro-stack");
+    let fw3_dir = repo_root
+        .join("tests")
+        .join("frameworks")
+        .join("03-node-http-express-compat");
 
     assert!(fw1_dir.join("slice.toml").is_file());
     assert!(fw1_dir.join("src/index.ts").is_file());
     assert!(fw2_dir.join("slice.toml").is_file());
     assert!(fw2_dir.join("src/index.ts").is_file());
+    assert!(fw3_dir.join("slice.toml").is_file());
+    assert!(fw3_dir.join("src/index.ts").is_file());
+
+    let bundled3 =
+        slice_cas::bundle_entrypoint_with_deps(&fw3_dir.join("src/index.ts")).unwrap();
+    let bc3 = compile_source_to_bytecode(&bundled3);
+    let mut iso3 = SliceIsolate::spawn(
+        "wave-e-node-http-express",
+        1,
+        CapabilityToken::pure_compute(),
+        20_000_000,
+        32 * 1024 * 1024,
+    );
+    let out3 = iso3.execute_bytecode(&bc3, None).unwrap();
+    assert!(out3.stdout[0].contains(r#""framework":"03-node-http-express-compat""#));
+    assert!(out3.stdout[0].contains(r#""totalRequestsDispatched":3"#));
+    assert!(out3.stdout[0].contains(r#""echoUpper":"HELLO SLICE STREAM""#));
 
     if fw1_dir.join("node_modules/hono").is_dir() {
         let bundled1 =
@@ -470,3 +491,83 @@ fs.readFileSync("/etc/passwd", "utf8");
     let m = iso.execute_bytecode(&bc, None).expect("Parent isolate succeeds");
     assert_eq!(m.stdout, vec!["ok:false|violation:true"]);
 }
+
+#[test]
+fn test_phase3_slice_serve_tls_config_layers() {
+    use crate::config_and_watch::ResolvedExecutionConfig;
+    use std::path::PathBuf;
+
+    // 1. Verify [server] tls_cert and tls_key in slice.toml
+    let toml_raw = r#"
+[package]
+name = "tls-edge-app"
+version = "0.1.0"
+entrypoint = "./src/index.ts"
+
+[server]
+port = 8443
+tls_cert = "./certs/server.crt"
+tls_key = "./certs/server.key"
+"#;
+    let mut cfg = ResolvedExecutionConfig::from_cli_args(&[]).unwrap();
+    cfg.apply_manifest_toml(toml_raw, Some(Path::new("/app")));
+    assert_eq!(cfg.server_port, Some(8443));
+    assert_eq!(cfg.tls_cert, Some(Path::new("/app").join("./certs/server.crt")));
+    assert_eq!(cfg.tls_key, Some(Path::new("/app").join("./certs/server.key")));
+
+    // 2. Verify untrusted inline directives CANNOT override tls-cert / tls-key
+    let untrusted_src = "// @slice-tls-cert: /etc/evil.crt\n// @slice-tls-key: /etc/evil.key\n";
+    cfg.apply_inline_directives(untrusted_src, None);
+    assert_eq!(cfg.tls_cert, Some(Path::new("/app").join("./certs/server.crt")));
+    assert_eq!(cfg.tls_key, Some(Path::new("/app").join("./certs/server.key")));
+
+    // 3. Verify trusted inline directives CAN set tls-cert / tls-key when not overridden by CLI
+    let mut cfg_trusted =
+        ResolvedExecutionConfig::from_cli_args(&["--trust-directives".to_string()]).unwrap();
+    cfg_trusted.apply_inline_directives(untrusted_src, None);
+    assert_eq!(cfg_trusted.tls_cert, Some(PathBuf::from("/etc/evil.crt")));
+    assert_eq!(cfg_trusted.tls_key, Some(PathBuf::from("/etc/evil.key")));
+
+    // 4. Verify CLI --tls-cert and --tls-key take highest precedence over slice.toml and directives
+    let mut cfg_cli = ResolvedExecutionConfig::from_cli_args(&[
+        "--tls-cert=/cli/cert.pem".to_string(),
+        "--tls-key=/cli/key.pem".to_string(),
+        "--trust-directives".to_string(),
+    ])
+    .unwrap();
+    cfg_cli.apply_manifest_toml(toml_raw, Some(Path::new("/app")));
+    cfg_cli.apply_inline_directives(untrusted_src, None);
+    assert_eq!(cfg_cli.tls_cert, Some(PathBuf::from("/cli/cert.pem")));
+    assert_eq!(cfg_cli.tls_key, Some(PathBuf::from("/cli/key.pem")));
+
+    // 5. Verify Slice.serve / Deno.serve / Bun.serve compatibility in SliceIsolate
+    let serve_js = r#"
+        Slice.serve({ port: 9000 }, (req) => {
+            return new Response(JSON.stringify({ servedBy: "Slice.serve", url: req.url }), {
+                status: 200,
+                headers: { "content-type": "application/json" }
+            });
+        });
+    "#;
+    let bc = compile_source_to_bytecode(serve_js);
+    let mut iso = SliceIsolate::spawn(
+        "phase3-slice-serve",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    let req_ctx = slice_engine::HttpRequestContext {
+        method: "GET",
+        path: "/hello-serve",
+        query: "x=1",
+        tenant_id: "phase3-slice-serve",
+        body: "",
+        headers: &[],
+    };
+    let outcome = iso.execute_http_request(&bc, None, &req_ctx).unwrap();
+    assert_eq!(outcome.status_code, 200);
+    assert!(outcome.response_body.contains(r#""servedBy":"Slice.serve""#));
+    assert!(outcome.response_body.contains("/hello-serve?x=1"));
+}
+

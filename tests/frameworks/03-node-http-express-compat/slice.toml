@@ -1,0 +1,11 @@
+[package]
+name = "03-node-http-express-compat"
+version = "1.0.0"
+entrypoint = "./src/index.ts"
+
+[limits]
+fuel = 50000000
+memory_kb = 32768
+
+[capabilities]
+allow_env = ["NODE_ENV"]

@@ -17,6 +17,8 @@ pub(crate) fn is_builtin_module(spec: &str) -> bool {
     matches!(
         spec,
         "fs" | "fs/promises"
+            | "http"
+            | "https"
             | "path"
             | "path/posix"
             | "path/win32"
@@ -29,6 +31,8 @@ pub(crate) fn is_builtin_module(spec: &str) -> bool {
             | "process"
             | "url"
             | "stream"
+            | "stream/promises"
+            | "stream/web"
             | "assert"
             | "assert/strict"
             | "timers"

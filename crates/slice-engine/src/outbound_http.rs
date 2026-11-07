@@ -2,7 +2,8 @@
 //! Pre-Connect DNS Resolved-IP SSRF Firewall, Zero-Trust Hop-by-Hop Redirect Guard, and Egress DLP.
 
 use crate::boa_realm::{
-    BOA_ACTIVE_TENANT, BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VIOLATION,
+    BOA_ACTIVE_TENANT, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
+    BOA_VIOLATION,
 };
 use crate::state_and_kv::verify_egress_secrets_slice;
 use serde::Serialize;
@@ -905,6 +906,54 @@ struct WireFetchResponse {
     redirected: bool,
 }
 
+fn is_host_bypassed_by_no_proxy(hostname: &str, no_proxy_raw: &str) -> bool {
+    let host_lower = hostname.to_ascii_lowercase();
+    for item in no_proxy_raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if item == "*" {
+            return true;
+        }
+        let pat = item
+            .split(':')
+            .next()
+            .unwrap_or(item)
+            .trim_start_matches('.')
+            .to_ascii_lowercase();
+        if pat.is_empty() {
+            continue;
+        }
+        if host_lower == pat || host_lower.ends_with(&format!(".{}", pat)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn resolve_active_proxy_url(is_https: bool, target_hostname: &str) -> Option<String> {
+    BOA_ENV_MAP.with(|m| {
+        let map = m.borrow();
+        if map.is_empty() {
+            return None;
+        }
+        let no_proxy = map
+            .get("NO_PROXY")
+            .or_else(|| map.get("no_proxy"))
+            .map(String::as_str)
+            .unwrap_or("");
+        if !no_proxy.is_empty() && is_host_bypassed_by_no_proxy(target_hostname, no_proxy) {
+            return None;
+        }
+        let proxy_val = if is_https {
+            map.get("HTTPS_PROXY")
+                .or_else(|| map.get("https_proxy"))
+                .or_else(|| map.get("HTTP_PROXY"))
+                .or_else(|| map.get("http_proxy"))
+        } else {
+            map.get("HTTP_PROXY").or_else(|| map.get("http_proxy"))
+        };
+        proxy_val.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    })
+}
+
 /// Executes an outbound HTTP/1.1 or HTTPS (TLS 1.3/1.2) `fetch()` request with:
 /// - Zero-Trust Hop-by-Hop Redirect Guard (`301`/`302`/`303`/`307`/`308`, up to 5 hops)
 /// - Per-hop OCap host allowlist + Pre-Connect DNS Resolved-IP SSRF Firewall + Egress DLP
@@ -934,10 +983,32 @@ pub(crate) fn execute_outbound_fetch_with_redirects(
             &headers_json,
             &current_body,
         )?;
-        let verified_addrs = resolve_and_verify_ssrf_socket_addrs(&parts, explicit_host_grant)?;
+        let (dial_parts, verified_addrs) = if let Some(proxy_url) =
+            resolve_active_proxy_url(parts.is_https, &parts.hostname)
+        {
+            let mut p_parts = parse_outbound_http_url(&proxy_url)
+                .ok_or_else(|| format!("Invalid proxy URL: {}", proxy_url))?;
+            let proxy_grant = check_boa_outbound_fetch_ocap_and_dlp(
+                &p_parts,
+                &proxy_url,
+                &headers_json,
+                &current_body,
+            )?;
+            let proxy_addrs = resolve_and_verify_ssrf_socket_addrs(&p_parts, proxy_grant)?;
+            p_parts.host_header = parts.host_header.clone();
+            p_parts.path_and_query = if !parts.is_https {
+                current_url.clone()
+            } else {
+                parts.path_and_query.clone()
+            };
+            (p_parts, proxy_addrs)
+        } else {
+            let addrs = resolve_and_verify_ssrf_socket_addrs(&parts, explicit_host_grant)?;
+            (parts.clone(), addrs)
+        };
 
         let resp = execute_single_http11_hop(
-            &parts,
+            &dial_parts,
             &verified_addrs,
             &current_method,
             &current_headers,

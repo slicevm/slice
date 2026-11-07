@@ -392,9 +392,43 @@
     evalSandbox: function(code, opts) {
       return JSON.parse(__slice_eval_sandbox(String(code), opts ? JSON.stringify(opts) : "{}"));
     },
+    serve: function(optsOrHandler, maybeHandler) {
+      __loadShard(1);
+      __loadShard(11);
+      var handler = typeof optsOrHandler === "function" ? optsOrHandler : (typeof maybeHandler === "function" ? maybeHandler : (optsOrHandler && typeof optsOrHandler.fetch === "function" ? optsOrHandler : null));
+      var o = (optsOrHandler && typeof optsOrHandler === "object") ? optsOrHandler : {};
+      var port = Number(o.port) || 8787;
+      var hostname = String(o.hostname || o.host || "127.0.0.1");
+      if (handler) {
+        globalThis.__slice_active_http_server = {
+          _handler: handler,
+          _dispatchActiveHttpBridge: function() {
+            globalThis.__slice_dispatch_fetch(handler);
+          }
+        };
+        if (typeof __slice_http_is_active === "function" && __slice_http_is_active()) {
+          globalThis.__slice_dispatch_fetch(handler);
+        }
+      }
+      if (typeof o.onListen === "function") {
+        queueMicrotask(function() { o.onListen({ port: port, hostname: hostname }); });
+      }
+      return {
+        port: port,
+        hostname: hostname,
+        addr: { transport: "tcp", hostname: hostname, port: port },
+        finished: Promise.resolve(),
+        stop: function() { globalThis.__slice_active_http_server = null; },
+        shutdown: function() { globalThis.__slice_active_http_server = null; return Promise.resolve(); },
+        ref: function() {},
+        unref: function() {}
+      };
+    },
     testSummary: function() { return __tMod().summary(); },
     resetTests: function() { return __tMod().reset(); }
   };
+  globalThis.Deno = globalThis.Deno || { serve: globalThis.Slice.serve };
+  globalThis.Bun = globalThis.Bun || { serve: globalThis.Slice.serve };
 
   globalThis.__slice_builtins = Object.create(null);
   globalThis.__slice_cjs_require = function(id) {

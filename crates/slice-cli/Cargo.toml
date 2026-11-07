@@ -21,6 +21,8 @@ libc.workspace = true
 notify.workspace = true
 memchr.workspace = true
 itoa.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

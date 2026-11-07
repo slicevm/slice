@@ -28,12 +28,22 @@ const exists: boolean = fs.existsSync("/tmp/report.json");
 const content: string = fs.readFileSync("/tmp/report.json", "utf8");
 const rawBuf: Buffer = fs.readFileSync("/tmp/report.json");
 
-// Directories, metadata & cleanup
+// Directories, metadata, symlinks, temp dirs & cleanup
 fs.mkdirSync("/tmp/shards", { recursive: true });
+const tmpDir: string = fs.mkdtempSync("/tmp/job-"); // CoW VFS-aware — rolls back in < 5 us on Slice.restore()!
+fs.symlinkSync("/tmp/report.json", `${tmpDir}/latest.json`);
+const realTarget: string = fs.realpathSync(`${tmpDir}/latest.json`);
+const lstats = fs.lstatSync(`${tmpDir}/latest.json`); // lstats.isSymbolicLink() === true
 const files: string[] = fs.readdirSync("/tmp");
 const stats = fs.statSync("/tmp/report.json"); // { size, isFile(), isDirectory(), mtimeMs, mtime }
+fs.chmodSync("/tmp/report.json", 0o644);
 fs.unlinkSync("/tmp/report.v2.json");
 fs.rmSync("/tmp/shards", { recursive: true, force: true });
+
+// 64 KB Streaming File I/O (fs.createReadStream & fs.createWriteStream)
+const rs = fs.createReadStream("/tmp/report.json", { highWaterMark: 65536 });
+const ws = fs.createWriteStream(`${tmpDir}/streamed.json`);
+rs.pipe(ws);
 
 // Promise-based API (node:fs/promises or fs.promises)
 await fsp.writeFile("/tmp/async.txt", "hello");
@@ -164,6 +174,29 @@ const t0: bigint = process.hrtime.bigint();
 // Sandboxed node:vm backed by Slice.evalSandbox (5-Ring OCap + fuel metered):
 const ctx = vm.createContext({ count: 10 });
 const vmOut = vm.runInContext("count += 32; count", ctx, { timeout: 50 }); // 42
+```
+
+### 1.7b `node:stream`, `node:stream/promises`, `node:stream/web`, `node:http`, `node:https`, & `Slice.serve`
+Slice provides a full `EventEmitter`-based `node:stream` hierarchy (`Readable`, `Writable`, `Duplex`, `Transform`, `PassThrough`, `pipeline`, `finished`, `Readable.fromWeb` / `Readable.toWeb`, `Writable.fromWeb` / `Writable.toWeb`) and `node:http` / `node:https` (`IncomingMessage`, `ServerResponse`, `Server`, `createServer`, `ClientRequest`, `request`, `get`, `Agent`, `STATUS_CODES`, `METHODS`), plus `Slice.serve` (`Deno.serve` / `Bun.serve` aliases). Incoming HTTP requests in `slice serve` bridge directly in-memory to `http.createServer` or `Slice.serve` handlers with zero loopback socket overhead:
+```typescript
+import * as http from "node:http";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+
+// Stream pipeline + WHATWG ReadableStream interoperability:
+const upper = new Transform({
+    transform(chunk, _enc, cb) {
+        cb(null, Buffer.from(chunk).toString("utf8").toUpperCase());
+    },
+});
+const webStream = Readable.toWeb(Readable.from(["slice-", "streams"]));
+
+// Express / Polka / Node http.createServer works in both `slice run` and `slice serve`:
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ method: req.method, url: req.url }));
+});
+server.listen(3000);
 ```
 
 ### 1.8 `slice:test` / `node:test` / `bun:test`

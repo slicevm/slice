@@ -1672,5 +1672,268 @@ crypto.pbkdf2Sync("pass", "salt", 50_000_000, 32, "sha256");
     );
 }
 
+#[test]
+fn test_phase3_node_stream_readable_writable_transform_pipeline() {
+    let script = r#"
+import { Readable, Writable, Transform, PassThrough, pipeline, finished } from "node:stream";
+import * as streamPromises from "node:stream/promises";
+
+async function run() {
+    // 1. Transform + PassThrough + stream/promises pipeline
+    const src = Readable.from(["alpha", "beta", "gamma"]);
+    const upper = new Transform({
+        objectMode: true,
+        transform(chunk, _enc, cb) {
+            cb(null, String(chunk).toUpperCase());
+        },
+        flush(cb) {
+            this.push("FINAL");
+            cb(null);
+        }
+    });
+    const pt = new PassThrough({ objectMode: true });
+    const collected: string[] = [];
+    const sink = new Writable({
+        objectMode: true,
+        write(chunk, _enc, cb) {
+            collected.push(String(chunk));
+            cb(null);
+        }
+    });
+    await streamPromises.pipeline(src, upper, pt, sink);
+
+    // 2. Async iterator on Readable
+    const iterSrc = Readable.from(["one", "two", "three"]);
+    const iterItems: string[] = [];
+    for await (const item of iterSrc) {
+        iterItems.push(String(item));
+    }
+
+    // 3. Readable.fromWeb / Readable.toWeb & Writable.fromWeb / Writable.toWeb
+    const webRs = new ReadableStream({
+        start(ctrl) {
+            ctrl.enqueue("web-1");
+            ctrl.enqueue("web-2");
+            ctrl.close();
+        }
+    });
+    const nodeFromWeb = Readable.fromWeb(webRs, { objectMode: true });
+    const fromWebItems: string[] = [];
+    for await (const c of nodeFromWeb) {
+        fromWebItems.push(String(c));
+    }
+
+    const webSinkItems: string[] = [];
+    const webWs = new WritableStream({
+        write(c) {
+            webSinkItems.push(String(c));
+        }
+    });
+    const nodeToWebWs = Writable.fromWeb(webWs, { objectMode: true });
+    nodeToWebWs.write("to-web-a");
+    nodeToWebWs.end("to-web-b");
+    await streamPromises.finished(nodeToWebWs);
+
+    // 4. Callback pipeline error propagation
+    let pipeErrMsg = "";
+    await new Promise<void>((resolve) => {
+        const s1 = Readable.from(["boom"]);
+        const badT = new Transform({
+            objectMode: true,
+            transform(_c, _e, cb) {
+                cb(new Error("TransformExploded"));
+            }
+        });
+        const s2 = new Writable({ objectMode: true, write(_c, _e, cb) { cb(null); } });
+        pipeline(s1, badT, s2, (err: any) => {
+            pipeErrMsg = err ? String(err.message || err) : "";
+            resolve();
+        });
+    });
+
+    console.log(JSON.stringify({
+        collected,
+        iterItems,
+        fromWebItems,
+        webSinkItems,
+        pipeErrMsg
+    }));
+}
+run();
+"#;
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "phase3-stream-tenant",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(
+        out["collected"],
+        serde_json::json!(["ALPHA", "BETA", "GAMMA", "FINAL"])
+    );
+    assert_eq!(out["iterItems"], serde_json::json!(["one", "two", "three"]));
+    assert_eq!(out["fromWebItems"], serde_json::json!(["web-1", "web-2"]));
+    assert_eq!(
+        out["webSinkItems"],
+        serde_json::json!(["to-web-a", "to-web-b"])
+    );
+    assert_eq!(out["pipeErrMsg"], "TransformExploded");
+}
+
+#[test]
+fn test_phase3_fs_read_write_streams_and_mkdtemp_cow() {
+    let script = r#"
+import fs from "node:fs";
+import { pipeline } from "node:stream/promises";
+
+async function run() {
+    const snap = Slice.checkpoint();
+
+    const tmpDir = fs.mkdtempSync("/tmp/slice-phase3-");
+    const fileA = tmpDir + "/input.txt";
+    const fileB = tmpDir + "/copied.txt";
+    const symB = tmpDir + "/link-copied.txt";
+
+    fs.writeFileSync(fileA, "stream-payload-0123456789");
+
+    const ws = fs.createWriteStream(fileB);
+    const rs = fs.createReadStream(fileA, { highWaterMark: 8 });
+    await pipeline(rs, ws);
+
+    fs.symlinkSync(fileB, symB);
+    const lstatSym = fs.lstatSync(symB);
+    const statSym = fs.statSync(symB);
+    const realSym = fs.realpathSync(symB);
+    const readViaSym = fs.readFileSync(symB, "utf8");
+
+    const dir = await fs.promises.opendir(tmpDir);
+    const entries: string[] = [];
+    for await (const dirent of dir) {
+        entries.push(dirent.name);
+    }
+
+    const existsBeforeRestore = fs.existsSync(fileB);
+    Slice.restore(snap);
+    const existsAfterRestore = fs.existsSync(fileB) || fs.existsSync(tmpDir);
+
+    console.log(JSON.stringify({
+        hasPrefix: tmpDir.startsWith("/tmp/slice-phase3-"),
+        readViaSym,
+        isSymLstat: lstatSym.isSymbolicLink(),
+        isFileStat: statSym.isFile(),
+        realEndsWithCopied: realSym.endsWith("/copied.txt"),
+        entriesCount: entries.length,
+        existsBeforeRestore,
+        existsAfterRestore
+    }));
+}
+run();
+"#;
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/tmp")
+        .with_write_prefix("/tmp");
+    let mut iso = SliceIsolate::spawn("phase3-fs-cow-tenant", 1, caps, 5_000_000, 8 * 1024 * 1024);
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(out["hasPrefix"], true);
+    assert_eq!(out["readViaSym"], "stream-payload-0123456789");
+    assert_eq!(out["isSymLstat"], true);
+    assert_eq!(out["isFileStat"], true);
+    assert_eq!(out["realEndsWithCopied"], true);
+    assert_eq!(out["entriesCount"], 3);
+    assert_eq!(out["existsBeforeRestore"], true);
+    assert_eq!(out["existsAfterRestore"], false);
+}
+
+#[test]
+fn test_phase3_node_http_create_server_and_client_request() {
+    let script = r#"
+import http from "node:http";
+
+async function run() {
+    // 1. Test outbound http.get via Slice.mockFetch
+    Slice.mockFetch("http://api.internal.example/v1/items", {
+        status: 200,
+        headers: { "content-type": "application/json", "x-upstream": "mocked" },
+        body: JSON.stringify({ items: [10, 20, 30] })
+    });
+
+    const outboundRes = await new Promise<any>((resolve, reject) => {
+        http.get("http://api.internal.example/v1/items", (res: any) => {
+            let raw = "";
+            res.setEncoding("utf8");
+            res.on("data", (chunk: string) => { raw += chunk; });
+            res.on("end", () => {
+                resolve({
+                    statusCode: res.statusCode,
+                    upstream: res.headers["x-upstream"],
+                    parsed: JSON.parse(raw)
+                });
+            });
+        }).on("error", reject);
+    });
+
+    // 2. Register an http.createServer listener that also bridges to execute_http_request
+    const server = http.createServer((req: any, res: any) => {
+        if (req.url === "/bridge-check") {
+            res.writeHead(202, {
+                "Content-Type": "application/json",
+                "X-Node-Server": "active"
+            });
+            res.end(JSON.stringify({ method: req.method, url: req.url, bridged: true }));
+            return;
+        }
+        res.statusCode = 404;
+        res.end("not-found");
+    });
+    server.listen(8080);
+
+    console.log(JSON.stringify({ outboundRes }));
+}
+run();
+"#;
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let caps = CapabilityToken::pure_compute().with_net_host("api.internal.example");
+    let mut iso =
+        SliceIsolate::spawn("phase3-http-tenant", 1, caps, 5_000_000, 8 * 1024 * 1024);
+
+    // Execute as an inbound HTTP request to `/bridge-check` so both outbound http.get and inbound http.createServer bridge are verified
+    let req_ctx = crate::HttpRequestContext {
+        method: "POST",
+        path: "/bridge-check",
+        query: "",
+        tenant_id: "phase3-http-tenant",
+        body: r#"{"ping":1}"#,
+        headers: &[("content-type", "application/json")],
+    };
+    let outcome = iso.execute_http_request(&bc, None, &req_ctx).unwrap();
+    assert_eq!(outcome.status_code, 202);
+    assert_eq!(outcome.content_type, "application/json");
+    assert!(outcome
+        .response_headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-node-server") && v == "active"));
+    let bridge_json: serde_json::Value = serde_json::from_str(&outcome.response_body).unwrap();
+    assert_eq!(bridge_json["bridged"], true);
+    assert_eq!(bridge_json["method"], "POST");
+
+    let stdout_json: serde_json::Value = serde_json::from_str(&outcome.metrics.stdout[0]).unwrap();
+    assert_eq!(stdout_json["outboundRes"]["statusCode"], 200);
+    assert_eq!(stdout_json["outboundRes"]["upstream"], "mocked");
+    assert_eq!(
+        stdout_json["outboundRes"]["parsed"]["items"],
+        serde_json::json!([10, 20, 30])
+    );
+}
+
+
 
 

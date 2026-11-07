@@ -53,6 +53,8 @@ pub(crate) struct ResolvedExecutionConfig {
     pub(crate) server_port: Option<u16>,
     pub(crate) server_workers: Option<usize>,
     pub(crate) static_dir: Option<PathBuf>,
+    pub(crate) tls_cert: Option<PathBuf>,
+    pub(crate) tls_key: Option<PathBuf>,
     pub(crate) trust_directives: bool,
     pub(crate) cli_fuel_override: Option<u64>,
     pub(crate) cli_mem_override: Option<usize>,
@@ -63,6 +65,8 @@ pub(crate) struct ResolvedExecutionConfig {
     pub(crate) cli_port_override: Option<u16>,
     pub(crate) cli_workers_override: Option<usize>,
     pub(crate) cli_static_override: Option<PathBuf>,
+    pub(crate) cli_tls_cert_override: Option<PathBuf>,
+    pub(crate) cli_tls_key_override: Option<PathBuf>,
     pub(crate) cli_trust_directives_override: Option<bool>,
 }
 
@@ -76,6 +80,8 @@ impl ResolvedExecutionConfig {
         let mut server_port = None;
         let mut server_workers = None;
         let mut static_dir = None;
+        let mut tls_cert = None;
+        let mut tls_key = None;
         let mut trust_directives = false;
 
         let mut cli_fuel_override = None;
@@ -87,6 +93,8 @@ impl ResolvedExecutionConfig {
         let mut cli_port_override = None;
         let mut cli_workers_override = None;
         let mut cli_static_override = None;
+        let mut cli_tls_cert_override = None;
+        let mut cli_tls_key_override = None;
         let mut cli_trust_directives_override = None;
 
         // 1. Apply `./slice.toml` if present in cwd
@@ -108,6 +116,12 @@ impl ResolvedExecutionConfig {
                 }
                 if let Some(sd) = m.static_dir {
                     static_dir = Some(PathBuf::from(sd));
+                }
+                if let Some(tc) = m.tls_cert {
+                    tls_cert = Some(PathBuf::from(tc));
+                }
+                if let Some(tk) = m.tls_key {
+                    tls_key = Some(PathBuf::from(tk));
                 }
                 if let Some(td) = m.trust_directives {
                     trust_directives = td;
@@ -232,6 +246,22 @@ impl ResolvedExecutionConfig {
                 let p = PathBuf::from(trimmed);
                 static_dir = Some(p.clone());
                 cli_static_override = Some(p);
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_TLS_CERT") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                let p = PathBuf::from(trimmed);
+                tls_cert = Some(p.clone());
+                cli_tls_cert_override = Some(p);
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_TLS_KEY") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                let p = PathBuf::from(trimmed);
+                tls_key = Some(p.clone());
+                cli_tls_key_override = Some(p);
             }
         }
         if let Ok(v) =
@@ -362,6 +392,14 @@ impl ResolvedExecutionConfig {
                 let p = PathBuf::from(sd_str);
                 static_dir = Some(p.clone());
                 cli_static_override = Some(p);
+            } else if let Some(tc_str) = arg.strip_prefix("--tls-cert=") {
+                let p = PathBuf::from(tc_str);
+                tls_cert = Some(p.clone());
+                cli_tls_cert_override = Some(p);
+            } else if let Some(tk_str) = arg.strip_prefix("--tls-key=") {
+                let p = PathBuf::from(tk_str);
+                tls_key = Some(p.clone());
+                cli_tls_key_override = Some(p);
             } else if arg == "--trust-directives" {
                 trust_directives = true;
                 cli_trust_directives_override = Some(true);
@@ -393,6 +431,8 @@ impl ResolvedExecutionConfig {
             server_port,
             server_workers,
             static_dir,
+            tls_cert,
+            tls_key,
             trust_directives,
             cli_fuel_override,
             cli_mem_override,
@@ -403,6 +443,8 @@ impl ResolvedExecutionConfig {
             cli_port_override,
             cli_workers_override,
             cli_static_override,
+            cli_tls_cert_override,
+            cli_tls_key_override,
             cli_trust_directives_override,
         })
     }
@@ -454,6 +496,24 @@ impl ResolvedExecutionConfig {
                     None => PathBuf::from(&sd),
                 };
                 self.static_dir = Some(p);
+            }
+        }
+        if self.cli_tls_cert_override.is_none() {
+            if let Some(tc) = m.tls_cert {
+                let p = match base_dir {
+                    Some(dir) => dir.join(&tc),
+                    None => PathBuf::from(&tc),
+                };
+                self.tls_cert = Some(p);
+            }
+        }
+        if self.cli_tls_key_override.is_none() {
+            if let Some(tk) = m.tls_key {
+                let p = match base_dir {
+                    Some(dir) => dir.join(&tk),
+                    None => PathBuf::from(&tk),
+                };
+                self.tls_key = Some(p);
             }
         }
         if self.cli_trust_directives_override.is_none() {
@@ -571,6 +631,24 @@ impl ResolvedExecutionConfig {
                     &mut self.caps,
                     &mut self.audit_secrets,
                 );
+            }
+            if self.cli_tls_cert_override.is_none() {
+                if let Some(tc) = dirs.tls_cert {
+                    let p = match base_dir {
+                        Some(dir) => dir.join(&tc),
+                        None => PathBuf::from(&tc),
+                    };
+                    self.tls_cert = Some(p);
+                }
+            }
+            if self.cli_tls_key_override.is_none() {
+                if let Some(tk) = dirs.tls_key {
+                    let p = match base_dir {
+                        Some(dir) => dir.join(&tk),
+                        None => PathBuf::from(&tk),
+                    };
+                    self.tls_key = Some(p);
+                }
             }
         } else {
             // Untrusted mode (default): monotonic capability attenuation only (never widens host caps)

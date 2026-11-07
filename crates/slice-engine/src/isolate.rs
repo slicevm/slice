@@ -1980,6 +1980,12 @@ impl SliceIsolate {
         {
             drive_event_loop_to_completion(&mut realm.ctx);
         }
+        if is_http_req && BOA_HTTP_RES.with(|res| res.borrow().is_none()) {
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"if(globalThis.__slice_active_http_server&&typeof globalThis.__slice_active_http_server._dispatchActiveHttpBridge==='function'){globalThis.__slice_active_http_server._dispatchActiveHttpBridge();}",
+            ));
+            drive_event_loop_to_completion(&mut realm.ctx);
+        }
         clear_event_loop_state();
 
         realm
@@ -2298,6 +2304,12 @@ impl SliceIsolate {
                 || BOA_HTTP_RES.with(|res| res.borrow().is_none())
                 || has_pending_event_loop_work())
         {
+            drive_event_loop_to_completion(&mut realm.ctx);
+        }
+        if is_http_req && BOA_HTTP_RES.with(|res| res.borrow().is_none()) {
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"if(globalThis.__slice_active_http_server&&typeof globalThis.__slice_active_http_server._dispatchActiveHttpBridge==='function'){globalThis.__slice_active_http_server._dispatchActiveHttpBridge();}",
+            ));
             drive_event_loop_to_completion(&mut realm.ctx);
         }
         clear_event_loop_state();
