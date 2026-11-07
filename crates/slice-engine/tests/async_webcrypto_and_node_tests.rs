@@ -1934,6 +1934,252 @@ run();
     );
 }
 
+#[test]
+fn test_phase4_child_process_deny_by_default() {
+    let script = r#"
+import { execFileSync } from "node:child_process";
+execFileSync("/bin/echo", ["hello"]);
+"#;
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "phase4-deny-tenant",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    let err = iso.execute_bytecode(&bc, None).unwrap_err();
+    match err {
+        SandboxViolation::ExecDenied { tenant_id, binary } => {
+            assert_eq!(tenant_id, "phase4-deny-tenant");
+            assert_eq!(binary, "/bin/echo");
+        }
+        other => panic!("Expected SandboxViolation::ExecDenied, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_phase4_child_process_allowlist_and_env_sanitization() {
+    std::env::set_var("SLICE_HOST_SECRET_UNLISTED", "TOP_SECRET_HOST_VAL_999");
+
+    let script = r#"
+import { execFileSync, spawnSync } from "node:child_process";
+
+const echoOut = execFileSync("/bin/echo", ["hello", "phase4"], { encoding: "utf8" }).trim();
+const envOut = execFileSync("/usr/bin/env", [], { encoding: "utf8" });
+
+let unlistedBinBlocked = false;
+try {
+    spawnSync("/usr/bin/curl", ["https://evil.example"]);
+} catch (e: any) {
+    unlistedBinBlocked = String(e && e.message || e).includes("[Slice Sandbox Violation] Subprocess execution denied");
+}
+
+let pathSpoofBlocked = false;
+try {
+    execFileSync("/tmp/evil/echo", ["spoof"]);
+} catch (e: any) {
+    pathSpoofBlocked = String(e && e.message || e).includes("[Slice Sandbox Violation] Subprocess execution denied");
+}
+
+const subEscalation = Slice.evalSandbox(
+    `const cp = require("node:child_process"); cp.execFileSync("/usr/bin/curl", []);`,
+    { allowExec: ["/usr/bin/curl"] }
+);
+
+console.log(JSON.stringify({
+    echoOut,
+    hasTenantAllowedEnv: envOut.includes("TENANT_ALLOWED_KEY=safe-tenant-val"),
+    leakedHostSecretKey: envOut.includes("SLICE_HOST_SECRET_UNLISTED"),
+    leakedHostSecretVal: envOut.includes("TOP_SECRET_HOST_VAL_999"),
+    unlistedBinBlocked,
+    pathSpoofBlocked,
+    subEscalationBlocked: !subEscalation.ok && String(subEscalation.violation || "").includes("Subprocess execution denied")
+}));
+"#;
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let caps = CapabilityToken::pure_compute()
+        .with_exec_binary("/bin/echo")
+        .with_exec_binary("/usr/bin/env")
+        .with_env("TENANT_ALLOWED_KEY", "safe-tenant-val");
+    let mut iso = SliceIsolate::spawn(
+        "phase4-allowlist-tenant",
+        1,
+        caps,
+        10_000_000,
+        16 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(out["echoOut"], "hello phase4");
+    assert_eq!(out["hasTenantAllowedEnv"], true);
+    assert_eq!(out["leakedHostSecretKey"], false);
+    assert_eq!(out["leakedHostSecretVal"], false);
+    assert_eq!(out["unlistedBinBlocked"], true);
+    assert_eq!(out["pathSpoofBlocked"], true);
+    assert_eq!(out["subEscalationBlocked"], true);
+}
+
+#[test]
+fn test_phase4_child_process_output_dlp_blocking() {
+    let script = r#"
+import { execFileSync } from "node:child_process";
+
+const safeOut = execFileSync("/bin/echo", ["PUBLIC_OK"], { encoding: "utf8" }).trim();
+let dlpBlocked = false;
+let dlpErr = "";
+try {
+    // `/usr/bin/env` outputs `OPENAI_API_KEY=sk-proj-phase4-super-secret-token` to stdout,
+    // which Ring 3 Output Egress DLP must intercept and block before JS receives it.
+    execFileSync("/usr/bin/env", [], { encoding: "utf8" });
+} catch (e: any) {
+    dlpBlocked = true;
+    dlpErr = String(e && e.message || e);
+}
+
+console.log(JSON.stringify({
+    safeOut,
+    dlpBlocked,
+    hasDlpViolationTag: dlpErr.includes("EGRESS_SECRET_LEAK_BLOCKED"),
+    secretNeverInError: !dlpErr.includes("sk-proj-phase4-super-secret-token")
+}));
+"#;
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let caps = CapabilityToken::pure_compute()
+        .with_exec_binary("/bin/echo")
+        .with_exec_binary("/usr/bin/env");
+    let mut iso =
+        SliceIsolate::spawn("phase4-dlp-tenant", 1, caps, 5_000_000, 8 * 1024 * 1024);
+    let dlp_count =
+        iso.load_dotenv_str("OPENAI_API_KEY=sk-proj-phase4-super-secret-token\nPUBLIC_TAG=v1\n");
+    assert_eq!(dlp_count, 1);
+
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(out["safeOut"], "PUBLIC_OK");
+    assert_eq!(out["dlpBlocked"], true);
+    assert_eq!(out["hasDlpViolationTag"], true);
+    assert_eq!(out["secretNeverInError"], true);
+}
+
+#[test]
+fn test_phase4_bounded_fetch_reactor_slab_reuse() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server_handle = std::thread::spawn(move || {
+        // Accept connections and handle HTTP/1.1 requests concurrently across a small server pool
+        let mut workers = Vec::new();
+        for _ in 0..50 {
+            if let Ok((mut stream, _)) = listener.accept() {
+                workers.push(std::thread::spawn(move || {
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let mut buf = [0u8; 2048];
+                    loop {
+                        let n = match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        let req_s = String::from_utf8_lossy(&buf[..n]);
+                        let path = req_s
+                            .lines()
+                            .next()
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .unwrap_or("/0");
+                        let body = format!(r#"{{"ok":true,"path":"{}"}}"#, path);
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        if stream.write_all(resp.as_bytes()).is_err() {
+                            break;
+                        }
+                        let _ = stream.flush();
+                        break;
+                    }
+                }));
+            }
+        }
+        for w in workers {
+            let _ = w.join();
+        }
+    });
+
+    crate::reset_fetch_reactor_telemetry();
+
+    let script = format!(
+        r#"
+async function run() {{
+    const urls = Array.from({{ length: 50 }}, (_, i) => `http://localhost:{port}/item-${{i}}`);
+    const responses = await Promise.all(urls.map((u) => fetch(u).then((r) => r.json())));
+    console.log(JSON.stringify({{
+        count: responses.length,
+        firstPath: responses[0].path,
+        lastPath: responses[49].path
+    }}));
+}}
+run();
+"#,
+        port = port
+    );
+
+    let bundled = slice_cas::strip_typescript_and_normalize(&script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let caps = CapabilityToken::pure_compute().with_net_host(format!("localhost:{}", port));
+    let mut iso = SliceIsolate::spawn(
+        "phase4-fetch-reactor-tenant",
+        1,
+        caps,
+        20_000_000,
+        32 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let _ = server_handle.join();
+
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(out["count"], 50);
+    assert_eq!(out["firstPath"], "/item-0");
+    assert_eq!(out["lastPath"], "/item-49");
+
+    let active_threads = crate::fetch_reactor_active_threads();
+    let thread_reuses = crate::fetch_reactor_pool_reuse_count();
+    let slab_acquires = crate::fetch_reactor_slab_acquire_count();
+    let slabs_in_use = crate::fetch_reactor_slab_in_use_count();
+    let slabs_avail = crate::fetch_reactor_slab_available_count();
+
+    assert!(
+        active_threads <= crate::MAX_FETCH_REACTOR_WORKERS,
+        "Expected active reactor threads <= {}, got {}",
+        crate::MAX_FETCH_REACTOR_WORKERS,
+        active_threads
+    );
+    assert!(
+        thread_reuses >= (50 - crate::MAX_FETCH_REACTOR_WORKERS) as u64,
+        "Expected reactor thread reuses >= {}, got {}",
+        50 - crate::MAX_FETCH_REACTOR_WORKERS,
+        thread_reuses
+    );
+    assert!(
+        slab_acquires >= 50,
+        "Expected >= 50 RegisteredBufferPool 64 KB slab acquisitions, got {}",
+        slab_acquires
+    );
+    assert_eq!(
+        slabs_in_use, 0,
+        "Expected 0 leaked slabs in use after completion, got {}",
+        slabs_in_use
+    );
+    assert_eq!(slabs_avail, 64);
+}
+
+
 
 
 

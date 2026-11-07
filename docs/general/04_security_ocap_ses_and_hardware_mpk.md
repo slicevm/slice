@@ -7,7 +7,7 @@ In Node.js and Bun, every `npm` package you install and every script you run inh
 | Ring | Defense Layer | What It Protects Against | Violation Error (`SandboxViolation`) |
 | :--- | :--- | :--- | :--- |
 | **Ring 1** | **SES Intrinsic Lockdown** | Prototype pollution (`Object.prototype.polluted = true`) across shared realms | `IntrinsicMutationBlocked` |
-| **Ring 2** | **OCap Filesystem Tokens (`FsCap`)** | Unauthorized file read/write & `..` directory traversal (`/etc/shadow`, `../../.env`) | `FsReadDenied` / `FsWriteDenied` |
+| **Ring 2** | **OCap Filesystem & Subprocess Tokens (`FsCap` & `ExecCap`)** | Unauthorized file read/write, `..` traversal, & unlisted subprocess execution | `FsReadDenied` / `FsWriteDenied` / `ExecDenied` |
 | **Ring 3** | **OCap Network & Env Tokens (`NetCap` & `EnvCap`)** | Unauthorized outbound `fetch()` & `process.env` / `env()` credential harvesting | `NetAccessDenied` / `EnvAccessDenied` |
 | **Ring 4** | **Deterministic CPU Fuel & Memory Cage** | Infinite loop CPU DoS (`while(true){}`) & heap/KV memory exhaustion | `CpuFuelExhausted` / `MemoryCeilingExceeded` |
 | **Ring 5** | **Cloud Metadata SSRF Shield, Egress Secret DLP & Hardware MPK** | `169.254.169.254` SSRF, Base64/raw secret exfiltration, & cross-tenant memory access | `SSRF_METADATA_BLOCKED` / `EGRESS_SECRET_LEAK_BLOCKED` |
@@ -155,6 +155,14 @@ Both the outbound `fetch()` / `WebSocket` client engine and the inbound `slice s
 - **RFC 9110 `tchar` Header & CRLF Injection Prevention:** Outbound and inbound header names are validated against a compile-time RFC 9110 `tchar` lookup table, and header values / request targets reject `\r`, `\n`, `\0`, and ASCII control characters to prevent HTTP Request/Response Splitting.
 - **RFC 9112 Request Smuggling (`CL.TE` / `TE.CL`) & Chunked Arithmetic Guards:** `slice serve` immediately rejects requests containing both `Transfer-Encoding` and `Content-Length` or conflicting duplicate `Content-Length` headers with `400 Bad Request` (`Connection: close`), validates chunked hex sizes with checked arithmetic, and caps inbound bodies at `4 MB` (`413 Payload Too Large`) and headers at 64 fields / 64 KB (`431 Request Header Fields Too Large`).
 - **Tenant-Partitioned Keep-Alive Pool & Outbound Memory Ceilings:** Warm Keep-Alive sockets are keyed by `(tenant_id, is_https, host_port)` so tenants never share an upstream connection, and outbound HTTP responses (`64 KB` max headers, `16 MB` max body) and WebSocket frames (`4 MB` max) are strictly bounded by the active tenant's remaining memory budget (`SandboxViolation::MemoryCeilingExceeded`).
+
+### 4.5 5-Ring OCap Subprocess Containment (`node:child_process` & `ExecCap`)
+When CLI tools or AI Code-Mode agents use `node:child_process` (`execFileSync`, `spawnSync`, `execSync`, `spawn`, `exec`, `execFile`), Slice enforces all 5 security rings:
+1. **Ring 1 — OCap `ExecCap` Binary Allowlist (`--allow-exec`):** Deny-All by default (`allowed_exec_binaries: []`). Any attempt to execute a binary not explicitly granted via `--allow-exec=/usr/bin/git`, `SLICE_ALLOW_EXEC`, or `[capabilities] allow_exec` (or attempting path spoofing such as `/tmp/evil/git` when `/usr/bin/git` is granted) immediately traps with `SandboxViolation::ExecDenied`.
+2. **Ring 2 — Environment Sanitization (`env_clear()`):** Spawned child processes **never** inherit the host OS `std::env::vars()`; they receive only the active tenant's attenuated `allowed_env_keys`.
+3. **Ring 3 — Child Stdio Output Egress DLP:** Both `stdout` and `stderr` produced by a child process are scanned by `verify_egress_secrets_slice` (raw, Base64, and Base64URL forms of `--audit-egress` and `.env` Auto-DLP secrets) before returning to JavaScript (`EGRESS_SECRET_LEAK_BLOCKED`).
+4. **Ring 4 — Execution Timeout & `maxBuffer` Ceiling:** Enforces hard execution timeouts (killing timed-out subprocesses) and `maxBuffer` byte ceilings.
+5. **Ring 5 — CPU Fuel, Memory Accounting & Sub-Isolate Attenuation:** Subprocess output bytes are charged against the tenant's fuel and memory budgets, and `Slice.evalSandbox(code, { allowExec: [...] })` / `new Worker(url, { slice: { allowExec: [...] } })` enforce strict subset attenuation (`child.allowExec ⊆ parent.allowExec`).
 
 ---
 

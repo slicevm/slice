@@ -37,8 +37,8 @@ Implemented in [`crates/slice-engine/src/workers.rs`](file:///p:/opensource/slic
 
 ## 3. Direct Kernel Completion Rings (`crates/slice-io`) & OS-Native File Watcher
 
-### 3.1 [`crates/slice-io`](file:///p:/opensource/slice/crates/slice-io/src/lib.rs): `io_uring` & `IOCP`
-- **Registered Slab Buffers (`RegisteredBufferPool`):** Pre-allocates `64 KB` page-aligned fixed buffers (`FIXED_BUFFER_SIZE = 65536`) with O(1) slot acquisition (`acquire_slot`) and release (`release_slot`) for zero-copy I/O transfers.
+### 3.1 [`crates/slice-io`](file:///p:/opensource/slice/crates/slice-io/src/lib.rs): `io_uring`, `IOCP`, & `RegisteredBufferPool` 64 KB Fetch Slabs
+- **Registered Slab Buffers (`RegisteredBufferPool`):** Pre-allocates 64 page-aligned fixed `64 KB` buffers (`FIXED_BUFFER_COUNT = 64`, `FIXED_BUFFER_SIZE = 65536`) with O(1) slot acquisition (`acquire_slot` / `buffer_mut`) and release (`release`). Integrated directly into `outbound_http::send_and_read_framed_http11` (`SHARED_FETCH_SLAB_POOL` + `FetchSlabSlotGuard`) and `event_loop::FetchReactorPool` (`MAX_FETCH_REACTOR_WORKERS = 16`) for zero-leak concurrent `fetch()` staging.
 - **Linux `io_uring` (`CompletionRingEngine`):** Attempts kernel ring setup with `IORING_SETUP_SQPOLL` (`IoUring::builder().setup_sqpoll(1000)`), enabling autonomous kernel thread submission polling with **0 system calls** on the hot path, and automatically falls back to standard `io_uring` or user-space completion rings inside unprivileged Docker seccomp profiles.
 - **Windows NT `IOCP`:** Binds directly to `CreateIoCompletionPort`, `PostQueuedCompletionStatus`, and `GetQueuedCompletionStatus` via `kernel32.dll` FFI, processing `10,000` completions in `0.02 ms - 5.26 ms`.
 

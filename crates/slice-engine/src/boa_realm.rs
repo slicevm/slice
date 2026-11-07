@@ -65,6 +65,10 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     pub(crate) static BOA_ENV_MAP: std::cell::RefCell<FxHashMap<String, String>> =
         std::cell::RefCell::new(FxHashMap::default());
+    pub(crate) static BOA_EXEC_BINS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    pub(crate) static BOA_LAST_CHILD_PROC_VIOLATION: std::cell::RefCell<Option<SandboxViolation>> =
+        const { std::cell::RefCell::new(None) };
     pub(crate) static BOA_FETCH_MOCKS: std::cell::RefCell<FxHashMap<String, String>> =
         std::cell::RefCell::new(FxHashMap::default());
     pub(crate) static CHECKPOINT_SLAB: std::cell::RefCell<FxHashMap<u64, StateCheckpoint>> =
@@ -343,6 +347,8 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_net_hosts: FxHashSet<String>,
     pub(crate) saved_egress_secrets: Vec<String>,
     pub(crate) saved_env_map: FxHashMap<String, String>,
+    pub(crate) saved_exec_bins: Vec<String>,
+    pub(crate) saved_last_cp_violation: Option<SandboxViolation>,
     pub(crate) saved_fetch_mocks: FxHashMap<String, String>,
     pub(crate) saved_ws_mocks: FxHashMap<String, String>,
     pub(crate) saved_sock_mocks: FxHashMap<String, String>,
@@ -367,6 +373,9 @@ impl SavedIsolateContextGuard {
         let saved_egress_secrets =
             BOA_EGRESS_SECRETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
         let saved_env_map = BOA_ENV_MAP.with(|m| m.borrow().clone());
+        let saved_exec_bins = BOA_EXEC_BINS.with(|b| std::mem::take(&mut *b.borrow_mut()));
+        let saved_last_cp_violation =
+            BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
         let saved_fetch_mocks = BOA_FETCH_MOCKS.with(|m| m.borrow().clone());
         let saved_ws_mocks = crate::websocket::BOA_WS_MOCKS.with(|m| m.borrow().clone());
         let saved_sock_mocks = crate::sockets::BOA_SOCKET_MOCKS.with(|m| m.borrow().clone());
@@ -393,6 +402,8 @@ impl SavedIsolateContextGuard {
             saved_net_hosts,
             saved_egress_secrets,
             saved_env_map,
+            saved_exec_bins,
+            saved_last_cp_violation,
             saved_fetch_mocks,
             saved_ws_mocks,
             saved_sock_mocks,
@@ -422,6 +433,9 @@ impl Drop for SavedIsolateContextGuard {
         BOA_EGRESS_SECRETS
             .with(|s| *s.borrow_mut() = std::mem::take(&mut self.saved_egress_secrets));
         BOA_ENV_MAP.with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_env_map));
+        BOA_EXEC_BINS.with(|b| *b.borrow_mut() = std::mem::take(&mut self.saved_exec_bins));
+        BOA_LAST_CHILD_PROC_VIOLATION
+            .with(|v| *v.borrow_mut() = self.saved_last_cp_violation.take());
         BOA_FETCH_MOCKS.with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_fetch_mocks));
         crate::websocket::BOA_WS_MOCKS
             .with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_ws_mocks));

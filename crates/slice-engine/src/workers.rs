@@ -10,8 +10,8 @@
 
 use crate::boa_realm::{
     check_boa_fs_read_ocap, norm_vfs_path, BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_DET_STATE,
-    BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_FETCH_MOCKS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
-    BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VIOLATION,
+    BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, BOA_FETCH_MOCKS, BOA_KV_MEM_BUDGET,
+    BOA_NET_HOSTS, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VIOLATION,
 };
 use crate::intrinsics::base64_decode;
 use crate::isolate::SliceIsolate;
@@ -105,6 +105,7 @@ pub struct WorkerSliceAttenuationOpts {
     pub allow_read: Option<Vec<String>>,
     pub allow_write: Option<Vec<String>>,
     pub allow_net: Option<Vec<String>>,
+    pub allow_exec: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -419,6 +420,23 @@ fn build_attenuated_worker_caps(
     // 4. Inherit allowed environment variables
     for (k, v) in parent_env_map {
         child_caps = child_caps.with_env(k.clone(), v.clone());
+    }
+
+    // 5. Attenuate allowed exec binaries against parent's `BOA_EXEC_BINS`
+    let parent_execs = BOA_EXEC_BINS.with(|eb_cell| eb_cell.borrow().clone());
+    if let Some(req_execs) = attenuation.and_then(|a| a.allow_exec.as_ref()) {
+        for req_bin in req_execs {
+            if parent_execs
+                .iter()
+                .any(|allowed| slice_sandbox::exec_binary_matches(req_bin, allowed))
+            {
+                child_caps = child_caps.with_exec_binary(req_bin.clone());
+            }
+        }
+    } else {
+        for eb in &parent_execs {
+            child_caps = child_caps.with_exec_binary(eb.clone());
+        }
     }
 
     child_caps

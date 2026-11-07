@@ -48,6 +48,33 @@ impl RegisteredBufferPool {
     }
 
     #[inline]
+    pub fn acquire_slot(&mut self) -> Option<u16> {
+        let idx = self.free_list.pop_front()?;
+        self.in_use[idx as usize] = true;
+        Some(idx)
+    }
+
+    #[inline]
+    pub fn buffer_mut(&mut self, idx: u16) -> Option<&mut [u8]> {
+        let slot = idx as usize;
+        if slot < self.buffers.len() && self.in_use[slot] {
+            Some(&mut self.buffers[slot][..])
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn in_use_count(&self) -> usize {
+        self.in_use.iter().filter(|&&b| b).count()
+    }
+
+    #[inline]
+    pub fn available_count(&self) -> usize {
+        self.free_list.len()
+    }
+
+    #[inline]
     pub fn release(&mut self, idx: u16) {
         let slot = idx as usize;
         if slot < self.in_use.len() && self.in_use[slot] {

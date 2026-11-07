@@ -266,6 +266,10 @@ allow_write = ["/tmp"]
 # Use ["*"] to allow all public hosts (Cloud Metadata 169.254.169.254 and RFC1918 private IPs remain blocked!).
 allow_net = ["api.stripe.com:443", "127.0.0.1:18095"]
 
+# Allowed subprocess binaries for node:child_process (`ExecCap` — Deny-All by default).
+# Child processes receive ONLY tenant-attenuated environment variables and their stdout/stderr are scanned by Egress DLP.
+allow_exec = ["/usr/bin/git", "/bin/echo"]
+
 # Optional .env file loaded automatically into process.env and env().
 # Any key matching *_SECRET*, *_TOKEN*, *_KEY*, *_PASSWORD*, or *_PRIVATE*
 # (except PUBLIC_KEY / PUBLISHABLE_KEY) is automatically registered into the Egress DLP guard!
@@ -313,6 +317,7 @@ For single-file scripts, benchmarks, or self-contained tests where you do not wa
 // @slice-allow-read: ["/tmp", "./data"]
 // @slice-allow-write: ["/tmp"]
 // @slice-allow-net: ["api.example.com:443"]
+// @slice-allow-exec: ["/usr/bin/git"]
 // @slice-allow-env: ["NODE_ENV=production"]
 // @slice-env-file: .env
 // @slice-audit-egress: ["sk_live_inline_secret"]
@@ -337,6 +342,7 @@ console.log("Running with self-contained inline directives!");
 | **VFS Read Prefixes** | `[]` (Zero access) | `[capabilities] allow_read = [...]` | `// @slice-allow-read: ["/tmp"]` | `SLICE_ALLOW_READ=/tmp,./data` | `--allow-read=/tmp` |
 | **VFS Write Prefixes** | `[]` (Zero access) | `[capabilities] allow_write = [...]` | `// @slice-allow-write: ["/tmp"]` | `SLICE_ALLOW_WRITE=/tmp` | `--allow-write=/tmp` |
 | **Network Hosts** | `[]` (Zero access) | `[capabilities] allow_net = [...]` | `// @slice-allow-net: ["host:443"]` | `SLICE_ALLOW_NET=host:443` | `--allow-net=host:443` |
+| **Exec Binaries (`ExecCap`)** | `[]` (Deny-All) | `[capabilities] allow_exec = [...]` | `// @slice-allow-exec: ["/usr/bin/git"]` | `SLICE_ALLOW_EXEC=/usr/bin/git` | `--allow-exec=/usr/bin/git` |
 | **Env Variables** | `{}` (Zero access) | `[capabilities.env] KEY = "VAL"` | `// @slice-allow-env: ["KEY=VAL"]` | `SLICE_ALLOW_ENV=KEY=VAL` | `--allow-env=KEY=VAL` |
 | **Dotenv Vault File** | `None` | `[capabilities] env_file = ".env"` | `// @slice-env-file: .env` | `SLICE_ENV_FILE=.env` | `--env-file=.env` |
 | **Egress DLP Secrets** | Auto from `.env` | `[capabilities] audit_egress = [...]` | `// @slice-audit-egress: ["sec"]` | `SLICE_AUDIT_EGRESS=sec1,sec2` | `--audit-egress=sec1` |
@@ -380,6 +386,7 @@ Executes a `.ts`/`.js` file, a project folder (with `package.json`, `slice.toml`
 | `--allow-read=<prefix>` | Grant read access to paths starting with `<prefix>` (comma-separated or repeatable). |
 | `--allow-write=<prefix>` | Grant write/append/mkdir/unlink access to paths starting with `<prefix>`. |
 | `--allow-net=<host:port>` | Grant outbound `fetch()` network access to `<host:port>` (or `*` for public internet). |
+| `--allow-exec=<binary>` | Grant `node:child_process` execution authority (`ExecCap`) for `<binary>` (comma-separated or repeatable; Deny-All by default). |
 | `--allow-env=<KEY=VAL>` | Inject `KEY=VAL` (or import `KEY` from host environment) into the isolate. |
 | `--env-file=<path>` | Load `.env` file into `process.env` / `env()` with automatic Egress DLP secret protection. |
 | `--audit-egress=<secret>` | Explicitly register `<secret>` into the Egress DLP guard (blocks raw, Base64, and Base64URL leaks). |

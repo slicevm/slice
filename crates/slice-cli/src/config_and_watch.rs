@@ -179,6 +179,13 @@ impl ResolvedExecutionConfig {
                 caps = caps.with_net_host(item);
             }
         }
+        if let Ok(v) = std::env::var("SLICE_ALLOW_EXEC") {
+            for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                if !caps.allowed_exec_binaries.contains(&item.to_string()) {
+                    caps = caps.with_exec_binary(item);
+                }
+            }
+        }
         if let Ok(v) = std::env::var("SLICE_ALLOW_ENV") {
             for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                 if let Some((k, val)) = item.split_once('=') {
@@ -294,6 +301,12 @@ impl ResolvedExecutionConfig {
             } else if let Some(host) = arg.strip_prefix("--allow-net=") {
                 for h in host.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     caps = caps.with_net_host(h);
+                }
+            } else if let Some(bins) = arg.strip_prefix("--allow-exec=") {
+                for b in bins.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if !caps.allowed_exec_binaries.contains(&b.to_string()) {
+                        caps = caps.with_exec_binary(b);
+                    }
                 }
             } else if let Some(kv) = arg.strip_prefix("--allow-env=") {
                 if let Some((k, v)) = kv.split_once('=') {
@@ -612,6 +625,11 @@ impl ResolvedExecutionConfig {
             for nh in dirs.allow_net {
                 self.caps.allowed_net_hosts.insert(nh);
             }
+            for eb in dirs.allow_exec {
+                if !self.caps.allowed_exec_binaries.contains(&eb) {
+                    self.caps.allowed_exec_binaries.push(eb);
+                }
+            }
             for (k, v) in dirs.allow_env {
                 if v.len() >= 6
                     && slice_sandbox::is_sensitive_env_key(&k)
@@ -699,6 +717,21 @@ impl ResolvedExecutionConfig {
                     }
                 }
             }
+            if !dirs.allow_exec.is_empty() && !self.caps.allowed_exec_binaries.is_empty() {
+                let narrowed: Vec<String> = dirs
+                    .allow_exec
+                    .into_iter()
+                    .filter(|eb| {
+                        self.caps
+                            .allowed_exec_binaries
+                            .iter()
+                            .any(|allowed| slice_sandbox::exec_binary_matches(eb, allowed))
+                    })
+                    .collect();
+                if !narrowed.is_empty() {
+                    self.caps.allowed_exec_binaries = narrowed;
+                }
+            }
         }
     }
 
@@ -753,6 +786,11 @@ pub(crate) fn merge_manifest_toml_into_caps_and_dlp(
     }
     for nh in m.capabilities.allowed_net_hosts {
         caps.allowed_net_hosts.insert(nh);
+    }
+    for eb in m.capabilities.allowed_exec_binaries {
+        if !caps.allowed_exec_binaries.contains(&eb) {
+            caps.allowed_exec_binaries.push(eb);
+        }
     }
     for (k, v) in m.capabilities.allowed_env_keys {
         if v.len() >= 6 && slice_sandbox::is_sensitive_env_key(&k) && !audit_secrets.contains(&v) {

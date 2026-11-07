@@ -4,8 +4,9 @@
 use crate::boa_realm::{
     acquire_warm_boa_realm, create_warm_boa_realm, ensure_realm_shards, release_warm_boa_realm,
     BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_CONTEXT_POOL, BOA_DET_STATE, BOA_EGRESS_SECRETS,
-    BOA_ENV_MAP, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET,
-    BOA_NET_HOSTS, BOA_STDOUT, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
+    BOA_ENV_MAP, BOA_EXEC_BINS, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES,
+    BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_NET_HOSTS, BOA_STDOUT, BOA_VIOLATION,
+    BOA_WAIT_UNTIL_COUNT,
 };
 use crate::event_loop::{
     clear_event_loop_state, drive_event_loop_to_completion, has_pending_event_loop_work,
@@ -68,6 +69,8 @@ pub struct SandboxEvalOptions {
     pub allow_write: Vec<String>,
     #[serde(default)]
     pub allow_net: Vec<String>,
+    #[serde(default)]
+    pub allow_exec: Vec<String>,
     pub deterministic_seed: Option<u64>,
     pub audit_secret: Option<String>,
 }
@@ -265,6 +268,19 @@ impl SliceIsolate {
         } else {
             for h in parent_nets {
                 child_caps = child_caps.with_net_host(h.clone());
+            }
+        }
+
+        let parent_execs = &self.compartment.capabilities.allowed_exec_binaries;
+        if !opts.allow_exec.is_empty() {
+            for req_bin in &opts.allow_exec {
+                if self.compartment.verify_exec_binary(req_bin).is_ok() {
+                    child_caps = child_caps.with_exec_binary(req_bin.clone());
+                }
+            }
+        } else {
+            for eb in parent_execs {
+                child_caps = child_caps.with_exec_binary(eb.clone());
             }
         }
 
@@ -875,6 +891,17 @@ impl SliceIsolate {
                 *m.borrow_mut() = self.compartment.capabilities.allowed_env_keys.clone();
             });
         }
+        let has_exec_bins = !self
+            .compartment
+            .capabilities
+            .allowed_exec_binaries
+            .is_empty();
+        if has_exec_bins {
+            BOA_EXEC_BINS.with(|b| {
+                *b.borrow_mut() = self.compartment.capabilities.allowed_exec_binaries.clone();
+            });
+        }
+        BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
         let mut realm = acquire_warm_boa_realm();
         ensure_realm_shards(&mut realm, (1 << 13) | (1 << 7), false);
         if has_env_keys {
@@ -890,7 +917,7 @@ impl SliceIsolate {
             code,
             serde_json::to_string(reason).unwrap_or_else(|_| "\"\"".to_string()),
         );
-        let _ = realm
+        let eval_res = realm
             .ctx
             .eval(boa_engine::Source::from_bytes(js_call.as_bytes()));
         drive_event_loop_to_completion(&mut realm.ctx);
@@ -900,6 +927,19 @@ impl SliceIsolate {
                 b"__slice_sync_process_env(false);",
             ));
             BOA_ENV_MAP.with(|m| m.borrow_mut().clear());
+        }
+        if has_exec_bins {
+            BOA_EXEC_BINS.with(|b| b.borrow_mut().clear());
+        }
+        let last_cp_violation = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
+        if eval_res.is_err() {
+            if let Some(cp_v) = last_cp_violation {
+                BOA_VIOLATION.with(|v| {
+                    if v.borrow().is_none() {
+                        *v.borrow_mut() = Some(cp_v);
+                    }
+                });
+            }
         }
         if has_egress_secrets {
             BOA_EGRESS_SECRETS.with(|s| s.borrow_mut().clear());
@@ -1840,6 +1880,17 @@ impl SliceIsolate {
                 *m.borrow_mut() = self.compartment.capabilities.allowed_env_keys.clone();
             });
         }
+        let has_exec_bins = !self
+            .compartment
+            .capabilities
+            .allowed_exec_binaries
+            .is_empty();
+        if has_exec_bins {
+            BOA_EXEC_BINS.with(|b| {
+                *b.borrow_mut() = self.compartment.capabilities.allowed_exec_binaries.clone();
+            });
+        }
+        BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
 
         let is_worker = crate::workers::is_worker_thread();
         if !is_worker && (js_code.contains("Worker") || js_code.contains("worker_threads")) {
@@ -2034,6 +2085,19 @@ impl SliceIsolate {
             ));
             BOA_ENV_MAP.with(|m| m.borrow_mut().clear());
         }
+        if has_exec_bins {
+            BOA_EXEC_BINS.with(|b| b.borrow_mut().clear());
+        }
+        let last_cp_violation = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
+        if eval_res.is_err() {
+            if let Some(cp_v) = last_cp_violation {
+                BOA_VIOLATION.with(|v| {
+                    if v.borrow().is_none() {
+                        *v.borrow_mut() = Some(cp_v);
+                    }
+                });
+            }
+        }
         if has_next_tick {
             let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
                 b"__slice_set_next_tick_hook(false);",
@@ -2189,6 +2253,17 @@ impl SliceIsolate {
                 *m.borrow_mut() = self.compartment.capabilities.allowed_env_keys.clone();
             });
         }
+        let has_exec_bins = !self
+            .compartment
+            .capabilities
+            .allowed_exec_binaries
+            .is_empty();
+        if has_exec_bins {
+            BOA_EXEC_BINS.with(|b| {
+                *b.borrow_mut() = self.compartment.capabilities.allowed_exec_binaries.clone();
+            });
+        }
+        BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
 
         let is_worker = crate::workers::is_worker_thread();
         if !is_worker && (header.feature_flags & BOACAS_FLAG_HAS_WORKER) != 0 {
@@ -2354,6 +2429,19 @@ impl SliceIsolate {
                 b"__slice_sync_process_env(false);",
             ));
             BOA_ENV_MAP.with(|m| m.borrow_mut().clear());
+        }
+        if has_exec_bins {
+            BOA_EXEC_BINS.with(|b| b.borrow_mut().clear());
+        }
+        let last_cp_violation = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
+        if eval_res.is_err() {
+            if let Some(cp_v) = last_cp_violation {
+                BOA_VIOLATION.with(|v| {
+                    if v.borrow().is_none() {
+                        *v.borrow_mut() = Some(cp_v);
+                    }
+                });
+            }
         }
         if has_next_tick {
             let _ = realm.ctx.eval(boa_engine::Source::from_bytes(

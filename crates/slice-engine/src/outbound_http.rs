@@ -163,9 +163,104 @@ struct PooledOutboundConn {
 }
 
 static SHARED_OUTBOUND_CONN_POOL: OnceLock<Mutex<Vec<PooledOutboundConn>>> = OnceLock::new();
+static SHARED_FETCH_SLAB_POOL: OnceLock<parking_lot::Mutex<slice_io::RegisteredBufferPool>> =
+    OnceLock::new();
+static FETCH_SLAB_ACQUIRE_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 thread_local! {
     static OUTBOUND_POOL_REUSE_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
+fn shared_fetch_slab_pool() -> &'static parking_lot::Mutex<slice_io::RegisteredBufferPool> {
+    SHARED_FETCH_SLAB_POOL.get_or_init(|| {
+        parking_lot::Mutex::new(slice_io::RegisteredBufferPool::new(
+            slice_io::FIXED_BUFFER_COUNT,
+            slice_io::FIXED_BUFFER_SIZE,
+        ))
+    })
+}
+
+/// Returns the total number of times a fixed 64 KB slab was acquired from
+/// `slice-io::RegisteredBufferPool` across outbound HTTP `fetch()` operations.
+pub fn fetch_reactor_slab_acquire_count() -> u64 {
+    FETCH_SLAB_ACQUIRE_COUNT.load(Ordering::Relaxed)
+}
+
+/// Returns the number of `slice-io::RegisteredBufferPool` 64 KB slabs currently in use.
+/// Should return `0` when all outbound `fetch()` requests have settled (zero slab leaks).
+pub fn fetch_reactor_slab_in_use_count() -> usize {
+    shared_fetch_slab_pool().lock().in_use_count()
+}
+
+/// Returns the number of `slice-io::RegisteredBufferPool` 64 KB slabs currently available (`0..=64`).
+pub fn fetch_reactor_slab_available_count() -> usize {
+    shared_fetch_slab_pool().lock().available_count()
+}
+
+/// Resets the `slice-io::RegisteredBufferPool` slab acquisition telemetry counter.
+pub fn reset_fetch_slab_telemetry() {
+    FETCH_SLAB_ACQUIRE_COUNT.store(0, Ordering::Relaxed);
+}
+
+struct FetchSlabSlotGuard {
+    slot_idx: Option<u16>,
+}
+
+impl FetchSlabSlotGuard {
+    #[inline]
+    fn acquire() -> Self {
+        let slot_idx = shared_fetch_slab_pool().lock().acquire_slot();
+        if slot_idx.is_some() {
+            FETCH_SLAB_ACQUIRE_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        Self { slot_idx }
+    }
+
+    #[inline]
+    fn read_chunk_via_slab(
+        &self,
+        stream: &mut OutboundStream,
+        dest: &mut Vec<u8>,
+        max_bytes: usize,
+    ) -> std::io::Result<usize> {
+        let limit = max_bytes.min(slice_io::FIXED_BUFFER_SIZE);
+        if limit == 0 {
+            return Ok(0);
+        }
+        if let Some(idx) = self.slot_idx {
+            let mut stack_buf = [0u8; 16384];
+            let step = limit.min(stack_buf.len());
+            let n = stream.read(&mut stack_buf[..step])?;
+            if n > 0 {
+                let mut guard = shared_fetch_slab_pool().lock();
+                if let Some(slab) = guard.buffer_mut(idx) {
+                    slab[..n].copy_from_slice(&stack_buf[..n]);
+                    dest.extend_from_slice(&slab[..n]);
+                    return Ok(n);
+                }
+                drop(guard);
+                dest.extend_from_slice(&stack_buf[..n]);
+            }
+            Ok(n)
+        } else {
+            let mut fallback = [0u8; 4096];
+            let step = limit.min(fallback.len());
+            let n = stream.read(&mut fallback[..step])?;
+            if n > 0 {
+                dest.extend_from_slice(&fallback[..n]);
+            }
+            Ok(n)
+        }
+    }
+}
+
+impl Drop for FetchSlabSlotGuard {
+    fn drop(&mut self) {
+        if let Some(idx) = self.slot_idx.take() {
+            shared_fetch_slab_pool().lock().release(idx);
+        }
+    }
 }
 
 fn shared_conn_pool() -> &'static Mutex<Vec<PooledOutboundConn>> {
@@ -635,6 +730,7 @@ fn send_and_read_framed_http11(
     req_buf: &[u8],
     method: &str,
 ) -> Result<RawHttpResponse, std::io::Error> {
+    let slab_guard = FetchSlabSlotGuard::acquire();
     stream.write_all(req_buf)?;
     stream.flush()?;
 
@@ -644,7 +740,6 @@ fn send_and_read_framed_http11(
     });
 
     let mut raw_resp = Vec::with_capacity(4096);
-    let mut scratch = [0u8; 4096];
 
     // 1. Read until end of HTTP response headers (`\r\n\r\n`), capped at `MAX_OUTBOUND_HEADER_BYTES` (64 KB)
     let (hdr_end, body_start) = loop {
@@ -663,7 +758,11 @@ fn send_and_read_framed_http11(
                 MAX_OUTBOUND_HEADER_BYTES,
             ));
         }
-        let n = stream.read(&mut scratch)?;
+        let n = slab_guard.read_chunk_via_slab(
+            stream,
+            &mut raw_resp,
+            slice_io::FIXED_BUFFER_SIZE,
+        )?;
         if n == 0 {
             if raw_resp.is_empty() {
                 return Err(std::io::Error::new(
@@ -673,7 +772,6 @@ fn send_and_read_framed_http11(
             }
             break (raw_resp.len(), raw_resp.len());
         }
-        raw_resp.extend_from_slice(&scratch[..n]);
     };
 
     let header_str = std::str::from_utf8(&raw_resp[..hdr_end]).unwrap_or("");
@@ -733,14 +831,17 @@ fn send_and_read_framed_http11(
                             effective_max_body,
                         ));
                     }
-                    let n = stream.read(&mut scratch)?;
+                    let n = slab_guard.read_chunk_via_slab(
+                        stream,
+                        &mut raw_resp,
+                        slice_io::FIXED_BUFFER_SIZE,
+                    )?;
                     if n == 0 {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::UnexpectedEof,
                             "truncated chunked HTTP response body",
                         ));
                     }
-                    raw_resp.extend_from_slice(&scratch[..n]);
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::OutOfMemory {
@@ -762,13 +863,11 @@ fn send_and_read_framed_http11(
         }
         while raw_resp.len().saturating_sub(body_start) < expected_len {
             let remaining = expected_len - (raw_resp.len() - body_start);
-            let to_read = remaining.min(scratch.len());
-            let n = stream.read(&mut scratch[..to_read])?;
+            let n = slab_guard.read_chunk_via_slab(stream, &mut raw_resp, remaining)?;
             if n == 0 {
                 peer_closed = true;
                 break;
             }
-            raw_resp.extend_from_slice(&scratch[..n]);
         }
         let end_idx = (body_start + expected_len).min(raw_resp.len());
         String::from_utf8_lossy(&raw_resp[body_start..end_idx]).into_owned()
@@ -782,17 +881,22 @@ fn send_and_read_framed_http11(
                     effective_max_body,
                 ));
             }
-            let n = stream.read(&mut scratch)?;
+            let prev_len = raw_resp.len();
+            let n = slab_guard.read_chunk_via_slab(
+                stream,
+                &mut raw_resp,
+                slice_io::FIXED_BUFFER_SIZE,
+            )?;
             if n == 0 {
                 break;
             }
             if current_body_len.saturating_add(n) > effective_max_body {
+                raw_resp.truncate(prev_len);
                 return Err(trap_outbound_memory_exceeded(
                     current_body_len.saturating_add(n),
                     effective_max_body,
                 ));
             }
-            raw_resp.extend_from_slice(&scratch[..n]);
         }
         String::from_utf8_lossy(&raw_resp[body_start..]).into_owned()
     };

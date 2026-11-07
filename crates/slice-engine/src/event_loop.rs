@@ -4,23 +4,151 @@
 
 use crate::boa_realm::{
     BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, BOA_EGRESS_SECRETS,
-    BOA_NET_HOSTS, BOA_VIOLATION,
+    BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VIOLATION,
 };
 use crate::outbound_http::{
     execute_outbound_fetch_with_redirects, outbound_pool_reuse_count, record_outbound_pool_reuses,
+    reset_fetch_slab_telemetry,
 };
 use crate::state_and_kv::edge_kv_set;
 use boa_engine::{js_string, Context, JsObject, JsValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 use slice_sandbox::SandboxViolation;
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 const MAX_ACTIVE_TIMERS: usize = 1024;
 const MAX_EVENT_LOOP_TICKS: usize = 4096;
 const MAX_CONCURRENT_FETCH_WAIT: Duration = Duration::from_secs(10);
+
+/// Maximum number of reusable OS threads in the shared `FetchReactorPool`.
+pub const MAX_FETCH_REACTOR_WORKERS: usize = 16;
+
+struct FetchReactorJob {
+    id: u32,
+    url: String,
+    method: String,
+    headers: Vec<(String, String)>,
+    body: String,
+    redirect_mode: String,
+    tenant_id: String,
+    net_hosts: FxHashSet<String>,
+    egress_secrets: Vec<String>,
+    mem_budget: (usize, usize),
+    tx: Sender<CompletedAsyncFetch>,
+}
+
+struct FetchReactorPool {
+    state: parking_lot::Mutex<(VecDeque<FetchReactorJob>, usize)>,
+    cv: parking_lot::Condvar,
+}
+
+static FETCH_REACTOR_POOL: OnceLock<Arc<FetchReactorPool>> = OnceLock::new();
+static FETCH_REACTOR_REUSE_COUNT: AtomicU64 = AtomicU64::new(0);
+static FETCH_REACTOR_ACTIVE_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+impl FetchReactorPool {
+    fn global() -> &'static Arc<Self> {
+        FETCH_REACTOR_POOL.get_or_init(|| {
+            Arc::new(Self {
+                state: parking_lot::Mutex::new((VecDeque::with_capacity(64), 0)),
+                cv: parking_lot::Condvar::new(),
+            })
+        })
+    }
+
+    fn submit(self: &Arc<Self>, job: FetchReactorJob) {
+        let mut need_spawn = false;
+        let mut worker_idx = 0usize;
+        {
+            let mut guard = self.state.lock();
+            guard.0.push_back(job);
+            let idle = guard.1;
+            let active = FETCH_REACTOR_ACTIVE_THREADS.load(Ordering::Acquire);
+            if idle == 0 && active < MAX_FETCH_REACTOR_WORKERS {
+                worker_idx = FETCH_REACTOR_ACTIVE_THREADS.fetch_add(1, Ordering::AcqRel);
+                if worker_idx < MAX_FETCH_REACTOR_WORKERS {
+                    need_spawn = true;
+                } else {
+                    FETCH_REACTOR_ACTIVE_THREADS.fetch_sub(1, Ordering::AcqRel);
+                    FETCH_REACTOR_REUSE_COUNT.fetch_add(1, Ordering::Relaxed);
+                }
+            } else {
+                FETCH_REACTOR_REUSE_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if need_spawn {
+            let pool_clone = Arc::clone(self);
+            let _ = std::thread::Builder::new()
+                .name(format!("slice-fetch-reactor-{}", worker_idx))
+                .stack_size(2 * 1024 * 1024)
+                .spawn(move || {
+                    pool_clone.worker_loop();
+                });
+        }
+        self.cv.notify_one();
+    }
+
+    fn worker_loop(&self) {
+        loop {
+            let job = {
+                let mut guard = self.state.lock();
+                while guard.0.is_empty() {
+                    guard.1 += 1;
+                    self.cv.wait(&mut guard);
+                    guard.1 = guard.1.saturating_sub(1);
+                }
+                guard.0.pop_front()
+            };
+            if let Some(job) = job {
+                BOA_ACTIVE_TENANT.with(|t| *t.borrow_mut() = job.tenant_id);
+                BOA_NET_HOSTS.with(|h| *h.borrow_mut() = job.net_hosts);
+                BOA_EGRESS_SECRETS.with(|s| *s.borrow_mut() = job.egress_secrets);
+                BOA_KV_MEM_BUDGET.with(|m| m.set(job.mem_budget));
+                BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
+                let reuse_before = outbound_pool_reuse_count();
+
+                let result = execute_outbound_fetch_with_redirects(
+                    &job.url,
+                    &job.method,
+                    &job.headers,
+                    &job.body,
+                    &job.redirect_mode,
+                );
+                let violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
+                let reused_conns = outbound_pool_reuse_count().saturating_sub(reuse_before);
+
+                let _ = job.tx.send(CompletedAsyncFetch {
+                    id: job.id,
+                    result,
+                    violation,
+                    reused_conns,
+                });
+            }
+        }
+    }
+}
+
+/// Returns the number of times a concurrent `fetch()` reused an existing worker thread in
+/// `FetchReactorPool` instead of spawning a new OS thread.
+pub fn fetch_reactor_pool_reuse_count() -> u64 {
+    FETCH_REACTOR_REUSE_COUNT.load(Ordering::Relaxed)
+}
+
+/// Returns the number of active OS threads in `FetchReactorPool` (bounded by `MAX_FETCH_REACTOR_WORKERS = 16`).
+pub fn fetch_reactor_active_threads() -> usize {
+    FETCH_REACTOR_ACTIVE_THREADS.load(Ordering::Acquire)
+}
+
+/// Resets both the `FetchReactorPool` thread reuse counter and `slice-io` slab telemetry.
+pub fn reset_fetch_reactor_telemetry() {
+    FETCH_REACTOR_REUSE_COUNT.store(0, Ordering::Relaxed);
+    reset_fetch_slab_telemetry();
+}
 
 static PROCESS_EPOCH: OnceLock<Instant> = OnceLock::new();
 
@@ -432,8 +560,8 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
             let _ = ctx.run_jobs();
         }
 
-        // 3. Dispatch queued outbound `fetch()` requests (bounded by MAX_CONCURRENT_FETCHES = 16)
-        const MAX_CONCURRENT_FETCHES: usize = 16;
+        // 3. Dispatch queued outbound `fetch()` requests (bounded by MAX_CONCURRENT_FETCHES = 64 slabs)
+        const MAX_CONCURRENT_FETCHES: usize = 64;
         let (queued_batch, has_timers_or_inflight, tx_clone) = EVENT_LOOP_STATE.with(|st| {
             let mut loop_st = st.borrow_mut();
             let avail_slots =
@@ -478,9 +606,13 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                 let _ = ctx.run_jobs();
             } else {
                 // Concurrent Fan-Out Path (`Promise.all([fetch(...), ...])` or timer-raced `fetch`)
+                // Dispatches onto the bounded `FetchReactorPool` (max 16 reusable worker threads)
+                // backed by `slice-io::RegisteredBufferPool` 64 KB slabs.
                 let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
                 let net_hosts: FxHashSet<String> = BOA_NET_HOSTS.with(|h| h.borrow().clone());
                 let egress_secrets: Vec<String> = BOA_EGRESS_SECRETS.with(|s| s.borrow().clone());
+                let mem_budget = BOA_KV_MEM_BUDGET.with(|m| m.get());
+                let pool = FetchReactorPool::global();
 
                 for req in queued_batch {
                     let fid = req.id;
@@ -508,29 +640,18 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                         );
                     });
 
-                    std::thread::spawn(move || {
-                        BOA_ACTIVE_TENANT.with(|t| *t.borrow_mut() = t_id);
-                        BOA_NET_HOSTS.with(|h| *h.borrow_mut() = n_hosts);
-                        BOA_EGRESS_SECRETS.with(|s| *s.borrow_mut() = e_secrets);
-                        BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
-                        let reuse_before = outbound_pool_reuse_count();
-
-                        let result = execute_outbound_fetch_with_redirects(
-                            &url,
-                            &method,
-                            &headers,
-                            &body,
-                            &redirect_mode,
-                        );
-                        let violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
-                        let reused_conns = outbound_pool_reuse_count().saturating_sub(reuse_before);
-
-                        let _ = tx.send(CompletedAsyncFetch {
-                            id: fid,
-                            result,
-                            violation,
-                            reused_conns,
-                        });
+                    pool.submit(FetchReactorJob {
+                        id: fid,
+                        url,
+                        method,
+                        headers,
+                        body,
+                        redirect_mode,
+                        tenant_id: t_id,
+                        net_hosts: n_hosts,
+                        egress_secrets: e_secrets,
+                        mem_budget,
+                        tx,
                     });
                 }
             }

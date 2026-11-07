@@ -2,9 +2,10 @@
 
 use crate::boa_realm::{
     check_boa_fs_read_ocap, check_boa_fs_write_ocap, norm_vfs_path, SavedIsolateContextGuard,
-    BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, BOA_ENV_MAP, BOA_FETCH_MOCKS,
-    BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_STDOUT, BOA_VFS_CACHE,
-    BOA_VFS_DIRS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
+    BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, BOA_EGRESS_SECRETS,
+    BOA_ENV_MAP, BOA_EXEC_BINS, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES,
+    BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_STDOUT, BOA_VFS_CACHE, BOA_VFS_DIRS,
+    BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
 };
 use crate::event_loop::{
     cancel_timer, clear_event_loop_state, drive_event_loop_to_completion, enqueue_async_fetch,
@@ -40,7 +41,7 @@ use crate::sockets::{
 };
 use crate::state_and_kv::{
     checkpoint_tenant_state, edge_kv_del, edge_kv_get, edge_kv_incr, edge_kv_set,
-    restore_tenant_state, splitmix64_next_f64,
+    restore_tenant_state, splitmix64_next_f64, verify_egress_secrets_slice,
 };
 use crate::wasm::{
     wasm_call_export, wasm_compile_module, wasm_create_memory, wasm_get_global, wasm_grow_memory,
@@ -1047,6 +1048,9 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             }
             for (ek, ev) in &scope_guard.saved_env_map {
                 parent_caps = parent_caps.with_env(ek.clone(), ev.clone());
+            }
+            for eb in &scope_guard.saved_exec_bins {
+                parent_caps = parent_caps.with_exec_binary(eb.clone());
             }
             let parent_rem_mem = scope_guard
                 .saved_kv_budget
@@ -4431,6 +4435,409 @@ pub(crate) fn register_shard9_wasm_host_functions(ctx: &mut boa_engine::Context)
             let val = args.get(2).cloned().unwrap_or_else(BoaVal::undefined);
             wasm_set_global(inst_id, &exp_name, &val, context)?;
             Ok(BoaVal::undefined())
+        }),
+    );
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ChildProcessSpawnOpts {
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    #[serde(default)]
+    input: Option<String>,
+    #[serde(default)]
+    timeout: Option<u64>,
+    #[serde(default, rename = "maxBuffer")]
+    max_buffer: Option<usize>,
+    #[serde(default)]
+    shell: Option<serde_json::Value>,
+}
+
+fn execute_sanitized_subprocess_sync(
+    file: &str,
+    args: &[String],
+    child_env: &std::collections::BTreeMap<String, String>,
+    cwd: Option<&str>,
+    stdin_input: Option<&str>,
+    timeout_ms: u64,
+    max_buffer: usize,
+) -> Result<(i32, Vec<u8>, Vec<u8>, Option<String>), String> {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let norm_file = file.trim().replace('\\', "/");
+    let base_raw = norm_file.rsplit('/').next().unwrap_or(norm_file.as_str());
+    let base_cmd = base_raw
+        .strip_suffix(".exe")
+        .or_else(|| base_raw.strip_suffix(".EXE"))
+        .unwrap_or(base_raw)
+        .to_ascii_lowercase();
+
+    // Portable built-in handling for standard POSIX utilities (`echo`, `env`, `printenv`, `true`, `false`)
+    // after Ring 1 (`ExecCap`) and Ring 2 (`BOA_ENV_MAP` sanitization) have verified authority.
+    match base_cmd.as_str() {
+        "echo" => {
+            let mut out = String::new();
+            let (no_newline, slice) = if args.first().map(|s| s.as_str()) == Some("-n") {
+                (true, &args[1..])
+            } else {
+                (false, args)
+            };
+            for (i, a) in slice.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                out.push_str(a);
+            }
+            if !no_newline {
+                out.push('\n');
+            }
+            let out_bytes = out.into_bytes();
+            if out_bytes.len() > max_buffer {
+                return Err(
+                    "RangeError [ERR_CHILD_PROCESS_STDIO_MAXBUFFER]: stdout maxBuffer length exceeded"
+                        .to_string(),
+                );
+            }
+            return Ok((0, out_bytes, Vec::new(), None));
+        }
+        "env" if args.is_empty() => {
+            let mut out = String::new();
+            for (k, v) in child_env {
+                out.push_str(k);
+                out.push('=');
+                out.push_str(v);
+                out.push('\n');
+            }
+            let out_bytes = out.into_bytes();
+            if out_bytes.len() > max_buffer {
+                return Err(
+                    "RangeError [ERR_CHILD_PROCESS_STDIO_MAXBUFFER]: stdout maxBuffer length exceeded"
+                        .to_string(),
+                );
+            }
+            return Ok((0, out_bytes, Vec::new(), None));
+        }
+        "printenv" => {
+            if args.is_empty() {
+                let mut out = String::new();
+                for (k, v) in child_env {
+                    out.push_str(k);
+                    out.push('=');
+                    out.push_str(v);
+                    out.push('\n');
+                }
+                let out_bytes = out.into_bytes();
+                if out_bytes.len() > max_buffer {
+                    return Err(
+                        "RangeError [ERR_CHILD_PROCESS_STDIO_MAXBUFFER]: stdout maxBuffer length exceeded"
+                            .to_string(),
+                    );
+                }
+                return Ok((0, out_bytes, Vec::new(), None));
+            }
+            let key = &args[0];
+            if let Some(val) = child_env.get(key) {
+                let out_bytes = format!("{}\n", val).into_bytes();
+                if out_bytes.len() > max_buffer {
+                    return Err(
+                        "RangeError [ERR_CHILD_PROCESS_STDIO_MAXBUFFER]: stdout maxBuffer length exceeded"
+                            .to_string(),
+                    );
+                }
+                return Ok((0, out_bytes, Vec::new(), None));
+            }
+            return Ok((1, Vec::new(), Vec::new(), None));
+        }
+        "true" => return Ok((0, Vec::new(), Vec::new(), None)),
+        "false" => return Ok((1, Vec::new(), Vec::new(), None)),
+        _ => {}
+    }
+
+    let mut cmd = Command::new(file);
+    cmd.args(args);
+    // Ring 2: Strictly clear host ambient environment and inject ONLY tenant-attenuated variables
+    cmd.env_clear();
+    cmd.envs(child_env);
+    if let Some(dir) = cwd {
+        if !dir.is_empty() && std::path::Path::new(dir).is_dir() {
+            cmd.current_dir(dir);
+        }
+    }
+    cmd.stdin(if stdin_input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Error: spawn {} ENOENT ({})", file, e))?;
+
+    if let Some(input_data) = stdin_input {
+        if let Some(mut stdin_pipe) = child.stdin.take() {
+            let _ = stdin_pipe.write_all(input_data.as_bytes());
+        }
+    }
+
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut p) = stdout_pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut p) = stderr_pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(1));
+    let mut timed_out = false;
+    let exit_code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code().unwrap_or(1),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break 1;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(e) => {
+                return Err(format!("Error waiting for subprocess {}: {}", file, e));
+            }
+        }
+    };
+
+    let stdout_bytes = stdout_handle.join().unwrap_or_default();
+    let stderr_bytes = stderr_handle.join().unwrap_or_default();
+
+    if timed_out {
+        return Err(format!(
+            "Error: spawnSync {} ETIMEDOUT (exceeded {} ms)",
+            file, timeout_ms
+        ));
+    }
+
+    // Ring 4: Output byte ceiling (`maxBuffer`)
+    if stdout_bytes.len().saturating_add(stderr_bytes.len()) > max_buffer {
+        return Err(
+            "RangeError [ERR_CHILD_PROCESS_STDIO_MAXBUFFER]: stdout/stderr maxBuffer length exceeded"
+                .to_string(),
+        );
+    }
+
+    Ok((exit_code, stdout_bytes, stderr_bytes, None))
+}
+
+pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_child_process_spawn_sync"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_child_process_spawn_sync"),
+        3,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let file = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let args_json = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "[]".to_string());
+            let opts_json = args
+                .get(2)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "{}".to_string());
+
+            let cmd_args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
+            let opts: ChildProcessSpawnOpts = serde_json::from_str(&opts_json).unwrap_or_default();
+
+            let tenant_id = BOA_ACTIVE_TENANT.with(|t| {
+                let b = t.borrow();
+                if b.is_empty() {
+                    "boa-tenant".to_string()
+                } else {
+                    b.clone()
+                }
+            });
+
+            // Ring 1: OCap `ExecCap` Allowlist Verification (Deny-All by default)
+            let allowed_bins = BOA_EXEC_BINS.with(|eb| eb.borrow().clone());
+            let is_allowed = !file.trim().is_empty()
+                && allowed_bins
+                    .iter()
+                    .any(|allowed| slice_sandbox::exec_binary_matches(&file, allowed));
+            if !is_allowed {
+                let violation = SandboxViolation::ExecDenied {
+                    tenant_id,
+                    binary: file,
+                };
+                let msg = violation.to_string();
+                BOA_LAST_CHILD_PROC_VIOLATION.with(|v| {
+                    *v.borrow_mut() = Some(violation);
+                });
+                return Err(JsNativeError::error().with_message(msg).into());
+            }
+
+            // If `shell` option is explicitly requested as a string path or boolean `true`,
+            // also verify that the shell binary itself is authorized in `allowed_exec_binaries`.
+            if let Some(ref sh_val) = opts.shell {
+                let shell_bin = match sh_val {
+                    serde_json::Value::Bool(true) => Some("/bin/sh"),
+                    serde_json::Value::String(s) if !s.is_empty() => Some(s.as_str()),
+                    _ => None,
+                };
+                if let Some(sb) = shell_bin {
+                    let shell_allowed = allowed_bins
+                        .iter()
+                        .any(|allowed| slice_sandbox::exec_binary_matches(sb, allowed));
+                    if !shell_allowed {
+                        let violation = SandboxViolation::ExecDenied {
+                            tenant_id,
+                            binary: sb.to_string(),
+                        };
+                        let msg = violation.to_string();
+                        BOA_LAST_CHILD_PROC_VIOLATION.with(|v| {
+                            *v.borrow_mut() = Some(violation);
+                        });
+                        return Err(JsNativeError::error().with_message(msg).into());
+                    }
+                }
+            }
+
+            // Ring 5: Base CPU Fuel charge for subprocess invocation
+            if let Err(fuel_err) = consume_crypto_kdf_fuel(500) {
+                return Err(JsNativeError::range().with_message(fuel_err).into());
+            }
+
+            // Ring 2: Environment Sanitization — construct child environment strictly from
+            // the tenant's attenuated `BOA_ENV_MAP` (never host `std::env::vars()`).
+            let tenant_env = BOA_ENV_MAP.with(|m| m.borrow().clone());
+            let mut child_env = std::collections::BTreeMap::new();
+            if let Some(custom_env) = opts.env {
+                for (k, v) in custom_env {
+                    match v {
+                        serde_json::Value::String(s) => {
+                            child_env.insert(k, s);
+                        }
+                        serde_json::Value::Number(n) => {
+                            child_env.insert(k, n.to_string());
+                        }
+                        serde_json::Value::Bool(b) => {
+                            child_env.insert(k, b.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                for (k, v) in &tenant_env {
+                    child_env.insert(k.clone(), v.clone());
+                }
+            }
+
+            let timeout_ms = opts.timeout.unwrap_or(30_000).min(120_000);
+            let max_buffer = opts.max_buffer.unwrap_or(1024 * 1024).min(16 * 1024 * 1024);
+
+            let (status_code, stdout_bytes, stderr_bytes, signal) =
+                match execute_sanitized_subprocess_sync(
+                    &file,
+                    &cmd_args,
+                    &child_env,
+                    opts.cwd.as_deref(),
+                    opts.input.as_deref(),
+                    timeout_ms,
+                    max_buffer,
+                ) {
+                    Ok(res) => res,
+                    Err(err_msg) => {
+                        return Err(JsNativeError::error().with_message(err_msg).into());
+                    }
+                };
+
+            // Ring 5: Charge fuel & memory ceiling proportional to child stdio output
+            let total_out_bytes = stdout_bytes.len().saturating_add(stderr_bytes.len());
+            if total_out_bytes > 0 {
+                let extra_fuel = (total_out_bytes as u64 / 64).max(1);
+                if let Err(fuel_err) = consume_crypto_kdf_fuel(extra_fuel) {
+                    return Err(JsNativeError::range().with_message(fuel_err).into());
+                }
+                let (used_mem, limit_mem) = BOA_KV_MEM_BUDGET.with(|m| m.get());
+                let next_mem = used_mem.saturating_add(total_out_bytes);
+                if next_mem > limit_mem {
+                    let violation = SandboxViolation::MemoryCeilingExceeded {
+                        tenant_id: tenant_id.clone(),
+                        requested: next_mem,
+                        limit: limit_mem,
+                    };
+                    let msg = violation.to_string();
+                    BOA_VIOLATION.with(|v| {
+                        if v.borrow().is_none() {
+                            *v.borrow_mut() = Some(violation);
+                        }
+                    });
+                    return Err(JsNativeError::range().with_message(msg).into());
+                }
+                BOA_KV_MEM_BUDGET.with(|m| m.set((next_mem, limit_mem)));
+            }
+
+            let stdout_str = String::from_utf8_lossy(&stdout_bytes).into_owned();
+            let stderr_str = String::from_utf8_lossy(&stderr_bytes).into_owned();
+
+            // Ring 3: Output Egress DLP — scan both `stdout` and `stderr` against the tenant's
+            // Egress DLP automaton (`BOA_EGRESS_SECRETS`, including `.env` Auto-DLP secrets).
+            let egress_secrets = BOA_EGRESS_SECRETS.with(|s| s.borrow().clone());
+            if !egress_secrets.is_empty() {
+                if let Err(violation) =
+                    verify_egress_secrets_slice(&tenant_id, &egress_secrets, &stdout_str)
+                        .and_then(|()| {
+                            verify_egress_secrets_slice(&tenant_id, &egress_secrets, &stderr_str)
+                        })
+                {
+                    let msg = violation.to_string();
+                    BOA_LAST_CHILD_PROC_VIOLATION.with(|v| {
+                        *v.borrow_mut() = Some(violation);
+                    });
+                    return Err(JsNativeError::error().with_message(msg).into());
+                }
+            }
+
+            let resp = serde_json::json!({
+                "status": status_code,
+                "signal": signal,
+                "stdoutBase64": base64_encode(&stdout_bytes, false),
+                "stderrBase64": base64_encode(&stderr_bytes, false),
+                "stdout": stdout_str,
+                "stderr": stderr_str,
+                "pid": 4200,
+            });
+            Ok(BoaVal::from(js_string!(resp.to_string())))
         }),
     );
 }

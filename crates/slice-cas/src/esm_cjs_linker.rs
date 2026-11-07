@@ -17,6 +17,7 @@ pub(crate) fn is_builtin_module(spec: &str) -> bool {
     matches!(
         spec,
         "fs" | "fs/promises"
+            | "child_process"
             | "http"
             | "https"
             | "path"

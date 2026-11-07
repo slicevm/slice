@@ -25,6 +25,9 @@ pub enum SandboxViolation {
     #[error("OCap Violation: Compartment '{tenant_id}' lacks environment variable authority for key '{key}'")]
     EnvAccessDenied { tenant_id: String, key: String },
 
+    #[error("[Slice Sandbox Violation] Subprocess execution denied: Compartment '{tenant_id}' lacks exec authority for binary '{binary}'")]
+    ExecDenied { tenant_id: String, binary: String },
+
     #[error("SES Lockdown Violation: Compartment '{tenant_id}' attempted to mutate frozen intrinsic '{intrinsic}'")]
     IntrinsicMutationBlocked {
         tenant_id: String,
@@ -53,6 +56,8 @@ pub struct CapabilityToken {
     pub allowed_write_prefixes: Vec<String>,
     pub allowed_net_hosts: FxHashSet<String>,
     pub allowed_env_keys: FxHashMap<String, String>,
+    #[serde(default)]
+    pub allowed_exec_binaries: Vec<String>,
 }
 
 impl CapabilityToken {
@@ -79,6 +84,11 @@ impl CapabilityToken {
 
     pub fn with_env(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
         self.allowed_env_keys.insert(key.into(), val.into());
+        self
+    }
+
+    pub fn with_exec_binary(mut self, binary: impl Into<String>) -> Self {
+        self.allowed_exec_binaries.push(binary.into());
         self
     }
 }
@@ -653,6 +663,15 @@ impl TenantCompartment {
         }
     }
 
+    #[cold]
+    #[inline(never)]
+    fn trap_exec_denied(&self, binary: &str) -> SandboxViolation {
+        SandboxViolation::ExecDenied {
+            tenant_id: self.tenant_id.clone(),
+            binary: binary.to_string(),
+        }
+    }
+
     /// Consumes `ops` deterministic instruction fuel units, trapping immediately if exceeded.
     #[inline(always)]
     pub fn consume_fuel(&mut self, ops: u64) -> Result<(), SandboxViolation> {
@@ -752,6 +771,70 @@ impl TenantCompartment {
             .map(|s| s.as_str())
             .ok_or_else(|| self.trap_env_access(key))
     }
+
+    /// Verifies attenuated subprocess execution capability (`ExecCap`) for `binary`.
+    /// By default (`allowed_exec_binaries` empty), all subprocess execution is denied.
+    #[inline]
+    pub fn verify_exec_binary(&self, binary: &str) -> Result<(), SandboxViolation> {
+        let trimmed = binary.trim();
+        if trimmed.is_empty() || memchr::memmem::find(trimmed.as_bytes(), b"..").is_some() {
+            return Err(self.trap_exec_denied(binary));
+        }
+        for allowed in &self.capabilities.allowed_exec_binaries {
+            if exec_binary_matches(trimmed, allowed) {
+                return Ok(());
+            }
+        }
+        Err(self.trap_exec_denied(binary))
+    }
+}
+
+/// Checks whether a requested subprocess binary (`requested`) matches an allowlisted
+/// `ExecCap` entry (`allowed`).
+///
+/// Security semantics:
+/// - Rejects any `requested` string containing `..` path traversal or null bytes.
+/// - If `allowed == "*"`, allows any non-empty binary without `..`.
+/// - If `requested` contains a path separator (`/` or `\`), it must match the normalized path
+///   of `allowed` (preventing `/tmp/evil/git` from matching `/usr/bin/git`).
+/// - If `requested` is a bare command name (e.g. `"git"` or `"echo"`), it matches if `allowed`
+///   is either that bare name or an explicit path whose basename is that name (e.g. `"/usr/bin/git"`).
+#[inline]
+pub fn exec_binary_matches(requested: &str, allowed: &str) -> bool {
+    let req = requested.trim();
+    let allow = allowed.trim();
+    if req.is_empty()
+        || allow.is_empty()
+        || memchr::memmem::find(req.as_bytes(), b"..").is_some()
+        || req.contains('\0')
+    {
+        return false;
+    }
+    if allow == "*" {
+        return true;
+    }
+    let norm_bin = |s: &str| -> String {
+        let replaced = s.replace('\\', "/");
+        let trimmed = replaced.trim_end_matches('/');
+        let lower = trimmed.to_ascii_lowercase();
+        lower
+            .strip_suffix(".exe")
+            .unwrap_or(&lower)
+            .to_string()
+    };
+    let req_norm = norm_bin(req);
+    let allow_norm = norm_bin(allow);
+    if req_norm == allow_norm {
+        return true;
+    }
+    if !req_norm.contains('/') {
+        if let Some(allow_base) = allow_norm.rsplit('/').next() {
+            if req_norm == allow_base {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl Drop for TenantCompartment {
@@ -869,6 +952,7 @@ pub struct InlineDirectives {
     pub allow_write: Vec<String>,
     pub allow_net: Vec<String>,
     pub allow_env: Vec<(String, String)>,
+    pub allow_exec: Vec<String>,
     pub env_file: Option<String>,
     pub audit_egress: Vec<String>,
     pub port: Option<u16>,
@@ -973,6 +1057,11 @@ pub fn parse_inline_directives(source: &str) -> InlineDirectives {
             "allow-net" | "allow_net" => {
                 for item in parse_toml_string_array(val) {
                     dirs.allow_net.push(item);
+                }
+            }
+            "allow-exec" | "allow_exec" => {
+                for item in parse_toml_string_array(val) {
+                    dirs.allow_exec.push(item);
                 }
             }
             "allow-env" | "allow_env" => {
@@ -1093,6 +1182,11 @@ impl SliceManifest {
                     ("capabilities", "allow_net") => {
                         for item in parse_toml_string_array(val) {
                             manifest.capabilities.allowed_net_hosts.insert(item);
+                        }
+                    }
+                    ("capabilities", "allow_exec") | ("capabilities", "allow-exec") => {
+                        for item in parse_toml_string_array(val) {
+                            manifest.capabilities.allowed_exec_binaries.push(item);
                         }
                     }
                     ("capabilities", "allow_env") => {

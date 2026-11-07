@@ -213,6 +213,7 @@ declare namespace Slice {
         allowRead?: string[];
         allowWrite?: string[];
         allowNet?: string[];
+        allowExec?: string[];
         auditSecret?: string;
     }
 

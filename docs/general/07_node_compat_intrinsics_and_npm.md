@@ -303,6 +303,20 @@ console.log(new TextDecoder().decode(value).trim()); // "+PONG"
 await sock.close();
 ```
 
+### 1.14 5-Ring OCap `node:child_process` (`ExecCap`, Environment Sanitization & Output Egress DLP)
+Slice provides `node:child_process` (`execFileSync`, `spawnSync`, `execSync`, `spawn`, `exec`, `execFile`, `ChildProcess`) gated by 5-Ring `ExecCap` security (`--allow-exec`, `SLICE_ALLOW_EXEC`, `[capabilities] allow_exec`):
+- **Ring 1 (Deny-All by Default):** Unlisted binaries immediately trap with `[Slice Sandbox Violation] Subprocess execution denied`.
+- **Ring 2 (Environment Sanitization):** Child processes run with `env_clear()` and receive **only** the tenant's explicitly allowed environment variables (`--allow-env` / `.env`), never host ambient `std::env::vars()`.
+- **Ring 3 (Child Stdio Egress DLP):** Child `stdout` and `stderr` are scanned against `--audit-egress` and `.env` Auto-DLP secrets before JavaScript receives them.
+- **Ring 4 & 5 (`maxBuffer`, Timeout, & Fuel/Memory Accounting):** Enforces `maxBuffer` and execution timeouts while charging fuel and memory budgets.
+```typescript
+import { execFileSync, spawnSync } from "node:child_process";
+
+// Requires: slice run app.ts --allow-exec=/bin/echo,/usr/bin/env
+const out = execFileSync("/bin/echo", ["hello", "from", "ExecCap"], { encoding: "utf8" }).trim();
+const envRes = spawnSync("/usr/bin/env", [], { encoding: "utf8" });
+```
+
 ---
 
 ## 2. Using External `npm` Packages (`node_modules/`), Package Managers, & `.wasm` vs `.node` Addons

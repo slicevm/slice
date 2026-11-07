@@ -57,15 +57,20 @@ pub use boacas::{
     BOACAS_FLAG_NEEDS_LAZY_GETTERS, BOACAS_FLAG_NEEDS_SES_CHECK, BOACAS_FLAG_STARTS_WITH_BRACE,
     BOACAS_HEADER_LEN, BOACAS_MAGIC,
 };
-pub use event_loop::{reset_virtual_time_warped_ms, virtual_time_warped_ms};
+pub use event_loop::{
+    fetch_reactor_active_threads, fetch_reactor_pool_reuse_count, reset_fetch_reactor_telemetry,
+    reset_virtual_time_warped_ms, virtual_time_warped_ms, MAX_FETCH_REACTOR_WORKERS,
+};
 pub use isolate::{
     run_source_isolated, ExecutionMetrics, HttpExecutionOutcome, HttpRequestContext,
     SandboxEvalOptions, SandboxEvalOutcome, SliceIsolate,
 };
 pub use outbound_http::{
-    clear_outbound_conn_pool, is_valid_http_header_name, is_valid_http_header_value,
-    is_valid_request_target, outbound_pool_reuse_count, parse_chunked_body,
-    register_custom_root_cert_der, MAX_OUTBOUND_BODY_BYTES, MAX_OUTBOUND_HEADER_BYTES,
+    clear_outbound_conn_pool, fetch_reactor_slab_acquire_count,
+    fetch_reactor_slab_available_count, fetch_reactor_slab_in_use_count, is_valid_http_header_name,
+    is_valid_http_header_value, is_valid_request_target, outbound_pool_reuse_count,
+    parse_chunked_body, register_custom_root_cert_der, reset_fetch_slab_telemetry,
+    MAX_OUTBOUND_BODY_BYTES, MAX_OUTBOUND_HEADER_BYTES,
 };
 pub use parser_and_compiler::{
     compile_source_to_bytecode, disassemble_bytecode, is_tier0_slicesnp_compatible_ast,
