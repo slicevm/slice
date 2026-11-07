@@ -2,6 +2,10 @@
 name = "slice-cas"
 version.workspace = true
 edition.workspace = true
+autotests = false
+
+[lib]
+bench = false
 
 [dependencies]
 blake3.workspace = true
@@ -18,4 +22,12 @@ compact_str.workspace = true
 cow-utils.workspace = true
 smallvec.workspace = true
 itoa.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "microbench"
+path = "microbench/main.rs"
+harness = false
 

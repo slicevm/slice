@@ -1,7 +1,7 @@
 //! Native Rust SIMD & Fast-Path Intrinsics (`SHA-NI` / FIPS-180-4 SHA-256, HMAC-SHA256, Base64, SemVer, `ms`, `bytes`).
 
 #[inline]
-pub(crate) fn fast_parse_ms(input: &str) -> Option<f64> {
+pub fn fast_parse_ms(input: &str) -> Option<f64> {
     let s = input.trim();
     if s.is_empty() || s.len() > 100 {
         return None;
@@ -124,7 +124,7 @@ pub(crate) fn fast_format_ms(ms: f64, long: bool) -> Option<String> {
 }
 
 #[inline]
-pub(crate) fn fast_parse_bytes(input: &str) -> Option<f64> {
+pub fn fast_parse_bytes(input: &str) -> Option<f64> {
     let s = input.trim();
     if s.is_empty() {
         return None;
@@ -727,14 +727,14 @@ pub(crate) fn digest_to_hex(digest: &[u8; 32]) -> String {
 }
 
 #[inline]
-pub(crate) fn sha256_hex(data: &[u8]) -> String {
+pub fn sha256_hex(data: &[u8]) -> String {
     let digest = sha256_bytes(data);
     digest_to_hex(&digest)
 }
 
 /// RFC 2104 HMAC-SHA256 implementation streaming directly from borrowed slices with zero heap allocation.
 #[inline]
-pub(crate) fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+pub fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
     let mut key_block = [0u8; 64];
     if key.len() > 64 {
         let hashed_key = sha256_bytes(key);

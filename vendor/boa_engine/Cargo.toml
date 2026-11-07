@@ -118,7 +118,6 @@ xsum = ["dep:xsum"]
 [lib]
 name = "boa_engine"
 crate-type = [
-    "cdylib",
     "lib",
 ]
 path = "src/lib.rs"

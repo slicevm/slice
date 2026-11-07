@@ -206,7 +206,7 @@ With **`SLICEBC\x01` Precompiled Boa `CodeBlock` CAS** enabled by default, Slice
 | **Slice (`01-fintech-checkout` / `05-jwt-oauth-session-guard`)** | **12,672 KB** | **12.38 MB** | **3.92x less memory** |
 | **Slice (`02-npm-ecosystem-suite`: `semver`+`ms`+`ini`)** | **13,184 KB** | **12.88 MB** | **4.79x less memory** |
 | **Slice (`01-hono-edge-microservice`)** | **13,952 KB** | **13.62 MB** | **3.80x less memory** |
-| **Slice (`1,000-Tenant MicroVM Swarm`)** | **10,168 KB** | **9.93 MB** | **6.20x less memory** |
+| **Slice (`1,000-Tenant MicroVM Swarm`)** | **9,916 KB** | **9.68 MB** | **6.35x less memory** |
 | Bun `v1.3.10` (Across 31 Apps) | 31,628 KB – 55,040 KB | 30.89 MB – 53.75 MB | 1.15x – 1.80x less memory |
 | Deno `v2.7.5` (Across 31 Apps) | 52,864 KB – 87,524 KB | 51.62 MB – 85.47 MB | 0.73x – 1.10x |
 | Node.js `v25.8.1` (Across 31 Apps) | 47,688 KB – 64,284 KB | 46.57 MB – 62.78 MB | 1.00x |
@@ -219,7 +219,7 @@ Verified inside Linux Docker `x86_64` (`SLICE_BENCH_TAGS=n1`, 16,000 HTTP/1.1 Ke
 
 | Server / Runtime | Multi-Tenant Isolation Model | Throughput (`req/s`) | Avg Latency (`us/req`) | Total Time (16k Reqs) | Speedup vs `Bun.serve` |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`slice serve` (Tier-0 CAS, `--workers=8`)** | **Per-Request OCap + SES + Fuel + PKU Isolate** | **154,348 req/s** | **6.48 us/req** | **103.7 ms** | **1.59x faster** |
+| **`slice serve` (Tier-0 CAS, `--workers=8`)** | **Per-Request OCap + SES + Fuel + PKU Isolate** | **163,766 req/s** | **6.11 us/req** | **97.7 ms** | **1.68x faster** |
 | **`slice serve` (Tier-1 WinterTC, `--workers=8`)** | **Per-Request OCap + SES + Fuel + PKU Isolate** | **126,566 req/s** | **7.90 us/req** | **126.4 ms** | **1.30x faster** |
 | **`Bun.serve` (`v1.3.10`, JSC)** | Shared Single-Process Heap (No Tenant Isolation) | 97,361 req/s | 10.27 us/req | 164.3 ms | 1.00x (Baseline) |
 | **`Deno.serve` (`v2.7.5`, V8)** | Shared Single-Process Heap (No Tenant Isolation) | 126,184 req/s | 7.92 us/req | 126.8 ms | 1.30x |
@@ -233,7 +233,7 @@ Verified inside Linux Docker `x86_64` (`SLICE_BENCH_TAGS=n2`):
 
 | Serverless Capability | Workload / Verification | Measured Result (`Linux x86_64`) |
 | :--- | :--- | :--- |
-| **16-Way Sharded `Slice.kv` Slab** | `1,001` `Slice.kv.incr` + `set` + `get` ops in Boa ES2024 isolate (`--warm`) | **`586.10 us` total (`0.58 us/op`, `0.02 us` instantiate, `12,486 B` memory cage)** |
+| **16-Way Sharded `Slice.kv` Slab** | `1,001` `Slice.kv.incr` + `set` + `get` ops in Boa ES2024 isolate (`--warm`) | **`563.26 us` total (`0.56 us/op`, `0.02 us` instantiate, `12,486 B` memory cage)** |
 | **Multi-Tenant `--tenant-dir` Router & Hot-Swap** | Live atomic replacement of `tenant-alpha.cas` while `slice serve` handles traffic | **Zero dropped connections; `tenant-alpha` hot-swaps `v1 -> v2` while preserving `Slice.kv` counter (`hits: 1 -> 2`) and isolating `tenant-beta` (`hits: 10`)** |
 | **Opt-In Deterministic Replay (`--deterministic=20261019`)** | Repeated executions of `Math.random()`, `Date.now()`, and `performance.now()` | **100% bit-for-bit identical output (`r1: 0.061962575866`, `r2: 0.555064217357`, `t1: 1700000000001`) with `0.00 ns` penalty when disabled** |
 

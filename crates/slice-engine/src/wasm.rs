@@ -26,11 +26,11 @@ use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use wasmi::core::ValType;
+use wasmi::errors::HostError;
 use wasmi::{
     Caller, CompilationMode, Config, Engine, Error as WasmiError, Extern, ExternType, Func,
     FuncType, Global, GlobalType, Linker, Memory, MemoryType, Module, Mutability, Store,
-    StoreLimits, StoreLimitsBuilder, Val,
+    StoreLimits, StoreLimitsBuilder, TrapCode, Val, ValType,
 };
 
 /// Maximum `.wasm` binary size accepted by the sandbox (`8 MB`).
@@ -84,7 +84,7 @@ impl std::fmt::Display for WasmHostError {
 }
 
 impl std::error::Error for WasmHostError {}
-impl wasmi::core::HostError for WasmHostError {}
+impl HostError for WasmHostError {}
 
 struct WasmStoreData {
     limits: StoreLimits,
@@ -473,7 +473,7 @@ pub fn wasm_grow_memory(mem_id: u32, inst_id: u32, delta_pages: u32) -> Result<i
             let Some(mem) = inst.memory else {
                 return Err("TypeError: WebAssembly.Instance has no linear memory".to_string());
             };
-            let cur_pages = mem.size(&inst.store);
+            let cur_pages = mem.size(&inst.store) as u32;
             let new_pages = cur_pages.saturating_add(delta_pages);
             if let Some(max_p) = inst.max_memory_pages {
                 if new_pages > max_p {
@@ -484,7 +484,7 @@ pub fn wasm_grow_memory(mem_id: u32, inst_id: u32, delta_pages: u32) -> Result<i
                 }
             }
             check_wasm_memory_pages_budget(new_pages)?;
-            match mem.grow(&mut inst.store, delta_pages) {
+            match mem.grow(&mut inst.store, delta_pages.into()) {
                 Ok(prev) => {
                     let new_byte_len = (new_pages as usize) * WASM_PAGE_BYTES;
                     inst.shadow_mem.resize(new_byte_len, 0);
@@ -573,14 +573,7 @@ fn sync_wasm_to_js_array_buffer(wasm_slice: &[u8], ab_slice: &mut [u8], shadow_m
 }
 
 fn default_val_for_type(vt: ValType) -> Val {
-    match vt {
-        ValType::I32 => Val::I32(0),
-        ValType::I64 => Val::I64(0),
-        ValType::F32 => Val::F32(0.0f32.into()),
-        ValType::F64 => Val::F64(0.0f64.into()),
-        ValType::FuncRef => Val::FuncRef(wasmi::FuncRef::null()),
-        ValType::ExternRef => Val::ExternRef(wasmi::ExternRef::null()),
-    }
+    Val::default_for_ty(vt)
 }
 
 fn js_val_to_wasm_val(val: &JsValue, vt: ValType, context: &mut Context) -> JsResult<Val> {
@@ -799,8 +792,8 @@ pub fn wasm_instantiate_module(
                 let _ = linker.define(mod_name, field_name, host_func);
             }
             ExternType::Memory(mem_ty) => {
-                let min_pages = u32::from(mem_ty.initial_pages());
-                let max_pages = mem_ty.maximum_pages().map(u32::from);
+                let min_pages = mem_ty.minimum() as u32;
+                let max_pages = mem_ty.maximum().map(|p| p as u32);
                 let mut actual_pages = min_pages;
                 let mut js_mem_buf_obj: Option<JsObject> = None;
 
@@ -828,10 +821,8 @@ pub fn wasm_instantiate_module(
                 if let Err(msg) = check_wasm_memory_pages_budget(actual_pages) {
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
-                let m_ty = MemoryType::new(actual_pages, max_pages.or(Some(MAX_WASM_MEMORY_PAGES)))
-                    .map_err(|e| {
-                        JsNativeError::error().with_message(format!("LinkError: {}", e))
-                    })?;
+                let eff_max = max_pages.or(Some(MAX_WASM_MEMORY_PAGES)).map(|m| m.max(actual_pages));
+                let m_ty = MemoryType::new(actual_pages, eff_max);
                 let mem = Memory::new(&mut store, m_ty).map_err(|e| {
                     JsNativeError::range().with_message(format!("RangeError: {}", e))
                 })?;
@@ -862,7 +853,7 @@ pub fn wasm_instantiate_module(
                 let _ = linker.define(mod_name, field_name, g);
             }
             ExternType::Table(tab_ty) => {
-                let init_val = default_val_for_type(tab_ty.element());
+                let init_val = wasmi::Ref::default_for_ty(tab_ty.element());
                 let tab = wasmi::Table::new(&mut store, *tab_ty, init_val).map_err(|e| {
                     JsNativeError::error().with_message(format!("LinkError: {}", e))
                 })?;
@@ -874,7 +865,7 @@ pub fn wasm_instantiate_module(
     // Check declared exported memory limits before instantiation
     for exp in module.exports() {
         if let ExternType::Memory(mem_ty) = exp.ty() {
-            let min_pages = u32::from(mem_ty.initial_pages());
+            let min_pages = mem_ty.minimum() as u32;
             if let Err(msg) = check_wasm_memory_pages_budget(min_pages) {
                 return Err(JsNativeError::range().with_message(msg).into());
             }
@@ -886,10 +877,7 @@ pub fn wasm_instantiate_module(
             context,
             imported_memory.as_ref().and_then(|(_, _, o)| o.as_ref()),
         );
-        let pre = linker
-            .instantiate(&mut store, &module)
-            .map_err(|e| JsNativeError::error().with_message(format!("LinkError: {}", e)))?;
-        match pre.start(&mut store) {
+        match linker.instantiate_and_start(&mut store, &module) {
             Ok(inst) => inst,
             Err(e) => {
                 let left = store.get_fuel().unwrap_or(0);
@@ -897,7 +885,7 @@ pub fn wasm_instantiate_module(
                 BOA_FUEL_BUDGET.with(|f| f.set((consumed_fuel.saturating_add(used), fuel_limit)));
                 let err_str = e.to_string();
                 if err_str.contains("fuel")
-                    || e.as_trap_code() == Some(wasmi::core::TrapCode::OutOfFuel)
+                    || e.as_trap_code() == Some(TrapCode::OutOfFuel)
                 {
                     record_wasm_fuel_violation();
                 }
@@ -929,8 +917,8 @@ pub fn wasm_instantiate_module(
             }
             Extern::Memory(m) => {
                 let m_ty = m.ty(&store);
-                let cur_pages = m.size(&store);
-                let max_p = m_ty.maximum_pages().map(u32::from);
+                let cur_pages = m.size(&store) as u32;
+                let max_p = m_ty.maximum().map(|p| p as u32);
                 active_mem = Some(m);
                 max_mem_pages = max_p;
                 exports_meta.push(serde_json::json!({
@@ -974,7 +962,7 @@ pub fn wasm_instantiate_module(
     let mut shadow_mem = Vec::new();
     let mut mem_pages = 0u32;
     if let Some(m) = active_mem {
-        mem_pages = m.size(&store);
+        mem_pages = m.size(&store) as u32;
         let data = m.data(&store);
         shadow_mem.extend_from_slice(data);
         let (used, limit) = BOA_KV_MEM_BUDGET.with(|b| b.get());
@@ -1157,7 +1145,7 @@ pub fn wasm_call_export(
             return Err(JsNativeError::error().with_message(h_err).into());
         }
         let err_str = err.to_string();
-        if err_str.contains("fuel") || err.as_trap_code() == Some(wasmi::core::TrapCode::OutOfFuel)
+        if err_str.contains("fuel") || err.as_trap_code() == Some(TrapCode::OutOfFuel)
         {
             record_wasm_fuel_violation();
         }

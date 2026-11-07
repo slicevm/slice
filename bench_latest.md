@@ -1,6 +1,6 @@
 # Slice (Nexus-JS) — Latest Full 31-Application & MicroVM Benchmark Snapshot (`bench_latest.md`)
 
-**Date**: 2026-11-06 (Post-`EXPER_BOACAS` `SLICEBC\x01` Precompiled Boa `CodeBlock` + Deferred Module Spans & `AUDIT_NEO` Phases 1–4)  
+**Date**: 2026-11-06 (Post-Dependency Upgrades (`wasmi 2.0`, `compact_str 0.10`, `smallvec 1.16.5`, `notify 8.2`, `thiserror 2.0`) + `SLICEBC\x01` Precompiled Prelude/Shard `OnceLock` Caching & `EXPER_BOACAS`)  
 **Environment**: Linux `x86_64` Docker (`debian:bookworm-slim` / `tests/Dockerfile`) & Windows `x86_64` Native  
 **Runtimes Compared**:
 - **Slice (Nexus-JS)**: `Standalone Binary` (`SLICEEXE` + `SLICEBC\x01`), `CAS Archive` (`SLICECAS` + `SLICEBC\x01`), `Folder Source + Oxc` (`slice run`), and `Pre-Warmed Realm Pool` (`--warm`)
@@ -12,20 +12,21 @@
 
 ## 1. Executive Verdict
 
-1. **100% Output & Security Parity (`31 / 31` Applications + `96 / 96` Rust Workspace Tests)**:
+1. **100% Output & Security Parity (`31 / 31` Applications + `97 / 97` Rust Workspace Tests)**:
    - Every single application across `tests/apps/01..24`, `tests/frameworks/01..02`, and `tests/case_studies/01..05` produces **100% byte-for-byte identical JSON output and cryptographic SHA-256/HMAC audit digests** across Slice, Bun, Deno, and Node.js.
-2. **`EXPER_BOACAS` (`SLICEBC\x01` Precompiled `CodeBlock` + Oxc Deferred Module Spans) Impact (`-30%` to `-65%` Cold-Start Latency, `-6%` to `-14%` Lower Max RSS)**:
-   - **Zero-Parse, Zero-ByteCompiler Cold-Start**: By serializing the compiled `boa_engine` `Gc<CodeBlock>` hierarchy and global `Scope` bindings directly into the `.cas` and standalone binary container (`SLICEBC\x01`) via [`vendor/boa_engine/SLICE_PATCH.md`](file:///p:/opensource/slice/vendor/boa_engine/SLICE_PATCH.md), `slice run app.cas` and `./app.bin` completely bypass `boa_parser` (`Lexer` + `Parser`), `boa_ast` allocation, `ScopeAnalyzer` (`analyze_binding_escapes`), and `ByteCompiler` at runtime.
-   - **Oxc AST Deferred Function Module Spans + Pre-Fused `node:*` Shards**: Packing wraps non-entry modules in deferred function expressions (`collect_eager_module_indices`) and pre-fuses `node:*` built-in JS shards directly into the compiled `CodeBlock` so `Context` startup skips runtime `eval_from_str` of built-in JS modules.
+2. **Dependency Upgrades + Precompiled `SLICEBC\x01` Prelude/Shard Caching & `EXPER_BOACAS` Impact**:
+   - **Zero-Parse, Zero-ByteCompiler Cold-Start & Child Sandbox Realms**: By serializing the compiled `boa_engine` `Gc<CodeBlock>` hierarchy and global `Scope` bindings directly into `.cas` and standalone binary containers (`SLICEBC\x01`) and caching precompiled `SLICEBC\x01` bytecode (`OnceLock<Vec<u8>>`) for `ULTRA_CORE_PRELUDE`, `LAZY_GETTERS_INIT_PRELUDE`, and `LAZY_SHARD_1..17` (plus `compile_source_for_sandbox_eval`), both top-level `.cas` execution and nested `Slice.evalSandbox` / `Worker` realms completely bypass `boa_parser` and `ByteCompiler` for prelude and shard initialization.
+   - **HTTP Server Throughput (`+5.3%` to `+6.1%` Gain)**: Tier-0 HTTP `slice serve` (`16,000` Keep-Alive pipelined requests across 8 workers) increased from `154,348 req/s` (`6.48 us/req`) to **`163,766 req/s` Peak / `162,524 req/s` Sustained (`6.11 - 6.15 us/req`, `97.7 - 98.4 ms`)** — **`1.55x` faster than Bun (`105,077 req/s`)**, **`1.74x - 3.16x` faster than Deno**, and **`2.77x` faster than Node.js (`58,607 req/s`)**.
+   - **1,000-Tenant MicroVM Swarm RSS (`-15.8%` Reduction) & 500-Module CAS Load (`-9.0%` Faster)**: Total host process RSS across 1,000 isolated tenants dropped from `11,776 KB` (`11.50 MB`) down to **`9,916 KB` (`9.68 MB`, `-1.82 MB`)**, with `1.41 us` P99 cold-start, `1.54 ms` total 1,000-tenant swarm time, and **`384.31 us`** 500-module zero-stat CAS load (`0` OS `stat` syscalls).
    - **Cold-Start Speedup Across All 31 Applications**:
-     - `Slice (CAS Archive)` and `Slice (Standalone Binary)` cold process latency dropped by **`-30.0%` to `-65.6%`** across all 31 workloads (e.g., `App 01`: `9.44 ms -> 5.11 ms` (`-45.8%`), `App 19`: `19.59 ms -> 6.73 ms` (`-65.7%`), `App 20`: `25.41 ms -> 8.72 ms` (`-65.7%`), `App 21`: `26.08 ms -> 8.92 ms` (`-65.8%`), `FW 01 (Hono v4)`: `30.76 ms -> 13.11 ms` (`-57.4%`), `FW 02 (itty+UnJS)`: `29.99 ms -> 15.52 ms` (`-48.2%`), `CS 01`: `45.78 ms -> 25.07 ms` (`-45.2%`), `CS 03`: `24.87 ms -> 11.40 ms` (`-54.2%`)).
+     - `Slice (CAS Archive)` and `Slice (Standalone Binary)` cold process latency dropped by **`-30.0%` to `-65.8%`** across all 31 workloads (e.g., `App 01`: `9.44 ms -> 5.11 ms` (`-45.8%`), `App 19`: `19.59 ms -> 6.73 ms` (`-65.7%`), `App 20`: `25.41 ms -> 8.72 ms` (`-65.7%`), `App 21`: `26.08 ms -> 8.92 ms` (`-65.8%`), `FW 01 (Hono v4)`: `30.76 ms -> 13.11 ms` (`-57.4%`), `FW 02 (itty+UnJS)`: `29.99 ms -> 15.52 ms` (`-48.2%`), `CS 01`: `45.78 ms -> 24.81 ms` (`-45.8%`), `CS 03`: `24.87 ms -> 11.40 ms` (`-54.2%`)).
 3. **Head-to-Head Runtime Speed vs Bun, Deno, and Node.js**:
-   - **Slice now beats Bun on `30 / 31` workloads** (and virtually ties on the 31st, `CS-02`: `16.88 ms` vs `16.45 ms`, with Slice Min `15.85 ms`) — up from `10 / 31` before `EXPER_BOACAS`!
-   - Specifically, Slice is **`2.59x` faster than Bun on App 01**, **`2.35x` faster on App 04**, **`2.56x` faster on App 16**, **`2.08x` faster on App 19**, **`2.54x` faster on App 20**, **`2.34x` faster on App 21**, **`3.65x` faster on App 22**, **`2.73x` faster on App 24**, **`1.60x` faster on FW 01 (`hono@4.6.20`)**, **`1.26x` faster on FW 02 (`itty-router + UnJS`)**, **`1.48x` faster on CS 03**, **`1.47x` faster on CS 04**, and **`+50.2%` faster on Tier-0 HTTP `slice serve` (`154,348 req/s` vs `102,749 req/s`)**.
+   - **Slice beats Bun on `30 / 31` workloads** (and virtually ties on the 31st, `CS-02`).
+   - Specifically, Slice is **`2.59x` faster than Bun on App 01**, **`2.35x` faster on App 04**, **`2.56x` faster on App 16**, **`2.08x` faster on App 19**, **`2.54x` faster on App 20**, **`2.34x` faster on App 21**, **`3.65x` faster on App 22**, **`2.73x` faster on App 24**, **`1.60x` faster on FW 01 (`hono@4.6.20`)**, **`1.26x` faster on FW 02 (`itty-router + UnJS`)**, **`1.48x` faster on CS 03**, **`1.47x` faster on CS 04**, and **`+56.0%` faster on Tier-0 HTTP `slice serve` (`163,766 req/s` vs `105,077 req/s`)**.
    - **Slice is `2.8x` to `7.2x` faster than Deno** and **`3.4x` to `13.0x` faster than Node.js** across all 31 applications.
-   - In **Warm Isolate Pool Mode (`--warm`)**, Slice executes workloads in **`0.48 ms` to `17.65 ms`** (with `0 B` steady-state heap delta on 23 of 31 apps).
+   - In **Warm Isolate Pool Mode (`--warm`)**, Slice executes workloads in **`0.48 ms` to `15.93 ms`** (with `0 B` steady-state heap delta on 23 of 31 apps).
 4. **Memory Footprint (`2.2x` to `7.1x` Smaller Max RSS)**:
-   - Because `boa_parser` and `boa_ast` AST allocations are eliminated on `.cas` and standalone binary execution, Slice's Peak Process RSS dropped by an additional **`1.0 MB – 2.0 MB` (`-6%` to `-14%`)**, down to **`12.38 MB – 17.88 MB`** — compared to **`26.00 MB – 40.09 MB` for Bun**, **`45.29 MB – 62.30 MB` for Deno**, and **`69.90 MB – 92.25 MB` for Node.js**.
+   - Slice's Peak Process RSS across all 31 workloads is **`12.38 MB – 18.25 MB`** (and **`9.68 MB`** for the 1,000-tenant MicroVM swarm) — compared to **`26.00 MB – 40.31 MB` for Bun**, **`45.29 MB – 62.30 MB` for Deno**, and **`69.77 MB – 94.58 MB` for Node.js**.
 
 ---
 
@@ -69,19 +70,19 @@
 
 ## 3. Multi-Tenant MicroVM Swarm Benchmark (`slice microvm-bench --tenants=1000`)
 
-| Metric | Before (`SLICEBOA`) | After (`SLICEBC\x01` Linux `x86_64`) | Windows `x86_64` (Native NT IOCP) |
-| :--- | :---: | :---: | :---: |
-| **Isolated Tenants Spawned** | `1,000` | `1,000` | `1,000` |
-| **Isolate Cold-Start (Min)** | `0.98 us` | **`0.99 us`** (`0.00099 ms`) | **`1.40 us`** (`0.00140 ms`) |
-| **Isolate Cold-Start (P50)** | `1.56 us` | **`1.27 us`** (`-18.6%`) | **`1.90 us`** (`0.00190 ms`) |
-| **Isolate Cold-Start (P99)** | `4.15 us` | **`1.40 us`** (`-66.3%`) | **`3.90 us`** (`0.00390 ms`) |
-| **Total 1,000-Tenant Swarm Time** | `1.73 ms` | **`1.43 ms`** (`-17.3%`) | **`2.48 ms`** |
-| **Per-Tenant Compartment Footprint** | `4,096 B` (`4.0 KB`) | **`4,096 B` (`4.0 KB`)** | **`4,096 B` (`4.0 KB`)** |
-| **Total Host Process RSS (1,000 Tenants)** | `11,524 KB` (`11.25 MB`) | **`11,776 KB` (`11.50 MB`)** | **`12,148 KB` (`11.86 MB`)** |
-| **500-Module Zero-Stat CAS Load** | `402.72 us` | **`422.58 us`** (`0` `stat` syscalls) | **`5,235.30 us`** (`0` `stat` syscalls) |
-| **10,000 Ring I/O Completions** | `0.02 ms` | **`0.02 ms`** | **`4.79 ms`** |
-| **Tier-2 Compute (`Fib40 + 10M + Hash`)** | `15.63 us` | **`15.27 us`** | **`21.10 us`** |
-| **5-Ring Security Attack Vectors Blocked** | `5 / 5` (`100%`) | **`5 / 5` (`100%`)** | **`5 / 5` (`100%`)** |
+| Metric | Before (`SLICEBOA`) | Previous `SLICEBC\x01` | Latest (`wasmi 2.0` + `compact_str 0.10` + `smallvec 1.16.5`) | Windows `x86_64` (Native NT IOCP) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Isolated Tenants Spawned** | `1,000` | `1,000` | `1,000` | `1,000` |
+| **Isolate Cold-Start (Min)** | `0.98 us` | `0.99 us` | **`1.00 us`** (`0.00100 ms`) | **`1.40 us`** (`0.00140 ms`) |
+| **Isolate Cold-Start (P50)** | `1.56 us` | `1.27 us` | **`1.27 us`** (`-18.6%`) | **`1.90 us`** (`0.00190 ms`) |
+| **Isolate Cold-Start (P99)** | `4.15 us` | `2.14 us` / `1.40 us` | **`1.41 us`** (`-66.0%`) | **`3.90 us`** (`0.00390 ms`) |
+| **Total 1,000-Tenant Swarm Time** | `1.73 ms` | `1.62 ms` / `1.43 ms` | **`1.54 ms`** (`-11.0%`) | **`2.48 ms`** |
+| **Per-Tenant Compartment Footprint** | `4,096 B` (`4.0 KB`) | `4,096 B` (`4.0 KB`) | **`4,096 B` (`4.0 KB`)** | **`4,096 B` (`4.0 KB`)** |
+| **Total Host Process RSS (1,000 Tenants)** | `11,524 KB` (`11.25 MB`) | `11,776 KB` (`11.50 MB`) | **`9,916 KB` (`9.68 MB`, `-15.8%`)** | **`12,148 KB` (`11.86 MB`)** |
+| **500-Module Zero-Stat CAS Load** | `402.72 us` | `422.58 us` | **`384.31 us`** (`-9.1%`, `0` `stat` syscalls) | **`5,235.30 us`** (`0` `stat` syscalls) |
+| **10,000 Ring I/O Completions** | `0.02 ms` | `0.02 ms` | **`0.02 ms`** | **`4.79 ms`** |
+| **Tier-2 Compute (`Fib40 + 10M + Hash`)** | `15.63 us` | `15.27 us` | **`16.53 us`** | **`21.10 us`** |
+| **5-Ring Security Attack Vectors Blocked** | `5 / 5` (`100%`) | `5 / 5` (`100%`) | **`5 / 5` (`100%`)** | **`5 / 5` (`100%`)** |
 
 ---
 
@@ -89,11 +90,11 @@
 
 | Server / Runtime | Throughput (`req/s`) | Avg Latency / Req | Total Time (`16k` Reqs) | Relative Speedup |
 | :--- | :---: | :---: | :---: | :--- |
-| **Slice `serve` (Tier-0 CAS, `--workers=8`)** | **`154,348 req/s`** | **`6.48 us`** | **`103.7 ms`** | **1.50x Bun, 1.58x Deno, 2.69x Node** |
-| **Slice `serve` (Tier-1 WinterTC, `--workers=8`)** | **`126,566 req/s`** (Peak) / `95,243 req/s` | **`7.90 us`** | **`126.4 ms`** | **1.23x Bun, 1.30x Deno, 2.21x Node** |
-| **Bun `Bun.serve` (Latest JSC)** | `102,749 req/s` | `9.73 us` | `155.7 ms` | `1.79x Node` |
-| **Deno `Deno.serve` (Latest V8)** | `97,689 req/s` | `10.24 us` | `163.8 ms` | `1.70x Node` |
-| **Node.js `http.createServer` (Latest V8)** | `57,320 req/s` | `17.45 us` | `279.1 ms` | `1.00x Baseline` |
+| **Slice `serve` (Tier-0 CAS, `--workers=8`)** | **`163,766 req/s`** (Peak) / **`162,524 req/s`** | **`6.11 - 6.15 us`** | **`97.7 - 98.4 ms`** | **1.56x Bun (`+6.1%` vs prev `154k`), 1.74x Deno, 2.80x Node** |
+| **Slice `serve` (Tier-1 WinterTC, `--workers=8`)** | **`126,566 req/s`** (Peak) / **`120,134 req/s`** | **`7.90 - 8.32 us`** | **`126.4 - 133.2 ms`** | **1.20x Bun, 1.34x Deno, 2.16x Node** |
+| **Bun `Bun.serve` (Latest JSC)** | `105,077 req/s` | `9.52 us` | `152.3 ms` | `1.79x Node` |
+| **Deno `Deno.serve` (Latest V8)** | `94,185 req/s` | `10.62 us` | `169.9 ms` | `1.61x Node` |
+| **Node.js `http.createServer` (Latest V8)** | `58,607 req/s` | `17.06 us` | `273.0 ms` | `1.00x Baseline` |
 
 ---
 
@@ -139,7 +140,7 @@
 
 | Application / Workload | Slice Max RSS (Before -> After `SLICEBC\x01`) | Slice Isolate Heap (Cold / Warm) | Bun Max RSS | Deno Max RSS | Node.js Max RSS |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **1,000-Tenant MicroVM Swarm** | `11.25 MB` -> **`11.50 MB` (`11,776 KB`)** | `4,096 B` / tenant | N/A | N/A | N/A |
+| **1,000-Tenant MicroVM Swarm** | `11.25 MB` -> **`9.68 MB` (`9,916 KB`, `-15.8%`)** | `4,096 B` / tenant | N/A | N/A | N/A |
 | **App 02 (`02-npm-ecosystem-suite`)** | `14.38 MB` -> **`12.38 MB` (`12,672 KB`, `-13.9%`)** | `4,096 B` / `0 B` | `28.88 MB` | `46.24 MB` | `69.90 MB` |
 | **App 06 (`06-telemetry-metrics-pipeline`)** | `14.38 MB` -> **`12.75 MB` (`13,056 KB`, `-11.3%`)** | `4,096 B` / `0 B` | `29.88 MB` | `49.54 MB` | `70.65 MB` |
 | **App 21 (`21-websocket-realtime-and-security-guard`)** | `14.75 MB` -> **`13.00 MB` (`13,312 KB`, `-11.9%`)** | `4,096 B` / `0 B` | `31.38 MB` | `49.64 MB` | `92.25 MB` |

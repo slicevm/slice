@@ -187,13 +187,13 @@ With **`SLICEBC\x01` Precompiled Boa `CodeBlock` CAS** enabled by default, Slice
 
 ### 4.2 HTTP Server (`slice serve`), Sharded KV & 1,000-Tenant MicroVM Benchmarks
 
-| Workload | Slice (`v0.9.91`) | Deno (`v2.7.5`) | Bun (`v1.3.10`) | Node.js (`v25.8.1`) |
+| Workload | Slice (`v0.10.0`) | Deno (`v2.7.5`) | Bun (`v1.3.10`) | Node.js (`v25.8.1`) |
 | :--- | :--- | :--- | :--- | :--- |
-| **`slice serve` Tier-0 CAS (`--workers=8`, Keep-Alive)** | **`154,348 req/s` (`6.48 us/req`)** | 126,184 req/s | 97,361 req/s | 58,926 req/s |
-| **`slice serve` Tier-1 WinterTC (`--workers=8`, Keep-Alive)** | **`126,566 req/s` (`7.90 us/req`)** | 126,184 req/s | 97,361 req/s | 58,926 req/s |
+| **`slice serve` Tier-0 CAS (`--workers=8`, Keep-Alive)** | **`163,766 req/s` (`6.11 us/req`)** | 94,185 req/s | 105,077 req/s | 58,607 req/s |
+| **`slice serve` Tier-1 WinterTC (`--workers=8`, Keep-Alive)** | **`126,566 req/s` (`7.90 us/req`)** | 94,185 req/s | 105,077 req/s | 58,607 req/s |
 | **Per-Request Security Isolation** | **OCap + SES + Fuel + MPK Isolate** | None (Shared Heap) | None (Shared Heap) | None (Shared Heap) |
-| **1,000-Tenant Swarm Cold Start (P50 / Total)** | **`1.27 us` P50 / `1.43 ms` total** | `> 15,000 ms` | `> 5,000 ms` | `> 30,000 ms` |
-| **Peak Process Memory (Across All 31 Apps)** | **`12.38 MB – 17.88 MB`** | `51.62 MB – 85.47 MB` | `30.89 MB – 53.75 MB` | `46.57 MB – 62.78 MB` |
+| **1,000-Tenant Swarm Cold Start (P50 / Total / RSS)** | **`1.27 us` P50 / `1.43 ms` total (`9.68 MB` RSS)** | `> 15,000 ms` | `> 5,000 ms` | `> 30,000 ms` |
+| **Peak Process Memory (Across All 31 Apps)** | **`12.38 MB – 18.25 MB`** | `45.29 MB – 62.12 MB` | `26.00 MB – 40.31 MB` | `69.77 MB – 94.58 MB` |
 
 ---
 

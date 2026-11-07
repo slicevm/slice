@@ -9,6 +9,8 @@
 //! realm; Shards `1..=17` are registered via self-replacing lazy property getters on `globalThis`
 //! (`__defLazy`) or pre-loaded on demand by `detect_needed_shards` with zero unused parse/eval cost.
 
+use std::sync::OnceLock;
+
 include!(concat!(env!("OUT_DIR"), "/minified_preludes.rs"));
 
 /// Human-readable source for `ULTRA_CORE_PRELUDE` (`src/preludes/00_ultra_core.js`).
@@ -211,7 +213,56 @@ pub(crate) fn build_fused_prelude_and_bundle(
     out
 }
 
-/// Evaluates a compile-time minified lazy prelude shard (`1..=17`) on demand inside `context`.
+static ULTRA_CORE_SLICEBC: OnceLock<Vec<u8>> = OnceLock::new();
+static LAZY_GETTERS_SLICEBC: OnceLock<Vec<u8>> = OnceLock::new();
+static SHARD_SLICEBC: [OnceLock<Vec<u8>>; 18] = [const { OnceLock::new() }; 18];
+
+#[inline]
+fn compile_static_js_to_slicebc(bytes: &[u8]) -> Vec<u8> {
+    let mut compiler_ctx = boa_engine::Context::default();
+    if let Ok(script) =
+        boa_engine::Script::parse(boa_engine::Source::from_bytes(bytes), None, &mut compiler_ctx)
+    {
+        script
+            .compile_to_slicebc(&mut compiler_ctx)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Evaluates `ULTRA_CORE_PRELUDE` inside `context` using cached precompiled `SLICEBC\x01` `CodeBlock` bytecode.
+#[inline]
+pub(crate) fn eval_ultra_core_prelude(
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsResult<boa_engine::JsValue> {
+    let precompiled =
+        ULTRA_CORE_SLICEBC.get_or_init(|| compile_static_js_to_slicebc(ULTRA_CORE_PRELUDE));
+    if !precompiled.is_empty() {
+        if let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context) {
+            return script.evaluate(context);
+        }
+    }
+    context.eval(boa_engine::Source::from_bytes(ULTRA_CORE_PRELUDE))
+}
+
+/// Evaluates `LAZY_GETTERS_INIT_PRELUDE` inside `context` using cached precompiled `SLICEBC\x01` `CodeBlock` bytecode.
+#[inline]
+pub(crate) fn eval_lazy_getters_init_prelude(
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsResult<boa_engine::JsValue> {
+    let precompiled = LAZY_GETTERS_SLICEBC
+        .get_or_init(|| compile_static_js_to_slicebc(LAZY_GETTERS_INIT_PRELUDE));
+    if !precompiled.is_empty() {
+        if let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context) {
+            return script.evaluate(context);
+        }
+    }
+    context.eval(boa_engine::Source::from_bytes(LAZY_GETTERS_INIT_PRELUDE))
+}
+
+/// Evaluates a compile-time minified lazy prelude shard (`1..=17`) on demand inside `context`
+/// using cached precompiled `SLICEBC\x01` `CodeBlock` bytecode.
 #[inline]
 pub(crate) fn eval_lazy_prelude_shard(
     shard_id: u32,
@@ -222,6 +273,13 @@ pub(crate) fn eval_lazy_prelude_shard(
     }
     register_shard_host_functions_for_mask(1u32 << shard_id, context);
     let bytes = shard_prelude_bytes(shard_id);
+    let precompiled =
+        SHARD_SLICEBC[shard_id as usize].get_or_init(|| compile_static_js_to_slicebc(bytes));
+    if !precompiled.is_empty() {
+        if let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context) {
+            return script.evaluate(context);
+        }
+    }
     context.eval(boa_engine::Source::from_bytes(bytes))
 }
 

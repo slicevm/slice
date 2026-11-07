@@ -20,6 +20,7 @@ mod mcp_and_repl;
 mod test_runner;
 
 #[cfg(test)]
+#[path = "../tests/mod.rs"]
 mod cli_tests;
 
 use crate::config_and_watch::{

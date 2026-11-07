@@ -1,6 +1,6 @@
 # Chapter 05: Building Full-Stack Web Apps, APIs, Static Sites & SSE Streams (`slice serve`)
 
-`slice serve` is a high-throughput, multi-tenant HTTP/1.1 `Keep-Alive` and pipelined web server that executes **every incoming HTTP request inside an isolated, fuel-metered `SliceIsolate`** — while achieving **`154,348 req/s`** in Tier-0 CAS mode and **`126,566 req/s`** in Tier-1 WinterTC mode (outperforming `Deno.serve`, `Bun.serve`, and `Node.js http.createServer`).
+`slice serve` is a high-throughput, multi-tenant HTTP/1.1 `Keep-Alive` and pipelined web server that executes **every incoming HTTP request inside an isolated, fuel-metered `SliceIsolate`** — while achieving **`163,766 req/s`** in Tier-0 CAS mode and **`126,566 req/s`** in Tier-1 WinterTC mode (outperforming `Deno.serve`, `Bun.serve`, and `Node.js http.createServer`).
 
 This chapter is a hands-on guide to building full-stack web applications, REST/BFF APIs, static frontend CDNs, Server-Sent Events (SSE) token streams, outbound `fetch()` webhooks, and multi-tenant hot-swapped SaaS platforms with `slice serve`.
 

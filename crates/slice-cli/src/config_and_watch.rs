@@ -106,10 +106,10 @@ impl ResolvedExecutionConfig {
                     static_dir = Some(PathBuf::from(sd));
                 }
                 if let Some(b) = m.exper_boacas {
-                    slice_engine::set_exper_boacas_override(Some(b));
+                    apply_boacas_override(Some(b));
                 }
                 if let Some(t) = m.tier {
-                    slice_engine::set_tier_override(Some(t));
+                    apply_tier_override(Some(t));
                 }
                 merge_manifest_toml_into_caps_and_dlp(
                     &raw,
@@ -232,13 +232,13 @@ impl ResolvedExecutionConfig {
         {
             if let Some(b) = slice_sandbox::parse_bool_setting(&v) {
                 cli_boacas_override = Some(b);
-                slice_engine::set_exper_boacas_override(Some(b));
+                apply_boacas_override(Some(b));
             }
         }
         if let Ok(v) = std::env::var("SLICE_TIER") {
             if let Some(t) = slice_sandbox::parse_tier_setting(&v) {
                 cli_tier_override = Some(t);
-                slice_engine::set_tier_override(t);
+                apply_tier_override(t);
             }
         }
 
@@ -301,22 +301,22 @@ impl ResolvedExecutionConfig {
                 }
             } else if arg == "--boacas" || arg == "--exper-boacas" {
                 cli_boacas_override = Some(true);
-                slice_engine::set_exper_boacas_override(Some(true));
+                apply_boacas_override(Some(true));
             } else if arg == "--no-boacas" || arg == "--no-exper-boacas" {
                 cli_boacas_override = Some(false);
-                slice_engine::set_exper_boacas_override(Some(false));
+                apply_boacas_override(Some(false));
             } else if let Some(b_str) = arg
                 .strip_prefix("--boacas=")
                 .or_else(|| arg.strip_prefix("--exper-boacas="))
             {
                 if let Some(b) = slice_sandbox::parse_bool_setting(b_str) {
                     cli_boacas_override = Some(b);
-                    slice_engine::set_exper_boacas_override(Some(b));
+                    apply_boacas_override(Some(b));
                 }
             } else if let Some(t_str) = arg.strip_prefix("--tier=") {
                 if let Some(t) = slice_sandbox::parse_tier_setting(t_str) {
                     cli_tier_override = Some(t);
-                    slice_engine::set_tier_override(t);
+                    apply_tier_override(t);
                 }
             } else if arg == "--warm" {
                 warm_pool = true;
@@ -390,12 +390,12 @@ impl ResolvedExecutionConfig {
         }
         if self.cli_boacas_override.is_none() {
             if let Some(b) = m.exper_boacas {
-                slice_engine::set_exper_boacas_override(Some(b));
+                apply_boacas_override(Some(b));
             }
         }
         if self.cli_tier_override.is_none() {
             if let Some(t) = m.tier {
-                slice_engine::set_tier_override(Some(t));
+                apply_tier_override(Some(t));
             }
         }
         if self.cli_warm_override.is_none() {
@@ -454,12 +454,12 @@ impl ResolvedExecutionConfig {
         }
         if self.cli_boacas_override.is_none() {
             if let Some(b) = dirs.boacas {
-                slice_engine::set_exper_boacas_override(Some(b));
+                apply_boacas_override(Some(b));
             }
         }
         if self.cli_tier_override.is_none() {
             if let Some(t) = dirs.tier {
-                slice_engine::set_tier_override(t);
+                apply_tier_override(t);
             }
         }
         if self.cli_warm_override.is_none() {
@@ -754,6 +754,22 @@ pub(crate) fn build_cas_archive(
     build_cas_archive_with_static(input_path, output_path, entrypoint, None)
 }
 
+#[inline]
+fn apply_boacas_override(enabled: Option<bool>) {
+    #[cfg(test)]
+    slice_engine::set_thread_exper_boacas_override(enabled);
+    #[cfg(not(test))]
+    slice_engine::set_exper_boacas_override(enabled);
+}
+
+#[inline]
+fn apply_tier_override(tier: Option<u8>) {
+    #[cfg(test)]
+    slice_engine::set_thread_tier_override(tier);
+    #[cfg(not(test))]
+    slice_engine::set_tier_override(tier);
+}
+
 pub(crate) fn build_cas_archive_with_static(
     input_path: &Path,
     output_path: &Path,
@@ -766,7 +782,7 @@ pub(crate) fn build_cas_archive_with_static(
         let m = SliceManifest::parse_toml(raw_toml);
         if let Some(b) = m.exper_boacas {
             if std::env::var("SLICE_EXPER_BOACAS").is_err() {
-                slice_engine::set_exper_boacas_override(Some(b));
+                apply_boacas_override(Some(b));
             }
         }
     }

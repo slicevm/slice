@@ -2,6 +2,10 @@
 name = "slice-engine"
 version.workspace = true
 edition.workspace = true
+autotests = false
+
+[lib]
+bench = false
 
 [dependencies]
 slice-cas = { path = "../slice-cas" }
@@ -27,3 +31,10 @@ webpki-roots.workspace = true
 rustls-pki-types.workspace = true
 wasmi.workspace = true
 
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "microbench"
+path = "microbench/main.rs"
+harness = false

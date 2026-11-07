@@ -2,10 +2,12 @@
 name = "slice-cli"
 version.workspace = true
 edition.workspace = true
+autotests = false
 
 [[bin]]
 name = "slice"
 path = "src/main.rs"
+bench = false
 
 [dependencies]
 slice-cas = { path = "../slice-cas" }
@@ -19,4 +21,12 @@ libc.workspace = true
 notify.workspace = true
 memchr.workspace = true
 itoa.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "microbench"
+path = "microbench/main.rs"
+harness = false
 

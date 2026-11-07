@@ -2,6 +2,10 @@
 name = "slice-sandbox"
 version.workspace = true
 edition.workspace = true
+autotests = false
+
+[lib]
+bench = false
 
 [dependencies]
 anyhow.workspace = true
@@ -13,4 +17,12 @@ rustc-hash.workspace = true
 memchr.workspace = true
 cow-utils.workspace = true
 smallvec.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "microbench"
+path = "microbench/main.rs"
+harness = false
 

@@ -2,7 +2,7 @@
 
 ## 1. Overview of the Production Toolchain
 
-Slice `v0.9.91` provides a complete developer and production deployment workflow packaged inside a single self-contained native Rust executable (`slice`, embedding the **Oxc** TypeScript compiler, transitive `node_modules` bundler, **Boa** ES2024+ VM, and **Slice** Zero-Stat CAS + Tier-0/Tier-2 engine):
+Slice `v0.10.0` provides a complete developer and production deployment workflow packaged inside a single self-contained native Rust executable (`slice`, embedding the **Oxc** TypeScript compiler, transitive `node_modules` bundler, **Boa** ES2024+ VM, and **Slice** Zero-Stat CAS + Tier-0/Tier-2 engine):
 
 1. **Project Initialization & Policy Configuration (`slice init` & `slice.toml`)**
 2. **Zero-Stat Content-Addressed Packaging (`slice pack` for single files or full `package.json` + `node_modules` folders)**
@@ -56,7 +56,7 @@ Implemented in [`crates/slice-sandbox/src/lib.rs`](file:///p:/opensource/slice/c
 
 ## 3. Workflow 2: State-of-the-Art Multi-Tenant HTTP MicroVM Server (`slice serve`)
 
-`slice serve` runs a shared-nothing **Thread-Per-Core (`--workers=N`)** HTTP/1.1 `Keep-Alive` and pipelined edge server where **every incoming HTTP request** executes inside a hardware- and OCap-isolated `SliceIsolate` (`154,348 req/s` in Tier-0 CAS mode, `126,566 req/s` in Tier-1 WinterTC mode):
+`slice serve` runs a shared-nothing **Thread-Per-Core (`--workers=N`)** HTTP/1.1 `Keep-Alive` and pipelined edge server where **every incoming HTTP request** executes inside a hardware- and OCap-isolated `SliceIsolate` (`163,766 req/s` in Tier-0 CAS mode, `126,566 req/s` in Tier-1 WinterTC mode):
 
 ```bash
 slice serve ./service.cas --port=3000 --workers=8

@@ -45,6 +45,7 @@ pub mod websocket;
 pub mod workers;
 
 #[cfg(test)]
+#[path = "../tests/mod.rs"]
 mod tests;
 
 pub use boacas::{

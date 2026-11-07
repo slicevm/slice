@@ -1,7 +1,6 @@
 //! Warm `boa_engine` Realm Pool, Thread-Local Compartment State, and OCap VFS Guards.
 
 use crate::host_bindings::register_slice_native_host_functions;
-use crate::js_preludes::ULTRA_CORE_PRELUDE;
 use crate::state_and_kv::StateCheckpoint;
 use crate::value_and_ast::BytecodeModule;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -279,9 +278,7 @@ pub(crate) fn populate_realm_cached_handles(realm: &mut WarmBoaRealm) {
 /// and microtask/macrotask schedulers (`process.nextTick`, `queueMicrotask`, `setImmediate`, `setTimeout`).
 pub(crate) fn create_warm_boa_realm() -> WarmBoaRealm {
     let mut realm = create_bare_boa_realm();
-    let _ = realm
-        .ctx
-        .eval(boa_engine::Source::from_bytes(ULTRA_CORE_PRELUDE));
+    let _ = crate::js_preludes::eval_ultra_core_prelude(&mut realm.ctx);
     populate_realm_cached_handles(&mut realm);
     realm
 }
@@ -294,9 +291,7 @@ pub(crate) fn ensure_realm_shards(
 ) {
     let missing = needed_mask & !realm.loaded_shards_mask;
     if init_lazy_getters && (realm.loaded_shards_mask & 1) == 0 {
-        let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-            crate::js_preludes::LAZY_GETTERS_INIT_PRELUDE,
-        ));
+        let _ = crate::js_preludes::eval_lazy_getters_init_prelude(&mut realm.ctx);
         realm.loaded_shards_mask |= 1;
     }
     if missing == 0 {

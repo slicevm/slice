@@ -2,6 +2,10 @@
 name = "slice-io"
 version.workspace = true
 edition.workspace = true
+autotests = false
+
+[lib]
+bench = false
 
 [dependencies]
 anyhow.workspace = true
@@ -10,4 +14,12 @@ libc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "microbench"
+path = "microbench/main.rs"
+harness = false
 

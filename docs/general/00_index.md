@@ -1,6 +1,6 @@
-# The Slice (Nexus-JS) Developer Handbook (`v0.9.91`)
+# The Slice (Nexus-JS) Developer Handbook (`v0.10.0`)
 
-Welcome to the complete developer handbook for **Slice (Nexus-JS)** (`v0.9.91`) — a microVM-grade JavaScript and TypeScript runtime, compiler, HTTP server, and AI sandbox engineered in Rust.
+Welcome to the complete developer handbook for **Slice (Nexus-JS)** (`v0.10.0`) — a microVM-grade JavaScript and TypeScript runtime, compiler, HTTP server, and AI sandbox engineered in Rust.
 
 Whether you are building a high-throughput full-stack web service, packaging a CLI tool into a single zero-dependency executable, running 1,000 untrusted customer plugins on a single machine, or executing LLM-generated TypeScript inside an AI coding agent, this handbook walks you through every feature, CLI command, API, security capability, and migration pattern from the perspective of an application developer.
 
@@ -18,7 +18,7 @@ Traditional JavaScript runtimes (**Node.js**, **Deno**, and **Bun**) were built 
    - Run `.ts`, `.js`, or entire project folders directly (`slice run`), pack them into a 64-byte aligned BLAKE3 `.cas` archive with ahead-of-time **Precompiled Boa `CodeBlock` (`SLICEBC\x01`)** bytecode (`slice pack`), or compile your backend + frontend UI into a **single zero-dependency native executable** (`slice compile`) — beating **Bun (`v1.3.10`)** on **30 out of 31** real-world application benchmarks (`5.11 ms` vs `25.19 ms` on App 01, `13.11 ms` vs `33.24 ms` on Hono v4).
 2. **True Multi-Tenant MicroVM Security in Microseconds:**
    - Every script or HTTP request executes inside a frozen Secure ECMAScript (`SES`) compartment with explicit **Object-Capability (OCap)** permissions (`allow_read`, `allow_write`, `allow_net`, `allow_env`), deterministic **CPU instruction fuel limits**, **byte-level memory cages**, a built-in **Cloud Metadata SSRF Firewall**, and **Outbound Egress DLP** that blocks raw, Base64, and Base64URL secret leaks.
-3. **Full-Stack Web & Edge Server Out of the Box (`154,348 req/s` Tier-0 / `126,566 req/s` Tier-1):**
+3. **Full-Stack Web & Edge Server Out of the Box (`163,766 req/s` Tier-0 / `126,566 req/s` Tier-1):**
    - Write standard WinterTC / Cloudflare Workers / Bun / Deno `export default { fetch(req, env, ctx) }` handlers (`Request`, `Response`, `Headers`, `URL`, `URLSearchParams`, `ReadableStream`), stream **Server-Sent Events (`Response.sse`)**, use the built-in **16-way sharded `Slice.kv` store**, serve static frontend assets (`--static=./public`) with `< 2 us` BLAKE3 `ETag` `304` responses, and hot-swap tenant bundles (`--tenant-dir`) with zero downtime.
 4. **Unified 4-Layer Configuration & AI Agent Primitives:**
    - Configure every engine, limit, OCap permission, and server setting declaratively across **`slice.toml`**, **top-of-file inline directives (`// @slice-...`)**, **`SLICE_*` environment variables**, and **CLI flags (`--*`)**.

@@ -1,10 +1,10 @@
 # Pure-Rust WebAssembly, Capability-Attenuated Web Workers & Direct Kernel I/O
 
-This document covers Slice's Pure-Rust WebAssembly engine (`wasm.rs` via `wasmi` `v0.40`), capability-attenuated MicroVM Web Workers and `node:worker_threads` (`workers.rs`), direct kernel completion rings (`slice-io`: Linux `io_uring` & Windows `IOCP`), and OS-native kernel event file watching (`OsNativeFileWatcher`).
+This document covers Slice's Pure-Rust WebAssembly engine (`wasm.rs` via `wasmi` `v2.0.0`), capability-attenuated MicroVM Web Workers and `node:worker_threads` (`workers.rs`), direct kernel completion rings (`slice-io`: Linux `io_uring` & Windows `IOCP`), and OS-native kernel event file watching (`OsNativeFileWatcher`).
 
 ---
 
-## 1. Pure-Rust WebAssembly Engine (`wasmi` `v0.40`), `GLOBAL_WASM_MODULE_CACHE` & 5-Ring WASM Cage
+## 1. Pure-Rust WebAssembly Engine (`wasmi` `v2.0.0`), `GLOBAL_WASM_MODULE_CACHE` & 5-Ring WASM Cage
 
 Implemented in [`crates/slice-engine/src/wasm.rs`](file:///p:/opensource/slice/crates/slice-engine/src/wasm.rs) and [`crates/slice-engine/src/preludes/09_wasm.js`](file:///p:/opensource/slice/crates/slice-engine/src/preludes/09_wasm.js):
 
@@ -43,5 +43,5 @@ Implemented in [`crates/slice-engine/src/workers.rs`](file:///p:/opensource/slic
 - **Windows NT `IOCP`:** Binds directly to `CreateIoCompletionPort`, `PostQueuedCompletionStatus`, and `GetQueuedCompletionStatus` via `kernel32.dll` FFI, processing `10,000` completions in `0.02 ms - 5.26 ms`.
 
 ### 3.2 OS-Native Kernel Event File Watcher ([`OsNativeFileWatcher`](file:///p:/opensource/slice/crates/slice-cli/src/config_and_watch.rs))
-- Uses the cross-platform `notify` (`v6.1`) crate (`inotify` on Linux, `ReadDirectoryChangesW` on Windows, `FSEvents`/`kqueue` on macOS) with a `15 ms` debounce window and automatic fingerprint fallback (`collect_watch_fingerprint`) to power zero-idle-CPU live reload (`4.92 ms` rebuild+rerun) across `slice run --watch`, `slice test --watch` / `--watch-once`, and `slice serve --watch`.
+- Uses the cross-platform `notify` (`v8.2`) crate (`inotify` on Linux, `ReadDirectoryChangesW` on Windows, `FSEvents`/`kqueue` on macOS) with a `15 ms` debounce window and automatic fingerprint fallback (`collect_watch_fingerprint`) to power zero-idle-CPU live reload (`4.92 ms` rebuild+rerun) across `slice run --watch`, `slice test --watch` / `--watch-once`, and `slice serve --watch`.
 

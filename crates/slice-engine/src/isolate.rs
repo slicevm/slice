@@ -281,7 +281,7 @@ impl SliceIsolate {
             child_iso.add_egress_audit_secret(sec);
         }
 
-        let bc = compile_source_to_bytecode(code);
+        let bc = crate::parser_and_compiler::compile_source_for_sandbox_eval(code);
         match child_iso.execute_bytecode(&bc, None) {
             Ok(metrics) => {
                 let _ = self.compartment.consume_fuel(metrics.fuel_consumed.max(1));

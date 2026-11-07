@@ -1728,14 +1728,27 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
 /// as the default optimal execution path, and **Tier-0/Tier-2** fast-path SIMD intrinsics
 /// (selected via AST-verified `is_tier0_slicesnp_compatible_ast` unless `--tier=1` forces pure Tier-1 Boa).
 pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
+    compile_source_to_bytecode_inner(raw_source, true)
+}
+
+/// Compiles an inline `Slice.evalSandbox(code)` snippet for immediate in-memory execution,
+/// using Tier-0 `SLICESNP` when compatible or lightweight `SLICEBOA` on a pooled `WarmBoaRealm`
+/// without constructing a throwaway AOT `SLICEBC\x01` compiler context.
+#[inline]
+pub(crate) fn compile_source_for_sandbox_eval(raw_source: &str) -> Vec<u8> {
+    compile_source_to_bytecode_inner(raw_source, false)
+}
+
+fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) -> Vec<u8> {
     let inline_dirs = if raw_source.starts_with("//") || raw_source.starts_with("#!") {
         slice_sandbox::parse_inline_directives(raw_source)
     } else {
         slice_sandbox::InlineDirectives::default()
     };
-    let use_boacas = inline_dirs
-        .boacas
-        .unwrap_or_else(crate::boacas::is_exper_boacas_build_enabled);
+    let use_boacas = allow_boacas_aot
+        && inline_dirs
+            .boacas
+            .unwrap_or_else(crate::boacas::is_exper_boacas_build_enabled);
     let tier_ov = inline_dirs
         .tier
         .unwrap_or_else(crate::boacas::active_tier_override);

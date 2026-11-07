@@ -18,14 +18,14 @@ Full reproducible benchmark report: **[`bench_latest.md`](file:///p:/opensource/
 | Metric (Linux x86_64 Verified)        | Node.js v27.0-a   | Deno v2.9.8       | Bun v1.4.4        | Slice (SLICEBC\x01 Def) |
 +---------------------------------------+-------------------+-------------------+-------------------+-------------------------+
 | Isolate Cold Start (In-Process)       | N/A (Process/VM)  | N/A (Process/VM)  | N/A (Process/VM)  | 0.99 us (P50: 1.27 us)  |
-| 1,000-Tenant MicroVM Swarm Time       | > 30,000 ms       | > 15,000 ms       | > 5,000 ms        | 1.43 ms total (11.5 MB) |
-| 500-Module Graph Load (Zero-Stat CAS) | 70.382 ms         | 41.799 ms         | 12.721 ms         | 0.42 ms (0 stat calls)  |
+| 1,000-Tenant MicroVM Swarm Time       | > 30,000 ms       | > 15,000 ms       | > 5,000 ms        | 1.43 ms total (9.68 MB) |
+| 500-Module Graph Load (Zero-Stat CAS) | 70.382 ms         | 41.799 ms         | 12.721 ms         | 0.38 ms (0 stat calls)  |
 | OS stat() Syscalls (500 Modules)      | 1,500+ syscalls   | 500+ syscalls     | 500+ syscalls     | 0 stat() syscalls       |
 | Real-World 31-App Suite Cold Wins     | 0 / 31            | 0 / 31            | 0 / 31 (1 Tie)    | 30 / 31 Wins (1 Tie)    |
-| Real-World 31-App Suite Warm (--warm) | N/A               | N/A               | N/A               | 0.48 ms - 17.65 ms      |
-| HTTP/1.1 Keep-Alive (8 Workers, T0)   | 57,320 req/s      | 97,689 req/s      | 102,749 req/s     | 154,348 req/s (6.48 us) |
-| HTTP/1.1 Keep-Alive (8 Workers, T1)   | 57,320 req/s      | 97,689 req/s      | 102,749 req/s     | 126,566 req/s (7.90 us) |
-| Peak Process Memory (31 Apps RSS)     | 69.90 - 92.25 MB  | 45.29 - 62.12 MB  | 26.00 - 40.09 MB  | 12.38 - 17.88 MB        |
+| Real-World 31-App Suite Warm (--warm) | N/A               | N/A               | N/A               | 0.48 ms - 15.93 ms      |
+| HTTP/1.1 Keep-Alive (8 Workers, T0)   | 58,607 req/s      | 94,185 req/s      | 105,077 req/s     | 163,766 req/s (6.11 us) |
+| HTTP/1.1 Keep-Alive (8 Workers, T1)   | 58,607 req/s      | 94,185 req/s      | 105,077 req/s     | 126,566 req/s (7.90 us) |
+| Peak Process Memory (31 Apps RSS)     | 69.77 - 94.58 MB  | 45.29 - 62.12 MB  | 26.00 - 40.31 MB  | 12.38 - 18.25 MB        |
 | Multi-Tenant Security Containment     | 0/5 (Ambient)     | 2/5 (Coarse CLI)  | 0/5 (Ambient)     | 5/5 (OCap+SES+Fuel+DLP) |
 +---------------------------------------+-------------------+-------------------+-------------------+-------------------------+
 ```
@@ -132,7 +132,7 @@ slice compile ./tests/apps/01-fintech-checkout -o my-edge-app
 
 ### 5. Launch the Multi-Tenant WinterTC HTTP Server (`slice serve`)
 
-`slice serve` runs a shared-nothing **Thread-Per-Core (`--workers=N`)** HTTP/1.1 `Keep-Alive` & pipelined server that executes every incoming HTTP request inside a fresh, hardware- and OCap-isolated `SliceIsolate` in microseconds (**`154,348 req/s`** in Tier-0 CAS mode, **`126,566 req/s`** in Tier-1 WinterTC mode):
+`slice serve` runs a shared-nothing **Thread-Per-Core (`--workers=N`)** HTTP/1.1 `Keep-Alive` & pipelined server that executes every incoming HTTP request inside a fresh, hardware- and OCap-isolated `SliceIsolate` in microseconds (**`163,766 req/s`** in Tier-0 CAS mode, **`126,566 req/s`** in Tier-1 WinterTC mode):
 
 ```bash
 # Start multi-worker Keep-Alive server on port 3000 with 8 shared-nothing worker threads
