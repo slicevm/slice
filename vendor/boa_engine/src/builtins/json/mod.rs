@@ -245,21 +245,22 @@ impl Json {
             .to_std_string()
             .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
 
-        // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
-        //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
-        let parsed_json = serde_json::from_str::<serde_json::Value>(&json_string)
-            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
-
         // Check if a reviver is provided, to determine if we need source text tracking
         let has_reviver = args.get_or_undefined(1).is_callable();
 
-        // SLICE PATCH (P01): Direct Rust `serde_json::Value -> JsValue` materialization fast-path
-        // when no `reviver` callback is supplied, bypassing JS parser + ByteCompiler + VM execution.
+        // SLICE PATCH (P01): Direct streaming `serde_json::Deserializer -> JsValue` materialization
+        // when no `reviver` callback is supplied, preserving exact ECMAScript property insertion
+        // order and bypassing both intermediate `serde_json::Value` allocations and JS compilation.
         if !has_reviver {
-            if let Some(js_val) = Self::try_fast_serde_json_to_js_value(parsed_json, context)? {
+            if let Some(js_val) = Self::try_fast_parse_json_str(&json_string, context)? {
                 return Ok(js_val);
             }
         }
+
+        // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
+        //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
+        serde_json::from_str::<serde_json::Value>(&json_string)
+            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
 
         // 3. Let scriptString be the string-concatenation of "(", jsonString, and ");".
         let script_string = format!("({json_string});");
@@ -364,52 +365,111 @@ impl Json {
         }
     }
 
-    /// SLICE PATCH (P01): Direct recursive `serde_json::Value -> JsValue` materialization.
+    /// SLICE PATCH (P01): Direct streaming `serde_json::Deserializer -> JsValue` materialization.
     ///
-    /// Returns `Ok(Some(JsValue))` when the entire JSON tree can be constructed directly in Rust
-    /// without invoking `boa_parser` + `ByteCompiler`, or `Ok(None)` if a number literal requires
-    /// fallback parsing.
-    fn try_fast_serde_json_to_js_value(
-        val: serde_json::Value,
+    /// Preserves exact ECMAScript property insertion order without allocating an intermediate
+    /// `serde_json::Value` (`BTreeMap`) tree or invoking `boa_parser` + `ByteCompiler`.
+    fn try_fast_parse_json_str(
+        json_str: &str,
         context: &mut Context,
     ) -> JsResult<Option<JsValue>> {
-        match val {
-            serde_json::Value::Null => Ok(Some(JsValue::null())),
-            serde_json::Value::Bool(b) => Ok(Some(JsValue::new(b))),
-            serde_json::Value::Number(n) => {
-                if let Some(f) = n.as_f64() {
-                    Ok(Some(JsValue::new(f)))
+        struct JsonSeed<'a>(&'a mut Context);
+
+        impl<'de> serde::de::DeserializeSeed<'de> for JsonSeed<'_> {
+            type Value = JsValue;
+
+            fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                deserializer.deserialize_any(self)
+            }
+        }
+
+        impl<'de> serde::de::Visitor<'de> for JsonSeed<'_> {
+            type Value = JsValue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("any valid JSON value")
+            }
+
+            fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(JsValue::new(v))
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+                if let Ok(i) = i32::try_from(v) {
+                    Ok(JsValue::new(i))
                 } else {
-                    Ok(None)
+                    Ok(JsValue::new(v as f64))
                 }
             }
-            serde_json::Value::String(s) => Ok(Some(JsValue::new(js_string!(s.as_str())))),
-            serde_json::Value::Array(items) => {
-                let mut elements = thin_vec::ThinVec::with_capacity(items.len());
-                for item in items {
-                    let Some(js_item) = Self::try_fast_serde_json_to_js_value(item, context)?
-                    else {
-                        return Ok(None);
-                    };
-                    elements.push(js_item);
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+                if let Ok(i) = i32::try_from(v) {
+                    Ok(JsValue::new(i))
+                } else {
+                    Ok(JsValue::new(v as f64))
                 }
-                let arr = crate::builtins::Array::array_create(elements.len() as u64, None, context)?;
+            }
+
+            fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> {
+                Ok(JsValue::new(v))
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(JsValue::new(js_string!(v)))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
+                Ok(JsValue::new(js_string!(v.as_str())))
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(JsValue::null())
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(JsValue::null())
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut elements = thin_vec::ThinVec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(elem) = seq.next_element_seed(JsonSeed(self.0))? {
+                    elements.push(elem);
+                }
+                let arr =
+                    crate::builtins::Array::array_create(elements.len() as u64, None, self.0)
+                        .map_err(serde::de::Error::custom)?;
                 arr.borrow_mut()
                     .properties_mut()
                     .override_indexed_properties(elements);
-                Ok(Some(arr.into()))
+                Ok(arr.into())
             }
-            serde_json::Value::Object(map) => {
-                let obj = JsObject::with_object_proto(context.intrinsics());
-                for (k, v) in map {
-                    let Some(js_val) = Self::try_fast_serde_json_to_js_value(v, context)? else {
-                        return Ok(None);
-                    };
-                    obj.create_data_property_or_throw(js_string!(k.as_str()), js_val, context)?;
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let obj = JsObject::with_object_proto(self.0.intrinsics());
+                while let Some(key) = map.next_key::<Cow<'de, str>>()? {
+                    let val = map.next_value_seed(JsonSeed(self.0))?;
+                    obj.create_data_property_or_throw(js_string!(key.as_ref()), val, self.0)
+                        .map_err(serde::de::Error::custom)?;
                 }
-                Ok(Some(obj.into()))
+                Ok(obj.into())
             }
         }
+
+        let mut de = serde_json::Deserializer::from_str(json_str);
+        let val = serde::de::DeserializeSeed::deserialize(JsonSeed(context), &mut de)
+            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
+        de.end()
+            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
+        Ok(Some(val))
     }
 
     /// `25.5.1.1 InternalizeJSONProperty ( holder, name, reviver )`

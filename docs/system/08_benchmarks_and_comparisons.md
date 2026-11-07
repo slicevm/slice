@@ -108,15 +108,15 @@ Across every evaluated metric—cold-start latency, 500-module graph resolution,
 
 Using `slice microvm-bench --tenants=1000` and `slice verify-security`, we spawned **1,000 isolated tenant compartments** in a single host process, each provisioned with its own hardware PKEY domain, frozen SES intrinsics, attenuated `CapabilityToken`, deterministic CPU fuel limit (`100,000` ops), and memory cage (`64 KB`).
 
-| MicroVM Swarm Metric | Linux (`io_uring` SQPOLL) | Windows (`NT IOCP`) | Comparison vs Firecracker MicroVM |
+| MicroVM Swarm Metric | Linux (`io_uring` / Ring) | Windows (`NT IOCP`) | Comparison vs Firecracker MicroVM |
 | :--- | :--- | :--- | :--- |
-| **Single Isolate Cold Start (Min)** | **1.92 us (0.00192 ms)** | **2.40 us (0.00240 ms)** | **~65,000x faster** (vs 125 ms) |
-| **Single Isolate Cold Start (P50)** | **2.10 us (0.00210 ms)** | **2.50 us (0.00250 ms)** | **~59,000x faster** |
-| **Single Isolate Cold Start (P99)** | **6.40 us (0.00640 ms)** | **5.70 us (0.00570 ms)** | **~20,000x faster** |
-| **Total Time to Spawn & Run 1,000 Tenants** | **2.62 ms** | **3.21 ms** | **> 10,000x faster** |
+| **Single Isolate Cold Start (Min)** | **0.98 us (0.00098 ms)** | **1.50 us (0.00150 ms)** | **~127,000x faster** (vs 125 ms) |
+| **Single Isolate Cold Start (P50)** | **1.03 us (0.00103 ms)** | **1.60 us (0.00160 ms)** | **~121,000x faster** |
+| **Single Isolate Cold Start (P99)** | **2.42 us (0.00242 ms)** | **2.10 us (0.00210 ms)** | **~51,000x faster** |
+| **Total Time to Spawn & Run 1,000 Tenants** | **1.28 ms** | **2.22 ms** | **> 10,000x faster** |
 | **Per-Tenant Base Memory Footprint** | **4,096 bytes (4.0 KB)** | **4,096 bytes (4.0 KB)** | **~32,000x denser** (vs 128 MB) |
-| **Total Host Process RSS (After 1,000 Tenants)** | **6.77 MB (6,932 KB)** | **9.58 MB (9,812 KB)** | Fits on a microcontroller / edge node |
-| **10,000 Direct Ring I/O Completions** | **2.83 ms (~3.53M ops/s)** | **5.26 ms (~1.90M ops/s)** | Zero worker-thread lock contention |
+| **Total Host Process RSS (After 1,000 Tenants)** | **10.06 MB (10,300 KB)** | **11.82 MB (12,104 KB)** | Fits on a microcontroller / edge node |
+| **10,000 Direct Ring I/O Completions** | **0.02 ms** | **5.11 ms (~1.96M ops/s)** | Zero worker-thread lock contention |
 
 ### Verified Security Containment Vectors (`slice verify-security`)
 
