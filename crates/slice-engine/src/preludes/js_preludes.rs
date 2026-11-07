@@ -14,45 +14,45 @@ use std::sync::OnceLock;
 include!(concat!(env!("OUT_DIR"), "/minified_preludes.rs"));
 
 /// Human-readable source for `ULTRA_CORE_PRELUDE` (`src/preludes/00_ultra_core.js`).
-pub const ULTRA_CORE_PRELUDE_SRC: &str = include_str!("preludes/00_ultra_core.js");
+pub const ULTRA_CORE_PRELUDE_SRC: &str = include_str!("00_ultra_core.js");
 /// Human-readable source for Shard 1: `WEB_FETCH_URL_PRELUDE` (`src/preludes/01_web_fetch_url.js`).
-pub const WEB_FETCH_URL_PRELUDE_SRC: &str = include_str!("preludes/01_web_fetch_url.js");
+pub const WEB_FETCH_URL_PRELUDE_SRC: &str = include_str!("01_web_fetch_url.js");
 /// Human-readable source for Shard 2: `ENCODING_EVENTS_PRELUDE` (`src/preludes/02_encoding_events.js`).
-pub const ENCODING_EVENTS_PRELUDE_SRC: &str = include_str!("preludes/02_encoding_events.js");
+pub const ENCODING_EVENTS_PRELUDE_SRC: &str = include_str!("02_encoding_events.js");
 /// Human-readable source for Shard 3: `STREAMS_FORMDATA_PRELUDE` (`src/preludes/03_streams_formdata.js`).
-pub const STREAMS_FORMDATA_PRELUDE_SRC: &str = include_str!("preludes/03_streams_formdata.js");
+pub const STREAMS_FORMDATA_PRELUDE_SRC: &str = include_str!("03_streams_formdata.js");
 /// Human-readable source for Shard 4: `WEBCRYPTO_CLONE_PRELUDE` (`src/preludes/04_webcrypto_clone.js`).
-pub const WEBCRYPTO_CLONE_PRELUDE_SRC: &str = include_str!("preludes/04_webcrypto_clone.js");
+pub const WEBCRYPTO_CLONE_PRELUDE_SRC: &str = include_str!("04_webcrypto_clone.js");
 /// Human-readable source for Shard 5: `FULL_BUFFER_PRELUDE` (`src/preludes/05_full_buffer.js`).
-pub const FULL_BUFFER_PRELUDE_SRC: &str = include_str!("preludes/05_full_buffer.js");
+pub const FULL_BUFFER_PRELUDE_SRC: &str = include_str!("05_full_buffer.js");
 /// Human-readable source for Shard 6: `CONSOLE_EXT_PRELUDE` (`src/preludes/06_console_ext.js`).
-pub const CONSOLE_EXT_PRELUDE_SRC: &str = include_str!("preludes/06_console_ext.js");
+pub const CONSOLE_EXT_PRELUDE_SRC: &str = include_str!("06_console_ext.js");
 /// Human-readable source for Shard 7: `WEBSOCKET_PRELUDE` (`src/preludes/07_websocket.js`).
-pub const WEBSOCKET_PRELUDE_SRC: &str = include_str!("preludes/07_websocket.js");
+pub const WEBSOCKET_PRELUDE_SRC: &str = include_str!("07_websocket.js");
 /// Human-readable source for Shard 8: `WORKERS_SOCKETS_PRELUDE` (`src/preludes/08_workers_sockets.js`).
-pub const WORKERS_SOCKETS_PRELUDE_SRC: &str = include_str!("preludes/08_workers_sockets.js");
+pub const WORKERS_SOCKETS_PRELUDE_SRC: &str = include_str!("08_workers_sockets.js");
 /// Human-readable source for Shard 9: `WASM_PRELUDE` (`src/preludes/09_wasm.js`).
-pub const WASM_PRELUDE_SRC: &str = include_str!("preludes/09_wasm.js");
+pub const WASM_PRELUDE_SRC: &str = include_str!("09_wasm.js");
 /// Human-readable source for Shard 10: `OUTBOUND_FETCH_SSE_PRELUDE` (`src/preludes/10_outbound_fetch_sse.js`).
-pub const OUTBOUND_FETCH_SSE_PRELUDE_SRC: &str = include_str!("preludes/10_outbound_fetch_sse.js");
+pub const OUTBOUND_FETCH_SSE_PRELUDE_SRC: &str = include_str!("10_outbound_fetch_sse.js");
 /// Human-readable source for Shard 11: `FETCH_HEADERS_REQ_RES_PRELUDE` (`src/preludes/11_fetch_headers_req_res.js`).
 pub const FETCH_HEADERS_REQ_RES_PRELUDE_SRC: &str =
-    include_str!("preludes/11_fetch_headers_req_res.js");
+    include_str!("11_fetch_headers_req_res.js");
 /// Human-readable source for Shard 12: `URL_PATTERN_PRELUDE` (`src/preludes/12_url_pattern.js`).
-pub const URL_PATTERN_PRELUDE_SRC: &str = include_str!("preludes/12_url_pattern.js");
+pub const URL_PATTERN_PRELUDE_SRC: &str = include_str!("12_url_pattern.js");
 /// Human-readable source for Shard 13: `DOM_EVENTS_PRELUDE` (`src/preludes/13_dom_events.js`).
-pub const DOM_EVENTS_PRELUDE_SRC: &str = include_str!("preludes/13_dom_events.js");
+pub const DOM_EVENTS_PRELUDE_SRC: &str = include_str!("13_dom_events.js");
 /// Human-readable source for Shard 14: `TRANSFORM_COMPRESSION_STREAMS_PRELUDE` (`src/preludes/14_transform_compression_streams.js`).
 pub const TRANSFORM_COMPRESSION_STREAMS_PRELUDE_SRC: &str =
-    include_str!("preludes/14_transform_compression_streams.js");
+    include_str!("14_transform_compression_streams.js");
 /// Human-readable source for Shard 15: `BLOB_FORMDATA_PRELUDE` (`src/preludes/15_blob_formdata.js`).
-pub const BLOB_FORMDATA_PRELUDE_SRC: &str = include_str!("preludes/15_blob_formdata.js");
+pub const BLOB_FORMDATA_PRELUDE_SRC: &str = include_str!("15_blob_formdata.js");
 /// Human-readable source for Shard 16: `STRUCTURED_CLONE_PRELUDE` (`src/preludes/16_structured_clone.js`).
-pub const STRUCTURED_CLONE_PRELUDE_SRC: &str = include_str!("preludes/16_structured_clone.js");
+pub const STRUCTURED_CLONE_PRELUDE_SRC: &str = include_str!("16_structured_clone.js");
 /// Human-readable source for Shard 17: `BUFFER_BINARY_RW_PRELUDE` (`src/preludes/17_buffer_binary_rw.js`).
-pub const BUFFER_BINARY_RW_PRELUDE_SRC: &str = include_str!("preludes/17_buffer_binary_rw.js");
+pub const BUFFER_BINARY_RW_PRELUDE_SRC: &str = include_str!("17_buffer_binary_rw.js");
 /// Human-readable source for Shard 18: `INTL_PRELUDE` (`src/preludes/18_intl.js`).
-pub const INTL_PRELUDE_SRC: &str = include_str!("preludes/18_intl.js");
+pub const INTL_PRELUDE_SRC: &str = include_str!("18_intl.js");
 
 /// On-demand self-replacing lazy property getter registration (`__defLazy`) evaluated ONLY when
 /// `needs_lazy_global_getters(js_code)` is true (`globalThis.*` dynamic probes).
@@ -103,7 +103,7 @@ pub(crate) fn register_shard_host_functions_for_mask(
         return;
     }
     if (shards_mask & (1 << 1)) != 0 {
-        crate::web_primitives::register_url_and_usp_host_functions(context);
+        crate::host_bindings::register_url_and_usp_host_functions(context);
     }
     if (shards_mask & ((1 << 2) | (1 << 5) | (1 << 14) | (1 << 15))) != 0 {
         crate::host_bindings::register_wintertc_phase_n3_host_functions(context);

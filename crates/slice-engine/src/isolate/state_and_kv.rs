@@ -1,7 +1,8 @@
 //! Sharded Edge KV Slab (`Slice.kv`), Sub-5us State Checkpoints (`Slice.checkpoint`/`Slice.restore`),
-//! Deterministic SplitMix64 PRNG, and Outbound Egress Secret DLP Guard.
+//! Deterministic SplitMix64 PRNG Re-export, and Outbound Egress Secret DLP Guard.
 
 use crate::boa_realm::{BOA_VFS_CACHE, BOA_VFS_DIRS, CHECKPOINT_SLAB, NEXT_CHECKPOINT_ID};
+pub(crate) use crate::intrinsics::splitmix64_next_f64;
 use compact_str::CompactString;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slice_sandbox::SandboxViolation;
@@ -256,10 +257,12 @@ pub(crate) fn edge_kv_del(tenant_id: &str, key: &str) -> bool {
 pub(crate) fn edge_kv_incr(tenant_id: &str, key: &str, delta: i64) -> i64 {
     let shard = edge_kv_shard(tenant_id, key);
     let mut guard = shard.write();
-    let now = current_epoch_ms();
     if let Some(t_map) = guard.get_mut(tenant_id) {
         if let Some(entry) = t_map.get_mut(key) {
-            let current = if entry.expires_at_ms.is_some_and(|exp| now >= exp) {
+            let current = if entry
+                .expires_at_ms
+                .is_some_and(|exp| current_epoch_ms() >= exp)
+            {
                 0
             } else {
                 entry.val.as_i64().unwrap_or(0)
@@ -290,14 +293,4 @@ pub(crate) fn edge_kv_incr(tenant_id: &str, key: &str, delta: i64) -> i64 {
     );
     guard.insert(CompactString::new(tenant_id), t_map);
     next
-}
-
-#[inline]
-pub(crate) fn splitmix64_next_f64(state: &mut u64) -> f64 {
-    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    ((z >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
 }

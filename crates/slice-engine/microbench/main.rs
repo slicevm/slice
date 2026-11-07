@@ -1,9 +1,11 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use slice_engine::boacas::{compute_boacas_metadata, pack_boacas_container};
 use slice_engine::intrinsics::{
-    aes_gcm_encrypt, aes_gcm_open_with_key, aes_gcm_seal_with_key, ed25519_keypair_from_seed,
-    ed25519_sign_bytes, ed25519_verify_bytes, fast_parse_bytes, fast_parse_ms, hmac_sha256_hex,
-    make_ring_aead_key, sha256_hex,
+    aes_cbc_decrypt_with_expanded, aes_cbc_encrypt_with_expanded, aes_gcm_encrypt,
+    aes_gcm_open_with_key, aes_gcm_seal_with_key, base64_decode, base64_encode, crc32_checksum,
+    ed25519_keypair_from_seed, ed25519_sign_bytes, ed25519_verify_bytes, fast_parse_bytes,
+    fast_parse_ms, hmac_sha256_hex, make_ring_aead_key, parse_whatwg_url, sha256_hex,
+    zlib_compress_bytes, zlib_decompress_bytes, AesExpandedKey,
 };
 use slice_engine::{compile_source_to_bytecode, SliceIsolate};
 use slice_sandbox::CapabilityToken;
@@ -159,6 +161,59 @@ fib(30);
                 black_box(&ed_sig),
             );
             black_box(ok)
+        });
+    });
+
+    let cbc_expanded = AesExpandedKey::new(&key_256).expect("valid AES-256-CBC key");
+    let iv_16 = [0x22u8; 16];
+    group.bench_function("aes_256_cbc_seal_open_branchless_256b", |b| {
+        b.iter(|| {
+            let ct = aes_cbc_encrypt_with_expanded(
+                black_box(&cbc_expanded),
+                black_box(&iv_16),
+                black_box(&payload_256b),
+                true,
+            )
+            .expect("cbc encrypt");
+            let pt = aes_cbc_decrypt_with_expanded(
+                black_box(&cbc_expanded),
+                black_box(&iv_16),
+                black_box(&ct),
+                true,
+            )
+            .expect("cbc decrypt");
+            black_box(pt.len())
+        });
+    });
+
+    let sample_4kb =
+        r#"{"service":"slice-edge","status":"ok","items":[1,2,3,4,5],"region":"us-east-1"}"#
+            .repeat(52);
+    let sample_gz = zlib_compress_bytes(sample_4kb.as_bytes(), "gzip").expect("gzip");
+    group.bench_function("crc32_table_4kb", |b| {
+        b.iter(|| black_box(crc32_checksum(black_box(sample_4kb.as_bytes()))));
+    });
+    group.bench_function("gunzip_huffman_lut_4kb", |b| {
+        b.iter(|| {
+            let out = zlib_decompress_bytes(black_box(&sample_gz), "gzip").expect("gunzip");
+            black_box(out.len())
+        });
+    });
+    group.bench_function("base64_lut_roundtrip_256b", |b| {
+        b.iter(|| {
+            let enc = base64_encode(black_box(&payload_256b), false);
+            let dec = base64_decode(black_box(&enc));
+            black_box(dec.len())
+        });
+    });
+    group.bench_function("whatwg_url_parse", |b| {
+        b.iter(|| {
+            let parsed = parse_whatwg_url(
+                black_box("https://edge.slice.dev:8443/v1/orders/../items?limit=25&sort=asc#top"),
+                None,
+            )
+            .expect("parse url");
+            black_box(parsed.pathname.len())
         });
     });
 

@@ -47,6 +47,7 @@ pub(crate) use self::kv_and_sandbox::register_kv_and_sandbox_host_functions;
 pub(crate) use self::wasm::register_shard9_wasm_host_functions;
 pub(crate) use self::websocket::register_shard7_websocket_host_functions;
 pub(crate) use self::wintertc_and_buffer::{
-    register_buffer_host_functions, register_wintertc_phase_n3_host_functions,
+    register_buffer_host_functions, register_url_and_usp_host_functions,
+    register_wintertc_phase_n3_host_functions,
 };
 pub(crate) use self::workers_and_sockets::register_shard8_workers_sockets_host_functions;

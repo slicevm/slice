@@ -5,45 +5,37 @@
 //! - Tier 1: Adaptive Baseline Promotion after hot-loop threshold (`> 1,000` iterations).
 //! - Tier 2: Native SIMD / JIT Intrinsics for compute-heavy kernels, JSON, Crypto, and WinterTC routing.
 //!
-//! Includes a complete recursive-descent ECMAScript/TypeScript AST & Bytecode VM supporting:
-//! - `var`, `let`, `const`, assignments (`=`, `+=`, `-=`, `*=`, `/=`), `++`, `--`
-//! - Full operator precedence (`||`, `&&`, `===`, `!==`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, `%`, `**`, `!`, unary `-`/`+`, ternary `? :`)
-//! - Arrays `[1, 2, 3]`, Objects `{ a: 1 }`, member access `obj.prop` / `arr[i]`, methods (`.map`, `.filter`, `.reduce`, `.push`, `.join`, `.slice`, `.includes`, `.length`)
-//! - Functions (`function f(a, b) {}`, arrow functions `(x) => x * 2`, closures, recursion)
-//! - Control flow (`if / else`, `while`, `for`, `return`, `break`, `continue`, `typeof`)
-//! - Built-in globals (`console.log`, `print`, `Math.*`, `JSON.*`, `Object.freeze`, `Array.isArray`, `Number`, `String`, `parseInt`, `parseFloat`)
-//! - Native Tier-2 SIMD intrinsics (`fib`, `numericLoop`, `cryptoDigest`, `WinterTC.route`, `fetch`, `fs.readFileSync`, `env`)
-//! - SES `lockdown()` prototype freeze enforcement and OCap capability token traps.
-//!
-//! ## Module Architecture
-//! - [`value_and_ast`]: 16-byte cache-line [`JsValue`] layout, [`ExecutionTier`], AST nodes ([`Stmt`], [`Expr`]), and [`BytecodeOp`].
-//! - [`parser_and_compiler`]: Recursive-descent JS/TS lexer/parser, [`compile_source_to_bytecode`], and [`disassemble_bytecode`].
-//! - [`isolate`]: [`SliceIsolate`] lifecycle, Tier-0/Tier-1/Tier-2 execution, [`HttpRequestContext`], and [`SandboxEvalOptions`].
-//! - [`boa_realm`]: Warm `boa_engine` realm pool, thread-local compartment state, `CORE_PRELUDE` WinterTC/SSE/Fetch bootstrap, and lazy `node:*` / `slice:test` loaders.
-//! - [`intrinsics`]: Native hardware `SHA-NI` + FIPS-180-4 SHA-256, HMAC-SHA256, Base64, SemVer, `ms`, and `bytes` fast-paths.
-//! - [`state_and_kv`]: 16-way sharded [`EDGE_KV_SLAB`](state_and_kv::EDGE_KV_SLAB) (`Slice.kv`), `< 5 us` VFS+KV checkpoints, SplitMix64 PRNG, and Egress DLP guard.
-//! - [`outbound_http`]: Outbound `fetch()` HTTP/1.1 socket engine, OCap host allowlist, and Cloud Metadata SSRF shield.
+//! ## Domain Architecture
+//! - [`bindings`]: Modular native Rust host functions (`__slice_*`) registered into `boa_engine::Context`.
+//! - [`intrinsics`]: Native hardware `SHA-NI` + FIPS-180-4 SHA-256, HMAC, AES-CBC/GCM, PBKDF2/HKDF/scrypt,
+//!   Ed25519/ECDSA, Base64/Hex, WHATWG URL/URLSearchParams, DEFLATE/Zlib/Gzip, SemVer, `ms`, and `bytes`.
+//! - [`isolate`]: [`SliceIsolate`] lifecycle, Tier-0/Tier-1/Tier-2 execution, [`HttpRequestContext`],
+//!   [`SandboxEvalOptions`], and 16-way sharded [`EDGE_KV_SLAB`](state_and_kv::EDGE_KV_SLAB) (`Slice.kv`).
+//! - [`vm`]: 16-byte [`JsValue`] layout, AST/Bytecode compiler ([`parser_and_compiler`]), unboxed [`numeric_vm`],
+//!   and precompiled `SLICEBC\x01` [`boacas`] container.
+//! - [`runtime`]: Warm `boa_engine` realm pool ([`boa_realm`]), virtual-time [`event_loop`], Web [`workers`],
+//!   and sandboxed `wasmi` [`wasm`] engine.
+//! - [`net`]: Outbound `fetch()` HTTP/1.1 & HTTPS engine ([`outbound_http`]), OCap TCP/TLS/UDP [`sockets`],
+//!   and RFC 6455 [`websocket`] codec.
+//! - [`preludes`]: Sharded JavaScript micro-preludes (`00_ultra_core.js` .. `18_intl.js`), Aho-Corasick shard
+//!   detector ([`js_preludes`]), compile-time minifier ([`js_minifier`]), and lazy `node:*` built-ins ([`node_builtins`]).
 
 pub mod bindings;
-pub mod boa_realm;
-pub mod boacas;
-pub mod event_loop;
-pub use bindings as host_bindings;
 pub mod intrinsics;
 pub mod isolate;
-pub mod js_minifier;
-pub mod js_preludes;
-pub mod node_builtins;
-pub mod numeric_vm;
-pub mod outbound_http;
-pub mod parser_and_compiler;
-pub mod sockets;
-pub mod state_and_kv;
-pub mod value_and_ast;
-pub mod wasm;
-pub mod web_primitives;
-pub mod websocket;
-pub mod workers;
+pub mod net;
+pub mod preludes;
+pub mod runtime;
+pub mod vm;
+
+// Backward-compatible flat module aliases:
+pub use bindings as host_bindings;
+pub use intrinsics::url_and_usp as web_primitives;
+pub use isolate::state_and_kv;
+pub use net::{outbound_http, sockets, websocket};
+pub use preludes::{js_minifier, js_preludes, node_builtins};
+pub use runtime::{boa_realm, event_loop, wasm, workers};
+pub use vm::{boacas, numeric_vm, parser_and_compiler, value_and_ast};
 
 #[cfg(test)]
 #[path = "../tests/mod.rs"]

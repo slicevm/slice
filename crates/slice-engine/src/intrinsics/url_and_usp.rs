@@ -165,12 +165,12 @@ pub fn normalize_url_pathname(p: &str) -> Cow<'_, str> {
     if p.is_empty() || p == "/" {
         return Cow::Borrowed("/");
     }
-    if !p.contains("/.") && !p.contains("//") && p.starts_with('/') {
+    if !p.contains("/.") && !p.contains("//") && !p.contains('\\') && p.starts_with('/') {
         return Cow::Borrowed(p);
     }
-    let trailing_slash = p.len() > 1 && p.ends_with('/');
+    let trailing_slash = p.len() > 1 && (p.ends_with('/') || p.ends_with('\\'));
     let mut out: smallvec::SmallVec<[&str; 16]> = smallvec::SmallVec::new();
-    for seg in p.split('/') {
+    for seg in p.split(['/', '\\']) {
         if seg.is_empty() || seg == "." {
             continue;
         }
@@ -194,15 +194,70 @@ pub fn normalize_url_pathname(p: &str) -> Cow<'_, str> {
     Cow::Owned(res)
 }
 
+#[inline]
+fn strip_whatwg_ascii_tab_or_newline(s: &str) -> Cow<'_, str> {
+    if s.bytes().any(|b| matches!(b, b'\t' | b'\n' | b'\r')) {
+        Cow::Owned(
+            s.chars()
+                .filter(|&c| !matches!(c, '\t' | '\n' | '\r'))
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(s)
+    }
+}
+
+#[inline]
+fn is_valid_whatwg_hostname(hostname: &str) -> bool {
+    if hostname.is_empty() {
+        return false;
+    }
+    let bytes = hostname.as_bytes();
+    if bytes[0] == b'[' {
+        if bytes.last() != Some(&b']') || bytes.len() < 4 {
+            return false;
+        }
+        return bytes[1..bytes.len() - 1]
+            .iter()
+            .all(|&b| b.is_ascii_hexdigit() || b == b':' || b == b'.');
+    }
+    // Reject WHATWG forbidden host code points: C0 controls, spaces, and authority/path delimiters
+    !bytes.iter().any(|&b| {
+        b <= 0x20
+            || b == 0x7F
+            || matches!(
+                b,
+                b'#' | b'%'
+                    | b'/'
+                    | b':'
+                    | b'<'
+                    | b'>'
+                    | b'?'
+                    | b'@'
+                    | b'['
+                    | b'\\'
+                    | b']'
+                    | b'^'
+                    | b'|'
+                    | b'"'
+                    | b'`'
+            )
+    })
+}
+
 /// Resolves and parses a WHATWG `URL` from `input` and optional `base`, returning `None` if invalid.
 pub fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<ParsedWhatwgUrl> {
-    let trimmed = input.trim();
+    // WHATWG URL step 1: trim leading/trailing C0 controls and space (`<= 0x20`) and strip ASCII tab/LF/CR
+    let trimmed_outer = input.trim_matches(|c: char| (c as u32) <= 0x20);
+    let cleaned_cow = strip_whatwg_ascii_tab_or_newline(trimmed_outer);
+    let trimmed = cleaned_cow.as_ref();
+
     let resolved_cow: Cow<'_, str> =
         if let Some(base_str) = base.filter(|_| !trimmed.contains("://")) {
             let b = parse_whatwg_url(base_str, None)?;
             if trimmed.starts_with("//") {
                 Cow::Owned(format!("{}{}", b.protocol, trimmed))
-            } else if trimmed.starts_with('/') {
+            } else if trimmed.starts_with('/') || trimmed.starts_with('\\') {
                 Cow::Owned(format!("{}{}", b.origin, trimmed))
             } else if trimmed.starts_with('?') {
                 Cow::Owned(format!("{}{}{}", b.origin, b.pathname, trimmed))
@@ -242,13 +297,24 @@ pub fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<ParsedWhatwgU
         return None;
     }
     let protocol = format!("{}:", scheme_part.to_ascii_lowercase());
+    let is_special = matches!(
+        protocol.as_str(),
+        "http:" | "https:" | "ws:" | "wss:" | "file:" | "ftp:"
+    );
     let rest = &before_query[si + 3..];
-    let (auth_host, path_raw) = match rest.find('/') {
+    // For special schemes, WHATWG treats both `/` and `\` as authority-terminating path delimiters,
+    // preventing `http://evil.com\@127.0.0.1/` SSRF authority confusion.
+    let path_split = if is_special {
+        rest.find(['/', '\\'])
+    } else {
+        rest.find('/')
+    };
+    let (auth_host, path_raw) = match path_split {
         Some(pi) => (&rest[..pi], &rest[pi..]),
         None => (rest, "/"),
     };
 
-    let (username, password, host_port) = match auth_host.find('@') {
+    let (username, password, host_port) = match auth_host.rfind('@') {
         Some(ai) => {
             let up = &auth_host[..ai];
             let hp = &auth_host[ai + 1..];
@@ -280,6 +346,8 @@ pub fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<ParsedWhatwgU
             }
             let prt = if (protocol == "http:" && prt_raw == "80")
                 || (protocol == "https:" && prt_raw == "443")
+                || (protocol == "ws:" && prt_raw == "80")
+                || (protocol == "wss:" && prt_raw == "443")
             {
                 String::new()
             } else {
@@ -290,7 +358,7 @@ pub fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<ParsedWhatwgU
         _ => (host_port.to_ascii_lowercase(), String::new()),
     };
 
-    if hostname.is_empty() && protocol != "file:" {
+    if protocol != "file:" && !is_valid_whatwg_hostname(&hostname) {
         return None;
     }
 
@@ -344,58 +412,4 @@ pub fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<ParsedWhatwgU
 #[inline]
 pub fn can_parse_whatwg_url(input: &str, base: Option<&str>) -> bool {
     parse_whatwg_url(input, base).is_some()
-}
-
-/// Registers native Rust `URL` and `URLSearchParams` host intrinsics into `ctx` when Shard 1 loads.
-pub(crate) fn register_url_and_usp_host_functions(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
-    if ctx
-        .global_object()
-        .has_own_property(js_string!("__slice_url_can_parse"), ctx)
-        .unwrap_or(false)
-    {
-        return;
-    }
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_url_can_parse"),
-        2,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let Some(first) = args.first() else {
-                return Ok(BoaVal::from(false));
-            };
-            let input = first.to_string(context)?.to_std_string_escaped();
-            let base = match args.get(1) {
-                Some(v) if !v.is_undefined() => Some(v.to_string(context)?.to_std_string_escaped()),
-                _ => None,
-            };
-            Ok(BoaVal::from(can_parse_whatwg_url(&input, base.as_deref())))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_usp_encode"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let Some(first) = args.first() else {
-                return Ok(BoaVal::from(js_string!("")));
-            };
-            let s = first.to_string(context)?.to_std_string_escaped();
-            let encoded = usp_encode_component(&s);
-            Ok(BoaVal::from(js_string!(encoded.as_ref())))
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_usp_decode"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let Some(first) = args.first() else {
-                return Ok(BoaVal::from(js_string!("")));
-            };
-            let s = first.to_string(context)?.to_std_string_escaped();
-            let decoded = usp_decode_component(&s);
-            Ok(BoaVal::from(js_string!(decoded.as_ref())))
-        }),
-    );
 }

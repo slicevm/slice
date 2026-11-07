@@ -3,7 +3,7 @@
 //! Reads the human-readable `.js` prelude sources in `src/preludes/*.js`, minifies them
 //! deterministically via `src/js_minifier.rs`, and emits `$OUT_DIR/minified_preludes.rs`.
 
-#[path = "src/js_minifier.rs"]
+#[path = "src/preludes/js_minifier.rs"]
 mod js_minifier;
 
 use std::env;
@@ -62,7 +62,7 @@ const PRELUDE_SPECS: &[(&str, &str)] = &[
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=src/js_minifier.rs");
+    println!("cargo:rerun-if-changed=src/preludes/js_minifier.rs");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));

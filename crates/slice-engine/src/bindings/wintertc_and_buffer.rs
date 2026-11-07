@@ -354,3 +354,58 @@ pub(crate) fn register_buffer_host_functions(ctx: &mut boa_engine::Context) {
         }),
     );
 }
+
+/// Registers native Rust `URL` and `URLSearchParams` host intrinsics into `ctx` when Shard 1 loads.
+pub(crate) fn register_url_and_usp_host_functions(ctx: &mut boa_engine::Context) {
+    use crate::intrinsics::{can_parse_whatwg_url, usp_decode_component, usp_encode_component};
+    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_url_can_parse"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_url_can_parse"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let Some(first) = args.first() else {
+                return Ok(BoaVal::from(false));
+            };
+            let input = first.to_string(context)?.to_std_string_escaped();
+            let base = match args.get(1) {
+                Some(v) if !v.is_undefined() => Some(v.to_string(context)?.to_std_string_escaped()),
+                _ => None,
+            };
+            Ok(BoaVal::from(can_parse_whatwg_url(&input, base.as_deref())))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_usp_encode"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let Some(first) = args.first() else {
+                return Ok(BoaVal::from(js_string!("")));
+            };
+            let s = first.to_string(context)?.to_std_string_escaped();
+            let encoded = usp_encode_component(&s);
+            Ok(BoaVal::from(js_string!(encoded.as_ref())))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_usp_decode"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let Some(first) = args.first() else {
+                return Ok(BoaVal::from(js_string!("")));
+            };
+            let s = first.to_string(context)?.to_std_string_escaped();
+            let decoded = usp_decode_component(&s);
+            Ok(BoaVal::from(js_string!(decoded.as_ref())))
+        }),
+    );
+}
