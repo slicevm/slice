@@ -40,7 +40,7 @@ await fsp.writeFile("/tmp/async.txt", "hello");
 const asyncText = await fsp.readFile("/tmp/async.txt", "utf8");
 ```
 
-### 1.2 `node:crypto` / `crypto` (Hardware Intel/AMD `SHA-NI` Accelerated + Multi-Chunk Streaming)
+### 1.2 `node:crypto` / `crypto` (Hardware Intel/AMD `SHA-NI` + Native `ring` AEAD, KDF, & Asymmetric Suite)
 ```typescript
 import * as crypto from "node:crypto";
 
@@ -52,17 +52,36 @@ const sha256Hex: string = crypto
     .update("1001")
     .digest("hex");
 
-// Multi-chunk RFC-2104 HMAC ("sha256", "sha384", "sha512", "sha1")
+// Multi-chunk RFC-2104 HMAC ("sha256", "sha384", "sha512", "sha1", "md5")
 const hmacBuf: Buffer = crypto
     .createHmac("sha512", "whsec_signing_key")
     .update("header.")
     .update("payload")
     .digest();
 
-// Cryptographic random generation & constant-time comparison
+// Cryptographic random generation, randomFillSync, & constant-time comparison
 const nonce: Buffer = crypto.randomBytes(32);
+crypto.randomFillSync(nonce, 0, 16);
 const id: string = crypto.randomUUID();
 const match: boolean = crypto.timingSafeEqual(hmacBuf, hmacBuf);
+
+// Fuel-metered Key Derivation Functions (PBKDF2, HKDF, scrypt)
+const derivedPbkdf2: Buffer = crypto.pbkdf2Sync("password", "salt", 10_000, 32, "sha256");
+const derivedHkdf: ArrayBuffer = crypto.hkdfSync("sha256", "ikm", "salt", "info", 32);
+const derivedScrypt: Buffer = crypto.scryptSync("password", "salt", 32, { N: 1024, r: 8, p: 1 });
+
+// Symmetric Ciphers (aes-128-gcm, aes-256-gcm, aes-128-cbc, aes-256-cbc)
+const gcmKey = crypto.randomBytes(32);
+const gcmIv = crypto.randomBytes(12);
+const cipher = crypto.createCipheriv("aes-256-gcm", gcmKey, gcmIv);
+cipher.setAAD(Buffer.from("aad-header"));
+const encHex = cipher.update("confidential-payload", "utf8", "hex") + cipher.final("hex");
+const authTag = cipher.getAuthTag();
+
+// Asymmetric Key Generation & Signing (Ed25519 & ECDSA P-256 / P-384)
+const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+const sig = crypto.sign(null, Buffer.from("token-body"), privateKey);
+const verified = crypto.verify(null, Buffer.from("token-body"), publicKey, sig);
 ```
 
 ### 1.3 `node:path` / `path` (and `path.posix` / `path.win32`)

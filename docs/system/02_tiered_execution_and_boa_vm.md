@@ -38,7 +38,7 @@
     - **Shard 1 (`01_web_fetch_url.js`):** `URL` and `URLSearchParams` (backed by native Rust [`web_primitives.rs`](file:///p:/opensource/slice/crates/slice-engine/src/web_primitives.rs)).
     - **Shard 2 (`02_encoding_events.js`):** `TextEncoder`, `TextDecoder`, `btoa`, `atob`.
     - **Shard 3 (`03_streams_formdata.js`):** `ReadableStream`.
-    - **Shard 4 (`04_webcrypto_clone.js`):** `crypto`, `CryptoKey`, `crypto.subtle`, `randomUUID`, `getRandomValues`.
+    - **Shard 4 (`04_webcrypto_clone.js`):** `crypto`, `CryptoKey` (with tenant-scoped `CRYPTO_KEY_HANDLE_TABLE` pre-expanded key handles), `crypto.subtle` (`digest`, `generateKey`, `importKey`, `exportKey`, `encrypt`, `decrypt`, `sign`, `verify`, `deriveBits`, `deriveKey`, `timingSafeEqual`), `randomUUID`, `getRandomValues`.
     - **Shard 5 (`05_full_buffer.js`):** Core `Uint8Array`-backed `Buffer` (`from`, `alloc`, `concat`, `byteLength`, `compare`, `toString`, `subarray`, `equals`) with lazy Shard 17 prototype forwarders.
     - **Shard 6 (`06_console_ext.js`):** `AbortController`, `AbortSignal` (`timeout`, `any`, `abort`), `DOMException`.
     - **Shard 7 (`07_websocket.js`):** `WebSocket`, `MessageEvent`, `CloseEvent`.
@@ -65,8 +65,10 @@ Implemented in [`crates/slice-engine/src/web_primitives.rs`](file:///p:/opensour
 
 1. **Hardware `SHA-NI` Block Compression ([`Sha256State::compress_block_sha_ni`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs)):**
    - Uses Intel/AMD `SHA-NI` instructions (`_mm_sha256rnds2_epu32`, `_mm_sha256msg1_epu32`, `_mm_sha256msg2_epu32`) with cached `AtomicU8` runtime feature detection (`sha,sse4.1,ssse3`) and automatic fallback to [`Sha256State::compress_block_soft`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs).
-2. **Pure-Rust FIPS-180-4 SHA-1/256/384/512, RFC-2104 HMAC & Base64/Base64URL:**
-   - Direct `JsArrayBuffer` / `JsUint8Array` zero-copy Rust host functions (`__slice_crypto_sha256`, `__slice_crypto_hmac_sha256`, `__slice_crypto_digest`, `__slice_crypto_hmac_sign`, `__slice_base64_encode`, `__slice_base64_decode`).
+2. **Native `ring` + FIPS-180-4 WebCrypto & `node:crypto` Suite with Tenant-Scoped Key Handle Cache (`CRYPTO_KEY_HANDLE_TABLE`):**
+   - Direct `JsArrayBuffer` / `JsUint8Array` zero-copy Rust host functions (`__slice_crypto_sha256`, `__slice_crypto_hmac_sha256`, `__slice_crypto_digest`, `__slice_crypto_hmac_sign`, `__slice_crypto_key_register`, `__slice_crypto_cipher`, `__slice_crypto_asym_keygen`, `__slice_crypto_asym_import`, `__slice_crypto_asym_sign`, `__slice_crypto_asym_verify`, `__slice_crypto_kdf`, `__slice_base64_encode`, `__slice_base64_decode`).
+   - Pre-expanded `ring::aead::LessSafeKey`, `ring::hmac::Key`, `AesExpandedKey`, `Ed25519` keypairs, and `ECDSA` (`P-256`/`P-384`) keys are cached in thread-local `CRYPTO_KEY_HANDLE_TABLE` scoped by `BOA_ACTIVE_TENANT` so repeated `encrypt`/`decrypt`/`sign`/`verify` calls skip key schedule expansion while preventing cross-tenant handle access.
+   - KDF operations (`PBKDF2`, `HKDF`, `scrypt`) charge proportional CPU fuel against `BOA_FUEL_BUDGET` (`consume_crypto_kdf_fuel`), deterministically trapping hostile iteration/cost parameters with `SandboxViolation::CpuFuelExhausted`.
 3. **Self-Contained RFC 1951 (`deflate-raw`), RFC 1950 (`deflate`), & RFC 1952 (`gzip`) Compression Engine:**
    - Implemented in [`zlib_compress_bytes`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs) and [`zlib_decompress_bytes`](file:///p:/opensource/slice/crates/slice-engine/src/intrinsics.rs) with LZ77 32 KB sliding-window compression, Stored/Fixed/Dynamic Huffman decompression, Adler-32, and CRC-32 validation, powering both WinterTC `CompressionStream` / `DecompressionStream` and `node:zlib` with zero external crate dependencies.
 4. **Zero-Overhead `SliceJobExecutor` for `node:async_hooks` (`AsyncLocalStorage` & `AsyncResource`):**

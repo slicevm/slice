@@ -1,6 +1,10 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use slice_engine::boacas::{compute_boacas_metadata, pack_boacas_container};
-use slice_engine::intrinsics::{fast_parse_bytes, fast_parse_ms, hmac_sha256_hex, sha256_hex};
+use slice_engine::intrinsics::{
+    aes_gcm_encrypt, aes_gcm_open_with_key, aes_gcm_seal_with_key, ed25519_keypair_from_seed,
+    ed25519_sign_bytes, ed25519_verify_bytes, fast_parse_bytes, fast_parse_ms, hmac_sha256_hex,
+    make_ring_aead_key, sha256_hex,
+};
 use slice_engine::{compile_source_to_bytecode, SliceIsolate};
 use slice_sandbox::CapabilityToken;
 use std::hint::black_box;
@@ -99,6 +103,62 @@ fib(30);
                 .execute_bytecode(black_box(&numeric_bc), None)
                 .expect("numeric execute");
             black_box(res.highest_tier_reached)
+        });
+    });
+
+    // Phase 2: AES-GCM-256 cached `LessSafeKey` handle vs uncached key expansion + Ed25519 sign/verify
+    let key_256 = [0x42u8; 32];
+    let iv_12 = [0x11u8; 12];
+    let aad = b"slice-jwt-jwe-header";
+    let payload_256b = [0x5au8; 256];
+    let cached_key = make_ring_aead_key(&key_256).expect("valid AES-256-GCM key");
+
+    group.bench_function("aes_256_gcm_seal_open_cached_handle_256b", |b| {
+        b.iter(|| {
+            let ct = aes_gcm_seal_with_key(
+                black_box(&cached_key),
+                black_box(&iv_12),
+                black_box(aad),
+                black_box(&payload_256b),
+                128,
+            )
+            .expect("seal");
+            let pt = aes_gcm_open_with_key(
+                black_box(&cached_key),
+                black_box(&iv_12),
+                black_box(aad),
+                black_box(&ct),
+                128,
+            )
+            .expect("open");
+            black_box(pt.len())
+        });
+    });
+
+    group.bench_function("aes_256_gcm_seal_uncached_256b", |b| {
+        b.iter(|| {
+            let ct = aes_gcm_encrypt(
+                black_box(&key_256),
+                black_box(&iv_12),
+                black_box(aad),
+                black_box(&payload_256b),
+                128,
+            )
+            .expect("encrypt");
+            black_box(ct.len())
+        });
+    });
+
+    let (ed_seed, ed_pub) = ed25519_keypair_from_seed([0x77u8; 32]).expect("ed25519 keypair");
+    let ed_sig = ed25519_sign_bytes(&ed_seed, b"slice-ed25519-jwt-token-payload").expect("ed25519 sign");
+    group.bench_function("ed25519_verify_signature", |b| {
+        b.iter(|| {
+            let ok = ed25519_verify_bytes(
+                black_box(&ed_pub),
+                black_box(b"slice-ed25519-jwt-token-payload"),
+                black_box(&ed_sig),
+            );
+            black_box(ok)
         });
     });
 

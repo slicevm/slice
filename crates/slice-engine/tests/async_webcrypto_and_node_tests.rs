@@ -1223,4 +1223,454 @@ fn test_phase1_boacas_single_pass_automaton() {
     assert_ne!(shards_mask & (1 << 24), 0);
 }
 
+#[test]
+fn test_phase2_webcrypto_aes_gcm_cbc_roundtrip() {
+    let script = r#"
+async function run() {
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    const plainText = "Slice Phase 2 AES-GCM & AES-CBC Confidential Payload";
+    const plainBytes = enc.encode(plainText);
+
+    // 1. AES-GCM 256-bit generateKey, JWK/raw export & import, encrypt & decrypt with AAD
+    const gcmKey = await crypto.subtle.generateKey(
+        { name: "AES-GCM", length: 256 },
+        true,
+        ["encrypt", "decrypt"]
+    );
+    const gcmJwk = await crypto.subtle.exportKey("jwk", gcmKey);
+    const gcmRaw = await crypto.subtle.exportKey("raw", gcmKey);
+    const importedGcmKey = await crypto.subtle.importKey(
+        "jwk",
+        gcmJwk,
+        { name: "AES-GCM" },
+        false,
+        ["encrypt", "decrypt"]
+    );
+
+    const iv12 = crypto.getRandomValues(new Uint8Array(12));
+    const aad = enc.encode("header-aad-v1");
+    const gcmCipherAb = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: iv12, additionalData: aad, tagLength: 128 },
+        gcmKey,
+        plainBytes
+    );
+    const gcmDecryptedAb = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: iv12, additionalData: aad, tagLength: 128 },
+        importedGcmKey,
+        gcmCipherAb
+    );
+    const gcmDecryptedText = dec.decode(gcmDecryptedAb);
+
+    // Verify tampered AAD or tampered tag rejects
+    let tamperedRejected = false;
+    try {
+        await crypto.subtle.decrypt(
+            { name: "AES-GCM", iv: iv12, additionalData: enc.encode("wrong-aad"), tagLength: 128 },
+            importedGcmKey,
+            gcmCipherAb
+        );
+    } catch (_e) {
+        tamperedRejected = true;
+    }
+
+    // 2. AES-CBC 128-bit generateKey, raw export/import, PKCS#7 padded encrypt & decrypt
+    const cbcKey = await crypto.subtle.generateKey(
+        { name: "AES-CBC", length: 128 },
+        true,
+        ["encrypt", "decrypt"]
+    );
+    const cbcJwk = await crypto.subtle.exportKey("jwk", cbcKey);
+    const iv16 = crypto.getRandomValues(new Uint8Array(16));
+    const cbcCipherAb = await crypto.subtle.encrypt(
+        { name: "AES-CBC", iv: iv16 },
+        cbcKey,
+        plainBytes
+    );
+    const cbcDecryptedAb = await crypto.subtle.decrypt(
+        { name: "AES-CBC", iv: iv16 },
+        cbcKey,
+        cbcCipherAb
+    );
+    const cbcDecryptedText = dec.decode(cbcDecryptedAb);
+
+    console.log(JSON.stringify({
+        gcmAlg: gcmJwk.alg,
+        gcmRawLen: gcmRaw.byteLength,
+        gcmCipherLen: gcmCipherAb.byteLength,
+        gcmPlainLen: plainBytes.byteLength,
+        gcmMatch: gcmDecryptedText === plainText,
+        tamperedRejected,
+        cbcAlg: cbcJwk.alg,
+        cbcMatch: cbcDecryptedText === plainText,
+        hasKeyHandle: gcmKey._id > 0 && cbcKey._id > 0
+    }));
+}
+run();
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "phase2-aes-gcm-cbc",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    iso.set_deterministic_seed(Some(20261107));
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(out["gcmAlg"], "A256GCM");
+    assert_eq!(out["gcmRawLen"], 32);
+    assert_eq!(
+        out["gcmCipherLen"].as_u64().unwrap(),
+        out["gcmPlainLen"].as_u64().unwrap() + 16
+    );
+    assert_eq!(out["gcmMatch"], true);
+    assert_eq!(out["tamperedRejected"], true);
+    assert_eq!(out["cbcAlg"], "A128CBC");
+    assert_eq!(out["cbcMatch"], true);
+    assert_eq!(out["hasKeyHandle"], true);
+}
+
+#[test]
+fn test_phase2_webcrypto_ecdsa_ed25519_sign_verify() {
+    let script = r#"
+async function run() {
+    const msg = new TextEncoder().encode("Slice Phase 2 Ed25519 & ECDSA P-256/P-384 Message");
+
+    // 1. Ed25519 generateKey, JWK/PKCS8/SPKI/raw export & import, sign & verify
+    const edPair = await crypto.subtle.generateKey(
+        { name: "Ed25519" },
+        true,
+        ["sign", "verify"]
+    );
+    const edSig = await crypto.subtle.sign({ name: "Ed25519" }, edPair.privateKey, msg);
+    const edValid = await crypto.subtle.verify({ name: "Ed25519" }, edPair.publicKey, edSig, msg);
+
+    const badSig = new Uint8Array(edSig.slice(0));
+    badSig[0] ^= 0xff;
+    const edInvalid = await crypto.subtle.verify({ name: "Ed25519" }, edPair.publicKey, badSig, msg);
+
+    const edPubJwk = await crypto.subtle.exportKey("jwk", edPair.publicKey);
+    const edPrivPkcs8 = await crypto.subtle.exportKey("pkcs8", edPair.privateKey);
+    const edPubSpki = await crypto.subtle.exportKey("spki", edPair.publicKey);
+
+    const edImportedPriv = await crypto.subtle.importKey(
+        "pkcs8",
+        edPrivPkcs8,
+        { name: "Ed25519" },
+        false,
+        ["sign"]
+    );
+    const edImportedPub = await crypto.subtle.importKey(
+        "jwk",
+        edPubJwk,
+        { name: "Ed25519" },
+        true,
+        ["verify"]
+    );
+    const edSig2 = await crypto.subtle.sign("Ed25519", edImportedPriv, msg);
+    const edValid2 = await crypto.subtle.verify("Ed25519", edImportedPub, edSig2, msg);
+
+    // 2. ECDSA P-256 & P-384 generateKey, JWK export/import, sign & verify
+    const p256Pair = await crypto.subtle.generateKey(
+        { name: "ECDSA", namedCurve: "P-256" },
+        true,
+        ["sign", "verify"]
+    );
+    const p256Sig = await crypto.subtle.sign(
+        { name: "ECDSA", hash: { name: "SHA-256" } },
+        p256Pair.privateKey,
+        msg
+    );
+    const p256Valid = await crypto.subtle.verify(
+        { name: "ECDSA", hash: { name: "SHA-256" } },
+        p256Pair.publicKey,
+        p256Sig,
+        msg
+    );
+    const p256Jwk = await crypto.subtle.exportKey("jwk", p256Pair.publicKey);
+    const p256PubImported = await crypto.subtle.importKey(
+        "jwk",
+        p256Jwk,
+        { name: "ECDSA", namedCurve: "P-256" },
+        true,
+        ["verify"]
+    );
+    const p256ValidImported = await crypto.subtle.verify(
+        { name: "ECDSA", hash: "SHA-256" },
+        p256PubImported,
+        p256Sig,
+        msg
+    );
+
+    const p384Pair = await crypto.subtle.generateKey(
+        { name: "ECDSA", namedCurve: "P-384" },
+        true,
+        ["sign", "verify"]
+    );
+    const p384Sig = await crypto.subtle.sign(
+        { name: "ECDSA", hash: "SHA-384" },
+        p384Pair.privateKey,
+        msg
+    );
+    const p384Valid = await crypto.subtle.verify(
+        { name: "ECDSA", hash: "SHA-384" },
+        p384Pair.publicKey,
+        p384Sig,
+        msg
+    );
+
+    console.log(JSON.stringify({
+        edSigLen: edSig.byteLength,
+        edValid,
+        edInvalid,
+        edValid2,
+        edKty: edPubJwk.kty,
+        edSpkiLen: edPubSpki.byteLength,
+        p256SigLen: p256Sig.byteLength,
+        p256Valid,
+        p256ValidImported,
+        p384SigLen: p384Sig.byteLength,
+        p384Valid
+    }));
+}
+run();
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "phase2-asym-sign-verify",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    iso.set_deterministic_seed(Some(998877));
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(out["edSigLen"], 64);
+    assert_eq!(out["edValid"], true);
+    assert_eq!(out["edInvalid"], false);
+    assert_eq!(out["edValid2"], true);
+    assert_eq!(out["edKty"], "OKP");
+    assert_eq!(out["edSpkiLen"], 44);
+    assert_eq!(out["p256SigLen"], 64);
+    assert_eq!(out["p256Valid"], true);
+    assert_eq!(out["p256ValidImported"], true);
+    assert_eq!(out["p384SigLen"], 96);
+    assert_eq!(out["p384Valid"], true);
+}
+
+#[test]
+fn test_phase2_webcrypto_pbkdf2_hkdf() {
+    let script = r#"
+async function run() {
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+
+    // 1. PBKDF2 importKey -> deriveBits & deriveKey (AES-GCM-256)
+    const basePbkdf2 = await crypto.subtle.importKey(
+        "raw",
+        enc.encode("correct-horse-battery-staple"),
+        "PBKDF2",
+        false,
+        ["deriveBits", "deriveKey"]
+    );
+    const salt = enc.encode("slice-salt-2026");
+    const pbkdf2Bits = await crypto.subtle.deriveBits(
+        { name: "PBKDF2", salt, iterations: 1000, hash: "SHA-256" },
+        basePbkdf2,
+        256
+    );
+    const derivedAesKey = await crypto.subtle.deriveKey(
+        { name: "PBKDF2", salt, iterations: 1000, hash: "SHA-256" },
+        basePbkdf2,
+        { name: "AES-GCM", length: 256 },
+        true,
+        ["encrypt", "decrypt"]
+    );
+    const derivedRaw = await crypto.subtle.exportKey("raw", derivedAesKey);
+
+    // 2. HKDF importKey -> deriveKey -> AES-GCM roundtrip
+    const baseHkdf = await crypto.subtle.importKey(
+        "raw",
+        enc.encode("initial-keying-material-ikm"),
+        "HKDF",
+        false,
+        ["deriveBits", "deriveKey"]
+    );
+    const hkdfKey = await crypto.subtle.deriveKey(
+        { name: "HKDF", hash: "SHA-256", salt, info: enc.encode("ctx-info") },
+        baseHkdf,
+        { name: "AES-GCM", length: 256 },
+        true,
+        ["encrypt", "decrypt"]
+    );
+    const iv = new Uint8Array(12);
+    const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, hkdfKey, enc.encode("hkdf-secret"));
+    const plain = dec.decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, hkdfKey, cipher));
+
+    const b1 = new Uint8Array(pbkdf2Bits);
+    const b2 = new Uint8Array(derivedRaw);
+    let bitsMatchKey = b1.length === 32 && b2.length === 32;
+    for (let i = 0; i < 32; i++) {
+        if (b1[i] !== b2[i]) bitsMatchKey = false;
+    }
+
+    console.log(JSON.stringify({
+        bitsMatchKey,
+        plain
+    }));
+}
+run();
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "phase2-pbkdf2-hkdf",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(out["bitsMatchKey"], true);
+    assert_eq!(out["plain"], "hkdf-secret");
+}
+
+#[test]
+fn test_phase2_node_crypto_ciphers_kdfs_timingsafe() {
+    let script = r#"
+import crypto from "node:crypto";
+
+// 1. MD5 createHash & createHmac
+const md5Hex = crypto.createHash("md5").update("abc").digest("hex");
+const hmacMd5Hex = crypto.createHmac("md5", "key").update("The quick brown fox jumps over the lazy dog").digest("hex");
+
+// 2. randomFillSync & timingSafeEqual
+const fillBuf = Buffer.alloc(16);
+crypto.randomFillSync(fillBuf, 4, 8);
+const first4Zero = fillBuf[0] === 0 && fillBuf[1] === 0 && fillBuf[2] === 0 && fillBuf[3] === 0;
+const last4Zero = fillBuf[12] === 0 && fillBuf[13] === 0 && fillBuf[14] === 0 && fillBuf[15] === 0;
+const eqTrue = crypto.timingSafeEqual(Buffer.from("slice-123"), Buffer.from("slice-123"));
+const eqFalse = crypto.timingSafeEqual(Buffer.from("slice-123"), Buffer.from("slice-999"));
+
+// 3. pbkdf2Sync, hkdfSync, scryptSync
+const pbkdf2Out = crypto.pbkdf2Sync("password", "salt", 1000, 32, "sha256");
+const hkdfOut = Buffer.from(crypto.hkdfSync("sha256", "ikm", "salt", "info", 32));
+const scryptOut = crypto.scryptSync("password", "salt", 32, { N: 1024, r: 8, p: 1 });
+
+// 4. createCipheriv / createDecipheriv (aes-256-gcm & aes-128-cbc)
+const gcmKey = crypto.randomBytes(32);
+const gcmIv = crypto.randomBytes(12);
+const cipherGcm = crypto.createCipheriv("aes-256-gcm", gcmKey, gcmIv);
+cipherGcm.setAAD(Buffer.from("node-aad"));
+const encPart1 = cipherGcm.update("Hello Node ", "utf8", "hex");
+const encPart2 = cipherGcm.final("hex");
+const tag = cipherGcm.getAuthTag();
+
+const decipherGcm = crypto.createDecipheriv("aes-256-gcm", gcmKey, gcmIv);
+decipherGcm.setAAD(Buffer.from("node-aad"));
+decipherGcm.setAuthTag(tag);
+const decGcm = decipherGcm.update(encPart1 + encPart2, "hex", "utf8") + decipherGcm.final("utf8");
+
+const cbcKey = crypto.randomBytes(16);
+const cbcIv = crypto.randomBytes(16);
+const cipherCbc = crypto.createCipheriv("aes-128-cbc", cbcKey, cbcIv);
+const cbcCipherHex = cipherCbc.update("CBC payload 123", "utf8", "hex") + cipherCbc.final("hex");
+const decipherCbc = crypto.createDecipheriv("aes-128-cbc", cbcKey, cbcIv);
+const decCbc = decipherCbc.update(cbcCipherHex, "hex", "utf8") + decipherCbc.final("utf8");
+
+// 5. generateKeyPairSync, createSign, createVerify (Ed25519 & ECDSA P-256)
+const edKeys = crypto.generateKeyPairSync("ed25519");
+const edSig = crypto.sign(null, Buffer.from("ed-msg"), edKeys.privateKey);
+const edVerified = crypto.verify(null, Buffer.from("ed-msg"), edKeys.publicKey, edSig);
+
+const ecKeys = crypto.generateKeyPairSync("ec", {
+    namedCurve: "P-256",
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" }
+});
+const signer = crypto.createSign("SHA256");
+signer.update("ecdsa-stream-message");
+const ecSigHex = signer.sign(ecKeys.privateKey, "hex");
+const verifier = crypto.createVerify("SHA256");
+verifier.update("ecdsa-stream-message");
+const ecVerified = verifier.verify(ecKeys.publicKey, ecSigHex, "hex");
+
+console.log(JSON.stringify({
+    md5Hex,
+    hmacMd5Hex,
+    first4Zero,
+    last4Zero,
+    eqTrue,
+    eqFalse,
+    pbkdf2Len: pbkdf2Out.length,
+    hkdfLen: hkdfOut.length,
+    scryptLen: scryptOut.length,
+    decGcm,
+    decCbc,
+    edVerified,
+    ecVerified,
+    hasPemHeader: ecKeys.publicKey.includes("BEGIN PUBLIC KEY")
+}));
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "phase2-node-crypto-full",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    iso.set_deterministic_seed(Some(424242));
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    assert!(!m.stdout.is_empty(), "Expected stdout from test, return_value: {:?}, bundled:\n{}", m.return_value, bundled);
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(out["md5Hex"], "900150983cd24fb0d6963f7d28e17f72");
+    assert_eq!(out["hmacMd5Hex"], "80070713463e7749b90c2dc24911e275");
+    assert_eq!(out["first4Zero"], true);
+    assert_eq!(out["last4Zero"], true);
+    assert_eq!(out["eqTrue"], true);
+    assert_eq!(out["eqFalse"], false);
+    assert_eq!(out["pbkdf2Len"], 32);
+    assert_eq!(out["hkdfLen"], 32);
+    assert_eq!(out["scryptLen"], 32);
+    assert_eq!(out["decGcm"], "Hello Node ");
+    assert_eq!(out["decCbc"], "CBC payload 123");
+    assert_eq!(out["edVerified"], true);
+    assert_eq!(out["ecVerified"], true);
+    assert_eq!(out["hasPemHeader"], true);
+
+    // Also verify CPU fuel exhaustion traps hostile PBKDF2 iteration counts
+    let hostile_kdf_js = r#"
+import crypto from "node:crypto";
+crypto.pbkdf2Sync("pass", "salt", 50_000_000, 32, "sha256");
+"#;
+    let hostile_bundled = slice_cas::strip_typescript_and_normalize(hostile_kdf_js, true);
+    let hostile_bc = compile_source_to_bytecode(&hostile_bundled);
+    let mut iso_low_fuel = SliceIsolate::spawn(
+        "phase2-kdf-fuel-guard",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000, // 5,000 fuel budget
+        8 * 1024 * 1024,
+    );
+    let err = iso_low_fuel.execute_bytecode(&hostile_bc, None).unwrap_err();
+    assert!(
+        matches!(err, SandboxViolation::CpuFuelExhausted { .. }),
+        "Expected CpuFuelExhausted on hostile PBKDF2 iterations, got {:?}",
+        err
+    );
+}
+
+
 

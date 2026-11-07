@@ -2057,6 +2057,7 @@ dependencies = [
  "memchr",
  "oxc",
  "parking_lot",
+ "ring",
  "rustc-hash",
  "rustls",
  "rustls-pki-types",

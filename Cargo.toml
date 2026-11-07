@@ -29,6 +29,7 @@ oxc = { version = "=0.152.0", features = ["transformer", "codegen", "semantic"] 
 boa_engine = { version = "0.22", default-features = false }
 rustc-hash = "2.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+ring = "0.17"
 webpki-roots = "1.0"
 rustls-pki-types = "1"
 wasmi = "2.0"

@@ -1340,9 +1340,1251 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     }
     let mut diff = 0u8;
     for (&x, &y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
+        diff |= std::hint::black_box(x ^ y);
     }
-    diff == 0
+    std::hint::black_box(diff) == 0
+}
+
+/// Zero-allocation RFC 1321 MD5 digest state machine (16-byte output) for `node:crypto`
+/// `createHash("md5")` and `createHmac("md5", ...)` compatibility.
+pub(crate) struct Md5State {
+    s: [u32; 4],
+    buf: [u8; 64],
+    buf_len: usize,
+    total_len: u64,
+}
+
+impl Md5State {
+    #[inline]
+    pub(crate) fn new() -> Self {
+        Self {
+            s: [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476],
+            buf: [0u8; 64],
+            buf_len: 0,
+            total_len: 0,
+        }
+    }
+
+    #[inline]
+    fn compress_block(s: &mut [u32; 4], chunk: &[u8]) {
+        const S_SHIFT: [u32; 64] = [
+            7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14,
+            20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11,
+            16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        ];
+        const K_TAB: [u32; 64] = [
+            0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
+            0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
+            0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
+            0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+            0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
+            0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
+            0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
+            0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+            0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
+            0xeb86d391,
+        ];
+        let mut m = [0u32; 16];
+        for i in 0..16 {
+            let off = i * 4;
+            m[i] = u32::from_le_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
+        }
+        let (mut a, mut b, mut c, mut d) = (s[0], s[1], s[2], s[3]);
+        for i in 0..64 {
+            let (f, g) = if i < 16 {
+                ((b & c) | ((!b) & d), i)
+            } else if i < 32 {
+                ((d & b) | ((!d) & c), (5 * i + 1) % 16)
+            } else if i < 48 {
+                (b ^ c ^ d, (3 * i + 5) % 16)
+            } else {
+                (c ^ (b | (!d)), (7 * i) % 16)
+            };
+            let temp = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(
+                a.wrapping_add(f)
+                    .wrapping_add(K_TAB[i])
+                    .wrapping_add(m[g])
+                    .rotate_left(S_SHIFT[i]),
+            );
+            a = temp;
+        }
+        s[0] = s[0].wrapping_add(a);
+        s[1] = s[1].wrapping_add(b);
+        s[2] = s[2].wrapping_add(c);
+        s[3] = s[3].wrapping_add(d);
+    }
+
+    #[inline]
+    pub(crate) fn update(&mut self, mut data: &[u8]) {
+        self.total_len += data.len() as u64;
+        if self.buf_len > 0 {
+            let need = 64 - self.buf_len;
+            if data.len() < need {
+                self.buf[self.buf_len..self.buf_len + data.len()].copy_from_slice(data);
+                self.buf_len += data.len();
+                return;
+            }
+            self.buf[self.buf_len..64].copy_from_slice(&data[..need]);
+            Self::compress_block(&mut self.s, &self.buf);
+            self.buf_len = 0;
+            data = &data[need..];
+        }
+        let (chunks, rem) = data.as_chunks::<64>();
+        for chunk in chunks {
+            Self::compress_block(&mut self.s, chunk);
+        }
+        if !rem.is_empty() {
+            self.buf[..rem.len()].copy_from_slice(rem);
+            self.buf_len = rem.len();
+        }
+    }
+
+    #[inline]
+    pub(crate) fn finalize(mut self) -> [u8; 16] {
+        let bit_len = self.total_len.wrapping_mul(8);
+        self.buf[self.buf_len] = 0x80;
+        self.buf_len += 1;
+        if self.buf_len > 56 {
+            self.buf[self.buf_len..64].fill(0);
+            Self::compress_block(&mut self.s, &self.buf);
+            self.buf.fill(0);
+        } else {
+            self.buf[self.buf_len..56].fill(0);
+        }
+        self.buf[56..64].copy_from_slice(&bit_len.to_le_bytes());
+        Self::compress_block(&mut self.s, &self.buf);
+        let mut out = [0u8; 16];
+        for (i, word) in self.s.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+}
+
+#[inline]
+pub(crate) fn md5_bytes(data: &[u8]) -> [u8; 16] {
+    let mut st = Md5State::new();
+    st.update(data);
+    st.finalize()
+}
+
+#[inline]
+pub(crate) fn hmac_md5_bytes(key: &[u8], message: &[u8]) -> [u8; 16] {
+    let mut key_block = [0u8; 64];
+    if key.len() > 64 {
+        let hk = md5_bytes(key);
+        key_block[..16].copy_from_slice(&hk);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+    let mut inner = Md5State::new();
+    inner.update(&ipad);
+    inner.update(message);
+    let ih = inner.finalize();
+    let mut outer = Md5State::new();
+    outer.update(&opad);
+    outer.update(&ih);
+    outer.finalize()
+}
+
+// ============================================================================
+// Phase 2: Native `ring` WebCrypto (`crypto.subtle`) & `node:crypto` Suite
+// ============================================================================
+
+const AES_SBOX: [u8; 256] = [
+    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab,
+    0x76, 0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4,
+    0x72, 0xc0, 0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71,
+    0xd8, 0x31, 0x15, 0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2,
+    0xeb, 0x27, 0xb2, 0x75, 0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6,
+    0xb3, 0x29, 0xe3, 0x2f, 0x84, 0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb,
+    0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf, 0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45,
+    0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8, 0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5,
+    0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2, 0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44,
+    0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73, 0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a,
+    0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb, 0xe0, 0x32, 0x3a, 0x0a, 0x49,
+    0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79, 0xe7, 0xc8, 0x37, 0x6d,
+    0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08, 0xba, 0x78, 0x25,
+    0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a, 0x70, 0x3e,
+    0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e, 0xe1,
+    0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb,
+    0x16,
+];
+
+const AES_INV_SBOX: [u8; 256] = [
+    0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7,
+    0xfb, 0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde,
+    0xe9, 0xcb, 0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42,
+    0xfa, 0xc3, 0x4e, 0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2, 0x76, 0x5b, 0xa2, 0x49,
+    0x6d, 0x8b, 0xd1, 0x25, 0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xd4, 0xa4, 0x5c,
+    0xcc, 0x5d, 0x65, 0xb6, 0x92, 0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda, 0x5e, 0x15,
+    0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84, 0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a, 0xf7,
+    0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06, 0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02,
+    0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b, 0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc,
+    0xea, 0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73, 0x96, 0xac, 0x74, 0x22, 0xe7, 0xad,
+    0x35, 0x85, 0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e, 0x47, 0xf1, 0x1a, 0x71, 0x1d,
+    0x29, 0xc5, 0x89, 0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b, 0xfc, 0x56, 0x3e, 0x4b,
+    0xc6, 0xd2, 0x79, 0x20, 0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4, 0x1f, 0xdd, 0xa8,
+    0x33, 0x88, 0x07, 0xc7, 0x31, 0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f, 0x60, 0x51,
+    0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d, 0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef, 0xa0,
+    0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
+    0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c,
+    0x7d,
+];
+
+#[inline]
+fn gf_mul(mut a: u8, mut b: u8) -> u8 {
+    let mut p = 0u8;
+    for _ in 0..8 {
+        if (b & 1) != 0 {
+            p ^= a;
+        }
+        let hi = a & 0x80;
+        a <<= 1;
+        if hi != 0 {
+            a ^= 0x1b;
+        }
+        b >>= 1;
+    }
+    p
+}
+
+/// Pre-expanded AES-128 (`11` round keys) or AES-256 (`15` round keys) key schedule.
+#[derive(Clone)]
+pub struct AesExpandedKey {
+    round_keys: [[u8; 16]; 15],
+    rounds: usize,
+}
+
+impl AesExpandedKey {
+    pub fn new(key: &[u8]) -> Result<Self, &'static str> {
+        let (nk, nr) = match key.len() {
+            16 => (4usize, 10usize),
+            32 => (8usize, 14usize),
+            _ => return Err("AES key length must be 16 (128-bit) or 32 (256-bit) bytes"),
+        };
+        let total_words = 4 * (nr + 1);
+        let mut w = [0u32; 60];
+        for i in 0..nk {
+            w[i] = u32::from_be_bytes([key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]]);
+        }
+        const RCON: [u32; 10] = [
+            0x01000000, 0x02000000, 0x04000000, 0x08000000, 0x10000000, 0x20000000, 0x40000000,
+            0x80000000, 0x1b000000, 0x36000000,
+        ];
+        let sub_word = |val: u32| -> u32 {
+            let b = val.to_be_bytes();
+            u32::from_be_bytes([
+                AES_SBOX[b[0] as usize],
+                AES_SBOX[b[1] as usize],
+                AES_SBOX[b[2] as usize],
+                AES_SBOX[b[3] as usize],
+            ])
+        };
+        for i in nk..total_words {
+            let mut temp = w[i - 1];
+            if i % nk == 0 {
+                temp = sub_word(temp.rotate_left(8)) ^ RCON[(i / nk) - 1];
+            } else if nk == 8 && i % nk == 4 {
+                temp = sub_word(temp);
+            }
+            w[i] = w[i - nk] ^ temp;
+        }
+        let mut round_keys = [[0u8; 16]; 15];
+        for r in 0..=nr {
+            for c in 0..4 {
+                let bytes = w[r * 4 + c].to_be_bytes();
+                round_keys[r][c * 4..c * 4 + 4].copy_from_slice(&bytes);
+            }
+        }
+        Ok(Self {
+            round_keys,
+            rounds: nr,
+        })
+    }
+
+    #[inline]
+    pub fn encrypt_block(&self, block: &mut [u8; 16]) {
+        for i in 0..16 {
+            block[i] ^= self.round_keys[0][i];
+        }
+        for r in 1..self.rounds {
+            for b in block.iter_mut() {
+                *b = AES_SBOX[*b as usize];
+            }
+            let s = *block;
+            block[1] = s[5];
+            block[5] = s[9];
+            block[9] = s[13];
+            block[13] = s[1];
+            block[2] = s[10];
+            block[6] = s[14];
+            block[10] = s[2];
+            block[14] = s[6];
+            block[3] = s[15];
+            block[7] = s[3];
+            block[11] = s[7];
+            block[15] = s[11];
+            for c in 0..4 {
+                let i = c * 4;
+                let (a0, a1, a2, a3) = (block[i], block[i + 1], block[i + 2], block[i + 3]);
+                block[i] = gf_mul(a0, 2) ^ gf_mul(a1, 3) ^ a2 ^ a3;
+                block[i + 1] = a0 ^ gf_mul(a1, 2) ^ gf_mul(a2, 3) ^ a3;
+                block[i + 2] = a0 ^ a1 ^ gf_mul(a2, 2) ^ gf_mul(a3, 3);
+                block[i + 3] = gf_mul(a0, 3) ^ a1 ^ a2 ^ gf_mul(a3, 2);
+            }
+            for i in 0..16 {
+                block[i] ^= self.round_keys[r][i];
+            }
+        }
+        for b in block.iter_mut() {
+            *b = AES_SBOX[*b as usize];
+        }
+        let s = *block;
+        block[1] = s[5];
+        block[5] = s[9];
+        block[9] = s[13];
+        block[13] = s[1];
+        block[2] = s[10];
+        block[6] = s[14];
+        block[10] = s[2];
+        block[14] = s[6];
+        block[3] = s[15];
+        block[7] = s[3];
+        block[11] = s[7];
+        block[15] = s[11];
+        for i in 0..16 {
+            block[i] ^= self.round_keys[self.rounds][i];
+        }
+    }
+
+    #[inline]
+    pub fn decrypt_block(&self, block: &mut [u8; 16]) {
+        for i in 0..16 {
+            block[i] ^= self.round_keys[self.rounds][i];
+        }
+        for r in (1..self.rounds).rev() {
+            let s = *block;
+            block[1] = s[13];
+            block[5] = s[1];
+            block[9] = s[5];
+            block[13] = s[9];
+            block[2] = s[10];
+            block[6] = s[14];
+            block[10] = s[2];
+            block[14] = s[6];
+            block[3] = s[7];
+            block[7] = s[11];
+            block[11] = s[15];
+            block[15] = s[3];
+            for b in block.iter_mut() {
+                *b = AES_INV_SBOX[*b as usize];
+            }
+            for i in 0..16 {
+                block[i] ^= self.round_keys[r][i];
+            }
+            for c in 0..4 {
+                let i = c * 4;
+                let (a0, a1, a2, a3) = (block[i], block[i + 1], block[i + 2], block[i + 3]);
+                block[i] = gf_mul(a0, 14) ^ gf_mul(a1, 11) ^ gf_mul(a2, 13) ^ gf_mul(a3, 9);
+                block[i + 1] = gf_mul(a0, 9) ^ gf_mul(a1, 14) ^ gf_mul(a2, 11) ^ gf_mul(a3, 13);
+                block[i + 2] = gf_mul(a0, 13) ^ gf_mul(a1, 9) ^ gf_mul(a2, 14) ^ gf_mul(a3, 11);
+                block[i + 3] = gf_mul(a0, 11) ^ gf_mul(a1, 13) ^ gf_mul(a2, 9) ^ gf_mul(a3, 14);
+            }
+        }
+        let s = *block;
+        block[1] = s[13];
+        block[5] = s[1];
+        block[9] = s[5];
+        block[13] = s[9];
+        block[2] = s[10];
+        block[6] = s[14];
+        block[10] = s[2];
+        block[14] = s[6];
+        block[3] = s[7];
+        block[7] = s[11];
+        block[11] = s[15];
+        block[15] = s[3];
+        for b in block.iter_mut() {
+            *b = AES_INV_SBOX[*b as usize];
+        }
+        for i in 0..16 {
+            block[i] ^= self.round_keys[0][i];
+        }
+    }
+}
+
+/// Encrypts `plaintext` with AES-128-CBC or AES-256-CBC and PKCS#7 padding (or unpadded when `auto_pad` is false).
+pub fn aes_cbc_encrypt_with_expanded(
+    expanded: &AesExpandedKey,
+    iv: &[u8],
+    plaintext: &[u8],
+    auto_pad: bool,
+) -> Result<Vec<u8>, &'static str> {
+    if iv.len() != 16 {
+        return Err("AES-CBC IV must be exactly 16 bytes");
+    }
+    if !auto_pad && !plaintext.len().is_multiple_of(16) {
+        return Err("AES-CBC input length must be a multiple of 16 bytes when padding is disabled");
+    }
+    let pad_len = if auto_pad {
+        16 - (plaintext.len() % 16)
+    } else {
+        0
+    };
+    let total_len = plaintext.len() + pad_len;
+    let mut out = Vec::with_capacity(total_len);
+    out.extend_from_slice(plaintext);
+    if auto_pad {
+        out.resize(total_len, pad_len as u8);
+    }
+    let mut prev = [0u8; 16];
+    prev.copy_from_slice(iv);
+    for chunk in out.chunks_exact_mut(16) {
+        let mut block = [0u8; 16];
+        for i in 0..16 {
+            block[i] = chunk[i] ^ prev[i];
+        }
+        expanded.encrypt_block(&mut block);
+        chunk.copy_from_slice(&block);
+        prev = block;
+    }
+    Ok(out)
+}
+
+/// Decrypts `ciphertext` with AES-128-CBC or AES-256-CBC and verifies PKCS#7 padding in constant-style checks.
+pub fn aes_cbc_decrypt_with_expanded(
+    expanded: &AesExpandedKey,
+    iv: &[u8],
+    ciphertext: &[u8],
+    auto_pad: bool,
+) -> Result<Vec<u8>, &'static str> {
+    if iv.len() != 16 {
+        return Err("AES-CBC IV must be exactly 16 bytes");
+    }
+    if ciphertext.is_empty() && auto_pad {
+        return Err("AES-CBC ciphertext cannot be empty");
+    }
+    if !ciphertext.len().is_multiple_of(16) {
+        return Err("AES-CBC ciphertext length must be a multiple of 16 bytes");
+    }
+    let mut out = ciphertext.to_vec();
+    let mut prev = [0u8; 16];
+    prev.copy_from_slice(iv);
+    for chunk in out.chunks_exact_mut(16) {
+        let mut next_prev = [0u8; 16];
+        next_prev.copy_from_slice(chunk);
+        let mut block = next_prev;
+        expanded.decrypt_block(&mut block);
+        for i in 0..16 {
+            chunk[i] = block[i] ^ prev[i];
+        }
+        prev = next_prev;
+    }
+    if auto_pad {
+        let pad_byte = *out.last().ok_or("Empty decrypted buffer")? as usize;
+        if pad_byte == 0 || pad_byte > 16 || pad_byte > out.len() {
+            return Err("Invalid AES-CBC PKCS#7 padding");
+        }
+        let start = out.len() - pad_byte;
+        let mut bad = 0u8;
+        for &b in &out[start..] {
+            bad |= b ^ (pad_byte as u8);
+        }
+        if bad != 0 {
+            return Err("Invalid AES-CBC PKCS#7 padding bytes");
+        }
+        out.truncate(start);
+    }
+    Ok(out)
+}
+
+pub fn aes_cbc_encrypt(
+    key: &[u8],
+    iv: &[u8],
+    plaintext: &[u8],
+    auto_pad: bool,
+) -> Result<Vec<u8>, &'static str> {
+    let expanded = AesExpandedKey::new(key)?;
+    aes_cbc_encrypt_with_expanded(&expanded, iv, plaintext, auto_pad)
+}
+
+pub fn aes_cbc_decrypt(
+    key: &[u8],
+    iv: &[u8],
+    ciphertext: &[u8],
+    auto_pad: bool,
+) -> Result<Vec<u8>, &'static str> {
+    let expanded = AesExpandedKey::new(key)?;
+    aes_cbc_decrypt_with_expanded(&expanded, iv, ciphertext, auto_pad)
+}
+
+/// Builds a `ring::aead::LessSafeKey` for 128-bit (`16`-byte) or 256-bit (`32`-byte) AES-GCM.
+#[inline]
+pub fn make_ring_aead_key(key: &[u8]) -> Result<ring::aead::LessSafeKey, &'static str> {
+    let alg = match key.len() {
+        16 => &ring::aead::AES_128_GCM,
+        32 => &ring::aead::AES_256_GCM,
+        _ => return Err("AES-GCM key length must be 16 (128-bit) or 32 (256-bit) bytes"),
+    };
+    let unbound =
+        ring::aead::UnboundKey::new(alg, key).map_err(|_| "Invalid AES-GCM key bytes")?;
+    Ok(ring::aead::LessSafeKey::new(unbound))
+}
+
+/// Encrypts `plaintext` in-place using a pre-expanded `ring::aead::LessSafeKey`, returning `ciphertext || tag`.
+#[inline]
+pub fn aes_gcm_seal_with_key(
+    less_safe_key: &ring::aead::LessSafeKey,
+    iv: &[u8],
+    aad: &[u8],
+    plaintext: &[u8],
+    tag_bits: usize,
+) -> Result<Vec<u8>, &'static str> {
+    if iv.len() != 12 {
+        return Err("AES-GCM IV must be 12 bytes (96 bits)");
+    }
+    let tag_bytes = match tag_bits {
+        96 | 104 | 112 | 120 | 128 => tag_bits / 8,
+        _ => return Err("AES-GCM tagLength must be 96, 104, 112, 120, or 128 bits"),
+    };
+    let nonce =
+        ring::aead::Nonce::try_assume_unique_for_key(iv).map_err(|_| "Invalid AES-GCM nonce")?;
+    let mut buf = Vec::with_capacity(plaintext.len() + 16);
+    buf.extend_from_slice(plaintext);
+    let tag = less_safe_key
+        .seal_in_place_separate_tag(nonce, ring::aead::Aad::from(aad), &mut buf)
+        .map_err(|_| "AES-GCM encryption failed")?;
+    buf.extend_from_slice(&tag.as_ref()[..tag_bytes]);
+    Ok(buf)
+}
+
+/// Decrypts `ciphertext_and_tag` using a pre-expanded `ring::aead::LessSafeKey`, returning `plaintext`.
+#[inline]
+pub fn aes_gcm_open_with_key(
+    less_safe_key: &ring::aead::LessSafeKey,
+    iv: &[u8],
+    aad: &[u8],
+    ciphertext_and_tag: &[u8],
+    tag_bits: usize,
+) -> Result<Vec<u8>, &'static str> {
+    if iv.len() != 12 {
+        return Err("AES-GCM IV must be 12 bytes (96 bits)");
+    }
+    if tag_bits != 128 {
+        return Err("AES-GCM decryption requires 128-bit authentication tag");
+    }
+    if ciphertext_and_tag.len() < 16 {
+        return Err("AES-GCM ciphertext too short for authentication tag");
+    }
+    let nonce =
+        ring::aead::Nonce::try_assume_unique_for_key(iv).map_err(|_| "Invalid AES-GCM nonce")?;
+    let mut buf = ciphertext_and_tag.to_vec();
+    let plain = less_safe_key
+        .open_in_place(nonce, ring::aead::Aad::from(aad), &mut buf)
+        .map_err(|_| "AES-GCM authentication tag verification failed")?;
+    let plain_len = plain.len();
+    buf.truncate(plain_len);
+    Ok(buf)
+}
+
+#[inline]
+pub fn aes_gcm_encrypt(
+    key: &[u8],
+    iv: &[u8],
+    aad: &[u8],
+    plaintext: &[u8],
+    tag_bits: usize,
+) -> Result<Vec<u8>, &'static str> {
+    let k = make_ring_aead_key(key)?;
+    aes_gcm_seal_with_key(&k, iv, aad, plaintext, tag_bits)
+}
+
+#[inline]
+pub fn aes_gcm_decrypt(
+    key: &[u8],
+    iv: &[u8],
+    aad: &[u8],
+    ciphertext_and_tag: &[u8],
+    tag_bits: usize,
+) -> Result<Vec<u8>, &'static str> {
+    let k = make_ring_aead_key(key)?;
+    aes_gcm_open_with_key(&k, iv, aad, ciphertext_and_tag, tag_bits)
+}
+
+/// Derives `byte_len` key bytes using `ring::pbkdf2::derive` (`SHA-1`, `SHA-256`, `SHA-384`, `SHA-512`).
+pub fn pbkdf2_derive_bytes(
+    hash_alg: &str,
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    byte_len: usize,
+) -> Result<Vec<u8>, &'static str> {
+    if byte_len == 0 {
+        return Ok(Vec::new());
+    }
+    let non_zero_iters =
+        std::num::NonZeroU32::new(iterations).ok_or("PBKDF2 iterations must be > 0")?;
+    let alg = if hash_alg.eq_ignore_ascii_case("SHA-256")
+        || hash_alg.eq_ignore_ascii_case("SHA256")
+    {
+        ring::pbkdf2::PBKDF2_HMAC_SHA256
+    } else if hash_alg.eq_ignore_ascii_case("SHA-384") || hash_alg.eq_ignore_ascii_case("SHA384") {
+        ring::pbkdf2::PBKDF2_HMAC_SHA384
+    } else if hash_alg.eq_ignore_ascii_case("SHA-512") || hash_alg.eq_ignore_ascii_case("SHA512") {
+        ring::pbkdf2::PBKDF2_HMAC_SHA512
+    } else if hash_alg.eq_ignore_ascii_case("SHA-1") || hash_alg.eq_ignore_ascii_case("SHA1") {
+        ring::pbkdf2::PBKDF2_HMAC_SHA1
+    } else {
+        return Err("Unsupported PBKDF2 digest algorithm");
+    };
+    let mut out = vec![0u8; byte_len];
+    ring::pbkdf2::derive(alg, non_zero_iters, salt, password, &mut out);
+    Ok(out)
+}
+
+struct HkdfLen(usize);
+impl ring::hkdf::KeyType for HkdfLen {
+    fn len(&self) -> usize {
+        self.0
+    }
+}
+
+/// Derives `byte_len` key bytes using `ring::hkdf` (`SHA-1`, `SHA-256`, `SHA-384`, `SHA-512`).
+pub fn hkdf_derive_bytes(
+    hash_alg: &str,
+    ikm: &[u8],
+    salt: &[u8],
+    info: &[u8],
+    byte_len: usize,
+) -> Result<Vec<u8>, &'static str> {
+    if byte_len == 0 {
+        return Ok(Vec::new());
+    }
+    let alg = if hash_alg.eq_ignore_ascii_case("SHA-256")
+        || hash_alg.eq_ignore_ascii_case("SHA256")
+    {
+        ring::hkdf::HKDF_SHA256
+    } else if hash_alg.eq_ignore_ascii_case("SHA-384") || hash_alg.eq_ignore_ascii_case("SHA384") {
+        ring::hkdf::HKDF_SHA384
+    } else if hash_alg.eq_ignore_ascii_case("SHA-512") || hash_alg.eq_ignore_ascii_case("SHA512") {
+        ring::hkdf::HKDF_SHA512
+    } else if hash_alg.eq_ignore_ascii_case("SHA-1") || hash_alg.eq_ignore_ascii_case("SHA1") {
+        ring::hkdf::HKDF_SHA1_FOR_LEGACY_USE_ONLY
+    } else {
+        return Err("Unsupported HKDF digest algorithm");
+    };
+    let ring_salt = ring::hkdf::Salt::new(alg, salt);
+    let prk = ring_salt.extract(ikm);
+    let info_slices = [info];
+    let okm = prk
+        .expand(&info_slices, HkdfLen(byte_len))
+        .map_err(|_| "HKDF output length exceeds maximum (255 * HashLen)")?;
+    let mut out = vec![0u8; byte_len];
+    okm.fill(&mut out).map_err(|_| "HKDF expand failed")?;
+    Ok(out)
+}
+
+#[inline]
+fn salsa20_8_core(b: &mut [u8; 64]) {
+    let mut x = [0u32; 16];
+    for i in 0..16 {
+        let off = i * 4;
+        x[i] = u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]);
+    }
+    let mut w = x;
+    for _ in 0..4 {
+        w[4] ^= w[0].wrapping_add(w[12]).rotate_left(7);
+        w[8] ^= w[4].wrapping_add(w[0]).rotate_left(9);
+        w[12] ^= w[8].wrapping_add(w[4]).rotate_left(13);
+        w[0] ^= w[12].wrapping_add(w[8]).rotate_left(18);
+        w[9] ^= w[5].wrapping_add(w[1]).rotate_left(7);
+        w[13] ^= w[9].wrapping_add(w[5]).rotate_left(9);
+        w[1] ^= w[13].wrapping_add(w[9]).rotate_left(13);
+        w[5] ^= w[1].wrapping_add(w[13]).rotate_left(18);
+        w[14] ^= w[10].wrapping_add(w[6]).rotate_left(7);
+        w[2] ^= w[14].wrapping_add(w[10]).rotate_left(9);
+        w[6] ^= w[2].wrapping_add(w[14]).rotate_left(13);
+        w[10] ^= w[6].wrapping_add(w[2]).rotate_left(18);
+        w[3] ^= w[15].wrapping_add(w[11]).rotate_left(7);
+        w[7] ^= w[3].wrapping_add(w[15]).rotate_left(9);
+        w[11] ^= w[7].wrapping_add(w[3]).rotate_left(13);
+        w[15] ^= w[11].wrapping_add(w[7]).rotate_left(18);
+
+        w[1] ^= w[0].wrapping_add(w[3]).rotate_left(7);
+        w[2] ^= w[1].wrapping_add(w[0]).rotate_left(9);
+        w[3] ^= w[2].wrapping_add(w[1]).rotate_left(13);
+        w[0] ^= w[3].wrapping_add(w[2]).rotate_left(18);
+        w[6] ^= w[5].wrapping_add(w[4]).rotate_left(7);
+        w[7] ^= w[6].wrapping_add(w[5]).rotate_left(9);
+        w[4] ^= w[7].wrapping_add(w[6]).rotate_left(13);
+        w[5] ^= w[4].wrapping_add(w[7]).rotate_left(18);
+        w[11] ^= w[10].wrapping_add(w[9]).rotate_left(7);
+        w[8] ^= w[11].wrapping_add(w[10]).rotate_left(9);
+        w[9] ^= w[8].wrapping_add(w[11]).rotate_left(13);
+        w[10] ^= w[9].wrapping_add(w[8]).rotate_left(18);
+        w[12] ^= w[15].wrapping_add(w[14]).rotate_left(7);
+        w[13] ^= w[12].wrapping_add(w[15]).rotate_left(9);
+        w[14] ^= w[13].wrapping_add(w[12]).rotate_left(13);
+        w[15] ^= w[14].wrapping_add(w[13]).rotate_left(18);
+    }
+    for i in 0..16 {
+        let bytes = x[i].wrapping_add(w[i]).to_le_bytes();
+        b[i * 4..i * 4 + 4].copy_from_slice(&bytes);
+    }
+}
+
+fn scrypt_block_mix(b: &[u8], y: &mut [u8], r: usize) {
+    let mut x = [0u8; 64];
+    x.copy_from_slice(&b[(2 * r - 1) * 64..2 * r * 64]);
+    for i in 0..(2 * r) {
+        let block = &b[i * 64..(i + 1) * 64];
+        for j in 0..64 {
+            x[j] ^= block[j];
+        }
+        salsa20_8_core(&mut x);
+        let dst_idx = if i % 2 == 0 { i / 2 } else { r + i / 2 };
+        y[dst_idx * 64..(dst_idx + 1) * 64].copy_from_slice(&x);
+    }
+}
+
+fn scrypt_ro_mix(b: &mut [u8], v: &mut [u8], y: &mut [u8], n: usize, r: usize) {
+    let block_len = 128 * r;
+    for i in 0..n {
+        v[i * block_len..(i + 1) * block_len].copy_from_slice(b);
+        scrypt_block_mix(b, y, r);
+        b.copy_from_slice(y);
+    }
+    let mask = n - 1;
+    let last_off = (2 * r - 1) * 64;
+    for _ in 0..n {
+        let j = (u32::from_le_bytes([
+            b[last_off],
+            b[last_off + 1],
+            b[last_off + 2],
+            b[last_off + 3],
+        ]) as usize)
+            & mask;
+        let v_slice = &v[j * block_len..(j + 1) * block_len];
+        for k in 0..block_len {
+            b[k] ^= v_slice[k];
+        }
+        scrypt_block_mix(b, y, r);
+        b.copy_from_slice(y);
+    }
+}
+
+/// RFC 7914 `scrypt` key derivation function (`N`, `r`, `p`, `maxmem`).
+pub fn scrypt_derive_bytes(
+    password: &[u8],
+    salt: &[u8],
+    n: usize,
+    r: usize,
+    p: usize,
+    dk_len: usize,
+    maxmem: usize,
+) -> Result<Vec<u8>, &'static str> {
+    if dk_len == 0 {
+        return Ok(Vec::new());
+    }
+    if n < 2 || !n.is_power_of_two() || r == 0 || p == 0 {
+        return Err("Invalid scrypt parameters: N must be a power of two > 1, r > 0, p > 0");
+    }
+    let block_len = 128usize
+        .checked_mul(r)
+        .ok_or("scrypt block size overflow")?;
+    let v_bytes = block_len
+        .checked_mul(n)
+        .ok_or("scrypt memory limit exceeded")?;
+    let total_b = block_len
+        .checked_mul(p)
+        .ok_or("scrypt parallel buffer overflow")?;
+    if v_bytes.saturating_add(total_b) > maxmem {
+        return Err("Invalid scrypt parameters: memory limit exceeded (ERR_CRYPTO_SCRYPT_INVALID_PARAMETER)");
+    }
+    let mut b = pbkdf2_derive_bytes("SHA-256", password, salt, 1, total_b)?;
+    let mut v = vec![0u8; v_bytes];
+    let mut y = vec![0u8; block_len];
+    for i in 0..p {
+        scrypt_ro_mix(
+            &mut b[i * block_len..(i + 1) * block_len],
+            &mut v,
+            &mut y,
+            n,
+            r,
+        );
+    }
+    pbkdf2_derive_bytes("SHA-256", password, &b, 1, dk_len)
+}
+
+const ED25519_PKCS8_V1_PREFIX: [u8; 16] = [
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+    0x20,
+];
+const ED25519_SPKI_PREFIX: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
+
+const ECDSA_P256_SPKI_PREFIX: [u8; 26] = [
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
+    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+];
+const ECDSA_P384_SPKI_PREFIX: [u8; 23] = [
+    0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x05,
+    0x2b, 0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00,
+];
+
+/// Wraps a 32-byte Ed25519 private seed and 32-byte public key into PKCS#8 v2 DER (accepted by `ring` and WebCrypto).
+pub fn ed25519_seed_and_pub_to_pkcs8_v2(seed: &[u8; 32], pub_bytes: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(85);
+    out.extend_from_slice(&[
+        0x30, 0x53, 0x02, 0x01, 0x01, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+        0x20,
+    ]);
+    out.extend_from_slice(seed);
+    out.extend_from_slice(&[0xa1, 0x23, 0x03, 0x21, 0x00]);
+    out.extend_from_slice(pub_bytes);
+    out
+}
+
+/// Wraps a 32-byte Ed25519 private seed into standard 48-byte PKCS#8 v1 DER for `exportKey("pkcs8")`.
+#[inline]
+pub fn ed25519_seed_to_pkcs8_v1(seed: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(48);
+    out.extend_from_slice(&ED25519_PKCS8_V1_PREFIX);
+    out.extend_from_slice(seed);
+    out
+}
+
+/// Wraps a 32-byte Ed25519 public key into standard 44-byte SPKI DER for `exportKey("spki")`.
+#[inline]
+pub fn ed25519_pub_to_spki(pub_bytes: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(44);
+    out.extend_from_slice(&ED25519_SPKI_PREFIX);
+    out.extend_from_slice(pub_bytes);
+    out
+}
+
+/// Extracts a 32-byte Ed25519 seed from raw 32-byte input, 48-byte PKCS#8 v1, or 83/85-byte PKCS#8 v2.
+pub fn extract_ed25519_seed(input: &[u8]) -> Result<[u8; 32], &'static str> {
+    if input.len() == 32 {
+        let mut s = [0u8; 32];
+        s.copy_from_slice(input);
+        return Ok(s);
+    }
+    if input.len() >= 48 && input[..16] == ED25519_PKCS8_V1_PREFIX {
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&input[16..48]);
+        return Ok(s);
+    }
+    if input.len() >= 48 && input[12..16] == [0x04, 0x22, 0x04, 0x20] {
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&input[16..48]);
+        return Ok(s);
+    }
+    Err("Invalid Ed25519 private key or PKCS#8 encoding")
+}
+
+/// Extracts a 32-byte Ed25519 public key from raw 32-byte input or 44-byte SPKI DER.
+pub fn extract_ed25519_pub(input: &[u8]) -> Result<[u8; 32], &'static str> {
+    if input.len() == 32 {
+        let mut p = [0u8; 32];
+        p.copy_from_slice(input);
+        return Ok(p);
+    }
+    if input.len() == 44 && input[..12] == ED25519_SPKI_PREFIX {
+        let mut p = [0u8; 32];
+        p.copy_from_slice(&input[12..44]);
+        return Ok(p);
+    }
+    Err("Invalid Ed25519 public key or SPKI encoding")
+}
+
+/// Derives an Ed25519 `(seed, public_key)` pair from a 32-byte seed using `ring::signature::Ed25519KeyPair`.
+pub fn ed25519_keypair_from_seed(seed: [u8; 32]) -> Result<([u8; 32], [u8; 32]), &'static str> {
+    use ring::signature::KeyPair;
+    let kp = ring::signature::Ed25519KeyPair::from_seed_unchecked(&seed)
+        .map_err(|_| "Failed to derive Ed25519 key pair from seed")?;
+    let mut pub_bytes = [0u8; 32];
+    pub_bytes.copy_from_slice(kp.public_key().as_ref());
+    Ok((seed, pub_bytes))
+}
+
+/// Signs `msg` with a 32-byte Ed25519 seed, returning the 64-byte signature.
+#[inline]
+pub fn ed25519_sign_bytes(seed: &[u8; 32], msg: &[u8]) -> Result<[u8; 64], &'static str> {
+    let kp = ring::signature::Ed25519KeyPair::from_seed_unchecked(seed)
+        .map_err(|_| "Invalid Ed25519 seed")?;
+    let sig = kp.sign(msg);
+    let mut out = [0u8; 64];
+    out.copy_from_slice(sig.as_ref());
+    Ok(out)
+}
+
+/// Verifies a 64-byte Ed25519 `signature` over `msg` using a 32-byte `pub_bytes`.
+#[inline]
+pub fn ed25519_verify_bytes(pub_bytes: &[u8], msg: &[u8], signature: &[u8]) -> bool {
+    let peer = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, pub_bytes);
+    peer.verify(msg, signature).is_ok()
+}
+
+/// Wraps an ECDSA uncompressed public key (`0x04 || X || Y`) and private scalar `d` into PKCS#8 v1 DER
+/// accepted by `ring::signature::EcdsaKeyPair::from_pkcs8`.
+pub fn ecdsa_components_to_pkcs8(curve: &str, d: &[u8], pub_uncompressed: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if curve.eq_ignore_ascii_case("P-256") || curve.eq_ignore_ascii_case("prime256v1") {
+        if d.len() != 32 || pub_uncompressed.len() != 65 || pub_uncompressed[0] != 0x04 {
+            return Err("Invalid P-256 key component lengths");
+        }
+        let mut out = Vec::with_capacity(138);
+        out.extend_from_slice(&[
+            0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce,
+            0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x04,
+            0x6d, 0x30, 0x6b, 0x02, 0x01, 0x01, 0x04, 0x20,
+        ]);
+        out.extend_from_slice(d);
+        out.extend_from_slice(&[0xa1, 0x44, 0x03, 0x42, 0x00]);
+        out.extend_from_slice(pub_uncompressed);
+        Ok(out)
+    } else if curve.eq_ignore_ascii_case("P-384") || curve.eq_ignore_ascii_case("secp384r1") {
+        if d.len() != 48 || pub_uncompressed.len() != 97 || pub_uncompressed[0] != 0x04 {
+            return Err("Invalid P-384 key component lengths");
+        }
+        let mut out = Vec::with_capacity(185);
+        out.extend_from_slice(&[
+            0x30, 0x81, 0xb6, 0x02, 0x01, 0x00, 0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce,
+            0x3d, 0x02, 0x01, 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22, 0x04, 0x81, 0x9e, 0x30,
+            0x81, 0x9b, 0x02, 0x01, 0x01, 0x04, 0x30,
+        ]);
+        out.extend_from_slice(d);
+        out.extend_from_slice(&[0xa1, 0x64, 0x03, 0x62, 0x00]);
+        out.extend_from_slice(pub_uncompressed);
+        Ok(out)
+    } else {
+        Err("Unsupported ECDSA curve (expected P-256 or P-384)")
+    }
+}
+
+/// Extracts `(d_bytes, pub_uncompressed_bytes)` from a P-256 or P-384 PKCS#8 v1 DER buffer.
+pub fn extract_ecdsa_pkcs8_components(
+    curve: &str,
+    pkcs8: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
+    let (scalar_len, point_len) =
+        if curve.eq_ignore_ascii_case("P-256") || curve.eq_ignore_ascii_case("prime256v1") {
+            (32usize, 65usize)
+        } else if curve.eq_ignore_ascii_case("P-384") || curve.eq_ignore_ascii_case("secp384r1") {
+            (48usize, 97usize)
+        } else {
+            return Err("Unsupported ECDSA curve");
+        };
+    // Validate with `ring` first and obtain public key directly from `KeyPair::public_key()`
+    use ring::signature::KeyPair;
+    let rng = ring::rand::SystemRandom::new();
+    let alg = if scalar_len == 32 {
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING
+    } else {
+        &ring::signature::ECDSA_P384_SHA384_FIXED_SIGNING
+    };
+    let kp = ring::signature::EcdsaKeyPair::from_pkcs8(alg, pkcs8, &rng)
+        .map_err(|_| "Invalid ECDSA PKCS#8 private key")?;
+    let pub_bytes = kp.public_key().as_ref().to_vec();
+    if pub_bytes.len() != point_len {
+        return Err("Unexpected ECDSA public key length");
+    }
+    // Locate the `[0x04, scalar_len]` OCTET STRING tag inside PKCS#8
+    let marker = [0x02, 0x01, 0x01, 0x04, scalar_len as u8];
+    if let Some(pos) = memchr::memmem::find(pkcs8, &marker) {
+        let start = pos + marker.len();
+        if start + scalar_len <= pkcs8.len() {
+            return Ok((pkcs8[start..start + scalar_len].to_vec(), pub_bytes));
+        }
+    }
+    Err("Failed to locate ECDSA private scalar in PKCS#8")
+}
+
+/// Wraps an uncompressed ECDSA public point (`0x04 || X || Y`) into SPKI DER.
+pub fn ecdsa_pub_to_spki(curve: &str, pub_uncompressed: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if curve.eq_ignore_ascii_case("P-256") || curve.eq_ignore_ascii_case("prime256v1") {
+        if pub_uncompressed.len() != 65 {
+            return Err("Invalid P-256 uncompressed public point length");
+        }
+        let mut out = Vec::with_capacity(91);
+        out.extend_from_slice(&ECDSA_P256_SPKI_PREFIX);
+        out.extend_from_slice(pub_uncompressed);
+        Ok(out)
+    } else if curve.eq_ignore_ascii_case("P-384") || curve.eq_ignore_ascii_case("secp384r1") {
+        if pub_uncompressed.len() != 97 {
+            return Err("Invalid P-384 uncompressed public point length");
+        }
+        let mut out = Vec::with_capacity(120);
+        out.extend_from_slice(&ECDSA_P384_SPKI_PREFIX);
+        out.extend_from_slice(pub_uncompressed);
+        Ok(out)
+    } else {
+        Err("Unsupported ECDSA curve")
+    }
+}
+
+/// Extracts an uncompressed ECDSA public point (`0x04 || X || Y`) from raw or SPKI DER.
+pub fn extract_ecdsa_pub(curve: &str, input: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if curve.eq_ignore_ascii_case("P-256") || curve.eq_ignore_ascii_case("prime256v1") {
+        if input.len() == 65 && input[0] == 0x04 {
+            return Ok(input.to_vec());
+        }
+        if input.len() == 91 && input[..26] == ECDSA_P256_SPKI_PREFIX {
+            return Ok(input[26..91].to_vec());
+        }
+        Err("Invalid P-256 public key or SPKI DER")
+    } else if curve.eq_ignore_ascii_case("P-384") || curve.eq_ignore_ascii_case("secp384r1") {
+        if input.len() == 97 && input[0] == 0x04 {
+            return Ok(input.to_vec());
+        }
+        if input.len() == 120 && input[..23] == ECDSA_P384_SPKI_PREFIX {
+            return Ok(input[23..120].to_vec());
+        }
+        Err("Invalid P-384 public key or SPKI DER")
+    } else {
+        Err("Unsupported ECDSA curve")
+    }
+}
+
+/// Generates a new ECDSA (`P-256` or `P-384`) keypair, returning `(pkcs8_bytes, d_bytes, pub_uncompressed_bytes)`.
+pub fn ecdsa_generate_keypair(curve: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), &'static str> {
+    let rng = ring::rand::SystemRandom::new();
+    let alg = if curve.eq_ignore_ascii_case("P-256") || curve.eq_ignore_ascii_case("prime256v1") {
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING
+    } else if curve.eq_ignore_ascii_case("P-384") || curve.eq_ignore_ascii_case("secp384r1") {
+        &ring::signature::ECDSA_P384_SHA384_FIXED_SIGNING
+    } else {
+        return Err("Unsupported ECDSA curve (expected P-256 or P-384)");
+    };
+    let doc = ring::signature::EcdsaKeyPair::generate_pkcs8(alg, &rng)
+        .map_err(|_| "Failed to generate ECDSA key pair")?;
+    let pkcs8 = doc.as_ref().to_vec();
+    let (d, pub_bytes) = extract_ecdsa_pkcs8_components(curve, &pkcs8)?;
+    Ok((pkcs8, d, pub_bytes))
+}
+
+/// Converts a fixed IEEE P1363 `(r || s)` ECDSA signature into ASN.1 DER `SEQUENCE { INTEGER r, INTEGER s }`.
+pub fn ecdsa_fixed_to_der(fixed: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if fixed.len() != 64 && fixed.len() != 96 {
+        return Err("Invalid fixed ECDSA signature length");
+    }
+    let half = fixed.len() / 2;
+    let encode_int = |slice: &[u8]| -> Vec<u8> {
+        let mut s = slice;
+        while s.len() > 1 && s[0] == 0 {
+            s = &s[1..];
+        }
+        let mut out = Vec::with_capacity(s.len() + 3);
+        out.push(0x02);
+        if (s[0] & 0x80) != 0 {
+            out.push((s.len() + 1) as u8);
+            out.push(0x00);
+        } else {
+            out.push(s.len() as u8);
+        }
+        out.extend_from_slice(s);
+        out
+    };
+    let r_der = encode_int(&fixed[..half]);
+    let s_der = encode_int(&fixed[half..]);
+    let seq_len = r_der.len() + s_der.len();
+    let mut out = Vec::with_capacity(seq_len + 3);
+    out.push(0x30);
+    if seq_len >= 128 {
+        out.push(0x81);
+    }
+    out.push(seq_len as u8);
+    out.extend_from_slice(&r_der);
+    out.extend_from_slice(&s_der);
+    Ok(out)
+}
+
+/// Signs `msg` using an ECDSA PKCS#8 key (`P-256` or `P-384`), returning IEEE P1363 (`64`/`96` bytes)
+/// when `asn1_der` is `false` or ASN.1 DER when `asn1_der` is `true`.
+pub fn ecdsa_sign_bytes(
+    curve: &str,
+    pkcs8: &[u8],
+    msg: &[u8],
+    asn1_der: bool,
+) -> Result<Vec<u8>, &'static str> {
+    let rng = ring::rand::SystemRandom::new();
+    let alg = if curve.eq_ignore_ascii_case("P-256") || curve.eq_ignore_ascii_case("prime256v1") {
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING
+    } else if curve.eq_ignore_ascii_case("P-384") || curve.eq_ignore_ascii_case("secp384r1") {
+        &ring::signature::ECDSA_P384_SHA384_FIXED_SIGNING
+    } else {
+        return Err("Unsupported ECDSA curve");
+    };
+    let kp = ring::signature::EcdsaKeyPair::from_pkcs8(alg, pkcs8, &rng)
+        .map_err(|_| "Invalid ECDSA PKCS#8 key")?;
+    let sig = kp
+        .sign(&rng, msg)
+        .map_err(|_| "ECDSA signing operation failed")?;
+    if asn1_der {
+        ecdsa_fixed_to_der(sig.as_ref())
+    } else {
+        Ok(sig.as_ref().to_vec())
+    }
+}
+
+/// Verifies an ECDSA (`P-256` or `P-384`) signature over `msg` (accepting both IEEE P1363 fixed and ASN.1 DER formats).
+pub fn ecdsa_verify_bytes(curve: &str, pub_uncompressed: &[u8], msg: &[u8], signature: &[u8]) -> bool {
+    let is_p256 = curve.eq_ignore_ascii_case("P-256") || curve.eq_ignore_ascii_case("prime256v1");
+    let is_p384 = curve.eq_ignore_ascii_case("P-384") || curve.eq_ignore_ascii_case("secp384r1");
+    if is_p256 {
+        if signature.len() == 64 {
+            let peer = ring::signature::UnparsedPublicKey::new(
+                &ring::signature::ECDSA_P256_SHA256_FIXED,
+                pub_uncompressed,
+            );
+            if peer.verify(msg, signature).is_ok() {
+                return true;
+            }
+        }
+        let peer_asn1 = ring::signature::UnparsedPublicKey::new(
+            &ring::signature::ECDSA_P256_SHA256_ASN1,
+            pub_uncompressed,
+        );
+        peer_asn1.verify(msg, signature).is_ok()
+    } else if is_p384 {
+        if signature.len() == 96 {
+            let peer = ring::signature::UnparsedPublicKey::new(
+                &ring::signature::ECDSA_P384_SHA384_FIXED,
+                pub_uncompressed,
+            );
+            if peer.verify(msg, signature).is_ok() {
+                return true;
+            }
+        }
+        let peer_asn1 = ring::signature::UnparsedPublicKey::new(
+            &ring::signature::ECDSA_P384_SHA384_ASN1,
+            pub_uncompressed,
+        );
+        peer_asn1.verify(msg, signature).is_ok()
+    } else {
+        false
+    }
+}
+
+/// Cached pre-expanded cryptographic key entry stored in the isolate-local / tenant-scoped slot table.
+#[allow(dead_code)]
+pub(crate) enum CachedCryptoKeyMaterial {
+    AesGcm {
+        less_safe: ring::aead::LessSafeKey,
+        raw: Vec<u8>,
+    },
+    AesCbc {
+        expanded: AesExpandedKey,
+        raw: Vec<u8>,
+    },
+    Hmac {
+        ring_key: ring::hmac::Key,
+        hash_alg: String,
+        raw: Vec<u8>,
+    },
+    Ed25519Private {
+        seed: [u8; 32],
+        pub_bytes: [u8; 32],
+    },
+    Ed25519Public {
+        pub_bytes: [u8; 32],
+    },
+    EcdsaPrivate {
+        curve: String,
+        pkcs8: Vec<u8>,
+        d_bytes: Vec<u8>,
+        pub_bytes: Vec<u8>,
+    },
+    EcdsaPublic {
+        curve: String,
+        pub_bytes: Vec<u8>,
+    },
+}
+
+pub(crate) struct TenantCachedCryptoKey {
+    pub(crate) tenant_id: String,
+    pub(crate) material: CachedCryptoKeyMaterial,
+}
+
+thread_local! {
+    static NEXT_CRYPTO_KEY_HANDLE: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+    static CRYPTO_KEY_HANDLE_TABLE: std::cell::RefCell<rustc_hash::FxHashMap<u32, TenantCachedCryptoKey>> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+}
+
+/// Inserts a pre-expanded `CachedCryptoKeyMaterial` into the tenant-scoped handle table, returning its opaque `u32` ID.
+pub(crate) fn insert_cached_crypto_key(
+    tenant_id: String,
+    material: CachedCryptoKeyMaterial,
+) -> u32 {
+    let id = NEXT_CRYPTO_KEY_HANDLE.with(|c| {
+        let cur = c.get();
+        c.set(cur.wrapping_add(1).max(1));
+        cur
+    });
+    CRYPTO_KEY_HANDLE_TABLE.with(|table| {
+        let mut borrow = table.borrow_mut();
+        if borrow.len() >= 1024 {
+            borrow.retain(|_, v| v.tenant_id == tenant_id);
+            if borrow.len() >= 1024 {
+                borrow.clear();
+            }
+        }
+        borrow.insert(
+            id,
+            TenantCachedCryptoKey {
+                tenant_id,
+                material,
+            },
+        );
+    });
+    id
+}
+
+/// Executes `f` with a reference to the cached `CachedCryptoKeyMaterial` for `handle_id` ONLY if its
+/// `tenant_id` matches `expected_tenant`, enforcing strict multi-tenant key isolation.
+#[inline]
+pub(crate) fn with_cached_crypto_key<R>(
+    handle_id: u32,
+    expected_tenant: &str,
+    f: impl FnOnce(&CachedCryptoKeyMaterial) -> R,
+) -> Option<R> {
+    if handle_id == 0 {
+        return None;
+    }
+    CRYPTO_KEY_HANDLE_TABLE.with(|table| {
+        let borrow = table.borrow();
+        let entry = borrow.get(&handle_id)?;
+        if entry.tenant_id != expected_tenant {
+            return None;
+        }
+        Some(f(&entry.material))
+    })
+}
+
+/// Clears all cached cryptographic key handles belonging to `tenant_id` (or all handles when `tenant_id` is empty).
+#[allow(dead_code)]
+pub fn clear_cached_crypto_keys_for_tenant(tenant_id: &str) {
+    CRYPTO_KEY_HANDLE_TABLE.with(|table| {
+        let mut borrow = table.borrow_mut();
+        if tenant_id.is_empty() {
+            borrow.clear();
+        } else {
+            borrow.retain(|_, v| v.tenant_id != tenant_id);
+        }
+    });
 }
 
 /// Strict WhatWG `btoa`: encodes a Latin1 (`0x00..=0xFF`) string to standard Base64,

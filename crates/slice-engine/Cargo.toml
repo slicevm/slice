@@ -27,6 +27,7 @@ cow-utils.workspace = true
 smallvec.workspace = true
 itoa.workspace = true
 rustls.workspace = true
+ring.workspace = true
 webpki-roots.workspace = true
 rustls-pki-types.workspace = true
 wasmi.workspace = true

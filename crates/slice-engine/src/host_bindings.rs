@@ -3,20 +3,28 @@
 use crate::boa_realm::{
     check_boa_fs_read_ocap, check_boa_fs_write_ocap, norm_vfs_path, SavedIsolateContextGuard,
     BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, BOA_ENV_MAP, BOA_FETCH_MOCKS,
-    BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_STDOUT, BOA_VFS_CACHE, BOA_VFS_DIRS,
-    BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
+    BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_STDOUT, BOA_VFS_CACHE,
+    BOA_VFS_DIRS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
 };
 use crate::event_loop::{
     cancel_timer, clear_event_loop_state, drive_event_loop_to_completion, enqueue_async_fetch,
     schedule_immediate, schedule_timer,
 };
 use crate::intrinsics::{
-    base64_decode, base64_encode, bytes_to_hex, constant_time_eq, fast_format_bytes,
-    fast_format_ms, fast_parse_bytes, fast_parse_ms, fill_random_bytes, generate_uuid_v4,
-    hex_decode_bytes, hmac_sha1_bytes, hmac_sha256_bytes, hmac_sha256_hex, hmac_sha384_bytes,
-    hmac_sha512_bytes, semver_coerce_xyz, semver_parse_strict_xyz, semver_satisfies_xyz,
+    aes_cbc_decrypt, aes_cbc_decrypt_with_expanded, aes_cbc_encrypt, aes_cbc_encrypt_with_expanded,
+    aes_gcm_decrypt, aes_gcm_encrypt, aes_gcm_open_with_key, aes_gcm_seal_with_key, base64_decode,
+    base64_encode, bytes_to_hex, constant_time_eq, ecdsa_components_to_pkcs8,
+    ecdsa_generate_keypair, ecdsa_pub_to_spki, ecdsa_sign_bytes, ecdsa_verify_bytes,
+    ed25519_keypair_from_seed, ed25519_pub_to_spki, ed25519_seed_to_pkcs8_v1, ed25519_sign_bytes,
+    ed25519_verify_bytes, extract_ecdsa_pkcs8_components, extract_ecdsa_pub, extract_ed25519_pub,
+    extract_ed25519_seed, fast_format_bytes, fast_format_ms, fast_parse_bytes, fast_parse_ms,
+    fill_random_bytes, generate_uuid_v4, hex_decode_bytes, hkdf_derive_bytes, hmac_md5_bytes,
+    hmac_sha1_bytes, hmac_sha256_bytes, hmac_sha256_hex, hmac_sha384_bytes, hmac_sha512_bytes,
+    insert_cached_crypto_key, make_ring_aead_key, md5_bytes, pbkdf2_derive_bytes,
+    scrypt_derive_bytes, semver_coerce_xyz, semver_parse_strict_xyz, semver_satisfies_xyz,
     sha1_bytes, sha256_bytes, sha256_hex, sha384_bytes, sha512_bytes, whatwg_atob, whatwg_btoa,
-    zlib_compress_bytes, zlib_decompress_bytes,
+    with_cached_crypto_key, zlib_compress_bytes, zlib_decompress_bytes, AesExpandedKey,
+    CachedCryptoKeyMaterial,
 };
 use crate::isolate::{SandboxEvalOptions, SliceIsolate};
 use crate::js_preludes::eval_lazy_prelude_shard;
@@ -1412,6 +1420,8 @@ fn normalize_webcrypto_hash_name(raw: &str) -> Option<&'static str> {
         Some("SHA-384")
     } else if trimmed.eq_ignore_ascii_case("SHA-512") || trimmed.eq_ignore_ascii_case("SHA512") {
         Some("SHA-512")
+    } else if trimmed.eq_ignore_ascii_case("MD5") || trimmed.eq_ignore_ascii_case("MD-5") {
+        Some("MD5")
     } else {
         None
     }
@@ -1423,8 +1433,41 @@ fn compute_webcrypto_hmac(hash_name: &str, key: &[u8], data: &[u8]) -> Option<Ve
         "SHA-256" => Some(hmac_sha256_bytes(key, data).to_vec()),
         "SHA-384" => Some(hmac_sha384_bytes(key, data).to_vec()),
         "SHA-512" => Some(hmac_sha512_bytes(key, data).to_vec()),
+        "MD5" => Some(hmac_md5_bytes(key, data).to_vec()),
         _ => None,
     }
+}
+
+/// Charges `cost` CPU fuel against the active isolate's `BOA_FUEL_BUDGET`, recording
+/// `SandboxViolation::CpuFuelExhausted` and returning `Err` if the budget is exceeded.
+#[inline]
+fn consume_crypto_kdf_fuel(cost: u64) -> Result<(), String> {
+    let (consumed, limit) = BOA_FUEL_BUDGET.with(|f| f.get());
+    let next = consumed.saturating_add(cost.max(1));
+    BOA_FUEL_BUDGET.with(|f| f.set((next, limit)));
+    if next > limit {
+        let tenant_id = BOA_ACTIVE_TENANT.with(|t| {
+            let b = t.borrow();
+            if b.is_empty() {
+                "boa-tenant".to_string()
+            } else {
+                b.clone()
+            }
+        });
+        BOA_VIOLATION.with(|v| {
+            if v.borrow().is_none() {
+                *v.borrow_mut() = Some(SandboxViolation::CpuFuelExhausted {
+                    tenant_id,
+                    limit,
+                });
+            }
+        });
+        return Err(format!(
+            "RangeError: Cryptographic KDF CPU fuel budget exhausted (limit: {} units)",
+            limit
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Context) {
@@ -2285,7 +2328,7 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_crypto_hmac_sign"),
-        3,
+        4,
         NativeFunction::from_fn_ptr(|_this, args, context| {
             let hash_name = args
                 .first()
@@ -2303,8 +2346,27 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                     .with_message("HMAC sign requires data bytes")
                     .into());
             };
-            let key_bytes = extract_buffer_source_bytes(key_arg, context)?;
+            let handle_id = args
+                .get(3)
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
             let data_bytes = extract_buffer_source_bytes(data_arg, context)?;
+            if handle_id != 0 {
+                let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+                if let Some(Some(sig_bytes)) =
+                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
+                        CachedCryptoKeyMaterial::Hmac { ring_key, .. } => {
+                            let tag = ring::hmac::sign(ring_key, &data_bytes);
+                            Some(tag.as_ref().to_vec())
+                        }
+                        _ => None,
+                    })
+                {
+                    return bytes_to_js_array_buffer(&sig_bytes, context);
+                }
+            }
+            let key_bytes = extract_buffer_source_bytes(key_arg, context)?;
             let Some(mac) = compute_webcrypto_hmac(&hash_name, &key_bytes, &data_bytes) else {
                 return Err(JsNativeError::error()
                     .with_message(format!(
@@ -2319,7 +2381,7 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_crypto_hmac_verify"),
-        4,
+        5,
         NativeFunction::from_fn_ptr(|_this, args, context| {
             let hash_name = args
                 .first()
@@ -2336,9 +2398,27 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
             let Some(data_arg) = args.get(3) else {
                 return Ok(BoaVal::from(false));
             };
-            let key_bytes = extract_buffer_source_bytes(key_arg, context)?;
+            let handle_id = args
+                .get(4)
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
             let sig_bytes = extract_buffer_source_bytes(sig_arg, context)?;
             let data_bytes = extract_buffer_source_bytes(data_arg, context)?;
+            if handle_id != 0 {
+                let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+                if let Some(Some(ok)) =
+                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
+                        CachedCryptoKeyMaterial::Hmac { ring_key, .. } => {
+                            Some(ring::hmac::verify(ring_key, &data_bytes, &sig_bytes).is_ok())
+                        }
+                        _ => None,
+                    })
+                {
+                    return Ok(BoaVal::from(ok));
+                }
+            }
+            let key_bytes = extract_buffer_source_bytes(key_arg, context)?;
             let Some(expected) = compute_webcrypto_hmac(&hash_name, &key_bytes, &data_bytes) else {
                 return Err(JsNativeError::error()
                     .with_message(format!(
@@ -2422,6 +2502,7 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 Some("SHA-256") => sha256_bytes(&bytes).to_vec(),
                 Some("SHA-384") => sha384_bytes(&bytes).to_vec(),
                 Some("SHA-512") => sha512_bytes(&bytes).to_vec(),
+                Some("MD5") => md5_bytes(&bytes).to_vec(),
                 _ => {
                     return Err(JsNativeError::error()
                         .with_message(format!("Unsupported hash algorithm '{}'", algo))
@@ -2456,6 +2537,876 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                     .into());
             };
             bytes_to_js_uint8_array(&mac, context)
+        }),
+    );
+
+    // Phase 2: Tenant-scoped key handle cache registration (`AES-GCM`, `AES-CBC`, `HMAC`)
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_key_register"),
+        3,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let kind = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let sub = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let Some(raw_arg) = args.get(2) else {
+                return Ok(BoaVal::from(0.0));
+            };
+            let raw = extract_buffer_source_bytes(raw_arg, context)?;
+            let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+            let material = if kind.eq_ignore_ascii_case("AES-GCM") {
+                let less_safe =
+                    make_ring_aead_key(&raw).map_err(|msg| JsNativeError::error().with_message(msg))?;
+                CachedCryptoKeyMaterial::AesGcm { less_safe, raw }
+            } else if kind.eq_ignore_ascii_case("AES-CBC") {
+                let expanded =
+                    AesExpandedKey::new(&raw).map_err(|msg| JsNativeError::error().with_message(msg))?;
+                CachedCryptoKeyMaterial::AesCbc { expanded, raw }
+            } else if kind.eq_ignore_ascii_case("HMAC") {
+                let norm_hash = normalize_webcrypto_hash_name(&sub).unwrap_or("SHA-256");
+                let ring_alg = match norm_hash {
+                    "SHA-1" => ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
+                    "SHA-384" => ring::hmac::HMAC_SHA384,
+                    "SHA-512" => ring::hmac::HMAC_SHA512,
+                    _ => ring::hmac::HMAC_SHA256,
+                };
+                let ring_key = ring::hmac::Key::new(ring_alg, &raw);
+                CachedCryptoKeyMaterial::Hmac {
+                    ring_key,
+                    hash_alg: norm_hash.to_string(),
+                    raw,
+                }
+            } else {
+                return Ok(BoaVal::from(0.0));
+            };
+            let handle_id = insert_cached_crypto_key(tenant, material);
+            Ok(BoaVal::from(handle_id as f64))
+        }),
+    );
+
+    // Phase 2: Symmetric cipher encrypt/decrypt (`AES-GCM`, `AES-CBC`) with cached handle fast-path
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_cipher"),
+        8,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let alg = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let is_encrypt = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(true);
+            let handle_id = args
+                .get(2)
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
+            let key_bytes = match args.get(3) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let iv_bytes = match args.get(4) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let aad_bytes = match args.get(5) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let tag_bits = args
+                .get(6)
+                .and_then(|v| v.as_number())
+                .map(|n| n as usize)
+                .unwrap_or(128);
+            let data_bytes = match args.get(7) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let auto_pad = args.get(8).and_then(|v| v.as_boolean()).unwrap_or(true);
+            let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+
+            if alg.eq_ignore_ascii_case("AES-GCM")
+                || alg.eq_ignore_ascii_case("aes-128-gcm")
+                || alg.eq_ignore_ascii_case("aes-256-gcm")
+            {
+                let res = if handle_id != 0 {
+                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
+                        CachedCryptoKeyMaterial::AesGcm { less_safe, .. } => {
+                            if is_encrypt {
+                                Some(aes_gcm_seal_with_key(
+                                    less_safe,
+                                    &iv_bytes,
+                                    &aad_bytes,
+                                    &data_bytes,
+                                    tag_bits,
+                                ))
+                            } else {
+                                Some(aes_gcm_open_with_key(
+                                    less_safe,
+                                    &iv_bytes,
+                                    &aad_bytes,
+                                    &data_bytes,
+                                    tag_bits,
+                                ))
+                            }
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                } else {
+                    None
+                };
+                let out = match res {
+                    Some(r) => r,
+                    None => {
+                        if is_encrypt {
+                            aes_gcm_encrypt(&key_bytes, &iv_bytes, &aad_bytes, &data_bytes, tag_bits)
+                        } else {
+                            aes_gcm_decrypt(&key_bytes, &iv_bytes, &aad_bytes, &data_bytes, tag_bits)
+                        }
+                    }
+                }
+                .map_err(|msg| {
+                    JsNativeError::error().with_message(format!("OperationError: {}", msg))
+                })?;
+                return bytes_to_js_array_buffer(&out, context);
+            }
+
+            if alg.eq_ignore_ascii_case("AES-CBC")
+                || alg.eq_ignore_ascii_case("aes-128-cbc")
+                || alg.eq_ignore_ascii_case("aes-256-cbc")
+            {
+                let res = if handle_id != 0 {
+                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
+                        CachedCryptoKeyMaterial::AesCbc { expanded, .. } => {
+                            if is_encrypt {
+                                Some(aes_cbc_encrypt_with_expanded(
+                                    expanded,
+                                    &iv_bytes,
+                                    &data_bytes,
+                                    auto_pad,
+                                ))
+                            } else {
+                                Some(aes_cbc_decrypt_with_expanded(
+                                    expanded,
+                                    &iv_bytes,
+                                    &data_bytes,
+                                    auto_pad,
+                                ))
+                            }
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                } else {
+                    None
+                };
+                let out = match res {
+                    Some(r) => r,
+                    None => {
+                        if is_encrypt {
+                            aes_cbc_encrypt(&key_bytes, &iv_bytes, &data_bytes, auto_pad)
+                        } else {
+                            aes_cbc_decrypt(&key_bytes, &iv_bytes, &data_bytes, auto_pad)
+                        }
+                    }
+                }
+                .map_err(|msg| {
+                    JsNativeError::error().with_message(format!("OperationError: {}", msg))
+                })?;
+                return bytes_to_js_array_buffer(&out, context);
+            }
+
+            Err(JsNativeError::error()
+                .with_message(format!("NotSupportedError: Unsupported cipher '{}'", alg))
+                .into())
+        }),
+    );
+
+    // Phase 2: Asymmetric key pair generation (`Ed25519`, `ECDSA` `P-256` / `P-384`)
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_asym_keygen"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let alg = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let curve = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "P-256".to_string());
+            let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+
+            if alg.eq_ignore_ascii_case("Ed25519") {
+                let mut seed = [0u8; 32];
+                BOA_DET_STATE.with(|s| {
+                    if let Some((mut prng, clk)) = s.get() {
+                        fill_random_bytes(&mut seed, Some(&mut prng));
+                        s.set(Some((prng, clk)));
+                    } else {
+                        fill_random_bytes(&mut seed, None);
+                    }
+                });
+                let (seed_bytes, pub_bytes) = ed25519_keypair_from_seed(seed)
+                    .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                let pkcs8 = ed25519_seed_to_pkcs8_v1(&seed_bytes);
+                let spki = ed25519_pub_to_spki(&pub_bytes);
+                let priv_id = insert_cached_crypto_key(
+                    tenant.clone(),
+                    CachedCryptoKeyMaterial::Ed25519Private {
+                        seed: seed_bytes,
+                        pub_bytes,
+                    },
+                );
+                let pub_id = insert_cached_crypto_key(
+                    tenant,
+                    CachedCryptoKeyMaterial::Ed25519Public { pub_bytes },
+                );
+                let res = serde_json::json!({
+                    "privId": priv_id,
+                    "pubId": pub_id,
+                    "d": base64_encode(&seed_bytes, true),
+                    "x": base64_encode(&pub_bytes, true),
+                    "pubRaw": base64_encode(&pub_bytes, false),
+                    "pkcs8": base64_encode(&pkcs8, false),
+                    "spki": base64_encode(&spki, false),
+                });
+                return Ok(BoaVal::from(js_string!(res.to_string())));
+            }
+
+            if alg.eq_ignore_ascii_case("ECDSA") || alg.eq_ignore_ascii_case("ec") {
+                let norm_curve = if curve.eq_ignore_ascii_case("P-384")
+                    || curve.eq_ignore_ascii_case("secp384r1")
+                {
+                    "P-384"
+                } else if curve.eq_ignore_ascii_case("P-256")
+                    || curve.eq_ignore_ascii_case("prime256v1")
+                {
+                    "P-256"
+                } else {
+                    return Err(JsNativeError::error()
+                        .with_message(format!(
+                            "NotSupportedError: Unsupported ECDSA namedCurve '{}'",
+                            curve
+                        ))
+                        .into());
+                };
+                let (pkcs8, d_bytes, pub_bytes) = ecdsa_generate_keypair(norm_curve)
+                    .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                let spki = ecdsa_pub_to_spki(norm_curve, &pub_bytes)
+                    .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                let coord_len = (pub_bytes.len() - 1) / 2;
+                let x_b64u = base64_encode(&pub_bytes[1..1 + coord_len], true);
+                let y_b64u = base64_encode(&pub_bytes[1 + coord_len..], true);
+                let d_b64u = base64_encode(&d_bytes, true);
+                let pub_raw_b64 = base64_encode(&pub_bytes, false);
+                let pkcs8_b64 = base64_encode(&pkcs8, false);
+                let spki_b64 = base64_encode(&spki, false);
+                let priv_id = insert_cached_crypto_key(
+                    tenant.clone(),
+                    CachedCryptoKeyMaterial::EcdsaPrivate {
+                        curve: norm_curve.to_string(),
+                        pkcs8,
+                        d_bytes,
+                        pub_bytes: pub_bytes.clone(),
+                    },
+                );
+                let pub_id = insert_cached_crypto_key(
+                    tenant,
+                    CachedCryptoKeyMaterial::EcdsaPublic {
+                        curve: norm_curve.to_string(),
+                        pub_bytes,
+                    },
+                );
+                let res = serde_json::json!({
+                    "privId": priv_id,
+                    "pubId": pub_id,
+                    "crv": norm_curve,
+                    "x": x_b64u,
+                    "y": y_b64u,
+                    "d": d_b64u,
+                    "pubRaw": pub_raw_b64,
+                    "pkcs8": pkcs8_b64,
+                    "spki": spki_b64,
+                });
+                return Ok(BoaVal::from(js_string!(res.to_string())));
+            }
+
+            Err(JsNativeError::error()
+                .with_message(format!("NotSupportedError: Unsupported keygen algorithm '{}'", alg))
+                .into())
+        }),
+    );
+
+    // Phase 2: Asymmetric key import (`raw`, `pkcs8`, `spki`, `jwk`) into `CRYPTO_KEY_HANDLE_TABLE`
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_asym_import"),
+        4,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let alg = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let curve = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "P-256".to_string());
+            let format = args
+                .get(2)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "raw".to_string());
+            let Some(data_arg) = args.get(3) else {
+                return Err(JsNativeError::typ()
+                    .with_message("importKey requires keyData")
+                    .into());
+            };
+            let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+
+            if alg.eq_ignore_ascii_case("Ed25519") {
+                if format.eq_ignore_ascii_case("jwk") {
+                    let jwk_str = data_arg.to_string(context)?.to_std_string_escaped();
+                    let jwk: serde_json::Value = serde_json::from_str(&jwk_str)
+                        .map_err(|_| JsNativeError::error().with_message("DataError: Invalid JWK JSON"))?;
+                    let x_str = jwk.get("x").and_then(|v| v.as_str()).unwrap_or("");
+                    if let Some(d_str) = jwk.get("d").and_then(|v| v.as_str()) {
+                        let d_raw = base64_decode(d_str);
+                        let seed = extract_ed25519_seed(&d_raw)
+                            .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                        let (seed_bytes, pub_bytes) = ed25519_keypair_from_seed(seed)
+                            .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                        let pkcs8 = ed25519_seed_to_pkcs8_v1(&seed_bytes);
+                        let id = insert_cached_crypto_key(
+                            tenant,
+                            CachedCryptoKeyMaterial::Ed25519Private {
+                                seed: seed_bytes,
+                                pub_bytes,
+                            },
+                        );
+                        let out = serde_json::json!({
+                            "id": id,
+                            "type": "private",
+                            "d": base64_encode(&seed_bytes, true),
+                            "x": base64_encode(&pub_bytes, true),
+                            "pkcs8": base64_encode(&pkcs8, false),
+                        });
+                        return Ok(BoaVal::from(js_string!(out.to_string())));
+                    } else {
+                        let x_raw = base64_decode(x_str);
+                        let pub_bytes = extract_ed25519_pub(&x_raw)
+                            .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                        let spki = ed25519_pub_to_spki(&pub_bytes);
+                        let id = insert_cached_crypto_key(
+                            tenant,
+                            CachedCryptoKeyMaterial::Ed25519Public { pub_bytes },
+                        );
+                        let out = serde_json::json!({
+                            "id": id,
+                            "type": "public",
+                            "x": base64_encode(&pub_bytes, true),
+                            "pubRaw": base64_encode(&pub_bytes, false),
+                            "spki": base64_encode(&spki, false),
+                        });
+                        return Ok(BoaVal::from(js_string!(out.to_string())));
+                    }
+                }
+                let raw = extract_buffer_source_bytes(data_arg, context)?;
+                if format.eq_ignore_ascii_case("pkcs8") {
+                    let seed = extract_ed25519_seed(&raw)
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                    let (seed_bytes, pub_bytes) = ed25519_keypair_from_seed(seed)
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                    let pkcs8 = ed25519_seed_to_pkcs8_v1(&seed_bytes);
+                    let id = insert_cached_crypto_key(
+                        tenant,
+                        CachedCryptoKeyMaterial::Ed25519Private {
+                            seed: seed_bytes,
+                            pub_bytes,
+                        },
+                    );
+                    let out = serde_json::json!({
+                        "id": id,
+                        "type": "private",
+                        "d": base64_encode(&seed_bytes, true),
+                        "x": base64_encode(&pub_bytes, true),
+                        "pkcs8": base64_encode(&pkcs8, false),
+                    });
+                    return Ok(BoaVal::from(js_string!(out.to_string())));
+                } else {
+                    let pub_bytes = extract_ed25519_pub(&raw)
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                    let spki = ed25519_pub_to_spki(&pub_bytes);
+                    let id = insert_cached_crypto_key(
+                        tenant,
+                        CachedCryptoKeyMaterial::Ed25519Public { pub_bytes },
+                    );
+                    let out = serde_json::json!({
+                        "id": id,
+                        "type": "public",
+                        "x": base64_encode(&pub_bytes, true),
+                        "pubRaw": base64_encode(&pub_bytes, false),
+                        "spki": base64_encode(&spki, false),
+                    });
+                    return Ok(BoaVal::from(js_string!(out.to_string())));
+                }
+            }
+
+            if alg.eq_ignore_ascii_case("ECDSA") || alg.eq_ignore_ascii_case("ec") {
+                let norm_curve = if curve.eq_ignore_ascii_case("P-384")
+                    || curve.eq_ignore_ascii_case("secp384r1")
+                {
+                    "P-384"
+                } else {
+                    "P-256"
+                };
+                if format.eq_ignore_ascii_case("jwk") {
+                    let jwk_str = data_arg.to_string(context)?.to_std_string_escaped();
+                    let jwk: serde_json::Value = serde_json::from_str(&jwk_str)
+                        .map_err(|_| JsNativeError::error().with_message("DataError: Invalid JWK JSON"))?;
+                    let x_bytes = base64_decode(jwk.get("x").and_then(|v| v.as_str()).unwrap_or(""));
+                    let y_bytes = base64_decode(jwk.get("y").and_then(|v| v.as_str()).unwrap_or(""));
+                    let mut pub_bytes = Vec::with_capacity(1 + x_bytes.len() + y_bytes.len());
+                    pub_bytes.push(0x04);
+                    pub_bytes.extend_from_slice(&x_bytes);
+                    pub_bytes.extend_from_slice(&y_bytes);
+                    if let Some(d_str) = jwk.get("d").and_then(|v| v.as_str()) {
+                        let d_bytes = base64_decode(d_str);
+                        let pkcs8 = ecdsa_components_to_pkcs8(norm_curve, &d_bytes, &pub_bytes)
+                            .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                        let id = insert_cached_crypto_key(
+                            tenant,
+                            CachedCryptoKeyMaterial::EcdsaPrivate {
+                                curve: norm_curve.to_string(),
+                                pkcs8: pkcs8.clone(),
+                                d_bytes: d_bytes.clone(),
+                                pub_bytes: pub_bytes.clone(),
+                            },
+                        );
+                        let out = serde_json::json!({
+                            "id": id,
+                            "type": "private",
+                            "crv": norm_curve,
+                            "x": base64_encode(&x_bytes, true),
+                            "y": base64_encode(&y_bytes, true),
+                            "d": base64_encode(&d_bytes, true),
+                            "pkcs8": base64_encode(&pkcs8, false),
+                        });
+                        return Ok(BoaVal::from(js_string!(out.to_string())));
+                    } else {
+                        let spki = ecdsa_pub_to_spki(norm_curve, &pub_bytes)
+                            .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                        let id = insert_cached_crypto_key(
+                            tenant,
+                            CachedCryptoKeyMaterial::EcdsaPublic {
+                                curve: norm_curve.to_string(),
+                                pub_bytes: pub_bytes.clone(),
+                            },
+                        );
+                        let out = serde_json::json!({
+                            "id": id,
+                            "type": "public",
+                            "crv": norm_curve,
+                            "x": base64_encode(&x_bytes, true),
+                            "y": base64_encode(&y_bytes, true),
+                            "pubRaw": base64_encode(&pub_bytes, false),
+                            "spki": base64_encode(&spki, false),
+                        });
+                        return Ok(BoaVal::from(js_string!(out.to_string())));
+                    }
+                }
+                let raw = extract_buffer_source_bytes(data_arg, context)?;
+                if format.eq_ignore_ascii_case("pkcs8") {
+                    let (d_bytes, pub_bytes) = extract_ecdsa_pkcs8_components(norm_curve, &raw)
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                    let coord_len = (pub_bytes.len() - 1) / 2;
+                    let x_b64u = base64_encode(&pub_bytes[1..1 + coord_len], true);
+                    let y_b64u = base64_encode(&pub_bytes[1 + coord_len..], true);
+                    let d_b64u = base64_encode(&d_bytes, true);
+                    let pkcs8_b64 = base64_encode(&raw, false);
+                    let id = insert_cached_crypto_key(
+                        tenant,
+                        CachedCryptoKeyMaterial::EcdsaPrivate {
+                            curve: norm_curve.to_string(),
+                            pkcs8: raw,
+                            d_bytes,
+                            pub_bytes,
+                        },
+                    );
+                    let out = serde_json::json!({
+                        "id": id,
+                        "type": "private",
+                        "crv": norm_curve,
+                        "x": x_b64u,
+                        "y": y_b64u,
+                        "d": d_b64u,
+                        "pkcs8": pkcs8_b64,
+                    });
+                    return Ok(BoaVal::from(js_string!(out.to_string())));
+                } else {
+                    let pub_bytes = extract_ecdsa_pub(norm_curve, &raw)
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                    let spki = ecdsa_pub_to_spki(norm_curve, &pub_bytes)
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                    let coord_len = (pub_bytes.len() - 1) / 2;
+                    let x_b64u = base64_encode(&pub_bytes[1..1 + coord_len], true);
+                    let y_b64u = base64_encode(&pub_bytes[1 + coord_len..], true);
+                    let pub_raw_b64 = base64_encode(&pub_bytes, false);
+                    let spki_b64 = base64_encode(&spki, false);
+                    let id = insert_cached_crypto_key(
+                        tenant,
+                        CachedCryptoKeyMaterial::EcdsaPublic {
+                            curve: norm_curve.to_string(),
+                            pub_bytes,
+                        },
+                    );
+                    let out = serde_json::json!({
+                        "id": id,
+                        "type": "public",
+                        "crv": norm_curve,
+                        "x": x_b64u,
+                        "y": y_b64u,
+                        "pubRaw": pub_raw_b64,
+                        "spki": spki_b64,
+                    });
+                    return Ok(BoaVal::from(js_string!(out.to_string())));
+                }
+            }
+
+            Err(JsNativeError::error()
+                .with_message(format!("NotSupportedError: Unsupported import algorithm '{}'", alg))
+                .into())
+        }),
+    );
+
+    // Phase 2: Asymmetric sign (`Ed25519`, `ECDSA` `P-256` / `P-384`)
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_asym_sign"),
+        6,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let alg = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let curve = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "P-256".to_string());
+            let handle_id = args
+                .get(2)
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
+            let key_fallback = match args.get(3) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let msg_bytes = match args.get(4) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let asn1_der = args.get(5).and_then(|v| v.as_boolean()).unwrap_or(false);
+            let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+
+            if alg.eq_ignore_ascii_case("Ed25519") {
+                let sig_res = if handle_id != 0 {
+                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
+                        CachedCryptoKeyMaterial::Ed25519Private { seed, .. } => {
+                            Some(ed25519_sign_bytes(seed, &msg_bytes).map(|s| s.to_vec()))
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                } else {
+                    None
+                };
+                let sig = match sig_res {
+                    Some(r) => r,
+                    None => extract_ed25519_seed(&key_fallback)
+                        .and_then(|seed| ed25519_sign_bytes(&seed, &msg_bytes).map(|s| s.to_vec())),
+                }
+                .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                return bytes_to_js_array_buffer(&sig, context);
+            }
+
+            if alg.eq_ignore_ascii_case("ECDSA") || alg.eq_ignore_ascii_case("ec") {
+                let sig_res = if handle_id != 0 {
+                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
+                        CachedCryptoKeyMaterial::EcdsaPrivate {
+                            curve: k_curve,
+                            pkcs8,
+                            ..
+                        } => Some(ecdsa_sign_bytes(k_curve, pkcs8, &msg_bytes, asn1_der)),
+                        _ => None,
+                    })
+                    .flatten()
+                } else {
+                    None
+                };
+                let sig = match sig_res {
+                    Some(r) => r,
+                    None => ecdsa_sign_bytes(&curve, &key_fallback, &msg_bytes, asn1_der),
+                }
+                .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                return bytes_to_js_array_buffer(&sig, context);
+            }
+
+            Err(JsNativeError::error()
+                .with_message(format!("NotSupportedError: Unsupported sign algorithm '{}'", alg))
+                .into())
+        }),
+    );
+
+    // Phase 2: Asymmetric verify (`Ed25519`, `ECDSA` `P-256` / `P-384`)
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_asym_verify"),
+        6,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let alg = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let curve = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "P-256".to_string());
+            let handle_id = args
+                .get(2)
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
+            let pub_fallback = match args.get(3) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let sig_bytes = match args.get(4) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let msg_bytes = match args.get(5) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+
+            if alg.eq_ignore_ascii_case("Ed25519") {
+                let verified = if handle_id != 0 {
+                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
+                        CachedCryptoKeyMaterial::Ed25519Public { pub_bytes }
+                        | CachedCryptoKeyMaterial::Ed25519Private { pub_bytes, .. } => {
+                            Some(ed25519_verify_bytes(pub_bytes, &msg_bytes, &sig_bytes))
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                } else {
+                    None
+                };
+                let ok = match verified {
+                    Some(v) => v,
+                    None => match extract_ed25519_pub(&pub_fallback) {
+                        Ok(pk) => ed25519_verify_bytes(&pk, &msg_bytes, &sig_bytes),
+                        Err(_) => false,
+                    },
+                };
+                return Ok(BoaVal::from(ok));
+            }
+
+            if alg.eq_ignore_ascii_case("ECDSA") || alg.eq_ignore_ascii_case("ec") {
+                let verified = if handle_id != 0 {
+                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
+                        CachedCryptoKeyMaterial::EcdsaPublic {
+                            curve: k_curve,
+                            pub_bytes,
+                        }
+                        | CachedCryptoKeyMaterial::EcdsaPrivate {
+                            curve: k_curve,
+                            pub_bytes,
+                            ..
+                        } => Some(ecdsa_verify_bytes(k_curve, pub_bytes, &msg_bytes, &sig_bytes)),
+                        _ => None,
+                    })
+                    .flatten()
+                } else {
+                    None
+                };
+                let ok = match verified {
+                    Some(v) => v,
+                    None => match extract_ecdsa_pub(&curve, &pub_fallback) {
+                        Ok(pk) => ecdsa_verify_bytes(&curve, &pk, &msg_bytes, &sig_bytes),
+                        Err(_) => false,
+                    },
+                };
+                return Ok(BoaVal::from(ok));
+            }
+
+            Ok(BoaVal::from(false))
+        }),
+    );
+
+    // Phase 2: Key Derivation Functions (`PBKDF2`, `HKDF`, `scrypt`) with proportional CPU fuel accounting
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_kdf"),
+        8,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let alg = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let hash = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "SHA-256".to_string());
+            let secret = match args.get(2) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let salt = match args.get(3) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let info = match args.get(4) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let iterations_or_n = args
+                .get(5)
+                .and_then(|v| v.as_number())
+                .map(|n| n.max(0.0) as usize)
+                .unwrap_or(1);
+            let byte_len = args
+                .get(6)
+                .and_then(|v| v.as_number())
+                .map(|n| n.max(0.0) as usize)
+                .unwrap_or(32);
+            if byte_len > 1_048_576 {
+                return Err(JsNativeError::range()
+                    .with_message("Derived key length exceeds 1MB sandbox limit")
+                    .into());
+            }
+
+            if alg.eq_ignore_ascii_case("PBKDF2") {
+                if iterations_or_n == 0 {
+                    return Err(JsNativeError::error()
+                        .with_message("OperationError: PBKDF2 iterations must be greater than 0")
+                        .into());
+                }
+                let fuel_cost = ((iterations_or_n as u64) / 100).max(10);
+                if let Err(msg) = consume_crypto_kdf_fuel(fuel_cost) {
+                    return Err(JsNativeError::range().with_message(msg).into());
+                }
+                let derived = pbkdf2_derive_bytes(
+                    &hash,
+                    &secret,
+                    &salt,
+                    iterations_or_n as u32,
+                    byte_len,
+                )
+                .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                return bytes_to_js_array_buffer(&derived, context);
+            }
+
+            if alg.eq_ignore_ascii_case("HKDF") {
+                if let Err(msg) = consume_crypto_kdf_fuel(15) {
+                    return Err(JsNativeError::range().with_message(msg).into());
+                }
+                let derived = hkdf_derive_bytes(&hash, &secret, &salt, &info, byte_len)
+                    .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                return bytes_to_js_array_buffer(&derived, context);
+            }
+
+            if alg.eq_ignore_ascii_case("SCRYPT") {
+                let r_val = args
+                    .get(7)
+                    .and_then(|v| v.as_number())
+                    .map(|n| n.max(1.0) as usize)
+                    .unwrap_or(8);
+                let p_val = args
+                    .get(8)
+                    .and_then(|v| v.as_number())
+                    .map(|n| n.max(1.0) as usize)
+                    .unwrap_or(1);
+                let maxmem = args
+                    .get(9)
+                    .and_then(|v| v.as_number())
+                    .map(|n| n.max(0.0) as usize)
+                    .unwrap_or(32 * 1024 * 1024);
+                let fuel_cost = (iterations_or_n as u64)
+                    .saturating_mul(r_val as u64)
+                    .saturating_mul(p_val as u64)
+                    / 16;
+                if let Err(msg) = consume_crypto_kdf_fuel(fuel_cost.max(50)) {
+                    return Err(JsNativeError::range().with_message(msg).into());
+                }
+                let derived = scrypt_derive_bytes(
+                    &secret,
+                    &salt,
+                    iterations_or_n,
+                    r_val,
+                    p_val,
+                    byte_len,
+                    maxmem,
+                )
+                .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                return bytes_to_js_array_buffer(&derived, context);
+            }
+
+            Err(JsNativeError::error()
+                .with_message(format!("NotSupportedError: Unsupported KDF '{}'", alg))
+                .into())
         }),
     );
 }
