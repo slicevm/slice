@@ -1,0 +1,62 @@
+name: Bug Report
+description: Report a bug, crash, or compatibility issue in Slice
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue in Slice! If this is a **security or sandbox isolation vulnerability**, please do not open a public issue — report it privately via [GitHub Security Advisories](https://github.com/slicevm/slice/security/advisories/new).
+
+  - type: input
+    id: version
+    attributes:
+      label: Slice Version
+      description: Output of `slice --version` or `slice info`
+      placeholder: "v0.10.3"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System & Architecture
+      options:
+        - Linux (x86_64)
+        - Linux (aarch64)
+        - macOS (Apple Silicon / aarch64)
+        - macOS (Intel / x86_64)
+        - Windows (x86_64)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Subsystem / Crate
+      options:
+        - slice-cli (CLI commands, config, server, MCP)
+        - slice-engine (JS/TS execution, WinterTC, node:* builtins, intrinsics, Wasm)
+        - slice-cas (Oxc bundler, TypeScript compiler, .cas archive)
+        - slice-sandbox (OCap permissions, SES lockdown, SSRF/DLP, MPK)
+        - slice-io (io_uring / kqueue / IOCP)
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal Reproduction
+      description: Provide a minimal JS/TS snippet and the exact `slice` command or `slice.toml` used.
+      render: typescript
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Actual vs. Expected Behavior
+      description: Include any error messages or stack traces.
+    validations:
+      required: true

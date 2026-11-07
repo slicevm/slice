@@ -98,7 +98,7 @@ In addition to standard WinterTC and `node:*` APIs, Slice provides deterministic
 
 ## 6. Automated Conformance Scorecard (`test_phase5_conformance_scorecard_ecmascript_wintertc_and_node`)
 
-Every workspace test run (`cargo test --workspace`) executes [`test_phase5_conformance_scorecard_ecmascript_wintertc_and_node`](file:///p:/opensource/slice/crates/slice-engine/tests/async_webcrypto_and_node_tests.rs) alongside the full `slice-engine` integration suite to continuously verify conformance across three standards axes:
+Every workspace test run (`cargo test --workspace`) executes [`test_phase5_conformance_scorecard_ecmascript_wintertc_and_node`](../../crates/slice-engine/tests/async_webcrypto_and_node_tests.rs) alongside the full `slice-engine` integration suite to continuously verify conformance across three standards axes:
 
 | Conformance Axis | Verified Surface | Automated Pass Rate |
 | :--- | :--- | :--- |

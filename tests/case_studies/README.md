@@ -1,6 +1,6 @@
 # Slice (Nexus-JS) — Production Case Studies & Interactive Workbench (`tests/case_studies/`)
 
-This directory contains **5 intensive, multi-file production Case Studies** and an **Interactive Visual Workbench & Terminal Cockpit (`workbench/`)** that showcase and benchmark Slice's core product wedges from [`PROCUCT_EVAL.md`](file:///p:/opensource/slice/PROCUCT_EVAL.md):
+This directory contains **5 intensive, multi-file production Case Studies** and an **Interactive Visual Workbench & Terminal Cockpit (`workbench/`)** that showcase and benchmark Slice's core product capabilities:
 
 1. **[`01-tot-autonomous-sre-agent`](./01-tot-autonomous-sre-agent/src/index.ts) — Depth-4 Tree-of-Thought (ToT) Autonomous SRE Remediation Agent:**
    * Evaluates **20 candidate LLM-generated patches** across a **4-level Tree-of-Thought search** over a degraded 4-service cluster (`edge-gateway`, `auth-token-broker`, `ledger-sequencer`, `risk-ml-scorer`).

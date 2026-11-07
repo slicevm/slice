@@ -11,7 +11,7 @@
 
 ## Verified Benchmark Overview (Linux `x86_64` Docker & Windows `x86_64`)
 
-Full reproducible benchmark report: **[`bench_latest.md`](file:///p:/opensource/slice/bench_latest.md)**
+Full reproducible benchmark report: **[`bench_latest.md`](./bench_latest.md)**
 
 ```text
 +---------------------------------------+-------------------+-------------------+-------------------+-------------------------+
@@ -30,7 +30,7 @@ Full reproducible benchmark report: **[`bench_latest.md`](file:///p:/opensource/
 +---------------------------------------+-------------------+-------------------+-------------------+-------------------------+
 ```
 
-### Real-World 32-Application, Framework & Case Study Suite ([`tests/`](file:///p:/opensource/slice/tests/README.md) & [`bench_latest.md`](file:///p:/opensource/slice/bench_latest.md))
+### Real-World 32-Application, Framework & Case Study Suite ([`tests/`](./tests/README.md) & [`bench_latest.md`](./bench_latest.md))
 
 Across **24 multi-file TypeScript & `node_modules` applications**, **3 production Edge & Node Framework suites (`Hono v4`, `itty-router + UnJS`, `Express/Polka node:http`)**, and **5 AI Agent / Multi-Tenant SaaS / Chaos Case Studies**, Slice produces **100% byte-for-byte identical JSON output and SHA-256/HMAC digests** as Bun, Deno, and Node.js while **beating Deno & Node.js on `31 / 31` workloads cold, beating Bun on `28 / 31` workloads cold, and beating all 3 runtimes on `31 / 31` workloads in `--warm` pooled mode**:
 
@@ -349,36 +349,36 @@ cargo test --workspace
 ## Documentation (`docs/general/`, `docs/guides/`, `docs/system/`)
 
 ### User & Developer Manual by Chapter (`docs/general/`)
-* **[Chapter 00: Master Documentation Index](file:///p:/opensource/slice/docs/general/00_index.md)**
-* **[Chapter 01: Getting Started, Unified 4-Layer Configuration & Complete CLI Reference](file:///p:/opensource/slice/docs/general/01_getting_started_and_cli.md)**
-* **[Chapter 02: Hybrid Three-Tier Execution Engine & Default `SLICEBC\x01` Precompiled CAS (`slice-engine`)](file:///p:/opensource/slice/docs/general/02_execution_engine_and_tiers.md)**
-* **[Chapter 03: Zero-Stat CAS Archive, Oxc Bundler & Standalone Binaries (`slice-cas`)](file:///p:/opensource/slice/docs/general/03_cas_bundler_and_standalone_binaries.md)**
-* **[Chapter 04: Security Architecture — OCap, SES Lockdown, Fuel Cage & Hardware MPK (`slice-sandbox`)](file:///p:/opensource/slice/docs/general/04_security_ocap_ses_and_hardware_mpk.md)**
-* **[Chapter 05: Multi-Tenant HTTP/1.1 Server, WinterTC Bridge & Sharded Edge KV (`slice serve`)](file:///p:/opensource/slice/docs/general/05_http_server_wintertc_and_edge_kv.md)**
-* **[Chapter 06: AI Agent "Code Mode" Sandbox, `< 5 us` Checkpoints & Native MCP Server (`slice mcp`)](file:///p:/opensource/slice/docs/general/06_ai_agent_sandbox_checkpoints_and_mcp.md)**
-* **[Chapter 07: Node.js Compatibility (`node:*`), Native Intrinsics & External NPM Packages](file:///p:/opensource/slice/docs/general/07_node_compat_intrinsics_and_npm.md)**
-* **[Chapter 08: Kernel Completion Rings (`slice-io`) & Embedding Slice in Rust](file:///p:/opensource/slice/docs/general/08_kernel_io_rings_and_rust_embedding.md)**
-* **[Chapter 09: Benchmarks, Time-Travel Testing & 31-Workload Docker Verification Suite](file:///p:/opensource/slice/docs/general/09_benchmarks_testing_and_docker_suite.md)**
-* **[Runtime Compatibility Matrix (`docs/general/COMPATIBILITY.md`)](file:///p:/opensource/slice/docs/general/COMPATIBILITY.md)**
+* **[Chapter 00: Master Documentation Index](./docs/general/00_index.md)**
+* **[Chapter 01: Getting Started, Unified 4-Layer Configuration & Complete CLI Reference](./docs/general/01_getting_started_and_cli.md)**
+* **[Chapter 02: Hybrid Three-Tier Execution Engine & Default `SLICEBC\x01` Precompiled CAS (`slice-engine`)](./docs/general/02_execution_engine_and_tiers.md)**
+* **[Chapter 03: Zero-Stat CAS Archive, Oxc Bundler & Standalone Binaries (`slice-cas`)](./docs/general/03_cas_bundler_and_standalone_binaries.md)**
+* **[Chapter 04: Security Architecture — OCap, SES Lockdown, Fuel Cage & Hardware MPK (`slice-sandbox`)](./docs/general/04_security_ocap_ses_and_hardware_mpk.md)**
+* **[Chapter 05: Multi-Tenant HTTP/1.1 Server, WinterTC Bridge & Sharded Edge KV (`slice serve`)](./docs/general/05_http_server_wintertc_and_edge_kv.md)**
+* **[Chapter 06: AI Agent "Code Mode" Sandbox, `< 5 us` Checkpoints & Native MCP Server (`slice mcp`)](./docs/general/06_ai_agent_sandbox_checkpoints_and_mcp.md)**
+* **[Chapter 07: Node.js Compatibility (`node:*`), Native Intrinsics & External NPM Packages](./docs/general/07_node_compat_intrinsics_and_npm.md)**
+* **[Chapter 08: Kernel Completion Rings (`slice-io`) & Embedding Slice in Rust](./docs/general/08_kernel_io_rings_and_rust_embedding.md)**
+* **[Chapter 09: Benchmarks, Time-Travel Testing & 31-Workload Docker Verification Suite](./docs/general/09_benchmarks_testing_and_docker_suite.md)**
+* **[Runtime Compatibility Matrix (`docs/general/COMPATIBILITY.md`)](./docs/general/COMPATIBILITY.md)**
 
 ### Developer How-To Guides (`docs/guides/`)
-* **[Developer Guides & Recipes Index (`docs/guides/README.md`)](file:///p:/opensource/slice/docs/guides/README.md)**
-* **[Guide 01: Building & Deploying Hono (`v4`) and UnJS Edge Microservices (`docs/guides/01_hono_and_unjs_edge_microservices.md`)](file:///p:/opensource/slice/docs/guides/01_hono_and_unjs_edge_microservices.md)**
-* **[Guide 02: TypeScript IDE Setup (`slice.d.ts`), Linting (`oxlint` / `Biome`), & `.wasm` Modules (`docs/guides/02_typescript_ide_linting_and_wasm.md`)](file:///p:/opensource/slice/docs/guides/02_typescript_ide_linting_and_wasm.md)**
+* **[Developer Guides & Recipes Index (`docs/guides/README.md`)](./docs/guides/README.md)**
+* **[Guide 01: Building & Deploying Hono (`v4`) and UnJS Edge Microservices (`docs/guides/01_hono_and_unjs_edge_microservices.md`)](./docs/guides/01_hono_and_unjs_edge_microservices.md)**
+* **[Guide 02: TypeScript IDE Setup (`slice.d.ts`), Linting (`oxlint` / `Biome`), & `.wasm` Modules (`docs/guides/02_typescript_ide_linting_and_wasm.md`)](./docs/guides/02_typescript_ide_linting_and_wasm.md)**
 
 ### System Engineering Specifications (`docs/system/`, `vendor/`, & `tests/`)
-* **[00: System Architecture & Internal Specification Index (`docs/system/00_index.md`)](file:///p:/opensource/slice/docs/system/00_index.md)**
-* **[01: `slice-cas` — Zero-Stat CAS, Oxc Compiler & AST Tree-Shaker (`docs/system/01_cas_bundler_and_oxc_compiler.md`)](file:///p:/opensource/slice/docs/system/01_cas_bundler_and_oxc_compiler.md)**
-* **[02: `slice-engine` — Hybrid Three-Tier Execution Pipeline, `SLICEBC\x01` & `WarmBoaRealm` (`docs/system/02_tiered_execution_and_boa_vm.md`)](file:///p:/opensource/slice/docs/system/02_tiered_execution_and_boa_vm.md)**
-* **[03: `slice-sandbox` — 5-Ring Zero-Trust OCap, Dynamic SES & Hardware MPK (`docs/system/03_security_sandbox_ocap_and_mpk.md`)](file:///p:/opensource/slice/docs/system/03_security_sandbox_ocap_and_mpk.md)**
-* **[04: Networking, WinterTC Web Platform & Async Event Loop (`docs/system/04_networking_wintertc_and_event_loop.md`)](file:///p:/opensource/slice/docs/system/04_networking_wintertc_and_event_loop.md)**
-* **[05: Pure-Rust WebAssembly, Web Workers & Direct Kernel I/O (`docs/system/05_wasm_workers_and_kernel_io.md`)](file:///p:/opensource/slice/docs/system/05_wasm_workers_and_kernel_io.md)**
-* **[06: Serverless Edge KV, AI Agent "Code Mode" & MCP Server (`docs/system/06_edge_kv_ai_sandbox_and_mcp.md`)](file:///p:/opensource/slice/docs/system/06_edge_kv_ai_sandbox_and_mcp.md)**
-* **[07: Production Tooling & Deployment Guide (`docs/system/07_production_tooling_guide.md`)](file:///p:/opensource/slice/docs/system/07_production_tooling_guide.md)**
-* **[08: Empirical Benchmarks & 31-Workload Comparisons (`docs/system/08_benchmarks_and_comparisons.md`)](file:///p:/opensource/slice/docs/system/08_benchmarks_and_comparisons.md)**
-* **[09: Cutting-Edge 2026 Research Deep Dive (`docs/system/09_research_deep_dive.md`)](file:///p:/opensource/slice/docs/system/09_research_deep_dive.md)**
-* **[Vendored `boa_engine` `SLICEBC\x01` Patch Specification (`vendor/boa_engine/SLICE_PATCH.md`)](file:///p:/opensource/slice/vendor/boa_engine/SLICE_PATCH.md)**
-* **[Latest Full 31-Application Benchmark Report (`bench_latest.md`)](file:///p:/opensource/slice/bench_latest.md)**
-* **[Docker 31-Workload Production Benchmarks (`tests/README.md`)](file:///p:/opensource/slice/tests/README.md)**
-* **[Framework Integration Benchmarks (`tests/frameworks/README.md`)](file:///p:/opensource/slice/tests/frameworks/README.md)**
-* **[Interactive Production Case Studies & Visual Cockpit (`tests/case_studies/README.md`)](file:///p:/opensource/slice/tests/case_studies/README.md)**
+* **[00: System Architecture & Internal Specification Index (`docs/system/00_index.md`)](./docs/system/00_index.md)**
+* **[01: `slice-cas` — Zero-Stat CAS, Oxc Compiler & AST Tree-Shaker (`docs/system/01_cas_bundler_and_oxc_compiler.md`)](./docs/system/01_cas_bundler_and_oxc_compiler.md)**
+* **[02: `slice-engine` — Hybrid Three-Tier Execution Pipeline, `SLICEBC\x01` & `WarmBoaRealm` (`docs/system/02_tiered_execution_and_boa_vm.md`)](./docs/system/02_tiered_execution_and_boa_vm.md)**
+* **[03: `slice-sandbox` — 5-Ring Zero-Trust OCap, Dynamic SES & Hardware MPK (`docs/system/03_security_sandbox_ocap_and_mpk.md`)](./docs/system/03_security_sandbox_ocap_and_mpk.md)**
+* **[04: Networking, WinterTC Web Platform & Async Event Loop (`docs/system/04_networking_wintertc_and_event_loop.md`)](./docs/system/04_networking_wintertc_and_event_loop.md)**
+* **[05: Pure-Rust WebAssembly, Web Workers & Direct Kernel I/O (`docs/system/05_wasm_workers_and_kernel_io.md`)](./docs/system/05_wasm_workers_and_kernel_io.md)**
+* **[06: Serverless Edge KV, AI Agent "Code Mode" & MCP Server (`docs/system/06_edge_kv_ai_sandbox_and_mcp.md`)](./docs/system/06_edge_kv_ai_sandbox_and_mcp.md)**
+* **[07: Production Tooling & Deployment Guide (`docs/system/07_production_tooling_guide.md`)](./docs/system/07_production_tooling_guide.md)**
+* **[08: Empirical Benchmarks & 31-Workload Comparisons (`docs/system/08_benchmarks_and_comparisons.md`)](./docs/system/08_benchmarks_and_comparisons.md)**
+* **[09: Cutting-Edge 2026 Research Deep Dive (`docs/system/09_research_deep_dive.md`)](./docs/system/09_research_deep_dive.md)**
+* **[Vendored `boa_engine` `SLICEBC\x01` Patch Specification (`vendor/boa_engine/SLICE_PATCH.md`)](./vendor/boa_engine/SLICE_PATCH.md)**
+* **[Latest Full 31-Application Benchmark Report (`bench_latest.md`)](./bench_latest.md)**
+* **[Docker 31-Workload Production Benchmarks (`tests/README.md`)](./tests/README.md)**
+* **[Framework Integration Benchmarks (`tests/frameworks/README.md`)](./tests/frameworks/README.md)**
+* **[Interactive Production Case Studies & Visual Cockpit (`tests/case_studies/README.md`)](./tests/case_studies/README.md)**

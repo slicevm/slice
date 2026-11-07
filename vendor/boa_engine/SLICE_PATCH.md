@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-Upstream `boa_engine v0.22.0` compiles JavaScript through four phases inside [`src/script.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/script.rs):
+Upstream `boa_engine v0.22.0` compiles JavaScript through four phases inside [`src/script.rs`](./src/script.rs):
 1. `boa_lexer` + `boa_parser` (`Script::parse`)
 2. `boa_ast::Script::analyze_scope`
 3. `ByteCompiler::compile_statement_list` (`Script::codeblock`)
@@ -11,7 +11,7 @@ Upstream `boa_engine v0.22.0` compiles JavaScript through four phases inside [`s
 While `pub struct CodeBlock` is public in `boa_engine::vm`, its 16 internal fields (`flags`, `length`, ` parameter_length`, `register_count`, `strict`, `this_mode`, `params`, `bytecode`, `constants`, `bindings`, `handler_table`, `source_info`, `ic`, `global_lexs`, `global_fns`, `global_vars`) are `pub(crate)`.
 Critically, by the time `ByteCompiler` finishes constructing a `CodeBlock`, **100% of `boa_interner::Sym` symbol IDs have already been resolved into `JsString` (Latin1 or UTF-16) values** inside `Constant::String(JsString)`, `BindingLocator`, and `InlineCache`.
 
-This minimal `[patch.crates-io]` overlay exposes two public methods on `boa_engine::Script` in [`src/script.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/script.rs) (~250 lines added at the bottom of the file, zero changes to VM execution or GC semantics):
+This minimal `[patch.crates-io]` overlay exposes two public methods on `boa_engine::Script` in [`src/script.rs`](./src/script.rs) (~250 lines added at the bottom of the file, zero changes to VM execution or GC semantics):
 - `pub fn compile_to_slicebc(&self, context: &mut Context) -> JsResult<Vec<u8>>`
 - `pub fn from_slicebc_bytes(bytes: &[u8], context: &mut Context) -> Option<Self>`
 
@@ -22,15 +22,15 @@ By serializing the compiled `Gc<CodeBlock>` tree and global `Scope` bindings int
 ## 2. Modified Files
 
 Five files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
-- [`vendor/boa_engine/src/script.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/script.rs):
+- [`vendor/boa_engine/src/script.rs`](./src/script.rs):
   - `Script::compile_to_slicebc(&self, context: &mut Context) -> JsResult<Vec<u8>>`
   - `Script::from_slicebc_bytes(bytes: &[u8], context: &mut Context) -> Option<Self>`
   - Internal recursive helpers `encode_codeblock` / `decode_codeblock` (including bytecode-to-line `SourceMap` entries) and `write_js_string` / `read_js_string`.
-- [`vendor/boa_engine/src/builtins/json/mod.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/builtins/json/mod.rs):
+- [`vendor/boa_engine/src/builtins/json/mod.rs`](./src/builtins/json/mod.rs):
   - `Json::try_fast_parse_json_str` (`JsonSeed` streaming `serde::de::DeserializeSeed`): Direct zero-intermediate-tree `serde_json::Deserializer::from_str -> JsValue` materialization fast-path in `JSON.parse` when no `reviver` callback is supplied, preserving exact ECMAScript source key insertion order while avoiding `boa_parser` + `ByteCompiler` + VM execution on every JSON payload.
-- [`vendor/boa_engine/src/vm/inline_cache/mod.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/vm/inline_cache/mod.rs):
+- [`vendor/boa_engine/src/vm/inline_cache/mod.rs`](./src/vm/inline_cache/mod.rs):
   - `InlineCache::mono_shape_addr`, `InlineCache::mono_slot`, and `InlineCache::get_fast(&self, shape: &Shape) -> Option<(Option<Shape>, Slot)>`: Zero-borrow monomorphic fast-path for own-property `Shape -> Slot` hits without locking `GcRefCell` or upgrading `WeakGc` pointers, with automatic polymorphic (`PIC_CAPACITY = 4`) and megamorphic fallback.
-- [`vendor/boa_engine/src/vm/opcode/get/property.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/vm/opcode/get/property.rs) & [`vendor/boa_engine/src/vm/opcode/set/property.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/vm/opcode/set/property.rs):
+- [`vendor/boa_engine/src/vm/opcode/get/property.rs`](./src/vm/opcode/get/property.rs) & [`vendor/boa_engine/src/vm/opcode/set/property.rs`](./src/vm/opcode/set/property.rs):
   - Wired `get_by_name` and `set_by_name` to call `ic.get_fast(object_borrowed.shape())`.
 
 ---
@@ -73,7 +73,7 @@ Five files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
 ## 4. Upgrade Checklist When Bumping `boa_engine`
 
 1. Extract the new upstream `boa_engine` crate into `vendor/boa_engine`.
-2. Copy the `impl Script { pub fn compile_to_slicebc ... pub fn from_slicebc_bytes ... }` block at the bottom of [`vendor/boa_engine/src/script.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/script.rs) into the new `script.rs`.
+2. Copy the `impl Script { pub fn compile_to_slicebc ... pub fn from_slicebc_bytes ... }` block at the bottom of [`vendor/boa_engine/src/script.rs`](./src/script.rs) into the new `script.rs`.
 3. If `CodeBlock` or `Constant` added or reordered fields in the new `boa_engine` release, update `encode_codeblock` / `decode_codeblock` and bump `b"SLCB\x01"` to `b"SLCB\x02"`.
 4. Run `cargo test --workspace` to verify all `boacas` roundtrip and edge-case tests pass.
 

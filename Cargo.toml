@@ -13,8 +13,8 @@ version = "0.10.3"
 edition = "2021"
 authors = ["Slice Runtime Team"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/siktec-lab/slice"
-homepage = "https://github.com/siktec-lab/slice"
+repository = "https://github.com/slicevm/slice"
+homepage = "https://github.com/slicevm/slice"
 description = "Next-generation microVM-grade JavaScript/TypeScript edge runtime engineered in Rust"
 
 [workspace.dependencies]

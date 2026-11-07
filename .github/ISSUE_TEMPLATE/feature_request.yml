@@ -1,0 +1,35 @@
+name: Feature / API Compatibility Request
+description: Propose a new runtime capability, WinterTC API, or Node.js (`node:*`) compatibility addition
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: Area
+      options:
+        - WinterTC / Web Standard API
+        - Node.js (node:*) Module / API Compatibility
+        - AI Agent Sandbox / Checkpoints / MCP
+        - CAS Bundler / TypeScript / Package Resolution
+        - Security / OCap / Sandbox Policy
+        - Performance / Native Rust Intrinsics
+        - CLI / Developer Experience
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary & Use Case
+      description: What API, feature, or npm package are you trying to run or enable?
+    validations:
+      required: true
+
+  - type: textarea
+    id: example
+    attributes:
+      label: Example Code / API Signature
+      render: typescript
+    validations:
+      required: false

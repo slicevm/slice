@@ -14,10 +14,10 @@ Slice is organized into four clean library crates:
 
 | Crate | Purpose for Rust Developers |
 | :--- | :--- |
-| **[`slice-engine`](file:///p:/opensource/slice/crates/slice-engine/Cargo.toml)** | `SliceIsolate`, `compile_source_to_bytecode`, `HttpRequestContext`, `SandboxEvalOptions`, `ExecutionMetrics` |
-| **[`slice-sandbox`](file:///p:/opensource/slice/crates/slice-sandbox/Cargo.toml)** | `CapabilityToken`, `SliceManifest`, `SandboxViolation`, `HardwareProtectionDomain`, `parse_dotenv_content` |
-| **[`slice-cas`](file:///p:/opensource/slice/crates/slice-cas/Cargo.toml)** | `CasBuilder`, `MappedCasArchive`, `bundle_entrypoint_with_deps`, `strip_typescript_and_normalize` |
-| **[`slice-io`](file:///p:/opensource/slice/crates/slice-io/Cargo.toml)** | `CompletionRingEngine` (`io_uring` / Windows `IOCP`), `RegisteredBufferPool`, `IoSubmission` |
+| **[`slice-engine`](../../crates/slice-engine/Cargo.toml)** | `SliceIsolate`, `compile_source_to_bytecode`, `HttpRequestContext`, `SandboxEvalOptions`, `ExecutionMetrics` |
+| **[`slice-sandbox`](../../crates/slice-sandbox/Cargo.toml)** | `CapabilityToken`, `SliceManifest`, `SandboxViolation`, `HardwareProtectionDomain`, `parse_dotenv_content` |
+| **[`slice-cas`](../../crates/slice-cas/Cargo.toml)** | `CasBuilder`, `MappedCasArchive`, `bundle_entrypoint_with_deps`, `strip_typescript_and_normalize` |
+| **[`slice-io`](../../crates/slice-io/Cargo.toml)** | `CompletionRingEngine` (`io_uring` / Windows `IOCP`), `RegisteredBufferPool`, `IoSubmission` |
 
 Add the crates you need to your `Cargo.toml`:
 ```toml

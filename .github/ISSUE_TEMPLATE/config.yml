@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability Report
+    url: https://github.com/slicevm/slice/security/advisories/new
+    about: Report sandbox escapes, OCap bypasses, or security vulnerabilities privately.
+  - name: Documentation & Compatibility Matrix
+    url: https://github.com/slicevm/slice/blob/main/docs/general/00_index.md
+    about: Read the Slice User & System Architecture Documentation before opening an issue.

@@ -51,5 +51,5 @@ const exports = instance.exports as {
     memory: WebAssembly.Memory;
 };
 ```
-See [`tests/apps/23-wasm-crypto-and-simd-kernel`](file:///p:/opensource/slice/tests/apps/23-wasm-crypto-and-simd-kernel/src/index.ts) and [`tests/apps/24-tsx-ssr-and-wasm-edge-pipeline`](file:///p:/opensource/slice/tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/src/index.ts) for working examples.
+See [`tests/apps/23-wasm-crypto-and-simd-kernel`](../../tests/apps/23-wasm-crypto-and-simd-kernel/src/index.ts) and [`tests/apps/24-tsx-ssr-and-wasm-edge-pipeline`](../../tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/src/index.ts) for working examples.
 

@@ -1,7 +1,7 @@
 # Slice (Nexus-JS) — Latest Full 31-Application & MicroVM Benchmark Snapshot (`bench_latest.md`)
 
 **Date**: 2026-11-07 (Post-Phases 1–5 Roadmap Completion: 5-Ring Security & Entrypoint Lockdown, WinterTC/ECMA-402/WebCrypto Expansion, 31 `node:*` Modules, Monomorphic IC `get_fast` & Streaming `JsonSeed` `JSON.parse`, Source-Mapped Stacks & Chrome Trace Export)  
-**Environment**: Linux `x86_64` Docker (`debian:bookworm-slim` / [`tests/Dockerfile`](file:///p:/opensource/slice/tests/Dockerfile)) & Windows `x86_64` Native (`NT IOCP`)  
+**Environment**: Linux `x86_64` Docker (`debian:bookworm-slim` / [`tests/Dockerfile`](./tests/Dockerfile)) & Windows `x86_64` Native (`NT IOCP`)  
 **Runtimes Compared**:
 - **Slice (Nexus-JS)**: `Standalone Binary` (`SLICEEXE` + `SLICEBC\x01`), `CAS Archive` (`SLICECAS` + `SLICEBC\x01`), `Folder Source + Oxc` (`slice run`), and `Pre-Warmed Realm Pool` (`--warm`)
 - **Bun**: Latest release (`v1.4.4`, `JavaScriptCore`)

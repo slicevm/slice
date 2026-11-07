@@ -338,7 +338,7 @@ In Slice, native performance extensions are written as **WebAssembly (`.wasm`)**
 - Every WASM instruction and `memory.grow()` call is metered against the tenant's deterministic CPU fuel and memory budget (`< 15 us` warm instantiation via `GLOBAL_WASM_MODULE_CACHE`).
 
 ### 2.3 Verified Production NPM Packages & Edge Frameworks in Slice's 31-Workload Suite
-All 25 production applications in [`tests/apps/`](file:///p:/opensource/slice/tests/README.md), 2 full-stack framework suites in [`tests/frameworks/`](file:///p:/opensource/slice/tests/frameworks/README.md), and 4 architectural differentiation case studies in [`tests/case_studies/`](file:///p:/opensource/slice/tests/case_studies/README.md) bundle and execute unmodified third-party `node_modules` libraries and verify **100% byte-for-byte identical output** against Node.js, Deno, and Bun:
+All 25 production applications in [`tests/apps/`](../../tests/README.md), 2 full-stack framework suites in [`tests/frameworks/`](../../tests/frameworks/README.md), and 4 architectural differentiation case studies in [`tests/case_studies/`](../../tests/case_studies/README.md) bundle and execute unmodified third-party `node_modules` libraries and verify **100% byte-for-byte identical output** against Node.js, Deno, and Bun:
 
 | NPM Package / Framework | Common Use Case | General-Purpose Slice Compiler / Runtime Mechanism Applied |
 | :--- | :--- | :--- |
@@ -360,7 +360,7 @@ All 25 production applications in [`tests/apps/`](file:///p:/opensource/slice/te
 | **`dlv`** (`@1.1.3`) & **`dset`** (`@3.1.3`) | Deep nested object property lookup and mutation | Direct CommonJS/ESM bundling |
 | **`mitt`** (`@3.0.1`) | Event emitter & CQRS pub/sub bus | Direct CommonJS/ESM bundling |
 
-> For the complete API matrix of supported WinterTC globals, `Buffer` methods, and `node:*` modules, see [`docs/general/COMPATIBILITY.md`](file:///p:/opensource/slice/docs/general/COMPATIBILITY.md).
+> For the complete API matrix of supported WinterTC globals, `Buffer` methods, and `node:*` modules, see [`docs/general/COMPATIBILITY.md`](./COMPATIBILITY.md).
 
 ---
 

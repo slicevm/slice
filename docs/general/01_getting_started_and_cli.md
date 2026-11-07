@@ -14,11 +14,11 @@ Slice is engineered in 100% pure Rust with **zero external C/C++ compiler depend
 
 ### 1.2 One-Step Installer Scripts (Recommended)
 
-The repository includes automated installer scripts in [`scripts/install.ps1`](file:///p:/opensource/slice/scripts/install.ps1) and [`scripts/install.sh`](file:///p:/opensource/slice/scripts/install.sh) that build the optimized release binary (`lto = "fat"`, `opt-level = 3`), copy it to `~/.slice/bin`, and verify your installation.
+The repository includes automated installer scripts in [`scripts/install.ps1`](../../scripts/install.ps1) and [`scripts/install.sh`](../../scripts/install.sh) that build the optimized release binary (`lto = "fat"`, `opt-level = 3`), copy it to `~/.slice/bin`, and verify your installation.
 
 **Windows (PowerShell):**
 ```powershell
-git clone https://github.com/siktec-lab/slice.git
+git clone https://github.com/slicevm/slice.git
 cd slice
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
@@ -29,7 +29,7 @@ Add `$HOME\.slice\bin` to your user `PATH` if it is not already present:
 
 **Linux & macOS (Bash / Zsh):**
 ```bash
-git clone https://github.com/siktec-lab/slice.git
+git clone https://github.com/slicevm/slice.git
 cd slice
 ./scripts/install.sh
 export PATH="$HOME/.slice/bin:$PATH"
@@ -47,7 +47,7 @@ The compiled binary is produced at:
 
 ### 1.4 Running Slice in Docker
 
-Slice includes a production multi-stage [`Dockerfile`](file:///p:/opensource/slice/Dockerfile) at the repository root:
+Slice includes a production multi-stage [`Dockerfile`](../../Dockerfile) at the repository root:
 ```bash
 docker build -t slice-runtime .
 docker run --rm slice-runtime info

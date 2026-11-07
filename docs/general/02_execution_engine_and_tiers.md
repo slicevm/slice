@@ -160,10 +160,10 @@ console.log(serializeReceipt("ORD-501", "tenant-eu", 19900));
 
 Beyond explicit `: number` loop annotations, Slice includes two general-purpose ahead-of-time compiler optimizations that accelerate standard JavaScript and TypeScript functions without requiring any special annotations:
 
-1. **Unboxed 64-Bit Numeric Register VM ([`numeric_vm.rs`](file:///p:/opensource/slice/crates/slice-engine/src/numeric_vm.rs)):**
+1. **Unboxed 64-Bit Numeric Register VM ([`numeric_vm.rs`](../../crates/slice-engine/src/vm/numeric_vm.rs)):**
    - Any pure numeric JS/TS function (`function fn(a, b) { ... }`) using arithmetic (`+`, `-`, `*`, `/`, `%`, `**`), bitwise operators (`|`, `&`, `^`, `<<`, `>>`, `>>>`), `while`/`for` loops, `if`/`else` branches, `Math.*` intrinsics (`Math.abs`, `Math.min`, `Math.max`, `Math.floor`, `Math.ceil`, `Math.round`, `Math.trunc`, `Math.sqrt`, `Math.imul`), or recursive calls is automatically compiled into unboxed 64-bit register instructions (`NumericOp`) on a 32-register stack file (`[f64; 32]`).
    - 2-term linear recurrences (`return f(n - 1) + f(n - 2)`) are automatically recognized and lowered to $O(n)$ register accumulation while charging deterministic CPU fuel per step.
-2. **Oxc AST Array Pipeline Fusion ([`fuse_array_pipelines_ast`](file:///p:/opensource/slice/crates/slice-cas/src/lib.rs#L231-L575)):**
+2. **Oxc AST Array Pipeline Fusion ([`fuse_array_pipelines_ast`](../../crates/slice-cas/src/lib.rs#L231-L575)):**
    - During `slice pack` and `slice compile`, Slice's Oxc AST pass detects chained functional array pipelines (such as `arr.filter(...).map(...).reduce(...)`, `arr.map(...).reduce(...)`, `arr.some(...)`, and `arr.every(...)`) on any arbitrary receiver expression and fuses them into a single-pass, zero-allocation `for` loop IIFE — eliminating intermediate array allocations on hot paths.
 
 ---

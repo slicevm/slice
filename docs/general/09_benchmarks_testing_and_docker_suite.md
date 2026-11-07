@@ -134,7 +134,7 @@ When deterministic mode is active:
 
 ## 4. Running the 31-Application Docker Benchmark Suite (`tests/`)
 
-Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`](file:///p:/opensource/slice/tests/README.md)) that tests **31 realistic multi-file TypeScript + `node_modules` applications, full-stack edge frameworks, and architectural case studies** against the latest official releases of **Bun (`v1.3.10`)**, **Deno (`v2.7.5`)**, and **Node.js (`v25.8.1`)**, verifying **100% byte-for-byte identical JSON output** across all 4 runtimes.
+Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`](../../tests/README.md)) that tests **31 realistic multi-file TypeScript + `node_modules` applications, full-stack edge frameworks, and architectural case studies** against the latest official releases of **Bun (`v1.3.10`)**, **Deno (`v2.7.5`)**, and **Node.js (`v25.8.1`)**, verifying **100% byte-for-byte identical JSON output** across all 4 runtimes.
 
 ```bash
 # Build the Linux Docker benchmark container
@@ -149,7 +149,7 @@ docker run --rm -e SLICE_BENCH_TAGS=apps,frameworks,cases,serve,swarm slice-real
 
 ### 4.1 Verified Results Across All 32 Production Applications, Frameworks & Case Studies (`SLICEBC\x01` Default, Linux `x86_64` Docker)
 
-With **`SLICEBC\x01` Precompiled Boa `CodeBlock` CAS**, Monomorphic Inline Caching (`get_fast`), and streaming `JsonSeed` `JSON.parse` enabled by default, Slice beats **Deno (`v2.9.8`)** and **Node.js (`v27.0.0-alpha`)** on **31 out of 31** workloads, beats **Bun (`v1.4.4`)** on **28 out of 31** workloads in cold one-shot execution, and beats **all 3 runtimes on 31 out of 31 workloads in `--warm` pooled execution** (full table in [`bench_latest.md`](file:///p:/opensource/slice/bench_latest.md)):
+With **`SLICEBC\x01` Precompiled Boa `CodeBlock` CAS**, Monomorphic Inline Caching (`get_fast`), and streaming `JsonSeed` `JSON.parse` enabled by default, Slice beats **Deno (`v2.9.8`)** and **Node.js (`v27.0.0-alpha`)** on **31 out of 31** workloads, beats **Bun (`v1.4.4`)** on **28 out of 31** workloads in cold one-shot execution, and beats **all 3 runtimes on 31 out of 31 workloads in `--warm` pooled execution** (full table in [`bench_latest.md`](../../bench_latest.md)):
 
 | Production Application / Framework / Case Study | Slice Cold `.cas` / Bin | Slice Warm (`--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v27.0.0-alpha` | Speedup vs Bun / Node |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |

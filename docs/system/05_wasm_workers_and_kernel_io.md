@@ -6,7 +6,7 @@ This document covers Slice's Pure-Rust WebAssembly engine (`wasm.rs` via `wasmi`
 
 ## 1. Pure-Rust WebAssembly Engine (`wasmi` `v2.0.0`), `GLOBAL_WASM_MODULE_CACHE` & 5-Ring WASM Cage
 
-Implemented in [`crates/slice-engine/src/wasm.rs`](file:///p:/opensource/slice/crates/slice-engine/src/wasm.rs) and [`crates/slice-engine/src/preludes/09_wasm.js`](file:///p:/opensource/slice/crates/slice-engine/src/preludes/09_wasm.js):
+Implemented in [`crates/slice-engine/src/wasm.rs`](../../crates/slice-engine/src/runtime/wasm.rs) and [`crates/slice-engine/src/preludes/09_wasm.js`](../../crates/slice-engine/src/preludes/09_wasm.js):
 
 1. **Zero Overhead When Unused (`Shard 9`):**
    - `globalThis.WebAssembly` is registered as a self-replacing lazy getter (`__defLazy(["WebAssembly"], 9)` in `00_ultra_core.js`) and gated in `detect_needed_shards` so non-WASM workloads pay `0.00 ns` and `0 B`.
@@ -25,10 +25,10 @@ Implemented in [`crates/slice-engine/src/wasm.rs`](file:///p:/opensource/slice/c
 
 ## 2. Capability-Attenuated MicroVM Web Workers & `node:worker_threads` (`workers.rs`)
 
-Implemented in [`crates/slice-engine/src/workers.rs`](file:///p:/opensource/slice/crates/slice-engine/src/workers.rs) and [`crates/slice-engine/src/preludes/08_workers_sockets.js`](file:///p:/opensource/slice/crates/slice-engine/src/preludes/08_workers_sockets.js):
+Implemented in [`crates/slice-engine/src/workers.rs`](../../crates/slice-engine/src/runtime/workers.rs) and [`crates/slice-engine/src/preludes/08_workers_sockets.js`](../../crates/slice-engine/src/preludes/08_workers_sockets.js):
 
 - **Standards-Compliant Surface:** Supports both WhatWG `new Worker(urlOrInlineSource, options)` (`postMessage`, `onmessage`, `terminate`), `MessageChannel`, `MessagePort`, `BroadcastChannel`, and Node.js `node:worker_threads` (`Worker`, `isMainThread`, `parentPort`, `workerData`, `threadId`).
-- **Strict Parent-Child OCap Intersection ([`build_attenuated_worker_caps`](file:///p:/opensource/slice/crates/slice-engine/src/workers.rs)):**
+- **Strict Parent-Child OCap Intersection ([`build_attenuated_worker_caps`](../../crates/slice-engine/src/runtime/workers.rs)):**
   - A child worker's `CapabilityToken` is strictly intersected with its parent isolate's capabilities (`parent_caps ∩ child_requested_caps`). A worker can never escalate filesystem, network, or environment privileges beyond its parent compartment, and worker CPU fuel and memory budgets are capped by the parent's remaining limits.
 - **Persistent Warm Worker Pool (`IDLE_WORKER_POOL`) & `WORKER_SCRIPT_CACHE`:**
   - Rather than spawning a fresh OS thread and initializing a cold `Boa` realm (`~15 ms`) per `new Worker()`, Slice maintains a warm `IDLE_WORKER_POOL` with speculative pre-warming (`speculative_prewarm_worker_pool`) and caches transpiled worker scripts by `BLAKE3` fingerprint in `WORKER_SCRIPT_CACHE` (`__SLICE_RC`), driving warm multi-worker execution (`App 22`) down to **`2.00 ms`** (`28.08 ms` cold vs Bun's `44.24 ms`).
@@ -37,11 +37,11 @@ Implemented in [`crates/slice-engine/src/workers.rs`](file:///p:/opensource/slic
 
 ## 3. Direct Kernel Completion Rings (`crates/slice-io`) & OS-Native File Watcher
 
-### 3.1 [`crates/slice-io`](file:///p:/opensource/slice/crates/slice-io/src/lib.rs): `io_uring`, `IOCP`, & `RegisteredBufferPool` 64 KB Fetch Slabs
+### 3.1 [`crates/slice-io`](../../crates/slice-io/src/lib.rs): `io_uring`, `IOCP`, & `RegisteredBufferPool` 64 KB Fetch Slabs
 - **Registered Slab Buffers (`RegisteredBufferPool`):** Pre-allocates 64 page-aligned fixed `64 KB` buffers (`FIXED_BUFFER_COUNT = 64`, `FIXED_BUFFER_SIZE = 65536`) with O(1) slot acquisition (`acquire_slot` / `buffer_mut`) and release (`release`). Integrated directly into `outbound_http::send_and_read_framed_http11` (`SHARED_FETCH_SLAB_POOL` + `FetchSlabSlotGuard`) and `event_loop::FetchReactorPool` (`MAX_FETCH_REACTOR_WORKERS = 16`) for zero-leak concurrent `fetch()` staging.
 - **Linux `io_uring` (`CompletionRingEngine`):** Attempts kernel ring setup with `IORING_SETUP_SQPOLL` (`IoUring::builder().setup_sqpoll(1000)`), enabling autonomous kernel thread submission polling with **0 system calls** on the hot path, and automatically falls back to standard `io_uring` or user-space completion rings inside unprivileged Docker seccomp profiles.
 - **Windows NT `IOCP`:** Binds directly to `CreateIoCompletionPort`, `PostQueuedCompletionStatus`, and `GetQueuedCompletionStatus` via `kernel32.dll` FFI, processing `10,000` completions in `0.02 ms - 5.26 ms`.
 
-### 3.2 OS-Native Kernel Event File Watcher ([`OsNativeFileWatcher`](file:///p:/opensource/slice/crates/slice-cli/src/config_and_watch.rs))
+### 3.2 OS-Native Kernel Event File Watcher ([`OsNativeFileWatcher`](../../crates/slice-cli/src/config_and_watch.rs))
 - Uses the cross-platform `notify` (`v8.2`) crate (`inotify` on Linux, `ReadDirectoryChangesW` on Windows, `FSEvents`/`kqueue` on macOS) with a `15 ms` debounce window and automatic fingerprint fallback (`collect_watch_fingerprint`) to power zero-idle-CPU live reload (`4.92 ms` rebuild+rerun) across `slice run --watch`, `slice test --watch` / `--watch-once`, and `slice serve --watch`.
 
