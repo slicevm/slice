@@ -1,6 +1,6 @@
-# The Slice (Nexus-JS) Developer Handbook (`v0.10.1`)
+# The Slice (Nexus-JS) Developer Handbook (`v0.10.2`)
 
-Welcome to the complete developer handbook for **Slice (Nexus-JS)** (`v0.10.1`) — a microVM-grade JavaScript and TypeScript runtime, compiler, HTTP server, and AI sandbox engineered in Rust.
+Welcome to the complete developer handbook for **Slice (Nexus-JS)** (`v0.10.2`) — a microVM-grade JavaScript and TypeScript runtime, compiler, HTTP server, and AI sandbox engineered in Rust.
 
 Whether you are building a high-throughput full-stack web service, packaging a CLI tool into a single zero-dependency executable, running 1,000 untrusted customer plugins on a single machine, or executing LLM-generated TypeScript inside an AI coding agent, this handbook walks you through every feature, CLI command, API, security capability, and migration pattern from the perspective of an application developer.
 
