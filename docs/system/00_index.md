@@ -1,4 +1,4 @@
-# Slice (Nexus-JS): System Architecture & Internal Specification Index (`v0.10.0`)
+# Slice (Nexus-JS): System Architecture & Internal Specification Index (`v0.10.1`)
 
 Welcome to the **Slice (Nexus-JS)** System Architecture and Internal Specification (`docs/system/`). Engineered in pure Rust (`edition = 2021`, `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`), Slice replaces the legacy POSIX + monolithic V8/JSC assumptions of Node.js, Deno, and Bun with four orthogonal, tightly integrated Rust crates:
 
@@ -21,7 +21,7 @@ Welcome to the **Slice (Nexus-JS)** System Architecture and Internal Specificati
 | **[`05_wasm_workers_and_kernel_io.md`](file:///p:/opensource/slice/docs/system/05_wasm_workers_and_kernel_io.md)** | Pure-Rust WebAssembly (`wasmi` `v2.0.0`, `GLOBAL_WASM_MODULE_CACHE`, 5-Ring WASM Cage), Capability-Attenuated MicroVM Web Workers & `node:worker_threads` (`IDLE_WORKER_POOL`), Direct Kernel Completion Rings (`io_uring` & `IOCP`), & OS-Native `notify` File Watcher | `crates/slice-engine/src/{wasm,workers}.rs`, `crates/slice-io/src/lib.rs`, `crates/slice-cli/src/config_and_watch.rs` |
 | **[`06_edge_kv_ai_sandbox_and_mcp.md`](file:///p:/opensource/slice/docs/system/06_edge_kv_ai_sandbox_and_mcp.md)** | 16-Way Sharded `Slice.kv` (`EDGE_KV_SLAB`), Multi-Tenant `--tenant-dir` Atomic Hot-Swap, SplitMix64 `--deterministic` Replay, AI Agent "Code Mode" (`Slice.evalSandbox`, `< 5 us` `Slice.checkpoint`/`restore`), Time-Travel `slice test`, & Built-In MCP Server (`slice mcp`) | `crates/slice-engine/src/state_and_kv.rs`, `crates/slice-cli/src/{test_runner,mcp_and_repl}.rs` |
 | **[`07_production_tooling_guide.md`](file:///p:/opensource/slice/docs/system/07_production_tooling_guide.md)** | Production CLI Reference, Unified 4-Layer Configuration System (`slice.toml`, Inline `// @slice-...`, `SLICE_*` Env Vars, CLI Flags), Docker & Kubernetes Deployment Patterns, and Multi-Tenant Operations | `crates/slice-cli/src/{main,config_and_watch}.rs`, `crates/slice-sandbox/src/lib.rs` |
-| **[`08_benchmarks_and_comparisons.md`](file:///p:/opensource/slice/docs/system/08_benchmarks_and_comparisons.md)** | Complete 4-Runtime Empirical Benchmark Suite (Slice `v0.10.0` vs Node.js `v25.8.1`, Deno `v2.7.5`, and Bun `v1.3.10`) Across All 31 Applications, Framework Suites & Case Studies | `benches/`, `tests/apps/`, `tests/frameworks/`, `tests/case_studies/` |
+| **[`08_benchmarks_and_comparisons.md`](file:///p:/opensource/slice/docs/system/08_benchmarks_and_comparisons.md)** | Complete 4-Runtime Empirical Benchmark Suite (Slice `v0.10.1` vs Node.js `v25.8.1`, Deno `v2.7.5`, and Bun `v1.3.10`) Across All 31 Applications, Framework Suites & Case Studies | `benches/`, `tests/apps/`, `tests/frameworks/`, `tests/case_studies/` |
 | **[`09_research_deep_dive.md`](file:///p:/opensource/slice/docs/system/09_research_deep_dive.md)** | Foundational Systems Research Paper: Breaking the JS/TS Cold-Start, Memory Density, and Multi-Tenant Security Wall | Architectural Research Blueprint |
 | **[`vendor/boa_engine/SLICE_PATCH.md`](file:///p:/opensource/slice/vendor/boa_engine/SLICE_PATCH.md)** | `SLICEBC1` Precompiled `CodeBlock` Binary Serializer/Deserializer & Deferred Function Span Architecture | `vendor/boa_engine/src/{slice_precompile.rs,lib.rs,vm/opcode/call/mod.rs}` |
 
@@ -31,7 +31,7 @@ Welcome to the **Slice (Nexus-JS)** System Architecture and Internal Specificati
 
 ```
 +---------------------------------------------------------------------------------------------------+
-|                                   Slice (Nexus-JS) v0.10.0 Host                                    |
+|                                   Slice (Nexus-JS) v0.10.1 Host                                    |
 |                                                                                                   |
 |  +---------------------------------------------------------------------------------------------+  |
 |  |                    slice-sandbox: Zero-Trust OCap, SES & Hardware Boundary                  |  |
