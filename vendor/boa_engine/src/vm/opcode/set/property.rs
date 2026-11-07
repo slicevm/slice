@@ -25,12 +25,16 @@ fn set_by_name(
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
 
     let object_borrowed = object.borrow();
-    if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
+    if let Some((shape_opt, slot)) = ic.get_fast(object_borrowed.shape()) {
         let slot_index = slot.index as usize;
 
         if slot.attributes.is_accessor_descriptor() {
             let result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-                let prototype = shape.prototype().expect("prototype should have value");
+                let prototype = shape_opt
+                    .as_ref()
+                    .and_then(crate::object::shape::Shape::prototype)
+                    .or_else(|| object_borrowed.shape().prototype())
+                    .expect("prototype should have value");
                 let prototype = prototype.borrow();
 
                 prototype.properties().storage[slot_index + 1].clone()
@@ -47,7 +51,11 @@ fn set_by_name(
                 )?;
             }
         } else if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            let prototype = shape.prototype().expect("prototype should have value");
+            let prototype = shape_opt
+                .as_ref()
+                .and_then(crate::object::shape::Shape::prototype)
+                .or_else(|| object_borrowed.shape().prototype())
+                .expect("prototype should have value");
             let mut prototype = prototype.borrow_mut();
 
             prototype.properties_mut().storage[slot_index] = value.clone();

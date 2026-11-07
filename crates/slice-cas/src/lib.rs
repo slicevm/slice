@@ -15,7 +15,8 @@ pub use oxc_compiler::{
     strip_typescript_raw, strip_typescript_raw_with_ext, TypeDirectedHints,
 };
 pub use resolver::{
-    bundle_entrypoint_with_deps, map_bundled_error_location, resolve_project_entrypoint,
+    bundle_entrypoint_with_deps, map_bundled_error_location, map_bundled_stack_trace,
+    resolve_project_entrypoint,
 };
 pub use static_assets::{
     detect_static_mime_type, StaticAssetEntry, StaticAssetPayload, StaticAssetTable,

@@ -1182,6 +1182,14 @@ pub(crate) fn compact_js_for_boa_bytecode(js: &str) -> String {
             continue;
         }
         let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("// #slice-source: ") {
+            if rest.bytes().filter(|&b| b == b'|').count() >= 2 {
+                out.push_str("//@sm:");
+                out.push_str(rest);
+                out.push('\n');
+            }
+            continue;
+        }
         if trimmed.is_empty() || trimmed.starts_with("//") {
             continue;
         }

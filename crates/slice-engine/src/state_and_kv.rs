@@ -15,19 +15,28 @@ pub(crate) struct StateCheckpoint {
 }
 
 pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
+    let trace_on = crate::boa_realm::is_trace_recording_enabled();
+    let t0 = if trace_on {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
     let vfs_files = BOA_VFS_CACHE.with(|c| c.borrow().clone());
     let vfs_dirs = BOA_VFS_DIRS.with(|d| d.borrow().clone());
     let mut tenant_kv: [Option<KvTenantMap>; 16] = std::array::from_fn(|_| None);
+    let mut kv_keys_count = 0usize;
     if let Some(shards) = EDGE_KV_SLAB.get() {
         for (idx, shard) in shards.iter().enumerate() {
             let guard = shard.read();
             if let Some(t_map) = guard.get(tenant_id) {
                 if !t_map.is_empty() {
+                    kv_keys_count += t_map.len();
                     tenant_kv[idx] = Some(t_map.clone());
                 }
             }
         }
     }
+    let vfs_files_count = vfs_files.len();
     let id = NEXT_CHECKPOINT_ID.with(|n| {
         let cur = n.get();
         n.set(cur + 1);
@@ -43,14 +52,35 @@ pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
             },
         );
     });
+    if let Some(start) = t0 {
+        crate::boa_realm::record_trace_event(
+            "state.checkpoint",
+            "slice.timetravel",
+            id * 10,
+            start.elapsed().as_nanos() as u64,
+            serde_json::json!({
+                "tenant_id": tenant_id,
+                "checkpoint_id": id,
+                "vfs_files": vfs_files_count,
+                "kv_keys": kv_keys_count
+            }),
+        );
+    }
     id
 }
 
 pub(crate) fn restore_tenant_state(tenant_id: &str, checkpoint_id: u64) -> bool {
+    let trace_on = crate::boa_realm::is_trace_recording_enabled();
+    let t0 = if trace_on {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
     let snap_opt = CHECKPOINT_SLAB.with(|slab| slab.borrow().get(&checkpoint_id).cloned());
     let Some(snap) = snap_opt else {
         return false;
     };
+    let vfs_files_count = snap.vfs_files.len();
     BOA_VFS_CACHE.with(|c| *c.borrow_mut() = snap.vfs_files);
     BOA_VFS_DIRS.with(|d| *d.borrow_mut() = snap.vfs_dirs);
     let shards = EDGE_KV_SLAB
@@ -62,6 +92,19 @@ pub(crate) fn restore_tenant_state(tenant_id: &str, checkpoint_id: u64) -> bool 
         } else {
             guard.remove(tenant_id);
         }
+    }
+    if let Some(start) = t0 {
+        crate::boa_realm::record_trace_event(
+            "state.restore",
+            "slice.timetravel",
+            checkpoint_id * 10 + 5,
+            start.elapsed().as_nanos() as u64,
+            serde_json::json!({
+                "tenant_id": tenant_id,
+                "checkpoint_id": checkpoint_id,
+                "vfs_files_restored": vfs_files_count
+            }),
+        );
     }
     true
 }

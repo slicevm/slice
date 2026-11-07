@@ -298,7 +298,7 @@ impl SliceIsolate {
         }
 
         let bc = crate::parser_and_compiler::compile_source_for_sandbox_eval(code);
-        match child_iso.execute_bytecode(&bc, None) {
+        let outcome = match child_iso.execute_bytecode(&bc, None) {
             Ok(metrics) => {
                 let _ = self.compartment.consume_fuel(metrics.fuel_consumed.max(1));
                 SandboxEvalOutcome {
@@ -325,7 +325,80 @@ impl SliceIsolate {
                     violation: Some(violation.to_string()),
                 }
             }
+        };
+        if crate::boa_realm::is_trace_recording_enabled() {
+            crate::boa_realm::record_trace_event(
+                "sandbox.eval",
+                "slice.ocap",
+                100,
+                start.elapsed().as_nanos() as u64,
+                serde_json::json!({
+                    "parent_tenant": self.compartment.tenant_id,
+                    "ok": outcome.ok,
+                    "fuel_used": outcome.fuel_used,
+                    "memory_used_bytes": outcome.memory_used_bytes,
+                    "violation": outcome.violation
+                }),
+            );
         }
+        outcome
+    }
+
+    /// Enables or disables Chrome DevTools / Perfetto execution trace recording (`--trace=<out.json>`)
+    /// on the current worker thread. When disabled (`false`, default), tracing incurs `0.00 ns` overhead.
+    pub fn enable_tracing(&mut self, enabled: bool) {
+        crate::boa_realm::BOA_TRACE_ENABLED.with(|c| c.set(enabled));
+        if enabled {
+            crate::boa_realm::BOA_TRACE_EVENTS.with(|ev| ev.borrow_mut().clear());
+        }
+    }
+
+    /// Exports the execution timeline and recorded time-travel / OCap spans as a Chrome DevTools
+    /// / Perfetto `traceEvents` JSON document (`chrome://tracing` / `ui.perfetto.dev`).
+    pub fn export_chrome_trace_json(&self, metrics: &ExecutionMetrics) -> String {
+        use crate::boa_realm::ChromeTraceEvent;
+        let mut events = Vec::with_capacity(8);
+        events.push(ChromeTraceEvent {
+            name: "isolate.instantiate".to_string(),
+            cat: "slice.lifecycle".to_string(),
+            ph: "X".to_string(),
+            ts: 0,
+            dur: metrics.instantiate_time_ns.max(1),
+            pid: 1,
+            tid: 1,
+            args: serde_json::json!({
+                "tenant_id": metrics.tenant_id,
+                "pkey_domain": metrics.pkey_domain,
+                "os_stat_syscalls": metrics.os_stat_syscalls,
+            }),
+        });
+        events.push(ChromeTraceEvent {
+            name: "isolate.execute".to_string(),
+            cat: "slice.vm".to_string(),
+            ph: "X".to_string(),
+            ts: metrics.instantiate_time_ns,
+            dur: metrics.execution_time_ns.max(1),
+            pid: 1,
+            tid: 1,
+            args: serde_json::json!({
+                "tenant_id": metrics.tenant_id,
+                "tier": format!("{:?}", metrics.highest_tier_reached),
+                "fuel_consumed": metrics.fuel_consumed,
+                "memory_used_bytes": metrics.memory_used_bytes,
+                "cas_modules_resolved": metrics.cas_modules_resolved,
+                "return_value": metrics.return_value,
+            }),
+        });
+        crate::boa_realm::BOA_TRACE_EVENTS.with(|recorded| {
+            for ev in recorded.borrow().iter() {
+                events.push(ev.clone());
+            }
+        });
+        let doc = serde_json::json!({
+            "displayTimeUnit": "ns",
+            "traceEvents": events,
+        });
+        serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Enables or disables opt-in deterministic replay mode (`--deterministic=<seed>`).
@@ -1827,6 +1900,7 @@ impl SliceIsolate {
     /// reusing pre-warmed contexts from `BOA_CONTEXT_POOL`, capturing `console.log` / `print` output
     /// via zero-eval native host hooks, and enforcing SES compartment limits.
     fn exec_boa_full_es_vm(&mut self, js_code: &str) -> Result<JsValue, SandboxViolation> {
+        let _active_src_guard = crate::boa_realm::ActiveSourceSliceGuard::new(js_code);
         BOA_STDOUT.with(|out| out.borrow_mut().clear());
         BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
         BOA_ACTIVE_TENANT.with(|t| {
@@ -2200,6 +2274,7 @@ impl SliceIsolate {
             BOACAS_FLAG_HAS_SEMVER_FAST, BOACAS_FLAG_HAS_WORKER, BOACAS_FLAG_NEEDS_SES_CHECK,
         };
 
+        let _active_src_guard = crate::boa_realm::ActiveSourceSliceGuard::new(fallback_js);
         BOA_STDOUT.with(|out| out.borrow_mut().clear());
         BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
         BOA_ACTIVE_TENANT.with(|t| {

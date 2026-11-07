@@ -48,6 +48,7 @@ pub mod workers;
 #[path = "../tests/mod.rs"]
 mod tests;
 
+pub use boa_realm::ChromeTraceEvent;
 pub use boacas::{
     active_tier_override, compute_boacas_metadata, is_exper_boacas_build_enabled,
     is_exper_boacas_runtime_enabled, pack_boacas_container, set_exper_boacas_override,

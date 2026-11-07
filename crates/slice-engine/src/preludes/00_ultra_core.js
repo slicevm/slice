@@ -459,5 +459,24 @@
       return String.fromCharCode(parseInt(u4 || x2, 16));
     });
   };
+  var __errStackDesc = Object.getOwnPropertyDescriptor(Error.prototype, "stack");
+  if (__errStackDesc && __errStackDesc.get) {
+    var __origStackGet = __errStackDesc.get;
+    Object.defineProperty(Error.prototype, "stack", {
+      get: function() {
+        var raw = __origStackGet.call(this);
+        var str = raw ? String(raw) : "";
+        var mapped = typeof __slice_map_error_stack === "function" ? __slice_map_error_stack(str) : str;
+        var name = (this && this.name) ? String(this.name) : "Error";
+        var msg = (this && this.message) ? String(this.message) : "";
+        var hdr = msg ? (name + ": " + msg) : name;
+        if (mapped.indexOf(hdr) === 0) return mapped;
+        return mapped ? (hdr + "\n" + mapped) : hdr;
+      },
+      set: __errStackDesc.set,
+      configurable: true,
+      enumerable: false
+    });
+  }
 })();
 

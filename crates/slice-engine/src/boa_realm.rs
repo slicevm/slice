@@ -79,6 +79,95 @@ thread_local! {
         const { std::cell::Cell::new(false) };
     pub(crate) static BOA_ALS_SNAP: std::cell::RefCell<boa_engine::JsValue> =
         const { std::cell::RefCell::new(boa_engine::JsValue::undefined()) };
+    pub(crate) static BOA_ACTIVE_SOURCE_PTR_LEN: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
+    pub(crate) static BOA_TRACE_ENABLED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    pub(crate) static BOA_TRACE_EVENTS: std::cell::RefCell<Vec<ChromeTraceEvent>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Chrome DevTools / Perfetto Trace Event (`ph: "X"` complete duration event).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChromeTraceEvent {
+    pub name: String,
+    pub cat: String,
+    pub ph: String,
+    pub ts: u64,
+    pub dur: u64,
+    pub pid: u32,
+    pub tid: u32,
+    pub args: serde_json::Value,
+}
+
+#[inline]
+pub(crate) fn is_trace_recording_enabled() -> bool {
+    BOA_TRACE_ENABLED.with(|c| c.get())
+}
+
+pub(crate) fn record_trace_event(
+    name: impl Into<String>,
+    cat: impl Into<String>,
+    ts: u64,
+    dur: u64,
+    args: serde_json::Value,
+) {
+    BOA_TRACE_EVENTS.with(|ev| {
+        ev.borrow_mut().push(ChromeTraceEvent {
+            name: name.into(),
+            cat: cat.into(),
+            ph: "X".to_string(),
+            ts,
+            dur: dur.max(1),
+            pid: 1,
+            tid: 1,
+            args,
+        });
+    });
+}
+
+/// Zero-allocation RAII guard that binds the currently executing JS bundle slice `(ptr, len)`
+/// to `BOA_ACTIVE_SOURCE_PTR_LEN` so lazy `Error.prototype.stack` accesses can translate frames
+/// without copying or allocating the source string on the hot execution path.
+pub(crate) struct ActiveSourceSliceGuard<'a> {
+    prev: (usize, usize),
+    _marker: std::marker::PhantomData<&'a str>,
+}
+
+impl<'a> ActiveSourceSliceGuard<'a> {
+    #[inline]
+    pub(crate) fn new(src: &'a str) -> Self {
+        let prev = BOA_ACTIVE_SOURCE_PTR_LEN.with(|c| {
+            let p = c.get();
+            c.set((src.as_ptr() as usize, src.len()));
+            p
+        });
+        Self {
+            prev,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<'a> Drop for ActiveSourceSliceGuard<'a> {
+    #[inline]
+    fn drop(&mut self) {
+        BOA_ACTIVE_SOURCE_PTR_LEN.with(|c| c.set(self.prev));
+    }
+}
+
+pub(crate) fn map_stack_with_active_source(raw_stack: &str) -> String {
+    let (ptr, len) = BOA_ACTIVE_SOURCE_PTR_LEN.with(|c| c.get());
+    if ptr == 0 || len == 0 {
+        return raw_stack.to_string();
+    }
+    // SAFETY: `ActiveSourceSliceGuard` guarantees `(ptr, len)` points to a valid live `&str`
+    // on the current thread's call stack and restores `prev` before the `&str` lifetime ends.
+    let active_src = unsafe {
+        let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
+        std::str::from_utf8_unchecked(bytes)
+    };
+    slice_cas::map_bundled_stack_trace(active_src, raw_stack)
 }
 
 pub(crate) struct SliceJobExecutor {

@@ -2179,6 +2179,377 @@ run();
     assert_eq!(slabs_avail, 64);
 }
 
+#[test]
+fn test_phase5_inline_property_cache_monomorphic_and_polymorphic_deopt() {
+    let js_src = r#"
+        function readHotProperty(obj) {
+            return obj.x + obj.y;
+        }
+
+        // 1. Monomorphic hot loop (single hidden class / shape)
+        let monoSum = 0;
+        const monoObj = { x: 3, y: 7 };
+        for (let i = 0; i < 2000; i++) {
+            monoObj.x = (i & 7);
+            monoSum += readHotProperty(monoObj);
+        }
+
+        // 2. Polymorphic transition (up to 4 distinct shapes)
+        const shapes4 = [
+            { x: 1, y: 2 },
+            { a: 0, x: 10, y: 20 },
+            { a: 0, b: 0, x: 100, y: 200 },
+            { a: 0, b: 0, c: 0, x: 1000, y: 2000 },
+        ];
+        let polySum = 0;
+        for (let i = 0; i < 400; i++) {
+            polySum += readHotProperty(shapes4[i & 3]);
+        }
+
+        // 3. Megamorphic deopt (> 4 distinct shapes + getter/prototype transition)
+        const protoCarrier = Object.create({
+            get x() { return this._px; },
+            y: 5
+        });
+        protoCarrier._px = 45;
+        const shapesMega = [
+            ...shapes4,
+            { d: 1, x: 4, y: 6 },
+            { e: 2, f: 3, x: 8, y: 12 },
+            protoCarrier,
+        ];
+        let megaSum = 0;
+        for (let i = 0; i < shapesMega.length; i++) {
+            megaSum += readHotProperty(shapesMega[i]);
+        }
+
+        // 4. Direct Rust JSON.parse fast-path (no reviver) + reviver fallback
+        const parsedFast = JSON.parse('{"items":[1,2,3,{"nested":true,"score":42.5}],"label":"ok"}');
+        const parsedRevived = JSON.parse('{"a":10,"b":20}', (k, v) => typeof v === "number" ? v * 2 : v);
+
+        console.log(JSON.stringify({
+            monoSum,
+            polySum,
+            megaSum,
+            fastScore: parsedFast.items[3].score,
+            fastLabel: parsedFast.label,
+            revivedSum: parsedRevived.a + parsedRevived.b,
+        }));
+    "#;
+
+    let bc = compile_source_to_bytecode(js_src);
+    let mut iso = SliceIsolate::spawn(
+        "phase5-ic-json",
+        1,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        16 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let res: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(res["monoSum"], 21000);
+    assert_eq!(res["polySum"], 333300);
+    assert_eq!(res["megaSum"], 3333 + 10 + 20 + 50);
+    assert_eq!(res["fastScore"], 42.5);
+    assert_eq!(res["fastLabel"], "ok");
+    assert_eq!(res["revivedSum"], 60);
+}
+
+#[test]
+fn test_phase5_superinstructions_boacas_roundtrip_and_fuel_interrupt() {
+    crate::set_thread_exper_boacas_override(Some(true));
+    let js_src = r#"
+        class KernelConfig {
+            constructor(step, bias) {
+                this.step = step;
+                this.bias = bias;
+            }
+        }
+        function computeHotKernel(n) {
+            let acc = 0;
+            const state = new KernelConfig(2, 1);
+            for (let i = 0; i < n; i++) {
+                acc = acc + (i * state.step) - state.bias;
+            }
+            return acc;
+        }
+        console.log(String(computeHotKernel(500)));
+    "#;
+    let bc = compile_source_to_bytecode(js_src);
+    assert_eq!(&bc[0..8], crate::BOACAS_MAGIC);
+
+    // 1. Cold bare-realm execution of SLICEBC\x01 precompiled CodeBlock
+    crate::boa_realm::BOA_CONTEXT_POOL.with(|pool| pool.borrow_mut().clear());
+    let mut iso_cold = SliceIsolate::spawn(
+        "phase5-boacas-cold",
+        1,
+        CapabilityToken::pure_compute(),
+        500_000,
+        16 * 1024 * 1024,
+    );
+    let m_cold = iso_cold.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(m_cold.stdout, vec!["249000"]);
+
+    // 2. Fallback SLICEBOA execution must yield identical result
+    crate::set_thread_exper_boacas_override(Some(false));
+    let mut iso_fb = SliceIsolate::spawn(
+        "phase5-boacas-fb",
+        1,
+        CapabilityToken::pure_compute(),
+        500_000,
+        16 * 1024 * 1024,
+    );
+    let m_fb = iso_fb.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(m_fb.stdout, vec!["249000"]);
+
+    // 3. Tight CPU fuel budget must still interrupt infinite/long loops inside SLICEBC\x01
+    crate::set_thread_exper_boacas_override(Some(true));
+    crate::set_thread_tier_override(Some(1));
+    let inf_src = r#"
+        class LoopState { constructor() { this.counter = 0; } }
+        const st = new LoopState();
+        for (let i = 0; i < 1000000; i++) {
+            st.counter += 1;
+        }
+    "#;
+    let inf_bc = compile_source_to_bytecode(inf_src);
+    assert_eq!(&inf_bc[0..8], crate::BOACAS_MAGIC);
+    crate::boa_realm::BOA_CONTEXT_POOL.with(|pool| pool.borrow_mut().clear());
+    let mut iso_fuel = SliceIsolate::spawn(
+        "phase5-boacas-fuel",
+        1,
+        CapabilityToken::pure_compute(),
+        500,
+        8 * 1024 * 1024,
+    );
+    let err = iso_fuel
+        .execute_bytecode(&inf_bc, None)
+        .expect_err("Expected CpuFuelExhausted on infinite loop inside SLICEBC\\x01");
+    assert!(
+        matches!(err, SandboxViolation::CpuFuelExhausted { .. }),
+        "Expected CpuFuelExhausted, got {:?}",
+        err
+    );
+    crate::set_thread_tier_override(None);
+    crate::set_thread_exper_boacas_override(None);
+}
+
+#[test]
+fn test_phase5_multi_frame_sourcemap_error_stack() {
+    let temp_dir = std::env::temp_dir().join("slice_phase5_sourcemap_stack_test");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let math_ts = temp_dir.join("math.ts");
+    let service_ts = temp_dir.join("service.ts");
+    let index_ts = temp_dir.join("index.ts");
+
+    std::fs::write(
+        &math_ts,
+        "// line 1\nexport interface OpConfig {\n    scale: number;\n}\nexport function innerExplode(val: number): number {\n    if (val < 0) {\n        throw new RangeError(\"negative-val:\" + val);\n    }\n    return val * 2;\n}\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        &service_ts,
+        "import { innerExplode } from \"./math.ts\";\nexport function middleStep(x: number): number {\n    const shifted: number = x - 100;\n    return innerExplode(shifted);\n}\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        &index_ts,
+        "import { middleStep } from \"./service.ts\";\nexport function outerRunner(input: number): number {\n    return middleStep(input);\n}\ntry {\n    outerRunner(42);\n} catch (err: any) {\n    console.log(String(err.stack));\n}\n",
+    )
+    .unwrap();
+
+    let bundled = slice_cas::bundle_entrypoint_with_deps(&index_ts).unwrap();
+    let bc = compile_source_to_bytecode(&bundled);
+
+    // Remove the temporary TypeScript source files from disk BEFORE running the isolate
+    // to prove that `// #slice-source:` embedded line maps work in standalone `.cas` / `SLICEBC\x01` deployments!
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    crate::boa_realm::BOA_CONTEXT_POOL.with(|pool| pool.borrow_mut().clear());
+    let mut iso = SliceIsolate::spawn(
+        "phase5-sourcemap-stack",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let joined_stack = m.stdout.join("\n");
+
+    assert!(
+        joined_stack.contains("RangeError: negative-val:-58"),
+        "Expected stack header in {:?}",
+        joined_stack
+    );
+    assert!(
+        joined_stack.contains("innerExplode") && joined_stack.contains("math.ts:7:"),
+        "Expected innerExplode mapped to math.ts:7 in:\n{}",
+        joined_stack
+    );
+    assert!(
+        joined_stack.contains("middleStep") && joined_stack.contains("service.ts:4:"),
+        "Expected middleStep mapped to service.ts:4 in:\n{}",
+        joined_stack
+    );
+    assert!(
+        joined_stack.contains("outerRunner") && joined_stack.contains("index.ts:3:"),
+        "Expected outerRunner mapped to index.ts:3 in:\n{}",
+        joined_stack
+    );
+}
+
+#[test]
+fn test_phase5_chrome_devtools_trace_export() {
+    let js_src = r#"
+        const fs = require("node:fs");
+        fs.writeFileSync("/tmp/trace-state.txt", "v1");
+        Slice.kv.set("counter", "100");
+        const snap = Slice.checkpoint();
+        fs.writeFileSync("/tmp/trace-state.txt", "v2");
+        Slice.kv.set("counter", "200");
+        Slice.restore(snap);
+        const child = Slice.evalSandbox("console.log('child-ok'); 7 * 6;", { fuel: 50000 });
+        console.log(fs.readFileSync("/tmp/trace-state.txt", "utf8") + ":" + Slice.kv.get("counter") + ":" + child.ok);
+    "#;
+    let bc = compile_source_to_bytecode(js_src);
+    let caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/tmp")
+        .with_write_prefix("/tmp");
+    let mut iso = SliceIsolate::spawn("phase5-trace-tenant", 1, caps, 5_000_000, 16 * 1024 * 1024);
+    iso.enable_tracing(true);
+    let metrics = iso.execute_bytecode(&bc, None).unwrap();
+    let trace_json = iso.export_chrome_trace_json(&metrics);
+    iso.enable_tracing(false);
+
+    assert_eq!(metrics.stdout, vec!["v1:100:true"]);
+
+    let parsed: serde_json::Value = serde_json::from_str(&trace_json).unwrap();
+    assert_eq!(parsed["displayTimeUnit"], "ns");
+    let events = parsed["traceEvents"]
+        .as_array()
+        .expect("Expected traceEvents array");
+    let names: Vec<&str> = events
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .collect();
+    assert!(names.contains(&"isolate.instantiate"));
+    assert!(names.contains(&"isolate.execute"));
+    assert!(names.contains(&"state.checkpoint"));
+    assert!(names.contains(&"state.restore"));
+    assert!(names.contains(&"sandbox.eval"));
+    for ev in events {
+        assert_eq!(ev["ph"], "X");
+        assert!(ev["dur"].as_u64().unwrap_or(0) >= 1);
+    }
+}
+
+#[test]
+fn test_phase5_conformance_scorecard_ecmascript_wintertc_and_node() {
+    let scorecard_js = r#"
+        const results = {};
+
+        // 1. ECMAScript ES2024+ Core Features
+        results.es_object_group_by = typeof Object.groupBy === "function"
+            && Object.groupBy([1, 2, 3, 4], (x) => x % 2 === 0 ? "even" : "odd").even.length === 2;
+        const pwr = Promise.withResolvers();
+        pwr.resolve("resolved-ok");
+        results.es_promise_with_resolvers = typeof Promise.withResolvers === "function";
+        results.es_array_copying = [3, 1, 2].toSorted().join(",") === "1,2,3"
+            && [1, 2, 3].toReversed().join(",") === "3,2,1"
+            && [1, 2, 3].with(1, 9).join(",") === "1,9,3";
+        const setA = new Set([1, 2, 3]);
+        const setB = new Set([2, 3, 4]);
+        results.es_set_methods = setA.intersection(setB).size === 2 && setA.union(setB).size === 4;
+        results.es_intl = new Intl.NumberFormat("en-US").format(1234567) === "1,234,567"
+            && typeof Intl.DateTimeFormat === "function"
+            && typeof Intl.Segmenter === "function";
+
+        // 2. WinterTC Minimum Common Web Platform API Surface
+        const u = new URL("https://edge.slice.dev/v1/users?active=1");
+        const pat = new URLPattern({ pathname: "/v1/:resource" });
+        results.wintertc_url_and_pattern = u.searchParams.get("active") === "1"
+            && pat.exec("https://edge.slice.dev/v1/users").pathname.groups.resource === "users";
+        const te = new TextEncoder();
+        const td = new TextDecoder();
+        results.wintertc_encoding = td.decode(te.encode("slice-wintertc")) === "slice-wintertc";
+        results.wintertc_atob_btoa = atob(btoa("binary-ok")) === "binary-ok";
+        results.wintertc_crypto_sync = crypto.randomUUID().length === 36
+            && crypto.getRandomValues(new Uint8Array(8)).byteLength === 8
+            && typeof crypto.subtle.digest === "function";
+        results.wintertc_fetch_primitives = typeof Headers === "function"
+            && typeof Request === "function"
+            && typeof Response === "function"
+            && typeof FormData === "function"
+            && typeof Blob === "function"
+            && typeof File === "function";
+        results.wintertc_streams = typeof ReadableStream === "function"
+            && typeof WritableStream === "function"
+            && typeof TransformStream === "function"
+            && typeof CompressionStream === "function"
+            && typeof DecompressionStream === "function";
+        results.wintertc_events_and_abort = typeof Event === "function"
+            && typeof EventTarget === "function"
+            && typeof CustomEvent === "function"
+            && typeof AbortController === "function"
+            && typeof AbortSignal.timeout === "function";
+        results.wintertc_structured_clone = structuredClone({ a: [1, 2], b: "ok" }).a.length === 2;
+
+        // 3. Node.js Built-in Modules (`node:*`)
+        const builtins = [
+            "node:fs", "node:fs/promises", "node:path", "node:crypto", "node:events",
+            "node:buffer", "node:stream", "node:stream/web", "node:http", "node:https",
+            "node:net", "node:tls", "node:dgram", "node:worker_threads", "node:child_process",
+            "node:os", "node:util", "node:url", "node:querystring", "node:assert",
+            "node:zlib", "node:timers", "node:timers/promises", "node:async_hooks",
+            "node:diagnostics_channel", "node:perf_hooks", "node:process", "node:module",
+            "node:string_decoder", "node:console", "node:dns"
+        ];
+        let loadedCount = 0;
+        for (const spec of builtins) {
+            const mod = require(spec);
+            if (mod && (typeof mod === "object" || typeof mod === "function")) {
+                loadedCount++;
+            }
+        }
+        results.node_builtins_loaded = loadedCount;
+        results.node_builtins_total = builtins.length;
+
+        console.log(JSON.stringify(results));
+    "#;
+
+    let bc = compile_source_to_bytecode(scorecard_js);
+    let mut iso = SliceIsolate::spawn(
+        "phase5-conformance-scorecard",
+        1,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        32 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let res: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+
+    assert_eq!(res["es_object_group_by"], true);
+    assert_eq!(res["es_promise_with_resolvers"], true);
+    assert_eq!(res["es_array_copying"], true);
+    assert_eq!(res["es_set_methods"], true);
+    assert_eq!(res["es_intl"], true);
+    assert_eq!(res["wintertc_url_and_pattern"], true);
+    assert_eq!(res["wintertc_encoding"], true);
+    assert_eq!(res["wintertc_atob_btoa"], true);
+    assert_eq!(res["wintertc_crypto_sync"], true);
+    assert_eq!(res["wintertc_fetch_primitives"], true);
+    assert_eq!(res["wintertc_streams"], true);
+    assert_eq!(res["wintertc_events_and_abort"], true);
+    assert_eq!(res["wintertc_structured_clone"], true);
+    assert_eq!(res["node_builtins_loaded"], 31);
+    assert_eq!(res["node_builtins_total"], 31);
+}
+
+
 
 
 

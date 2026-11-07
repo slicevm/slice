@@ -56,6 +56,7 @@ pub(crate) struct ResolvedExecutionConfig {
     pub(crate) tls_cert: Option<PathBuf>,
     pub(crate) tls_key: Option<PathBuf>,
     pub(crate) trust_directives: bool,
+    pub(crate) trace_output_path: Option<PathBuf>,
     pub(crate) cli_fuel_override: Option<u64>,
     pub(crate) cli_mem_override: Option<usize>,
     pub(crate) cli_boacas_override: Option<bool>,
@@ -83,6 +84,11 @@ impl ResolvedExecutionConfig {
         let mut tls_cert = None;
         let mut tls_key = None;
         let mut trust_directives = false;
+        let mut trace_output_path = std::env::var("SLICE_TRACE")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
 
         let mut cli_fuel_override = None;
         let mut cli_mem_override = None;
@@ -427,6 +433,11 @@ impl ResolvedExecutionConfig {
                     trust_directives = b;
                     cli_trust_directives_override = Some(b);
                 }
+            } else if let Some(tr_str) = arg.strip_prefix("--trace=") {
+                let trimmed = tr_str.trim();
+                if !trimmed.is_empty() {
+                    trace_output_path = Some(PathBuf::from(trimmed));
+                }
             }
         }
 
@@ -447,6 +458,7 @@ impl ResolvedExecutionConfig {
             tls_cert,
             tls_key,
             trust_directives,
+            trace_output_path,
             cli_fuel_override,
             cli_mem_override,
             cli_boacas_override,

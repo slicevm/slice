@@ -21,11 +21,17 @@ By serializing the compiled `Gc<CodeBlock>` tree and global `Scope` bindings int
 
 ## 2. Modified Files
 
-Only **one file** in `vendor/boa_engine` differs from upstream `boa_engine v0.22.0`:
-- [`vendor/boa_engine/src/script.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/script.rs) (lines `245–595`):
+Five files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
+- [`vendor/boa_engine/src/script.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/script.rs):
   - `Script::compile_to_slicebc(&self, context: &mut Context) -> JsResult<Vec<u8>>`
   - `Script::from_slicebc_bytes(bytes: &[u8], context: &mut Context) -> Option<Self>`
-  - Internal recursive helpers `encode_codeblock` / `decode_codeblock` and `encode_js_string` / `decode_js_string`.
+  - Internal recursive helpers `encode_codeblock` / `decode_codeblock` (including bytecode-to-line `SourceMap` entries) and `write_js_string` / `read_js_string`.
+- [`vendor/boa_engine/src/builtins/json/mod.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/builtins/json/mod.rs):
+  - `Json::try_fast_serde_json_to_js_value`: Direct Rust `serde_json::Value -> JsValue` materialization fast-path in `JSON.parse` when no `reviver` callback is supplied, avoiding `boa_parser` + `ByteCompiler` + VM execution on every JSON payload.
+- [`vendor/boa_engine/src/vm/inline_cache/mod.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/vm/inline_cache/mod.rs):
+  - `InlineCache::mono_shape_addr`, `InlineCache::mono_slot`, and `InlineCache::get_fast(&self, shape: &Shape) -> Option<(Option<Shape>, Slot)>`: Zero-borrow monomorphic fast-path for own-property `Shape -> Slot` hits without locking `GcRefCell` or upgrading `WeakGc` pointers, with automatic polymorphic (`PIC_CAPACITY = 4`) and megamorphic fallback.
+- [`vendor/boa_engine/src/vm/opcode/get/property.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/vm/opcode/get/property.rs) & [`vendor/boa_engine/src/vm/opcode/set/property.rs`](file:///p:/opensource/slice/vendor/boa_engine/src/vm/opcode/set/property.rs):
+  - Wired `get_by_name` and `set_by_name` to call `ic.get_fast(object_borrowed.shape())`.
 
 ---
 

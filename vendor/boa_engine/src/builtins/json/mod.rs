@@ -247,12 +247,19 @@ impl Json {
 
         // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
         //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
-        if let Err(e) = serde_json::from_str::<serde_json::Value>(&json_string) {
-            return Err(JsNativeError::syntax().with_message(e.to_string()).into());
-        }
+        let parsed_json = serde_json::from_str::<serde_json::Value>(&json_string)
+            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
 
         // Check if a reviver is provided, to determine if we need source text tracking
         let has_reviver = args.get_or_undefined(1).is_callable();
+
+        // SLICE PATCH (P01): Direct Rust `serde_json::Value -> JsValue` materialization fast-path
+        // when no `reviver` callback is supplied, bypassing JS parser + ByteCompiler + VM execution.
+        if !has_reviver {
+            if let Some(js_val) = Self::try_fast_serde_json_to_js_value(parsed_json, context)? {
+                return Ok(js_val);
+            }
+        }
 
         // 3. Let scriptString be the string-concatenation of "(", jsonString, and ");".
         let script_string = format!("({json_string});");
@@ -354,6 +361,54 @@ impl Json {
             // 12. Else,
             // a. Return unfiltered.
             Ok(unfiltered)
+        }
+    }
+
+    /// SLICE PATCH (P01): Direct recursive `serde_json::Value -> JsValue` materialization.
+    ///
+    /// Returns `Ok(Some(JsValue))` when the entire JSON tree can be constructed directly in Rust
+    /// without invoking `boa_parser` + `ByteCompiler`, or `Ok(None)` if a number literal requires
+    /// fallback parsing.
+    fn try_fast_serde_json_to_js_value(
+        val: serde_json::Value,
+        context: &mut Context,
+    ) -> JsResult<Option<JsValue>> {
+        match val {
+            serde_json::Value::Null => Ok(Some(JsValue::null())),
+            serde_json::Value::Bool(b) => Ok(Some(JsValue::new(b))),
+            serde_json::Value::Number(n) => {
+                if let Some(f) = n.as_f64() {
+                    Ok(Some(JsValue::new(f)))
+                } else {
+                    Ok(None)
+                }
+            }
+            serde_json::Value::String(s) => Ok(Some(JsValue::new(js_string!(s.as_str())))),
+            serde_json::Value::Array(items) => {
+                let mut elements = thin_vec::ThinVec::with_capacity(items.len());
+                for item in items {
+                    let Some(js_item) = Self::try_fast_serde_json_to_js_value(item, context)?
+                    else {
+                        return Ok(None);
+                    };
+                    elements.push(js_item);
+                }
+                let arr = crate::builtins::Array::array_create(elements.len() as u64, None, context)?;
+                arr.borrow_mut()
+                    .properties_mut()
+                    .override_indexed_properties(elements);
+                Ok(Some(arr.into()))
+            }
+            serde_json::Value::Object(map) => {
+                let obj = JsObject::with_object_proto(context.intrinsics());
+                for (k, v) in map {
+                    let Some(js_val) = Self::try_fast_serde_json_to_js_value(v, context)? else {
+                        return Ok(None);
+                    };
+                    obj.create_data_property_or_throw(js_string!(k.as_str()), js_val, context)?;
+                }
+                Ok(Some(obj.into()))
+            }
         }
     }
 

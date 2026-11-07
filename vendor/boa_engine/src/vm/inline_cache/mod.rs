@@ -7,7 +7,10 @@ use boa_macros::{Finalize, Trace};
 
 use crate::{
     JsString,
-    object::shape::{Shape, WeakShape, slot::Slot},
+    object::shape::{
+        Shape, WeakShape,
+        slot::{Slot, SlotAttributes},
+    },
 };
 
 #[cfg(test)]
@@ -36,6 +39,14 @@ pub(crate) struct InlineCache {
     /// Whether this access site has seen too many shapes and should no longer be cached.
     #[unsafe_ignore_trace]
     pub(crate) megamorphic: Cell<bool>,
+
+    /// SLICE PATCH (P01): Monomorphic fast-path shape address for lock-free/borrow-free own-property lookup.
+    #[unsafe_ignore_trace]
+    pub(crate) mono_shape_addr: Cell<usize>,
+
+    /// SLICE PATCH (P01): Monomorphic fast-path slot cached alongside `mono_shape_addr`.
+    #[unsafe_ignore_trace]
+    pub(crate) mono_slot: Cell<Slot>,
 }
 
 impl fmt::Display for InlineCache {
@@ -59,6 +70,8 @@ impl InlineCache {
             name,
             entries: GcRefCell::new(ArrayVec::new()),
             megamorphic: Cell::new(false),
+            mono_shape_addr: Cell::new(0),
+            mono_slot: Cell::new(Slot::new()),
         }
     }
 
@@ -68,6 +81,7 @@ impl InlineCache {
         }
 
         let mut entries = self.entries.borrow_mut();
+        let was_empty = entries.is_empty();
 
         // Add a new entry if there's space.
         if entries
@@ -79,8 +93,34 @@ impl InlineCache {
         {
             // Polymorphic cache is full, transition to megamorphic.
             self.megamorphic.set(true);
+            self.mono_shape_addr.set(0);
             entries.clear();
+        } else if was_empty {
+            self.mono_shape_addr.set(shape.to_addr_usize());
+            self.mono_slot.set(slot);
         }
+    }
+
+    /// SLICE PATCH (P01): Zero-borrow monomorphic fast-path for own-property slot hits.
+    ///
+    /// When the receiver's `Shape` address matches `mono_shape_addr` and the cached slot is an
+    /// own property (`!PROTOTYPE`), returns `(None, slot)` without borrowing `GcRefCell` or
+    /// upgrading a `WeakGc`. Falls back to the polymorphic `get()` path otherwise.
+    #[inline(always)]
+    pub(crate) fn get_fast(&self, shape: &Shape) -> Option<(Option<Shape>, Slot)> {
+        if self.megamorphic.get() {
+            return None;
+        }
+
+        let shape_addr = shape.to_addr_usize();
+        if self.mono_shape_addr.get() == shape_addr && shape_addr != 0 {
+            let slot = self.mono_slot.get();
+            if !slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+                return Some((None, slot));
+            }
+        }
+
+        self.get(shape).map(|(s, slot)| (Some(s), slot))
     }
 
     /// Returns the cached `(Shape, Slot)` if a matching shape exists in the inline cache.
@@ -107,6 +147,13 @@ impl InlineCache {
                 // Opportunistically clean up stale weak shapes.
                 entries.swap_remove(i);
             }
+        }
+
+        if let Some((ref hit_shape, hit_slot)) = result {
+            self.mono_shape_addr.set(hit_shape.to_addr_usize());
+            self.mono_slot.set(hit_slot);
+        } else if entries.is_empty() {
+            self.mono_shape_addr.set(0);
         }
 
         result

@@ -94,6 +94,21 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     );
 
     let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_map_error_stack"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let raw = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let mapped = crate::boa_realm::map_stack_with_active_source(&raw);
+            Ok(BoaVal::from(js_string!(mapped)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_load_builtin"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
@@ -1066,6 +1081,7 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             for sec in &scope_guard.saved_egress_secrets {
                 proxy_parent.add_egress_audit_secret(sec.clone());
             }
+            let parent_tenant_for_trace = scope_guard.saved_tenant.clone();
             let outcome = if cfg!(debug_assertions) {
                 std::thread::Builder::new()
                     .name("slice-eval-sandbox".to_string())
@@ -1078,6 +1094,21 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 proxy_parent.eval_sandbox(&code, opts)
             };
             drop(scope_guard);
+            if crate::boa_realm::is_trace_recording_enabled() {
+                crate::boa_realm::record_trace_event(
+                    "sandbox.eval",
+                    "slice.ocap",
+                    100,
+                    (outcome.total_time_us * 1_000.0).max(1.0) as u64,
+                    serde_json::json!({
+                        "parent_tenant": parent_tenant_for_trace,
+                        "ok": outcome.ok,
+                        "fuel_used": outcome.fuel_used,
+                        "memory_used_bytes": outcome.memory_used_bytes,
+                        "violation": outcome.violation
+                    }),
+                );
+            }
 
             let json = serde_json::to_string(&outcome).unwrap_or_else(|_| "{}".to_string());
             Ok(BoaVal::from(js_string!(json)))

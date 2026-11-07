@@ -549,7 +549,15 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             isolate.restore(snap);
             isolate.reset_for_request("tenant-cli", 1, exec_cfg.fuel_limit, exec_cfg.mem_limit);
         }
+        if exec_cfg.trace_output_path.is_some() {
+            isolate.enable_tracing(true);
+        }
         let m = isolate.execute_bytecode(bytecode, Some(&archive))?;
+        if let Some(ref trace_path) = exec_cfg.trace_output_path {
+            let trace_json = isolate.export_chrome_trace_json(&m);
+            isolate.enable_tracing(false);
+            let _ = std::fs::write(trace_path, trace_json);
+        }
         if m.return_value.starts_with("Uncaught ") {
             bundled_for_sourcemap = archive.reconstruct_annotated_source(entry);
         }
@@ -589,7 +597,16 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             isolate.restore(snap);
             isolate.reset_for_request("tenant-cli", 1, exec_cfg.fuel_limit, exec_cfg.mem_limit);
         }
-        isolate.execute_bytecode(&bytecode, None)?
+        if exec_cfg.trace_output_path.is_some() {
+            isolate.enable_tracing(true);
+        }
+        let m = isolate.execute_bytecode(&bytecode, None)?;
+        if let Some(ref trace_path) = exec_cfg.trace_output_path {
+            let trace_json = isolate.export_chrome_trace_json(&m);
+            isolate.enable_tracing(false);
+            let _ = std::fs::write(trace_path, trace_json);
+        }
+        m
     };
 
     if metrics.return_value.starts_with("Uncaught ") {

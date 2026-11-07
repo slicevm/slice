@@ -353,6 +353,7 @@ console.log("Running with self-contained inline directives!");
 | **TLS 1.3 Cert Chain** | `None` | `[server] tls_cert = "./cert.pem"` | `// @slice-tls-cert: ./cert.pem` (when `trust_directives = true`) | `SLICE_TLS_CERT=./cert.pem` | `--tls-cert=./cert.pem` |
 | **TLS 1.3 Private Key** | `None` | `[server] tls_key = "./key.pem"` | `// @slice-tls-key: ./key.pem` (when `trust_directives = true`) | `SLICE_TLS_KEY=./key.pem` | `--tls-key=./key.pem` |
 | **Outbound HTTP Proxy** | `None` | `[capabilities.env] HTTP_PROXY = "..."` | `// @slice-allow-env: ["HTTP_PROXY=..."]` | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | `--allow-env=HTTP_PROXY=...` |
+| **Execution Trace Export** | `None` | *(CLI / Env diagnostic flag)* | *(Host-only setting)* | `SLICE_TRACE=trace.json` | `--trace=trace.json` |
 
 ---
 
@@ -397,6 +398,7 @@ Executes a `.ts`/`.js` file, a project folder (with `package.json`, `slice.toml`
 | `--tier=<tier1\|tier0\|auto>` | Override execution tier (`tier1` default, `tier0` for SLICESNP snapshot VM, or `auto`). |
 | `--boacas` / `--no-boacas` | Enable (default) or disable Precompiled Boa `CodeBlock` (`SLICEBC\x01`) bytecode execution. |
 | `--warm` / `--no-warm` | Pre-warm the thread-local `BOA_CONTEXT_POOL` and `__slice_rc` bundle closure before measurement. |
+| `--trace=<out.json>` | Export a Chrome DevTools / Perfetto (`ui.perfetto.dev`) execution timeline (`traceEvents`) with instantiate, execute, checkpoint, restore, and nested sandbox spans. |
 | `--watch` | Watch source files (`src/`, `slice.toml`, `.env`) and live-reload in `< 3 ms` on save. |
 | `--watch-once` | Run once, wait for a single file modification, re-execute in `< 3 ms`, and exit (ideal for CI/scripts). |
 | `--deterministic[=<seed>]` | Enable deterministic `Math.random()`, `Date.now()`, `performance.now()`, and `fetch()` cassette replay (default seed: `42`). |

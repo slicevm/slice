@@ -400,6 +400,19 @@ fn encode_codeblock(cb: &CodeBlock, dst: &mut Vec<u8>) {
 
     write_js_string(dst, cb.name());
 
+    let sm_entries = cb.source_info.map().entries();
+    write_u32(dst, sm_entries.len() as u32);
+    for entry in sm_entries {
+        write_u32(dst, entry.pc());
+        if let Some(pos) = entry.position() {
+            write_u32(dst, pos.line_number());
+            write_u32(dst, pos.column_number());
+        } else {
+            write_u32(dst, 0);
+            write_u32(dst, 0);
+        }
+    }
+
     write_u32(dst, cb.global_lexs.len() as u32);
     for &idx in &cb.global_lexs {
         write_u32(dst, idx);
@@ -591,9 +604,22 @@ fn decode_codeblock(
     }
 
     let fn_name = read_js_string(src, pos)?;
+    let sm_len = read_u32(src, pos)? as usize;
+    let mut sm_entries = Vec::with_capacity(sm_len);
+    for _ in 0..sm_len {
+        let pc = read_u32(src, pos)?;
+        let line = read_u32(src, pos)?;
+        let col = read_u32(src, pos)?;
+        let position = if line > 0 && col > 0 {
+            Some(boa_ast::Position::new(line, col))
+        } else {
+            None
+        };
+        sm_entries.push(crate::vm::source_info::Entry { pc, position });
+    }
     let source_info = crate::vm::source_info::SourceInfo::new(
         crate::vm::source_info::SourceMap::new(
-            Box::default(),
+            sm_entries.into_boxed_slice(),
             crate::vm::source_info::SourcePath::None,
         ),
         fn_name,

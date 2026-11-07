@@ -366,11 +366,11 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ),
     (
         "AbortController",
-        ShardTriggerAction::Mask((1 << 10) | (1 << 11)),
+        ShardTriggerAction::Mask((1 << 10) | (1 << 11) | (1 << 6)),
     ),
     (
         "AbortSignal",
-        ShardTriggerAction::Mask((1 << 10) | (1 << 11)),
+        ShardTriggerAction::Mask((1 << 10) | (1 << 11) | (1 << 6)),
     ),
     // HTTP Request / Response / Headers (`1 << 11`)
     (".fetch(", ShardTriggerAction::Mask(1 << 11)),
@@ -400,7 +400,8 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ("atob(", ShardTriggerAction::Mask(1 << 2)),
     // Event / EventTarget (`1 << 13`)
     ("new Event(", ShardTriggerAction::Mask(1 << 13)),
-    ("new CustomEvent(", ShardTriggerAction::Mask(1 << 13)),
+    ("typeof Event", ShardTriggerAction::Mask(1 << 13)),
+    ("CustomEvent", ShardTriggerAction::Mask(1 << 13)),
     ("EventTarget", ShardTriggerAction::Mask(1 << 13)),
     // Streams (`(1 << 14) | (1 << 3)` and `1 << 3`)
     (
@@ -432,6 +433,9 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ("new Blob(", ShardTriggerAction::Mask(1 << 15)),
     ("new File(", ShardTriggerAction::Mask(1 << 15)),
     ("new FormData(", ShardTriggerAction::Mask(1 << 15)),
+    ("typeof FormData", ShardTriggerAction::Mask(1 << 15)),
+    ("typeof Blob", ShardTriggerAction::Mask(1 << 15)),
+    ("typeof File", ShardTriggerAction::Mask(1 << 15)),
     ("FormData.", ShardTriggerAction::Mask(1 << 15)),
     ("Blob.", ShardTriggerAction::Mask(1 << 15)),
     ("File.", ShardTriggerAction::Mask(1 << 15)),
