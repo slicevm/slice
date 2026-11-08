@@ -4,7 +4,7 @@
 pub mod windows_iocp;
 
 use crate::slab::{RegisteredBufferPool, FIXED_BUFFER_COUNT, FIXED_BUFFER_SIZE};
-use anyhow::{bail, ensure, Result};
+use anyhow::{ensure, Result};
 use std::collections::VecDeque;
 
 pub const DEFAULT_RING_ENTRIES: u32 = 256;
@@ -118,7 +118,7 @@ impl CompletionRingEngine {
                 windows_iocp::CreateIoCompletionPort(windows_iocp::INVALID_HANDLE_VALUE, 0, 0, 0)
             };
             if handle == 0 {
-                bail!("Failed to initialize Windows IOCP completion ring");
+                anyhow::bail!("Failed to initialize Windows IOCP completion ring");
             }
             Ok(Self {
                 buffer_pool,
