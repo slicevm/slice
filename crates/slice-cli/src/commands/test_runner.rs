@@ -1,47 +1,63 @@
-use crate::config_and_watch::{
-    install_ctrlc_handler, OsNativeFileWatcher, ResolvedExecutionConfig,
-};
+use crate::config::{install_ctrlc_handler, OsNativeFileWatcher, ResolvedExecutionConfig};
 use anyhow::{bail, Result};
 use slice_engine::{compile_source_to_bytecode, SliceIsolate};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+/// Maximum directory recursion depth when discovering test files (`CLI-SEC-03`).
+pub(crate) const MAX_TEST_WALK_DEPTH: usize = 64;
+
+#[inline]
+fn is_test_filename(name: &str) -> bool {
+    name.ends_with(".test.ts")
+        || name.ends_with(".spec.ts")
+        || name.ends_with("_test.ts")
+        || name.ends_with(".test.tsx")
+        || name.ends_with(".spec.tsx")
+        || name.ends_with("_test.tsx")
+        || name.ends_with(".test.js")
+        || name.ends_with(".spec.js")
+        || name.ends_with("_test.js")
+        || name.ends_with(".test.jsx")
+        || name.ends_with(".spec.jsx")
+        || name.ends_with("_test.jsx")
+}
+
+/// Discovers test files under `target`, skipping symlinks (`CLI-SEC-03`) and using `DirEntry::file_type()`
+/// to avoid redundant OS `stat` syscalls (`CLI-PERF-03`).
 pub(crate) fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>> {
     if target.is_file() {
         return Ok(vec![target.to_path_buf()]);
     }
     let mut found = Vec::new();
-    fn walk_tests(dir: &Path, out: &mut Vec<PathBuf>) {
+    fn walk_tests(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > MAX_TEST_WALK_DEPTH {
+            return;
+        }
         let Ok(rd) = std::fs::read_dir(dir) else {
             return;
         };
-        let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-        entries.sort();
-        for p in entries {
+        let mut entries: Vec<(PathBuf, std::fs::FileType)> = rd
+            .flatten()
+            .filter_map(|e| e.file_type().ok().map(|ft| (e.path(), ft)))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (p, ft) in entries {
+            if ft.is_symlink() {
+                continue;
+            }
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or_default();
             if matches!(name, "node_modules" | "target" | ".git" | ".archive") {
                 continue;
             }
-            if p.is_dir() {
-                walk_tests(&p, out);
-            } else if name.ends_with(".test.ts")
-                || name.ends_with(".spec.ts")
-                || name.ends_with("_test.ts")
-                || name.ends_with(".test.tsx")
-                || name.ends_with(".spec.tsx")
-                || name.ends_with("_test.tsx")
-                || name.ends_with(".test.js")
-                || name.ends_with(".spec.js")
-                || name.ends_with("_test.js")
-                || name.ends_with(".test.jsx")
-                || name.ends_with(".spec.jsx")
-                || name.ends_with("_test.jsx")
-            {
+            if ft.is_dir() {
+                walk_tests(&p, depth + 1, out);
+            } else if ft.is_file() && is_test_filename(name) {
                 out.push(p);
             }
         }
     }
-    walk_tests(target, &mut found);
+    walk_tests(target, 0, &mut found);
     Ok(found)
 }
 

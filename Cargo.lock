@@ -2034,6 +2034,7 @@ dependencies = [
  "libc",
  "memchr",
  "notify",
+ "rustc-hash",
  "rustls",
  "rustls-pki-types",
  "serde",
