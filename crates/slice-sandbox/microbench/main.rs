@@ -77,4 +77,3 @@ export default { fetch(req) { return new Response("ok"); } };
 
 criterion_group!(benches, bench_ocap_verification, bench_ssrf_and_directives);
 criterion_main!(benches);
-

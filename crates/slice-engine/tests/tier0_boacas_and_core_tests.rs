@@ -9,7 +9,6 @@ use crate::{
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
-
 #[test]
 fn test_tiered_execution_and_cold_start() {
     let ts_src = r#"
@@ -723,4 +722,3 @@ console.log(new TreeOfThoughtAgent().run());
         Err(SandboxViolation::EnvAccessDenied { ref key, .. }) if key == "EGRESS_SECRET_LEAK_BLOCKED"
     ));
 }
-

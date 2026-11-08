@@ -19,4 +19,3 @@ fn test_registered_buffer_pool_lifecycle() {
     assert_eq!(idx_reused, 0);
     assert!(pool.acquire().is_none());
 }
-

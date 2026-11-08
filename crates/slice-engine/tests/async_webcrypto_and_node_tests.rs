@@ -9,7 +9,6 @@ use crate::{
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
-
 #[test]
 fn test_phase_n2_deterministic_time_travel_event_loop_concurrent_fetch_and_abort_signal() {
     use std::io::{Read, Write};
@@ -1043,10 +1042,7 @@ console.log(JSON.stringify({
     assert_eq!(out["ord2"], "two");
     assert_eq!(out["ord3"], "few");
     assert_eq!(out["ord11"], "other");
-    assert_eq!(
-        out["words"],
-        serde_json::json!(["Hello", "Slice", "2026"])
-    );
+    assert_eq!(out["words"], serde_json::json!(["Hello", "Slice", "2026"]));
     assert_eq!(out["canon"], serde_json::json!(["en-US", "en-GB"]));
 }
 
@@ -1633,7 +1629,12 @@ console.log(JSON.stringify({
     );
     iso.set_deterministic_seed(Some(424242));
     let m = iso.execute_bytecode(&bc, None).unwrap();
-    assert!(!m.stdout.is_empty(), "Expected stdout from test, return_value: {:?}, bundled:\n{}", m.return_value, bundled);
+    assert!(
+        !m.stdout.is_empty(),
+        "Expected stdout from test, return_value: {:?}, bundled:\n{}",
+        m.return_value,
+        bundled
+    );
     let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
     assert_eq!(out["md5Hex"], "900150983cd24fb0d6963f7d28e17f72");
     assert_eq!(out["hmacMd5Hex"], "80070713463e7749b90c2dc24911e275");
@@ -1664,7 +1665,9 @@ crypto.pbkdf2Sync("pass", "salt", 50_000_000, 32, "sha256");
         5_000, // 5,000 fuel budget
         8 * 1024 * 1024,
     );
-    let err = iso_low_fuel.execute_bytecode(&hostile_bc, None).unwrap_err();
+    let err = iso_low_fuel
+        .execute_bytecode(&hostile_bc, None)
+        .unwrap_err();
     assert!(
         matches!(err, SandboxViolation::CpuFuelExhausted { .. }),
         "Expected CpuFuelExhausted on hostile PBKDF2 iterations, got {:?}",
@@ -1902,8 +1905,7 @@ run();
     let bundled = slice_cas::strip_typescript_and_normalize(script, true);
     let bc = compile_source_to_bytecode(&bundled);
     let caps = CapabilityToken::pure_compute().with_net_host("api.internal.example");
-    let mut iso =
-        SliceIsolate::spawn("phase3-http-tenant", 1, caps, 5_000_000, 8 * 1024 * 1024);
+    let mut iso = SliceIsolate::spawn("phase3-http-tenant", 1, caps, 5_000_000, 8 * 1024 * 1024);
 
     // Execute as an inbound HTTP request to `/bridge-check` so both outbound http.get and inbound http.createServer bridge are verified
     let req_ctx = crate::HttpRequestContext {
@@ -2051,8 +2053,7 @@ console.log(JSON.stringify({
     let caps = CapabilityToken::pure_compute()
         .with_exec_binary("/bin/echo")
         .with_exec_binary("/usr/bin/env");
-    let mut iso =
-        SliceIsolate::spawn("phase4-dlp-tenant", 1, caps, 5_000_000, 8 * 1024 * 1024);
+    let mut iso = SliceIsolate::spawn("phase4-dlp-tenant", 1, caps, 5_000_000, 8 * 1024 * 1024);
     let dlp_count =
         iso.load_dotenv_str("OPENAI_API_KEY=sk-proj-phase4-super-secret-token\nPUBLIC_TAG=v1\n");
     assert_eq!(dlp_count, 1);
@@ -2427,10 +2428,7 @@ fn test_phase5_chrome_devtools_trace_export() {
     let events = parsed["traceEvents"]
         .as_array()
         .expect("Expected traceEvents array");
-    let names: Vec<&str> = events
-        .iter()
-        .filter_map(|e| e["name"].as_str())
-        .collect();
+    let names: Vec<&str> = events.iter().filter_map(|e| e["name"].as_str()).collect();
     assert!(names.contains(&"isolate.instantiate"));
     assert!(names.contains(&"isolate.execute"));
     assert!(names.contains(&"state.checkpoint"));
@@ -2543,9 +2541,3 @@ fn test_phase5_conformance_scorecard_ecmascript_wintertc_and_node() {
     assert_eq!(res["node_builtins_loaded"], 31);
     assert_eq!(res["node_builtins_total"], 31);
 }
-
-
-
-
-
-

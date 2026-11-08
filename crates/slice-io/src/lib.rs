@@ -288,7 +288,8 @@ impl CompletionRingEngine {
             if let IoSubmission::ReadFixed { buf_index, len, .. }
             | IoSubmission::WriteFixed { buf_index, len, .. } = *op
             {
-                self.buffer_pool.validate_submission_bounds(buf_index, len)?;
+                self.buffer_pool
+                    .validate_submission_bounds(buf_index, len)?;
             }
         }
 

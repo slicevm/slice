@@ -413,10 +413,9 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
             let egress_secrets = BOA_EGRESS_SECRETS.with(|s| s.borrow().clone());
             if !egress_secrets.is_empty() {
                 if let Err(violation) =
-                    verify_egress_secrets_slice(&tenant_id, &egress_secrets, &stdout_str)
-                        .and_then(|()| {
-                            verify_egress_secrets_slice(&tenant_id, &egress_secrets, &stderr_str)
-                        })
+                    verify_egress_secrets_slice(&tenant_id, &egress_secrets, &stdout_str).and_then(
+                        |()| verify_egress_secrets_slice(&tenant_id, &egress_secrets, &stderr_str),
+                    )
                 {
                     let msg = violation.to_string();
                     BOA_LAST_CHILD_PROC_VIOLATION.with(|v| {

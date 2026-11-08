@@ -205,8 +205,11 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 return Ok(BoaVal::from(js_string!("")));
             };
             if key_arg.is_object() || msg_arg.is_object() {
-                let encoded =
-                    with_two_buffer_source_bytes(key_arg, msg_arg, context, |key_bytes, msg_bytes| {
+                let encoded = with_two_buffer_source_bytes(
+                    key_arg,
+                    msg_arg,
+                    context,
+                    |key_bytes, msg_bytes| {
                         if enc.eq_ignore_ascii_case("base64") {
                             let mac = hmac_sha256_bytes(key_bytes, msg_bytes);
                             base64_encode(&mac, false)
@@ -216,7 +219,8 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                         } else {
                             hmac_sha256_hex(key_bytes, msg_bytes)
                         }
-                    })?;
+                    },
+                )?;
                 return Ok(BoaVal::from(js_string!(encoded)));
             }
             let key = key_arg.to_string(context)?.to_std_string_escaped();
@@ -243,8 +247,9 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 return Ok(BoaVal::from(js_string!("")));
             };
             if first.is_object() {
-                let encoded =
-                    with_buffer_source_bytes(first, context, |bytes| base64_encode(bytes, url_safe))?;
+                let encoded = with_buffer_source_bytes(first, context, |bytes| {
+                    base64_encode(bytes, url_safe)
+                })?;
                 return Ok(BoaVal::from(js_string!(encoded)));
             }
             let input = first.to_string(context)?.to_std_string_escaped();

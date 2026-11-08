@@ -1,0 +1,720 @@
+//! Oxc AST-Driven ESM-to-CommonJS Transformer (`transform_module_to_cjs`)
+//! and Barrel Lazy-Getter Optimizer (`apply_cjs_lazy_barrel_getters`).
+
+use crate::linker::{
+    collect_binding_pattern_names, collect_require_edits_from_program, format_exports_lhs,
+    is_valid_js_identifier, resolve_spec_and_record, rewrite_cjs_requires_ast, slice_with_edits,
+};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::path::{Path, PathBuf};
+
+fn collapse_multiline_imports_exports(code: &str) -> String {
+    let mut out = String::with_capacity(code.len());
+    let mut in_stmt = false;
+    let mut stmt_buf = String::new();
+
+    for line in code.lines() {
+        let trimmed = line.trim();
+        if !in_stmt {
+            if (trimmed.starts_with("import ") || trimmed.starts_with("export {"))
+                && !trimmed.ends_with(';')
+                && !trimmed.contains(" from ")
+            {
+                in_stmt = true;
+                stmt_buf.clear();
+                stmt_buf.push_str(trimmed);
+                stmt_buf.push(' ');
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        } else {
+            stmt_buf.push_str(trimmed);
+            stmt_buf.push(' ');
+            if trimmed.ends_with(';') || trimmed.contains(" from ") {
+                in_stmt = false;
+                out.push_str(stmt_buf.trim());
+                out.push('\n');
+            }
+        }
+    }
+    if in_stmt && !stmt_buf.is_empty() {
+        out.push_str(stmt_buf.trim());
+        out.push('\n');
+    }
+    out
+}
+
+fn extract_quoted_specifier(s: &str) -> Option<(String, char)> {
+    let trimmed = s.trim().trim_end_matches(';').trim();
+    if let Some(stripped) = trimmed.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        return Some((stripped.to_string(), '"'));
+    }
+    if let Some(stripped) = trimmed
+        .strip_prefix('\'')
+        .and_then(|r| r.strip_suffix('\''))
+    {
+        return Some((stripped.to_string(), '\''));
+    }
+    None
+}
+
+fn apply_cjs_lazy_barrel_getters(mut body_lines: Vec<String>) -> Vec<String> {
+    if body_lines.iter().any(|l| l.trim() == "module.exports = {") {
+        let mut const_req_map: FxHashMap<String, (usize, String)> = FxHashMap::default();
+        for (idx, line) in body_lines.iter().enumerate() {
+            let t = line.trim().trim_end_matches(';');
+            if let Some(rest) = t.strip_prefix("const ") {
+                if let Some((ident, rhs)) = rest.split_once('=') {
+                    let ident = ident.trim();
+                    let rhs = rhs.trim();
+                    if is_valid_js_identifier(ident)
+                        && rhs.starts_with("require(\"")
+                        && rhs.ends_with("\")")
+                    {
+                        const_req_map.insert(ident.to_string(), (idx, rhs.to_string()));
+                    }
+                }
+            }
+        }
+        let mut to_remove_indices = FxHashSet::default();
+        let mut shorthand_replacements: FxHashMap<usize, String> = FxHashMap::default();
+
+        for (idx, line) in body_lines.iter().enumerate() {
+            let t = line.trim();
+            if let Some(ident) = t.strip_suffix(',') {
+                let ident = ident.trim();
+                if let Some((decl_idx, req_expr)) = const_req_map.get(ident) {
+                    let used_elsewhere =
+                        body_lines
+                            .iter()
+                            .enumerate()
+                            .any(|(other_idx, other_line)| {
+                                other_idx != idx
+                                    && other_idx != *decl_idx
+                                    && other_line.contains(ident)
+                            });
+                    if !used_elsewhere {
+                        to_remove_indices.insert(*decl_idx);
+                        shorthand_replacements.insert(
+                            idx,
+                            format!("  get {}() {{ return {}; }},", ident, req_expr),
+                        );
+                    }
+                }
+            }
+        }
+        if !shorthand_replacements.is_empty() || !to_remove_indices.is_empty() {
+            let mut optimized_lines = Vec::with_capacity(body_lines.len());
+            for (idx, line) in body_lines.into_iter().enumerate() {
+                if to_remove_indices.contains(&idx) {
+                    continue;
+                }
+                if let Some(rep) = shorthand_replacements.remove(&idx) {
+                    optimized_lines.push(rep);
+                } else {
+                    optimized_lines.push(line);
+                }
+            }
+            body_lines = optimized_lines;
+        }
+    }
+    body_lines
+}
+
+fn try_transform_esm_to_cjs_ast(
+    js_code: &str,
+    from_dir: &Path,
+    module_path: Option<&Path>,
+    deps_out: &mut Vec<PathBuf>,
+) -> Option<String> {
+    use oxc::ast::ast::{
+        Declaration, ExportDefaultDeclarationKind, ImportDeclarationSpecifier, Statement,
+    };
+    use oxc::span::GetSpan;
+
+    let allocator = oxc::allocator::Allocator::default();
+    let source_type = oxc::span::SourceType::ts().with_module(true);
+    let parser_ret = oxc::parser::Parser::new(&allocator, js_code, source_type).parse();
+    if !parser_ret.diagnostics.is_empty() {
+        return None;
+    }
+
+    // Single-pass `require(...)`, dynamic `import(...)`, and `import.meta` AST edit collection:
+    let req_edits = collect_require_edits_from_program(
+        js_code,
+        &parser_ret.program,
+        from_dir,
+        module_path,
+        deps_out,
+    );
+
+    let has_esm_stmt = parser_ret.program.body.iter().any(|stmt| {
+        matches!(
+            stmt,
+            Statement::ImportDeclaration(_)
+                | Statement::ExportDeclaration(_)
+                | Statement::ExportNamedDeclaration(_)
+                | Statement::ExportFromDeclaration(_)
+                | Statement::ExportDefaultDeclaration(_)
+                | Statement::ExportAllDeclaration(_)
+        )
+    });
+    if !has_esm_stmt {
+        let rewritten_cjs = slice_with_edits(js_code, 0, js_code.len(), &req_edits);
+        if !rewritten_cjs.contains("module.exports = {") {
+            return Some(rewritten_cjs);
+        }
+        let body_lines: Vec<String> = rewritten_cjs
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
+            .collect();
+        return Some(apply_cjs_lazy_barrel_getters(body_lines).join("\n"));
+    }
+
+    let mut body_lines = Vec::with_capacity(parser_ret.program.body.len() + 4);
+    let mut deferred_exports: Vec<(String, String)> = Vec::new();
+    let mut has_default_export = false;
+    let mut req_counter = 0usize;
+
+    for stmt in &parser_ret.program.body {
+        match stmt {
+            Statement::ImportDeclaration(imp) => {
+                if imp.import_kind.is_type() {
+                    continue;
+                }
+                let spec = imp.source.value.as_str();
+                let resolved_id = resolve_spec_and_record(spec, from_dir, deps_out);
+                let Some(specs) = &imp.specifiers else {
+                    body_lines.push(format!("require({:?});", resolved_id));
+                    continue;
+                };
+                if specs.is_empty() {
+                    body_lines.push(format!("require({:?});", resolved_id));
+                    continue;
+                }
+                let mut default_ident: Option<&str> = None;
+                let mut namespace_ident: Option<&str> = None;
+                let mut named_specs: Vec<(String, String)> = Vec::new();
+
+                for s in specs {
+                    match s {
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(def) => {
+                            default_ident = Some(def.local.name.as_str());
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(ns) => {
+                            namespace_ident = Some(ns.local.name.as_str());
+                        }
+                        ImportDeclarationSpecifier::ImportSpecifier(named) => {
+                            if named.import_kind.is_type() {
+                                continue;
+                            }
+                            named_specs.push((
+                                named.imported.name().to_string(),
+                                named.local.name.to_string(),
+                            ));
+                        }
+                    }
+                }
+
+                if default_ident.is_none() && namespace_ident.is_none() && named_specs.is_empty() {
+                    continue;
+                }
+
+                if let Some(ns) = namespace_ident {
+                    body_lines.push(format!("const {} = require({:?});", ns, resolved_id));
+                }
+                if let Some(def_name) = default_ident {
+                    req_counter += 1;
+                    let tmp_var = format!("__imp_{}", req_counter);
+                    if !named_specs.is_empty() {
+                        let fields: Vec<String> = named_specs
+                            .iter()
+                            .map(|(imp_n, loc_n)| {
+                                if imp_n == loc_n {
+                                    imp_n.clone()
+                                } else if is_valid_js_identifier(imp_n) {
+                                    format!("{}: {}", imp_n, loc_n)
+                                } else {
+                                    format!("{:?}: {}", imp_n, loc_n)
+                                }
+                            })
+                            .collect();
+                        body_lines.push(format!(
+                            "const {tmp} = require({id:?}); const {def} = ({tmp} && {tmp}.__esModule && {tmp}.default !== undefined) ? {tmp}.default : ({tmp} && {tmp}.default !== undefined ? {tmp}.default : {tmp}); const {{ {destr} }} = {tmp};",
+                            tmp = tmp_var,
+                            id = resolved_id,
+                            def = def_name,
+                            destr = fields.join(", ")
+                        ));
+                    } else {
+                        body_lines.push(format!(
+                            "const {tmp} = require({id:?}); const {def} = ({tmp} && {tmp}.__esModule && {tmp}.default !== undefined) ? {tmp}.default : ({tmp} && {tmp}.default !== undefined ? {tmp}.default : {tmp});",
+                            tmp = tmp_var,
+                            id = resolved_id,
+                            def = def_name
+                        ));
+                    }
+                } else if !named_specs.is_empty() {
+                    let fields: Vec<String> = named_specs
+                        .iter()
+                        .map(|(imp_n, loc_n)| {
+                            if imp_n == loc_n {
+                                imp_n.clone()
+                            } else if is_valid_js_identifier(imp_n) {
+                                format!("{}: {}", imp_n, loc_n)
+                            } else {
+                                format!("{:?}: {}", imp_n, loc_n)
+                            }
+                        })
+                        .collect();
+                    body_lines.push(format!(
+                        "const {{ {} }} = require({:?});",
+                        fields.join(", "),
+                        resolved_id
+                    ));
+                }
+            }
+            Statement::ExportAllDeclaration(exp_all) => {
+                if exp_all.export_kind.is_type() {
+                    continue;
+                }
+                let spec = exp_all.source.value.as_str();
+                let resolved_id = resolve_spec_and_record(spec, from_dir, deps_out);
+                if let Some(exported) = &exp_all.exported {
+                    let lhs = format_exports_lhs(exported.name().as_str());
+                    body_lines.push(format!("{} = require({:?});", lhs, resolved_id));
+                } else {
+                    body_lines.push(format!(
+                        "Object.assign(exports, require({:?}));",
+                        resolved_id
+                    ));
+                }
+            }
+            Statement::ExportDefaultDeclaration(exp_def) => {
+                has_default_export = true;
+                match &exp_def.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                        let fn_src = slice_with_edits(
+                            js_code,
+                            func.span.start as usize,
+                            func.span.end as usize,
+                            &req_edits,
+                        );
+                        if let Some(id) = &func.id {
+                            body_lines.push(fn_src);
+                            body_lines.push(format!("const __slice_default = {};", id.name));
+                        } else {
+                            body_lines.push(format!("const __slice_default = {};", fn_src));
+                        }
+                    }
+                    ExportDefaultDeclarationKind::ClassDeclaration(cls) => {
+                        let cls_src = slice_with_edits(
+                            js_code,
+                            cls.span.start as usize,
+                            cls.span.end as usize,
+                            &req_edits,
+                        );
+                        if let Some(id) = &cls.id {
+                            body_lines.push(cls_src);
+                            body_lines.push(format!("const __slice_default = {};", id.name));
+                        } else {
+                            body_lines.push(format!("const __slice_default = {};", cls_src));
+                        }
+                    }
+                    ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
+                        has_default_export = false;
+                    }
+                    expr => {
+                        let sp = expr.span();
+                        let expr_src = slice_with_edits(
+                            js_code,
+                            sp.start as usize,
+                            sp.end as usize,
+                            &req_edits,
+                        );
+                        body_lines.push(format!("const __slice_default = {};", expr_src));
+                    }
+                }
+            }
+            Statement::ExportDeclaration(exp_decl) => {
+                let decl = &exp_decl.declaration;
+                let sp = decl.span();
+                let decl_src =
+                    slice_with_edits(js_code, sp.start as usize, sp.end as usize, &req_edits);
+                match decl {
+                    Declaration::VariableDeclaration(vd) => {
+                        body_lines.push(decl_src);
+                        for d in &vd.declarations {
+                            collect_binding_pattern_names(&d.id, &mut deferred_exports);
+                        }
+                    }
+                    Declaration::FunctionDeclaration(fd) => {
+                        body_lines.push(decl_src);
+                        if let Some(id) = &fd.id {
+                            deferred_exports.push((id.name.to_string(), id.name.to_string()));
+                        }
+                    }
+                    Declaration::ClassDeclaration(cd) => {
+                        body_lines.push(decl_src);
+                        if let Some(id) = &cd.id {
+                            deferred_exports.push((id.name.to_string(), id.name.to_string()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Statement::ExportNamedDeclaration(exp_named) => {
+                if exp_named.export_kind.is_type() {
+                    continue;
+                }
+                for spec in &exp_named.specifiers {
+                    if spec.export_kind.is_type() {
+                        continue;
+                    }
+                    let local_n = spec.local.name().to_string();
+                    let exported_n = spec.exported.name().to_string();
+                    if exported_n == "default"
+                        && exp_named.specifiers.len() == 1
+                        && deferred_exports.is_empty()
+                    {
+                        has_default_export = true;
+                        body_lines.push(format!("const __slice_default = {};", local_n));
+                    } else {
+                        deferred_exports.push((exported_n, local_n));
+                    }
+                }
+            }
+            Statement::ExportFromDeclaration(exp_from) => {
+                if exp_from.export_kind.is_type() {
+                    continue;
+                }
+                let spec_str = exp_from.source.value.as_str();
+                let resolved_id = resolve_spec_and_record(spec_str, from_dir, deps_out);
+                req_counter += 1;
+                let tmp_var = format!("__reexp_{}", req_counter);
+                let mut has_runtime_spec = false;
+                let mut reexp_lines = Vec::new();
+                for spec in &exp_from.specifiers {
+                    if spec.export_kind.is_type() {
+                        continue;
+                    }
+                    has_runtime_spec = true;
+                    let orig_n = spec.local.name();
+                    let exp_n = spec.exported.name();
+                    if orig_n == "default" && exp_n == "default" {
+                        has_default_export = true;
+                        reexp_lines.push(format!(
+                            "const __slice_default = ({tmp} && {tmp}.__esModule && {tmp}.default !== undefined) ? {tmp}.default : ({tmp} && {tmp}.default !== undefined ? {tmp}.default : {tmp});",
+                            tmp = tmp_var
+                        ));
+                    } else if orig_n == "default" {
+                        deferred_exports.push((
+                            exp_n.to_string(),
+                            format!(
+                                "(({tmp} && {tmp}.default !== undefined) ? {tmp}.default : {tmp})",
+                                tmp = tmp_var
+                            ),
+                        ));
+                    } else {
+                        let rhs = if is_valid_js_identifier(orig_n.as_str()) {
+                            format!("{}.{}", tmp_var, orig_n)
+                        } else {
+                            format!("{}[{:?}]", tmp_var, orig_n.as_str())
+                        };
+                        deferred_exports.push((exp_n.to_string(), rhs));
+                    }
+                }
+                if has_runtime_spec {
+                    body_lines.push(format!("const {} = require({:?});", tmp_var, resolved_id));
+                    body_lines.extend(reexp_lines);
+                }
+            }
+            other => {
+                let sp = other.span();
+                body_lines.push(slice_with_edits(
+                    js_code,
+                    sp.start as usize,
+                    sp.end as usize,
+                    &req_edits,
+                ));
+            }
+        }
+    }
+
+    let uses_crypto_obj = body_lines.iter().any(|l| {
+        !l.contains("require(\"node:crypto\")")
+            && (l.contains("crypto.")
+                || l.contains("createHash(")
+                || l.contains("createHmac(")
+                || l.contains("randomBytes(")
+                || l.contains("randomUUID(")
+                || l.contains("getRandomValues(")
+                || l.contains("timingSafeEqual("))
+    });
+    if !uses_crypto_obj {
+        body_lines.retain(|l| !l.contains("require(\"node:crypto\")"));
+    }
+
+    if has_default_export || !deferred_exports.is_empty() {
+        body_lines.push("exports.__esModule = true;".to_string());
+    }
+    for (export_name, local_name) in &deferred_exports {
+        let lhs = format_exports_lhs(export_name);
+        body_lines.push(format!("{} = {};", lhs, local_name));
+    }
+    if has_default_export {
+        body_lines.push("exports.default = __slice_default;".to_string());
+        if deferred_exports.is_empty() {
+            body_lines.push(
+                "module.exports = __slice_default; if (typeof module.exports === 'object' && module.exports !== null || typeof module.exports === 'function') { module.exports.default = __slice_default; module.exports.__esModule = true; }"
+                    .to_string(),
+            );
+        }
+    }
+
+    Some(body_lines.join("\n"))
+}
+
+pub fn transform_module_to_cjs(
+    js_code: &str,
+    from_dir: &Path,
+    module_path: Option<&Path>,
+    deps_out: &mut Vec<PathBuf>,
+) -> String {
+    if let Some(ast_transformed) =
+        try_transform_esm_to_cjs_ast(js_code, from_dir, module_path, deps_out)
+    {
+        return ast_transformed;
+    }
+
+    // Fallback CommonJS module path if top-level parse failed
+    if !js_code.contains("import ") && !js_code.contains("export ") {
+        let rewritten_cjs = rewrite_cjs_requires_ast(js_code, from_dir, deps_out);
+        if !rewritten_cjs.contains("module.exports = {") {
+            return rewritten_cjs;
+        }
+        let body_lines: Vec<String> = rewritten_cjs
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
+            .collect();
+        return apply_cjs_lazy_barrel_getters(body_lines).join("\n");
+    }
+
+    let collapsed = collapse_multiline_imports_exports(js_code);
+    let mut body_lines = Vec::new();
+    let mut deferred_exports: Vec<(String, String)> = Vec::new();
+    let mut has_default_export = false;
+
+    for raw_line in collapsed.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some(after_import) = trimmed.strip_prefix("import ") {
+            if after_import.starts_with("type ") {
+                continue;
+            }
+            if let Some((spec, _)) = extract_quoted_specifier(after_import) {
+                let resolved_id = resolve_spec_and_record(&spec, from_dir, deps_out);
+                body_lines.push(format!("require({:?});", resolved_id));
+                continue;
+            }
+            if let Some((clause, from_part)) = after_import.split_once(" from ") {
+                if let Some((spec, _)) = extract_quoted_specifier(from_part) {
+                    let resolved_id = resolve_spec_and_record(&spec, from_dir, deps_out);
+                    let clause = clause.trim();
+                    if let Some(ns_name) = clause.strip_prefix("* as ") {
+                        let ns = ns_name.trim();
+                        if is_valid_js_identifier(ns) {
+                            body_lines.push(format!("const {} = require({:?});", ns, resolved_id));
+                        }
+                    } else if clause.starts_with('{') && clause.ends_with('}') {
+                        let inner = &clause[1..clause.len() - 1];
+                        let mut fields = Vec::new();
+                        for part in inner.split(',') {
+                            let p = part.trim();
+                            if p.is_empty() || p.starts_with("type ") {
+                                continue;
+                            }
+                            if let Some((orig, alias)) = p.split_once(" as ") {
+                                let orig = orig.trim();
+                                let alias = alias.trim();
+                                if is_valid_js_identifier(orig) && is_valid_js_identifier(alias) {
+                                    fields.push(format!("{}: {}", orig, alias));
+                                }
+                            } else if is_valid_js_identifier(p) {
+                                fields.push(p.to_string());
+                            }
+                        }
+                        if !fields.is_empty() {
+                            body_lines.push(format!(
+                                "const {{ {} }} = require({:?});",
+                                fields.join(", "),
+                                resolved_id
+                            ));
+                        }
+                    } else {
+                        let def_name = clause.trim();
+                        if is_valid_js_identifier(def_name) {
+                            body_lines.push(format!(
+                                "const __imp_{} = require({:?}); const {} = (__imp_{} && __imp_{}.__esModule && __imp_{}.default !== undefined) ? __imp_{}.default : __imp_{};",
+                                def_name, resolved_id, def_name, def_name, def_name, def_name, def_name, def_name
+                            ));
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+
+        if let Some(after_export) = trimmed.strip_prefix("export ") {
+            let after_export = after_export.trim();
+            if after_export.starts_with("type ") || after_export.starts_with("interface ") {
+                continue;
+            }
+            if let Some(after_star) = after_export.strip_prefix("* from ") {
+                if let Some((spec, _)) = extract_quoted_specifier(after_star) {
+                    let resolved_id = resolve_spec_and_record(&spec, from_dir, deps_out);
+                    body_lines.push(format!(
+                        "Object.assign(exports, require({:?}));",
+                        resolved_id
+                    ));
+                    continue;
+                }
+            }
+            if after_export.starts_with('{') {
+                if let Some((brace_part, from_part)) = after_export.split_once(" from ") {
+                    if let Some((spec, _)) = extract_quoted_specifier(from_part) {
+                        let resolved_id = resolve_spec_and_record(&spec, from_dir, deps_out);
+                        let inner = brace_part
+                            .trim()
+                            .trim_start_matches('{')
+                            .trim_end_matches('}');
+                        body_lines.push(format!("const __reexp = require({:?});", resolved_id));
+                        for item in inner.split(',') {
+                            let item = item.trim();
+                            if item.is_empty() || item.starts_with("type ") {
+                                continue;
+                            }
+                            if let Some((orig, alias)) = item.split_once(" as ") {
+                                let orig = orig.trim();
+                                let alias = alias.trim();
+                                if is_valid_js_identifier(orig) {
+                                    let lhs = format_exports_lhs(alias);
+                                    body_lines.push(format!("{} = __reexp.{};", lhs, orig));
+                                }
+                            } else if is_valid_js_identifier(item) {
+                                body_lines.push(format!("exports.{} = __reexp.{};", item, item));
+                            }
+                        }
+                        continue;
+                    }
+                } else if let Some(end_b) = after_export.find('}') {
+                    let inner = &after_export[1..end_b];
+                    for item in inner.split(',') {
+                        let item = item.trim();
+                        if item.is_empty() || item.starts_with("type ") {
+                            continue;
+                        }
+                        if let Some((orig, alias)) = item.split_once(" as ") {
+                            let orig = orig.trim();
+                            let alias = alias.trim();
+                            if is_valid_js_identifier(orig) {
+                                deferred_exports.push((alias.to_string(), orig.to_string()));
+                            }
+                        } else if is_valid_js_identifier(item) {
+                            deferred_exports.push((item.to_string(), item.to_string()));
+                        }
+                    }
+                    continue;
+                }
+            }
+            if let Some(def_expr) = after_export.strip_prefix("default ") {
+                has_default_export = true;
+                body_lines.push(format!("const __slice_default = {}", def_expr));
+                continue;
+            }
+            for kw in ["const ", "let ", "var "] {
+                if let Some(decl_rest) = after_export.strip_prefix(kw) {
+                    if let Some(ident) = decl_rest
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+                        .next()
+                    {
+                        if is_valid_js_identifier(ident) {
+                            deferred_exports.push((ident.to_string(), ident.to_string()));
+                        }
+                    }
+                    body_lines.push(rewrite_cjs_requires_ast(after_export, from_dir, deps_out));
+                    break;
+                }
+            }
+            if after_export.starts_with("const ")
+                || after_export.starts_with("let ")
+                || after_export.starts_with("var ")
+            {
+                continue;
+            }
+            for kw in ["async function ", "function ", "class "] {
+                if let Some(decl_rest) = after_export.strip_prefix(kw) {
+                    if let Some(ident) = decl_rest
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '$')
+                        .next()
+                    {
+                        if is_valid_js_identifier(ident) {
+                            deferred_exports.push((ident.to_string(), ident.to_string()));
+                        }
+                    }
+                    body_lines.push(rewrite_cjs_requires_ast(after_export, from_dir, deps_out));
+                    break;
+                }
+            }
+            if after_export.starts_with("async function ")
+                || after_export.starts_with("function ")
+                || after_export.starts_with("class ")
+            {
+                continue;
+            }
+        }
+
+        body_lines.push(rewrite_cjs_requires_ast(raw_line, from_dir, deps_out));
+    }
+
+    let uses_crypto_obj = body_lines.iter().any(|l| {
+        !l.contains("require(\"node:crypto\")")
+            && (l.contains("crypto.")
+                || l.contains("createHash(")
+                || l.contains("createHmac(")
+                || l.contains("randomBytes(")
+                || l.contains("randomUUID(")
+                || l.contains("getRandomValues(")
+                || l.contains("timingSafeEqual("))
+    });
+    if !uses_crypto_obj {
+        body_lines.retain(|l| !l.contains("require(\"node:crypto\")"));
+    }
+
+    body_lines = apply_cjs_lazy_barrel_getters(body_lines);
+
+    if has_default_export || !deferred_exports.is_empty() {
+        body_lines.push("exports.__esModule = true;".to_string());
+    }
+    for (export_name, local_name) in &deferred_exports {
+        let lhs = format_exports_lhs(export_name);
+        body_lines.push(format!("{} = {};", lhs, local_name));
+    }
+    if has_default_export {
+        body_lines.push("exports.default = __slice_default;".to_string());
+        if deferred_exports.is_empty() {
+            body_lines.push(
+                "module.exports = __slice_default; if (typeof module.exports === 'object' && module.exports !== null || typeof module.exports === 'function') { module.exports.default = __slice_default; module.exports.__esModule = true; }"
+                    .to_string(),
+            );
+        }
+    }
+
+    body_lines.join("\n")
+}

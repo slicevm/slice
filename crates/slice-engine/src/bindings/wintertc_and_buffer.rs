@@ -166,43 +166,50 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
             let fatal = args.get(2).and_then(|v| v.as_boolean()).unwrap_or(false);
             let ignore_bom = args.get(3).and_then(|v| v.as_boolean()).unwrap_or(false);
 
-            let res = with_buffer_source_bytes(first, context, |bytes| -> Result<String, &'static str> {
-                if enc.eq_ignore_ascii_case("latin1") || enc.eq_ignore_ascii_case("iso-8859-1") {
-                    let mut s = String::with_capacity(bytes.len());
-                    for &b in bytes {
-                        s.push(b as char);
-                    }
-                    return Ok(s);
-                }
-                if enc.eq_ignore_ascii_case("ascii") || enc.eq_ignore_ascii_case("us-ascii") {
-                    let mut s = String::with_capacity(bytes.len());
-                    for &b in bytes {
-                        if b > 0x7F {
-                            if fatal {
-                                return Err("The encoded data was not valid for encoding ascii");
-                            }
-                            s.push('\u{FFFD}');
-                        } else {
+            let res = with_buffer_source_bytes(
+                first,
+                context,
+                |bytes| -> Result<String, &'static str> {
+                    if enc.eq_ignore_ascii_case("latin1") || enc.eq_ignore_ascii_case("iso-8859-1")
+                    {
+                        let mut s = String::with_capacity(bytes.len());
+                        for &b in bytes {
                             s.push(b as char);
                         }
+                        return Ok(s);
                     }
-                    return Ok(s);
-                }
+                    if enc.eq_ignore_ascii_case("ascii") || enc.eq_ignore_ascii_case("us-ascii") {
+                        let mut s = String::with_capacity(bytes.len());
+                        for &b in bytes {
+                            if b > 0x7F {
+                                if fatal {
+                                    return Err(
+                                        "The encoded data was not valid for encoding ascii",
+                                    );
+                                }
+                                s.push('\u{FFFD}');
+                            } else {
+                                s.push(b as char);
+                            }
+                        }
+                        return Ok(s);
+                    }
 
-                let slice = if !ignore_bom && bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-                    &bytes[3..]
-                } else {
-                    bytes
-                };
-                if fatal {
-                    match std::str::from_utf8(slice) {
-                        Ok(valid) => Ok(valid.to_string()),
-                        Err(_) => Err("The encoded data was not valid for encoding utf-8"),
+                    let slice = if !ignore_bom && bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                        &bytes[3..]
+                    } else {
+                        bytes
+                    };
+                    if fatal {
+                        match std::str::from_utf8(slice) {
+                            Ok(valid) => Ok(valid.to_string()),
+                            Err(_) => Err("The encoded data was not valid for encoding utf-8"),
+                        }
+                    } else {
+                        Ok(String::from_utf8_lossy(slice).into_owned())
                     }
-                } else {
-                    Ok(String::from_utf8_lossy(slice).into_owned())
-                }
-            })?;
+                },
+            )?;
 
             match res {
                 Ok(decoded) => Ok(BoaVal::from(js_string!(decoded))),

@@ -16,7 +16,6 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 
-
 #[test]
 fn test_wave_d_wasm_import_bundling_and_os_native_watch_test_runner() {
     let tmp_dir = env::temp_dir().join("slice_wave_d_wasm_bundle_and_watch");
@@ -170,8 +169,7 @@ fn test_wave_e_hono_and_itty_unjs_framework_suites() {
     assert!(fw3_dir.join("slice.toml").is_file());
     assert!(fw3_dir.join("src/index.ts").is_file());
 
-    let bundled3 =
-        slice_cas::bundle_entrypoint_with_deps(&fw3_dir.join("src/index.ts")).unwrap();
+    let bundled3 = slice_cas::bundle_entrypoint_with_deps(&fw3_dir.join("src/index.ts")).unwrap();
     let bc3 = compile_source_to_bytecode(&bundled3);
     let mut iso3 = SliceIsolate::spawn(
         "wave-e-node-http-express",
@@ -371,15 +369,15 @@ console.log("hi");
     slice_engine::set_thread_exper_boacas_override(None);
     slice_engine::set_tier_override(None);
     slice_engine::set_thread_tier_override(None);
-    let bc_default =
-        compile_source_to_bytecode("class App { run() { return 1 + 2; } } console.log(new App().run());\n");
+    let bc_default = compile_source_to_bytecode(
+        "class App { run() { return 1 + 2; } } console.log(new App().run());\n",
+    );
     assert!(bc_default.starts_with(slice_engine::BOACAS_MAGIC));
     let bc_no_boacas = compile_source_to_bytecode(
         "// @slice-boacas: false\nclass App { run() { return 1 + 2; } } console.log(new App().run());\n",
     );
     assert!(bc_no_boacas.starts_with(b"SLICEBOA"));
-    let bc_tier1_forced =
-        compile_source_to_bytecode("// @slice-tier: 1\nconsole.log(1 + 2);\n");
+    let bc_tier1_forced = compile_source_to_bytecode("// @slice-tier: 1\nconsole.log(1 + 2);\n");
     assert!(bc_tier1_forced.starts_with(slice_engine::BOACAS_MAGIC));
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -488,7 +486,9 @@ fs.readFileSync("/etc/passwd", "utf8");
         500_000,
         16 * 1024 * 1024,
     );
-    let m = iso.execute_bytecode(&bc, None).expect("Parent isolate succeeds");
+    let m = iso
+        .execute_bytecode(&bc, None)
+        .expect("Parent isolate succeeds");
     assert_eq!(m.stdout, vec!["ok:false|violation:true"]);
 }
 
@@ -512,14 +512,26 @@ tls_key = "./certs/server.key"
     let mut cfg = ResolvedExecutionConfig::from_cli_args(&[]).unwrap();
     cfg.apply_manifest_toml(toml_raw, Some(Path::new("/app")));
     assert_eq!(cfg.server_port, Some(8443));
-    assert_eq!(cfg.tls_cert, Some(Path::new("/app").join("./certs/server.crt")));
-    assert_eq!(cfg.tls_key, Some(Path::new("/app").join("./certs/server.key")));
+    assert_eq!(
+        cfg.tls_cert,
+        Some(Path::new("/app").join("./certs/server.crt"))
+    );
+    assert_eq!(
+        cfg.tls_key,
+        Some(Path::new("/app").join("./certs/server.key"))
+    );
 
     // 2. Verify untrusted inline directives CANNOT override tls-cert / tls-key
     let untrusted_src = "// @slice-tls-cert: /etc/evil.crt\n// @slice-tls-key: /etc/evil.key\n";
     cfg.apply_inline_directives(untrusted_src, None);
-    assert_eq!(cfg.tls_cert, Some(Path::new("/app").join("./certs/server.crt")));
-    assert_eq!(cfg.tls_key, Some(Path::new("/app").join("./certs/server.key")));
+    assert_eq!(
+        cfg.tls_cert,
+        Some(Path::new("/app").join("./certs/server.crt"))
+    );
+    assert_eq!(
+        cfg.tls_key,
+        Some(Path::new("/app").join("./certs/server.key"))
+    );
 
     // 3. Verify trusted inline directives CAN set tls-cert / tls-key when not overridden by CLI
     let mut cfg_trusted =
@@ -567,7 +579,8 @@ tls_key = "./certs/server.key"
     };
     let outcome = iso.execute_http_request(&bc, None, &req_ctx).unwrap();
     assert_eq!(outcome.status_code, 200);
-    assert!(outcome.response_body.contains(r#""servedBy":"Slice.serve""#));
+    assert!(outcome
+        .response_body
+        .contains(r#""servedBy":"Slice.serve""#));
     assert!(outcome.response_body.contains("/hello-serve?x=1"));
 }
-

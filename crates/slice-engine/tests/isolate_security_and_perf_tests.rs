@@ -14,8 +14,10 @@ fn test_iso_sec01_wait_until_fuel_memory_dlp_and_ses_lockdown() {
             while (true) {}
         });
     "#;
-    let bc_fuel =
-        compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(script_fuel, true));
+    let bc_fuel = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        script_fuel,
+        true,
+    ));
     let mut iso_fuel = SliceIsolate::spawn(
         "iso-sec01-fuel",
         1,
@@ -63,9 +65,9 @@ fn test_iso_sec01_wait_until_fuel_memory_dlp_and_ses_lockdown() {
     let _ = iso_mem
         .execute_http_request(&bc_mem, None, &req)
         .expect("initial HTTP response should succeed");
-    let err_mem = iso_mem
-        .drain_wait_until_tasks()
-        .expect_err("oversized KV write inside Slice.waitUntil must trap with MemoryCeilingExceeded");
+    let err_mem = iso_mem.drain_wait_until_tasks().expect_err(
+        "oversized KV write inside Slice.waitUntil must trap with MemoryCeilingExceeded",
+    );
     assert!(
         matches!(err_mem, SandboxViolation::MemoryCeilingExceeded { .. }),
         "expected MemoryCeilingExceeded, got: {:?}",
@@ -117,8 +119,10 @@ fn test_iso_sec02_websocket_event_fs_ocap_fuel_and_dlp_enforcement() {
             }
         });
     "#;
-    let bc_fs =
-        compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(setup_ws_fs, true));
+    let bc_fs = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        setup_ws_fs,
+        true,
+    ));
     let caps_fs = CapabilityToken::pure_compute().with_read_prefix("/public");
     let mut iso_fs = SliceIsolate::spawn("iso-sec02-ws-fs", 1, caps_fs, 500_000, 8 * 1024 * 1024);
     iso_fs
@@ -141,8 +145,10 @@ fn test_iso_sec02_websocket_event_fs_ocap_fuel_and_dlp_enforcement() {
             }
         });
     "#;
-    let bc_fuel =
-        compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(setup_ws_fuel, true));
+    let bc_fuel = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        setup_ws_fuel,
+        true,
+    ));
     let mut iso_fuel = SliceIsolate::spawn(
         "iso-sec02-ws-fuel",
         1,
@@ -172,15 +178,12 @@ fn test_iso_sec03_asymmetric_fs_read_only_and_write_only_ocap_enforcement() {
         import fs from "node:fs";
         fs.writeFileSync("/tmp/readonly_violation.txt", "should_be_blocked");
     "#;
-    let bc_write =
-        compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(write_script, true));
-    let mut iso_ro = SliceIsolate::spawn(
-        "iso-sec03-ro",
-        1,
-        read_only_caps,
-        500_000,
-        8 * 1024 * 1024,
-    );
+    let bc_write = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        write_script,
+        true,
+    ));
+    let mut iso_ro =
+        SliceIsolate::spawn("iso-sec03-ro", 1, read_only_caps, 500_000, 8 * 1024 * 1024);
     let err_ro = iso_ro
         .execute_bytecode(&bc_write, None)
         .expect_err("read-only compartment must reject fs.writeFileSync");
@@ -197,15 +200,12 @@ fn test_iso_sec03_asymmetric_fs_read_only_and_write_only_ocap_enforcement() {
         import fs from "node:fs";
         fs.readFileSync("/tmp/writeonly_violation.txt", "utf8");
     "#;
-    let bc_read =
-        compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(read_script, true));
-    let mut iso_wo = SliceIsolate::spawn(
-        "iso-sec03-wo",
-        1,
-        write_only_caps,
-        500_000,
-        8 * 1024 * 1024,
-    );
+    let bc_read = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        read_script,
+        true,
+    ));
+    let mut iso_wo =
+        SliceIsolate::spawn("iso-sec03-wo", 1, write_only_caps, 500_000, 8 * 1024 * 1024);
     let err_wo = iso_wo
         .execute_bytecode(&bc_read, None)
         .expect_err("write-only compartment must reject fs.readFileSync");
@@ -248,13 +248,7 @@ fn test_iso_sec04_eval_sandbox_parent_fuel_memory_and_env_attenuation() {
     let parent_caps = CapabilityToken::pure_compute()
         .with_env("PUBLIC_STAGE", "production")
         .with_env("DB_ROOT_PASSWORD", "top_secret_pw");
-    let mut parent_iso = SliceIsolate::spawn(
-        "iso-sec04-env",
-        1,
-        parent_caps,
-        500_000,
-        64 * 1024,
-    );
+    let mut parent_iso = SliceIsolate::spawn("iso-sec04-env", 1, parent_caps, 500_000, 64 * 1024);
     let mem_before = parent_iso.compartment.memory_used_bytes;
 
     // Grant only PUBLIC_STAGE to child sandbox; DB_ROOT_PASSWORD and NON_EXISTENT must be denied
@@ -269,7 +263,11 @@ fn test_iso_sec04_eval_sandbox_parent_fuel_memory_and_env_attenuation() {
             ..Default::default()
         },
     );
-    assert!(outcome_allowed.ok, "allowed env read failed: {:?}", outcome_allowed.violation);
+    assert!(
+        outcome_allowed.ok,
+        "allowed env read failed: {:?}",
+        outcome_allowed.violation
+    );
     assert_eq!(outcome_allowed.stdout, vec!["production"]);
     assert!(
         parent_iso.compartment.memory_used_bytes >= mem_before + 4096,
@@ -301,7 +299,11 @@ fn test_iso_sec05_tier0_ast_sparse_array_memory_bomb_and_recursion_guard() {
         console.log(a.length);
     "#;
     let bc_sparse = compile_source_to_bytecode(sparse_script);
-    assert_eq!(&bc_sparse[0..8], crate::SNAPSHOT_MAGIC, "must compile to Tier-0 SLICESNP");
+    assert_eq!(
+        &bc_sparse[0..8],
+        crate::SNAPSHOT_MAGIC,
+        "must compile to Tier-0 SLICESNP"
+    );
     let mut iso_sparse = SliceIsolate::spawn(
         "iso-sec05-sparse",
         1,
@@ -336,9 +338,9 @@ fn test_iso_sec05_tier0_ast_sparse_array_memory_bomb_and_recursion_guard() {
         500_000,
         32 * 1024, // 32 KB ceiling
     );
-    let err_str = iso_str
-        .execute_bytecode(&bc_str, None)
-        .expect_err("exponential string doubling in Tier-0 AST VM must trap with MemoryCeilingExceeded");
+    let err_str = iso_str.execute_bytecode(&bc_str, None).expect_err(
+        "exponential string doubling in Tier-0 AST VM must trap with MemoryCeilingExceeded",
+    );
     assert!(
         matches!(err_str, SandboxViolation::MemoryCeilingExceeded { .. }),
         "expected MemoryCeilingExceeded, got: {:?}",
@@ -428,7 +430,10 @@ fn test_iso_perf01_02_03_reset_for_request_http_dlp_and_warm_isolate_throughput(
             .execute_http_request(&bc, None, &req)
             .expect("warm HTTP request with DLP should succeed");
         assert_eq!(out.status_code, 200);
-        assert_eq!(out.metrics.highest_tier_reached, ExecutionTier::Tier1Baseline);
+        assert_eq!(
+            out.metrics.highest_tier_reached,
+            ExecutionTier::Tier1Baseline
+        );
     }
     let http_us_per_op = (start_http.elapsed().as_nanos() as f64 / 1_000.0) / (iters as f64);
     println!(

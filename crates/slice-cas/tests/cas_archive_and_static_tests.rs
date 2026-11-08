@@ -112,7 +112,11 @@ fn test_audit_neo_phase4_zero_copy_static_mmap_and_resolver_cache() {
     let _ = std::fs::remove_dir_all(&temp_dir);
     let static_dir = temp_dir.join("public");
     std::fs::create_dir_all(&static_dir).unwrap();
-    std::fs::write(static_dir.join("index.html"), "<h1>Zero-Copy CAS Asset</h1>").unwrap();
+    std::fs::write(
+        static_dir.join("index.html"),
+        "<h1>Zero-Copy CAS Asset</h1>",
+    )
+    .unwrap();
 
     let cas_path = temp_dir.join("static_test.cas");
     let mut builder = CasBuilder::new("./index.js");
@@ -136,4 +140,3 @@ fn test_audit_neo_phase4_zero_copy_static_mmap_and_resolver_cache() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
-

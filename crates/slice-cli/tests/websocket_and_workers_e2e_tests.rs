@@ -16,7 +16,6 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 
-
 #[test]
 fn test_wave_b_http_server_security_hardening_and_websocket_upgrade_roundtrip() {
     use std::io::{Read, Write};
@@ -753,4 +752,3 @@ module.exports = fn;"#,
     let _ = tcp_srv.join();
     let _ = udp_srv.join();
 }
-

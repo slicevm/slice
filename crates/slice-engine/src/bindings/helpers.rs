@@ -207,10 +207,7 @@ pub(crate) fn consume_crypto_kdf_fuel(cost: u64) -> Result<(), String> {
         let tenant_id = active_tenant_id_or_default();
         BOA_VIOLATION.with(|v| {
             if v.borrow().is_none() {
-                *v.borrow_mut() = Some(SandboxViolation::CpuFuelExhausted {
-                    tenant_id,
-                    limit,
-                });
+                *v.borrow_mut() = Some(SandboxViolation::CpuFuelExhausted { tenant_id, limit });
             }
         });
         return Err(format!(

@@ -9,7 +9,6 @@ use crate::{
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
-
 #[test]
 fn test_web_primitives_rust_url_search_params_and_sub_shards_compat() {
     use crate::web_primitives::{

@@ -16,7 +16,6 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 
-
 #[test]
 fn test_cli_security_checks_and_rss_telemetry() {
     let blocked = run_security_containment_checks().unwrap();
@@ -600,4 +599,3 @@ describe("Ledger Time-Travel Suite", () => {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
-

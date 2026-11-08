@@ -444,13 +444,7 @@ impl<'a> InflateBitReader<'a> {
 pub(crate) fn inflate_raw_decompress(input: &[u8]) -> Result<Vec<u8>, &'static str> {
     let effective_max = effective_compression_mem_budget();
     let mut br = InflateBitReader::new(input);
-    let mut out = Vec::with_capacity(
-        input
-            .len()
-            .saturating_mul(2)
-            .min(65536)
-            .min(effective_max),
-    );
+    let mut out = Vec::with_capacity(input.len().saturating_mul(2).min(65536).min(effective_max));
 
     loop {
         let bfinal = br.read_bits(1)?;

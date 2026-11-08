@@ -159,9 +159,15 @@ static_dir = "./public"
         m.capabilities.allowed_write_prefixes,
         vec!["/tmp".to_string()]
     );
-    assert!(m.capabilities.allowed_net_hosts.contains("api.example.com:443"));
+    assert!(m
+        .capabilities
+        .allowed_net_hosts
+        .contains("api.example.com:443"));
     assert_eq!(
-        m.capabilities.allowed_env_keys.get("NODE_ENV").map(|s| s.as_str()),
+        m.capabilities
+            .allowed_env_keys
+            .get("NODE_ENV")
+            .map(|s| s.as_str()),
         Some("production")
     );
     assert_eq!(m.env_file.as_deref(), Some(".env.prod"));
@@ -193,12 +199,17 @@ const x = 1 + 2;
     assert_eq!(dirs.deterministic_seed, Some(1337));
     assert_eq!(dirs.fuel_limit, Some(10_000_000));
     assert_eq!(dirs.memory_limit_bytes, Some(8192 * 1024));
-    assert_eq!(dirs.allow_read, vec!["/tmp".to_string(), "./fixtures".to_string()]);
+    assert_eq!(
+        dirs.allow_read,
+        vec!["/tmp".to_string(), "./fixtures".to_string()]
+    );
     assert_eq!(dirs.allow_write, vec!["/tmp".to_string()]);
     assert_eq!(dirs.allow_net, vec!["127.0.0.1:3000".to_string()]);
-    assert_eq!(dirs.allow_env, vec![("API_MODE".to_string(), "test".to_string())]);
+    assert_eq!(
+        dirs.allow_env,
+        vec![("API_MODE".to_string(), "test".to_string())]
+    );
     assert_eq!(dirs.audit_egress, vec!["top_secret_token".to_string()]);
     assert_eq!(dirs.port, Some(9090));
     assert_eq!(dirs.workers, Some(2));
 }
-

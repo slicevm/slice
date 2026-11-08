@@ -9,7 +9,6 @@ use crate::{
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
-
 #[test]
 fn test_wave_d_wasm_compile_instantiate_memory_globals_and_host_imports() {
     let script = r#"
@@ -719,4 +718,3 @@ runWaveJ().catch((e) => console.log(JSON.stringify({ __err: String(e && e.stack 
     assert_eq!(out["urlPattern"]["p3AlphaReject"], true);
     assert_eq!(out["urlPattern"]["p3HasRegExp"], true);
 }
-
