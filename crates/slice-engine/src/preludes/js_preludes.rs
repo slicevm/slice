@@ -36,8 +36,7 @@ pub const WASM_PRELUDE_SRC: &str = include_str!("09_wasm.js");
 /// Human-readable source for Shard 10: `OUTBOUND_FETCH_SSE_PRELUDE` (`src/preludes/10_outbound_fetch_sse.js`).
 pub const OUTBOUND_FETCH_SSE_PRELUDE_SRC: &str = include_str!("10_outbound_fetch_sse.js");
 /// Human-readable source for Shard 11: `FETCH_HEADERS_REQ_RES_PRELUDE` (`src/preludes/11_fetch_headers_req_res.js`).
-pub const FETCH_HEADERS_REQ_RES_PRELUDE_SRC: &str =
-    include_str!("11_fetch_headers_req_res.js");
+pub const FETCH_HEADERS_REQ_RES_PRELUDE_SRC: &str = include_str!("11_fetch_headers_req_res.js");
 /// Human-readable source for Shard 12: `URL_PATTERN_PRELUDE` (`src/preludes/12_url_pattern.js`).
 pub const URL_PATTERN_PRELUDE_SRC: &str = include_str!("12_url_pattern.js");
 /// Human-readable source for Shard 13: `DOM_EVENTS_PRELUDE` (`src/preludes/13_dom_events.js`).
@@ -247,9 +246,11 @@ pub(crate) fn compile_static_js_to_slicebc(bytes: &[u8]) -> Vec<u8> {
             .expect("slicebc-static-compiler thread panicked");
     }
     let mut compiler_ctx = boa_engine::Context::default();
-    if let Ok(script) =
-        boa_engine::Script::parse(boa_engine::Source::from_bytes(bytes), None, &mut compiler_ctx)
-    {
+    if let Ok(script) = boa_engine::Script::parse(
+        boa_engine::Source::from_bytes(bytes),
+        None,
+        &mut compiler_ctx,
+    ) {
         script
             .compile_to_slicebc(&mut compiler_ctx)
             .unwrap_or_default()
@@ -380,15 +381,24 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ("new Headers(", ShardTriggerAction::Mask(1 << 11)),
     ("Headers.", ShardTriggerAction::Mask(1 << 11)),
     ("Request.", ShardTriggerAction::Mask(1 << 11)),
-    ("__slice_dispatch_fetch", ShardTriggerAction::BuiltinMask(1 << 11)),
+    (
+        "__slice_dispatch_fetch",
+        ShardTriggerAction::BuiltinMask(1 << 11),
+    ),
     // URL & URLSearchParams (`1 << 1` & builtin `1 << 27`)
     ("new URL(", ShardTriggerAction::Mask(1 << 1)),
     ("URL.", ShardTriggerAction::Mask(1 << 1)),
     ("new URLSearchParams(", ShardTriggerAction::Mask(1 << 1)),
     ("URLSearchParams.", ShardTriggerAction::Mask(1 << 1)),
     ("node:url", ShardTriggerAction::Mask((1 << 1) | (1 << 27))),
-    ("\"url\"", ShardTriggerAction::BuiltinMask((1 << 1) | (1 << 27))),
-    ("'url'", ShardTriggerAction::BuiltinMask((1 << 1) | (1 << 27))),
+    (
+        "\"url\"",
+        ShardTriggerAction::BuiltinMask((1 << 1) | (1 << 27)),
+    ),
+    (
+        "'url'",
+        ShardTriggerAction::BuiltinMask((1 << 1) | (1 << 27)),
+    ),
     ("createObjectURL", ShardTriggerAction::Mask(1 << 1)),
     ("canParse", ShardTriggerAction::Mask(1 << 1)),
     // URLPattern (`1 << 12`)
@@ -466,9 +476,18 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ("Buffer.concat", ShardTriggerAction::Mask(1 << 5)),
     ("Buffer.compare", ShardTriggerAction::Mask(1 << 5)),
     ("new Buffer(", ShardTriggerAction::Mask(1 << 5)),
-    ("node:buffer", ShardTriggerAction::Mask((1 << 5) | (1 << 26))),
-    ("\"buffer\"", ShardTriggerAction::BuiltinMask((1 << 5) | (1 << 26))),
-    ("'buffer'", ShardTriggerAction::BuiltinMask((1 << 5) | (1 << 26))),
+    (
+        "node:buffer",
+        ShardTriggerAction::Mask((1 << 5) | (1 << 26)),
+    ),
+    (
+        "\"buffer\"",
+        ShardTriggerAction::BuiltinMask((1 << 5) | (1 << 26)),
+    ),
+    (
+        "'buffer'",
+        ShardTriggerAction::BuiltinMask((1 << 5) | (1 << 26)),
+    ),
     ("instanceof Buffer", ShardTriggerAction::Mask(1 << 5)),
     ("randomBytes", ShardTriggerAction::Mask(1 << 5)),
     ("pbkdf2", ShardTriggerAction::Mask(1 << 5)),
@@ -498,18 +517,12 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ("console.assert", ShardTriggerAction::Mask(1 << 6)),
     ("console.clear", ShardTriggerAction::Mask(1 << 6)),
     // WebSocket (`(1 << 7) | (1 << 13)`)
-    (
-        "WebSocket",
-        ShardTriggerAction::Mask((1 << 7) | (1 << 13)),
-    ),
+    ("WebSocket", ShardTriggerAction::Mask((1 << 7) | (1 << 13))),
     (
         "MessageEvent",
         ShardTriggerAction::Mask((1 << 7) | (1 << 13)),
     ),
-    (
-        "CloseEvent",
-        ShardTriggerAction::Mask((1 << 7) | (1 << 13)),
-    ),
+    ("CloseEvent", ShardTriggerAction::Mask((1 << 7) | (1 << 13))),
     (
         "mockWebSocket",
         ShardTriggerAction::Mask((1 << 7) | (1 << 13)),
@@ -598,7 +611,10 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ("process.emit", ShardTriggerAction::Mask(1 << 18)),
     ("process.listeners", ShardTriggerAction::Mask(1 << 18)),
     ("process.removeListener", ShardTriggerAction::Mask(1 << 18)),
-    ("process.removeAllListeners", ShardTriggerAction::Mask(1 << 18)),
+    (
+        "process.removeAllListeners",
+        ShardTriggerAction::Mask(1 << 18),
+    ),
     ("node:process", ShardTriggerAction::Mask(1 << 18)),
     // Pre-fused `node:*` builtin module triggers (`19..=28`)
     ("node:crypto", ShardTriggerAction::BuiltinMask(1 << 19)),

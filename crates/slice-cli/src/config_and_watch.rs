@@ -1006,8 +1006,8 @@ pub(crate) fn build_cas_archive_with_static(
     entrypoint: &str,
     static_dir_opt: Option<&Path>,
 ) -> Result<slice_cas::CasIndexHeader> {
-    let manifest_toml_opt = find_project_manifest_path(input_path)
-        .and_then(|mf| std::fs::read_to_string(&mf).ok());
+    let manifest_toml_opt =
+        find_project_manifest_path(input_path).and_then(|mf| std::fs::read_to_string(&mf).ok());
     if let Some(ref raw_toml) = manifest_toml_opt {
         let m = SliceManifest::parse_toml(raw_toml);
         if let Some(b) = m.exper_boacas {

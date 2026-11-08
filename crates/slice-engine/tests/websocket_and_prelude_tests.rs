@@ -9,7 +9,6 @@ use crate::{
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
-
 #[test]
 fn test_wave_b_network_security_hardening_and_rfc6455_websocket_engine() {
     use std::io::{Read, Write};
@@ -707,4 +706,3 @@ console.log(JSON.stringify({
         r#"{"wasLazyGetter":true,"isFunc":true,"openConst":1,"replacedWithValue":true}"#
     );
 }
-

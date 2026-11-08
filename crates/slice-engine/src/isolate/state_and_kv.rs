@@ -177,7 +177,10 @@ pub(crate) fn current_epoch_ms() -> u64 {
 }
 
 #[inline]
-pub(crate) fn edge_kv_shard(tenant_id: &str, key: &str) -> &'static parking_lot::RwLock<KvShardMap> {
+pub(crate) fn edge_kv_shard(
+    tenant_id: &str,
+    key: &str,
+) -> &'static parking_lot::RwLock<KvShardMap> {
     let shards = EDGE_KV_SLAB
         .get_or_init(|| std::array::from_fn(|_| parking_lot::RwLock::new(FxHashMap::default())));
     use std::hash::{Hash, Hasher};
@@ -192,7 +195,10 @@ pub(crate) fn edge_kv_get(tenant_id: &str, key: &str) -> Option<String> {
     {
         let guard = shard.read();
         let entry = guard.get(tenant_id).and_then(|m| m.get(key))?;
-        if entry.expires_at_ms.is_none_or(|exp| current_epoch_ms() < exp) {
+        if entry
+            .expires_at_ms
+            .is_none_or(|exp| current_epoch_ms() < exp)
+        {
             return Some(entry.val.to_std_string());
         }
     }

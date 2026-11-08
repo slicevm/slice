@@ -183,4 +183,3 @@ console.log(identity(htmlTemplate));
         out
     );
 }
-

@@ -36,4 +36,3 @@ fn test_submission_bounds_and_pinned_safety() {
     assert!(engine.submit_and_reap(&bad_len_op).is_err());
     assert_eq!(engine.buffer_pool.get_slice(999, 16), &[]);
 }
-

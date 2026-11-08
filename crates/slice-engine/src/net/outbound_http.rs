@@ -758,11 +758,8 @@ fn send_and_read_framed_http11(
                 MAX_OUTBOUND_HEADER_BYTES,
             ));
         }
-        let n = slab_guard.read_chunk_via_slab(
-            stream,
-            &mut raw_resp,
-            slice_io::FIXED_BUFFER_SIZE,
-        )?;
+        let n =
+            slab_guard.read_chunk_via_slab(stream, &mut raw_resp, slice_io::FIXED_BUFFER_SIZE)?;
         if n == 0 {
             if raw_resp.is_empty() {
                 return Err(std::io::Error::new(
@@ -1012,7 +1009,11 @@ struct WireFetchResponse {
 
 fn is_host_bypassed_by_no_proxy(hostname: &str, no_proxy_raw: &str) -> bool {
     let host_lower = hostname.to_ascii_lowercase();
-    for item in no_proxy_raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+    for item in no_proxy_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         if item == "*" {
             return true;
         }
@@ -1054,7 +1055,9 @@ fn resolve_active_proxy_url(is_https: bool, target_hostname: &str) -> Option<Str
         } else {
             map.get("HTTP_PROXY").or_else(|| map.get("http_proxy"))
         };
-        proxy_val.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        proxy_val
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     })
 }
 
@@ -1087,29 +1090,28 @@ pub(crate) fn execute_outbound_fetch_with_redirects(
             &headers_json,
             &current_body,
         )?;
-        let (dial_parts, verified_addrs) = if let Some(proxy_url) =
-            resolve_active_proxy_url(parts.is_https, &parts.hostname)
-        {
-            let mut p_parts = parse_outbound_http_url(&proxy_url)
-                .ok_or_else(|| format!("Invalid proxy URL: {}", proxy_url))?;
-            let proxy_grant = check_boa_outbound_fetch_ocap_and_dlp(
-                &p_parts,
-                &proxy_url,
-                &headers_json,
-                &current_body,
-            )?;
-            let proxy_addrs = resolve_and_verify_ssrf_socket_addrs(&p_parts, proxy_grant)?;
-            p_parts.host_header = parts.host_header.clone();
-            p_parts.path_and_query = if !parts.is_https {
-                current_url.clone()
+        let (dial_parts, verified_addrs) =
+            if let Some(proxy_url) = resolve_active_proxy_url(parts.is_https, &parts.hostname) {
+                let mut p_parts = parse_outbound_http_url(&proxy_url)
+                    .ok_or_else(|| format!("Invalid proxy URL: {}", proxy_url))?;
+                let proxy_grant = check_boa_outbound_fetch_ocap_and_dlp(
+                    &p_parts,
+                    &proxy_url,
+                    &headers_json,
+                    &current_body,
+                )?;
+                let proxy_addrs = resolve_and_verify_ssrf_socket_addrs(&p_parts, proxy_grant)?;
+                p_parts.host_header = parts.host_header.clone();
+                p_parts.path_and_query = if !parts.is_https {
+                    current_url.clone()
+                } else {
+                    parts.path_and_query.clone()
+                };
+                (p_parts, proxy_addrs)
             } else {
-                parts.path_and_query.clone()
+                let addrs = resolve_and_verify_ssrf_socket_addrs(&parts, explicit_host_grant)?;
+                (parts.clone(), addrs)
             };
-            (p_parts, proxy_addrs)
-        } else {
-            let addrs = resolve_and_verify_ssrf_socket_addrs(&parts, explicit_host_grant)?;
-            (parts.clone(), addrs)
-        };
 
         let resp = execute_single_http11_hop(
             &dial_parts,

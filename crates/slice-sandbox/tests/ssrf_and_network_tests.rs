@@ -190,4 +190,3 @@ fn test_nsec8_noncanonical_ip_and_special_cidr_ssrf_blocking() {
         );
     }
 }
-

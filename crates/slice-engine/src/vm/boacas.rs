@@ -127,7 +127,8 @@ pub fn is_exper_boacas_build_enabled() -> bool {
         2 => return false,
         _ => {}
     }
-    if let Ok(val) = std::env::var("SLICE_BOACAS").or_else(|_| std::env::var("SLICE_EXPER_BOACAS")) {
+    if let Ok(val) = std::env::var("SLICE_BOACAS").or_else(|_| std::env::var("SLICE_EXPER_BOACAS"))
+    {
         if let Some(b) = slice_sandbox::parse_bool_setting(&val) {
             return b;
         }
@@ -151,7 +152,8 @@ pub fn is_exper_boacas_runtime_enabled() -> bool {
         2 => return false,
         _ => {}
     }
-    if let Ok(val) = std::env::var("SLICE_BOACAS").or_else(|_| std::env::var("SLICE_EXPER_BOACAS")) {
+    if let Ok(val) = std::env::var("SLICE_BOACAS").or_else(|_| std::env::var("SLICE_EXPER_BOACAS"))
+    {
         if let Some(b) = slice_sandbox::parse_bool_setting(&val) {
             return b;
         }
@@ -551,10 +553,7 @@ mod tests {
             8 * 1024 * 1024,
         );
         let m_cold = iso_cold.execute_bytecode(&bc, None).unwrap();
-        assert_eq!(
-            m_cold.stdout,
-            vec!["18014398509481986|αβγδ-λ-Ω|8|15,-1,17"]
-        );
+        assert_eq!(m_cold.stdout, vec!["18014398509481986|αβγδ-λ-Ω|8|15,-1,17"]);
 
         // 2. Corrupt the inner SLCB\x01 magic inside precompiled_slice and verify graceful fallback to fallback_js
         let mut corrupted_bc = bc.clone();
@@ -627,9 +626,17 @@ mod tests {
 
         let bc = compile_source_to_bytecode(&bundled);
         let (hdr, _, _) = BoaCasHeader::decode(&bc).expect("Valid SLICEBCv1 header");
-        assert_ne!(hdr.shards_mask & (1 << 19), 0, "Expected node:crypto bit 19");
+        assert_ne!(
+            hdr.shards_mask & (1 << 19),
+            0,
+            "Expected node:crypto bit 19"
+        );
         assert_ne!(hdr.shards_mask & (1 << 21), 0, "Expected node:path bit 21");
-        assert_ne!(hdr.shards_mask & (1 << 25), 0, "Expected node:assert bit 25");
+        assert_ne!(
+            hdr.shards_mask & (1 << 25),
+            0,
+            "Expected node:assert bit 25"
+        );
         assert_ne!(hdr.feature_flags & BOACAS_FLAG_IS_RC_BUNDLE, 0);
 
         crate::boa_realm::BOA_CONTEXT_POOL.with(|pool| pool.borrow_mut().clear());

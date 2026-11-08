@@ -294,8 +294,7 @@ console.log(answer);
     )
     .unwrap();
 
-    let bundled =
-        bundle_entrypoint_with_deps(&entry_path).expect("bundle_entrypoint_with_deps");
+    let bundled = bundle_entrypoint_with_deps(&entry_path).expect("bundle_entrypoint_with_deps");
     assert!(
         bundled.contains("__slice_modules = [];"),
         "Wave H bundle must initialize dense JS Array __slice_modules = []:\n{}",
@@ -448,4 +447,3 @@ console.log(APP_TITLE, INTERNAL_TAG, metaUrl, metaDir, cjsDir, dynMod.lazyBanner
         mapped
     );
 }
-

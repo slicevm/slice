@@ -925,9 +925,9 @@ impl Md5State {
     #[inline]
     fn compress_block(s: &mut [u32; 4], chunk: &[u8]) {
         const S_SHIFT: [u32; 64] = [
-            7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14,
-            20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11,
-            16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+            7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20,
+            5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+            6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
         ];
         const K_TAB: [u32; 64] = [
             0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
@@ -944,7 +944,8 @@ impl Md5State {
         let mut m = [0u32; 16];
         for (i, item) in m.iter_mut().enumerate() {
             let off = i * 4;
-            *item = u32::from_le_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
+            *item =
+                u32::from_le_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
         }
         let (mut a, mut b, mut c, mut d) = (s[0], s[1], s[2], s[3]);
         for i in 0..64 {

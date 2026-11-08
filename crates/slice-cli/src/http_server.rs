@@ -386,7 +386,9 @@ pub(crate) fn load_tls_server_config(
     cert_path: &Path,
     key_path: &Path,
 ) -> Result<std::sync::Arc<rustls::ServerConfig>> {
-    use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer};
+    use rustls_pki_types::{
+        CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
+    };
 
     let cert_raw = std::fs::read(cert_path)
         .with_context(|| format!("Failed to read TLS certificate '{}'", cert_path.display()))?;
@@ -408,7 +410,8 @@ pub(crate) fn load_tls_server_config(
     }
 
     let key_blocks = decode_pem_blocks(&key_raw);
-    let priv_key: PrivateKeyDer<'static> = if let Some((label, der)) = key_blocks.into_iter().next() {
+    let priv_key: PrivateKeyDer<'static> = if let Some((label, der)) = key_blocks.into_iter().next()
+    {
         if label.contains("RSA PRIVATE KEY") {
             PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(der))
         } else if label.contains("EC PRIVATE KEY") {

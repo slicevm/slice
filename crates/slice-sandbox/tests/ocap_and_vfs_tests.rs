@@ -100,4 +100,3 @@ fn test_canonical_vfs_resolver_lexical_normalization_and_boundary_guards() {
         assert!(vfs_prefix_matches("Cargo.toml", &cwd.to_string_lossy()));
     }
 }
-

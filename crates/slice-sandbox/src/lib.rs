@@ -817,10 +817,7 @@ pub fn exec_binary_matches(requested: &str, allowed: &str) -> bool {
         let replaced = s.replace('\\', "/");
         let trimmed = replaced.trim_end_matches('/');
         let lower = trimmed.to_ascii_lowercase();
-        lower
-            .strip_suffix(".exe")
-            .unwrap_or(&lower)
-            .to_string()
+        lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
     };
     let req_norm = norm_bin(req);
     let allow_norm = norm_bin(allow);
@@ -1228,9 +1225,7 @@ impl SliceManifest {
                             .allowed_env_keys
                             .insert(key.to_string(), env_val);
                     }
-                    ("engine", "boacas")
-                    | ("runtime", "boacas")
-                    | ("experiments", "boacas") => {
+                    ("engine", "boacas") | ("runtime", "boacas") | ("experiments", "boacas") => {
                         if let Some(b) = parse_bool_setting(val) {
                             manifest.exper_boacas = Some(b);
                         }

@@ -22,8 +22,7 @@ impl SliceIsolate {
 
         // Zero-copy fast path for SLICEBC\x01 precompiled Boa containers and SLICEBOA raw ECMAScript bundles
         if bytecode.len() >= 8
-            && (&bytecode[0..8] == b"SLICEBOA"
-                || &bytecode[0..8] == crate::boacas::BOACAS_MAGIC)
+            && (&bytecode[0..8] == b"SLICEBOA" || &bytecode[0..8] == crate::boacas::BOACAS_MAGIC)
         {
             let instantiate_ns = start.elapsed().as_nanos() as u64;
             let exec_start = Instant::now();

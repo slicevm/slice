@@ -9,7 +9,6 @@ use crate::{
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
-
 #[test]
 fn test_web_worker_and_node_worker_threads_roundtrip() {
     let code = r#"
@@ -907,4 +906,3 @@ fn test_pillar5_sliceboa_payload_compaction_and_multiline_template_preservation(
         r#"{"rxOk":true,"strOk":true,"lines":["line1","    indented_line2","        indented_line3"]}"#
     );
 }
-

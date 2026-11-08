@@ -516,19 +516,19 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if BOA_VFS_CACHE.with(|c| c.borrow().contains_key(&norm))
                 || BOA_VFS_DIRS.with(|d| d.borrow().contains(&norm))
             {
-                let resolved = if norm.starts_with('/')
-                    || (norm.len() >= 2 && norm.as_bytes()[1] == b':')
-                {
-                    norm
-                } else {
-                    let cwd = std::env::current_dir()
-                        .map(|p| norm_vfs_path(&p.to_string_lossy()))
-                        .unwrap_or_else(|_| "/workspace".to_string());
-                    format!("{}/{}", cwd.trim_end_matches('/'), norm)
-                };
+                let resolved =
+                    if norm.starts_with('/') || (norm.len() >= 2 && norm.as_bytes()[1] == b':') {
+                        norm
+                    } else {
+                        let cwd = std::env::current_dir()
+                            .map(|p| norm_vfs_path(&p.to_string_lossy()))
+                            .unwrap_or_else(|_| "/workspace".to_string());
+                        format!("{}/{}", cwd.trim_end_matches('/'), norm)
+                    };
                 return Ok(BoaVal::from(js_string!(resolved)));
             }
-            if let Ok(canon) = std::fs::canonicalize(&norm).or_else(|_| std::fs::canonicalize(&path))
+            if let Ok(canon) =
+                std::fs::canonicalize(&norm).or_else(|_| std::fs::canonicalize(&path))
             {
                 let mut s = canon.to_string_lossy().replace('\\', "/");
                 if let Some(stripped) = s.strip_prefix("//?/") {
@@ -536,16 +536,15 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                 }
                 return Ok(BoaVal::from(js_string!(s)));
             }
-            let fallback = if norm.starts_with('/')
-                || (norm.len() >= 2 && norm.as_bytes()[1] == b':')
-            {
-                norm
-            } else {
-                let cwd = std::env::current_dir()
-                    .map(|p| norm_vfs_path(&p.to_string_lossy()))
-                    .unwrap_or_else(|_| "/workspace".to_string());
-                format!("{}/{}", cwd.trim_end_matches('/'), norm)
-            };
+            let fallback =
+                if norm.starts_with('/') || (norm.len() >= 2 && norm.as_bytes()[1] == b':') {
+                    norm
+                } else {
+                    let cwd = std::env::current_dir()
+                        .map(|p| norm_vfs_path(&p.to_string_lossy()))
+                        .unwrap_or_else(|_| "/workspace".to_string());
+                    format!("{}/{}", cwd.trim_end_matches('/'), norm)
+                };
             Ok(BoaVal::from(js_string!(fallback)))
         }),
     );

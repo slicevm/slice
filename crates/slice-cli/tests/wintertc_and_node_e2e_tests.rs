@@ -16,7 +16,6 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 
-
 #[test]
 fn test_phase_n1_wintertc_redirect_keepalive_and_ssrf_mesh_roundtrip() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -723,4 +722,3 @@ describe("TSX SSR & Event Loop Suite", () => {
         "<!doctype html><section class=\"edge-card\" data-count=\"2\"><h2>Wave A &lt;Rust&gt;</h2><ul><li>Oxc TSX</li><li>Slice SSR &amp; &lt;Safe&gt;</li></ul></section>"
     ));
 }
-

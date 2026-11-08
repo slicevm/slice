@@ -821,7 +821,9 @@ pub fn wasm_instantiate_module(
                 if let Err(msg) = check_wasm_memory_pages_budget(actual_pages) {
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
-                let eff_max = max_pages.or(Some(MAX_WASM_MEMORY_PAGES)).map(|m| m.max(actual_pages));
+                let eff_max = max_pages
+                    .or(Some(MAX_WASM_MEMORY_PAGES))
+                    .map(|m| m.max(actual_pages));
                 let m_ty = MemoryType::new(actual_pages, eff_max);
                 let mem = Memory::new(&mut store, m_ty).map_err(|e| {
                     JsNativeError::range().with_message(format!("RangeError: {}", e))
@@ -884,9 +886,7 @@ pub fn wasm_instantiate_module(
                 let used = avail_fuel.saturating_sub(left).max(1);
                 BOA_FUEL_BUDGET.with(|f| f.set((consumed_fuel.saturating_add(used), fuel_limit)));
                 let err_str = e.to_string();
-                if err_str.contains("fuel")
-                    || e.as_trap_code() == Some(TrapCode::OutOfFuel)
-                {
+                if err_str.contains("fuel") || e.as_trap_code() == Some(TrapCode::OutOfFuel) {
                     record_wasm_fuel_violation();
                 }
                 return Err(JsNativeError::error()
@@ -1145,8 +1145,7 @@ pub fn wasm_call_export(
             return Err(JsNativeError::error().with_message(h_err).into());
         }
         let err_str = err.to_string();
-        if err_str.contains("fuel") || err.as_trap_code() == Some(TrapCode::OutOfFuel)
-        {
+        if err_str.contains("fuel") || err.as_trap_code() == Some(TrapCode::OutOfFuel) {
             record_wasm_fuel_violation();
         }
         return Err(JsNativeError::error()

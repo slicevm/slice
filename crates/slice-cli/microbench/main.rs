@@ -50,4 +50,3 @@ export default { fetch(req) { return new Response("ok"); } };
 
 criterion_group!(benches, bench_cli_config_layers);
 criterion_main!(benches);
-

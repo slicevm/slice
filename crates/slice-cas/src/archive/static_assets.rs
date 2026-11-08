@@ -1,6 +1,6 @@
 //! Zero-Stat Static Web Asset Table & Cryptographic BLAKE3 `ETag` Indexer (`--static`).
 
-use crate::MappedCasArchive;
+use crate::archive::MappedCasArchive;
 use anyhow::{bail, Result};
 use rustc_hash::FxHashMap;
 use std::path::Path;
@@ -131,6 +131,9 @@ impl StaticAssetTable {
 
     /// Recursively loads a static asset directory (`--static=./public`) and pre-computes
     /// 256-bit BLAKE3 `ETag` digests for instant `304 Not Modified` negotiation.
+    ///
+    /// Security (`CAS-SEC-04`): Skips symbolic links via `entry.file_type()` (`lstat`) so a
+    /// symlink inside `static_dir` cannot expose arbitrary host files over HTTP.
     pub fn extend_from_directory(&mut self, static_dir: &Path) -> Result<usize> {
         if !static_dir.exists() {
             bail!(
@@ -141,12 +144,19 @@ impl StaticAssetTable {
         let mut count = 0;
         let mut stack = vec![static_dir.to_path_buf()];
         while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir)? {
-                let entry = entry?;
+            let mut entries: Vec<std::fs::DirEntry> =
+                std::fs::read_dir(&dir)?.collect::<std::io::Result<Vec<_>>>()?;
+            entries.sort_by_key(|e| e.file_name());
+
+            for entry in entries {
+                let ft = entry.file_type()?;
+                if ft.is_symlink() {
+                    continue;
+                }
                 let path = entry.path();
-                if path.is_dir() {
+                if ft.is_dir() {
                     stack.push(path);
-                } else if path.is_file() {
+                } else if ft.is_file() {
                     let rel = path
                         .strip_prefix(static_dir)
                         .unwrap_or(&path)

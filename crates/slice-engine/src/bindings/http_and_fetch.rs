@@ -136,13 +136,14 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
             let egress_secrets = BOA_EGRESS_SECRETS.with(|s| s.borrow().clone());
             if !egress_secrets.is_empty() {
                 let tenant_id = active_tenant_id_or_default();
-                if let Err(violation) = verify_egress_secrets_slice(&tenant_id, &egress_secrets, &body)
-                    .and_then(|()| {
-                        verify_egress_secrets_slice(&tenant_id, &egress_secrets, &content_type)
-                    })
-                    .and_then(|()| {
-                        verify_egress_secrets_slice(&tenant_id, &egress_secrets, &headers_json)
-                    })
+                if let Err(violation) =
+                    verify_egress_secrets_slice(&tenant_id, &egress_secrets, &body)
+                        .and_then(|()| {
+                            verify_egress_secrets_slice(&tenant_id, &egress_secrets, &content_type)
+                        })
+                        .and_then(|()| {
+                            verify_egress_secrets_slice(&tenant_id, &egress_secrets, &headers_json)
+                        })
                 {
                     let msg = violation.to_string();
                     BOA_VIOLATION.with(|v| {

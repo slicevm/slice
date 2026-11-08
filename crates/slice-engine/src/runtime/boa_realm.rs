@@ -463,8 +463,7 @@ impl SavedIsolateContextGuard {
             BOA_EGRESS_SECRETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
         let saved_env_map = BOA_ENV_MAP.with(|m| m.borrow().clone());
         let saved_exec_bins = BOA_EXEC_BINS.with(|b| std::mem::take(&mut *b.borrow_mut()));
-        let saved_last_cp_violation =
-            BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
+        let saved_last_cp_violation = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
         let saved_fetch_mocks = BOA_FETCH_MOCKS.with(|m| m.borrow().clone());
         let saved_ws_mocks = crate::websocket::BOA_WS_MOCKS.with(|m| m.borrow().clone());
         let saved_sock_mocks = crate::sockets::BOA_SOCKET_MOCKS.with(|m| m.borrow().clone());

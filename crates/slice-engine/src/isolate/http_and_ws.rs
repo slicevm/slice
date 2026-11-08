@@ -41,8 +41,7 @@ impl SliceIsolate {
         req: &HttpRequestContext<'_>,
     ) -> Result<HttpExecutionOutcome, SandboxViolation> {
         if bytecode.len() >= 8
-            && (&bytecode[0..8] == b"SLICEBOA"
-                || &bytecode[0..8] == crate::boacas::BOACAS_MAGIC)
+            && (&bytecode[0..8] == b"SLICEBOA" || &bytecode[0..8] == crate::boacas::BOACAS_MAGIC)
         {
             BOA_HTTP_REQ.with(|r| {
                 let mut borrow = r.borrow_mut();

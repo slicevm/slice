@@ -40,4 +40,3 @@ fn bench_completion_ring(c: &mut Criterion) {
 
 criterion_group!(benches, bench_slab_pool, bench_completion_ring);
 criterion_main!(benches);
-

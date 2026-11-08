@@ -618,10 +618,8 @@ impl SliceIsolate {
                 if let Some(cb) = eval_args.first() {
                     let mut acc = eval_args.get(1).cloned().unwrap_or(JsValue::Number(0.0));
                     for (idx, item) in items.into_iter().enumerate() {
-                        acc = self.invoke_function_val(
-                            cb,
-                            &[acc, item, JsValue::Number(idx as f64)],
-                        )?;
+                        acc = self
+                            .invoke_function_val(cb, &[acc, item, JsValue::Number(idx as f64)])?;
                     }
                     return Ok(Some(acc));
                 }

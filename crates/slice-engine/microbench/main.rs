@@ -152,7 +152,8 @@ fib(30);
     });
 
     let (ed_seed, ed_pub) = ed25519_keypair_from_seed([0x77u8; 32]).expect("ed25519 keypair");
-    let ed_sig = ed25519_sign_bytes(&ed_seed, b"slice-ed25519-jwt-token-payload").expect("ed25519 sign");
+    let ed_sig =
+        ed25519_sign_bytes(&ed_seed, b"slice-ed25519-jwt-token-payload").expect("ed25519 sign");
     group.bench_function("ed25519_verify_signature", |b| {
         b.iter(|| {
             let ok = ed25519_verify_bytes(
@@ -220,5 +221,9 @@ fib(30);
     group.finish();
 }
 
-criterion_group!(benches, bench_boacas_and_automaton, bench_intrinsics_and_numeric_vm);
+criterion_group!(
+    benches,
+    bench_boacas_and_automaton,
+    bench_intrinsics_and_numeric_vm
+);
 criterion_main!(benches);

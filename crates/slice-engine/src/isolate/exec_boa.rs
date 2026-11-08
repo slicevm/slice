@@ -210,22 +210,29 @@ impl SliceIsolate {
                 .allowed_write_prefixes
                 .is_empty();
         if has_fs_restrictions {
-            let read_prefs = if self.compartment.capabilities.allowed_read_prefixes.is_empty() {
+            let read_prefs = if self
+                .compartment
+                .capabilities
+                .allowed_read_prefixes
+                .is_empty()
+            {
                 vec!["/__slice_denied__".to_string()]
             } else {
                 self.compartment.capabilities.allowed_read_prefixes.clone()
             };
-            let write_prefs = if self.compartment.capabilities.allowed_write_prefixes.is_empty() {
+            let write_prefs = if self
+                .compartment
+                .capabilities
+                .allowed_write_prefixes
+                .is_empty()
+            {
                 vec!["/__slice_denied__".to_string()]
             } else {
                 self.compartment.capabilities.allowed_write_prefixes.clone()
             };
             BOA_ACTIVE_CAPS.with(|c| {
-                *c.borrow_mut() = Some((
-                    self.compartment.tenant_id.clone(),
-                    read_prefs,
-                    write_prefs,
-                ));
+                *c.borrow_mut() =
+                    Some((self.compartment.tenant_id.clone(), read_prefs, write_prefs));
             });
         }
         let has_net_hosts = !self.compartment.capabilities.allowed_net_hosts.is_empty();
@@ -472,7 +479,10 @@ impl SliceIsolate {
     /// Executes full ES2024+ JavaScript inside the production **Boa (`boa_engine`)** ECMAScript VM,
     /// reusing pre-warmed contexts from `BOA_CONTEXT_POOL`, capturing `console.log` / `print` output
     /// via zero-eval native host hooks, and enforcing SES compartment limits.
-    pub(crate) fn exec_boa_full_es_vm(&mut self, js_code: &str) -> Result<JsValue, SandboxViolation> {
+    pub(crate) fn exec_boa_full_es_vm(
+        &mut self,
+        js_code: &str,
+    ) -> Result<JsValue, SandboxViolation> {
         let _active_src_guard = crate::boa_realm::ActiveSourceSliceGuard::new(js_code);
         let flags = self.setup_boa_compartment_thread_locals();
 

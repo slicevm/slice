@@ -274,10 +274,12 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                     return bytes_to_js_array_buffer(&sig_bytes, context);
                 }
             }
-            let mac_opt =
-                with_two_buffer_source_bytes(key_arg, data_arg, context, |key_bytes, data_bytes| {
-                    compute_webcrypto_hmac(&hash_name, key_bytes, data_bytes)
-                })?;
+            let mac_opt = with_two_buffer_source_bytes(
+                key_arg,
+                data_arg,
+                context,
+                |key_bytes, data_bytes| compute_webcrypto_hmac(&hash_name, key_bytes, data_bytes),
+            )?;
             let Some(mac) = mac_opt else {
                 return Err(JsNativeError::error()
                     .with_message(format!(
@@ -335,11 +337,15 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 }
             }
             let key_bytes = extract_buffer_source_bytes(key_arg, context)?;
-            let verified_opt =
-                with_two_buffer_source_bytes(sig_arg, data_arg, context, |sig_bytes, data_bytes| {
+            let verified_opt = with_two_buffer_source_bytes(
+                sig_arg,
+                data_arg,
+                context,
+                |sig_bytes, data_bytes| {
                     compute_webcrypto_hmac(&hash_name, &key_bytes, data_bytes)
                         .map(|expected| constant_time_eq(&expected, sig_bytes))
-                })?;
+                },
+            )?;
             let Some(ok) = verified_opt else {
                 return Err(JsNativeError::error()
                     .with_message(format!(
@@ -459,10 +465,12 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
             let Some(data_arg) = args.get(2) else {
                 return bytes_to_js_uint8_array(&[], context);
             };
-            let mac_opt =
-                with_two_buffer_source_bytes(key_arg, data_arg, context, |key_bytes, data_bytes| {
-                    compute_webcrypto_hmac(&algo, key_bytes, data_bytes)
-                })?;
+            let mac_opt = with_two_buffer_source_bytes(
+                key_arg,
+                data_arg,
+                context,
+                |key_bytes, data_bytes| compute_webcrypto_hmac(&algo, key_bytes, data_bytes),
+            )?;
             let Some(mac) = mac_opt else {
                 return Err(JsNativeError::error()
                     .with_message(format!("Unsupported HMAC algorithm '{}'", algo))
@@ -495,12 +503,12 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
             let raw = extract_buffer_source_bytes(raw_arg, context)?;
             let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
             let material = if kind.eq_ignore_ascii_case("AES-GCM") {
-                let less_safe =
-                    make_ring_aead_key(&raw).map_err(|msg| JsNativeError::error().with_message(msg))?;
+                let less_safe = make_ring_aead_key(&raw)
+                    .map_err(|msg| JsNativeError::error().with_message(msg))?;
                 CachedCryptoKeyMaterial::AesGcm { less_safe, raw }
             } else if kind.eq_ignore_ascii_case("AES-CBC") {
-                let expanded =
-                    AesExpandedKey::new(&raw).map_err(|msg| JsNativeError::error().with_message(msg))?;
+                let expanded = AesExpandedKey::new(&raw)
+                    .map_err(|msg| JsNativeError::error().with_message(msg))?;
                 CachedCryptoKeyMaterial::AesCbc { expanded, raw }
             } else if kind.eq_ignore_ascii_case("HMAC") {
                 let norm_hash = normalize_webcrypto_hash_name(&sub).unwrap_or("SHA-256");
@@ -608,9 +616,21 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                     Some(r) => r,
                     None => {
                         if is_encrypt {
-                            aes_gcm_encrypt(&key_bytes, &iv_bytes, &aad_bytes, &data_bytes, tag_bits)
+                            aes_gcm_encrypt(
+                                &key_bytes,
+                                &iv_bytes,
+                                &aad_bytes,
+                                &data_bytes,
+                                tag_bits,
+                            )
                         } else {
-                            aes_gcm_decrypt(&key_bytes, &iv_bytes, &aad_bytes, &data_bytes, tag_bits)
+                            aes_gcm_decrypt(
+                                &key_bytes,
+                                &iv_bytes,
+                                &aad_bytes,
+                                &data_bytes,
+                                tag_bits,
+                            )
                         }
                     }
                 }
@@ -786,7 +806,10 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
             }
 
             Err(JsNativeError::error()
-                .with_message(format!("NotSupportedError: Unsupported keygen algorithm '{}'", alg))
+                .with_message(format!(
+                    "NotSupportedError: Unsupported keygen algorithm '{}'",
+                    alg
+                ))
                 .into())
         }),
     );
@@ -824,8 +847,9 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
             if alg.eq_ignore_ascii_case("Ed25519") {
                 if format.eq_ignore_ascii_case("jwk") {
                     let jwk_str = data_arg.to_string(context)?.to_std_string_escaped();
-                    let jwk: serde_json::Value = serde_json::from_str(&jwk_str)
-                        .map_err(|_| JsNativeError::error().with_message("DataError: Invalid JWK JSON"))?;
+                    let jwk: serde_json::Value = serde_json::from_str(&jwk_str).map_err(|_| {
+                        JsNativeError::error().with_message("DataError: Invalid JWK JSON")
+                    })?;
                     let x_str = jwk.get("x").and_then(|v| v.as_str()).unwrap_or("");
                     if let Some(d_str) = jwk.get("d").and_then(|v| v.as_str()) {
                         let d_raw = base64_decode(d_str);
@@ -919,10 +943,13 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 };
                 if format.eq_ignore_ascii_case("jwk") {
                     let jwk_str = data_arg.to_string(context)?.to_std_string_escaped();
-                    let jwk: serde_json::Value = serde_json::from_str(&jwk_str)
-                        .map_err(|_| JsNativeError::error().with_message("DataError: Invalid JWK JSON"))?;
-                    let x_bytes = base64_decode(jwk.get("x").and_then(|v| v.as_str()).unwrap_or(""));
-                    let y_bytes = base64_decode(jwk.get("y").and_then(|v| v.as_str()).unwrap_or(""));
+                    let jwk: serde_json::Value = serde_json::from_str(&jwk_str).map_err(|_| {
+                        JsNativeError::error().with_message("DataError: Invalid JWK JSON")
+                    })?;
+                    let x_bytes =
+                        base64_decode(jwk.get("x").and_then(|v| v.as_str()).unwrap_or(""));
+                    let y_bytes =
+                        base64_decode(jwk.get("y").and_then(|v| v.as_str()).unwrap_or(""));
                     let mut pub_bytes = Vec::with_capacity(1 + x_bytes.len() + y_bytes.len());
                     pub_bytes.push(0x04);
                     pub_bytes.extend_from_slice(&x_bytes);
@@ -1031,7 +1058,10 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
             }
 
             Err(JsNativeError::error()
-                .with_message(format!("NotSupportedError: Unsupported import algorithm '{}'", alg))
+                .with_message(format!(
+                    "NotSupportedError: Unsupported import algorithm '{}'",
+                    alg
+                ))
                 .into())
         }),
     );
@@ -1117,7 +1147,10 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
             }
 
             Err(JsNativeError::error()
-                .with_message(format!("NotSupportedError: Unsupported sign algorithm '{}'", alg))
+                .with_message(format!(
+                    "NotSupportedError: Unsupported sign algorithm '{}'",
+                    alg
+                ))
                 .into())
         }),
     );
@@ -1198,7 +1231,9 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                             curve: k_curve,
                             pub_bytes,
                             ..
-                        } => Some(ecdsa_verify_bytes(k_curve, pub_bytes, &msg_bytes, &sig_bytes)),
+                        } => Some(ecdsa_verify_bytes(
+                            k_curve, pub_bytes, &msg_bytes, &sig_bytes,
+                        )),
                         _ => None,
                     })
                     .flatten()
@@ -1280,14 +1315,9 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 if let Err(msg) = consume_crypto_kdf_fuel(fuel_cost) {
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
-                let derived = pbkdf2_derive_bytes(
-                    &hash,
-                    &secret,
-                    &salt,
-                    iterations_or_n as u32,
-                    byte_len,
-                )
-                .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                let derived =
+                    pbkdf2_derive_bytes(&hash, &secret, &salt, iterations_or_n as u32, byte_len)
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?;
                 return bytes_to_js_array_buffer(&derived, context);
             }
 

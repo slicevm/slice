@@ -9,7 +9,6 @@ use crate::{
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
-
 #[test]
 fn test_tag_f1_wintertc_url_headers_request_response_and_export_default_fetch() {
     SliceIsolate::prewarm_boa_pool(2);
@@ -1047,4 +1046,3 @@ attack();
     let _ = handle_a.join();
     let _ = handle_b.join();
 }
-

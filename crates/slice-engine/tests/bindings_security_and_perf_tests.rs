@@ -91,12 +91,36 @@ fn test_sec01_vfs_symlink_target_ocap_escape_defense() {
     .expect("parent eval should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(parsed["copyOk"], false, "copyFileSync via symlink escaped OCap: {}", out);
-    assert_eq!(parsed["writeOk"], false, "writeFileSync via symlink escaped OCap: {}", out);
-    assert_eq!(parsed["appendOk"], false, "appendFileSync via symlink escaped OCap: {}", out);
-    assert_eq!(parsed["statOk"], false, "statSync via symlink escaped OCap: {}", out);
-    assert_eq!(parsed["existsOk"], false, "existsSync via symlink leaked target existence: {}", out);
-    assert_eq!(parsed["secretIntact"], "TOP_SECRET_PEM_DATA", "secret was modified: {}", out);
+    assert_eq!(
+        parsed["copyOk"], false,
+        "copyFileSync via symlink escaped OCap: {}",
+        out
+    );
+    assert_eq!(
+        parsed["writeOk"], false,
+        "writeFileSync via symlink escaped OCap: {}",
+        out
+    );
+    assert_eq!(
+        parsed["appendOk"], false,
+        "appendFileSync via symlink escaped OCap: {}",
+        out
+    );
+    assert_eq!(
+        parsed["statOk"], false,
+        "statSync via symlink escaped OCap: {}",
+        out
+    );
+    assert_eq!(
+        parsed["existsOk"], false,
+        "existsSync via symlink leaked target existence: {}",
+        out
+    );
+    assert_eq!(
+        parsed["secretIntact"], "TOP_SECRET_PEM_DATA",
+        "secret was modified: {}",
+        out
+    );
 }
 
 #[test]
@@ -132,9 +156,21 @@ fn test_sec02_isolate_memory_ceiling_on_vfs_stdout_and_random_bytes() {
     .expect("memory ceiling sandbox test should run");
 
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(parsed["vfsOk"], false, "VFS write bypassed memory ceiling: {}", out);
-    assert_eq!(parsed["stdoutOk"], false, "console.log bypassed memory ceiling: {}", out);
-    assert_eq!(parsed["randOk"], false, "crypto.randomBytes bypassed memory ceiling: {}", out);
+    assert_eq!(
+        parsed["vfsOk"], false,
+        "VFS write bypassed memory ceiling: {}",
+        out
+    );
+    assert_eq!(
+        parsed["stdoutOk"], false,
+        "console.log bypassed memory ceiling: {}",
+        out
+    );
+    assert_eq!(
+        parsed["randOk"], false,
+        "crypto.randomBytes bypassed memory ceiling: {}",
+        out
+    );
 }
 
 #[test]
