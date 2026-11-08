@@ -1,6 +1,14 @@
+pub(crate) mod cas_packager;
+pub(crate) mod watcher;
+
+#[cfg(test)]
+pub(crate) use cas_packager::build_cas_archive;
+pub(crate) use cas_packager::build_cas_archive_with_static;
+#[cfg(test)]
+pub(crate) use watcher::collect_watch_fingerprint;
+pub(crate) use watcher::OsNativeFileWatcher;
+
 use anyhow::{Context, Result};
-use slice_cas::CasBuilder;
-use slice_engine::compile_source_to_bytecode;
 use slice_sandbox::{CapabilityToken, SliceManifest};
 use std::path::{Path, PathBuf};
 
@@ -32,6 +40,25 @@ mod win_ctrlc {
 pub(crate) fn install_ctrlc_handler() {
     #[cfg(windows)]
     win_ctrlc::install();
+}
+
+/// Zero-allocation parser that extracts ASCII digits from `raw` (ignoring underscores, spaces, or
+/// unit suffixes) into a `u64`. Returns `None` if no digits are present or if overflow occurs.
+#[inline]
+pub(crate) fn parse_u64_digits(raw: &str) -> Option<u64> {
+    let mut acc: u64 = 0;
+    let mut saw_digit = false;
+    for &b in raw.as_bytes() {
+        if b.is_ascii_digit() {
+            saw_digit = true;
+            acc = acc.checked_mul(10)?.checked_add((b - b'0') as u64)?;
+        }
+    }
+    if saw_digit {
+        Some(acc)
+    } else {
+        None
+    }
 }
 
 /// Unified execution configuration (`CapabilityToken`, `fuel_limit`, `mem_limit`, `audit_secrets`,
@@ -149,25 +176,23 @@ impl ResolvedExecutionConfig {
 
         // 2. Apply `SLICE_*` environment variables (override slice.toml, overridden by CLI flags)
         if let Ok(v) = std::env::var("SLICE_FUEL") {
-            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
-            if let Ok(parsed) = digits.parse::<u64>() {
+            if let Some(parsed) = parse_u64_digits(&v) {
                 fuel_limit = parsed;
                 cli_fuel_override = Some(parsed);
             }
         }
         if let Ok(v) = std::env::var("SLICE_MEMORY_KB") {
-            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
-            if let Ok(parsed) = digits.parse::<usize>() {
-                let bytes = parsed.saturating_mul(1024);
+            if let Some(parsed) = parse_u64_digits(&v) {
+                let bytes = (parsed as usize).saturating_mul(1024);
                 mem_limit = bytes;
                 cli_mem_override = Some(bytes);
             }
         }
         if let Ok(v) = std::env::var("SLICE_MEMORY") {
-            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
-            if let Ok(parsed) = digits.parse::<usize>() {
-                mem_limit = parsed;
-                cli_mem_override = Some(parsed);
+            if let Some(parsed) = parse_u64_digits(&v) {
+                let bytes = parsed as usize;
+                mem_limit = bytes;
+                cli_mem_override = Some(bytes);
             }
         }
         if let Ok(v) = std::env::var("SLICE_ALLOW_READ") {
@@ -234,8 +259,7 @@ impl ResolvedExecutionConfig {
             }
         }
         if let Ok(v) = std::env::var("SLICE_DETERMINISTIC_SEED") {
-            let digits: String = v.chars().filter(|c| c.is_ascii_digit()).collect();
-            if let Ok(seed) = digits.parse::<u64>() {
+            if let Some(seed) = parse_u64_digits(&v) {
                 deterministic_seed = Some(seed);
                 cli_det_override = Some(Some(seed));
             }
@@ -343,21 +367,19 @@ impl ResolvedExecutionConfig {
                     audit_secrets.push(sec.to_string());
                 }
             } else if let Some(f) = arg.strip_prefix("--fuel=") {
-                let digits: String = f.chars().filter(|c| c.is_ascii_digit()).collect();
-                if let Ok(parsed) = digits.parse::<u64>() {
+                if let Some(parsed) = parse_u64_digits(f) {
                     fuel_limit = parsed;
                     cli_fuel_override = Some(parsed);
                 }
             } else if let Some(m) = arg.strip_prefix("--memory=") {
-                let digits: String = m.chars().filter(|c| c.is_ascii_digit()).collect();
-                if let Ok(parsed) = digits.parse::<usize>() {
-                    mem_limit = parsed;
-                    cli_mem_override = Some(parsed);
+                if let Some(parsed) = parse_u64_digits(m) {
+                    let bytes = parsed as usize;
+                    mem_limit = bytes;
+                    cli_mem_override = Some(bytes);
                 }
             } else if let Some(mkb) = arg.strip_prefix("--memory-kb=") {
-                let digits: String = mkb.chars().filter(|c| c.is_ascii_digit()).collect();
-                if let Ok(parsed) = digits.parse::<usize>() {
-                    let bytes = parsed.saturating_mul(1024);
+                if let Some(parsed) = parse_u64_digits(mkb) {
+                    let bytes = (parsed as usize).saturating_mul(1024);
                     mem_limit = bytes;
                     cli_mem_override = Some(bytes);
                 }
@@ -556,14 +578,6 @@ impl ResolvedExecutionConfig {
 
     /// Applies top-of-file inline source directives (`// @slice-...`) from an entrypoint script,
     /// overriding `slice.toml` defaults while respecting `SLICE_*` env vars and CLI flags.
-    ///
-    /// Security Boundary (`P33`):
-    /// - Safe tuning hints (`tier`, `boacas`, `warm`, `deterministic`, `port`, `workers`),
-    ///   extra DLP secrets (`audit-egress`), and monotonic self-attenuation (lowering `fuel`/`memory`
-    ///   or narrowing paths already granted by the host) are always active.
-    /// - Privilege-widening directives (`allow-read`, `allow-write`, `allow-net`, `allow-env`,
-    ///   `env-file`, or raising `fuel`/`memory` above the host ceiling) require explicit host opt-in
-    ///   via `--trust-directives` (`SLICE_TRUST_DIRECTIVES=1` or `trust_directives = true` in `slice.toml`).
     pub(crate) fn apply_inline_directives(&mut self, source: &str, base_dir: Option<&Path>) {
         if !source.starts_with("//") && !source.starts_with("#!") {
             return;
@@ -844,116 +858,6 @@ pub(crate) fn apply_dotenv_file_to_caps_and_dlp(
     Ok(count)
 }
 
-pub(crate) fn collect_watch_fingerprint(target: &Path) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    fn visit_watch(dir: &Path, hasher: &mut DefaultHasher) {
-        if dir.is_file() {
-            if let Ok(meta) = std::fs::metadata(dir) {
-                dir.to_string_lossy().hash(hasher);
-                meta.len().hash(hasher);
-                if let Ok(m) = meta.modified() {
-                    if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
-                        d.as_nanos().hash(hasher);
-                    }
-                }
-            }
-            return;
-        }
-        let Ok(rd) = std::fs::read_dir(dir) else {
-            return;
-        };
-        let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-        entries.sort();
-        for p in entries {
-            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or_default();
-            if matches!(name, "node_modules" | "target" | ".git" | ".archive") {
-                continue;
-            }
-            if p.is_dir() {
-                visit_watch(&p, hasher);
-            } else {
-                let ext = p.extension().and_then(|s| s.to_str()).unwrap_or_default();
-                if matches!(
-                    ext,
-                    "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "json" | "toml" | "env" | "wasm"
-                ) || name.starts_with(".env")
-                {
-                    visit_watch(&p, hasher);
-                }
-            }
-        }
-    }
-    visit_watch(target, &mut hasher);
-    hasher.finish()
-}
-
-/// OS-native filesystem watcher backed by `notify` (`inotify` on Linux, `ReadDirectoryChangesW` on Windows,
-/// `FSEvents`/`kqueue` on macOS) with a 15ms debounce window and automatic fingerprint fallback.
-pub(crate) struct OsNativeFileWatcher {
-    target: PathBuf,
-    prev_fp: u64,
-    _watcher: Option<notify::RecommendedWatcher>,
-    rx: std::sync::mpsc::Receiver<notify::Event>,
-}
-
-impl OsNativeFileWatcher {
-    pub(crate) fn new(target: &Path) -> Self {
-        use notify::{RecursiveMode, Watcher};
-        let prev_fp = collect_watch_fingerprint(target);
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut watcher_opt =
-            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                if let Ok(ev) = res {
-                    let _ = tx.send(ev);
-                }
-            })
-            .ok();
-        if let Some(ref mut w) = watcher_opt {
-            let watch_root = if target.is_dir() {
-                target
-            } else {
-                target.parent().unwrap_or(target)
-            };
-            let _ = w.watch(watch_root, RecursiveMode::Recursive);
-        }
-        Self {
-            target: target.to_path_buf(),
-            prev_fp,
-            _watcher: watcher_opt,
-            rx,
-        }
-    }
-
-    /// Blocks on the OS kernel event channel (with zero polling CPU when idle) or until `watch_once`
-    /// deadline expires, debouncing rapid save bursts (15 ms) and confirming fingerprint change.
-    pub(crate) fn wait_for_change(&mut self, watch_once: bool) -> bool {
-        use std::time::{Duration, Instant};
-        let wait_start = Instant::now();
-        let timeout = if watch_once {
-            Duration::from_millis(50)
-        } else {
-            Duration::from_millis(500)
-        };
-        loop {
-            let _ = self.rx.recv_timeout(timeout);
-            // Drain any coalesced save events within a 15ms debounce window
-            let debounce_deadline = Instant::now() + Duration::from_millis(15);
-            while self
-                .rx
-                .recv_timeout(debounce_deadline.saturating_duration_since(Instant::now()))
-                .is_ok()
-            {}
-            let cur_fp = collect_watch_fingerprint(&self.target);
-            if cur_fp != self.prev_fp || (watch_once && wait_start.elapsed().as_millis() >= 250) {
-                self.prev_fp = cur_fp;
-                return true;
-            }
-        }
-    }
-}
-
 pub(crate) fn find_project_manifest_path(input_path: &Path) -> Option<PathBuf> {
     if input_path.is_dir() {
         let candidate = input_path.join("slice.toml");
@@ -975,17 +879,8 @@ pub(crate) fn find_project_manifest_path(input_path: &Path) -> Option<PathBuf> {
     None
 }
 
-#[cfg(test)]
-pub(crate) fn build_cas_archive(
-    input_path: &Path,
-    output_path: &Path,
-    entrypoint: &str,
-) -> Result<slice_cas::CasIndexHeader> {
-    build_cas_archive_with_static(input_path, output_path, entrypoint, None)
-}
-
 #[inline]
-fn apply_boacas_override(enabled: Option<bool>) {
+pub(crate) fn apply_boacas_override(enabled: Option<bool>) {
     #[cfg(test)]
     slice_engine::set_thread_exper_boacas_override(enabled);
     #[cfg(not(test))]
@@ -993,60 +888,9 @@ fn apply_boacas_override(enabled: Option<bool>) {
 }
 
 #[inline]
-fn apply_tier_override(tier: Option<u8>) {
+pub(crate) fn apply_tier_override(tier: Option<u8>) {
     #[cfg(test)]
     slice_engine::set_thread_tier_override(tier);
     #[cfg(not(test))]
     slice_engine::set_tier_override(tier);
-}
-
-pub(crate) fn build_cas_archive_with_static(
-    input_path: &Path,
-    output_path: &Path,
-    entrypoint: &str,
-    static_dir_opt: Option<&Path>,
-) -> Result<slice_cas::CasIndexHeader> {
-    let manifest_toml_opt =
-        find_project_manifest_path(input_path).and_then(|mf| std::fs::read_to_string(&mf).ok());
-    if let Some(ref raw_toml) = manifest_toml_opt {
-        let m = SliceManifest::parse_toml(raw_toml);
-        if let Some(b) = m.exper_boacas {
-            if std::env::var("SLICE_EXPER_BOACAS").is_err() {
-                apply_boacas_override(Some(b));
-            }
-        }
-    }
-
-    let is_folder_app = input_path.is_dir()
-        && (input_path.join("package.json").is_file()
-            || input_path.join("slice.toml").is_file()
-            || input_path.join("src").is_dir());
-
-    let mut builder = if input_path.is_file() || is_folder_app {
-        let entry_file = slice_cas::resolve_project_entrypoint(input_path, Some(entrypoint))?;
-        let file_name = entry_file
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let spec = format!("./{}", file_name);
-        let mut b = CasBuilder::new(&spec);
-        let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
-        b.add_module(spec, entry_file, &bundled, compile_source_to_bytecode);
-        b
-    } else {
-        let mut b = CasBuilder::new(entrypoint);
-        b.ingest_directory(input_path, &compile_source_to_bytecode)?;
-        b
-    };
-
-    if let Some(ref raw_toml) = manifest_toml_opt {
-        builder.embed_manifest_toml(raw_toml);
-    }
-
-    if let Some(static_dir) = static_dir_opt {
-        builder.ingest_static_directory(static_dir)?;
-    }
-
-    builder.write_to_file(output_path)
 }

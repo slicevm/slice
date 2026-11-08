@@ -1,286 +1,15 @@
-use crate::config_and_watch::{install_ctrlc_handler, ResolvedExecutionConfig};
-use anyhow::{Context, Result};
-use slice_cas::MappedCasArchive;
-use slice_engine::{compile_source_to_bytecode, SliceIsolate};
+use super::resolve_tenant_bytecode_hotswap;
+use super::tls::ServerConnStream;
+use anyhow::Result;
+use slice_engine::SliceIsolate;
 use slice_sandbox::CapabilityToken;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::net::TcpStream;
+use std::path::Path;
 use std::time::Instant;
 
-pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
-    let mut exec_cfg = ResolvedExecutionConfig::from_cli_args(args)?;
-    let mut smoke_test = false;
-    let mut max_requests_opt: Option<usize> = None;
-    let mut tenant_dir_opt: Option<PathBuf> = None;
-    let mut target_opt: Option<String> = None;
-
-    for arg in args {
-        if let Some(m) = arg.strip_prefix("--max-requests=") {
-            max_requests_opt = m.parse().ok();
-        } else if let Some(td) = arg.strip_prefix("--tenant-dir=") {
-            tenant_dir_opt = Some(PathBuf::from(td));
-        } else if arg == "--smoke-test" || arg == "--once" {
-            smoke_test = true;
-        } else if !arg.starts_with('-') && target_opt.is_none() {
-            target_opt = Some(arg.clone());
-        }
-    }
-
-    // Pre-compile or map handler bytecode and extract any embedded CAS static assets
-    let default_handler_src = r#"
-const route_res: string = WinterTC.route("GET", "https://edge.slice.local/api/v1/status");
-console.log(route_res);
-"#;
-    let mut static_table = slice_cas::StaticAssetTable::new();
-    let bytecode = std::sync::Arc::new(if let Some(target) = &target_opt {
-        let p = Path::new(target);
-        if target.ends_with(".cas") {
-            let archive = MappedCasArchive::open(p)?;
-            if let Some(toml_str) = archive.get_manifest_toml() {
-                exec_cfg.apply_manifest_toml(toml_str, p.parent());
-            }
-            static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
-            let entry = archive
-                .entrypoint_blob()
-                .context("Missing CAS entrypoint")?;
-            archive.get_bytecode_slice(entry).to_vec()
-        } else {
-            exec_cfg.apply_target_path_manifest(p);
-            let entry_file = slice_cas::resolve_project_entrypoint(p, None)?;
-            if let Ok(raw_entry) = std::fs::read_to_string(&entry_file) {
-                exec_cfg.apply_inline_directives(&raw_entry, entry_file.parent());
-            }
-            let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
-            compile_source_to_bytecode(&bundled)
-        }
-    } else if let Ok(Some(archive)) = MappedCasArchive::open_embedded_self() {
-        if let Some(toml_str) = archive.get_manifest_toml() {
-            exec_cfg.apply_manifest_toml(toml_str, None);
-        }
-        static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
-        if let Some(entry) = archive.entrypoint_blob() {
-            archive.get_bytecode_slice(entry).to_vec()
-        } else {
-            compile_source_to_bytecode(default_handler_src)
-        }
-    } else {
-        compile_source_to_bytecode(default_handler_src)
-    });
-
-    let port: u16 = exec_cfg.server_port.unwrap_or(3000);
-    let workers: usize = exec_cfg.server_workers.unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(|n| n.get().clamp(1, 8))
-            .unwrap_or(4)
-    });
-    let static_dir_opt = exec_cfg.static_dir;
-    let tls_cert_opt = exec_cfg.tls_cert;
-    let tls_key_opt = exec_cfg.tls_key;
-    let deterministic_seed = exec_cfg.deterministic_seed;
-    let caps = exec_cfg.caps;
-    let fuel_limit = exec_cfg.fuel_limit;
-    let mem_limit = exec_cfg.mem_limit;
-
-    let tls_server_cfg = match (&tls_cert_opt, &tls_key_opt) {
-        (Some(cert_path), Some(key_path)) => Some(load_tls_server_config(cert_path, key_path)?),
-        (Some(_), None) => anyhow::bail!("--tls-cert specified without --tls-key"),
-        (None, Some(_)) => anyhow::bail!("--tls-key specified without --tls-cert"),
-        (None, None) => None,
-    };
-
-    if let Some(static_dir) = &static_dir_opt {
-        static_table.extend_from_directory(static_dir)?;
-    }
-    let static_table_arc = if static_table.is_empty() {
-        None
-    } else {
-        Some(std::sync::Arc::new(static_table))
-    };
-
-    if smoke_test {
-        let listener = TcpListener::bind(("127.0.0.1", 0))?;
-        let bound_port = listener.local_addr()?.port();
-        let bc_clone = std::sync::Arc::clone(&bytecode);
-        let st_clone = static_table_arc.as_ref().map(std::sync::Arc::clone);
-        let caps_clone = caps.clone();
-
-        let server_thread = std::thread::spawn(move || -> Result<()> {
-            SliceIsolate::prewarm_boa_bundle(&bc_clone);
-            let mut read_buf = vec![0u8; 65536];
-            let mut write_buf = Vec::with_capacity(4096);
-            if let Ok((stream, _)) = listener.accept() {
-                let _ = serve_connection_keep_alive(
-                    stream,
-                    1,
-                    &bc_clone,
-                    None,
-                    st_clone.as_deref(),
-                    deterministic_seed,
-                    &caps_clone,
-                    fuel_limit,
-                    mem_limit,
-                    &mut read_buf,
-                    &mut write_buf,
-                    None,
-                );
-            }
-            Ok(())
-        });
-
-        let mut client = TcpStream::connect(("127.0.0.1", bound_port))?;
-        let _ = client.set_nodelay(true);
-        // Send 2 pipelined HTTP/1.1 Keep-Alive requests on a single TCP connection
-        client.write_all(
-            b"GET /api/v1/status?ping=1 HTTP/1.1\r\nHost: localhost\r\nX-Slice-Tenant: tenant-edge-42\r\nConnection: keep-alive\r\n\r\nGET /api/v1/status?ping=2 HTTP/1.1\r\nHost: localhost\r\nX-Slice-Tenant: tenant-edge-42\r\nConnection: close\r\n\r\n",
-        )?;
-        let mut resp = String::new();
-        client.read_to_string(&mut resp)?;
-        let _ = server_thread.join();
-
-        println!("=========================================================================");
-        println!("  SLICE WINTERTC MULTI-TENANT HTTP MICROVM SERVER SMOKE TEST (KEEP-ALIVE)");
-        println!("=========================================================================");
-        for line in resp.lines() {
-            println!("  {}", line);
-        }
-        println!("=========================================================================");
-        return Ok(());
-    }
-
-    install_ctrlc_handler();
-
-    let addr = format!("0.0.0.0:{}", port);
-    let listener = std::sync::Arc::new(TcpListener::bind(&addr)?);
-    let scheme = if tls_server_cfg.is_some() {
-        "https"
-    } else {
-        "http"
-    };
-    println!(
-        "[Slice Edge Server] Listening on {}://127.0.0.1:{} (Workers: {}, HTTP/1.1 Keep-Alive + Pre-Warmed __slice_rc)",
-        scheme, port, workers
-    );
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-
-    let req_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let tenant_dir_arc = tenant_dir_opt.map(std::sync::Arc::new);
-    let mut handles = Vec::with_capacity(workers.saturating_sub(1));
-
-    for worker_idx in 1..workers {
-        let listener_clone = std::sync::Arc::clone(&listener);
-        let bc_clone = std::sync::Arc::clone(&bytecode);
-        let td_clone = tenant_dir_arc.as_ref().map(std::sync::Arc::clone);
-        let st_clone = static_table_arc.as_ref().map(std::sync::Arc::clone);
-        let tls_clone = tls_server_cfg.as_ref().map(std::sync::Arc::clone);
-        let caps_clone = caps.clone();
-        let counter_clone = std::sync::Arc::clone(&req_counter);
-        handles.push(std::thread::spawn(move || {
-            SliceIsolate::prewarm_boa_bundle(&bc_clone);
-            let mut read_buf = vec![0u8; 65536];
-            let mut write_buf = Vec::with_capacity(4096);
-            let mut local_slot = (worker_idx as u32) << 20;
-            while let Ok((stream, _)) = listener_clone.accept() {
-                local_slot = local_slot.wrapping_add(1);
-                let _ = serve_connection_keep_alive_with_tls(
-                    stream,
-                    local_slot,
-                    &bc_clone,
-                    td_clone.as_deref().map(|p| p.as_path()),
-                    st_clone.as_deref(),
-                    deterministic_seed,
-                    &caps_clone,
-                    fuel_limit,
-                    mem_limit,
-                    &mut read_buf,
-                    &mut write_buf,
-                    max_requests_opt.map(|max| (&*counter_clone, max)),
-                    tls_clone.as_ref(),
-                );
-            }
-        }));
-    }
-
-    SliceIsolate::prewarm_boa_bundle(&bytecode);
-    let mut read_buf = vec![0u8; 65536];
-    let mut write_buf = Vec::with_capacity(4096);
-    let mut local_slot: u32 = 0;
-    while let Ok((stream, _)) = listener.accept() {
-        local_slot = local_slot.wrapping_add(1);
-        let _ = serve_connection_keep_alive_with_tls(
-            stream,
-            local_slot,
-            &bytecode,
-            tenant_dir_arc.as_deref().map(|p| p.as_path()),
-            static_table_arc.as_deref(),
-            deterministic_seed,
-            &caps,
-            fuel_limit,
-            mem_limit,
-            &mut read_buf,
-            &mut write_buf,
-            max_requests_opt.map(|max| (&*req_counter, max)),
-            tls_server_cfg.as_ref(),
-        );
-    }
-    Ok(())
-}
-
-type TenantCasCacheEntry = (u128, u64, std::sync::Arc<Vec<u8>>);
-
-thread_local! {
-    static TENANT_CAS_CACHE: std::cell::RefCell<std::collections::HashMap<String, TenantCasCacheEntry>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-/// Resolves a per-tenant `.cas` archive from `tenant_dir` (`<tenant_id>.cas` or `default.cas`),
-/// automatically hot-swapping and pre-warming the bundle when the file's modification timestamp
-/// or byte length changes on disk, with zero dropped TCP connections.
-pub(crate) fn resolve_tenant_bytecode_hotswap(
-    tenant_dir: &Path,
-    tenant_id: &str,
-) -> Option<std::sync::Arc<Vec<u8>>> {
-    let safe_tenant: String = tenant_id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    if safe_tenant.is_empty() {
-        return None;
-    }
-    let mut candidate = tenant_dir.join(format!("{}.cas", safe_tenant));
-    if !candidate.is_file() {
-        candidate = tenant_dir.join("default.cas");
-        if !candidate.is_file() {
-            return None;
-        }
-    }
-    let meta = std::fs::metadata(&candidate).ok()?;
-    let file_len = meta.len();
-    let mtime_ns = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-
-    TENANT_CAS_CACHE.with(|cache| {
-        if let Some((cached_mtime, cached_len, arc_bc)) = cache.borrow().get(&safe_tenant) {
-            if *cached_mtime == mtime_ns && *cached_len == file_len {
-                return Some(std::sync::Arc::clone(arc_bc));
-            }
-        }
-        let archive = MappedCasArchive::open(&candidate).ok()?;
-        let entry = archive.entrypoint_blob()?;
-        let bc_vec = archive.get_bytecode_slice(entry).to_vec();
-        SliceIsolate::prewarm_boa_bundle(&bc_vec);
-        let arc_bc = std::sync::Arc::new(bc_vec);
-        cache.borrow_mut().insert(
-            safe_tenant,
-            (mtime_ns, file_len, std::sync::Arc::clone(&arc_bc)),
-        );
-        Some(arc_bc)
-    })
-}
+/// Maximum allowed inbound HTTP request body size (`4 MB`).
+pub(crate) const MAX_INBOUND_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 #[inline]
 pub(crate) fn find_http_header_end(buf: &[u8]) -> Option<(usize, usize)> {
@@ -300,9 +29,6 @@ fn contains_ascii_ignore_case(haystack: &str, needle_lower: &[u8]) -> bool {
         .windows(needle_lower.len())
         .any(|w| w.eq_ignore_ascii_case(needle_lower))
 }
-
-/// Maximum allowed inbound HTTP request body size (`4 MB`).
-pub(crate) const MAX_INBOUND_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 #[inline]
 pub(crate) fn http_status_reason(code: u16) -> &'static str {
@@ -329,164 +55,53 @@ pub(crate) fn http_status_reason(code: u16) -> &'static str {
     }
 }
 
-fn decode_pem_blocks(raw: &[u8]) -> Vec<(String, Vec<u8>)> {
-    let Ok(text) = std::str::from_utf8(raw) else {
-        return Vec::new();
-    };
-    let mut blocks = Vec::new();
-    let mut cur_label: Option<String> = None;
-    let mut b64_buf = String::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("-----BEGIN ") {
-            if let Some(label) = rest.strip_suffix("-----") {
-                cur_label = Some(label.trim().to_string());
-                b64_buf.clear();
+/// Fast stack-allocated ASCII integer formatter using `itoa` (`CLI-PERF-02`).
+#[inline]
+pub(crate) fn push_u64_ascii(buf: &mut Vec<u8>, val: u64) {
+    let mut itoa_buf = itoa::Buffer::new();
+    buf.extend_from_slice(itoa_buf.format(val).as_bytes());
+}
+
+/// Escapes `raw` for safe embedding inside a JSON string literal (`"..."`), preventing malformed
+/// or injected JSON when formatting `SandboxViolation` messages (`CLI-SEC-01`).
+#[inline]
+pub(crate) fn escape_json_string_into(raw: &str, out: &mut String) {
+    for ch in raw.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
             }
-        } else if trimmed.starts_with("-----END ") {
-            if let Some(label) = cur_label.take() {
-                let der = decode_base64_simple(&b64_buf);
-                if !der.is_empty() {
-                    blocks.push((label, der));
-                }
-            }
-            b64_buf.clear();
-        } else if cur_label.is_some() {
-            b64_buf.push_str(trimmed);
-        }
-    }
-    blocks
-}
-
-fn decode_base64_simple(s: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
-    let mut buf: u32 = 0;
-    let mut bits: u32 = 0;
-    for b in s.bytes() {
-        let val = match b {
-            b'A'..=b'Z' => b - b'A',
-            b'a'..=b'z' => b - b'a' + 26,
-            b'0'..=b'9' => b - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            b'=' => break,
-            _ => continue,
-        };
-        buf = (buf << 6) | (val as u32);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((buf >> bits) & 0xFF) as u8);
-        }
-    }
-    out
-}
-
-pub(crate) fn load_tls_server_config(
-    cert_path: &Path,
-    key_path: &Path,
-) -> Result<std::sync::Arc<rustls::ServerConfig>> {
-    use rustls_pki_types::{
-        CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
-    };
-
-    let cert_raw = std::fs::read(cert_path)
-        .with_context(|| format!("Failed to read TLS certificate '{}'", cert_path.display()))?;
-    let key_raw = std::fs::read(key_path)
-        .with_context(|| format!("Failed to read TLS private key '{}'", key_path.display()))?;
-
-    let cert_blocks = decode_pem_blocks(&cert_raw);
-    let certs: Vec<CertificateDer<'static>> = if !cert_blocks.is_empty() {
-        cert_blocks
-            .into_iter()
-            .filter(|(label, _)| label.contains("CERTIFICATE"))
-            .map(|(_, der)| CertificateDer::from(der))
-            .collect()
-    } else {
-        vec![CertificateDer::from(cert_raw)]
-    };
-    if certs.is_empty() {
-        anyhow::bail!("No X.509 certificates found in '{}'", cert_path.display());
-    }
-
-    let key_blocks = decode_pem_blocks(&key_raw);
-    let priv_key: PrivateKeyDer<'static> = if let Some((label, der)) = key_blocks.into_iter().next()
-    {
-        if label.contains("RSA PRIVATE KEY") {
-            PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(der))
-        } else if label.contains("EC PRIVATE KEY") {
-            PrivateKeyDer::Sec1(PrivateSec1KeyDer::from(der))
-        } else {
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(der))
-        }
-    } else {
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_raw))
-    };
-
-    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
-    let mut cfg = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .context("Failed to configure TLS 1.3/1.2 protocol versions")?
-        .with_no_client_auth()
-        .with_single_cert(certs, priv_key)
-        .context("Invalid TLS certificate or private key")?;
-    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(std::sync::Arc::new(cfg))
-}
-
-enum ServerConnStream {
-    Plain(TcpStream),
-    Tls(Box<rustls::StreamOwned<rustls::ServerConnection, TcpStream>>),
-}
-
-impl Read for ServerConnStream {
-    #[inline]
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Plain(s) => s.read(buf),
-            Self::Tls(s) => s.read(buf),
+            c => out.push(c),
         }
     }
 }
 
-impl Write for ServerConnStream {
-    #[inline]
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Plain(s) => s.write(buf),
-            Self::Tls(s) => s.write(buf),
-        }
-    }
-
-    #[inline]
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            Self::Plain(s) => s.flush(),
-            Self::Tls(s) => s.flush(),
-        }
-    }
-}
-
-fn write_http_error_and_close<S: Write>(
+pub(crate) fn write_http_error_and_close<S: Write>(
     stream: &mut S,
     status: u16,
     json_body: &str,
 ) -> Result<()> {
     let mut resp = Vec::with_capacity(256 + json_body.len());
-    let _ = write!(
-        &mut resp,
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nServer: Slice-NexusJS/0.2\r\n\r\n{}",
-        status,
-        http_status_reason(status),
-        json_body.len(),
-        json_body
-    );
+    resp.extend_from_slice(b"HTTP/1.1 ");
+    push_u64_ascii(&mut resp, status as u64);
+    resp.push(b' ');
+    resp.extend_from_slice(http_status_reason(status).as_bytes());
+    resp.extend_from_slice(b"\r\nContent-Type: application/json\r\nContent-Length: ");
+    push_u64_ascii(&mut resp, json_body.len() as u64);
+    resp.extend_from_slice(b"\r\nConnection: close\r\nServer: Slice-NexusJS/0.2\r\n\r\n");
+    resp.extend_from_slice(json_body.as_bytes());
     let _ = stream.write_all(&resp);
     let _ = stream.flush();
     Ok(())
 }
 
-fn flush_server_ws_frames<S: Write>(
+pub(crate) fn flush_server_ws_frames<S: Write>(
     stream: &mut S,
     frames: Vec<slice_engine::ServerWsOutFrame>,
 ) -> Result<bool> {
@@ -519,6 +134,7 @@ fn flush_server_ws_frames<S: Write>(
     Ok(should_close)
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn serve_connection_keep_alive(
     tcp_stream: TcpStream,
@@ -534,7 +150,7 @@ pub(crate) fn serve_connection_keep_alive(
     write_buf: &mut Vec<u8>,
     max_requests_tracker: Option<(&std::sync::atomic::AtomicUsize, usize)>,
 ) -> Result<()> {
-    serve_connection_keep_alive_with_tls(
+    serve_connection_keep_alive_with_tls_and_secrets(
         tcp_stream,
         slot_id,
         bytecode,
@@ -542,6 +158,7 @@ pub(crate) fn serve_connection_keep_alive(
         static_assets_opt,
         deterministic_seed,
         caps,
+        &[],
         fuel_limit,
         mem_limit,
         read_buf,
@@ -552,7 +169,7 @@ pub(crate) fn serve_connection_keep_alive(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn serve_connection_keep_alive_with_tls(
+pub(crate) fn serve_connection_keep_alive_with_tls_and_secrets(
     tcp_stream: TcpStream,
     mut slot_id: u32,
     bytecode: &[u8],
@@ -560,6 +177,7 @@ pub(crate) fn serve_connection_keep_alive_with_tls(
     static_assets_opt: Option<&slice_cas::StaticAssetTable>,
     deterministic_seed: Option<u64>,
     caps: &CapabilityToken,
+    audit_secrets: &[String],
     fuel_limit: u64,
     mem_limit: usize,
     read_buf: &mut [u8],
@@ -591,6 +209,12 @@ pub(crate) fn serve_connection_keep_alive_with_tls(
     for (k, v) in &caps.allowed_env_keys {
         if slice_sandbox::is_sensitive_env_key(k) && v.len() >= 6 {
             isolate.add_egress_audit_secret(v.clone());
+        }
+    }
+    // CLI-SEC-01: Register explicit DLP secrets (`--audit-egress`, `SLICE_AUDIT_EGRESS`, `slice.toml` `audit_egress`, `.env`)
+    for sec in audit_secrets {
+        if !sec.is_empty() {
+            isolate.add_egress_audit_secret(sec.clone());
         }
     }
 
@@ -905,27 +529,43 @@ pub(crate) fn serve_connection_keep_alive_with_tls(
                                 || if_none_match.contains(&asset.etag_quoted)
                                 || if_none_match.trim_matches('"')
                                     == asset.etag_quoted.trim_matches('"'));
-                        let total_us = req_start.elapsed().as_nanos() / 1_000;
+                        let total_us = (req_start.elapsed().as_nanos() / 1_000) as u64;
                         if is_304 {
-                            let _ = write!(
-                                write_buf,
-                                "HTTP/1.1 304 Not Modified\r\nETag: {}\r\nCache-Control: public, max-age=3600\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Static: HIT-304\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: 0\r\n\r\n",
-                                asset.etag_quoted,
-                                conn_hdr,
-                                tenant_id,
-                                total_us,
+                            write_buf.extend_from_slice(b"HTTP/1.1 304 Not Modified\r\nETag: ");
+                            write_buf.extend_from_slice(asset.etag_quoted.as_bytes());
+                            write_buf.extend_from_slice(
+                                b"\r\nCache-Control: public, max-age=3600\r\nConnection: ",
                             );
+                            write_buf.extend_from_slice(conn_hdr.as_bytes());
+                            write_buf.extend_from_slice(
+                                b"\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: ",
+                            );
+                            write_buf.extend_from_slice(tenant_id.as_bytes());
+                            write_buf.extend_from_slice(
+                                b"\r\nX-Slice-Static: HIT-304\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: ",
+                            );
+                            push_u64_ascii(write_buf, total_us);
+                            write_buf.extend_from_slice(b"\r\nX-Slice-Fuel-Used: 0\r\n\r\n");
                         } else {
-                            let _ = write!(
-                                write_buf,
-                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nETag: {}\r\nCache-Control: public, max-age=3600\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Static: HIT-200\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: 0\r\n\r\n",
-                                asset.content_type,
-                                asset.payload.len(),
-                                asset.etag_quoted,
-                                conn_hdr,
-                                tenant_id,
-                                total_us,
+                            write_buf.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Type: ");
+                            write_buf.extend_from_slice(asset.content_type.as_bytes());
+                            write_buf.extend_from_slice(b"\r\nContent-Length: ");
+                            push_u64_ascii(write_buf, asset.payload.len() as u64);
+                            write_buf.extend_from_slice(b"\r\nETag: ");
+                            write_buf.extend_from_slice(asset.etag_quoted.as_bytes());
+                            write_buf.extend_from_slice(
+                                b"\r\nCache-Control: public, max-age=3600\r\nConnection: ",
                             );
+                            write_buf.extend_from_slice(conn_hdr.as_bytes());
+                            write_buf.extend_from_slice(
+                                b"\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: ",
+                            );
+                            write_buf.extend_from_slice(tenant_id.as_bytes());
+                            write_buf.extend_from_slice(
+                                b"\r\nX-Slice-Static: HIT-200\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: ",
+                            );
+                            push_u64_ascii(write_buf, total_us);
+                            write_buf.extend_from_slice(b"\r\nX-Slice-Fuel-Used: 0\r\n\r\n");
                             if method != "HEAD" {
                                 write_buf.extend_from_slice(&asset.payload);
                             }
@@ -989,11 +629,14 @@ pub(crate) fn serve_connection_keep_alive_with_tls(
                 {
                     let accept_key = slice_engine::compute_websocket_accept_key(sec_websocket_key);
                     write_buf.clear();
-                    let _ = write!(
-                        write_buf,
-                        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\n\r\n",
-                        accept_key, outcome.metrics.tenant_id
+                    write_buf.extend_from_slice(
+                        b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ",
                     );
+                    write_buf.extend_from_slice(accept_key.as_bytes());
+                    write_buf
+                        .extend_from_slice(b"\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: ");
+                    write_buf.extend_from_slice(outcome.metrics.tenant_id.as_bytes());
+                    write_buf.extend_from_slice(b"\r\n\r\n");
                     stream.write_all(write_buf)?;
                     stream.flush()?;
                     write_buf.clear();
@@ -1074,37 +717,48 @@ pub(crate) fn serve_connection_keep_alive_with_tls(
                 }
 
                 let isolate_us = outcome.metrics.total_time_ns / 1_000;
-                let total_us = req_start.elapsed().as_nanos() / 1_000;
+                let total_us = (req_start.elapsed().as_nanos() / 1_000) as u64;
                 let safe_ct = if slice_engine::is_valid_http_header_value(&outcome.content_type) {
                     outcome.content_type.as_str()
                 } else {
                     "application/octet-stream"
                 };
-                let extra_sse_hdr = if safe_ct.starts_with("text/event-stream") {
-                    "Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\n"
-                } else {
-                    ""
-                };
-                let _ = write!(
-                    write_buf,
-                    "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}Content-Length: {}\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: {}\r\nX-Slice-Isolate-Us: {}\r\nX-Slice-Total-Us: {}\r\nX-Slice-Fuel-Used: {}\r\n",
-                    outcome.status_code,
-                    http_status_reason(outcome.status_code),
-                    safe_ct,
-                    extra_sse_hdr,
-                    outcome.response_body.len(),
-                    conn_hdr,
-                    outcome.metrics.tenant_id,
-                    isolate_us,
-                    total_us,
-                    outcome.metrics.fuel_consumed,
-                );
+
+                // CLI-PERF-02: Zero-format-macro byte slice + `itoa` response header serialization
+                write_buf.extend_from_slice(b"HTTP/1.1 ");
+                push_u64_ascii(write_buf, outcome.status_code as u64);
+                write_buf.push(b' ');
+                write_buf.extend_from_slice(http_status_reason(outcome.status_code).as_bytes());
+                write_buf.extend_from_slice(b"\r\nContent-Type: ");
+                write_buf.extend_from_slice(safe_ct.as_bytes());
+                write_buf.extend_from_slice(b"\r\n");
+                if safe_ct.starts_with("text/event-stream") {
+                    write_buf
+                        .extend_from_slice(b"Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\n");
+                }
+                write_buf.extend_from_slice(b"Content-Length: ");
+                push_u64_ascii(write_buf, outcome.response_body.len() as u64);
+                write_buf.extend_from_slice(b"\r\nConnection: ");
+                write_buf.extend_from_slice(conn_hdr.as_bytes());
+                write_buf.extend_from_slice(b"\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: ");
+                write_buf.extend_from_slice(outcome.metrics.tenant_id.as_bytes());
+                write_buf.extend_from_slice(b"\r\nX-Slice-Isolate-Us: ");
+                push_u64_ascii(write_buf, isolate_us);
+                write_buf.extend_from_slice(b"\r\nX-Slice-Total-Us: ");
+                push_u64_ascii(write_buf, total_us);
+                write_buf.extend_from_slice(b"\r\nX-Slice-Fuel-Used: ");
+                push_u64_ascii(write_buf, outcome.metrics.fuel_consumed);
+                write_buf.extend_from_slice(b"\r\n");
+
                 // N-Sec-2: Validate all custom response headers against CRLF / control character injection
                 for (hk, hv) in &outcome.response_headers {
                     if slice_engine::is_valid_http_header_name(hk)
                         && slice_engine::is_valid_http_header_value(hv)
                     {
-                        let _ = write!(write_buf, "{}: {}\r\n", hk, hv);
+                        write_buf.extend_from_slice(hk.as_bytes());
+                        write_buf.extend_from_slice(b": ");
+                        write_buf.extend_from_slice(hv.as_bytes());
+                        write_buf.extend_from_slice(b"\r\n");
                     }
                 }
                 write_buf.extend_from_slice(b"\r\n");
@@ -1120,14 +774,21 @@ pub(crate) fn serve_connection_keep_alive_with_tls(
                 }
             }
             Err(violation) => {
-                let err_body = format!(r#"{{"error":"{}"}}"#, violation);
-                let _ = write!(
-                    write_buf,
-                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {}\r\nServer: Slice-NexusJS/0.2\r\n\r\n{}",
-                    err_body.len(),
-                    conn_hdr,
-                    err_body
+                // CLI-SEC-01: Escape quotes/backslashes/control chars in violation string for valid JSON
+                let violation_raw = violation.to_string();
+                let mut err_body = String::with_capacity(violation_raw.len() + 16);
+                err_body.push_str(r#"{"error":""#);
+                escape_json_string_into(&violation_raw, &mut err_body);
+                err_body.push_str(r#""}"#);
+
+                write_buf.extend_from_slice(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: ",
                 );
+                push_u64_ascii(write_buf, err_body.len() as u64);
+                write_buf.extend_from_slice(b"\r\nConnection: ");
+                write_buf.extend_from_slice(conn_hdr.as_bytes());
+                write_buf.extend_from_slice(b"\r\nServer: Slice-NexusJS/0.2\r\n\r\n");
+                write_buf.extend_from_slice(err_body.as_bytes());
                 stream.write_all(write_buf)?;
                 write_buf.clear();
             }
