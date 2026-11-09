@@ -148,12 +148,12 @@ Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`]
 
 <!-- BENCHMARK_SUMMARY_START -->
 > **Latest Verified Benchmark Report:** **[`tests/reports/latest.md`](../../tests/reports/latest.md)** (Archive: [`bench_v0.10.4_20261109_073538Z_7a86dd6.md`](../../tests/reports/bench_v0.10.4_20261109_073538Z_7a86dd6.md))  
-> **Provenance:** Slice `v0.10.4` (`7a86dd6`) · Generated `2026-11-09T07:35:38Z` · Environment: `Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)`  
+> **Provenance:** Slice `v0.10.5` (`7a86dd6`) · Generated `2026-11-09T07:35:38Z` · Environment: `Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)`  
 > **Scorecard Across All 32 Production Workloads:** Beats **Deno (`v2.9.8`)** on **32/32**, **Node.js (`v27.0.0-alpha.0.0.0`)** on **32/32**, **Bun (`v1.4.4`)** on **29/32** cold one-shot, and **all 3 runtimes on 32/32 workloads in `--warm` pooled execution**.
 
 #### 1. Core Architecture, HTTP Throughput & 1,000-Tenant MicroVM Density
 
-| Metric | Slice (`v0.10.4` `SLICEBC\x01`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha.0.0.0`) | Slice Advantage |
+| Metric | Slice (`v0.10.5` `SLICEBC\x01`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha.0.0.0`) | Slice Advantage |
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **In-Process Isolate Cold Start (`P50` / `P99`)** | **`1.24 us` / `1.61 us`** | N/A (Process/VM) | N/A (Process/VM) | N/A (Process/VM) | **~120,000x faster than 125ms Firecracker VM** |
 | **1,000-Tenant MicroVM Swarm (Boot + Exec)** | **`1.51 ms` (`10.07 MB` RSS)** | > 5,000 ms | > 15,000 ms | > 30,000 ms | **> 3,900x faster / ~32,000x denser** |

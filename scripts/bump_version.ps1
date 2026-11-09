@@ -65,7 +65,9 @@ $TargetFiles = @(
     "scripts/install.ps1",
     "scripts/install.sh",
     "scripts/package_release.ps1",
+    "scripts/run_benchmarks.ps1",
     "tests/run_real_stack_benchmarks.sh",
+    "tests/scripts/generate_bench_report.mjs",
     "tests/reports/latest.md",
     "tests/reports/latest.json",
     "README.md",
@@ -90,6 +92,9 @@ foreach ($RelPath in $TargetFiles) {
         -replace "v$EscOld\b", "v$NewVersion" `
         -replace "`"version`":\s*`"$EscOld`"", "`"version`": `"$NewVersion`"" `
         -replace "`"version`":`"$EscOld`"", "`"version`":`"$NewVersion`"" `
+        -replace "SLICE_VERSION:-$EscOld\b", "SLICE_VERSION:-$NewVersion" `
+        -replace "\`$Version = `"$EscOld`"", "`$Version = `"$NewVersion`"" `
+        -replace "\|\| `"$EscOld`"", "|| `"$NewVersion`"" `
         -replace "Slice-NexusJS/$EscOld\b", "Slice-NexusJS/$NewVersion"
 
     if ($Updated -ne $Content) {
