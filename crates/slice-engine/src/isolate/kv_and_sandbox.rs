@@ -30,6 +30,12 @@ pub struct SandboxEvalOptions {
     pub allow_env: Vec<String>,
     pub deterministic_seed: Option<u64>,
     pub audit_secret: Option<String>,
+    #[serde(default)]
+    pub audit_secrets: Vec<String>,
+    #[serde(default, alias = "allowCheckpoints")]
+    pub checkpoints: Option<bool>,
+    #[serde(default)]
+    pub max_checkpoints: Option<u32>,
 }
 
 /// Structured result returned by `Slice.evalSandbox(code, opts)` and `slice mcp` `slice_eval_ts`.
@@ -39,11 +45,19 @@ pub struct SandboxEvalOutcome {
     pub ok: bool,
     pub stdout: Vec<String>,
     pub return_value: String,
+    pub return_json: Option<String>,
     pub error: Option<String>,
+    pub violation: Option<String>,
     pub fuel_used: u64,
     pub memory_used_bytes: usize,
+    pub peak_memory_bytes: usize,
+    pub spawn_time_ns: u64,
+    pub compile_time_ns: u64,
+    pub exec_time_ns: u64,
     pub total_time_us: f64,
-    pub violation: Option<String>,
+    pub checkpoints_taken: u32,
+    pub restores_performed: u32,
+    pub restore_time_ns: u64,
 }
 
 impl SliceIsolate {
@@ -199,6 +213,24 @@ impl SliceIsolate {
             }
         }
 
+        let parent_allow_cp = self.compartment.capabilities.allow_checkpoints;
+        let child_allow_cp =
+            parent_allow_cp && opts.checkpoints.unwrap_or(true) && opts.max_checkpoints != Some(0);
+        let parent_rem_cp = self
+            .compartment
+            .capabilities
+            .max_checkpoints
+            .map(|m| m.saturating_sub(self.checkpoints_taken));
+        let child_max_cp = match (parent_rem_cp, opts.max_checkpoints) {
+            (Some(p), Some(c)) => Some(p.min(c)),
+            (Some(p), None) => Some(p),
+            (None, Some(c)) => Some(c),
+            (None, None) => None,
+        };
+        child_caps = child_caps
+            .with_checkpoints(child_allow_cp)
+            .with_max_checkpoints(child_max_cp);
+
         let child_tenant = match opts
             .tenant_id
             .as_deref()
@@ -210,6 +242,7 @@ impl SliceIsolate {
         };
         let mut child_iso =
             SliceIsolate::spawn(child_tenant, 99, child_caps, child_fuel, child_mem);
+        child_iso.capture_return_json = true;
         if let Some(seed) = opts.deterministic_seed.or(self.deterministic_seed) {
             child_iso.set_deterministic_seed(Some(seed));
         }
@@ -217,10 +250,28 @@ impl SliceIsolate {
         if let Some(sec) = opts.audit_secret {
             child_iso.add_egress_audit_secret(sec);
         }
+        for sec in opts.audit_secrets {
+            child_iso.add_egress_audit_secret(sec);
+        }
+        let spawn_time_ns = (start.elapsed().as_nanos() as u64).max(1);
 
+        let compile_start = Instant::now();
         let bc = crate::parser_and_compiler::compile_source_for_sandbox_eval(code);
+        let compile_time_ns = (compile_start.elapsed().as_nanos() as u64).max(1);
+
+        let exec_start = Instant::now();
         let exec_res = child_iso.execute_bytecode(&bc, None);
+        let exec_time_ns = (exec_start.elapsed().as_nanos() as u64).max(1);
         clear_tenant_checkpoints(&child_iso.compartment.tenant_id);
+        self.checkpoints_taken = self
+            .checkpoints_taken
+            .saturating_add(child_iso.checkpoints_taken);
+        self.restores_performed = self
+            .restores_performed
+            .saturating_add(child_iso.restores_performed);
+        self.restore_time_ns = self
+            .restore_time_ns
+            .saturating_add(child_iso.restore_time_ns);
         let outcome = match exec_res {
             Ok(metrics) => {
                 let _ = self.compartment.consume_fuel(metrics.fuel_consumed.max(1));
@@ -229,20 +280,32 @@ impl SliceIsolate {
                     let _ = self.compartment.alloc_memory(net_mem);
                 }
                 let is_uncaught = metrics.return_value.starts_with("Uncaught ");
-                let (return_value, error) = if is_uncaught {
-                    ("undefined".to_string(), Some(metrics.return_value))
+                let (return_value, return_json, error) = if is_uncaught {
+                    ("undefined".to_string(), None, Some(metrics.return_value))
                 } else {
-                    (metrics.return_value, None)
+                    (
+                        metrics.return_value,
+                        child_iso.last_return_json.take(),
+                        None,
+                    )
                 };
                 SandboxEvalOutcome {
                     ok: !is_uncaught,
                     stdout: metrics.stdout,
                     return_value,
+                    return_json,
                     error,
+                    violation: None,
                     fuel_used: metrics.fuel_consumed,
                     memory_used_bytes: metrics.memory_used_bytes,
+                    peak_memory_bytes: metrics.memory_used_bytes,
+                    spawn_time_ns,
+                    compile_time_ns,
+                    exec_time_ns,
                     total_time_us: start.elapsed().as_nanos() as f64 / 1_000.0,
-                    violation: None,
+                    checkpoints_taken: child_iso.checkpoints_taken,
+                    restores_performed: child_iso.restores_performed,
+                    restore_time_ns: child_iso.restore_time_ns,
                 }
             }
             Err(violation) => {
@@ -266,11 +329,19 @@ impl SliceIsolate {
                     ok: false,
                     stdout: safe_stdout,
                     return_value: "undefined".to_string(),
+                    return_json: None,
                     error: None,
+                    violation: Some(violation.to_string()),
                     fuel_used: child_iso.compartment.fuel_consumed,
                     memory_used_bytes: child_iso.compartment.memory_used_bytes,
+                    peak_memory_bytes: child_iso.compartment.memory_used_bytes,
+                    spawn_time_ns,
+                    compile_time_ns,
+                    exec_time_ns,
                     total_time_us: start.elapsed().as_nanos() as f64 / 1_000.0,
-                    violation: Some(violation.to_string()),
+                    checkpoints_taken: child_iso.checkpoints_taken,
+                    restores_performed: child_iso.restores_performed,
+                    restore_time_ns: child_iso.restore_time_ns,
                 }
             }
         };

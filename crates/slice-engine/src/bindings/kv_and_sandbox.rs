@@ -144,8 +144,36 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_checkpoint"),
         0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+        NativeFunction::from_fn_ptr(|_this, _args, context| {
+            let (allow_cp, max_cp) = crate::boa_realm::BOA_CHECKPOINT_CAP.with(|c| c.get());
+            let (taken, restored, restore_ns) =
+                crate::boa_realm::BOA_CHECKPOINT_STATS.with(|s| s.get());
+            if !allow_cp || taken >= max_cp {
+                let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+                let reason = if !allow_cp {
+                    "guest checkpoints are disabled for this compartment".to_string()
+                } else {
+                    format!(
+                        "exceeded max_checkpoints limit ({} > {})",
+                        taken.saturating_add(1),
+                        max_cp
+                    )
+                };
+                BOA_VIOLATION.with(|v| {
+                    *v.borrow_mut() = Some(SandboxViolation::CheckpointDenied {
+                        tenant_id: tenant,
+                        reason,
+                    });
+                });
+                context.runtime_limits_mut().set_loop_iteration_limit(1);
+                return Err(boa_engine::JsNativeError::error()
+                    .with_message("SandboxViolation: CheckpointDenied")
+                    .into());
+            }
             let id = BOA_ACTIVE_TENANT.with(|t| checkpoint_tenant_state(&t.borrow()));
+            crate::boa_realm::BOA_CHECKPOINT_STATS.with(|s| {
+                s.set((taken.saturating_add(1), restored, restore_ns));
+            });
             Ok(BoaVal::from(id as f64))
         }),
     );
@@ -153,13 +181,40 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_restore"),
         1,
-        NativeFunction::from_fn_ptr(|_this, args, _context| {
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let (allow_cp, _) = crate::boa_realm::BOA_CHECKPOINT_CAP.with(|c| c.get());
+            if !allow_cp {
+                let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+                BOA_VIOLATION.with(|v| {
+                    *v.borrow_mut() = Some(SandboxViolation::CheckpointDenied {
+                        tenant_id: tenant,
+                        reason: "guest checkpoints/restores are disabled for this compartment"
+                            .to_string(),
+                    });
+                });
+                context.runtime_limits_mut().set_loop_iteration_limit(1);
+                return Err(boa_engine::JsNativeError::error()
+                    .with_message("SandboxViolation: CheckpointDenied")
+                    .into());
+            }
             let id = args
                 .first()
                 .and_then(|v| v.as_number())
                 .map(|n| n as u64)
                 .unwrap_or(0);
+            let t0 = std::time::Instant::now();
             let ok = BOA_ACTIVE_TENANT.with(|t| restore_tenant_state(&t.borrow(), id));
+            let elapsed_ns = (t0.elapsed().as_nanos() as u64).max(1);
+            if ok {
+                crate::boa_realm::BOA_CHECKPOINT_STATS.with(|s| {
+                    let (taken, restored, restore_ns) = s.get();
+                    s.set((
+                        taken,
+                        restored.saturating_add(1),
+                        restore_ns.saturating_add(elapsed_ns),
+                    ));
+                });
+            }
             Ok(BoaVal::from(ok))
         }),
     );
@@ -216,6 +271,12 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             for eb in &scope_guard.saved_exec_bins {
                 parent_caps = parent_caps.with_exec_binary(eb.clone());
             }
+            let (parent_allow_cp, parent_max_cp) = scope_guard.saved_checkpoint_cap;
+            parent_caps = parent_caps.with_checkpoints(parent_allow_cp);
+            if parent_max_cp < u32::MAX {
+                let rem_cp = parent_max_cp.saturating_sub(scope_guard.saved_checkpoint_stats.0);
+                parent_caps = parent_caps.with_max_checkpoints(Some(rem_cp));
+            }
             let parent_rem_fuel = scope_guard
                 .saved_fuel_budget
                 .1
@@ -257,6 +318,16 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 proxy_parent.eval_sandbox(&code, opts)
             };
             drop(scope_guard);
+            if outcome.checkpoints_taken > 0 || outcome.restores_performed > 0 {
+                crate::boa_realm::BOA_CHECKPOINT_STATS.with(|s| {
+                    let (taken, restored, restore_ns) = s.get();
+                    s.set((
+                        taken.saturating_add(outcome.checkpoints_taken),
+                        restored.saturating_add(outcome.restores_performed),
+                        restore_ns.saturating_add(outcome.restore_time_ns),
+                    ));
+                });
+            }
             if outcome.fuel_used > 0 {
                 crate::boa_realm::BOA_FUEL_BUDGET.with(|f| {
                     let (used, limit) = f.get();

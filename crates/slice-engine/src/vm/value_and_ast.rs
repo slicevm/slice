@@ -422,6 +422,27 @@ pub(crate) fn js_value_to_json_string(val: &JsValue) -> String {
     }
 }
 
+pub(crate) fn js_value_to_optional_json_string(val: &JsValue) -> Option<String> {
+    match val {
+        JsValue::Undefined | JsValue::Function(_) => None,
+        JsValue::Null => Some("null".to_string()),
+        JsValue::Bool(b) => Some(if *b { "true" } else { "false" }.to_string()),
+        JsValue::Number(n) => {
+            if n.is_finite() {
+                if n.fract() == 0.0 && n.abs() < 1e16 {
+                    Some(format!("{:.0}", n))
+                } else {
+                    Some(n.to_string())
+                }
+            } else {
+                None
+            }
+        }
+        JsValue::Str(s) => serde_json::to_string(s).ok(),
+        JsValue::Array(_) | JsValue::Object(_) => Some(js_value_to_json_string(val)),
+    }
+}
+
 pub(crate) fn serde_json_to_js_value(v: &serde_json::Value) -> JsValue {
     match v {
         serde_json::Value::Null => JsValue::Null,

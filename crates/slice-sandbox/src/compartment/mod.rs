@@ -51,11 +51,18 @@ pub enum SandboxViolation {
 
     #[error("Hardware PKEY Trap: Compartment '{tenant_id}' attempted unauthorized cross-domain memory access (PKEY 0x{pkey:x})")]
     HardwareMemoryDomainTrap { tenant_id: String, pkey: u32 },
+
+    #[error("OCap Violation (CapabilityDenied: checkpoints): Compartment '{tenant_id}' checkpoint denied: {reason}")]
+    CheckpointDenied { tenant_id: String, reason: String },
+}
+
+fn default_allow_checkpoints() -> bool {
+    true
 }
 
 /// Attenuated Capability Token granted explicitly to a TC39/SES Compartment.
 /// By default, a new Compartment has ZERO ambient authority.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityToken {
     pub allowed_read_prefixes: Vec<String>,
     pub allowed_write_prefixes: Vec<String>,
@@ -63,6 +70,25 @@ pub struct CapabilityToken {
     pub allowed_env_keys: FxHashMap<String, String>,
     #[serde(default)]
     pub allowed_exec_binaries: Vec<String>,
+    #[serde(default = "default_allow_checkpoints")]
+    pub allow_checkpoints: bool,
+    #[serde(default)]
+    pub max_checkpoints: Option<u32>,
+}
+
+impl Default for CapabilityToken {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            allowed_read_prefixes: Vec::new(),
+            allowed_write_prefixes: Vec::new(),
+            allowed_net_hosts: FxHashSet::default(),
+            allowed_env_keys: FxHashMap::default(),
+            allowed_exec_binaries: Vec::new(),
+            allow_checkpoints: true,
+            max_checkpoints: None,
+        }
+    }
 }
 
 impl CapabilityToken {
@@ -94,6 +120,22 @@ impl CapabilityToken {
 
     pub fn with_exec_binary(mut self, binary: impl Into<String>) -> Self {
         self.allowed_exec_binaries.push(binary.into());
+        self
+    }
+
+    pub fn with_checkpoints(mut self, enabled: bool) -> Self {
+        self.allow_checkpoints = enabled;
+        if !enabled {
+            self.max_checkpoints = Some(0);
+        }
+        self
+    }
+
+    pub fn with_max_checkpoints(mut self, max: Option<u32>) -> Self {
+        self.max_checkpoints = max;
+        if max == Some(0) {
+            self.allow_checkpoints = false;
+        }
         self
     }
 }
@@ -303,6 +345,30 @@ impl TenantCompartment {
             return Err(self.trap_memory_exceeded(next));
         }
         self.memory_used_bytes = next;
+        Ok(())
+    }
+
+    /// Verifies whether this compartment is permitted to take another state checkpoint.
+    #[inline]
+    pub fn verify_checkpoint(&self, current_taken: u32) -> Result<(), SandboxViolation> {
+        if !self.capabilities.allow_checkpoints {
+            return Err(SandboxViolation::CheckpointDenied {
+                tenant_id: self.tenant_id.clone(),
+                reason: "guest checkpoints are disabled for this compartment".to_string(),
+            });
+        }
+        if let Some(max) = self.capabilities.max_checkpoints {
+            if current_taken >= max {
+                return Err(SandboxViolation::CheckpointDenied {
+                    tenant_id: self.tenant_id.clone(),
+                    reason: format!(
+                        "exceeded max_checkpoints limit ({} > {})",
+                        current_taken.saturating_add(1),
+                        max
+                    ),
+                });
+            }
+        }
         Ok(())
     }
 

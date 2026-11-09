@@ -60,7 +60,8 @@ pub use isolate::{
     SandboxEvalOptions, SandboxEvalOutcome, SliceIsolate,
 };
 pub use outbound_http::{
-    clear_outbound_conn_pool, fetch_reactor_slab_acquire_count, fetch_reactor_slab_available_count,
+    clear_outbound_conn_pool, clear_outbound_conn_pool_for_tenant,
+    fetch_reactor_slab_acquire_count, fetch_reactor_slab_available_count,
     fetch_reactor_slab_in_use_count, is_valid_http_header_name, is_valid_http_header_value,
     is_valid_request_target, outbound_pool_reuse_count, parse_chunked_body,
     register_custom_root_cert_der, reset_fetch_slab_telemetry, MAX_OUTBOUND_BODY_BYTES,

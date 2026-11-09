@@ -32,15 +32,26 @@ declare namespace Slice {
         allowEnv?: string[];
         deterministicSeed?: number;
         auditSecret?: string;
+        auditSecrets?: string[];
+        checkpoints?: boolean;
+        maxCheckpoints?: number;
     }
 
     interface SandboxEvalOutcome {
         ok: boolean;
         returnValue: string;
+        returnJson: string | null;
         stdout: string[];
         fuelUsed: number;
         memoryUsedBytes: number;
+        peakMemoryBytes: number;
+        spawnTimeNs: number;
+        compileTimeNs: number;
+        execTimeNs: number;
         totalTimeUs: number;
+        checkpointsTaken: number;
+        restoresPerformed: number;
+        restoreTimeNs: number;
         violation: string | null;
         error: string | null;
     }

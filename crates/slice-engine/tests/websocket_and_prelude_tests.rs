@@ -305,6 +305,9 @@ main();
     );
     let caps = CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", port));
 
+    crate::clear_outbound_conn_pool_for_tenant("tenant-alpha");
+    crate::clear_outbound_conn_pool_for_tenant("tenant-beta");
+
     let m_alpha = run_source_isolated(
         "tenant-alpha",
         &js,
@@ -326,6 +329,8 @@ main();
     );
     assert_eq!(accept_count.load(Ordering::SeqCst), 2);
     let _ = srv.join();
+    crate::clear_outbound_conn_pool_for_tenant("tenant-alpha");
+    crate::clear_outbound_conn_pool_for_tenant("tenant-beta");
 
     // 2. N-Sec-2: Verify outbound `fetch()` rejects CRLF header injection on live outbound sockets
     let bad_hdr_js = format!(

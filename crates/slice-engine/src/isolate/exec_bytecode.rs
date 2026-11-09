@@ -62,6 +62,9 @@ impl SliceIsolate {
                     self.verify_egress_not_leaked(line)?;
                 }
                 self.verify_egress_not_leaked(&ret_str)?;
+                if let Some(ref rj) = self.last_return_json {
+                    self.verify_egress_not_leaked(rj)?;
+                }
                 BOA_HTTP_RES.with(|res| -> Result<(), SandboxViolation> {
                     if let Some((_, ref res_body, _, ref res_hdrs)) = *res.borrow() {
                         self.verify_egress_not_leaked(res_body)?;
@@ -87,6 +90,9 @@ impl SliceIsolate {
                 os_stat_syscalls: 0,
                 stdout: self.stdout.clone(),
                 return_value: ret_str,
+                checkpoints_taken: self.checkpoints_taken,
+                restores_performed: self.restores_performed,
+                restore_time_ns: self.restore_time_ns,
             });
         }
 
@@ -283,12 +289,19 @@ impl SliceIsolate {
 
         let exec_ns = exec_start.elapsed().as_nanos() as u64;
         let total_ns = start.elapsed().as_nanos() as u64;
+        if self.capture_return_json && self.last_return_json.is_none() {
+            self.last_return_json =
+                crate::value_and_ast::js_value_to_optional_json_string(&last_val);
+        }
         let ret_str = last_val.to_string();
         if !self.egress_audit_secrets.is_empty() {
             for line in &self.stdout {
                 self.verify_egress_not_leaked(line)?;
             }
             self.verify_egress_not_leaked(&ret_str)?;
+            if let Some(ref rj) = self.last_return_json {
+                self.verify_egress_not_leaked(rj)?;
+            }
         }
 
         Ok(ExecutionMetrics {
@@ -304,6 +317,9 @@ impl SliceIsolate {
             os_stat_syscalls: 0,
             stdout: self.stdout.clone(),
             return_value: ret_str,
+            checkpoints_taken: self.checkpoints_taken,
+            restores_performed: self.restores_performed,
+            restore_time_ns: self.restore_time_ns,
         })
     }
 

@@ -43,6 +43,12 @@ pub struct ExecutionMetrics {
     pub os_stat_syscalls: usize,
     pub stdout: Vec<String>,
     pub return_value: String,
+    #[serde(default)]
+    pub checkpoints_taken: u32,
+    #[serde(default)]
+    pub restores_performed: u32,
+    #[serde(default)]
+    pub restore_time_ns: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +72,11 @@ pub struct SliceIsolate {
     pub(crate) det_clock_ms: u64,
     pub egress_audit_secrets: Vec<String>,
     pub(crate) recursion_depth: u32,
+    pub checkpoints_taken: u32,
+    pub restores_performed: u32,
+    pub restore_time_ns: u64,
+    pub(crate) capture_return_json: bool,
+    pub(crate) last_return_json: Option<String>,
 }
 
 impl SliceIsolate {
@@ -98,6 +109,11 @@ impl SliceIsolate {
             det_clock_ms: 1_700_000_000_000,
             egress_audit_secrets: Vec::new(),
             recursion_depth: 0,
+            checkpoints_taken: 0,
+            restores_performed: 0,
+            restore_time_ns: 0,
+            capture_return_json: false,
+            last_return_json: None,
         }
     }
 
@@ -248,6 +264,10 @@ impl SliceIsolate {
         self.env_vars.clear();
         self.stdout.clear();
         self.recursion_depth = 0;
+        self.checkpoints_taken = 0;
+        self.restores_performed = 0;
+        self.restore_time_ns = 0;
+        self.last_return_json = None;
         if let Some(s) = self.deterministic_seed {
             self.det_prng_state = s ^ 0x9E37_79B9_7F4A_7C15;
             self.det_clock_ms = 1_700_000_000_000;
