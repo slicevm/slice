@@ -212,7 +212,7 @@ impl MappedCasArchive {
     pub fn reconstruct_annotated_source(&self, entry: &CasBlobEntry) -> String {
         let src = self.get_source_slice(entry);
         let markers = &self.header.source_map_markers;
-        if markers.is_empty() || src.contains("// #slice-source: ") {
+        if markers.is_empty() || src.contains("// #slice-source: ") || src.contains("//@sm:") {
             return src.to_string();
         }
         let mut out = String::with_capacity(src.len() + markers.len() * 64);

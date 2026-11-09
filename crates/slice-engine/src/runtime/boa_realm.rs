@@ -190,6 +190,20 @@ pub(crate) fn map_stack_with_active_source(raw_stack: &str) -> String {
     slice_cas::map_bundled_stack_trace(active_src, raw_stack)
 }
 
+pub(crate) fn map_error_with_active_source(raw_error: &str) -> String {
+    let (ptr, len) = BOA_ACTIVE_SOURCE_PTR_LEN.with(|c| c.get());
+    if ptr == 0 || len == 0 {
+        return raw_error.to_string();
+    }
+    // SAFETY: `ActiveSourceSliceGuard` guarantees `(ptr, len)` points to a valid live `&str`
+    // on the current thread's call stack and restores `prev` before the `&str` lifetime ends.
+    let active_src = unsafe {
+        let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
+        std::str::from_utf8_unchecked(bytes)
+    };
+    slice_cas::map_bundled_error_location(active_src, raw_error)
+}
+
 pub(crate) struct SliceJobExecutor {
     promise_jobs: std::cell::RefCell<
         std::collections::VecDeque<(boa_engine::job::PromiseJob, Option<boa_engine::JsValue>)>,

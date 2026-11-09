@@ -45,6 +45,7 @@ pub(crate) fn build_cas_archive_with_static(
             .to_string();
         let spec = format!("./{}", file_name);
         let mut b = CasBuilder::new(&spec);
+        b.scan_project_dependencies(input_path);
         let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
         b.add_module(spec, entry_file, &bundled, compile_source_to_bytecode);
         b

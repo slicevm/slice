@@ -21,13 +21,16 @@ By serializing the compiled `Gc<CodeBlock>` tree and global `Scope` bindings int
 
 ## 2. Modified Files
 
-Five files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
-- [`vendor/boa_engine/src/script.rs`](./src/script.rs):
+Nine files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
+- [`vendor/boa_engine/src/script.rs`](./src/script.rs) & [`vendor/boa_engine/src/slice_precompile.rs`](./src/slice_precompile.rs):
   - `Script::compile_to_slicebc(&self, context: &mut Context) -> JsResult<Vec<u8>>`
   - `Script::from_slicebc_bytes(bytes: &[u8], context: &mut Context) -> Option<Self>`
-  - Internal recursive helpers `encode_codeblock` / `decode_codeblock` (including bytecode-to-line `SourceMap` entries) and `write_js_string` / `read_js_string`.
+  - Internal recursive helpers `encode_codeblock` / `decode_codeblock` (including bytecode-to-line `SourceMap` entries and deferred `0x11` function source spans) and `write_js_string` / `read_js_string`.
 - [`vendor/boa_engine/src/builtins/json/mod.rs`](./src/builtins/json/mod.rs):
-  - `Json::try_fast_parse_json_str` (`JsonSeed` streaming `serde::de::DeserializeSeed`): Direct zero-intermediate-tree `serde_json::Deserializer::from_str -> JsValue` materialization fast-path in `JSON.parse` when no `reviver` callback is supplied, preserving exact ECMAScript source key insertion order while avoiding `boa_parser` + `ByteCompiler` + VM execution on every JSON payload.
+  - `Json::try_fast_parse_json_str` (`JsonSeed` streaming `serde::de::DeserializeSeed`): Direct zero-intermediate-tree `serde_json::Deserializer::from_str -> JsValue` materialization fast-path in `JSON.parse` when no `reviver` callback is supplied (with zero-copy ASCII `JsStrVariant::Latin1` input borrowing and Latin1 `JsString` output), preserving exact ECMAScript source key insertion order while avoiding `boa_parser` + `ByteCompiler` + VM execution on every JSON payload.
+  - `Json::try_fast_stringify`: Direct single-buffer `Vec<u8>` serializer fast-path in `JSON.stringify` when no `replacer` or `space` argument is supplied, traversing ordinary `JsObject`s (via `Shape::with_property_keys` + direct storage slots) and dense `Array`s (`DenseI32`, `DenseF64`, `DenseElement`) with `ryu_js` number formatting and automatic fallback for `toJSON`, getters, exotic objects, or unpaired surrogates.
+- [`vendor/boa_engine/src/object/shape/mod.rs`](./src/object/shape/mod.rs), [`vendor/boa_engine/src/object/shape/shared_shape/mod.rs`](./src/object/shape/shared_shape/mod.rs), & [`vendor/boa_engine/src/object/shape/unique_shape.rs`](./src/object/shape/unique_shape.rs):
+  - `Shape::with_property_keys`: Zero-allocation slice/iterator callback over ordinary object property keys for `Json::try_fast_stringify`.
 - [`vendor/boa_engine/src/vm/inline_cache/mod.rs`](./src/vm/inline_cache/mod.rs):
   - `InlineCache::mono_shape_addr`, `InlineCache::mono_slot`, and `InlineCache::get_fast(&self, shape: &Shape) -> Option<(Option<Shape>, Slot)>`: Zero-borrow monomorphic fast-path for own-property `Shape -> Slot` hits without locking `GcRefCell` or upgrading `WeakGc` pointers, with automatic polymorphic (`PIC_CAPACITY = 4`) and megamorphic fallback.
 - [`vendor/boa_engine/src/vm/opcode/get/property.rs`](./src/vm/opcode/get/property.rs) & [`vendor/boa_engine/src/vm/opcode/set/property.rs`](./src/vm/opcode/set/property.rs):

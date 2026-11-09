@@ -168,16 +168,85 @@ pub(crate) fn serve_connection_keep_alive(
     )
 }
 
+pub(crate) fn spawn_worker_isolate(
+    slot_id: u32,
+    deterministic_seed: Option<u64>,
+    caps: &CapabilityToken,
+    audit_secrets: &[String],
+    fuel_limit: u64,
+    mem_limit: usize,
+) -> SliceIsolate {
+    let mut isolate = SliceIsolate::spawn(
+        "tenant-default",
+        slot_id,
+        caps.clone(),
+        fuel_limit,
+        mem_limit,
+    );
+    isolate.set_deterministic_seed(deterministic_seed);
+    for (k, v) in &caps.allowed_env_keys {
+        if slice_sandbox::is_sensitive_env_key(k) && v.len() >= 6 {
+            isolate.add_egress_audit_secret(v.clone());
+        }
+    }
+    // CLI-SEC-01: Register explicit DLP secrets (`--audit-egress`, `SLICE_AUDIT_EGRESS`, `slice.toml` `audit_egress`, `.env`)
+    for sec in audit_secrets {
+        if !sec.is_empty() {
+            isolate.add_egress_audit_secret(sec.clone());
+        }
+    }
+    isolate
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn serve_connection_keep_alive_with_tls_and_secrets(
     tcp_stream: TcpStream,
-    mut slot_id: u32,
+    slot_id: u32,
     bytecode: &[u8],
     tenant_dir_opt: Option<&Path>,
     static_assets_opt: Option<&slice_cas::StaticAssetTable>,
     deterministic_seed: Option<u64>,
     caps: &CapabilityToken,
     audit_secrets: &[String],
+    fuel_limit: u64,
+    mem_limit: usize,
+    read_buf: &mut [u8],
+    write_buf: &mut Vec<u8>,
+    max_requests_tracker: Option<(&std::sync::atomic::AtomicUsize, usize)>,
+    tls_server_cfg: Option<&std::sync::Arc<rustls::ServerConfig>>,
+) -> Result<()> {
+    let mut isolate = spawn_worker_isolate(
+        slot_id,
+        deterministic_seed,
+        caps,
+        audit_secrets,
+        fuel_limit,
+        mem_limit,
+    );
+    serve_connection_with_isolate(
+        tcp_stream,
+        slot_id,
+        &mut isolate,
+        bytecode,
+        tenant_dir_opt,
+        static_assets_opt,
+        fuel_limit,
+        mem_limit,
+        read_buf,
+        write_buf,
+        max_requests_tracker,
+        tls_server_cfg,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn serve_connection_with_isolate(
+    tcp_stream: TcpStream,
+    mut slot_id: u32,
+    isolate: &mut SliceIsolate,
+    bytecode: &[u8],
+    tenant_dir_opt: Option<&Path>,
+    static_assets_opt: Option<&slice_cas::StaticAssetTable>,
     fuel_limit: u64,
     mem_limit: usize,
     read_buf: &mut [u8],
@@ -198,25 +267,6 @@ pub(crate) fn serve_connection_keep_alive_with_tls_and_secrets(
 
     let mut filled: usize = 0;
     write_buf.clear();
-    let mut isolate = SliceIsolate::spawn(
-        "tenant-default",
-        slot_id,
-        caps.clone(),
-        fuel_limit,
-        mem_limit,
-    );
-    isolate.set_deterministic_seed(deterministic_seed);
-    for (k, v) in &caps.allowed_env_keys {
-        if slice_sandbox::is_sensitive_env_key(k) && v.len() >= 6 {
-            isolate.add_egress_audit_secret(v.clone());
-        }
-    }
-    // CLI-SEC-01: Register explicit DLP secrets (`--audit-egress`, `SLICE_AUDIT_EGRESS`, `slice.toml` `audit_egress`, `.env`)
-    for sec in audit_secrets {
-        if !sec.is_empty() {
-            isolate.add_egress_audit_secret(sec.clone());
-        }
-    }
 
     loop {
         let mut header_deadline: Option<Instant> = if filled > 0 {

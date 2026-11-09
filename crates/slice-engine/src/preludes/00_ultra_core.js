@@ -135,9 +135,7 @@
 
   var __orand = Math.random;
   var __onow = Date.now;
-  function __perfNowNative() {
-    return __onow() - 1700000000000;
-  }
+  var __perfNowNative = __slice_perf_now;
   globalThis.performance = {
     now: __perfNowNative
   };

@@ -249,6 +249,19 @@ pub(crate) fn cmd_inspect(args: &[String]) -> Result<()> {
             "  Radix Index Entries  : {}",
             archive.header.radix_resolution_map.len()
         );
+        if let Some(ref lf_hash) = archive.header.lockfile_blake3 {
+            println!("  Lockfile BLAKE3      : {}", lf_hash);
+        }
+        if !archive.header.resolved_dependencies.is_empty() {
+            let deps_str = archive
+                .header
+                .resolved_dependencies
+                .iter()
+                .map(|(k, v)| format!("{}@{}", k, v))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("  Resolved NPM Deps    : {}", deps_str);
+        }
         println!("-------------------------------------------------------------------------");
         let mut blobs: Vec<_> = archive.header.blobs.values().collect();
         blobs.sort_by_key(|b| b.offset);

@@ -237,13 +237,11 @@ impl Json {
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse
     pub(crate) fn parse(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         // 1. Let jsonString be ? ToString(text).
-        let json_string = args
+        let js_str = args
             .first()
             .cloned()
             .unwrap_or_default()
-            .to_string(context)?
-            .to_std_string()
-            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
+            .to_string(context)?;
 
         // Check if a reviver is provided, to determine if we need source text tracking
         let has_reviver = args.get_or_undefined(1).is_callable();
@@ -252,10 +250,24 @@ impl Json {
         // when no `reviver` callback is supplied, preserving exact ECMAScript property insertion
         // order and bypassing both intermediate `serde_json::Value` allocations and JS compilation.
         if !has_reviver {
+            if let boa_string::JsStrVariant::Latin1(bytes) = js_str.as_str().variant() {
+                if let Ok(ascii_str) = std::str::from_utf8(bytes) {
+                    if let Some(js_val) = Self::try_fast_parse_json_str(ascii_str, context)? {
+                        return Ok(js_val);
+                    }
+                }
+            }
+            let json_string = js_str
+                .to_std_string()
+                .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
             if let Some(js_val) = Self::try_fast_parse_json_str(&json_string, context)? {
                 return Ok(js_val);
             }
         }
+
+        let json_string = js_str
+            .to_std_string()
+            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
 
         // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
         //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
@@ -849,6 +861,13 @@ impl Json {
             js_string!()
         };
 
+        // SLICE PATCH (P03): Single-buffer `try_fast_stringify` when no `replacer` or `gap` is supplied.
+        if replacer_function.is_none() && property_list.is_none() && gap.is_empty() {
+            if let Some(fast_val) = Self::try_fast_stringify(args.get_or_undefined(0), context)? {
+                return Ok(fast_val);
+            }
+        }
+
         // 9. Let wrapper be ! OrdinaryObjectCreate(%Object.prototype%).
         let wrapper = JsObject::with_object_proto(context.intrinsics());
 
@@ -872,6 +891,406 @@ impl Json {
                 .map(Into::into)
                 .unwrap_or_default(),
         )
+    }
+
+    /// SLICE PATCH (P03): Direct single-buffer JSON serializer for ordinary objects, dense arrays,
+    /// strings, numbers, booleans, and `null` when no `replacer` or `space` is provided.
+    ///
+    /// Eliminates wrapper object creation, per-property `get_v("toJSON")` prototype walks,
+    /// `enumerable_own_property_names` `Vec<JsValue>` + `Vec<JsString>` allocations, and per-string
+    /// `Vec<u16>` allocations. Falls back (`Ok(None)`) whenever any object has `toJSON`, accessors,
+    /// non-standard prototypes, indexed properties on non-arrays, sparse arrays, or exotic slots.
+    fn try_fast_stringify(value: &JsValue, context: &mut Context) -> JsResult<Option<JsValue>> {
+        use crate::object::{IndexedProperties, shape::slot::SlotAttributes};
+        use crate::property::PropertyKey;
+        use crate::value::JsVariant;
+
+        enum FastStatus {
+            Written,
+            UndefinedOrSkipped,
+            Fallback,
+        }
+
+        #[inline]
+        fn write_i32(v: i32, buf: &mut Vec<u8>) {
+            if v == 0 {
+                buf.push(b'0');
+                return;
+            }
+            let mut n = i64::from(v);
+            if n < 0 {
+                buf.push(b'-');
+                n = -n;
+            }
+            let mut tmp = [0u8; 12];
+            let mut pos = tmp.len();
+            while n > 0 {
+                pos -= 1;
+                tmp[pos] = b'0' + (n % 10) as u8;
+                n /= 10;
+            }
+            buf.extend_from_slice(&tmp[pos..]);
+        }
+
+        #[inline]
+        fn write_f64(n: f64, buf: &mut Vec<u8>) {
+            if n.is_finite() {
+                let mut ryu_buf = ryu_js::Buffer::new();
+                buf.extend_from_slice(ryu_buf.format_finite(n).as_bytes());
+            } else {
+                buf.extend_from_slice(b"null");
+            }
+        }
+
+        #[inline]
+        fn write_js_str(s: &JsString, buf: &mut Vec<u8>, all_ascii: &mut bool) -> bool {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            match s.as_str().variant() {
+                boa_string::JsStrVariant::Latin1(bytes) => {
+                    buf.push(b'"');
+                    let mut start = 0usize;
+                    for (i, &b) in bytes.iter().enumerate() {
+                        if b < 0x20 || b == b'"' || b == b'\\' || b >= 0x80 {
+                            if i > start {
+                                buf.extend_from_slice(&bytes[start..i]);
+                            }
+                            match b {
+                                b'"' => buf.extend_from_slice(b"\\\""),
+                                b'\\' => buf.extend_from_slice(b"\\\\"),
+                                0x08 => buf.extend_from_slice(b"\\b"),
+                                0x09 => buf.extend_from_slice(b"\\t"),
+                                0x0A => buf.extend_from_slice(b"\\n"),
+                                0x0C => buf.extend_from_slice(b"\\f"),
+                                0x0D => buf.extend_from_slice(b"\\r"),
+                                b if b < 0x20 => {
+                                    buf.extend_from_slice(&[
+                                        b'\\',
+                                        b'u',
+                                        b'0',
+                                        b'0',
+                                        HEX[(b >> 4) as usize],
+                                        HEX[(b & 0xF) as usize],
+                                    ]);
+                                }
+                                b => {
+                                    *all_ascii = false;
+                                    buf.push(0xC0 | (b >> 6));
+                                    buf.push(0x80 | (b & 0x3F));
+                                }
+                            }
+                            start = i + 1;
+                        }
+                    }
+                    if start < bytes.len() {
+                        buf.extend_from_slice(&bytes[start..]);
+                    }
+                    buf.push(b'"');
+                    true
+                }
+                boa_string::JsStrVariant::Utf16(units) => {
+                    buf.push(b'"');
+                    let mut utf8_tmp = [0u8; 4];
+                    for decoded in char::decode_utf16(units.iter().copied()) {
+                        let Ok(c) = decoded else {
+                            return false;
+                        };
+                        match c {
+                            '"' => buf.extend_from_slice(b"\\\""),
+                            '\\' => buf.extend_from_slice(b"\\\\"),
+                            '\u{0008}' => buf.extend_from_slice(b"\\b"),
+                            '\u{0009}' => buf.extend_from_slice(b"\\t"),
+                            '\u{000A}' => buf.extend_from_slice(b"\\n"),
+                            '\u{000C}' => buf.extend_from_slice(b"\\f"),
+                            '\u{000D}' => buf.extend_from_slice(b"\\r"),
+                            c if c < '\u{0020}' => {
+                                let b = c as u8;
+                                buf.extend_from_slice(&[
+                                    b'\\',
+                                    b'u',
+                                    b'0',
+                                    b'0',
+                                    HEX[(b >> 4) as usize],
+                                    HEX[(b & 0xF) as usize],
+                                ]);
+                            }
+                            c if c.is_ascii() => {
+                                buf.push(c as u8);
+                            }
+                            c => {
+                                *all_ascii = false;
+                                let enc = c.encode_utf8(&mut utf8_tmp);
+                                buf.extend_from_slice(enc.as_bytes());
+                            }
+                        }
+                    }
+                    buf.push(b'"');
+                    true
+                }
+            }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn write_val(
+            val: &JsValue,
+            buf: &mut Vec<u8>,
+            all_ascii: &mut bool,
+            stack: &mut Vec<usize>,
+            obj_proto: &JsObject,
+            arr_proto: &JsObject,
+            arr_template_shape_addr: usize,
+            to_json_key: &PropertyKey,
+        ) -> JsResult<FastStatus> {
+            match val.variant() {
+                JsVariant::Null => {
+                    buf.extend_from_slice(b"null");
+                    Ok(FastStatus::Written)
+                }
+                JsVariant::Boolean(b) => {
+                    buf.extend_from_slice(if b { b"true" } else { b"false" });
+                    Ok(FastStatus::Written)
+                }
+                JsVariant::Integer32(i) => {
+                    write_i32(i, buf);
+                    Ok(FastStatus::Written)
+                }
+                JsVariant::Float64(f) => {
+                    write_f64(f, buf);
+                    Ok(FastStatus::Written)
+                }
+                JsVariant::String(s) => {
+                    if write_js_str(&s, buf, all_ascii) {
+                        Ok(FastStatus::Written)
+                    } else {
+                        Ok(FastStatus::Fallback)
+                    }
+                }
+                JsVariant::Undefined | JsVariant::Symbol(_) => Ok(FastStatus::UndefinedOrSkipped),
+                JsVariant::BigInt(_) => Ok(FastStatus::Fallback),
+                JsVariant::Object(obj) => {
+                    let borrow = obj.borrow();
+                    let props = borrow.properties();
+                    if props.shape.lookup(to_json_key).is_some() {
+                        return Ok(FastStatus::Fallback);
+                    }
+                    if obj.is_callable() {
+                        return Ok(FastStatus::UndefinedOrSkipped);
+                    }
+                    let addr = std::ptr::from_ref(obj.as_ref()).addr();
+                    if stack.contains(&addr) {
+                        return Err(JsNativeError::typ()
+                            .with_message("cyclic object value")
+                            .into());
+                    }
+
+                    if obj.is_array() {
+                        if props.shape.to_addr_usize() != arr_template_shape_addr {
+                            if let Some(ref p) = props.shape.prototype() {
+                                if p != arr_proto {
+                                    return Ok(FastStatus::Fallback);
+                                }
+                            } else {
+                                return Ok(FastStatus::Fallback);
+                            }
+                        }
+                        let Some(len_val) = props.storage.first() else {
+                            return Ok(FastStatus::Fallback);
+                        };
+                        let arr_len = match len_val.variant() {
+                            JsVariant::Integer32(i) if i >= 0 => i as usize,
+                            JsVariant::Float64(f) if f >= 0.0 && f <= (u32::MAX as f64) => {
+                                f as usize
+                            }
+                            _ => return Ok(FastStatus::Fallback),
+                        };
+                        match &props.indexed_properties {
+                            IndexedProperties::DenseI32(vec) if vec.len() == arr_len => {
+                                buf.push(b'[');
+                                for (idx, &v) in vec.iter().enumerate() {
+                                    if idx > 0 {
+                                        buf.push(b',');
+                                    }
+                                    write_i32(v, buf);
+                                }
+                                buf.push(b']');
+                                return Ok(FastStatus::Written);
+                            }
+                            IndexedProperties::DenseF64(vec) if vec.len() == arr_len => {
+                                buf.push(b'[');
+                                for (idx, &v) in vec.iter().enumerate() {
+                                    if idx > 0 {
+                                        buf.push(b',');
+                                    }
+                                    write_f64(v, buf);
+                                }
+                                buf.push(b']');
+                                return Ok(FastStatus::Written);
+                            }
+                            IndexedProperties::DenseElement(vec) if vec.len() == arr_len => {
+                                stack.push(addr);
+                                buf.push(b'[');
+                                for (idx, elem) in vec.iter().enumerate() {
+                                    if idx > 0 {
+                                        buf.push(b',');
+                                    }
+                                    match write_val(
+                                        elem,
+                                        buf,
+                                        all_ascii,
+                                        stack,
+                                        obj_proto,
+                                        arr_proto,
+                                        arr_template_shape_addr,
+                                        to_json_key,
+                                    ) {
+                                        Ok(FastStatus::Written) => {}
+                                        Ok(FastStatus::UndefinedOrSkipped) => {
+                                            buf.extend_from_slice(b"null");
+                                        }
+                                        Ok(FastStatus::Fallback) => {
+                                            stack.pop();
+                                            return Ok(FastStatus::Fallback);
+                                        }
+                                        Err(e) => {
+                                            stack.pop();
+                                            return Err(e);
+                                        }
+                                    }
+                                }
+                                buf.push(b']');
+                                stack.pop();
+                                return Ok(FastStatus::Written);
+                            }
+                            _ if arr_len == 0 => {
+                                buf.extend_from_slice(b"[]");
+                                return Ok(FastStatus::Written);
+                            }
+                            _ => return Ok(FastStatus::Fallback),
+                        }
+                    }
+
+                    let indexed_empty = match &props.indexed_properties {
+                        IndexedProperties::DenseI32(v) => v.is_empty(),
+                        IndexedProperties::DenseF64(v) => v.is_empty(),
+                        IndexedProperties::DenseElement(v) => v.is_empty(),
+                        IndexedProperties::SparseElement(m) => m.is_empty(),
+                        IndexedProperties::SparseProperty(m) => m.is_empty(),
+                    };
+                    if !obj.is_ordinary() || !indexed_empty {
+                        return Ok(FastStatus::Fallback);
+                    }
+                    if let Some(ref p) = props.shape.prototype() {
+                        if p != obj_proto {
+                            return Ok(FastStatus::Fallback);
+                        }
+                    }
+
+                    stack.push(addr);
+                    let res = props.shape.with_property_keys(|keys| -> JsResult<FastStatus> {
+                        buf.push(b'{');
+                        let mut first = true;
+                        for (key, slot) in keys {
+                            if slot.attributes.is_accessor_descriptor() {
+                                return Ok(FastStatus::Fallback);
+                            }
+                            if !slot.attributes.contains(SlotAttributes::ENUMERABLE) {
+                                continue;
+                            }
+                            let PropertyKey::String(key_str) = key else {
+                                continue;
+                            };
+                            let prop_val = &props.storage[slot.index as usize];
+                            match prop_val.variant() {
+                                JsVariant::Undefined | JsVariant::Symbol(_) => continue,
+                                JsVariant::Object(ref child_obj) if child_obj.is_callable() => {
+                                    if child_obj
+                                        .borrow()
+                                        .properties()
+                                        .shape
+                                        .lookup(to_json_key)
+                                        .is_some()
+                                    {
+                                        return Ok(FastStatus::Fallback);
+                                    }
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                            if !first {
+                                buf.push(b',');
+                            }
+                            if !write_js_str(key_str, buf, all_ascii) {
+                                return Ok(FastStatus::Fallback);
+                            }
+                            buf.push(b':');
+                            match write_val(
+                                prop_val,
+                                buf,
+                                all_ascii,
+                                stack,
+                                obj_proto,
+                                arr_proto,
+                                arr_template_shape_addr,
+                                to_json_key,
+                            )? {
+                                FastStatus::Written => {
+                                    first = false;
+                                }
+                                FastStatus::UndefinedOrSkipped | FastStatus::Fallback => {
+                                    return Ok(FastStatus::Fallback);
+                                }
+                            }
+                        }
+                        buf.push(b'}');
+                        Ok(FastStatus::Written)
+                    });
+                    stack.pop();
+                    res
+                }
+            }
+        }
+
+        let to_json_key = PropertyKey::from(js_string!("toJSON"));
+        let obj_proto = context.intrinsics().constructors().object().prototype();
+        let arr_proto = context.intrinsics().constructors().array().prototype();
+        if obj_proto.borrow().properties().shape.lookup(&to_json_key).is_some()
+            || arr_proto.borrow().properties().shape.lookup(&to_json_key).is_some()
+        {
+            return Ok(None);
+        }
+        let arr_template_shape_addr = context
+            .intrinsics()
+            .templates()
+            .array()
+            .shape()
+            .to_addr_usize();
+
+        let mut buf = Vec::with_capacity(128);
+        let mut all_ascii = true;
+        let mut stack = Vec::with_capacity(8);
+
+        match write_val(
+            value,
+            &mut buf,
+            &mut all_ascii,
+            &mut stack,
+            &obj_proto,
+            &arr_proto,
+            arr_template_shape_addr,
+            &to_json_key,
+        )? {
+            FastStatus::Written => {
+                if all_ascii {
+                    Ok(Some(JsValue::new(JsString::from(
+                        boa_string::JsStr::latin1(&buf),
+                    ))))
+                } else {
+                    let s = std::str::from_utf8(&buf).unwrap_or("");
+                    Ok(Some(JsValue::new(js_string!(s))))
+                }
+            }
+            FastStatus::UndefinedOrSkipped => Ok(Some(JsValue::undefined())),
+            FastStatus::Fallback => Ok(None),
+        }
     }
 
     /// `25.5.2.1 SerializeJSONProperty ( state, key, holder )`
