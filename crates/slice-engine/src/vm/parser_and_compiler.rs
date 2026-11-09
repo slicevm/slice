@@ -111,8 +111,10 @@ pub(crate) fn tokenize_js(input: &str) -> Vec<Token> {
             tokens.push(Token::Str(s));
             continue;
         }
-        // Number literal
-        if b.is_ascii_digit() {
+        // Number literal (including leading-dot decimals like `.5` emitted by Oxc codegen)
+        if b.is_ascii_digit()
+            || (b == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit())
+        {
             let start = i;
             if b == b'0' && i + 1 < bytes.len() && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X') {
                 i += 2;
@@ -125,22 +127,46 @@ pub(crate) fn tokenize_js(input: &str) -> Vec<Token> {
                 tokens.push(Token::Num(val));
                 continue;
             }
-            while i < bytes.len()
-                && (bytes[i].is_ascii_digit() || bytes[i] == b'.' || bytes[i] == b'_')
-            {
+            let mut seen_dot = b == b'.';
+            let mut has_underscore = false;
+            if seen_dot {
                 i += 1;
+            }
+            while i < bytes.len() {
+                if bytes[i].is_ascii_digit() {
+                    i += 1;
+                } else if bytes[i] == b'_' {
+                    has_underscore = true;
+                    i += 1;
+                } else if bytes[i] == b'.' && !seen_dot {
+                    seen_dot = true;
+                    i += 1;
+                } else {
+                    break;
+                }
             }
             if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
                 i += 1;
                 if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
                     i += 1;
                 }
-                while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'_') {
-                    i += 1;
+                while i < bytes.len() {
+                    if bytes[i].is_ascii_digit() {
+                        i += 1;
+                    } else if bytes[i] == b'_' {
+                        has_underscore = true;
+                        i += 1;
+                    } else {
+                        break;
+                    }
                 }
             }
-            let num_str: String = input[start..i].chars().filter(|&c| c != '_').collect();
-            let val = num_str.parse::<f64>().unwrap_or(0.0);
+            let val = if !has_underscore {
+                input[start..i].parse::<f64>().unwrap_or(0.0)
+            } else {
+                let num_str: String = input[start..i].chars().filter(|&c| c != '_').collect();
+                num_str.parse::<f64>().unwrap_or(0.0)
+            };
             tokens.push(Token::Num(val));
             continue;
         }
@@ -1792,7 +1818,8 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
     };
 
     if route_to_tier1_boa {
-        let compacted = compact_js_for_boa_bytecode(&source);
+        let boa_source = slice_cas::wrap_top_level_await_script(&source).unwrap_or(source);
+        let compacted = compact_js_for_boa_bytecode(&boa_source);
         if use_boacas {
             return crate::boacas::pack_boacas_container(&compacted);
         }

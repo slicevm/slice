@@ -418,18 +418,36 @@ where
 
 /// Detects via Oxc AST whether `code` contains any top-level `await` expression or `for await`
 /// loop outside nested function/method scopes.
+#[inline]
 pub fn has_top_level_await(code: &str) -> bool {
+    detect_top_level_await_and_last_expr_span(code).is_some()
+}
+
+/// Single-pass Oxc AST detector that returns `Some(last_expr_span)` if `code` contains any
+/// top-level `await` expression or `for await` loop outside nested functions, where
+/// `last_expr_span` is `Some((start, end))` when the final top-level statement is an
+/// `ExpressionStatement`.
+fn detect_top_level_await_and_last_expr_span(code: &str) -> Option<Option<(usize, usize)>> {
     use oxc::ast::ast::{Declaration, Expression, ForStatementInit, ObjectPropertyKind, Statement};
 
-    if !code.contains("await ") && !code.contains("await(") {
-        return false;
+    let bytes = code.as_bytes();
+    if memchr::memmem::find(bytes, b"await ").is_none()
+        && memchr::memmem::find(bytes, b"await(").is_none()
+    {
+        return None;
     }
 
     let allocator = oxc::allocator::Allocator::default();
+    let parse_opts = oxc::parser::ParseOptions {
+        allow_return_outside_function: true,
+        ..Default::default()
+    };
     let source_type = oxc::span::SourceType::ts().with_module(true);
-    let parser_ret = oxc::parser::Parser::new(&allocator, code, source_type).parse();
+    let parser_ret = oxc::parser::Parser::new(&allocator, code, source_type)
+        .with_options(parse_opts)
+        .parse();
     if !parser_ret.diagnostics.is_empty() {
-        return false;
+        return None;
     }
 
     fn expr_has_tla(expr: &Expression<'_>) -> bool {
@@ -533,7 +551,45 @@ pub fn has_top_level_await(code: &str) -> bool {
         }
     }
 
-    parser_ret.program.body.iter().any(stmt_has_tla)
+    if !parser_ret.program.body.iter().any(stmt_has_tla) {
+        return None;
+    }
+
+    let last_expr_span =
+        if let Some(Statement::ExpressionStatement(es)) = parser_ret.program.body.last() {
+            Some((es.span.start as usize, es.span.end as usize))
+        } else {
+            None
+        };
+    Some(last_expr_span)
+}
+
+/// When `code` contains a top-level `await`, wraps it into an async IIFE that preserves
+/// the completion value of a trailing top-level `ExpressionStatement` (returning it via
+/// `globalThis.__slice_tla_v` / `globalThis.__slice_tla_st`) so `boa_engine` can evaluate
+/// top-level `await` in `Slice.evalSandbox`, `slice mcp` `slice_eval_ts`, and single-file scripts.
+pub fn wrap_top_level_await_script(code: &str) -> Option<String> {
+    let last_expr_span = detect_top_level_await_and_last_expr_span(code)?;
+    let mut out = String::with_capacity(code.len() + 220);
+    out.push_str(
+        "globalThis.__slice_tla_st = 0;\nglobalThis.__slice_tla_v = undefined;\n(async function() {\n",
+    );
+    if let Some((start, end)) = last_expr_span {
+        if start <= end && end <= code.len() {
+            out.push_str(&code[..start]);
+            out.push_str("return ");
+            out.push_str(&code[start..end]);
+            out.push_str(&code[end..]);
+        } else {
+            out.push_str(code);
+        }
+    } else {
+        out.push_str(code);
+    }
+    out.push_str(
+        "\n})().then(function(__v) { globalThis.__slice_tla_st = 1; globalThis.__slice_tla_v = __v; }, function(__e) { globalThis.__slice_tla_st = 2; globalThis.__slice_tla_v = __e; });\n",
+    );
+    Some(out)
 }
 
 pub fn slice_with_edits(

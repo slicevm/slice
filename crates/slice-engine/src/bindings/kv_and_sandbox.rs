@@ -7,7 +7,7 @@ use crate::event_loop::{clear_event_loop_state, drive_event_loop_to_completion};
 use crate::isolate::{SandboxEvalOptions, SliceIsolate};
 use crate::state_and_kv::{
     checkpoint_tenant_state, edge_kv_del, edge_kv_get, edge_kv_incr, edge_kv_set,
-    restore_tenant_state,
+    release_tenant_checkpoint, restore_tenant_state,
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
@@ -160,6 +160,20 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 .map(|n| n as u64)
                 .unwrap_or(0);
             let ok = BOA_ACTIVE_TENANT.with(|t| restore_tenant_state(&t.borrow(), id));
+            Ok(BoaVal::from(ok))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_release_checkpoint"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, _context| {
+            let id = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as u64)
+                .unwrap_or(0);
+            let ok = BOA_ACTIVE_TENANT.with(|t| release_tenant_checkpoint(&t.borrow(), id));
             Ok(BoaVal::from(ok))
         }),
     );

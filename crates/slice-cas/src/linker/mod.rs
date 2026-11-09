@@ -18,7 +18,7 @@ pub mod tree_shaker;
 
 pub use ast_walker::{
     collect_binding_pattern_names, has_top_level_await, slice_with_edits,
-    walk_ast_call_expressions, walk_ast_expressions,
+    walk_ast_call_expressions, walk_ast_expressions, wrap_top_level_await_script,
 };
 pub use builtins_and_ids::{
     canonical_mod_id, clear_canonical_mod_id_cache, format_exports_lhs, is_builtin_module,

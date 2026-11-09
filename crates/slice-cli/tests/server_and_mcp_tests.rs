@@ -599,3 +599,266 @@ describe("Ledger Time-Travel Suite", () => {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn test_issue_6_mcp_fuel_violation_does_not_poison_subsequent_calls() {
+    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use slice_engine::SliceIsolate;
+    use slice_sandbox::CapabilityToken;
+
+    let mut isolate = SliceIsolate::spawn(
+        "mcp-agent-host",
+        100,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        16 * 1024 * 1024,
+    );
+
+    let r2 = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"1 + 1"}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(r2.contains(r#""isError":false"#));
+    assert!(r2.contains(r#"\"value\":\"2\""#));
+
+    let r3 = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"while (true) {}","fuel":100000}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(r3.contains(r#""isError":true"#));
+    assert!(r3.contains(r#"\"fuelUsed\":100000"#));
+
+    let r4 = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"1 + 1"}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(r4.contains(r#""isError":false"#));
+    assert!(r4.contains(r#"\"value\":\"2\""#));
+
+    let r5 = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"2 + 2","fuel":5000000}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(r5.contains(r#""isError":false"#));
+    assert!(r5.contains(r#"\"value\":\"4\""#));
+}
+
+#[test]
+fn test_issue_7_mcp_and_eval_sandbox_uncaught_exceptions_and_syntax_errors_report_error() {
+    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use slice_engine::{SandboxEvalOptions, SliceIsolate};
+    use slice_sandbox::CapabilityToken;
+
+    let mut isolate = SliceIsolate::spawn(
+        "mcp-agent-host",
+        107,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        16 * 1024 * 1024,
+    );
+
+    // 1. Direct eval_sandbox with uncaught exception
+    let thrown = isolate.eval_sandbox("throw new Error(\"boom\")", SandboxEvalOptions::default());
+    assert!(!thrown.ok);
+    assert!(thrown.violation.is_none());
+    assert!(thrown
+        .error
+        .as_deref()
+        .is_some_and(|e| e.contains("Uncaught Error: boom")));
+
+    // 2. MCP slice_eval_ts with uncaught exception -> ok: false, isError: true, error populated
+    let mcp_throw = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"throw new Error(\"boom\")"}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(mcp_throw.contains(r#""isError":true"#));
+    assert!(mcp_throw.contains(r#"\"ok\":false"#));
+    assert!(mcp_throw.contains(r#"Uncaught Error: boom"#));
+
+    // 3. MCP slice_eval_ts with syntax error -> ok: false, isError: true, error populated
+    let mcp_syn = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"const x = ;"}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(mcp_syn.contains(r#""isError":true"#));
+    assert!(mcp_syn.contains(r#"\"ok\":false"#));
+    assert!(mcp_syn.contains("SyntaxError"));
+}
+
+#[test]
+fn test_issue_8_mcp_allow_net_honored_and_attenuated() {
+    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use slice_engine::SliceIsolate;
+    use slice_sandbox::CapabilityToken;
+
+    let caps = CapabilityToken::pure_compute()
+        .with_net_host("example.com")
+        .with_net_host("allowed-second.com");
+    let mut isolate = SliceIsolate::spawn("mcp-agent-host", 108, caps, 1_000_000, 16 * 1024 * 1024);
+
+    // 1. `allowNet: "example.com"` succeeds for example.com
+    let r_ok = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"Slice.mockFetch(\"https://example.com/x\", {status:200, body:\"hi\"}); Slice.fetchSync(\"https://example.com/x\").status","allowNet":"example.com"}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(r_ok.contains(r#""isError":false"#));
+    assert!(r_ok.contains(r#"\"value\":\"200\""#));
+
+    // 2. `allowNet: ["example.com"]` attenuates child so `allowed-second.com` is blocked in that call
+    let r_attenuated = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"Slice.mockFetch(\"https://allowed-second.com/x\", {status:200, body:\"hi\"}); Slice.fetchSync(\"https://allowed-second.com/x\").status","allowNet":["example.com"]}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(r_attenuated.contains(r#""isError":true"#));
+    assert!(r_attenuated.contains("lacks outbound network authority"));
+}
+
+#[test]
+fn test_issue_9_audit_egress_auto_not_treated_as_literal_secret() {
+    use crate::config_and_watch::ResolvedExecutionConfig;
+    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use slice_engine::SliceIsolate;
+
+    let args = vec![
+        "--allow-net=example.com".to_string(),
+        "--allow-env=STRIPE_SECRET_KEY=sk_live_auto_dlp_secret_99".to_string(),
+        "--audit-egress=auto".to_string(),
+    ];
+    let exec_cfg = ResolvedExecutionConfig::from_cli_args(&args).unwrap();
+    assert!(!exec_cfg.audit_secrets.contains(&"auto".to_string()));
+    assert!(exec_cfg
+        .audit_secrets
+        .contains(&"sk_live_auto_dlp_secret_99".to_string()));
+
+    let mut isolate = SliceIsolate::spawn(
+        "mcp-agent-host",
+        109,
+        exec_cfg.caps,
+        exec_cfg.fuel_limit,
+        exec_cfg.mem_limit,
+    );
+    for sec in &exec_cfg.audit_secrets {
+        isolate.add_egress_audit_secret(sec.clone());
+    }
+
+    // URL containing `?mode=automatic` must NOT be blocked by `--audit-egress=auto`
+    let r_auto_ok = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"Slice.mockFetch(\"https://example.com/x\", {status:200, body:\"ok\"}); Slice.fetchSync(\"https://example.com/x?mode=automatic\").status"}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(r_auto_ok.contains(r#""isError":false"#));
+    assert!(r_auto_ok.contains(r#"\"value\":\"200\""#));
+
+    // Actual sensitive secret is blocked by DLP
+    let r_leak_blocked = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"Slice.mockFetch(\"https://example.com/x\", {status:200, body:\"ok\"}); Slice.fetchSync(\"https://example.com/x?k=sk_live_auto_dlp_secret_99\").status"}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(r_leak_blocked.contains(r#""isError":true"#));
+    assert!(r_leak_blocked.contains("EGRESS_SECRET_LEAK_BLOCKED"));
+}
+
+#[test]
+fn test_issue_10_top_level_await_in_eval_sandbox_and_mcp() {
+    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use slice_engine::{SandboxEvalOptions, SliceIsolate};
+    use slice_sandbox::CapabilityToken;
+
+    let mut isolate = SliceIsolate::spawn(
+        "mcp-agent-host",
+        110,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        16 * 1024 * 1024,
+    );
+
+    // 1. Direct eval_sandbox with top-level await returns resolved completion value
+    let res = isolate.eval_sandbox(
+        "const v = await Promise.resolve(7); v",
+        SandboxEvalOptions::default(),
+    );
+    assert!(res.ok, "Expected ok=true, got: {:?}", res);
+    assert_eq!(res.return_value, "7");
+
+    // 2. MCP slice_eval_ts with top-level await
+    let mcp_ok = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"const v = await Promise.resolve(7); v"}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(mcp_ok.contains(r#""isError":false"#));
+    assert!(mcp_ok.contains(r#"\"value\":\"7\""#));
+
+    // 3. Rejected top-level await reports ok: false / isError: true
+    let mcp_rej = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"await Promise.reject(new Error(\"async-boom\"))"}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(mcp_rej.contains(r#""isError":true"#));
+    assert!(mcp_rej.contains("async-boom"));
+}
+
+#[test]
+fn test_issue_11_memory_cap_enforced_and_fuel_scales_with_work() {
+    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use slice_engine::{SandboxEvalOptions, SliceIsolate};
+    use slice_sandbox::CapabilityToken;
+
+    let mut isolate = SliceIsolate::spawn(
+        "mcp-agent-host",
+        111,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    );
+
+    // 1. 1,000,000-element array fill with 64 KB (65536) memory cap must trap with MemoryCeilingExceeded
+    let mcp_oom = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":50,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"const a = new Array(1000000).fill(7); a.length","memory":65536}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(mcp_oom.contains(r#""isError":true"#), "Got: {}", mcp_oom);
+    assert!(mcp_oom.contains(r#"\"ok\":false"#), "Got: {}", mcp_oom);
+    assert!(mcp_oom.contains("memory ceiling"), "Got: {}", mcp_oom);
+
+    // 2. Fuel and memory scale with actual work performed across evaluations
+    let small = isolate.eval_sandbox(
+        "const a = new Array(100).fill(1); a.length",
+        SandboxEvalOptions::default(),
+    );
+    let larger = isolate.eval_sandbox(
+        "const a = new Array(10000).fill(7); console.log('filled=' + a.length); a.length",
+        SandboxEvalOptions::default(),
+    );
+    assert!(small.ok && larger.ok);
+    assert!(
+        larger.fuel_used > small.fuel_used,
+        "Expected larger.fuel_used ({}) > small.fuel_used ({})",
+        larger.fuel_used,
+        small.fuel_used
+    );
+    assert!(
+        larger.memory_used_bytes > small.memory_used_bytes,
+        "Expected larger.memory_used_bytes ({}) > small.memory_used_bytes ({})",
+        larger.memory_used_bytes,
+        small.memory_used_bytes
+    );
+}
+
+
+
+
+
+

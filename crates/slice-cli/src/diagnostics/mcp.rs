@@ -3,8 +3,27 @@ use anyhow::Result;
 use slice_engine::SliceIsolate;
 use std::io::Write;
 
-/// Maximum allowed MCP JSON-RPC 2.0 request line length (`4 MB`) (`CLI-SEC-04`).
+///Maximum allowed MCP JSON-RPC 2.0 request line length (`4 MB`) (`CLI-SEC-04`).
 pub(crate) const MAX_MCP_LINE_BYTES: usize = 4 * 1024 * 1024;
+
+fn push_string_or_array_arg(args: &serde_json::Value, key: &str, out: &mut Vec<String>) {
+    if let Some(val) = args.get(key) {
+        if let Some(s) = val.as_str() {
+            for item in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                out.push(item.to_string());
+            }
+        } else if let Some(arr) = val.as_array() {
+            for elem in arr {
+                if let Some(s) = elem.as_str() {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        out.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+}
 
 pub(crate) fn cmd_mcp(args: &[String]) -> Result<()> {
     let exec_cfg = ResolvedExecutionConfig::from_cli_args(args)?;
@@ -121,10 +140,11 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                             "code": { "type": "string", "description": "TypeScript or JavaScript source code to evaluate" },
                             "fuel": { "type": "integer", "description": "Maximum CPU instruction fuel budget" },
                             "memory": { "type": "integer", "description": "Maximum memory ceiling in bytes" },
-                            "allowRead": { "type": "string", "description": "Optional allowed VFS read prefix" },
-                            "allowWrite": { "type": "string", "description": "Optional allowed VFS write prefix" },
-                            "allowNet": { "type": "string", "description": "Optional allowed network host" },
-                            "allowExec": { "type": "string", "description": "Optional allowed subprocess binary" },
+                            "allowRead": { "type": ["string", "array"], "description": "Optional allowed VFS read prefix(es) attenuated against server grants" },
+                            "allowWrite": { "type": ["string", "array"], "description": "Optional allowed VFS write prefix(es) attenuated against server grants" },
+                            "allowNet": { "type": ["string", "array"], "description": "Optional allowed network host(s) attenuated against server grants" },
+                            "allowExec": { "type": ["string", "array"], "description": "Optional allowed subprocess binary(ies) attenuated against server grants" },
+                            "allowEnv": { "type": ["string", "array"], "description": "Optional allowed environment variable key(s) attenuated against server grants" },
                             "auditSecret": { "type": "string", "description": "Optional secret to guard against egress leakage" }
                         },
                         "required": ["code"]
@@ -188,28 +208,40 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                     if let Some(m) = args.get("memory").and_then(|v| v.as_u64()) {
                         opts.memory_bytes = Some(m as usize);
                     }
-                    if let Some(r) = args.get("allowRead").and_then(|v| v.as_str()) {
-                        opts.allow_read.push(r.to_string());
-                    }
-                    if let Some(w) = args.get("allowWrite").and_then(|v| v.as_str()) {
-                        opts.allow_write.push(w.to_string());
-                    }
-                    // CLI-SEC-04: Wire `allowNet` and `allowExec` into `SandboxEvalOptions`
-                    if let Some(nh) = args.get("allowNet").and_then(|v| v.as_str()) {
-                        opts.allow_net.push(nh.to_string());
-                    }
-                    if let Some(eb) = args.get("allowExec").and_then(|v| v.as_str()) {
-                        opts.allow_exec.push(eb.to_string());
-                    }
+                    push_string_or_array_arg(&args, "allowRead", &mut opts.allow_read);
+                    push_string_or_array_arg(&args, "allowWrite", &mut opts.allow_write);
+                    push_string_or_array_arg(&args, "allowNet", &mut opts.allow_net);
+                    push_string_or_array_arg(&args, "allowExec", &mut opts.allow_exec);
+                    push_string_or_array_arg(&args, "allowEnv", &mut opts.allow_env);
                     if let Some(s) = args.get("auditSecret").and_then(|v| v.as_str()) {
                         opts.audit_secret = Some(s.to_string());
                     }
+                    let saved_fuel_limit = isolate.compartment.fuel_limit;
+                    let saved_mem_limit = isolate.compartment.memory_limit_bytes;
+                    isolate.compartment.fuel_consumed = 0;
+                    isolate.compartment.memory_used_bytes = 0;
+                    if let Some(req_fuel) = opts.fuel {
+                        if req_fuel > isolate.compartment.fuel_limit {
+                            isolate.compartment.fuel_limit = req_fuel;
+                        }
+                    }
+                    if let Some(req_mem) = opts.memory_bytes {
+                        if req_mem > isolate.compartment.memory_limit_bytes {
+                            isolate.compartment.memory_limit_bytes = req_mem;
+                        }
+                    }
                     let outcome = isolate.eval_sandbox(code, opts);
+                    isolate.compartment.fuel_limit = saved_fuel_limit;
+                    isolate.compartment.memory_limit_bytes = saved_mem_limit;
+                    isolate.compartment.fuel_consumed = 0;
+                    isolate.compartment.memory_used_bytes = 0;
                     let payload = serde_json::json!({
                         "ok": outcome.ok,
                         "value": outcome.return_value,
+                        "error": outcome.error,
                         "stdout": outcome.stdout,
                         "fuelUsed": outcome.fuel_used,
+                        "memoryUsedBytes": outcome.memory_used_bytes,
                         "timeUs": outcome.total_time_us,
                         "violation": outcome.violation
                     });

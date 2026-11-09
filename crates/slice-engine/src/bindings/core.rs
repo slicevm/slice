@@ -2,8 +2,8 @@
 //! `os.platform`/`arch`, Fast SHA-256/HMAC-SHA256, Base64/UTF-8, `process.env`, Event-Loop Timers).
 
 use crate::bindings::helpers::{
-    bytes_to_js_uint8_array, try_consume_isolate_memory, with_buffer_source_bytes,
-    with_two_buffer_source_bytes,
+    bytes_to_js_uint8_array, consume_crypto_kdf_fuel, try_consume_isolate_memory,
+    with_buffer_source_bytes, with_two_buffer_source_bytes,
 };
 use crate::boa_realm::{
     BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_ENV_MAP, BOA_HTTP_REQ, BOA_KV_MEM_BUDGET, BOA_STDOUT,
@@ -58,10 +58,38 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 }
                 joined
             };
-            if let Err(msg) = try_consume_isolate_memory(line.len()) {
+            if let Err(msg) = try_consume_isolate_memory(line.len().max(8)) {
+                return Err(JsNativeError::range().with_message(msg).into());
+            }
+            if let Err(msg) = consume_crypto_kdf_fuel(((line.len() as u64) / 32).saturating_add(2))
+            {
                 return Err(JsNativeError::range().with_message(msg).into());
             }
             BOA_STDOUT.with(|out| out.borrow_mut().push(line));
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_charge_mem"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, _context| {
+            let bytes = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n.max(0.0) as usize)
+                .unwrap_or(0);
+            let fuel = args
+                .get(1)
+                .and_then(|v| v.as_number())
+                .map(|n| n.max(0.0) as u64)
+                .unwrap_or_else(|| ((bytes as u64) / 64).max(1));
+            if let Err(msg) = try_consume_isolate_memory(bytes) {
+                return Err(JsNativeError::range().with_message(msg).into());
+            }
+            if let Err(msg) = consume_crypto_kdf_fuel(fuel) {
+                return Err(JsNativeError::range().with_message(msg).into());
+            }
             Ok(BoaVal::undefined())
         }),
     );

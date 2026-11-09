@@ -22,22 +22,27 @@ declare namespace Slice {
     }
 
     interface SandboxEvalOptions {
+        tenantId?: string;
         fuel?: number;
         memoryBytes?: number;
         allowRead?: string[];
         allowWrite?: string[];
         allowNet?: string[];
         allowExec?: string[];
+        allowEnv?: string[];
+        deterministicSeed?: number;
         auditSecret?: string;
     }
 
     interface SandboxEvalOutcome {
         ok: boolean;
-        value: string;
+        returnValue: string;
         stdout: string[];
         fuelUsed: number;
-        timeUs: number;
+        memoryUsedBytes: number;
+        totalTimeUs: number;
         violation: string | null;
+        error: string | null;
     }
 
     interface SseStreamController {
@@ -72,6 +77,7 @@ declare namespace Slice {
     function evalSandbox(code: string, options?: SandboxEvalOptions): SandboxEvalOutcome;
     function checkpoint(): number;
     function restore(snapshotId: number): boolean;
+    function releaseCheckpoint(snapshotId: number): boolean;
     function connect(address: string | { hostname: string; port: number }, options?: TcpSocketOptions): TcpSocket;
 }
 

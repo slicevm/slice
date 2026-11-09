@@ -722,3 +722,163 @@ console.log(new TreeOfThoughtAgent().run());
         Err(SandboxViolation::EnvAccessDenied { ref key, .. }) if key == "EGRESS_SECRET_LEAK_BLOCKED"
     ));
 }
+
+#[test]
+fn test_issue_1_fractional_literals_tier0_and_oxc_codegen() {
+    let src = r#"
+console.log("String(0.5)=" + String(0.5));
+console.log("0.5*2=" + (0.5 * 2));
+console.log("arr=" + JSON.stringify([0.25, 1.25]));
+function f() {
+    const a = 0.25;
+    const b = 0.75;
+    console.log("in fn:", String(a), String(a + b));
+}
+f();
+"#;
+    let bc = compile_source_to_bytecode(src);
+    let mut iso = SliceIsolate::spawn(
+        "issue-1-frac",
+        101,
+        CapabilityToken::pure_compute(),
+        500_000,
+        2 * 1024 * 1024,
+    );
+    let metrics = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(
+        metrics.stdout,
+        vec![
+            "String(0.5)=0.5",
+            "0.5*2=1",
+            "arr=[0.25,1.25]",
+            "in fn: 0.25 1",
+        ]
+    );
+}
+
+#[test]
+fn test_issue_2_eval_sandbox_tenant_id_cannot_escape_parent_kv_partition() {
+    let src = r#"
+Slice.kv.set("db_password", "parent-only-secret");
+const own = Slice.evalSandbox('String(Slice.kv.get("db_password"))');
+const escaped = Slice.evalSandbox('String(Slice.kv.get("db_password"))', { tenantId: "issue-2-parent" });
+console.log(JSON.stringify({ own: own.returnValue, escaped: escaped.returnValue }));
+"#;
+    let bc = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(src, true));
+    let mut iso = SliceIsolate::spawn(
+        "issue-2-parent",
+        102,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        4 * 1024 * 1024,
+    );
+    let _ = iso.kv_del("db_password");
+    let metrics = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(metrics.stdout[0], r#"{"own":"null","escaped":"null"}"#);
+}
+
+#[test]
+fn test_issue_3_checkpoint_slab_bounded_and_released() {
+    use crate::state_and_kv::{checkpoint_slab_len, MAX_CHECKPOINTS_PER_SLAB};
+
+    let src = r#"
+for (let i = 0; i < 200; i++) {
+    Slice.checkpoint();
+}
+const last = Slice.checkpoint();
+const released = Slice.releaseCheckpoint(last);
+const restoredAfterRelease = Slice.restore(last);
+console.log(JSON.stringify({ released, restoredAfterRelease }));
+"#;
+    let bc = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(src, true));
+    let mut iso = SliceIsolate::spawn(
+        "issue-3-tenant",
+        103,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        4 * 1024 * 1024,
+    );
+    let metrics = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(
+        metrics.stdout[0],
+        r#"{"released":true,"restoredAfterRelease":false}"#
+    );
+    assert!(checkpoint_slab_len() <= MAX_CHECKPOINTS_PER_SLAB);
+
+    // Cross-tenant restore or release must fail
+    let snap_a = iso.checkpoint();
+    let iso_b = SliceIsolate::spawn(
+        "issue-3-other-tenant",
+        104,
+        CapabilityToken::pure_compute(),
+        100_000,
+        1024 * 1024,
+    );
+    assert!(!iso_b.restore(snap_a));
+    assert!(!iso_b.release_checkpoint(snap_a));
+
+    // Resetting isolate for a new request clears all checkpoints owned by that tenant
+    iso.reset_for_request("issue-3-tenant-next", 103, 1_000_000, 1024 * 1024);
+    assert!(!iso.restore(snap_a));
+}
+
+#[test]
+fn test_issue_4_guest_stdout_preserved_when_sandbox_traps() {
+    use crate::SandboxEvalOptions;
+
+    let mut iso = SliceIsolate::spawn(
+        "issue-4-parent",
+        105,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        4 * 1024 * 1024,
+    );
+    let outcome = iso.eval_sandbox(
+        r#"console.log("step 1 done"); console.log("step 2 done"); while (true) {}"#,
+        SandboxEvalOptions {
+            fuel: Some(200_000),
+            ..Default::default()
+        },
+    );
+    assert!(!outcome.ok);
+    assert!(outcome.violation.is_some());
+    assert_eq!(outcome.stdout, vec!["step 1 done", "step 2 done"]);
+}
+
+#[test]
+fn test_issue_5_fuel_used_clamped_to_limit_on_fuel_trap() {
+    use crate::SandboxEvalOptions;
+
+    let mut iso = SliceIsolate::spawn(
+        "issue-5-parent",
+        106,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        4 * 1024 * 1024,
+    );
+    let outcome = iso.eval_sandbox(
+        "while (true) {}",
+        SandboxEvalOptions {
+            fuel: Some(200_000),
+            ..Default::default()
+        },
+    );
+    assert!(!outcome.ok);
+    assert_eq!(outcome.fuel_used, 200_000);
+
+    // Also verify non-empty loop on the Boa path reports exact fuel limit on trap
+    let outcome_boa = iso.eval_sandbox(
+        "let x = 0; while (true) { x++; }",
+        SandboxEvalOptions {
+            fuel: Some(150_000),
+            ..Default::default()
+        },
+    );
+    assert!(!outcome_boa.ok);
+    assert_eq!(outcome_boa.fuel_used, 150_000);
+}
+
+
+
+
+

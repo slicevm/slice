@@ -255,7 +255,15 @@ pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engin
             let method_url_key = format!("{} {}", method, url);
             if let Some(mock_json) = BOA_FETCH_MOCKS.with(|m| {
                 let map = m.borrow();
-                map.get(&method_url_key).or_else(|| map.get(&url)).cloned()
+                map.get(&method_url_key)
+                    .or_else(|| map.get(&url))
+                    .or_else(|| {
+                        url.split_once('?').and_then(|(base, _)| {
+                            map.get(&format!("{} {}", method, base))
+                                .or_else(|| map.get(base))
+                        })
+                    })
+                    .cloned()
             }) {
                 return Ok(BoaVal::from(js_string!(mock_json)));
             }
@@ -341,7 +349,15 @@ pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engin
             let method_url_key = format!("{} {}", method, url);
             if let Some(mock_json) = BOA_FETCH_MOCKS.with(|m| {
                 let map = m.borrow();
-                map.get(&method_url_key).or_else(|| map.get(&url)).cloned()
+                map.get(&method_url_key)
+                    .or_else(|| map.get(&url))
+                    .or_else(|| {
+                        url.split_once('?').and_then(|(base, _)| {
+                            map.get(&format!("{} {}", method, base))
+                                .or_else(|| map.get(base))
+                        })
+                    })
+                    .cloned()
             }) {
                 return Ok(BoaVal::from(js_string!(mock_json)));
             }

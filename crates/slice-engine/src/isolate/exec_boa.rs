@@ -128,6 +128,7 @@ impl SliceIsolate {
                     if js_code.contains("Slice.kv")
                         || js_code.contains("Slice.checkpoint")
                         || js_code.contains("Slice.restore")
+                        || js_code.contains("Slice.releaseCheckpoint")
                         || js_code.contains("Slice.evalSandbox")
                     {
                         crate::host_bindings::register_kv_and_sandbox_host_functions(
@@ -397,6 +398,7 @@ impl SliceIsolate {
         }
 
         self.teardown_boa_compartment_thread_locals(&mut realm, flags, has_next_tick);
+        self.harvest_boa_stdout();
 
         let last_cp_violation = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
         if eval_res.is_err() {
@@ -436,6 +438,7 @@ impl SliceIsolate {
                 || msg.contains("Maximum call stack")
                 || msg.contains("recursion limit")
             {
+                self.compartment.fuel_consumed = self.compartment.fuel_limit;
                 release_warm_boa_realm(realm);
                 return Err(SandboxViolation::CpuFuelExhausted {
                     tenant_id: self.compartment.tenant_id.clone(),
@@ -451,10 +454,40 @@ impl SliceIsolate {
             }
         }
 
-        self.harvest_boa_stdout();
-
         let result = match eval_res {
-            Ok(val) => {
+            Ok(mut val) => {
+                if val.as_promise().is_some() {
+                    if let Ok(st_val) = realm
+                        .ctx
+                        .global_object()
+                        .get(boa_engine::js_string!("__slice_tla_st"), &mut realm.ctx)
+                    {
+                        let st = st_val.as_number().unwrap_or(0.0) as i32;
+                        if st == 1 || st == 2 {
+                            let _ = realm.ctx.global_object().set(
+                                boa_engine::js_string!("__slice_tla_st"),
+                                boa_engine::JsValue::from(0),
+                                false,
+                                &mut realm.ctx,
+                            );
+                            let tla_v = realm
+                                .ctx
+                                .global_object()
+                                .get(boa_engine::js_string!("__slice_tla_v"), &mut realm.ctx)
+                                .unwrap_or_default();
+                            if st == 1 {
+                                val = tla_v;
+                            } else {
+                                let err_msg = tla_v
+                                    .to_string(&mut realm.ctx)
+                                    .map(|s| s.to_std_string_escaped())
+                                    .unwrap_or_else(|_| "Promise rejected".to_string());
+                                release_warm_boa_realm(realm);
+                                return Ok(JsValue::str(format!("Uncaught {}", err_msg)));
+                            }
+                        }
+                    }
+                }
                 if val.is_undefined() {
                     Ok(JsValue::Undefined)
                 } else if val.is_null() {
@@ -540,6 +573,7 @@ impl SliceIsolate {
         if js_code.contains("Slice.kv")
             || js_code.contains("Slice.checkpoint")
             || js_code.contains("Slice.restore")
+            || js_code.contains("Slice.releaseCheckpoint")
             || js_code.contains("Slice.evalSandbox")
         {
             crate::host_bindings::register_kv_and_sandbox_host_functions(&mut realm.ctx);

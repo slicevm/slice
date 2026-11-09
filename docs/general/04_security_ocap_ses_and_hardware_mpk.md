@@ -134,9 +134,16 @@ You have two ways to enable Slice's **Egress Data Loss Prevention (DLP) Firewall
      DB_MASTER_PASSWORD="pg_prod_password_998877"
      ```
    - When loaded via `--env-file=.env`, Slice automatically classifies `STRIPE_SECRET_KEY` and `DB_MASTER_PASSWORD` as sensitive (because their names match `*_SECRET*`, `*_TOKEN*`, `*_KEY*`, `*_PASSWORD*`, or `*_PRIVATE*`, while ignoring `PUBLIC_KEY*` and `PUBLISHABLE_KEY*`) and registers their raw, Base64, and Base64URL forms into the Egress DLP guard!
-2. **Explicit `--audit-egress=<secret>` Flag:**
+2. **Explicit `--audit-egress=<secret|auto>` & `--audit-egress-file=<path>` Flags:**
    ```bash
+   # Register an explicit secret string
    slice serve ./src/server.ts --audit-egress="sk_live_super_secret_stripe_key"
+
+   # Auto-discover sensitive keys from .env and granted environment variables without treating "auto" as a literal secret
+   slice run ./src/agent.ts --audit-egress=auto
+
+   # Load newline-delimited secrets from a dedicated secrets file
+   slice serve ./src/server.ts --audit-egress-file=./secrets.txt
    ```
 
 ### Example: Seeing Egress DLP Catch a Base64 Secret Leak
