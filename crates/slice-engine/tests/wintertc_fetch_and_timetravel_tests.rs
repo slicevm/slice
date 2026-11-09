@@ -803,7 +803,8 @@ fn test_phase_n1_tls13_https_keepalive_pooling_chunked_and_redirect_ssrf_guard()
     ];
 
     crate::register_custom_root_cert_der(TEST_ROOT_CA_DER.to_vec());
-    crate::clear_outbound_conn_pool();
+    crate::clear_outbound_conn_pool_for_tenant("n1-tls-tenant");
+    crate::clear_outbound_conn_pool_for_tenant("n1-http-tenant");
 
     // 1. Real TLS 1.3 HTTPS server (`rustls::ServerConnection`) serving 2 Keep-Alive requests on 1 TLS session
     let tls_listener = TcpListener::bind("127.0.0.1:0").unwrap();

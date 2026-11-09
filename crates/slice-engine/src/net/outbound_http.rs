@@ -6,6 +6,7 @@ use crate::boa_realm::{
     BOA_VIOLATION,
 };
 use crate::state_and_kv::verify_egress_secrets_slice;
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 use slice_sandbox::SandboxViolation;
 use std::cell::Cell;
@@ -16,7 +17,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const MAX_REDIRECT_HOPS: usize = 5;
-const MAX_IDLE_CONNS_GLOBAL: usize = 32;
+const MAX_IDLE_CONNS_PER_TENANT: usize = 16;
+const MAX_TENANT_CONN_POOLS: usize = 256;
 const IDLE_CONN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maximum allowed size of outbound HTTP response headers (`64 KB`).
@@ -155,14 +157,14 @@ impl Write for OutboundStream {
 }
 
 struct PooledOutboundConn {
-    tenant_id: String,
     is_https: bool,
     host_port: String,
     stream: OutboundStream,
     last_used: Instant,
 }
 
-static SHARED_OUTBOUND_CONN_POOL: OnceLock<Mutex<Vec<PooledOutboundConn>>> = OnceLock::new();
+static SHARED_OUTBOUND_CONN_POOL: OnceLock<Mutex<FxHashMap<String, Vec<PooledOutboundConn>>>> =
+    OnceLock::new();
 static SHARED_FETCH_SLAB_POOL: OnceLock<parking_lot::Mutex<slice_io::RegisteredBufferPool>> =
     OnceLock::new();
 static FETCH_SLAB_ACQUIRE_COUNT: std::sync::atomic::AtomicU64 =
@@ -263,8 +265,8 @@ impl Drop for FetchSlabSlotGuard {
     }
 }
 
-fn shared_conn_pool() -> &'static Mutex<Vec<PooledOutboundConn>> {
-    SHARED_OUTBOUND_CONN_POOL.get_or_init(|| Mutex::new(Vec::with_capacity(MAX_IDLE_CONNS_GLOBAL)))
+fn shared_conn_pool() -> &'static Mutex<FxHashMap<String, Vec<PooledOutboundConn>>> {
+    SHARED_OUTBOUND_CONN_POOL.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 /// Returns the number of times the current isolate/worker reused a warm Keep-Alive TCP/TLS stream
@@ -279,10 +281,18 @@ pub(crate) fn record_outbound_pool_reuses(delta: u64) {
     }
 }
 
-/// Clears all idle connections in the outbound Keep-Alive pool.
+/// Clears all idle connections in the outbound Keep-Alive pool across all tenants.
 pub fn clear_outbound_conn_pool() {
-    if let Ok(mut vec) = shared_conn_pool().lock() {
-        vec.clear();
+    if let Ok(mut map) = shared_conn_pool().lock() {
+        map.clear();
+    }
+}
+
+/// Clears all idle connections in the outbound Keep-Alive pool for a specific `tenant_id`
+/// without disturbing warm Keep-Alive sockets belonging to other concurrent tenants.
+pub fn clear_outbound_conn_pool_for_tenant(tenant_id: &str) {
+    if let Ok(mut map) = shared_conn_pool().lock() {
+        map.remove(tenant_id);
     }
 }
 
@@ -299,13 +309,16 @@ fn current_tenant_id() -> String {
 
 fn take_pooled_stream(tenant_id: &str, is_https: bool, host_port: &str) -> Option<OutboundStream> {
     let now = Instant::now();
-    if let Ok(mut vec) = shared_conn_pool().lock() {
-        vec.retain(|entry| now.duration_since(entry.last_used) < IDLE_CONN_TIMEOUT);
-        if let Some(pos) = vec.iter().rposition(|e| {
-            e.tenant_id == tenant_id && e.is_https == is_https && e.host_port == host_port
-        }) {
-            let entry = vec.swap_remove(pos);
-            return Some(entry.stream);
+    if let Ok(mut map) = shared_conn_pool().lock() {
+        if let Some(vec) = map.get_mut(tenant_id) {
+            vec.retain(|entry| now.duration_since(entry.last_used) < IDLE_CONN_TIMEOUT);
+            if let Some(pos) = vec
+                .iter()
+                .rposition(|e| e.is_https == is_https && e.host_port == host_port)
+            {
+                let entry = vec.swap_remove(pos);
+                return Some(entry.stream);
+            }
         }
     }
     None
@@ -318,13 +331,30 @@ fn return_pooled_stream(
     stream: OutboundStream,
 ) {
     let now = Instant::now();
-    if let Ok(mut vec) = shared_conn_pool().lock() {
+    if let Ok(mut map) = shared_conn_pool().lock() {
+        if !map.contains_key(&tenant_id) && map.len() >= MAX_TENANT_CONN_POOLS {
+            map.retain(|_, vec| {
+                vec.retain(|entry| now.duration_since(entry.last_used) < IDLE_CONN_TIMEOUT);
+                !vec.is_empty()
+            });
+            if map.len() >= MAX_TENANT_CONN_POOLS {
+                if let Some(oldest_tenant) = map
+                    .iter()
+                    .min_by_key(|(_, vec)| vec.last().map(|e| e.last_used).unwrap_or(now))
+                    .map(|(k, _)| k.clone())
+                {
+                    map.remove(&oldest_tenant);
+                }
+            }
+        }
+        let vec = map
+            .entry(tenant_id)
+            .or_insert_with(|| Vec::with_capacity(4));
         vec.retain(|entry| now.duration_since(entry.last_used) < IDLE_CONN_TIMEOUT);
-        if vec.len() >= MAX_IDLE_CONNS_GLOBAL {
+        if vec.len() >= MAX_IDLE_CONNS_PER_TENANT {
             vec.remove(0);
         }
         vec.push(PooledOutboundConn {
-            tenant_id,
             is_https,
             host_port,
             stream,

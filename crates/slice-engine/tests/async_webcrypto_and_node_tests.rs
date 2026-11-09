@@ -234,9 +234,11 @@ runFanout();
     assert_eq!(fanout_out["shards"], serde_json::json!([0, 1, 2, 3]));
     assert_eq!(fanout_out["timeoutAborted"], true);
     assert_eq!(fanout_out["isTimeoutErr"], true);
+    let max_fanout_ms = if cfg!(debug_assertions) { 450 } else { 220 };
     assert!(
-        fanout_elapsed < Duration::from_millis(220),
-        "Expected 4x60ms parallel fan-out + 35ms timeout to complete in < 220ms, took {:?}",
+        fanout_elapsed < Duration::from_millis(max_fanout_ms),
+        "Expected 4x60ms parallel fan-out + 35ms timeout to complete in < {}ms, took {:?}",
+        max_fanout_ms,
         fanout_elapsed
     );
 

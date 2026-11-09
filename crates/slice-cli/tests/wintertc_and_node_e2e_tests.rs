@@ -147,7 +147,7 @@ export default {
         merge_manifest_toml_into_caps(manifest_toml, &mut caps);
     }
     let entry = archive.entrypoint_blob().unwrap();
-    slice_engine::clear_outbound_conn_pool();
+    slice_engine::clear_outbound_conn_pool_for_tenant("app17-tenant");
     let reuse_before = slice_engine::outbound_pool_reuse_count();
     let mut iso = SliceIsolate::spawn("app17-tenant", 1, caps, 50_000_000, 16 * 1024 * 1024);
     let metrics = iso
@@ -156,7 +156,7 @@ export default {
     let reuse_after = slice_engine::outbound_pool_reuse_count();
 
     // Drop pooled connection so `srv_handle` sees EOF and exits cleanly
-    slice_engine::clear_outbound_conn_pool();
+    slice_engine::clear_outbound_conn_pool_for_tenant("app17-tenant");
     let _ = srv_handle.join();
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
@@ -358,7 +358,7 @@ export default {
     );
 
     stop_srv.store(true, std::sync::atomic::Ordering::Relaxed);
-    slice_engine::clear_outbound_conn_pool();
+    slice_engine::clear_outbound_conn_pool_for_tenant("app18-live-tenant");
     let _ = srv_handle.join();
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }

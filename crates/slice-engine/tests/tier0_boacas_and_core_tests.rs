@@ -1007,9 +1007,13 @@ fn test_issue_14_richer_sandbox_eval_outcome_phase_timings_and_return_json() {
     assert!(obj_out.compile_time_ns >= 1);
     assert!(obj_out.exec_time_ns >= 1);
     assert!(obj_out.peak_memory_bytes >= obj_out.memory_used_bytes);
-    let parsed_json: serde_json::Value =
-        serde_json::from_str(obj_out.return_json.as_deref().expect("expected return_json"))
-            .expect("valid JSON");
+    let parsed_json: serde_json::Value = serde_json::from_str(
+        obj_out
+            .return_json
+            .as_deref()
+            .expect("expected return_json"),
+    )
+    .expect("valid JSON");
     assert_eq!(parsed_json["a"], 1);
     assert_eq!(parsed_json["b"], serde_json::json!([2, 3]));
     assert_eq!(parsed_json["ok"], true);
@@ -1020,8 +1024,3 @@ fn test_issue_14_richer_sandbox_eval_outcome_phase_timings_and_return_json() {
     assert_eq!(undef_out.return_value, "undefined");
     assert!(undef_out.return_json.is_none());
 }
-
-
-
-
-

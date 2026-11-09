@@ -993,9 +993,3 @@ fn test_issue_16_mcp_multiple_audit_secrets_deterministic_seed_and_schema_sync()
     assert!(p1["compileTimeNs"].as_u64().unwrap() >= 1);
     assert!(p1["execTimeNs"].as_u64().unwrap() >= 1);
 }
-
-
-
-
-
-

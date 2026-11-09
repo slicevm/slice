@@ -112,8 +112,7 @@ pub(crate) fn tokenize_js(input: &str) -> Vec<Token> {
             continue;
         }
         // Number literal (including leading-dot decimals like `.5` emitted by Oxc codegen)
-        if b.is_ascii_digit()
-            || (b == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit())
+        if b.is_ascii_digit() || (b == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit())
         {
             let start = i;
             if b == b'0' && i + 1 < bytes.len() && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X') {
