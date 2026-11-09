@@ -245,6 +245,28 @@ fn is_valid_whatwg_hostname(hostname: &str) -> bool {
     })
 }
 
+#[inline]
+fn has_non_special_scheme(s: &str) -> bool {
+    let Some(ci) = s.find(':') else {
+        return false;
+    };
+    if ci == 0 || s.find('/').is_some_and(|sl| sl < ci) {
+        return false;
+    }
+    let scheme = &s[..ci];
+    if !scheme.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())
+        || !scheme
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+    {
+        return false;
+    }
+    !matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "http" | "https" | "ws" | "wss" | "file" | "ftp"
+    )
+}
+
 /// Resolves and parses a WHATWG `URL` from `input` and optional `base`, returning `None` if invalid.
 pub fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<ParsedWhatwgUrl> {
     // WHATWG URL step 1: trim leading/trailing C0 controls and space (`<= 0x20`) and strip ASCII tab/LF/CR
@@ -253,7 +275,7 @@ pub fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<ParsedWhatwgU
     let trimmed = cleaned_cow.as_ref();
 
     let resolved_cow: Cow<'_, str> =
-        if let Some(base_str) = base.filter(|_| !trimmed.contains("://")) {
+        if let Some(base_str) = base.filter(|_| !trimmed.contains("://") && !has_non_special_scheme(trimmed)) {
             let b = parse_whatwg_url(base_str, None)?;
             if trimmed.starts_with("//") {
                 Cow::Owned(format!("{}{}", b.protocol, trimmed))
@@ -284,7 +306,56 @@ pub fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<ParsedWhatwgU
         None => (before_hash, ""),
     };
 
-    let si = before_query.find("://")?;
+    let Some(si) = before_query.find("://") else {
+        let ci = before_query.find(':')?;
+        if ci == 0 {
+            return None;
+        }
+        let scheme_part = &before_query[..ci];
+        if !scheme_part.bytes().next()?.is_ascii_alphabetic()
+            || !scheme_part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+        {
+            return None;
+        }
+        let protocol = format!("{}:", scheme_part.to_ascii_lowercase());
+        if matches!(
+            protocol.as_str(),
+            "http:" | "https:" | "ws:" | "wss:" | "file:" | "ftp:"
+        ) {
+            return None;
+        }
+        let path_part = &before_query[ci + 1..];
+        if path_part.starts_with('/') || path_part.starts_with('\\') {
+            return None;
+        }
+        let pathname = path_part.to_string();
+        let search = if search_raw == "?" {
+            String::new()
+        } else {
+            search_raw.to_string()
+        };
+        let hash = if hash_raw == "#" {
+            String::new()
+        } else {
+            hash_raw.to_string()
+        };
+        let href = format!("{}{}{}{}", protocol, pathname, search, hash);
+        return Some(ParsedWhatwgUrl {
+            href,
+            origin: "null".to_string(),
+            protocol,
+            username: String::new(),
+            password: String::new(),
+            host: String::new(),
+            hostname: String::new(),
+            port: String::new(),
+            pathname,
+            search,
+            hash,
+        });
+    };
     if si == 0 {
         return None;
     }
@@ -326,7 +397,7 @@ pub fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<ParsedWhatwgU
         None => (String::new(), String::new(), auth_host),
     };
 
-    if host_port.is_empty() && protocol != "file:" {
+    if host_port.is_empty() && is_special && protocol != "file:" {
         return None;
     }
 
@@ -358,7 +429,7 @@ pub fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<ParsedWhatwgU
         _ => (host_port.to_ascii_lowercase(), String::new()),
     };
 
-    if protocol != "file:" && !is_valid_whatwg_hostname(&hostname) {
+    if (is_special || !hostname.is_empty()) && protocol != "file:" && !is_valid_whatwg_hostname(&hostname) {
         return None;
     }
 

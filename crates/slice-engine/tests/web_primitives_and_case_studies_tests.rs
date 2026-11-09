@@ -401,3 +401,75 @@ fn test_audit_neo_phase3_zero_alloc_kv_counters_and_cow_vfs_checkpoints() {
     assert_eq!(res["restoredVfs"], "alpha");
     assert_eq!(res["restoredKv"], "12");
 }
+
+#[test]
+fn test_sveltekit_whatwg_opaque_url_signal_and_async_stream_response() {
+    use crate::intrinsics::{can_parse_whatwg_url, parse_whatwg_url};
+
+    // 1. Native Rust WHATWG URL non-special opaque-path URLs (used by SvelteKit `$app/state` `new URL("a:")`)
+    let u_a = parse_whatwg_url("a:", None).expect("new URL('a:') must parse");
+    assert_eq!(u_a.protocol, "a:");
+    assert_eq!(u_a.pathname, "");
+    assert_eq!(u_a.origin, "null");
+    assert_eq!(u_a.href, "a:");
+    assert!(can_parse_whatwg_url("a:", None));
+    assert!(can_parse_whatwg_url("about:blank", None));
+    assert!(can_parse_whatwg_url("data:text/plain;base64,SGVsbG8=", None));
+    assert!(!can_parse_whatwg_url("http:foo", None));
+
+    // 2. JS `new URL("a:")`, `Request.prototype.signal`, and async `ReadableStream` `Response` body
+    let js = r#"
+        (async () => {
+            const u1 = new URL("a:");
+            const u2 = new URL("about:blank?x=1#top");
+            const req = new Request("https://edge.slice.local/items");
+            let abortListenerOk = false;
+            req.signal.addEventListener("abort", () => {});
+            abortListenerOk = (req.signal.aborted === false);
+
+            const stream = new ReadableStream({
+                async start(controller) {
+                    await Promise.resolve();
+                    controller.enqueue("chunk-1:");
+                    await Promise.resolve();
+                    controller.enqueue("chunk-2");
+                    controller.close();
+                }
+            });
+            const res = new Response(stream, { headers: { "x-test": "1" } });
+            res.headers.set("content-type", "text/sveltekit-data");
+            res.headers.append("set-cookie", "a=1; Path=/");
+            res.headers.append("set-cookie", "b=2; Path=/");
+            const text = await res.text();
+            console.log(JSON.stringify({
+                u1Href: u1.href,
+                u1Proto: u1.protocol,
+                u1Origin: u1.origin,
+                u2Path: u2.pathname,
+                u2Search: u2.search,
+                canParseA: URL.canParse("a:"),
+                abortListenerOk,
+                text,
+                cookies: res.headers.getSetCookie()
+            }));
+        })();
+    "#;
+    let m = run_source_isolated(
+        "sveltekit-primitives-tenant",
+        js,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        8 * 1024 * 1024,
+    )
+    .unwrap();
+    let res: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(res["u1Href"], "a:");
+    assert_eq!(res["u1Proto"], "a:");
+    assert_eq!(res["u1Origin"], "null");
+    assert_eq!(res["u2Path"], "blank");
+    assert_eq!(res["u2Search"], "?x=1");
+    assert_eq!(res["canParseA"], true);
+    assert_eq!(res["abortListenerOk"], true);
+    assert_eq!(res["text"], "chunk-1:chunk-2");
+    assert_eq!(res["cookies"], serde_json::json!(["a=1; Path=/", "b=2; Path=/"]));
+}

@@ -161,6 +161,10 @@ fn test_wave_e_hono_and_itty_unjs_framework_suites() {
         .join("tests")
         .join("frameworks")
         .join("03-node-http-express-compat");
+    let fw4_dir = repo_root
+        .join("tests")
+        .join("frameworks")
+        .join("04-sveltekit-edge-ssr");
 
     assert!(fw1_dir.join("slice.toml").is_file());
     assert!(fw1_dir.join("src/index.ts").is_file());
@@ -168,6 +172,8 @@ fn test_wave_e_hono_and_itty_unjs_framework_suites() {
     assert!(fw2_dir.join("src/index.ts").is_file());
     assert!(fw3_dir.join("slice.toml").is_file());
     assert!(fw3_dir.join("src/index.ts").is_file());
+    assert!(fw4_dir.join("slice.toml").is_file());
+    assert!(fw4_dir.join("src/index.ts").is_file());
 
     let bundled3 = slice_cas::bundle_entrypoint_with_deps(&fw3_dir.join("src/index.ts")).unwrap();
     let bc3 = compile_source_to_bytecode(&bundled3);
@@ -216,6 +222,36 @@ fn test_wave_e_hono_and_itty_unjs_framework_suites() {
         assert!(out2.stdout[0].contains(r#""totalRequestsDispatched":12"#));
         assert!(out2.stdout[0].contains(r#""status304Count":2"#));
     }
+
+    if fw4_dir.join("node_modules/@sveltejs/kit").is_dir()
+        && fw4_dir.join("src/build/slice-entry.js").is_file()
+    {
+        let fw4_clone = fw4_dir.clone();
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                let bundled4 =
+                    slice_cas::bundle_entrypoint_with_deps(&fw4_clone.join("src/index.ts"))
+                        .unwrap();
+                let bc4 = compile_source_to_bytecode(&bundled4);
+                let mut iso4 = SliceIsolate::spawn(
+                    "wave-e-sveltekit",
+                    1,
+                    CapabilityToken::pure_compute(),
+                    50_000_000,
+                    64 * 1024 * 1024,
+                );
+                let out4 = iso4.execute_bytecode(&bc4, None).unwrap();
+                assert!(out4.stdout[0].contains(r#""framework":"04-sveltekit-edge-ssr""#));
+                assert!(out4.stdout[0].contains(r#""totalRequestsDispatched":12"#));
+                assert!(out4.stdout[0].contains(r#""ssrPagesRendered":4"#));
+                assert!(out4.stdout[0].contains(r#""formActionsExecuted":2"#));
+                assert!(out4.stdout[0].contains(r#""auditDigest":"1d85e85c9c954480""#));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }
 
 #[test]
@@ -240,6 +276,24 @@ fn test_wave_f_slice_init_generates_slice_d_ts_and_tsconfig() {
     assert!(tsconfig.contains("\"slice.d.ts\""));
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    // Verify `slice init <dir> --template=sveltekit`
+    let sk_dir = env::temp_dir().join("slice_cli_test_init_sveltekit");
+    let _ = std::fs::remove_dir_all(&sk_dir);
+    cmd_init(&[
+        sk_dir.to_string_lossy().to_string(),
+        "--template=sveltekit".to_string(),
+    ])
+    .unwrap();
+    assert!(sk_dir.join("slice.toml").is_file());
+    assert!(sk_dir.join("package.json").is_file());
+    assert!(sk_dir.join("adapter-slice.js").is_file());
+    assert!(sk_dir.join("vite.config.js").is_file());
+    assert!(sk_dir.join("src/hooks.server.js").is_file());
+    assert!(sk_dir.join("src/routes/+page.server.js").is_file());
+    assert!(sk_dir.join("src/routes/+page.svelte").is_file());
+    assert!(sk_dir.join("src/routes/api/items/+server.js").is_file());
+    let _ = std::fs::remove_dir_all(&sk_dir);
 }
 
 #[test]

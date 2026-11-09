@@ -89,6 +89,7 @@ APP24_DIR="$APPS_DIR/24-tsx-ssr-and-wasm-edge-pipeline"
 APP25_DIR="$FRAMEWORKS_DIR/01-hono-edge-microservice"
 APP26_DIR="$FRAMEWORKS_DIR/02-itty-router-unjs-nitro-stack"
 APP32_DIR="$FRAMEWORKS_DIR/03-node-http-express-compat"
+APP33_DIR="$FRAMEWORKS_DIR/04-sveltekit-edge-ssr"
 APP27_DIR="$CASE_STUDIES_DIR/01-tot-autonomous-sre-agent"
 APP28_DIR="$CASE_STUDIES_DIR/02-mcp-code-mode-orchestrator"
 APP29_DIR="$CASE_STUDIES_DIR/03-multi-tenant-saas-plugin-mesh"
@@ -218,9 +219,9 @@ record_jsonl "{\"type\":\"meta\",\"version\":\"$SLICE_VERSION\",\"commit\":\"$SL
 
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  [TAG: apps] PACKING & COMPILING ALL 27 APPS & FRAMEWORK SUITES (OXC + CAS)"
+echo "  [TAG: apps] PACKING & COMPILING ALL 28 APPS & FRAMEWORK SUITES (OXC + CAS)"
 echo "========================================================================="
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 32; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 32 33; do
     if [ -n "${SLICE_ONLY_APPS:-}" ] && [[ ",${SLICE_ONLY_APPS}," != *",${i},"* ]]; then
         continue
     fi
@@ -294,6 +295,7 @@ verify_app_parity "App 24: 24-tsx-ssr-and-wasm-edge-pipeline (WebAssembly SLA Sc
 verify_app_parity "Framework 1 (App 25): 01-hono-edge-microservice (Hono v4.6.20 + hono/cookie + cookie + ms)" "$APP25_DIR" "/tmp/app25.cas" "-A"
 verify_app_parity "Framework 2 (App 26): 02-itty-router-unjs-nitro-stack (itty-router v5 + ufo + destr + ohash + radix3)" "$APP26_DIR" "/tmp/app26.cas" "-A"
 verify_app_parity "Framework 3 (App 32): 03-node-http-express-compat (node:http + node:stream Express/Polka)" "$APP32_DIR" "/tmp/app32.cas" "-A"
+verify_app_parity "Framework 4 (App 33): 04-sveltekit-edge-ssr (SvelteKit v3.1.1 + Svelte v5.57.3 + devalue v6.0.3)" "$APP33_DIR" "/tmp/app33.cas" "-A"
 fi
 
 measure_ms() {
@@ -425,6 +427,7 @@ bench_app 24 "24-TSX-SSR-AND-WASM-EDGE-PIPELINE (WebAssembly SLA Scorer + SSR Pi
 bench_app 25 "FRAMEWORK 1: 01-HONO-EDGE-MICROSERVICE (Hono v4.6.20 + hono/cookie + cookie + ms)" "$APP25_DIR" "-A"
 bench_app 26 "FRAMEWORK 2: 02-ITTY-ROUTER-UNJS-NITRO-STACK (itty-router v5 + ufo + destr + ohash + radix3)" "$APP26_DIR" "-A"
 bench_app 32 "FRAMEWORK 3: 03-NODE-HTTP-EXPRESS-COMPAT (node:http + node:stream Express/Polka)" "$APP32_DIR" "-A"
+bench_app 33 "FRAMEWORK 4: 04-SVELTEKIT-EDGE-SSR (SvelteKit v3.1.1 + Svelte v5.57.3 + devalue v6.0.3)" "$APP33_DIR" "-A"
 
 if [ -z "${SLICE_ONLY_APPS:-}" ]; then
 echo "========================================================================="
@@ -464,20 +467,25 @@ measure_rss_kb "Slice (FW 2: itty-router + UnJS)"   "$SLICE_BIN" run "/tmp/app26
 measure_rss_kb "Bun (FW 2: itty-router + UnJS)"     bun run "$APP26_DIR/src/index.ts"
 measure_rss_kb "Deno (FW 2: itty-router + UnJS)"    deno run -A "$APP26_DIR/src/index.ts"
 measure_rss_kb "Node (FW 2: itty-router + UnJS)"    node "$APP26_DIR/src/index.ts"
+echo "-------------------------------------------------------------------------"
+measure_rss_kb "Slice (FW 4: SvelteKit 3 + Svelte 5)" "$SLICE_BIN" run "/tmp/app33.cas" --quiet
+measure_rss_kb "Bun (FW 4: SvelteKit 3 + Svelte 5)"   bun run "$APP33_DIR/src/index.ts"
+measure_rss_kb "Deno (FW 4: SvelteKit 3 + Svelte 5)"  deno run -A "$APP33_DIR/src/index.ts"
+measure_rss_kb "Node (FW 4: SvelteKit 3 + Svelte 5)"  node "$APP33_DIR/src/index.ts"
 fi
 
 echo "========================================================================="
-echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 27 APPS (COLD VS WARM POOL)"
+echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 28 APPS (COLD VS WARM POOL)"
 echo "========================================================================="
 echo "  --- Cold Realm Telemetry ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 32; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 32 33; do
     if [ -n "${SLICE_ONLY_APPS:-}" ] && [[ ",${SLICE_ONLY_APPS}," != *",${i},"* ]]; then
         continue
     fi
     "$SLICE_BIN" run "/tmp/app${i}.cas" --quiet --metrics
 done
 echo "  --- Pre-Warmed Boa Pool Telemetry (--warm) ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 32; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 32 33; do
     if [ -n "${SLICE_ONLY_APPS:-}" ] && [[ ",${SLICE_ONLY_APPS}," != *",${i},"* ]]; then
         continue
     fi
@@ -1115,7 +1123,7 @@ fi
 
 if should_run_tag "frameworks"; then
 echo "========================================================================="
-echo "  [TAG: frameworks] WAVE E REAL-WORLD FRAMEWORK SUITES (HONO, ITTY+UNJS, EXPRESS)"
+echo "  [TAG: frameworks] WAVE E REAL-WORLD FRAMEWORK SUITES (HONO, ITTY+UNJS, EXPRESS, SVELTEKIT)"
 echo "========================================================================="
 "$SLICE_BIN" pack "$APP25_DIR" "/tmp/app25.cas" >/dev/null
 "$SLICE_BIN" compile "/tmp/app25.cas" -o "/tmp/app25_bin" >/dev/null
@@ -1123,12 +1131,16 @@ echo "========================================================================="
 "$SLICE_BIN" compile "/tmp/app26.cas" -o "/tmp/app26_bin" >/dev/null
 "$SLICE_BIN" pack "$APP32_DIR" "/tmp/app32.cas" >/dev/null
 "$SLICE_BIN" compile "/tmp/app32.cas" -o "/tmp/app32_bin" >/dev/null
+"$SLICE_BIN" pack "$APP33_DIR" "/tmp/app33.cas" >/dev/null
+"$SLICE_BIN" compile "/tmp/app33.cas" -o "/tmp/app33_bin" >/dev/null
 verify_app_parity "Framework 1 (App 25): 01-hono-edge-microservice" "$APP25_DIR" "/tmp/app25.cas" "-A"
 verify_app_parity "Framework 2 (App 26): 02-itty-router-unjs-nitro-stack" "$APP26_DIR" "/tmp/app26.cas" "-A"
 verify_app_parity "Framework 3 (App 32): 03-node-http-express-compat" "$APP32_DIR" "/tmp/app32.cas" "-A"
+verify_app_parity "Framework 4 (App 33): 04-sveltekit-edge-ssr" "$APP33_DIR" "/tmp/app33.cas" "-A"
 bench_app 25 "FRAMEWORK 1: 01-HONO-EDGE-MICROSERVICE (Hono v4.6.20 + hono/cookie + cookie + ms)" "$APP25_DIR" "-A"
 bench_app 26 "FRAMEWORK 2: 02-ITTY-ROUTER-UNJS-NITRO-STACK (itty-router v5 + ufo + destr + ohash + radix3)" "$APP26_DIR" "-A"
 bench_app 32 "FRAMEWORK 3: 03-NODE-HTTP-EXPRESS-COMPAT (node:http + node:stream Express/Polka)" "$APP32_DIR" "-A"
+bench_app 33 "FRAMEWORK 4: 04-SVELTEKIT-EDGE-SSR (SvelteKit v3.1.1 + Svelte v5.57.3 + devalue v6.0.3)" "$APP33_DIR" "-A"
 measure_rss_kb "Slice (FW 1: Hono v4 Microservice)" "$SLICE_BIN" run "/tmp/app25.cas" --quiet
 measure_rss_kb "Bun (FW 1: Hono v4 Microservice)"   bun run "$APP25_DIR/src/index.ts"
 measure_rss_kb "Deno (FW 1: Hono v4 Microservice)"  deno run -A "$APP25_DIR/src/index.ts"
@@ -1143,16 +1155,24 @@ measure_rss_kb "Slice (FW 3: Express node:http)"    "$SLICE_BIN" run "/tmp/app32
 measure_rss_kb "Bun (FW 3: Express node:http)"      bun run "$APP32_DIR/src/index.ts"
 measure_rss_kb "Deno (FW 3: Express node:http)"     deno run -A "$APP32_DIR/src/index.ts"
 measure_rss_kb "Node (FW 3: Express node:http)"     node "$APP32_DIR/src/index.ts"
-echo "  --- Frameworks 1..3 Cold vs Warm Isolate Telemetry ---"
+echo "-------------------------------------------------------------------------"
+measure_rss_kb "Slice (FW 4: SvelteKit 3 + Svelte 5)" "$SLICE_BIN" run "/tmp/app33.cas" --quiet
+measure_rss_kb "Bun (FW 4: SvelteKit 3 + Svelte 5)"   bun run "$APP33_DIR/src/index.ts"
+measure_rss_kb "Deno (FW 4: SvelteKit 3 + Svelte 5)"  deno run -A "$APP33_DIR/src/index.ts"
+measure_rss_kb "Node (FW 4: SvelteKit 3 + Svelte 5)"  node "$APP33_DIR/src/index.ts"
+echo "  --- Frameworks 1..4 Cold vs Warm Isolate Telemetry ---"
 "$SLICE_BIN" run "/tmp/app25.cas" --quiet --metrics
 record_warm_metrics 25 "/tmp/app25.cas"
 "$SLICE_BIN" run "/tmp/app26.cas" --quiet --metrics
 record_warm_metrics 26 "/tmp/app26.cas"
 "$SLICE_BIN" run "/tmp/app32.cas" --quiet --metrics
 record_warm_metrics 32 "/tmp/app32.cas"
+"$SLICE_BIN" run "/tmp/app33.cas" --quiet --metrics
+record_warm_metrics 33 "/tmp/app33.cas"
 echo "  [Live slice test Runner Verification on Framework Suites]"
 "$SLICE_BIN" test "$APP25_DIR"
 "$SLICE_BIN" test "$APP26_DIR"
+"$SLICE_BIN" test "$APP33_DIR"
 fi
 
 if should_run_tag "case_studies"; then

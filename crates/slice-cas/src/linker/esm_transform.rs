@@ -1,12 +1,110 @@
 //! Oxc AST-Driven ESM-to-CommonJS Transformer (`transform_module_to_cjs`)
 //! and Barrel Lazy-Getter Optimizer (`apply_cjs_lazy_barrel_getters`).
 
+use crate::bundler::resolve_module_specifier;
+use crate::compiler::strip_typescript_raw_with_ext;
+use crate::linker::builtins_and_ids::MUTABLE_EXPORTS_CACHE;
 use crate::linker::{
-    collect_binding_pattern_names, collect_require_edits_from_program, format_exports_lhs,
-    is_valid_js_identifier, resolve_spec_and_record, rewrite_cjs_requires_ast, slice_with_edits,
+    collect_binding_pattern_names, collect_live_import_reference_edits,
+    collect_mutated_binding_names, collect_require_edits_from_program, format_exports_lhs,
+    is_builtin_module, is_jsx_runtime_builtin, is_valid_js_identifier, resolve_spec_and_record,
+    rewrite_cjs_requires_ast, slice_with_edits,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
+
+fn get_module_mutable_exports(path: &Path) -> FxHashSet<String> {
+    if let Some(cached) = MUTABLE_EXPORTS_CACHE.with(|c| c.borrow().get(path).cloned()) {
+        return cached;
+    }
+    // Insert empty sentinel first to break any cyclic `export ... from` chains
+    MUTABLE_EXPORTS_CACHE.with(|c| {
+        c.borrow_mut()
+            .insert(path.to_path_buf(), FxHashSet::default());
+    });
+
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if matches!(ext, "json" | "wasm") {
+        return FxHashSet::default();
+    }
+    let Ok(raw_src) = std::fs::read_to_string(path) else {
+        return FxHashSet::default();
+    };
+    if !raw_src.contains("export") {
+        return FxHashSet::default();
+    }
+
+    let is_ts = matches!(ext, "ts" | "tsx" | "jsx");
+    let is_jsx_ext = matches!(ext, "tsx" | "jsx");
+    let js_code = strip_typescript_raw_with_ext(&raw_src, is_ts, is_jsx_ext);
+
+    let allocator = oxc::allocator::Allocator::default();
+    let source_type = oxc::span::SourceType::ts().with_module(true);
+    let parser_ret = oxc::parser::Parser::new(&allocator, &js_code, source_type).parse();
+    if !parser_ret.diagnostics.is_empty() {
+        return FxHashSet::default();
+    }
+
+    let mutated_locals = collect_mutated_binding_names(&parser_ret.program);
+    let mut mutable_exported_names = FxHashSet::default();
+    let from_dir = path.parent().unwrap_or_else(|| Path::new("."));
+
+    use oxc::ast::ast::{Declaration, Statement};
+    for stmt in &parser_ret.program.body {
+        match stmt {
+            Statement::ExportDeclaration(exp_decl) if !mutated_locals.is_empty() => {
+                if let Declaration::VariableDeclaration(vd) = &exp_decl.declaration {
+                    let mut pairs = Vec::new();
+                    for d in &vd.declarations {
+                        collect_binding_pattern_names(&d.id, &mut pairs);
+                    }
+                    for (exp_n, loc_n) in pairs {
+                        if mutated_locals.contains(&loc_n) {
+                            mutable_exported_names.insert(exp_n);
+                        }
+                    }
+                }
+            }
+            Statement::ExportNamedDeclaration(exp_named)
+                if !mutated_locals.is_empty() && !exp_named.export_kind.is_type() =>
+            {
+                for spec in &exp_named.specifiers {
+                    if spec.export_kind.is_type() {
+                        continue;
+                    }
+                    let loc_n = spec.local.name().as_str();
+                    if mutated_locals.contains(loc_n) {
+                        mutable_exported_names.insert(spec.exported.name().to_string());
+                    }
+                }
+            }
+            Statement::ExportFromDeclaration(exp_from) if !exp_from.export_kind.is_type() => {
+                let spec_str = exp_from.source.value.as_str();
+                if !is_builtin_module(spec_str) && !is_jsx_runtime_builtin(spec_str) {
+                    if let Some(inner_path) = resolve_module_specifier(from_dir, spec_str) {
+                        let inner_mut = get_module_mutable_exports(&inner_path);
+                        if !inner_mut.is_empty() {
+                            for spec in &exp_from.specifiers {
+                                if !spec.export_kind.is_type()
+                                    && inner_mut.contains(spec.local.name().as_str())
+                                {
+                                    mutable_exported_names.insert(spec.exported.name().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    MUTABLE_EXPORTS_CACHE.with(|c| {
+        c.borrow_mut()
+            .insert(path.to_path_buf(), mutable_exported_names.clone());
+    });
+    mutable_exported_names
+}
 
 fn collapse_multiline_imports_exports(code: &str) -> String {
     let mut out = String::with_capacity(code.len());
@@ -141,7 +239,7 @@ fn try_transform_esm_to_cjs_ast(
     }
 
     // Single-pass `require(...)`, dynamic `import(...)`, and `import.meta` AST edit collection:
-    let req_edits = collect_require_edits_from_program(
+    let mut req_edits = collect_require_edits_from_program(
         js_code,
         &parser_ret.program,
         from_dir,
@@ -173,6 +271,68 @@ fn try_transform_esm_to_cjs_ast(
         return Some(apply_cjs_lazy_barrel_getters(body_lines).join("\n"));
     }
 
+    // Detect any imported bindings that point to mutable ESM live bindings in their source module:
+    let mut live_import_map: FxHashMap<String, String> = FxHashMap::default();
+    let mut live_var_by_stmt_start: FxHashMap<u32, String> = FxHashMap::default();
+    let mut live_counter = 0usize;
+    for stmt in &parser_ret.program.body {
+        let Statement::ImportDeclaration(imp) = stmt else {
+            continue;
+        };
+        if imp.import_kind.is_type() {
+            continue;
+        }
+        let Some(specs) = &imp.specifiers else {
+            continue;
+        };
+        let has_named = specs
+            .iter()
+            .any(|s| matches!(s, ImportDeclarationSpecifier::ImportSpecifier(n) if !n.import_kind.is_type()));
+        if !has_named {
+            continue;
+        }
+        let spec = imp.source.value.as_str();
+        if is_builtin_module(spec) || is_jsx_runtime_builtin(spec) {
+            continue;
+        }
+        let Some(dep_path) = resolve_module_specifier(from_dir, spec) else {
+            continue;
+        };
+        let mut_exports = get_module_mutable_exports(&dep_path);
+        if mut_exports.is_empty() {
+            continue;
+        }
+        let mut live_var: Option<String> = None;
+        for s in specs {
+            if let ImportDeclarationSpecifier::ImportSpecifier(named) = s {
+                if named.import_kind.is_type() {
+                    continue;
+                }
+                let imp_n = named.imported.name().as_str();
+                if mut_exports.contains(imp_n) {
+                    let var_name = live_var.get_or_insert_with(|| {
+                        live_counter += 1;
+                        format!("__live_{}", live_counter)
+                    });
+                    let access = if is_valid_js_identifier(imp_n) {
+                        format!("{}.{}", var_name, imp_n)
+                    } else {
+                        format!("{}[{:?}]", var_name, imp_n)
+                    };
+                    live_import_map.insert(named.local.name.to_string(), access);
+                }
+            }
+        }
+        if let Some(var_name) = live_var {
+            live_var_by_stmt_start.insert(imp.span.start, var_name);
+        }
+    }
+
+    if !live_import_map.is_empty() {
+        collect_live_import_reference_edits(&parser_ret.program, &live_import_map, &mut req_edits);
+        req_edits.sort_by_key(|e| e.0);
+    }
+
     let mut body_lines = Vec::with_capacity(parser_ret.program.body.len() + 4);
     let mut deferred_exports: Vec<(String, String)> = Vec::new();
     let mut has_default_export = false;
@@ -194,6 +354,9 @@ fn try_transform_esm_to_cjs_ast(
                     body_lines.push(format!("require({:?});", resolved_id));
                     continue;
                 }
+                if let Some(live_var) = live_var_by_stmt_start.get(&imp.span.start) {
+                    body_lines.push(format!("const {} = require({:?});", live_var, resolved_id));
+                }
                 let mut default_ident: Option<&str> = None;
                 let mut namespace_ident: Option<&str> = None;
                 let mut named_specs: Vec<(String, String)> = Vec::new();
@@ -210,9 +373,13 @@ fn try_transform_esm_to_cjs_ast(
                             if named.import_kind.is_type() {
                                 continue;
                             }
+                            let loc_s = named.local.name.as_str();
+                            if live_import_map.contains_key(loc_s) {
+                                continue;
+                            }
                             named_specs.push((
                                 named.imported.name().to_string(),
-                                named.local.name.to_string(),
+                                loc_s.to_string(),
                             ));
                         }
                     }
@@ -460,9 +627,21 @@ fn try_transform_esm_to_cjs_ast(
     if has_default_export || !deferred_exports.is_empty() {
         body_lines.push("exports.__esModule = true;".to_string());
     }
+    let mutated_locals = if deferred_exports.is_empty() {
+        FxHashSet::default()
+    } else {
+        collect_mutated_binding_names(&parser_ret.program)
+    };
     for (export_name, local_name) in &deferred_exports {
-        let lhs = format_exports_lhs(export_name);
-        body_lines.push(format!("{} = {};", lhs, local_name));
+        if is_valid_js_identifier(local_name) && mutated_locals.contains(local_name) {
+            body_lines.push(format!(
+                "Object.defineProperty(exports, {:?}, {{ enumerable: true, get: function() {{ return {}; }} }});",
+                export_name, local_name
+            ));
+        } else {
+            let lhs = format_exports_lhs(export_name);
+            body_lines.push(format!("{} = {};", lhs, local_name));
+        }
     }
     if has_default_export {
         body_lines.push("exports.default = __slice_default;".to_string());

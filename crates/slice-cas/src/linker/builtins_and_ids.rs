@@ -1,7 +1,7 @@
 //! Built-in Module Classifier, Canonical Module ID Cache, and Identifier Sanitizer.
 
 use crate::bundler::resolve_module_specifier;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 
 #[inline]
@@ -112,10 +112,13 @@ pub fn format_exports_lhs(export_name: &str) -> String {
 thread_local! {
     static CANONICAL_MOD_ID_CACHE: std::cell::RefCell<FxHashMap<PathBuf, String>> =
         std::cell::RefCell::new(FxHashMap::default());
+    pub(crate) static MUTABLE_EXPORTS_CACHE: std::cell::RefCell<FxHashMap<PathBuf, FxHashSet<String>>> =
+        std::cell::RefCell::new(FxHashMap::default());
 }
 
 pub fn clear_canonical_mod_id_cache() {
     CANONICAL_MOD_ID_CACHE.with(|c| c.borrow_mut().clear());
+    MUTABLE_EXPORTS_CACHE.with(|c| c.borrow_mut().clear());
 }
 
 #[inline]

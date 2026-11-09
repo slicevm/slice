@@ -1,0 +1,12 @@
+[package]
+name = "04-sveltekit-edge-ssr"
+version = "1.0.0"
+entrypoint = "./src/index.ts"
+static_dir = "./src/build/client"
+
+[runtime]
+fuel_limit = 50000000
+memory_limit_mb = 64
+
+[capabilities]
+allow_env = ["NODE_ENV", "ORIGIN", "PORT"]

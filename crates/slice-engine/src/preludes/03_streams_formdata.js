@@ -27,8 +27,10 @@
       }
     };
     this._ctrl = ctrl;
+    this._startPromise = null;
     if (this._src && typeof this._src.start === "function") {
-      this._src.start(ctrl);
+      var sp = this._src.start(ctrl);
+      if (sp && typeof sp.then === "function") this._startPromise = sp;
     }
   }
   ReadableStream.from = function(iterable) {

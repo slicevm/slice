@@ -35,6 +35,7 @@ export const WORKLOAD_METADATA = [
   { num: 25, code: "FW-01", id: "frameworks/01-hono-edge-microservice", label: "`FW-01: frameworks/01-hono-edge-microservice` (`hono@4.6.20` + `hono/cookie` + `ms`)", category: "frameworks", flagship: true },
   { num: 26, code: "FW-02", id: "frameworks/02-itty-router-unjs-nitro-stack", label: "`FW-02: frameworks/02-itty-router-unjs-nitro-stack` (`itty-router` + UnJS)", category: "frameworks", flagship: false },
   { num: 32, code: "FW-03", id: "frameworks/03-node-http-express-compat", label: "`FW-03: frameworks/03-node-http-express-compat` (`node:http` + `node:stream` Express/Polka)", category: "frameworks", flagship: false },
+  { num: 33, code: "FW-04", id: "frameworks/04-sveltekit-edge-ssr", label: "`FW-04: frameworks/04-sveltekit-edge-ssr` (`@sveltejs/kit@3.1.1` + `svelte@5.57.3` + `devalue@6.0.3`)", category: "frameworks", flagship: true },
   { num: 27, code: "CS-01", id: "case_studies/01-tot-autonomous-sre-agent", label: "`CS-01: case_studies/01-tot-autonomous-sre-agent` (20 ToT Sandboxes)", category: "case_studies", flagship: true },
   { num: 28, code: "CS-02", id: "case_studies/02-mcp-code-mode-orchestrator", label: "`CS-02: case_studies/02-mcp-code-mode-orchestrator` (`-98.4%` Tokens)", category: "case_studies", flagship: false },
   { num: 29, code: "CS-03", id: "case_studies/03-multi-tenant-saas-plugin-mesh", label: "`CS-03: case_studies/03-multi-tenant-saas-plugin-mesh` (12 Tenants + Hot-Swap)", category: "case_studies", flagship: false },
@@ -65,8 +66,8 @@ export const CATEGORY_DEFINITIONS = [
   },
   {
     id: "frameworks",
-    title: "Full-Stack Edge & Node Frameworks (`FW 01–03`)",
-    focus: "`Hono v4.6.20`, `itty-router + UnJS Nitro`, `Express/Polka node:http`"
+    title: "Full-Stack Edge & Node Frameworks (`FW 01–04`)",
+    focus: "`Hono v4.6.20`, `itty-router + UnJS Nitro`, `Express/Polka node:http`, `SvelteKit 3.1.1 + Svelte 5.57.3`"
   },
   {
     id: "case_studies",

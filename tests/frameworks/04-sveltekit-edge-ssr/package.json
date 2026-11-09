@@ -1,0 +1,24 @@
+{
+  "name": "04-sveltekit-edge-ssr",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@sveltejs/kit": "3.1.1",
+    "clsx": "2.1.1",
+    "cookie": "2.0.2",
+    "devalue": "6.0.3",
+    "esm-env": "1.2.2",
+    "set-cookie-parser": "3.2.2",
+    "svelte": "5.57.3"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "vite": "8.3.7"
+  }
+}

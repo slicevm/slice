@@ -17,7 +17,8 @@ pub mod lazy_and_inline;
 pub mod tree_shaker;
 
 pub use ast_walker::{
-    collect_binding_pattern_names, has_top_level_await, slice_with_edits,
+    collect_binding_pattern_names, collect_live_import_reference_edits,
+    collect_mutated_binding_names, has_top_level_await, slice_with_edits,
     walk_ast_call_expressions, walk_ast_expressions, wrap_top_level_await_script,
 };
 pub use builtins_and_ids::{

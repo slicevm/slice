@@ -77,9 +77,9 @@ export function renderSummaryBlock(report, relativePathToLatestMd, relativePathT
     return `| **${cat.title}**<br><sub>${cat.focus}</sub> | \`${items.length}\` | **\`${catColdAvg.toFixed(2)} ms\`** (\`${minVal(sliceColdAvgs).toFixed(2)}–${maxVal(sliceColdAvgs).toFixed(2)} ms\`) | **\`${catWarmAvg.toFixed(2)} ms\`** | \`${catBunAvg.toFixed(2)} ms\` | \`${catDenoAvg.toFixed(2)} ms\` | \`${catNodeAvg.toFixed(2)} ms\` | **\`${vsBunCold}x Bun\` (\`${vsBunWarm}x\` Warm) / \`${vsNodeCold}x Node\`** |`;
   }).join("\n");
 
-  // Flagship rows (top 8 representative real-life workloads)
-  const flagshipRows = workloads
-    .filter((w) => w.flagship)
+  // Flagship rows (top representative real-life workloads)
+  const flagshipItems = workloads.filter((w) => w.flagship);
+  const flagshipRows = flagshipItems
     .map((w) => {
       const sliceColdBest = Math.min(w.sliceCasAvgMs, w.sliceBinAvgMs);
       const vsBunCold = (w.bunAvgMs / sliceColdBest).toFixed(2);
@@ -114,7 +114,7 @@ export function renderSummaryBlock(report, relativePathToLatestMd, relativePathT
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
 ${categoryRows}
 
-#### 3. Flagship Real-World Representative Workloads (8 of ${totalCount} Highlights)
+#### 3. Flagship Real-World Representative Workloads (${flagshipItems.length} of ${totalCount} Highlights)
 
 | # | Flagship Workload | Slice Cold \`.cas\` | Slice Warm (\`--warm\`) | Bun \`${meta.runtimes.bun}\` | Deno \`${meta.runtimes.deno}\` | Node.js \`${meta.runtimes.node}\` | Speedup vs Bun / Node.js |
 | :- | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
