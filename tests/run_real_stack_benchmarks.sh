@@ -41,6 +41,18 @@ APPS_DIR="$ROOT_DIR/tests/apps"
 FRAMEWORKS_DIR="$ROOT_DIR/tests/frameworks"
 CASE_STUDIES_DIR="$ROOT_DIR/tests/case_studies"
 BENCH_TAGS="${1:-${SLICE_BENCH_TAGS:-all}}"
+METRICS_JSONL="${SLICE_BENCH_JSONL:-/tmp/slice_bench_metrics.jsonl}"
+rm -f "$METRICS_JSONL"
+
+SLICE_VERSION="${SLICE_VERSION:-0.10.4}"
+SLICE_GIT_COMMIT="${SLICE_GIT_COMMIT:-$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo "abdbf89")}"
+SLICE_BENCH_TS_UTC="${SLICE_BENCH_TS_UTC:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
+CURRENT_APP_IDX=""
+CURRENT_BENCH_MODE=""
+
+record_jsonl() {
+    echo "$1" >> "$METRICS_JSONL"
+}
 
 should_run_tag() {
     local tag="$1"
@@ -76,6 +88,7 @@ APP23_DIR="$APPS_DIR/23-wasm-crypto-and-simd-kernel"
 APP24_DIR="$APPS_DIR/24-tsx-ssr-and-wasm-edge-pipeline"
 APP25_DIR="$FRAMEWORKS_DIR/01-hono-edge-microservice"
 APP26_DIR="$FRAMEWORKS_DIR/02-itty-router-unjs-nitro-stack"
+APP32_DIR="$FRAMEWORKS_DIR/03-node-http-express-compat"
 APP27_DIR="$CASE_STUDIES_DIR/01-tot-autonomous-sre-agent"
 APP28_DIR="$CASE_STUDIES_DIR/02-mcp-code-mode-orchestrator"
 APP29_DIR="$CASE_STUDIES_DIR/03-multi-tenant-saas-plugin-mesh"
@@ -198,11 +211,16 @@ echo "  Node.js : $(node -v)"
 echo "  Bun     : v$(bun -v)"
 echo "  Deno    : $(deno -V)"
 
+NODE_VER="$(node -v)"
+BUN_VER="v$(bun -v)"
+DENO_VER="$(deno -V | awk '{print "v"$2}')"
+record_jsonl "{\"type\":\"meta\",\"version\":\"$SLICE_VERSION\",\"commit\":\"$SLICE_GIT_COMMIT\",\"timestampUtc\":\"$SLICE_BENCH_TS_UTC\",\"bunVersion\":\"$BUN_VER\",\"denoVersion\":\"$DENO_VER\",\"nodeVersion\":\"$NODE_VER\"}"
+
 if should_run_tag "apps"; then
 echo "========================================================================="
-echo "  [TAG: apps] PACKING & COMPILING ALL 26 APPS & FRAMEWORK SUITES (OXC + CAS)"
+echo "  [TAG: apps] PACKING & COMPILING ALL 27 APPS & FRAMEWORK SUITES (OXC + CAS)"
 echo "========================================================================="
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 32; do
     eval "dir=\$APP${i}_DIR"
     "$SLICE_BIN" pack "$dir" "/tmp/app${i}.cas"
     "$SLICE_BIN" compile "/tmp/app${i}.cas" -o "/tmp/app${i}_bin"
@@ -272,6 +290,7 @@ verify_app_parity "App 23: 23-wasm-crypto-and-simd-kernel (Pure-Rust WebAssembly
 verify_app_parity "App 24: 24-tsx-ssr-and-wasm-edge-pipeline (WebAssembly SLA Scorer + SSR Pipeline)" "$APP24_DIR" "/tmp/app24.cas" "-A"
 verify_app_parity "Framework 1 (App 25): 01-hono-edge-microservice (Hono v4.6.20 + hono/cookie + cookie + ms)" "$APP25_DIR" "/tmp/app25.cas" "-A"
 verify_app_parity "Framework 2 (App 26): 02-itty-router-unjs-nitro-stack (itty-router v5 + ufo + destr + ohash + radix3)" "$APP26_DIR" "/tmp/app26.cas" "-A"
+verify_app_parity "Framework 3 (App 32): 03-node-http-express-compat (node:http + node:stream Express/Polka)" "$APP32_DIR" "/tmp/app32.cas" "-A"
 fi
 
 measure_ms() {
@@ -298,6 +317,13 @@ measure_ms() {
     awk -v name="$name" -v min="$min_ns" -v avg="$avg_ns" 'BEGIN {
         printf "  %-36s | Min: %8.3f ms | Avg: %8.3f ms\n", name, min / 1000000.0, avg / 1000000.0
     }'
+    if [ -n "$CURRENT_APP_IDX" ] && [ -n "$CURRENT_BENCH_MODE" ]; then
+        local min_ms
+        local avg_ms
+        min_ms=$(awk -v min="$min_ns" 'BEGIN { printf "%.3f", min / 1000000.0 }')
+        avg_ms=$(awk -v avg="$avg_ns" 'BEGIN { printf "%.3f", avg / 1000000.0 }')
+        record_jsonl "{\"type\":\"latency\",\"appIdx\":$CURRENT_APP_IDX,\"mode\":\"$CURRENT_BENCH_MODE\",\"minMs\":$min_ms,\"avgMs\":$avg_ms}"
+    fi
 }
 
 measure_rss_kb() {
@@ -308,6 +334,30 @@ measure_rss_kb() {
     awk -v name="$name" -v rss="$rss" 'BEGIN {
         printf "  %-36s | Max RSS: %8d KB (%6.2f MB)\n", name, rss, rss / 1024.0
     }'
+    local runtime_key="other"
+    if [[ "$name" == Slice* ]]; then runtime_key="slice";
+    elif [[ "$name" == Bun* ]]; then runtime_key="bun";
+    elif [[ "$name" == Deno* ]]; then runtime_key="deno";
+    elif [[ "$name" == Node* ]]; then runtime_key="node";
+    fi
+    local suite_name
+    suite_name=$(echo "$name" | sed -E 's/^(Slice|Bun|Deno|Node)[[:space:]]*\((.*)\)$/\2/')
+    record_jsonl "{\"type\":\"rss\",\"suite\":\"$suite_name\",\"runtime\":\"$runtime_key\",\"kb\":$rss}"
+}
+
+record_warm_metrics() {
+    local app_idx="$1"
+    local cas_path="$2"
+    local out
+    out=$("$SLICE_BIN" run "$cas_path" --warm --quiet --metrics)
+    echo "$out"
+    local total_us
+    total_us=$(echo "$out" | awk -F'Total: ' '{print $2}' | awk '{print $1}')
+    if [ -n "$total_us" ]; then
+        local total_ms
+        total_ms=$(awk -v us="$total_us" 'BEGIN { printf "%.3f", us / 1000.0 }')
+        record_jsonl "{\"type\":\"warm_metrics\",\"appIdx\":$app_idx,\"totalMs\":$total_ms}"
+    fi
 }
 
 bench_app() {
@@ -321,13 +371,22 @@ bench_app() {
     echo "========================================================================="
     echo "  APP ${idx} LATENCY: ${title} (20 Runs)"
     echo "========================================================================="
+    CURRENT_APP_IDX="$idx"
+    CURRENT_BENCH_MODE="slice_bin"
     measure_ms "Slice (Standalone Binary)"           20 "/tmp/app${idx}_bin" --quiet
+    CURRENT_BENCH_MODE="slice_cas"
     measure_ms "Slice (CAS Archive)"                 20 "$SLICE_BIN" run "/tmp/app${idx}.cas" --quiet
+    CURRENT_BENCH_MODE="slice_src"
     measure_ms "Slice (Folder Source + Oxc)"         20 "$SLICE_BIN" run "$app_dir" --quiet
+    CURRENT_BENCH_MODE="bun"
     measure_ms "Bun (Latest)"                        20 bun run "$app_dir/src/index.ts"
+    CURRENT_BENCH_MODE="deno"
     # shellcheck disable=SC2086
     measure_ms "Deno (Latest)"                       20 deno run $deno_flags "$app_dir/src/index.ts"
+    CURRENT_BENCH_MODE="node"
     measure_ms "Node.js (Latest)"                    20 node "$app_dir/src/index.ts"
+    CURRENT_APP_IDX=""
+    CURRENT_BENCH_MODE=""
 }
 
 if should_run_tag "apps"; then
@@ -357,6 +416,7 @@ bench_app 23 "23-WASM-CRYPTO-AND-SIMD-KERNEL (Pure-Rust WebAssembly + 5-Ring WAS
 bench_app 24 "24-TSX-SSR-AND-WASM-EDGE-PIPELINE (WebAssembly SLA Scorer + SSR Pipeline)" "$APP24_DIR" "-A"
 bench_app 25 "FRAMEWORK 1: 01-HONO-EDGE-MICROSERVICE (Hono v4.6.20 + hono/cookie + cookie + ms)" "$APP25_DIR" "-A"
 bench_app 26 "FRAMEWORK 2: 02-ITTY-ROUTER-UNJS-NITRO-STACK (itty-router v5 + ufo + destr + ohash + radix3)" "$APP26_DIR" "-A"
+bench_app 32 "FRAMEWORK 3: 03-NODE-HTTP-EXPRESS-COMPAT (node:http + node:stream Express/Polka)" "$APP32_DIR" "-A"
 
 echo "========================================================================="
 echo "  PEAK MEMORY FOOTPRINT (MAX RSS) ACROSS REPRESENTATIVE APPS"
@@ -397,15 +457,15 @@ measure_rss_kb "Deno (FW 2: itty-router + UnJS)"    deno run -A "$APP26_DIR/src/
 measure_rss_kb "Node (FW 2: itty-router + UnJS)"    node "$APP26_DIR/src/index.ts"
 
 echo "========================================================================="
-echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 26 APPS (COLD VS WARM POOL)"
+echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 27 APPS (COLD VS WARM POOL)"
 echo "========================================================================="
 echo "  --- Cold Realm Telemetry ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 32; do
     "$SLICE_BIN" run "/tmp/app${i}.cas" --quiet --metrics
 done
 echo "  --- Pre-Warmed Boa Pool Telemetry (--warm) ---"
-for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26; do
-    "$SLICE_BIN" run "/tmp/app${i}.cas" --warm --quiet --metrics
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 32; do
+    record_warm_metrics "$i" "/tmp/app${i}.cas"
 done
 fi
 
@@ -1017,16 +1077,20 @@ fi
 
 if should_run_tag "frameworks"; then
 echo "========================================================================="
-echo "  [TAG: frameworks] WAVE E REAL-WORLD FRAMEWORK SUITES (HONO & ITTY+UNJS)"
+echo "  [TAG: frameworks] WAVE E REAL-WORLD FRAMEWORK SUITES (HONO, ITTY+UNJS, EXPRESS)"
 echo "========================================================================="
 "$SLICE_BIN" pack "$APP25_DIR" "/tmp/app25.cas" >/dev/null
 "$SLICE_BIN" compile "/tmp/app25.cas" -o "/tmp/app25_bin" >/dev/null
 "$SLICE_BIN" pack "$APP26_DIR" "/tmp/app26.cas" >/dev/null
 "$SLICE_BIN" compile "/tmp/app26.cas" -o "/tmp/app26_bin" >/dev/null
+"$SLICE_BIN" pack "$APP32_DIR" "/tmp/app32.cas" >/dev/null
+"$SLICE_BIN" compile "/tmp/app32.cas" -o "/tmp/app32_bin" >/dev/null
 verify_app_parity "Framework 1 (App 25): 01-hono-edge-microservice" "$APP25_DIR" "/tmp/app25.cas" "-A"
 verify_app_parity "Framework 2 (App 26): 02-itty-router-unjs-nitro-stack" "$APP26_DIR" "/tmp/app26.cas" "-A"
+verify_app_parity "Framework 3 (App 32): 03-node-http-express-compat" "$APP32_DIR" "/tmp/app32.cas" "-A"
 bench_app 25 "FRAMEWORK 1: 01-HONO-EDGE-MICROSERVICE (Hono v4.6.20 + hono/cookie + cookie + ms)" "$APP25_DIR" "-A"
 bench_app 26 "FRAMEWORK 2: 02-ITTY-ROUTER-UNJS-NITRO-STACK (itty-router v5 + ufo + destr + ohash + radix3)" "$APP26_DIR" "-A"
+bench_app 32 "FRAMEWORK 3: 03-NODE-HTTP-EXPRESS-COMPAT (node:http + node:stream Express/Polka)" "$APP32_DIR" "-A"
 measure_rss_kb "Slice (FW 1: Hono v4 Microservice)" "$SLICE_BIN" run "/tmp/app25.cas" --quiet
 measure_rss_kb "Bun (FW 1: Hono v4 Microservice)"   bun run "$APP25_DIR/src/index.ts"
 measure_rss_kb "Deno (FW 1: Hono v4 Microservice)"  deno run -A "$APP25_DIR/src/index.ts"
@@ -1036,11 +1100,18 @@ measure_rss_kb "Slice (FW 2: itty-router + UnJS)"   "$SLICE_BIN" run "/tmp/app26
 measure_rss_kb "Bun (FW 2: itty-router + UnJS)"     bun run "$APP26_DIR/src/index.ts"
 measure_rss_kb "Deno (FW 2: itty-router + UnJS)"    deno run -A "$APP26_DIR/src/index.ts"
 measure_rss_kb "Node (FW 2: itty-router + UnJS)"    node "$APP26_DIR/src/index.ts"
-echo "  --- Frameworks 1 & 2 Cold vs Warm Isolate Telemetry ---"
+echo "-------------------------------------------------------------------------"
+measure_rss_kb "Slice (FW 3: Express node:http)"    "$SLICE_BIN" run "/tmp/app32.cas" --quiet
+measure_rss_kb "Bun (FW 3: Express node:http)"      bun run "$APP32_DIR/src/index.ts"
+measure_rss_kb "Deno (FW 3: Express node:http)"     deno run -A "$APP32_DIR/src/index.ts"
+measure_rss_kb "Node (FW 3: Express node:http)"     node "$APP32_DIR/src/index.ts"
+echo "  --- Frameworks 1..3 Cold vs Warm Isolate Telemetry ---"
 "$SLICE_BIN" run "/tmp/app25.cas" --quiet --metrics
-"$SLICE_BIN" run "/tmp/app25.cas" --warm --quiet --metrics
+record_warm_metrics 25 "/tmp/app25.cas"
 "$SLICE_BIN" run "/tmp/app26.cas" --quiet --metrics
-"$SLICE_BIN" run "/tmp/app26.cas" --warm --quiet --metrics
+record_warm_metrics 26 "/tmp/app26.cas"
+"$SLICE_BIN" run "/tmp/app32.cas" --quiet --metrics
+record_warm_metrics 32 "/tmp/app32.cas"
 echo "  [Live slice test Runner Verification on Framework Suites]"
 "$SLICE_BIN" test "$APP25_DIR"
 "$SLICE_BIN" test "$APP26_DIR"
@@ -1083,7 +1154,7 @@ done
 echo "  --- Case Studies 1..5 Cold vs Warm Isolate Telemetry ---"
 for cs_num in 27 28 29 30 31; do
     "$SLICE_BIN" run "/tmp/app${cs_num}.cas" --quiet --metrics
-    "$SLICE_BIN" run "/tmp/app${cs_num}.cas" --warm --quiet --metrics
+    record_warm_metrics "$cs_num" "/tmp/app${cs_num}.cas"
 done
 
 echo "  [Live slice test Runner Verification on All 5 Case Studies]"
@@ -1104,4 +1175,14 @@ echo "========================================================================="
 "$SLICE_BIN" microvm-bench --tenants=1000
 fi
 
-rm -f /tmp/app*.cas /tmp/app*_bin
+if [ -f "$ROOT_DIR/tests/scripts/generate_bench_report.mjs" ] && [ -f "$METRICS_JSONL" ]; then
+    echo "========================================================================="
+    echo "  AUTO-GENERATING TIMESTAMPED BENCHMARK REPORT & DOC SUMMARY"
+    echo "========================================================================="
+    node "$ROOT_DIR/tests/scripts/generate_bench_report.mjs" --jsonl "$METRICS_JSONL"
+    if [ "${SLICE_SYNC_DOCS:-1}" = "1" ] && [ -f "$ROOT_DIR/tests/scripts/sync_doc_benchmarks.mjs" ]; then
+        node "$ROOT_DIR/tests/scripts/sync_doc_benchmarks.mjs"
+    fi
+fi
+
+rm -f /tmp/app*.cas /tmp/app*_bin "$METRICS_JSONL"

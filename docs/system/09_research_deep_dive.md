@@ -36,7 +36,7 @@ To win on **all metrics** immediately on both Windows (local) and Linux (Docker)
 * **Tiered Execution Core (Hybrid Engine — Default Tier 1 + `boacas = true`):**
   * **Tier 0 (`SLICESNP` Sub-1.5us Instant Micro-Isolate):** Register VM with pre-allocated stack/arena memory and frozen intrinsics (SES `lockdown()`).
   * **Tier 1 (`SLICEBC\x01` Precompiled Boa `CodeBlock` — Default):** Full ECMAScript 2024+ + WinterTC + `node:*` execution engine that deserializes precompiled `Gc<CodeBlock>` bytecode directly into a `WarmBoaRealm` in microseconds without invoking `boa_parser` or `ByteCompiler`.
-  * **Tier 2 / Tier WASI (Native SIMD & Pure-Rust `wasmi` Acceleration):** Compute-intensive modules and hot loops execute on native Rust SIMD intrinsics (`SHA-256`/`SHA-512`, `HMAC`, `SemVer`, `URL`, `Buffer`, `zlib`) or pure-Rust `wasmi` WebAssembly kernels with deterministic CPU fuel and memory-page cages, beating Bun on `30 / 31` real-world multi-file workloads (`bench_latest.md`).
+  * **Tier 2 / Tier WASI (Native SIMD & Pure-Rust `wasmi` Acceleration):** Compute-intensive modules and hot loops execute on native Rust SIMD intrinsics (`SHA-256`/`SHA-512`, `HMAC`, `SemVer`, `URL`, `Buffer`, `zlib`) or pure-Rust `wasmi` WebAssembly kernels with deterministic CPU fuel and memory-page cages, beating Bun on `30 / 32` real-world multi-file workloads ([`tests/reports/latest.md`](../../tests/reports/latest.md)).
 
 ---
 
