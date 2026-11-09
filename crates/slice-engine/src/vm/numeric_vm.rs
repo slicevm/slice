@@ -15,13 +15,16 @@
 //! pattern matching on **any** function name and lowers them into an $O(N)$ iterative register loop,
 //! achieving sub-microsecond execution honestly without ever inspecting function or variable names.
 
-use crate::value_and_ast::{BinOp, Expr, JsFunction, JsValue, Stmt, UnaryOp};
+use crate::value_and_ast::{
+    js_math_max, js_math_min, js_math_round, js_to_int32, js_to_uint32, BinOp, Expr, JsFunction,
+    JsValue, Stmt, UnaryOp,
+};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use slice_sandbox::SandboxViolation;
 
 /// Maximum number of virtual 64-bit registers per numeric stack frame.
-pub const MAX_NUMERIC_REGS: usize = 16;
+pub const MAX_NUMERIC_REGS: usize = 24;
 
 /// Maximum recursion depth for general recursive numeric functions.
 pub const MAX_NUMERIC_CALL_DEPTH: usize = 256;
@@ -84,12 +87,17 @@ pub enum MathOpKind {
     Floor,
     Ceil,
     Round,
+    Trunc,
+    Sign,
     Sqrt,
     Pow,
     Sin,
     Cos,
     Max,
     Min,
+    Imul,
+    Clz32,
+    Fround,
 }
 
 /// Compiled unboxed numeric function ready for Tier-2 register execution.
@@ -104,21 +112,28 @@ pub struct NumericFunc {
 struct CompilerCtx {
     fn_name: String,
     locals: FxHashMap<String, u8>,
+    temp_reg_base: u8,
     next_reg: u8,
+    max_reg_used: u8,
     ops: Vec<NumericOp>,
     loop_stack: Vec<(Vec<usize>, Vec<usize>)>, // (break_jumps, continue_jumps)
 }
 
 impl CompilerCtx {
+    #[inline]
     fn alloc_reg(&mut self) -> Option<u8> {
         if (self.next_reg as usize) >= MAX_NUMERIC_REGS {
             return None;
         }
         let r = self.next_reg;
         self.next_reg += 1;
+        if self.next_reg > self.max_reg_used {
+            self.max_reg_used = self.next_reg;
+        }
         Some(r)
     }
 
+    #[inline]
     fn get_or_alloc_local(&mut self, name: &str) -> Option<u8> {
         if let Some(&r) = self.locals.get(name) {
             return Some(r);
@@ -127,6 +142,38 @@ impl CompilerCtx {
         self.locals.insert(name.to_string(), r);
         Some(r)
     }
+}
+
+fn prealloc_locals_in_stmts(ctx: &mut CompilerCtx, stmts: &[Stmt]) -> Option<()> {
+    for stmt in stmts {
+        match stmt {
+            Stmt::VarDecl { name, .. } => {
+                ctx.get_or_alloc_local(name)?;
+            }
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                prealloc_locals_in_stmts(ctx, then_branch)?;
+                prealloc_locals_in_stmts(ctx, else_branch)?;
+            }
+            Stmt::While { body, .. } => {
+                prealloc_locals_in_stmts(ctx, body)?;
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(init_s) = init {
+                    prealloc_locals_in_stmts(ctx, std::slice::from_ref(init_s.as_ref()))?;
+                }
+                prealloc_locals_in_stmts(ctx, body)?;
+            }
+            Stmt::Block(inner) => {
+                prealloc_locals_in_stmts(ctx, inner)?;
+            }
+            _ => {}
+        }
+    }
+    Some(())
 }
 
 /// Attempts to compile any [`JsFunction`] AST into an unboxed [`NumericFunc`].
@@ -160,7 +207,9 @@ pub fn try_compile_numeric_func(func: &JsFunction) -> Option<NumericFunc> {
     let mut ctx = CompilerCtx {
         fn_name: func.name.clone(),
         locals: FxHashMap::default(),
+        temp_reg_base: 0,
         next_reg: 0,
+        max_reg_used: 0,
         ops: Vec::with_capacity(func.body.len() * 4),
         loop_stack: Vec::new(),
     };
@@ -170,8 +219,15 @@ pub fn try_compile_numeric_func(func: &JsFunction) -> Option<NumericFunc> {
         ctx.locals.insert(p.clone(), r);
     }
 
+    // Pre-allocate permanent registers for all local declarations so temporary scratch registers
+    // can be recycled after each statement without ever colliding with local variables.
+    prealloc_locals_in_stmts(&mut ctx, &func.body)?;
+    ctx.temp_reg_base = ctx.next_reg;
+
     for stmt in &func.body {
+        let saved_temp = ctx.next_reg;
         compile_stmt(&mut ctx, stmt)?;
+        ctx.next_reg = saved_temp;
     }
 
     // Ensure trailing return of 0.0 if control reaches end of function
@@ -185,7 +241,7 @@ pub fn try_compile_numeric_func(func: &JsFunction) -> Option<NumericFunc> {
     Some(NumericFunc {
         name: func.name.clone(),
         param_count: func.params.len() as u8,
-        num_regs: ctx.next_reg,
+        num_regs: ctx.max_reg_used,
         ops: ctx.ops,
     })
 }
@@ -296,7 +352,8 @@ fn match_self_call_minus_k(expr: &Expr, fn_name: &str, param: &str) -> Option<i6
 }
 
 fn compile_stmt(ctx: &mut CompilerCtx, stmt: &Stmt) -> Option<()> {
-    match stmt {
+    let saved_temp = ctx.next_reg;
+    let res = match stmt {
         Stmt::VarDecl { name, init, .. } => {
             let dst = ctx.get_or_alloc_local(name)?;
             if let Some(expr) = init {
@@ -318,11 +375,9 @@ fn compile_stmt(ctx: &mut CompilerCtx, stmt: &Stmt) -> Option<()> {
                 cond: cond_reg,
                 target: 0,
             });
-            let saved_next = ctx.next_reg;
             for s in then_branch {
                 compile_stmt(ctx, s)?;
             }
-            ctx.next_reg = saved_next;
             if else_branch.is_empty() {
                 let target = ctx.ops.len() as u32;
                 if let NumericOp::JumpIfFalse { target: t, .. } = &mut ctx.ops[jfalse_idx] {
@@ -335,11 +390,9 @@ fn compile_stmt(ctx: &mut CompilerCtx, stmt: &Stmt) -> Option<()> {
                 if let NumericOp::JumpIfFalse { target: t, .. } = &mut ctx.ops[jfalse_idx] {
                     *t = else_start;
                 }
-                let saved_next_else = ctx.next_reg;
                 for s in else_branch {
                     compile_stmt(ctx, s)?;
                 }
-                ctx.next_reg = saved_next_else;
                 let end_target = ctx.ops.len() as u32;
                 if let NumericOp::Jump { target: t } = &mut ctx.ops[jend_idx] {
                     *t = end_target;
@@ -356,6 +409,7 @@ fn compile_stmt(ctx: &mut CompilerCtx, stmt: &Stmt) -> Option<()> {
                 cond: cond_reg,
                 target: 0,
             });
+            ctx.next_reg = saved_temp;
             ctx.loop_stack.push((Vec::new(), Vec::new()));
             for s in body {
                 compile_stmt(ctx, s)?;
@@ -396,6 +450,7 @@ fn compile_stmt(ctx: &mut CompilerCtx, stmt: &Stmt) -> Option<()> {
                     cond: cond_reg,
                     target: 0,
                 });
+                ctx.next_reg = saved_temp;
                 Some(idx)
             } else {
                 None
@@ -412,8 +467,14 @@ fn compile_stmt(ctx: &mut CompilerCtx, stmt: &Stmt) -> Option<()> {
                 }
             }
             if let Some(step_e) = step {
-                let scratch = ctx.alloc_reg()?;
-                compile_expr_into(ctx, step_e, scratch)?;
+                if let Expr::Update { name, .. } = step_e {
+                    let var_reg = *ctx.locals.get(name)?;
+                    compile_expr_into(ctx, step_e, var_reg)?;
+                } else {
+                    let scratch = ctx.alloc_reg()?;
+                    compile_expr_into(ctx, step_e, scratch)?;
+                    ctx.next_reg = saved_temp;
+                }
             }
             ctx.ops.push(NumericOp::Jump { target: loop_start });
             let loop_end = ctx.ops.len() as u32;
@@ -458,11 +519,18 @@ fn compile_stmt(ctx: &mut CompilerCtx, stmt: &Stmt) -> Option<()> {
             Some(())
         }
         Stmt::ExprStmt(expr) => {
-            let scratch = ctx.alloc_reg()?;
-            compile_expr_into(ctx, expr, scratch)
+            if let Expr::Update { name, .. } = expr {
+                let var_reg = *ctx.locals.get(name)?;
+                compile_expr_into(ctx, expr, var_reg)
+            } else {
+                let scratch = ctx.alloc_reg()?;
+                compile_expr_into(ctx, expr, scratch)
+            }
         }
         Stmt::ImportCas { .. } | Stmt::FuncDecl { .. } => None,
-    }
+    };
+    ctx.next_reg = saved_temp;
+    res
 }
 
 fn compile_expr_into(ctx: &mut CompilerCtx, expr: &Expr, dst: u8) -> Option<()> {
@@ -495,6 +563,57 @@ fn compile_expr_into(ctx: &mut CompilerCtx, expr: &Expr, dst: u8) -> Option<()> 
             Some(())
         }
         Expr::Binary { op, lhs, rhs } => {
+            // Short-circuit logical operators `&&` and `||`
+            if *op == BinOp::And {
+                let out_reg = if dst < ctx.temp_reg_base {
+                    ctx.alloc_reg()?
+                } else {
+                    dst
+                };
+                compile_expr_into(ctx, lhs, out_reg)?;
+                let jfalse_idx = ctx.ops.len();
+                ctx.ops.push(NumericOp::JumpIfFalse {
+                    cond: out_reg,
+                    target: 0,
+                });
+                compile_expr_into(ctx, rhs, out_reg)?;
+                let end_target = ctx.ops.len() as u32;
+                if let NumericOp::JumpIfFalse { target: t, .. } = &mut ctx.ops[jfalse_idx] {
+                    *t = end_target;
+                }
+                if out_reg != dst {
+                    ctx.ops.push(NumericOp::Move { dst, src: out_reg });
+                }
+                return Some(());
+            }
+            if *op == BinOp::Or {
+                let out_reg = if dst < ctx.temp_reg_base {
+                    ctx.alloc_reg()?
+                } else {
+                    dst
+                };
+                compile_expr_into(ctx, lhs, out_reg)?;
+                let jfalse_idx = ctx.ops.len();
+                ctx.ops.push(NumericOp::JumpIfFalse {
+                    cond: out_reg,
+                    target: 0,
+                });
+                let jend_idx = ctx.ops.len();
+                ctx.ops.push(NumericOp::Jump { target: 0 });
+                let rhs_start = ctx.ops.len() as u32;
+                if let NumericOp::JumpIfFalse { target: t, .. } = &mut ctx.ops[jfalse_idx] {
+                    *t = rhs_start;
+                }
+                compile_expr_into(ctx, rhs, out_reg)?;
+                let end_target = ctx.ops.len() as u32;
+                if let NumericOp::Jump { target: t } = &mut ctx.ops[jend_idx] {
+                    *t = end_target;
+                }
+                if out_reg != dst {
+                    ctx.ops.push(NumericOp::Move { dst, src: out_reg });
+                }
+                return Some(());
+            }
             if let Expr::Literal(JsValue::Number(imm)) = rhs.as_ref() {
                 let l_reg = if let Expr::Ident(id) = lhs.as_ref() {
                     *ctx.locals.get(id)?
@@ -560,16 +679,31 @@ fn compile_expr_into(ctx: &mut CompilerCtx, expr: &Expr, dst: u8) -> Option<()> 
             }
             Some(())
         }
-        Expr::Update { name, increment } => {
+        Expr::Update {
+            name,
+            increment,
+            prefix,
+        } => {
             let var_reg = *ctx.locals.get(name)?;
-            ctx.ops.push(NumericOp::BinaryImm {
-                dst: var_reg,
-                op: if *increment { BinOp::Add } else { BinOp::Sub },
-                lhs: var_reg,
-                imm: 1.0,
-            });
-            if dst != var_reg {
+            let op = if *increment { BinOp::Add } else { BinOp::Sub };
+            if *prefix || dst == var_reg {
+                ctx.ops.push(NumericOp::BinaryImm {
+                    dst: var_reg,
+                    op,
+                    lhs: var_reg,
+                    imm: 1.0,
+                });
+                if dst != var_reg {
+                    ctx.ops.push(NumericOp::Move { dst, src: var_reg });
+                }
+            } else {
                 ctx.ops.push(NumericOp::Move { dst, src: var_reg });
+                ctx.ops.push(NumericOp::BinaryImm {
+                    dst: var_reg,
+                    op,
+                    lhs: var_reg,
+                    imm: 1.0,
+                });
             }
             Some(())
         }
@@ -605,6 +739,9 @@ fn compile_expr_into(ctx: &mut CompilerCtx, expr: &Expr, dst: u8) -> Option<()> 
                     let imm = match property.as_str() {
                         "PI" => std::f64::consts::PI,
                         "E" => std::f64::consts::E,
+                        "SQRT2" => std::f64::consts::SQRT_2,
+                        "LN2" => std::f64::consts::LN_2,
+                        "LN10" => std::f64::consts::LN_10,
                         _ => return None,
                     };
                     ctx.ops.push(NumericOp::LoadConst { dst, imm });
@@ -648,12 +785,17 @@ fn compile_expr_into(ctx: &mut CompilerCtx, expr: &Expr, dst: u8) -> Option<()> 
                         "floor" => MathOpKind::Floor,
                         "ceil" => MathOpKind::Ceil,
                         "round" => MathOpKind::Round,
+                        "trunc" => MathOpKind::Trunc,
+                        "sign" => MathOpKind::Sign,
                         "sqrt" => MathOpKind::Sqrt,
                         "pow" => MathOpKind::Pow,
                         "sin" => MathOpKind::Sin,
                         "cos" => MathOpKind::Cos,
                         "max" => MathOpKind::Max,
                         "min" => MathOpKind::Min,
+                        "imul" => MathOpKind::Imul,
+                        "clz32" => MathOpKind::Clz32,
+                        "fround" => MathOpKind::Fround,
                         _ => return None,
                     };
                     let a0 = ctx.alloc_reg()?;
@@ -690,14 +832,14 @@ fn eval_bin_f64(op: BinOp, a: f64, b: f64) -> f64 {
         BinOp::Rem => a % b,
         BinOp::Pow => a.powf(b),
         BinOp::Eq | BinOp::StrictEq => {
-            if (a - b).abs() < f64::EPSILON {
+            if a == b {
                 1.0
             } else {
                 0.0
             }
         }
         BinOp::Neq | BinOp::StrictNeq => {
-            if (a - b).abs() >= f64::EPSILON {
+            if a != b {
                 1.0
             } else {
                 0.0
@@ -745,11 +887,12 @@ fn eval_bin_f64(op: BinOp, a: f64, b: f64) -> f64 {
                 b
             }
         }
-        BinOp::BitAnd => ((a as i64) & (b as i64)) as f64,
-        BinOp::BitOr => ((a as i64) | (b as i64)) as f64,
-        BinOp::BitXor => ((a as i64) ^ (b as i64)) as f64,
-        BinOp::Shl => ((a as i64) << ((b as u32) & 31)) as f64,
-        BinOp::Shr => ((a as i64) >> ((b as u32) & 31)) as f64,
+        BinOp::BitAnd => (js_to_int32(a) & js_to_int32(b)) as f64,
+        BinOp::BitOr => (js_to_int32(a) | js_to_int32(b)) as f64,
+        BinOp::BitXor => (js_to_int32(a) ^ js_to_int32(b)) as f64,
+        BinOp::Shl => (js_to_int32(a).wrapping_shl(js_to_uint32(b) & 31)) as f64,
+        BinOp::Shr => (js_to_int32(a).wrapping_shr(js_to_uint32(b) & 31)) as f64,
+        BinOp::UShr => (js_to_uint32(a).wrapping_shr(js_to_uint32(b) & 31)) as f64,
     }
 }
 
@@ -823,6 +966,7 @@ impl NumericFunc {
                                 0.0
                             }
                         }
+                        UnaryOp::BitNot => (!js_to_int32(v)) as f64,
                         UnaryOp::TypeOf => f64::NAN,
                     };
                     pc += 1;
@@ -839,13 +983,26 @@ impl NumericFunc {
                         MathOpKind::Abs => x.abs(),
                         MathOpKind::Floor => x.floor(),
                         MathOpKind::Ceil => x.ceil(),
-                        MathOpKind::Round => x.round(),
+                        MathOpKind::Round => js_math_round(x),
+                        MathOpKind::Trunc => x.trunc(),
+                        MathOpKind::Sign => {
+                            if x == 0.0 || x.is_nan() {
+                                x
+                            } else if x > 0.0 {
+                                1.0
+                            } else {
+                                -1.0
+                            }
+                        }
                         MathOpKind::Sqrt => x.sqrt(),
                         MathOpKind::Pow => x.powf(y),
                         MathOpKind::Sin => x.sin(),
                         MathOpKind::Cos => x.cos(),
-                        MathOpKind::Max => x.max(y),
-                        MathOpKind::Min => x.min(y),
+                        MathOpKind::Max => js_math_max(x, y),
+                        MathOpKind::Min => js_math_min(x, y),
+                        MathOpKind::Imul => (js_to_int32(x).wrapping_mul(js_to_int32(y))) as f64,
+                        MathOpKind::Clz32 => (js_to_uint32(x).leading_zeros()) as f64,
+                        MathOpKind::Fround => (x as f32) as f64,
                     };
                     pc += 1;
                 }

@@ -41,12 +41,14 @@ pub(crate) enum Token {
     MinusEq,
     StarEq,
     SlashEq,
+    PercentEq,
     Eq,
     EqEq,
     EqEqEq,
     Bang,
     BangEq,
     BangEqEq,
+    Tilde,
     Lt,
     Lte,
     Gt,
@@ -58,6 +60,7 @@ pub(crate) enum Token {
     Caret,
     Shl,
     Shr,
+    UShr,
     Eof,
 }
 
@@ -207,6 +210,9 @@ pub(crate) fn tokenize_js(input: &str) -> Vec<Token> {
         } else if rem.starts_with(b"<<") {
             tokens.push(Token::Shl);
             i += 2;
+        } else if rem.starts_with(b">>>") {
+            tokens.push(Token::UShr);
+            i += 3;
         } else if rem.starts_with(b">>") {
             tokens.push(Token::Shr);
             i += 2;
@@ -234,6 +240,9 @@ pub(crate) fn tokenize_js(input: &str) -> Vec<Token> {
         } else if rem.starts_with(b"/=") {
             tokens.push(Token::SlashEq);
             i += 2;
+        } else if rem.starts_with(b"%=") {
+            tokens.push(Token::PercentEq);
+            i += 2;
         } else if rem.starts_with(b"**") {
             tokens.push(Token::StarStar);
             i += 2;
@@ -257,6 +266,7 @@ pub(crate) fn tokenize_js(input: &str) -> Vec<Token> {
                 b'%' => tokens.push(Token::Percent),
                 b'=' => tokens.push(Token::Eq),
                 b'!' => tokens.push(Token::Bang),
+                b'~' => tokens.push(Token::Tilde),
                 b'<' => tokens.push(Token::Lt),
                 b'>' => tokens.push(Token::Gt),
                 b'&' => tokens.push(Token::Amp),
@@ -630,13 +640,19 @@ impl Parser {
     fn parse_assign(&mut self) -> Expr {
         let lhs = self.parse_ternary();
         match self.peek().clone() {
-            Token::Eq | Token::PlusEq | Token::MinusEq | Token::StarEq | Token::SlashEq => {
+            Token::Eq
+            | Token::PlusEq
+            | Token::MinusEq
+            | Token::StarEq
+            | Token::SlashEq
+            | Token::PercentEq => {
                 let op_tok = self.next();
                 let assign_op = match op_tok {
                     Token::PlusEq => Some(BinOp::Add),
                     Token::MinusEq => Some(BinOp::Sub),
                     Token::StarEq => Some(BinOp::Mul),
                     Token::SlashEq => Some(BinOp::Div),
+                    Token::PercentEq => Some(BinOp::Rem),
                     _ => None,
                 };
                 let rhs = self.parse_assign();
@@ -706,10 +722,10 @@ impl Parser {
     }
 
     fn parse_logical_and(&mut self) -> Expr {
-        let mut left = self.parse_bitwise();
+        let mut left = self.parse_bit_or();
         while matches!(self.peek(), Token::AmpAmp) {
             self.next();
-            let right = self.parse_bitwise();
+            let right = self.parse_bit_or();
             left = Expr::Binary {
                 op: BinOp::And,
                 lhs: Box::new(left),
@@ -719,19 +735,41 @@ impl Parser {
         left
     }
 
-    fn parse_bitwise(&mut self) -> Expr {
-        let mut left = self.parse_equality();
-        loop {
-            let op = match self.peek() {
-                Token::Amp => BinOp::BitAnd,
-                Token::Pipe => BinOp::BitOr,
-                Token::Caret => BinOp::BitXor,
-                _ => break,
+    fn parse_bit_or(&mut self) -> Expr {
+        let mut left = self.parse_bit_xor();
+        while matches!(self.peek(), Token::Pipe) {
+            self.next();
+            let right = self.parse_bit_xor();
+            left = Expr::Binary {
+                op: BinOp::BitOr,
+                lhs: Box::new(left),
+                rhs: Box::new(right),
             };
+        }
+        left
+    }
+
+    fn parse_bit_xor(&mut self) -> Expr {
+        let mut left = self.parse_bit_and();
+        while matches!(self.peek(), Token::Caret) {
+            self.next();
+            let right = self.parse_bit_and();
+            left = Expr::Binary {
+                op: BinOp::BitXor,
+                lhs: Box::new(left),
+                rhs: Box::new(right),
+            };
+        }
+        left
+    }
+
+    fn parse_bit_and(&mut self) -> Expr {
+        let mut left = self.parse_equality();
+        while matches!(self.peek(), Token::Amp) {
             self.next();
             let right = self.parse_equality();
             left = Expr::Binary {
-                op,
+                op: BinOp::BitAnd,
                 lhs: Box::new(left),
                 rhs: Box::new(right),
             };
@@ -787,6 +825,7 @@ impl Parser {
             let op = match self.peek() {
                 Token::Shl => BinOp::Shl,
                 Token::Shr => BinOp::Shr,
+                Token::UShr => BinOp::UShr,
                 _ => break,
             };
             self.next();
@@ -877,6 +916,13 @@ impl Parser {
                     expr: Box::new(self.parse_unary()),
                 }
             }
+            Token::Tilde => {
+                self.next();
+                Expr::Unary {
+                    op: UnaryOp::BitNot,
+                    expr: Box::new(self.parse_unary()),
+                }
+            }
             Token::Ident(kw) if kw == "typeof" => {
                 self.next();
                 Expr::Unary {
@@ -894,6 +940,7 @@ impl Parser {
                     Expr::Update {
                         name,
                         increment: true,
+                        prefix: true,
                     }
                 } else {
                     Expr::Literal(JsValue::Undefined)
@@ -905,6 +952,7 @@ impl Parser {
                     Expr::Update {
                         name,
                         increment: false,
+                        prefix: true,
                     }
                 } else {
                     Expr::Literal(JsValue::Undefined)
@@ -961,6 +1009,7 @@ impl Parser {
                         expr = Expr::Update {
                             name,
                             increment: true,
+                            prefix: false,
                         };
                     }
                 }
@@ -970,6 +1019,7 @@ impl Parser {
                         expr = Expr::Update {
                             name,
                             increment: false,
+                            prefix: false,
                         };
                     }
                 }
@@ -1414,12 +1464,17 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                                     | "floor"
                                     | "ceil"
                                     | "round"
+                                    | "trunc"
+                                    | "sign"
                                     | "sqrt"
                                     | "pow"
                                     | "sin"
                                     | "cos"
                                     | "max"
                                     | "min"
+                                    | "imul"
+                                    | "clz32"
+                                    | "fround"
                             );
                         }
                         "JSON" => {
@@ -1503,6 +1558,7 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                     UnaryOperator::UnaryNegation
                         | UnaryOperator::UnaryPlus
                         | UnaryOperator::LogicalNot
+                        | UnaryOperator::BitwiseNot
                         | UnaryOperator::Typeof
                 ) && is_supported_expr(&u.argument, in_function_depth)
             }
@@ -1534,6 +1590,7 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                         | BinaryOperator::BitwiseXOR
                         | BinaryOperator::ShiftLeft
                         | BinaryOperator::ShiftRight
+                        | BinaryOperator::ShiftRightZeroFill
                 ) && is_supported_expr(&b.left, in_function_depth)
                     && is_supported_expr(&b.right, in_function_depth)
             }
@@ -1558,6 +1615,7 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                         | AssignmentOperator::Subtraction
                         | AssignmentOperator::Multiplication
                         | AssignmentOperator::Division
+                        | AssignmentOperator::Remainder
                 );
                 if !op_ok {
                     return false;
@@ -1635,7 +1693,10 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                 }
                 if let Expression::Identifier(obj_id) = &m.object {
                     if obj_id.name.as_str() == "Math" {
-                        return matches!(m.property.name.as_str(), "PI" | "E");
+                        return matches!(
+                            m.property.name.as_str(),
+                            "PI" | "E" | "SQRT2" | "LN2" | "LN10"
+                        );
                     }
                 }
                 is_supported_expr(&m.object, in_function_depth)
@@ -1933,6 +1994,7 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
                         Expr::Update {
                             name: s_name,
                             increment: true,
+                            ..
                         } => s_name == idx_var,
                         Expr::Assign {
                             name: s_name,

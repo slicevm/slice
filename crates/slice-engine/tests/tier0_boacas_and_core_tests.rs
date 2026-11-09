@@ -1024,3 +1024,334 @@ fn test_issue_14_richer_sandbox_eval_outcome_phase_timings_and_return_json() {
     assert_eq!(undef_out.return_value, "undefined");
     assert!(undef_out.return_json.is_none());
 }
+
+#[test]
+fn test_tier2_ieee754_equality_nan_infinity_subnormal_and_signed_zero() {
+    let src = r#"
+function checkEq(a: number, b: number): number {
+    let mask = 0;
+    if (a === b) mask = mask | 1;
+    if (a !== b) mask = mask | 2;
+    if (a == b)  mask = mask | 4;
+    if (a != b)  mask = mask | 8;
+    return mask;
+}
+const nanVal = 0 / 0;
+const posInf = 1 / 0;
+const negInf = -1 / 0;
+// 1. NaN vs NaN: === is false (0), !== is true (2), == is false (0), != is true (8) -> 10
+const rNan = checkEq(nanVal, nanVal);
+// 2. +Infinity vs +Infinity: === is true (1), !== is false (0), == is true (4), != is false (0) -> 5
+const rInf = checkEq(posInf, posInf);
+// 3. +Infinity vs -Infinity -> 10
+const rInfSign = checkEq(posInf, negInf);
+// 4. -0.0 vs +0.0 -> 5
+const rZero = checkEq(-0.0, 0.0);
+// 5. Sub-epsilon distinct floats (1e-17 vs 0.0) -> 10 (not equal!)
+const rTiny = checkEq(1e-17, 0.0);
+console.log(rNan, rInf, rInfSign, rZero, rTiny);
+"#;
+    let bc = compile_source_to_bytecode(src);
+    assert_eq!(&bc[0..8], crate::SNAPSHOT_MAGIC);
+    let mut iso = SliceIsolate::spawn(
+        "tier2-ieee754-eq",
+        201,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        512 * 1024,
+    );
+    let metrics = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(metrics.highest_tier_reached, ExecutionTier::Tier2PeakNative);
+    assert_eq!(metrics.stdout[0], "10 5 10 5 10");
+}
+
+#[test]
+fn test_tier0_and_tier2_ecmascript_32bit_bitwise_toint32_touint32_and_ushr() {
+    let src = r#"
+function bitwiseKernel(x: number, y: number): number {
+    const shl31 = 1 << 31;
+    const ushr31 = (1 << 31) >>> 0;
+    const allOnesSigned = 0xffffffff | 0;
+    const allOnesUnsigned = 0xffffffff >>> 0;
+    const wrap32 = 4294967296 | 0;
+    const negShift = 1 << -1;
+    const notZero = ~0;
+    const notNegOne = ~(-1);
+    const notFloat = ~3.9;
+    const infOrZero = (1 / 0) | 0;
+    const nanOrZero = (0 / 0) | 0;
+    let h = 2166136261 | 0;
+    for (let i = 0; i < 8; i++) {
+        h = h ^ ((x + i) & 0xff);
+        h = Math.imul(h, 16777619);
+    }
+    const hashUnsigned = h >>> 0;
+    if (shl31 === -2147483648 &&
+        ushr31 === 2147483648 &&
+        allOnesSigned === -1 &&
+        allOnesUnsigned === 4294967295 &&
+        wrap32 === 0 &&
+        negShift === -2147483648 &&
+        notZero === -1 &&
+        notNegOne === 0 &&
+        notFloat === -4 &&
+        infOrZero === 0 &&
+        nanOrZero === 0) {
+        return hashUnsigned + (y % 7);
+    }
+    return -999;
+}
+const res = bitwiseKernel(42, 19);
+console.log(res);
+"#;
+    // 1. Execute on Tier-0/Tier-2 SLICESNP
+    let bc_snp = compile_source_to_bytecode(src);
+    assert_eq!(&bc_snp[0..8], crate::SNAPSHOT_MAGIC);
+    let mut iso_snp = SliceIsolate::spawn(
+        "tier2-bitwise",
+        202,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        512 * 1024,
+    );
+    let m_snp = iso_snp.execute_bytecode(&bc_snp, None).unwrap();
+    assert_eq!(m_snp.highest_tier_reached, ExecutionTier::Tier2PeakNative);
+
+    // 2. Execute on Tier-1 Boa and verify 100% bit-exact parity
+    crate::set_thread_tier_override(Some(1));
+    let bc_boa = compile_source_to_bytecode(src);
+    crate::set_thread_tier_override(None);
+    let mut iso_boa = SliceIsolate::spawn(
+        "tier1-bitwise-parity",
+        203,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        2 * 1024 * 1024,
+    );
+    let m_boa = iso_boa.execute_bytecode(&bc_boa, None).unwrap();
+    assert_eq!(m_snp.stdout[0], m_boa.stdout[0]);
+    assert_ne!(m_snp.stdout[0], "-999");
+}
+
+#[test]
+fn test_tier2_short_circuit_logical_and_or_with_side_effects_and_recursion() {
+    let src = r#"
+function shortCircuitKernel(n: number): number {
+    let sideEffect = 0;
+    const a = 0 && (sideEffect += 100);
+    const b = 1 || (sideEffect += 200);
+    const c = 0 || 42;
+    const d = 5 && 99;
+    let x = n;
+    x = (x > 0) && (x + 10);
+    return sideEffect * 1000 + a + b + c + d + x;
+}
+function recCountdown(n: number): number {
+    return (n > 0) && (1 + recCountdown(n - 1));
+}
+console.log(shortCircuitKernel(7), recCountdown(15));
+"#;
+    let bc = compile_source_to_bytecode(src);
+    assert_eq!(&bc[0..8], crate::SNAPSHOT_MAGIC);
+    let mut iso = SliceIsolate::spawn(
+        "tier2-short-circuit",
+        204,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        512 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(m.highest_tier_reached, ExecutionTier::Tier2PeakNative);
+    // sideEffect=0, a=0, b=1, c=42, d=99, x=17 -> 0 + 0 + 1 + 42 + 99 + 17 = 159; recCountdown(15) = 15
+    assert_eq!(m.stdout[0], "159 15");
+}
+
+#[test]
+fn test_tier0_and_tier2_prefix_vs_postfix_increment_decrement() {
+    let src = r#"
+function updateNuances(start: number): number {
+    let x = start;
+    const a = x++;
+    const b = ++x;
+    const c = x--;
+    const d = --x;
+    let acc = 0;
+    for (let i = 0; i < 5; i++) {
+        acc += i;
+    }
+    return a * 1000 + b * 100 + c * 10 + d + acc + x;
+}
+let top = 5;
+const postTop = top++;
+const preTop = ++top;
+console.log(updateNuances(10), postTop, preTop, top);
+"#;
+    let bc = compile_source_to_bytecode(src);
+    assert_eq!(&bc[0..8], crate::SNAPSHOT_MAGIC);
+    let mut iso = SliceIsolate::spawn(
+        "tier2-prefix-postfix",
+        205,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        512 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(m.highest_tier_reached, ExecutionTier::Tier2PeakNative);
+    // a=10, b=12, c=12, d=10, acc=10, x=10 -> 10000 + 1200 + 120 + 10 + 10 + 10 = 11350
+    // postTop=5, preTop=7, top=7
+    assert_eq!(m.stdout[0], "11350 5 7 7");
+}
+
+#[test]
+fn test_tier0_and_tier2_math_round_ties_to_pos_inf_and_extended_math_intrinsics() {
+    let src = r#"
+function mathNuances(x: number): number {
+    const rNegHalf = Math.round(-0.5);
+    const negZeroCheck = 1 / rNegHalf;
+    const rNeg3Half = Math.round(-3.5);
+    const rPosHalf = Math.round(0.5);
+    const rBelowHalf = Math.round(0.49999999999999994);
+    const tNeg = Math.trunc(-3.9);
+    const sNeg = Math.sign(-42);
+    const clz = Math.clz32(1);
+    const maxSign = 1 / Math.max(-0.0, 0.0);
+    const minSign = 1 / Math.min(-0.0, 0.0);
+    const maxNan = Math.max(0 / 0, 5);
+    if (negZeroCheck === -1 / 0 &&
+        rNeg3Half === -3 &&
+        rPosHalf === 1 &&
+        rBelowHalf === 0 &&
+        tNeg === -3 &&
+        sNeg === -1 &&
+        clz === 31 &&
+        maxSign === 1 / 0 &&
+        minSign === -1 / 0 &&
+        maxNan !== maxNan) {
+        return x + clz;
+    }
+    return -1;
+}
+console.log(mathNuances(11), isNaN(Math.min(1, 0 / 0)), isFinite(Math.SQRT2));
+"#;
+    let bc = compile_source_to_bytecode(src);
+    assert_eq!(&bc[0..8], crate::SNAPSHOT_MAGIC);
+    let mut iso = SliceIsolate::spawn(
+        "tier2-math-nuances",
+        206,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        512 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(m.highest_tier_reached, ExecutionTier::Tier2PeakNative);
+    assert_eq!(m.stdout[0], "42 true true");
+}
+
+#[test]
+fn test_tier2_register_allocator_local_vars_in_branches_and_many_statements() {
+    let src = r#"
+function branchLocalsAndManyStmts(n: number): number {
+    let total = 0;
+    if (n > 0) {
+        let innerA = n * 2;
+        let innerB = innerA + 3;
+        total += (innerA + 1) * (innerB - 1);
+    } else {
+        let innerC = 99;
+        total += innerC;
+    }
+    for (let i = 0; i < 4; i++) {
+        let stepVal = (i + 1) * (n + 2) + (i * 3);
+        total += stepVal;
+    }
+    // Execute 20 sequential compound expressions to verify scratch register recycling
+    total += (n + 1) * (n + 2) - (n + 3);
+    total += (n + 2) * (n + 3) - (n + 4);
+    total += (n + 3) * (n + 4) - (n + 5);
+    total += (n + 4) * (n + 5) - (n + 6);
+    total += (n + 5) * (n + 6) - (n + 7);
+    total += (n + 6) * (n + 7) - (n + 8);
+    total += (n + 7) * (n + 8) - (n + 9);
+    total += (n + 8) * (n + 9) - (n + 10);
+    total += (n + 9) * (n + 10) - (n + 11);
+    total += (n + 10) * (n + 11) - (n + 12);
+    total += (n + 11) * (n + 12) - (n + 13);
+    total += (n + 12) * (n + 13) - (n + 14);
+    total += (n + 13) * (n + 14) - (n + 15);
+    total += (n + 14) * (n + 15) - (n + 16);
+    total += (n + 15) * (n + 16) - (n + 17);
+    total += (n + 16) * (n + 17) - (n + 18);
+    return total;
+}
+console.log(branchLocalsAndManyStmts(5));
+"#;
+    let bc = compile_source_to_bytecode(src);
+    assert_eq!(&bc[0..8], crate::SNAPSHOT_MAGIC);
+    let mut iso = SliceIsolate::spawn(
+        "tier2-reg-alloc",
+        207,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        512 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(m.highest_tier_reached, ExecutionTier::Tier2PeakNative);
+
+    // Verify parity against Tier-1 Boa
+    crate::set_thread_tier_override(Some(1));
+    let bc_boa = compile_source_to_bytecode(src);
+    crate::set_thread_tier_override(None);
+    let mut iso_boa = SliceIsolate::spawn(
+        "tier1-reg-alloc-parity",
+        208,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        2 * 1024 * 1024,
+    );
+    let m_boa = iso_boa.execute_bytecode(&bc_boa, None).unwrap();
+    assert_eq!(m.stdout[0], m_boa.stdout[0]);
+}
+
+#[test]
+fn test_tier0_nuances_abstract_equality_array_methods_negative_index_and_scope_shadowing() {
+    let src = r#"
+function recStringBuilder(n: number): string {
+    if (n <= 0) return "0";
+    let step = "s" + n;
+    let sub = recStringBuilder(n - 1);
+    return step + ":" + sub;
+}
+let step = "outer-preserved";
+const tree = recStringBuilder(3);
+
+const eq1 = (null == undefined);
+const eq2 = (null === undefined);
+const eq3 = ("42" == 42);
+const eq4 = ("42" === 42);
+const eq5 = (true == 1);
+
+const arr = [2, 3, 4];
+const prodNoInit = arr.reduce((a, b) => a * b);
+const nanArr = [1, 0 / 0, 3];
+const hasNan = nanArr.includes(0 / 0);
+const joinedNulls = [1, null, undefined, 2].join(",");
+const negIdx = arr[-1];
+const fracIdx = arr[1.5];
+
+console.log(step, tree, eq1, eq2, eq3, eq4, eq5, prodNoInit, hasNan, joinedNulls, negIdx, fracIdx);
+"#;
+    let bc = compile_source_to_bytecode(src);
+    assert_eq!(&bc[0..8], crate::SNAPSHOT_MAGIC);
+    let mut iso = SliceIsolate::spawn(
+        "tier0-js-nuances",
+        209,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        512 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(
+        m.stdout[0],
+        "outer-preserved s3:s2:s1:0 true false true false true 24 true 1,,,2 undefined undefined"
+    );
+}
