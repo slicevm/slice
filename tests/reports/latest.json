@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "version": "0.10.5",
+    "version": "0.10.6",
     "commit": "47bfa6b",
     "timestampUtc": "2026-11-09T22:52:49Z",
     "environment": "Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)",
     "runtimes": {
-      "slice": "v0.10.5",
+      "slice": "v0.10.6",
       "bun": "v1.4.4",
       "deno": "v2.9.8",
       "node": "v27.0.0-alpha.0.0.0"

@@ -1,12 +1,12 @@
 # Slice (Nexus-JS) — Full 33-Workload & MicroVM Benchmark Report
 
-* **Slice Version:** `v0.10.5` (Commit `47bfa6b`)
+* **Slice Version:** `v0.10.6` (Commit `47bfa6b`)
 * **Generated Timestamp (UTC):** `2026-11-09T22:52:49Z`
 * **Archive File:** [`tests/reports/bench_v0.10.5_20261109_225249Z_47bfa6b.md`](./bench_v0.10.5_20261109_225249Z_47bfa6b.md)
 * **Canonical Latest Report:** [`tests/reports/latest.md`](./latest.md)
 * **Environment:** `Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)`
 * **Compared Runtimes:**
-  * **Slice:** `v0.10.5` (Default `SLICEBC\x01` Precompiled Boa `CodeBlock` CAS + Monomorphic Inline Caching `get_fast` + Streaming `JsonSeed` `JSON.parse`)
+  * **Slice:** `v0.10.6` (Default `SLICEBC\x01` Precompiled Boa `CodeBlock` CAS + Monomorphic Inline Caching `get_fast` + Streaming `JsonSeed` `JSON.parse`)
   * **Bun:** `v1.4.4` (JavaScriptCore)
   * **Deno:** `v2.9.8` (V8)
   * **Node.js:** `v27.0.0-alpha.0.0.0` (V8 native TypeScript execution)
