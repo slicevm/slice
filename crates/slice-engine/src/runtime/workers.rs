@@ -9,9 +9,10 @@
 //! - Lock-free `mpsc` bidirectional message channels integrated directly into `event_loop.rs`
 
 use crate::boa_realm::{
-    check_boa_fs_read_ocap, norm_vfs_path, BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_DET_STATE,
-    BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, BOA_FETCH_MOCKS, BOA_KV_MEM_BUDGET,
-    BOA_NET_HOSTS, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VIOLATION,
+    check_boa_fs_read_ocap, mark_subsystem_dirty, norm_vfs_path, BOA_ACTIVE_CAPS,
+    BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS,
+    BOA_FETCH_MOCKS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VIOLATION,
+    DIRTY_WORKERS,
 };
 use crate::intrinsics::base64_decode;
 use crate::isolate::SliceIsolate;
@@ -444,6 +445,7 @@ fn build_attenuated_worker_caps(
 
 /// Spawns a capability-attenuated MicroVM Worker thread and returns its `worker_id`.
 pub fn worker_spawn(specifier_or_code: &str, options_json: &str) -> Result<u32, String> {
+    mark_subsystem_dirty(DIRTY_WORKERS);
     let opts: WorkerSpawnOptions = serde_json::from_str(options_json).unwrap_or_default();
     let active_in_isolate = PARENT_WORKERS.with(|reg| {
         reg.borrow()

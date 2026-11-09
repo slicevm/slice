@@ -181,7 +181,9 @@ pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool
         }
     }
 
-    code = fuse_array_pipelines_ast(&code);
+    if code.contains(".reduce(") || code.contains(".some(") || code.contains(".every(") {
+        code = fuse_array_pipelines_ast(&code);
+    }
 
     if memchr::memmem::find(code.as_bytes(), b"Buffer.").is_some() {
         rewrite_buffer_fast_paths_ast(&code)
@@ -326,7 +328,11 @@ pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
             );
         }
     }
-    rewrite_cjs_require(&js_code)
+    if js_code.contains("require(") {
+        rewrite_cjs_require(&js_code)
+    } else {
+        js_code
+    }
 }
 
 /// Rewrites legacy CommonJS `const x = require("mod")` into synthetic deterministic ESM/CAS lookup

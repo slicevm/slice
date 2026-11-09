@@ -14,7 +14,8 @@
 //! 5. **Deterministic Mock Socket Support (`Slice.mockSocket`)**: Supports zero-network deterministic testing and replay.
 
 use crate::boa_realm::{
-    BOA_ACTIVE_TENANT, BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VIOLATION,
+    mark_subsystem_dirty, BOA_ACTIVE_TENANT, BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
+    BOA_VIOLATION, DIRTY_SOCKETS,
 };
 use crate::intrinsics::{base64_decode, base64_encode};
 use crate::outbound_http::{
@@ -93,6 +94,7 @@ fn next_socket_handle_id() -> Result<u32, String> {
         c.set(cur.wrapping_add(1).max(1));
         cur
     });
+    mark_subsystem_dirty(DIRTY_SOCKETS);
     Ok(id)
 }
 
@@ -350,6 +352,7 @@ fn generate_mock_tcp_reply(spec: &str, written: &[u8]) -> Vec<u8> {
 
 /// Registers a deterministic mock socket for `host:port` (or `host`).
 pub fn register_socket_mock(target: &str, spec: &str) {
+    mark_subsystem_dirty(DIRTY_SOCKETS);
     BOA_SOCKET_MOCKS.with(|m| {
         m.borrow_mut()
             .insert(target.trim().to_ascii_lowercase(), spec.to_string());

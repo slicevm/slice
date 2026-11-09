@@ -6,6 +6,14 @@ use crate::value_and_ast::BytecodeModule;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slice_sandbox::SandboxViolation;
 
+pub(crate) const DIRTY_EVENT_LOOP: u8 = 1 << 0;
+pub(crate) const DIRTY_ALS: u8 = 1 << 1;
+pub(crate) const DIRTY_FETCH_MOCK: u8 = 1 << 2;
+pub(crate) const DIRTY_WEBSOCKET: u8 = 1 << 3;
+pub(crate) const DIRTY_SOCKETS: u8 = 1 << 4;
+pub(crate) const DIRTY_WORKERS: u8 = 1 << 5;
+pub(crate) const DIRTY_WASM: u8 = 1 << 6;
+
 #[derive(Default, Clone)]
 pub(crate) struct ActiveBoaHttpReq {
     pub(crate) active: bool,
@@ -24,6 +32,7 @@ pub(crate) struct WarmBoaRealm {
     pub(crate) ses_check_fn: Option<boa_engine::JsObject>,
     pub(crate) ensure_shard_fn: Option<boa_engine::JsObject>,
     pub(crate) init_worker_self_fn: Option<boa_engine::JsObject>,
+    pub(crate) drain_wu_fn: Option<boa_engine::JsObject>,
     pub(crate) loaded_shards_mask: u32,
 }
 
@@ -89,6 +98,13 @@ thread_local! {
         const { std::cell::Cell::new(false) };
     pub(crate) static BOA_TRACE_EVENTS: std::cell::RefCell<Vec<ChromeTraceEvent>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    pub(crate) static BOA_DIRTY_SUBSYSTEMS: std::cell::Cell<u8> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+pub(crate) fn mark_subsystem_dirty(bit: u8) {
+    BOA_DIRTY_SUBSYSTEMS.with(|c| c.set(c.get() | bit));
 }
 
 /// Chrome DevTools / Perfetto Trace Event (`ph: "X"` complete duration event).
@@ -343,12 +359,13 @@ pub(crate) fn create_bare_boa_realm() -> WarmBoaRealm {
         ses_check_fn: None,
         ensure_shard_fn: None,
         init_worker_self_fn: None,
+        drain_wu_fn: None,
         loaded_shards_mask: 0,
     }
 }
 
-/// Refreshes the cached JS function handles (`__slice_check_ses`, `__slice_ensure_shard`) on `realm`
-/// after `ULTRA_CORE_PRELUDE` has been evaluated.
+/// Refreshes the cached JS function handles (`__slice_check_ses`, `__slice_ensure_shard`, `__slice_drain_wu`)
+/// on `realm` after `ULTRA_CORE_PRELUDE` has been evaluated.
 #[inline]
 pub(crate) fn populate_realm_cached_handles(realm: &mut WarmBoaRealm) {
     let global = realm.ctx.global_object();
@@ -364,6 +381,12 @@ pub(crate) fn populate_realm_cached_handles(realm: &mut WarmBoaRealm) {
                 boa_engine::js_string!("__slice_ensure_shard"),
                 &mut realm.ctx,
             )
+            .ok()
+            .and_then(|v| v.as_object());
+    }
+    if realm.drain_wu_fn.is_none() {
+        realm.drain_wu_fn = global
+            .get(boa_engine::js_string!("__slice_drain_wu"), &mut realm.ctx)
             .ok()
             .and_then(|v| v.as_object());
     }
@@ -442,9 +465,9 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_env_map: FxHashMap<String, String>,
     pub(crate) saved_exec_bins: Vec<String>,
     pub(crate) saved_last_cp_violation: Option<SandboxViolation>,
-    pub(crate) saved_fetch_mocks: FxHashMap<String, String>,
-    pub(crate) saved_ws_mocks: FxHashMap<String, String>,
-    pub(crate) saved_sock_mocks: FxHashMap<String, String>,
+    pub(crate) saved_fetch_mocks: Option<FxHashMap<String, String>>,
+    pub(crate) saved_ws_mocks: Option<FxHashMap<String, String>>,
+    pub(crate) saved_sock_mocks: Option<FxHashMap<String, String>>,
     pub(crate) saved_kv_budget: (usize, usize),
     pub(crate) saved_fuel_budget: (u64, u64),
     pub(crate) saved_checkpoint_stats: (u32, u32, u64),
@@ -452,9 +475,10 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_det: Option<(u64, u64)>,
     pub(crate) saved_als_active: bool,
     pub(crate) saved_als_snap: boa_engine::JsValue,
-    pub(crate) saved_http_req: ActiveBoaHttpReq,
+    pub(crate) saved_http_req: Option<ActiveBoaHttpReq>,
     pub(crate) saved_http_res: Option<CapturedBoaHttpRes>,
     pub(crate) saved_wait_until_count: usize,
+    pub(crate) saved_dirty_subsystems: u8,
     pub(crate) saved_ev_loop: Option<crate::event_loop::SavedEventLoopSnapshot>,
 }
 
@@ -462,33 +486,61 @@ impl SavedIsolateContextGuard {
     pub(crate) fn enter() -> Self {
         let saved_stdout = BOA_STDOUT.with(|out| std::mem::take(&mut *out.borrow_mut()));
         let saved_violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
-        let saved_tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+        let saved_tenant = BOA_ACTIVE_TENANT.with(|t| std::mem::take(&mut *t.borrow_mut()));
         let saved_caps = BOA_ACTIVE_CAPS.with(|c| c.borrow_mut().take());
         let saved_net_hosts = BOA_NET_HOSTS.with(|h| std::mem::take(&mut *h.borrow_mut()));
         let saved_egress_secrets =
             BOA_EGRESS_SECRETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
-        let saved_env_map = BOA_ENV_MAP.with(|m| m.borrow().clone());
+        let saved_env_map = BOA_ENV_MAP.with(|m| std::mem::take(&mut *m.borrow_mut()));
         let saved_exec_bins = BOA_EXEC_BINS.with(|b| std::mem::take(&mut *b.borrow_mut()));
         let saved_last_cp_violation = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
-        let saved_fetch_mocks = BOA_FETCH_MOCKS.with(|m| m.borrow().clone());
-        let saved_ws_mocks = crate::websocket::BOA_WS_MOCKS.with(|m| m.borrow().clone());
-        let saved_sock_mocks = crate::sockets::BOA_SOCKET_MOCKS.with(|m| m.borrow().clone());
+        let saved_fetch_mocks = BOA_FETCH_MOCKS.with(|m| {
+            let b = m.borrow();
+            if b.is_empty() {
+                None
+            } else {
+                Some(b.clone())
+            }
+        });
+        let saved_ws_mocks = crate::websocket::BOA_WS_MOCKS.with(|m| {
+            let b = m.borrow();
+            if b.is_empty() {
+                None
+            } else {
+                Some(b.clone())
+            }
+        });
+        let saved_sock_mocks = crate::sockets::BOA_SOCKET_MOCKS.with(|m| {
+            let b = m.borrow();
+            if b.is_empty() {
+                None
+            } else {
+                Some(b.clone())
+            }
+        });
         let saved_kv_budget = BOA_KV_MEM_BUDGET.with(|m| m.get());
         let saved_fuel_budget = BOA_FUEL_BUDGET.with(|f| f.get());
         let saved_checkpoint_stats = BOA_CHECKPOINT_STATS.with(|s| s.replace((0, 0, 0)));
         let saved_checkpoint_cap = BOA_CHECKPOINT_CAP.with(|c| c.get());
         let saved_det = BOA_DET_STATE.with(|s| s.get());
         let saved_als_active = BOA_ALS_ACTIVE.with(|a| a.replace(false));
-        let saved_als_snap = BOA_ALS_SNAP.with(|s| s.replace(boa_engine::JsValue::undefined()));
+        let saved_als_snap = if saved_als_active {
+            BOA_ALS_SNAP.with(|s| s.replace(boa_engine::JsValue::undefined()))
+        } else {
+            boa_engine::JsValue::undefined()
+        };
         let saved_http_req = BOA_HTTP_REQ.with(|r| {
             let mut borrow = r.borrow_mut();
-            let cloned = borrow.clone();
-            borrow.active = false;
-            cloned
+            if borrow.active {
+                Some(std::mem::take(&mut *borrow))
+            } else {
+                None
+            }
         });
         let saved_http_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
         let saved_wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.replace(0));
-        let saved_ev_loop = Some(crate::event_loop::save_and_reset_event_loop_state());
+        let saved_dirty_subsystems = BOA_DIRTY_SUBSYSTEMS.with(|d| d.replace(0));
+        let saved_ev_loop = crate::event_loop::save_and_reset_event_loop_state();
 
         Self {
             saved_stdout,
@@ -513,6 +565,7 @@ impl SavedIsolateContextGuard {
             saved_http_req,
             saved_http_res,
             saved_wait_until_count,
+            saved_dirty_subsystems,
             saved_ev_loop,
         }
     }
@@ -523,6 +576,8 @@ impl Drop for SavedIsolateContextGuard {
         if let Some(ev) = self.saved_ev_loop.take() {
             crate::event_loop::restore_event_loop_state(ev);
         }
+        let child_dirty = BOA_DIRTY_SUBSYSTEMS.with(|d| d.get());
+        BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(self.saved_dirty_subsystems));
         BOA_STDOUT.with(|out| *out.borrow_mut() = std::mem::take(&mut self.saved_stdout));
         BOA_VIOLATION.with(|v| *v.borrow_mut() = self.saved_violation.take());
         BOA_ACTIVE_TENANT.with(|t| *t.borrow_mut() = std::mem::take(&mut self.saved_tenant));
@@ -534,19 +589,35 @@ impl Drop for SavedIsolateContextGuard {
         BOA_EXEC_BINS.with(|b| *b.borrow_mut() = std::mem::take(&mut self.saved_exec_bins));
         BOA_LAST_CHILD_PROC_VIOLATION
             .with(|v| *v.borrow_mut() = self.saved_last_cp_violation.take());
-        BOA_FETCH_MOCKS.with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_fetch_mocks));
-        crate::websocket::BOA_WS_MOCKS
-            .with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_ws_mocks));
-        crate::sockets::BOA_SOCKET_MOCKS
-            .with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_sock_mocks));
+        if let Some(fm) = self.saved_fetch_mocks.take() {
+            BOA_FETCH_MOCKS.with(|m| *m.borrow_mut() = fm);
+        } else if (child_dirty & DIRTY_FETCH_MOCK) != 0 {
+            BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
+        }
+        if let Some(wm) = self.saved_ws_mocks.take() {
+            crate::websocket::BOA_WS_MOCKS.with(|m| *m.borrow_mut() = wm);
+        } else if (child_dirty & DIRTY_WEBSOCKET) != 0 {
+            crate::websocket::BOA_WS_MOCKS.with(|m| m.borrow_mut().clear());
+        }
+        if let Some(sm) = self.saved_sock_mocks.take() {
+            crate::sockets::BOA_SOCKET_MOCKS.with(|m| *m.borrow_mut() = sm);
+        } else if (child_dirty & DIRTY_SOCKETS) != 0 {
+            crate::sockets::BOA_SOCKET_MOCKS.with(|m| m.borrow_mut().clear());
+        }
         BOA_KV_MEM_BUDGET.with(|m| m.set(self.saved_kv_budget));
         BOA_FUEL_BUDGET.with(|f| f.set(self.saved_fuel_budget));
         BOA_CHECKPOINT_STATS.with(|s| s.set(self.saved_checkpoint_stats));
         BOA_CHECKPOINT_CAP.with(|c| c.set(self.saved_checkpoint_cap));
         BOA_DET_STATE.with(|s| s.set(self.saved_det));
         BOA_ALS_ACTIVE.with(|a| a.set(self.saved_als_active));
-        BOA_ALS_SNAP.with(|s| *s.borrow_mut() = self.saved_als_snap.clone());
-        BOA_HTTP_REQ.with(|r| *r.borrow_mut() = std::mem::take(&mut self.saved_http_req));
+        if self.saved_als_active || (child_dirty & DIRTY_ALS) != 0 {
+            BOA_ALS_SNAP.with(|s| *s.borrow_mut() = self.saved_als_snap.clone());
+        }
+        if let Some(req) = self.saved_http_req.take() {
+            BOA_HTTP_REQ.with(|r| *r.borrow_mut() = req);
+        } else {
+            BOA_HTTP_REQ.with(|r| r.borrow_mut().active = false);
+        }
         BOA_HTTP_RES.with(|res| *res.borrow_mut() = self.saved_http_res.take());
         BOA_WAIT_UNTIL_COUNT.with(|c| c.set(self.saved_wait_until_count));
     }

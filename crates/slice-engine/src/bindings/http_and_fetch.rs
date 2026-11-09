@@ -2,8 +2,8 @@
 
 use crate::bindings::helpers::active_tenant_id_or_default;
 use crate::boa_realm::{
-    BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_FETCH_MOCKS, BOA_HTTP_REQ,
-    BOA_HTTP_RES, BOA_VIOLATION,
+    mark_subsystem_dirty, BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_FETCH_MOCKS,
+    BOA_HTTP_REQ, BOA_HTTP_RES, BOA_VIOLATION, DIRTY_FETCH_MOCK,
 };
 use crate::event_loop::enqueue_async_fetch;
 use crate::outbound_http::{
@@ -195,6 +195,7 @@ pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engin
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             if !key.is_empty() && !payload.is_empty() {
+                mark_subsystem_dirty(DIRTY_FETCH_MOCK);
                 BOA_FETCH_MOCKS.with(|m| {
                     m.borrow_mut().insert(key, payload);
                 });

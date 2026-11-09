@@ -1,5 +1,6 @@
 //! RFC 6455 WebSocket Client and Server Host Bindings (`Shard 7`).
 
+use crate::boa_realm::{mark_subsystem_dirty, DIRTY_WEBSOCKET};
 use crate::websocket::{
     ws_client_close, ws_client_connect, ws_client_poll, ws_client_send, ws_server_queue_close,
     ws_server_queue_send, BOA_WS_MOCKS,
@@ -31,6 +32,7 @@ pub(crate) fn register_shard7_websocket_host_functions(ctx: &mut boa_engine::Con
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_else(|| "echo".to_string());
+            mark_subsystem_dirty(DIRTY_WEBSOCKET);
             BOA_WS_MOCKS.with(|m| {
                 m.borrow_mut().insert(url, spec);
             });

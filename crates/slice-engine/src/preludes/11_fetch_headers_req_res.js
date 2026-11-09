@@ -363,6 +363,27 @@
   Object.defineProperty(RP, "body", __bodyDesc);
   Object.defineProperty(SP, "body", __bodyDesc);
   Response.json = function(data, init) {
+    if (!init) {
+      var rFast = Object.create(SP);
+      rFast.status = 200;
+      rFast.statusText = "OK";
+      rFast.ok = true;
+      var hFast = Object.create(Headers.prototype);
+      hFast._live = false;
+      hFast._sc = null;
+      var mFast = Object.create(null);
+      mFast["content-type"] = "application/json";
+      hFast._m = mFast;
+      rFast.headers = hFast;
+      rFast._data = data;
+      rFast._body = "";
+      rFast._u8 = null;
+      rFast._fd = null;
+      rFast._ct = "application/json";
+      rFast._isSliceRes = true;
+      rFast.bodyUsed = false;
+      return rFast;
+    }
     var r = new Response(null, typeof init === "number" ? { status: init } : init);
     if (!r.headers._m["content-type"]) r.headers._m["content-type"] = "application/json";
     r._data = data;

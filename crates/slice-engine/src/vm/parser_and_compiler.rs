@@ -1235,13 +1235,19 @@ pub(crate) fn compact_js_for_boa_bytecode(js: &str) -> String {
 /// statements, expressions, operators, and built-in calls in the Oxc AST belong to the exact
 /// subset supported by `SLICESNP` (`eval_stmt` / `eval_expr` / `NumericFuncIr`).
 pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
-    // Fast SIMD rejections for multi-module bundles or internal host intrinsics
+    // Fast SIMD rejections for multi-module bundles, large scripts, or constructs not in Tier-0
     let src_bytes = source.as_bytes();
-    if memchr::memmem::find(src_bytes, b"var __slice_modules =").is_some()
+    if src_bytes.len() > 4096
+        || memchr::memmem::find(src_bytes, b"var __slice_modules =").is_some()
         || memchr::memmem::find(src_bytes, b"__slice_").is_some()
         || memchr::memmem::find(src_bytes, b"node:").is_some()
         || memchr::memmem::find(src_bytes, b"cloudflare:").is_some()
         || memchr::memmem::find(src_bytes, b"slice:").is_some()
+        || memchr::memmem::find(src_bytes, b"new ").is_some()
+        || memchr::memmem::find(src_bytes, b"try").is_some()
+        || memchr::memmem::find(src_bytes, b"async").is_some()
+        || memchr::memmem::find(src_bytes, b"await").is_some()
+        || memchr::memmem::find(src_bytes, b"class ").is_some()
     {
         return false;
     }
@@ -1764,12 +1770,58 @@ pub fn compile_source_to_bytecode(raw_source: &str) -> Vec<u8> {
     compile_source_to_bytecode_inner(raw_source, true)
 }
 
+struct SandboxEvalCacheEntry {
+    source: String,
+    tier_override: Option<u8>,
+    bytecode: std::rc::Rc<[u8]>,
+}
+
+thread_local! {
+    static SANDBOX_EVAL_BC_CACHE: std::cell::RefCell<FxHashMap<(u64, usize), SandboxEvalCacheEntry>> =
+        std::cell::RefCell::new(FxHashMap::default());
+}
+
 /// Compiles an inline `Slice.evalSandbox(code)` snippet for immediate in-memory execution,
 /// using Tier-0 `SLICESNP` when compatible or lightweight `SLICEBOA` on a pooled `WarmBoaRealm`
-/// without constructing a throwaway AOT `SLICEBC\x01` compiler context.
+/// without constructing a throwaway AOT `SLICEBC\x01` compiler context, backed by a bounded
+/// 64-entry thread-local bytecode cache for repeated template/snippet evaluations.
 #[inline]
-pub(crate) fn compile_source_for_sandbox_eval(raw_source: &str) -> Vec<u8> {
-    compile_source_to_bytecode_inner(raw_source, false)
+pub(crate) fn compile_source_for_sandbox_eval(raw_source: &str) -> std::rc::Rc<[u8]> {
+    if raw_source.len() <= 131_072 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        raw_source.hash(&mut hasher);
+        let key = (hasher.finish(), raw_source.len());
+        let active_tier = crate::boacas::active_tier_override();
+        let hit = SANDBOX_EVAL_BC_CACHE.with(|cache| {
+            cache
+                .borrow()
+                .get(&key)
+                .filter(|e| e.tier_override == active_tier && e.source == raw_source)
+                .map(|e| e.bytecode.clone())
+        });
+        if let Some(bc) = hit {
+            return bc;
+        }
+        let compiled: std::rc::Rc<[u8]> =
+            compile_source_to_bytecode_inner(raw_source, false).into();
+        SANDBOX_EVAL_BC_CACHE.with(|cache| {
+            let mut map = cache.borrow_mut();
+            if map.len() >= 64 {
+                map.clear();
+            }
+            map.insert(
+                key,
+                SandboxEvalCacheEntry {
+                    source: raw_source.to_string(),
+                    tier_override: active_tier,
+                    bytecode: compiled.clone(),
+                },
+            );
+        });
+        return compiled;
+    }
+    compile_source_to_bytecode_inner(raw_source, false).into()
 }
 
 fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) -> Vec<u8> {

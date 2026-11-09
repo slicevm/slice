@@ -25,7 +25,6 @@ impl SliceIsolate {
             && (&bytecode[0..8] == b"SLICEBOA" || &bytecode[0..8] == crate::boacas::BOACAS_MAGIC)
         {
             let instantiate_ns = start.elapsed().as_nanos() as u64;
-            let exec_start = Instant::now();
             let base_fuel = ((bytecode.len() as u64) / 16).clamp(10, 250);
             let initial_charge = base_fuel.min(self.compartment.fuel_limit.max(1));
             self.compartment.consume_fuel(initial_charge)?;
@@ -75,8 +74,8 @@ impl SliceIsolate {
                     Ok(())
                 })?;
             }
-            let exec_ns = exec_start.elapsed().as_nanos() as u64;
             let total_ns = start.elapsed().as_nanos() as u64;
+            let exec_ns = total_ns.saturating_sub(instantiate_ns).max(1);
             return Ok(ExecutionMetrics {
                 tenant_id: self.compartment.tenant_id.clone(),
                 highest_tier_reached: self.current_tier,
@@ -100,7 +99,6 @@ impl SliceIsolate {
         self.current_tier = ExecutionTier::Tier0LLIntSnapshot;
 
         let instantiate_ns = start.elapsed().as_nanos() as u64;
-        let exec_start = Instant::now();
         let mut last_val = JsValue::Undefined;
 
         for op in &module.ops {
@@ -287,8 +285,8 @@ impl SliceIsolate {
             }
         }
 
-        let exec_ns = exec_start.elapsed().as_nanos() as u64;
         let total_ns = start.elapsed().as_nanos() as u64;
+        let exec_ns = total_ns.saturating_sub(instantiate_ns).max(1);
         if self.capture_return_json && self.last_return_json.is_none() {
             self.last_return_json =
                 crate::value_and_ast::js_value_to_optional_json_string(&last_val);

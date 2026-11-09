@@ -1,6 +1,8 @@
 //! Deterministic Replay (`__slice_det_random`, `__slice_det_now`), `os.tmpdir`, and `AsyncLocalStorage` Host Bindings.
 
-use crate::boa_realm::{BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE};
+use crate::boa_realm::{
+    mark_subsystem_dirty, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, DIRTY_ALS,
+};
 use crate::state_and_kv::splitmix64_next_f64;
 
 pub(crate) fn register_deterministic_host_functions(ctx: &mut boa_engine::Context) {
@@ -90,6 +92,7 @@ pub(crate) fn register_async_hooks_host_functions(ctx: &mut boa_engine::Context)
         1,
         NativeFunction::from_fn_ptr(|_this, args, _context| {
             let next = args.first().cloned().unwrap_or_else(BoaVal::undefined);
+            mark_subsystem_dirty(DIRTY_ALS);
             BOA_ALS_ACTIVE.with(|a| a.set(true));
             let prev = BOA_ALS_SNAP.with(|s| s.replace(next));
             Ok(prev)

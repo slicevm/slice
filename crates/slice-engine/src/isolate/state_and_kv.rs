@@ -111,11 +111,15 @@ pub(crate) fn restore_tenant_state(tenant_id: &str, checkpoint_id: u64) -> bool 
     let shards = EDGE_KV_SLAB
         .get_or_init(|| std::array::from_fn(|_| parking_lot::RwLock::new(FxHashMap::default())));
     for (idx, shard_snap) in snap.tenant_kv.into_iter().enumerate() {
-        let mut guard = shards[idx].write();
         if let Some(t_map) = shard_snap {
-            guard.insert(CompactString::new(tenant_id), t_map);
+            shards[idx]
+                .write()
+                .insert(CompactString::new(tenant_id), t_map);
         } else {
-            guard.remove(tenant_id);
+            let mut guard = shards[idx].write();
+            if !guard.is_empty() {
+                guard.remove(tenant_id);
+            }
         }
     }
     if let Some(start) = t0 {
