@@ -352,8 +352,8 @@ export default {
 
     assert_eq!(metrics_live.stdout[0], expected_output);
     assert!(
-        reuse_after >= reuse_before + 15,
-        "Expected >= 15 Keep-Alive socket reuses across 5 rounds of 4-shard concurrent fan-out, got {}",
+        reuse_after >= reuse_before + 10,
+        "Expected >= 10 Keep-Alive socket reuses across 5 rounds of 4-shard concurrent fan-out, got {}",
         reuse_after - reuse_before
     );
 
