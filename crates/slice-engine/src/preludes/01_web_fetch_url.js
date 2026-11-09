@@ -175,9 +175,19 @@
     return "/" + out.join("/") + (p.length > 1 && p.charCodeAt(p.length - 1) === 47 && out.length > 0 ? "/" : "");
   }
 
+  function __hasNonSpecialScheme(s) {
+    var ci = s.indexOf(":");
+    if (ci <= 0) return false;
+    var sl = s.indexOf("/");
+    if (sl !== -1 && sl < ci) return false;
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*$/.test(s.slice(0, ci))) return false;
+    var p = s.slice(0, ci + 1).toLowerCase();
+    return p !== "http:" && p !== "https:" && p !== "ws:" && p !== "wss:" && p !== "file:" && p !== "ftp:";
+  }
+
   function URL(input, base) {
     var raw = (input && input._isSliceUrl) ? input.href : (typeof input === "string" ? input.trim() : String(input).trim());
-    if (base !== undefined && raw.indexOf("https://") !== 0 && raw.indexOf("http://") !== 0 && raw.indexOf("://") === -1) {
+    if (base !== undefined && raw.indexOf("https://") !== 0 && raw.indexOf("http://") !== 0 && raw.indexOf("://") === -1 && !__hasNonSpecialScheme(raw)) {
       if (typeof base === "string" && raw.charCodeAt(0) === 47 && raw.charCodeAt(1) !== 47) {
         var bsi = base.indexOf("://");
         if (bsi > 0 && base.indexOf("?", bsi + 3) === -1 && base.indexOf("#", bsi + 3) === -1) {
@@ -189,7 +199,8 @@
         }
       } else {
         var b = (base && base._isSliceUrl) ? base : new URL(String(base));
-        if (raw.indexOf("//") === 0) raw = b.protocol + raw;
+        if (raw === "") raw = b.href;
+        else if (raw.indexOf("//") === 0) raw = b.protocol + raw;
         else if (raw.charCodeAt(0) === 47) raw = b.origin + raw;
         else if (raw.charCodeAt(0) === 63) raw = b.origin + b.pathname + raw;
         else if (raw.charCodeAt(0) === 35) raw = b.origin + b.pathname + b.search + raw;
@@ -210,7 +221,28 @@
       raw = raw.slice(0, qi);
     }
     var si = raw.indexOf("://");
-    if (si <= 0) throw new TypeError("Invalid URL: " + input);
+    if (si <= 0) {
+      var ci0 = raw.indexOf(":");
+      if (ci0 > 0 && /^[a-zA-Z][a-zA-Z0-9+.-]*$/.test(raw.slice(0, ci0))) {
+        var proto0 = raw.slice(0, ci0 + 1).toLowerCase();
+        if (proto0 !== "http:" && proto0 !== "https:" && proto0 !== "ws:" && proto0 !== "wss:" && proto0 !== "file:" && proto0 !== "ftp:" && raw.charCodeAt(ci0 + 1) !== 47) {
+          this.protocol = proto0;
+          this.username = "";
+          this.password = "";
+          this.hostname = "";
+          this.port = "";
+          this.host = "";
+          this.origin = "null";
+          this.pathname = raw.slice(ci0 + 1);
+          this.hash = hash === "#" ? "" : hash;
+          this.search = search === "?" ? "" : search;
+          this.href = this.protocol + this.pathname + this.search + this.hash;
+          this._sp = null;
+          return;
+        }
+      }
+      throw new TypeError("Invalid URL: " + input);
+    }
     this.protocol = raw.slice(0, si + 1).toLowerCase();
     var rest = raw.slice(si + 3);
     var pi = rest.indexOf("/");
@@ -250,14 +282,15 @@
     }
   });
   URL.prototype._syncSearch = function() {
+    var baseHref = (this.origin === "null" ? this.protocol : this.origin) + this.pathname;
     if (!this._sp || this._sp._p.length === 0) {
       this.search = "";
-      this.href = this.origin + this.pathname + this.hash;
+      this.href = baseHref + this.hash;
       return;
     }
     var qs = this._sp.toString();
     this.search = qs ? "?" + qs : "";
-    this.href = this.origin + this.pathname + this.search + this.hash;
+    this.href = baseHref + this.search + this.hash;
   };
   URL.prototype.toString = URL.prototype.toJSON = function() {
     return this.href;

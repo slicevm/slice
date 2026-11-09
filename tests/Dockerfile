@@ -64,6 +64,8 @@ RUN bun install --cwd /app/tests/apps/02-npm-ecosystem-suite \
     && bun install --cwd /app/tests/apps/24-tsx-ssr-and-wasm-edge-pipeline \
     && bun install --cwd /app/tests/frameworks/01-hono-edge-microservice \
     && bun install --cwd /app/tests/frameworks/02-itty-router-unjs-nitro-stack \
+    && bun install --cwd /app/tests/frameworks/04-sveltekit-edge-ssr \
+    && bun run --cwd /app/tests/frameworks/04-sveltekit-edge-ssr build \
     && bun install --cwd /app/tests/case_studies/01-tot-autonomous-sre-agent \
     && bun install --cwd /app/tests/case_studies/02-mcp-code-mode-orchestrator \
     && bun install --cwd /app/tests/case_studies/03-multi-tenant-saas-plugin-mesh \

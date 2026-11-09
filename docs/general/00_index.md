@@ -39,7 +39,7 @@ Traditional JavaScript runtimes (**Node.js**, **Deno**, and **Bun**) were built 
 | **[Chapter 06](./06_ai_agent_sandbox_checkpoints_and_mcp.md)** | **AI Agents, Nested MicroVM Sandboxes (`Slice.evalSandbox`), `< 5 us` Checkpoints & `slice mcp`**<br>Execute untrusted LLM or user plugin code safely in microseconds, branch and roll back VFS + KV state with `Slice.checkpoint()` / `Slice.restore()`, and integrate `slice mcp` with Claude Code and Cursor. |
 | **[Chapter 07](./07_node_compat_intrinsics_and_npm.md)** | **Node.js Compatibility (`node:*`), NPM Packages & Migration Guide (Node / Bun / Deno to Slice)**<br>Complete API reference for `node:fs`, `node:crypto`, `node:path`, `node:os`, `node:buffer`, `node:url`, `node:util`, `node:process`, and `node:test`, plus recipes for npm packages and step-by-step migration guides from Express/Fastify, Hono, Bun, and Deno. |
 | **[Chapter 08](./08_kernel_io_rings_and_rust_embedding.md)** | **Embedding Slice in Rust Applications & High-Density MicroVM Swarms**<br>Embed `slice-engine`, `slice-cas`, `slice-sandbox`, and `slice-io` as a library inside your own Rust services to run thousands of isolated tenant scripts in a single process. |
-| **[Chapter 09](./09_benchmarks_testing_and_docker_suite.md)** | **Time-Travel Testing (`slice test`), Deterministic Replay & Production Benchmarks**<br>Write rock-solid unit and security tests with `slice test` (`expect(...).toViolate()`, `.toStayWithinFuel()`, `< 5 us` VFS+KV rollbacks), replay bugs with `--deterministic`, and explore all 31 real-world benchmark applications and case studies. |
+| **[Chapter 09](./09_benchmarks_testing_and_docker_suite.md)** | **Time-Travel Testing (`slice test`), Deterministic Replay & Production Benchmarks**<br>Write rock-solid unit and security tests with `slice test` (`expect(...).toViolate()`, `.toStayWithinFuel()`, `< 5 us` VFS+KV rollbacks), replay bugs with `--deterministic`, and explore all 33 real-world benchmark applications, frameworks, and case studies. |
 | **[Compatibility Matrix](./COMPATIBILITY.md)** | **WinterTC, Node.js (`node:*`), `Buffer` & NPM Bundler Compatibility Matrix**<br>Complete reference of supported WinterTC Web APIs, `Uint8Array`-backed `Buffer` methods, `node:*` core modules, and `package.json` `"exports"` bundler capabilities. |
 
 ---
@@ -86,6 +86,6 @@ Traditional JavaScript runtimes (**Node.js**, **Deno**, and **Bun**) were built 
   - [`docs/system/09_research_deep_dive.md`](../system/09_research_deep_dive.md)
   - [`vendor/boa_engine/SLICE_PATCH.md`](../../vendor/boa_engine/SLICE_PATCH.md) (`SLICEBC1` Precompiled `CodeBlock` Vendor Patch Specification)
 - **Docker Application, Framework & Case Study Test Suites (`tests/`):**
-  - [`tests/README.md`](../../tests/README.md) (`tests/apps/` — 25 Production Apps)
-  - [`tests/frameworks/README.md`](../../tests/frameworks/README.md) (`tests/frameworks/` — Hono v4 & itty-router + UnJS)
-  - [`tests/case_studies/README.md`](../../tests/case_studies/README.md) (`tests/case_studies/` — 4 Architectural Differentiation Workloads)
+  - [`tests/README.md`](../../tests/README.md) (`tests/apps/` — 24 Production Apps)
+  - [`tests/frameworks/README.md`](../../tests/frameworks/README.md) (`tests/frameworks/` — Hono v4, itty-router + UnJS, Express/Polka, & SvelteKit 3 + Svelte 5)
+  - [`tests/case_studies/README.md`](../../tests/case_studies/README.md) (`tests/case_studies/` — 5 Architectural Differentiation Workloads)

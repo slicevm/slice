@@ -193,6 +193,16 @@
     return { str: JSON.stringify(rawBody), u8: null, fd: null };
   }
 
+  var __defaultReqSignal = {
+    aborted: false,
+    reason: undefined,
+    onabort: null,
+    addEventListener: function() {},
+    removeEventListener: function() {},
+    dispatchEvent: function() { return true; },
+    throwIfAborted: function() {}
+  };
+
   function Request(input, init) {
     if (input === "__SLICE_LIVE_REQ__") {
       this.method = __slice_http_method() || "GET";
@@ -205,7 +215,7 @@
       this._u8 = null;
       this._fd = null;
       this.redirect = "follow";
-      this.signal = null;
+      this.signal = __defaultReqSignal;
       this.bodyUsed = false;
       return;
     }
@@ -217,7 +227,7 @@
       this._u8 = null;
       this._fd = null;
       this.redirect = "follow";
-      this.signal = null;
+      this.signal = __defaultReqSignal;
       this.bodyUsed = false;
       return;
     }
@@ -253,7 +263,7 @@
       this._fd = null;
     }
     this.redirect = o.redirect ? String(o.redirect) : (isReq && input.redirect ? input.redirect : "follow");
-    this.signal = o.signal || (isReq && input.signal ? input.signal : null);
+    this.signal = o.signal || (isReq && input.signal ? input.signal : __defaultReqSignal);
     this.bodyUsed = false;
   }
   Request.prototype._isSliceReq = true;
@@ -267,12 +277,18 @@
     var oh = o.headers;
     this.headers = (oh && oh._isHeaders) ? oh : new Headers(oh);
     this._data = undefined;
+    this._stream = null;
     if (body === undefined || body === null) {
       this._body = "";
       this._u8 = null;
       this._fd = null;
     } else if (typeof body === "string") {
       this._body = body;
+      this._u8 = null;
+      this._fd = null;
+    } else if (typeof body === "object" && typeof body._toText === "function" && (!body._closed || body._startPromise)) {
+      this._stream = body;
+      this._body = "";
       this._u8 = null;
       this._fd = null;
     } else {
@@ -289,6 +305,18 @@
   var RP = Request.prototype, SP = Response.prototype;
   RP.text = SP.text = function() {
     this.bodyUsed = true;
+    if (this._stream) {
+      var st = this._stream, self = this;
+      if (st._startPromise) {
+        return st._startPromise.then(function() {
+          self._body = st._toText();
+          self._stream = null;
+          return self._body;
+        });
+      }
+      this._body = st._toText();
+      this._stream = null;
+    }
     if (this._data !== undefined && !this._body) this._body = JSON.stringify(this._data);
     return Promise.resolve(this._body);
   };
@@ -406,9 +434,31 @@
     var ks = Object.keys(h._m), out = [];
     for (var i = 0; i < ks.length; i++) {
       var k = ks[i];
-      if (k !== "content-type" && k !== "content-length") out.push([k, h._m[k]]);
+      if (k === "content-type" || k === "content-length") continue;
+      if (k === "set-cookie" && h._sc && h._sc.length > 1) {
+        for (var j = 0; j < h._sc.length; j++) out.push(["set-cookie", h._sc[j]]);
+      } else {
+        out.push([k, h._m[k]]);
+      }
     }
     return out.length > 0 ? JSON.stringify(out) : "";
+  }
+
+  function __finishSliceRes(r) {
+    var ct = (r.headers && r.headers._m && r.headers._m["content-type"]) || r._ct;
+    if (r._stream) {
+      var st = r._stream;
+      if (st._startPromise) {
+        st._startPromise.then(function() {
+          __slice_http_respond(r.status, st._toText(), ct, __resHdrJson(r.headers));
+        });
+        return;
+      }
+      __slice_http_respond(r.status, st._toText(), ct, __resHdrJson(r.headers));
+      return;
+    }
+    var rb = r._body || (r._data !== undefined ? JSON.stringify(r._data) : "");
+    __slice_http_respond(r.status, rb, ct, __resHdrJson(r.headers));
   }
 
   globalThis.Headers = Headers;
@@ -429,14 +479,10 @@
     var res = fn.call(h, new Request("__SLICE_LIVE_REQ__"), globalThis.process.env, __slice_web_ctx);
     if (res) {
       if (res._isSliceRes) {
-        var b = res._body || (res._data !== undefined ? JSON.stringify(res._data) : "");
-        __slice_http_respond(res.status, b, res._ct, __resHdrJson(res.headers));
+        __finishSliceRes(res);
       } else if (typeof res.then === "function") {
         res.then(function(r) {
-          if (r && r._isSliceRes) {
-            var rb = r._body || (r._data !== undefined ? JSON.stringify(r._data) : "");
-            __slice_http_respond(r.status, rb, r._ct, __resHdrJson(r.headers));
-          }
+          if (r && r._isSliceRes) __finishSliceRes(r);
         });
       }
     }

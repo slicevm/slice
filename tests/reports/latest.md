@@ -1,8 +1,8 @@
-# Slice (Nexus-JS) — Full 32-Workload & MicroVM Benchmark Report
+# Slice (Nexus-JS) — Full 33-Workload & MicroVM Benchmark Report
 
-* **Slice Version:** `v0.10.5` (Commit `7a86dd6`)
-* **Generated Timestamp (UTC):** `2026-11-09T07:35:38Z`
-* **Archive File:** [`tests/reports/bench_v0.10.4_20261109_073538Z_7a86dd6.md`](./bench_v0.10.4_20261109_073538Z_7a86dd6.md)
+* **Slice Version:** `v0.10.5` (Commit `a0c723e`)
+* **Generated Timestamp (UTC):** `2026-11-09T20:29:07Z`
+* **Archive File:** [`tests/reports/bench_v0.10.5_20261109_202907Z_a0c723e.md`](./bench_v0.10.5_20261109_202907Z_a0c723e.md)
 * **Canonical Latest Report:** [`tests/reports/latest.md`](./latest.md)
 * **Environment:** `Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)`
 * **Compared Runtimes:**
@@ -15,7 +15,7 @@
 
 ## 1. Executive Summary
 
-Across all **32 real-world multi-file TypeScript applications, framework suites, and case studies**, Slice beats **Deno (`v2.9.8`)** on **32/32** workloads, beats **Node.js (`v27.0.0-alpha.0.0.0`)** on **32/32** workloads, beats **Bun (`v1.4.4`)** on **29/32** workloads in cold one-shot execution, and beats **all 3 runtimes on 32/32 workloads in `--warm` pooled isolate execution**.
+Across all **33 real-world multi-file TypeScript applications, framework suites, and case studies**, Slice beats **Deno (`v2.9.8`)** on **33/33** workloads, beats **Node.js (`v27.0.0-alpha.0.0.0`)** on **33/33** workloads, beats **Bun (`v1.4.4`)** on **30/33** workloads in cold one-shot execution, and beats **all 3 runtimes on 33/33 workloads in `--warm` pooled isolate execution**.
 
 | Metric | Linux (`x86_64` Docker) | Windows (`x86_64` Host) | Comparison vs Runtimes & MicroVMs |
 | :--- | :---: | :---: | :--- |
@@ -39,7 +39,7 @@ Across all **32 real-world multi-file TypeScript applications, framework suites,
 
 ---
 
-## 3. Full 32-Workload Latency Comparison (20 Runs Each, Linux `x86_64` Docker)
+## 3. Full 33-Workload Latency Comparison (20 Runs Each, Linux `x86_64` Docker)
 
 | # | Workload (`tests/apps/`, `tests/frameworks/`, `tests/case_studies/`) | Slice Cold `.cas` (`SLICEBC\x01`) | Slice Standalone Bin (`SLICEBC\x01`) | Slice Warm (`--warm`) | Previous `.cas` (`Delta`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v27.0.0-alpha.0.0.0` | Slice Speedup vs Bun / Node.js |
 | :- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
@@ -67,9 +67,10 @@ Across all **32 real-world multi-file TypeScript applications, framework suites,
 | **22** | `22-worker-threads-and-raw-sockets` (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **`21.520 ms`** (`19.88 ms` Min) | **`21.161 ms`** | **`2.217 ms`** | `20.938 ms` (`2.8%`) | `57.852 ms` | `113.393 ms` | `103.236 ms` | **`2.73x Bun` (`26.09x` Warm) / `4.88x Node`** |
 | **23** | `23-wasm-crypto-and-simd-kernel` (Pure-Rust `WebAssembly` + 5-Ring WASM Sec) | **`15.912 ms`** (`14.82 ms` Min) | **`15.965 ms`** | **`1.955 ms`** | `15.069 ms` (`5.6%`) | `21.598 ms` | `42.081 ms` | `61.413 ms` | **`1.36x Bun` (`11.05x` Warm) / `3.86x Node`** |
 | **24** | `24-tsx-ssr-and-wasm-edge-pipeline` (`WebAssembly` SLA Scorer + SSR Pipeline) | **`8.927 ms`** (`8.48 ms` Min) | **`9.257 ms`** | **`1.824 ms`** | `8.419 ms` (`6.0%`) | `19.246 ms` | `43.391 ms` | `69.066 ms` | **`2.16x Bun` (`10.55x` Warm) / `7.74x Node`** |
-| **FW-01** | `FW-01: frameworks/01-hono-edge-microservice` (`hono@4.6.20` + `hono/cookie` + `ms`) | **`15.318 ms`** (`14.30 ms` Min) | **`16.199 ms`** | **`6.483 ms`** | `15.140 ms` (`1.2%`) | `20.415 ms` | `54.052 ms` | `96.960 ms` | **`1.33x Bun` (`3.15x` Warm) / `6.33x Node`** |
-| **FW-02** | `FW-02: frameworks/02-itty-router-unjs-nitro-stack` (`itty-router` + UnJS) | **`18.321 ms`** (`17.05 ms` Min) | **`18.916 ms`** | **`8.790 ms`** | `17.873 ms` (`2.5%`) | `20.104 ms` | `47.450 ms` | `89.334 ms` | **`1.10x Bun` (`2.29x` Warm) / `4.88x Node`** |
-| **FW-03** | `FW-03: frameworks/03-node-http-express-compat` (`node:http` + `node:stream` Express/Polka) | **`16.913 ms`** (`15.81 ms` Min) | **`17.379 ms`** | **`1.070 ms`** | `16.410 ms` (`3.1%`) | `35.105 ms` | `50.537 ms` | `86.593 ms` | **`2.08x Bun` (`32.81x` Warm) / `5.12x Node`** |
+| **FW-01** | `FW-01: frameworks/01-hono-edge-microservice` (`hono@4.6.20` + `hono/cookie` + `ms`) | **`16.071 ms`** (`14.92 ms` Min) | **`15.859 ms`** | **`5.721 ms`** | `15.318 ms` (`4.9%`) | `19.913 ms` | `53.967 ms` | `99.710 ms` | **`1.26x Bun` (`3.48x` Warm) / `6.29x Node`** |
+| **FW-02** | `FW-02: frameworks/02-itty-router-unjs-nitro-stack` (`itty-router` + UnJS) | **`19.468 ms`** (`18.25 ms` Min) | **`18.506 ms`** | **`9.528 ms`** | `18.321 ms` (`6.3%`) | `19.441 ms` | `47.715 ms` | `91.467 ms` | **`1.05x Bun` (`2.04x` Warm) / `4.94x Node`** |
+| **FW-03** | `FW-03: frameworks/03-node-http-express-compat` (`node:http` + `node:stream` Express/Polka) | **`16.830 ms`** (`16.23 ms` Min) | **`17.159 ms`** | **`1.300 ms`** | `16.913 ms` (`-0.5%`) | `49.313 ms` | `68.567 ms` | `95.033 ms` | **`2.93x Bun` (`37.93x` Warm) / `5.65x Node`** |
+| **FW-04** | `FW-04: frameworks/04-sveltekit-edge-ssr` (`@sveltejs/kit@3.1.1` + `svelte@5.57.3` + `devalue@6.0.3`) | **`36.160 ms`** (`33.80 ms` Min) | **`37.795 ms`** | **`17.019 ms`** | — | `46.579 ms` | `71.052 ms` | `119.710 ms` | **`1.29x Bun` (`2.74x` Warm) / `3.31x Node`** |
 | **CS-01** | `CS-01: case_studies/01-tot-autonomous-sre-agent` (20 ToT Sandboxes) | **`26.485 ms`** (`25.52 ms` Min) | **`28.096 ms`** | **`13.120 ms`** | `26.690 ms` (`-0.8%`) | `28.256 ms` | `72.647 ms` | `89.711 ms` | **`1.07x Bun` (`2.15x` Warm) / `3.39x Node`** |
 | **CS-02** | `CS-02: case_studies/02-mcp-code-mode-orchestrator` (`-98.4%` Tokens) | **`20.362 ms`** (`19.29 ms` Min) | **`21.082 ms`** | **`7.854 ms`** | `19.966 ms` (`2.0%`) | `16.230 ms` | `44.344 ms` | `66.894 ms` | **`2.07x Bun Warm` / `3.29x Node`** |
 | **CS-03** | `CS-03: case_studies/03-multi-tenant-saas-plugin-mesh` (12 Tenants + Hot-Swap) | **`13.984 ms`** (`12.95 ms` Min) | **`14.000 ms`** | **`6.270 ms`** | `13.726 ms` (`1.9%`) | `16.305 ms` | `49.236 ms` | `84.935 ms` | **`1.17x Bun` (`2.60x` Warm) / `6.07x Node`** |
@@ -87,15 +88,16 @@ Across all **32 real-world multi-file TypeScript applications, framework suites,
 | **App 21: RFC 6455 WS + Sec** | **13,952 KB (13.63 MB)** | 32,088 KB (31.34 MB) | 50,848 KB (49.66 MB) | 94,724 KB (92.50 MB) | **6.79x less than Node / 2.30x less than Bun** |
 | **App 22: Workers + Sockets** | **22,016 KB (21.50 MB)** | 41,568 KB (40.59 MB) | 62,868 KB (61.39 MB) | 94,028 KB (91.82 MB) | **4.27x less than Node / 1.89x less than Bun** |
 | **App 23: Pure-Rust WASM** | **18,944 KB (18.50 MB)** | 30,976 KB (30.25 MB) | 48,924 KB (47.78 MB) | 80,660 KB (78.77 MB) | **4.26x less than Node / 1.64x less than Bun** |
-| **FW 1: Hono v4 Microservice** | **15,232 KB (14.88 MB)** | 31,224 KB (30.49 MB) | 49,436 KB (48.28 MB) | 89,116 KB (87.03 MB) | **5.85x less than Node / 2.05x less than Bun** |
-| **FW 2: itty-router + UnJS** | **14,592 KB (14.25 MB)** | 32,128 KB (31.38 MB) | 48,544 KB (47.41 MB) | 87,180 KB (85.14 MB) | **5.97x less than Node / 2.20x less than Bun** |
+| **FW 1: Hono v4 Microservice** | **15,104 KB (14.75 MB)** | 30,624 KB (29.91 MB) | 49,008 KB (47.86 MB) | 88,988 KB (86.90 MB) | **5.89x less than Node / 2.03x less than Bun** |
+| **FW 2: itty-router + UnJS** | **14,720 KB (14.38 MB)** | 31,616 KB (30.88 MB) | 48,628 KB (47.49 MB) | 86,796 KB (84.76 MB) | **5.90x less than Node / 2.15x less than Bun** |
 | **App 24: WASM + SSR** | **13,696 KB (13.38 MB)** | 32,256 KB (31.50 MB) | 48,544 KB (47.41 MB) | 81,152 KB (79.25 MB) | **5.93x less than Node / 2.36x less than Bun** |
-| **FW 3: Express node:http** | **14,976 KB (14.63 MB)** | 33,152 KB (32.38 MB) | 46,956 KB (45.86 MB) | 80,136 KB (78.26 MB) | **5.35x less than Node / 2.21x less than Bun** |
+| **FW 3: Express node:http** | **14,976 KB (14.63 MB)** | 33,024 KB (32.25 MB) | 46,564 KB (45.47 MB) | 79,884 KB (78.01 MB) | **5.33x less than Node / 2.21x less than Bun** |
 | **01-tot-autonomous-sre-agent** | **18,560 KB (18.13 MB)** | 31,744 KB (31.00 MB) | 52,980 KB (51.74 MB) | 86,016 KB (84.00 MB) | **4.63x less than Node / 1.71x less than Bun** |
 | **02-mcp-code-mode-orchestrator** | **18,112 KB (17.69 MB)** | 27,904 KB (27.25 MB) | 47,068 KB (45.96 MB) | 80,648 KB (78.76 MB) | **4.45x less than Node / 1.54x less than Bun** |
 | **03-multi-tenant-saas-plugin-mesh** | **15,744 KB (15.38 MB)** | 28,672 KB (28.00 MB) | 49,480 KB (48.32 MB) | 87,940 KB (85.88 MB) | **5.59x less than Node / 1.82x less than Bun** |
 | **04-wasm-zero-trust-cdr-pipeline** | **19,968 KB (19.50 MB)** | 31,104 KB (30.38 MB) | 49,692 KB (48.53 MB) | 80,136 KB (78.26 MB) | **4.01x less than Node / 1.56x less than Bun** |
 | **05-time-travel-chaos-fuzzer-payments** | **15,744 KB (15.38 MB)** | 29,184 KB (28.50 MB) | 49,780 KB (48.61 MB) | 81,440 KB (79.53 MB) | **5.17x less than Node / 1.85x less than Bun** |
+| **FW 4: SvelteKit 3 + Svelte 5** | **20,992 KB (20.50 MB)** | 41,984 KB (41.00 MB) | 56,580 KB (55.25 MB) | 85,412 KB (83.41 MB) | **4.07x less than Node / 2.00x less than Bun** |
 
 ---
 

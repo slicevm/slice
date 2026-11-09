@@ -132,9 +132,9 @@ When deterministic mode is active:
 
 ---
 
-## 4. Running the 32-Workload Docker Benchmark Suite (`tests/`)
+## 4. Running the 33-Workload Docker Benchmark Suite (`tests/`)
 
-Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`](../../tests/README.md)) that tests **32 realistic multi-file TypeScript + `node_modules` applications, full-stack edge frameworks, and architectural case studies** against the latest official releases of **Bun**, **Deno**, and **Node.js**, verifying **100% byte-for-byte identical JSON output** across all 4 runtimes and automatically writing timestamped reports to [`tests/reports/`](../../tests/reports/latest.md).
+Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`](../../tests/README.md)) that tests **33 realistic multi-file TypeScript + `node_modules` applications, full-stack edge frameworks (`Hono`, `itty-router + UnJS`, `Express/Polka`, `SvelteKit 3 + Svelte 5`), and architectural case studies** against the latest official releases of **Bun**, **Deno**, and **Node.js**, verifying **100% byte-for-byte identical JSON output** across all 4 runtimes and automatically writing timestamped reports to [`tests/reports/`](../../tests/reports/latest.md).
 
 ```bash
 # Run the automated benchmark suite & doc sync (PowerShell or Bash)
@@ -144,12 +144,12 @@ Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`]
 ./scripts/run_benchmarks.sh "apps,frameworks,case_studies,serve,swarm"
 ```
 
-### 4.1 Verified Results Across All 32 Production Applications, Frameworks & Case Studies ([`tests/reports/latest.md`](../../tests/reports/latest.md))
+### 4.1 Verified Results Across All 33 Production Applications, Frameworks & Case Studies ([`tests/reports/latest.md`](../../tests/reports/latest.md))
 
 <!-- BENCHMARK_SUMMARY_START -->
-> **Latest Verified Benchmark Report:** **[`tests/reports/latest.md`](../../tests/reports/latest.md)** (Archive: [`bench_v0.10.4_20261109_073538Z_7a86dd6.md`](../../tests/reports/bench_v0.10.4_20261109_073538Z_7a86dd6.md))  
-> **Provenance:** Slice `v0.10.5` (`7a86dd6`) · Generated `2026-11-09T07:35:38Z` · Environment: `Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)`  
-> **Scorecard Across All 32 Production Workloads:** Beats **Deno (`v2.9.8`)** on **32/32**, **Node.js (`v27.0.0-alpha.0.0.0`)** on **32/32**, **Bun (`v1.4.4`)** on **29/32** cold one-shot, and **all 3 runtimes on 32/32 workloads in `--warm` pooled execution**.
+> **Latest Verified Benchmark Report:** **[`tests/reports/latest.md`](../../tests/reports/latest.md)** (Archive: [`bench_v0.10.5_20261109_202907Z_a0c723e.md`](../../tests/reports/bench_v0.10.5_20261109_202907Z_a0c723e.md))  
+> **Provenance:** Slice `v0.10.5` (`a0c723e`) · Generated `2026-11-09T20:29:07Z` · Environment: `Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)`  
+> **Scorecard Across All 33 Production Workloads:** Beats **Deno (`v2.9.8`)** on **33/33**, **Node.js (`v27.0.0-alpha.0.0.0`)** on **33/33**, **Bun (`v1.4.4`)** on **30/33** cold one-shot, and **all 3 runtimes on 33/33 workloads in `--warm` pooled execution**.
 
 #### 1. Core Architecture, HTTP Throughput & 1,000-Tenant MicroVM Density
 
@@ -159,10 +159,10 @@ Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`]
 | **1,000-Tenant MicroVM Swarm (Boot + Exec)** | **`1.51 ms` (`10.07 MB` RSS)** | > 5,000 ms | > 15,000 ms | > 30,000 ms | **> 3,900x faster / ~32,000x denser** |
 | **500-Module Monorepo Cold Boot (`stat()` Calls)** | **`3.41 ms` (`0 stat()`)** | `12.72 ms` (`500+ stat`) | `41.80 ms` (`500+ stat`) | `70.38 ms` (`1,500+ stat`) | **`3.7x` faster than Bun / `20.6x` Node.js** |
 | **HTTP/1.1 Keep-Alive Throughput (`16k` Reqs)** | **`148,407 req/s`** (Tier-0)<br>**`145,839 req/s`** (Tier-1) | `97,987 req/s` | `100,099 req/s` | `55,977 req/s` | **`1.51x` (`Tier-0`) / `1.49x` (`Tier-1`) vs `Bun.serve`** |
-| **Peak Process Memory (`Max RSS` Across Suite)** | **`13.38 – 21.50 MB`** | `27.25 – 40.59 MB` | `45.86 – 61.39 MB` | `69.90 – 92.50 MB` | **`2.0x–2.3x` less than Bun / `4.3x–6.8x` less than Node** |
+| **Peak Process Memory (`Max RSS` Across Suite)** | **`13.38 – 21.50 MB`** | `27.25 – 41.00 MB` | `45.47 – 61.39 MB` | `69.90 – 92.50 MB` | **`2.0x–2.3x` less than Bun / `4.3x–6.8x` less than Node** |
 | **Multi-Tenant Security Containment** | **`5 / 5 PASS`** (OCap+SES+Fuel+DLP) | `0 / 5` (Ambient) | `2 / 5` (Coarse CLI) | `0 / 5` (Ambient) | **Hardware & Language Zero-Trust Isolation** |
 
-#### 2. Real-Life Workload Summary by Domain (All 32 Workloads Aggregated)
+#### 2. Real-Life Workload Summary by Domain (All 33 Workloads Aggregated)
 
 | Workload Domain & Stack Coverage | Suites | Slice Cold `.cas` Avg (Range) | Slice Warm (`--warm`) Avg | Bun `v1.4.4` Avg | Deno `v2.9.8` Avg | Node.js `v27.0.0-alpha.0.0.0` Avg | Category Speedup vs Bun / Node.js |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
@@ -170,10 +170,10 @@ Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`]
 | **NPM Ecosystem, AST & Disk I/O (`Apps 02, 03, 06, 07, 08, 20`)**<br><sub>`semver`, `flatted`, `dlv`/`dset`, `mitt`, 10-Shard JSONL I/O, `Buffer`</sub> | `6` | **`11.85 ms`** (`8.04–14.66 ms`) | **`3.87 ms`** | `17.63 ms` | `51.32 ms` | `67.38 ms` | **`1.49x Bun` (`4.55x` Warm) / `5.69x Node`** |
 | **WinterTC Web Standards, Fetch Mesh & DLP (`Apps 09–14, 17–19`)**<br><sub>`Request`/`Response`, Static CDN `304`, SSE, Live `fetch`, WebCrypto</sub> | `9` | **`15.73 ms`** (`8.35–30.83 ms`) | **`8.25 ms`** | `19.22 ms` | `55.05 ms` | `97.59 ms` | **`1.22x Bun` (`2.33x` Warm) / `6.20x Node`** |
 | **Realtime WebSockets, Workers & Wasm/TSX (`Apps 15, 21–24`)**<br><sub>RFC 6455 WS, `worker_threads` + TCP/UDP, Pure-Rust `wasmi` Wasm, TSX SSR</sub> | `5` | **`14.43 ms`** (`8.93–21.16 ms`) | **`2.79 ms`** | `28.88 ms` | `64.18 ms` | `87.52 ms` | **`2.00x Bun` (`10.35x` Warm) / `6.07x Node`** |
-| **Full-Stack Edge & Node Frameworks (`FW 01–03`)**<br><sub>`Hono v4.6.20`, `itty-router + UnJS Nitro`, `Express/Polka node:http`</sub> | `3` | **`16.85 ms`** (`15.32–18.32 ms`) | **`5.45 ms`** | `25.21 ms` | `50.68 ms` | `90.96 ms` | **`1.50x Bun` (`4.63x` Warm) / `5.40x Node`** |
+| **Full-Stack Edge & Node Frameworks (`FW 01–04`)**<br><sub>`Hono v4.6.20`, `itty-router + UnJS Nitro`, `Express/Polka node:http`, `SvelteKit 3.1.1 + Svelte 5.57.3`</sub> | `4` | **`21.84 ms`** (`15.86–36.16 ms`) | **`8.39 ms`** | `33.81 ms` | `60.33 ms` | `101.48 ms` | **`1.55x Bun` (`4.03x` Warm) / `4.65x Node`** |
 | **AI Agent, Multi-Tenant SaaS & Chaos Case Studies (`CS 01–05`)**<br><sub>Depth-4 ToT Agent, MCP Code Mode, 12-Tenant Mesh, Wasm CDR, 48 Payment Sagas</sub> | `5` | **`19.29 ms`** (`13.98–26.48 ms`) | **`7.87 ms`** | `20.04 ms` | `54.98 ms` | `78.81 ms` | **`1.04x Bun` (`2.55x` Warm) / `4.08x Node`** |
 
-#### 3. Flagship Real-World Representative Workloads (8 of 32 Highlights)
+#### 3. Flagship Real-World Representative Workloads (9 of 33 Highlights)
 
 | # | Flagship Workload | Slice Cold `.cas` | Slice Warm (`--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v27.0.0-alpha.0.0.0` | Speedup vs Bun / Node.js |
 | :- | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
@@ -182,11 +182,12 @@ Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`]
 | **14** | `14-federated-api-mesh-dlp` (`bytes` + `dlv` + `dset` + Live `fetch`) | **`15.52 ms`** | **`7.87 ms`** | `22.38 ms` | `56.66 ms` | `112.02 ms` | **`1.44x Bun` (`2.84x` Warm) / `7.22x Node`** |
 | **20** | `20-node-compat-and-edge-router` (`Uint8Array` `Buffer`/Node Core/AST Bundler) | **`11.50 ms`** | **`0.55 ms`** | `22.56 ms` | `55.77 ms` | `71.86 ms` | **`1.96x Bun` (`41.39x` Warm) / `6.25x Node`** |
 | **22** | `22-worker-threads-and-raw-sockets` (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **`21.52 ms`** | **`2.22 ms`** | `57.85 ms` | `113.39 ms` | `103.24 ms` | **`2.73x Bun` (`26.09x` Warm) / `4.88x Node`** |
-| **FW-01** | `FW-01: frameworks/01-hono-edge-microservice` (`hono@4.6.20` + `hono/cookie` + `ms`) | **`15.32 ms`** | **`6.48 ms`** | `20.41 ms` | `54.05 ms` | `96.96 ms` | **`1.33x Bun` (`3.15x` Warm) / `6.33x Node`** |
+| **FW-01** | `FW-01: frameworks/01-hono-edge-microservice` (`hono@4.6.20` + `hono/cookie` + `ms`) | **`16.07 ms`** | **`5.72 ms`** | `19.91 ms` | `53.97 ms` | `99.71 ms` | **`1.26x Bun` (`3.48x` Warm) / `6.29x Node`** |
+| **FW-04** | `FW-04: frameworks/04-sveltekit-edge-ssr` (`@sveltejs/kit@3.1.1` + `svelte@5.57.3` + `devalue@6.0.3`) | **`36.16 ms`** | **`17.02 ms`** | `46.58 ms` | `71.05 ms` | `119.71 ms` | **`1.29x Bun` (`2.74x` Warm) / `3.31x Node`** |
 | **CS-01** | `CS-01: case_studies/01-tot-autonomous-sre-agent` (20 ToT Sandboxes) | **`26.48 ms`** | **`13.12 ms`** | `28.26 ms` | `72.65 ms` | `89.71 ms` | **`1.07x Bun` (`2.15x` Warm) / `3.39x Node`** |
 | **CS-05** | `CS-05: case_studies/05-time-travel-chaos-fuzzer-payments` (48 Payment Sagas) | **`18.13 ms`** | **`10.31 ms`** | `19.62 ms` | `62.94 ms` | `83.70 ms` | **`1.08x Bun` (`1.90x` Warm) / `4.62x Node`** |
 
-*Full 32-workload latency breakdown, standalone binary metrics, peak RSS per app, and historical reports: **[`tests/reports/latest.md`](../../tests/reports/latest.md)**.*
+*Full 33-workload latency breakdown, standalone binary metrics, peak RSS per app, and historical reports: **[`tests/reports/latest.md`](../../tests/reports/latest.md)**.*
 <!-- BENCHMARK_SUMMARY_END -->
 
 ---

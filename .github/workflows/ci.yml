@@ -80,10 +80,12 @@ jobs:
         run: |
           ./target/debug/slice serve ./tests/apps/09-wintertc-web-router --port=18080 --smoke-test
 
-      - name: Verify time-travel deterministic test runner
+      - name: Verify time-travel deterministic test runner and SvelteKit 3 Edge SSR
         run: |
           (cd ./tests/apps/15-time-travel-test-suite && npm install --no-audit --no-fund)
           ./target/debug/slice test ./tests/apps/15-time-travel-test-suite
+          (cd ./tests/frameworks/04-sveltekit-edge-ssr && npm install --no-audit --no-fund && npm run build)
+          ./target/debug/slice test ./tests/frameworks/04-sveltekit-edge-ssr
 
       - name: Verify Flagship Case Studies & Workbench (CS 01-05)
         run: |

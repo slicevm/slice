@@ -242,18 +242,325 @@ pub(crate) const DEFAULT_TSCONFIG_JSON: &str = r#"{
 }
 "#;
 
-pub(crate) fn cmd_init(args: &[String]) -> Result<()> {
-    let target_dir = if args.is_empty() {
-        PathBuf::from(".")
-    } else {
-        PathBuf::from(&args[0])
+pub(crate) const SVELTEKIT_ADAPTER_SLICE_JS: &str = r#"import fs from 'node:fs';
+import path from 'node:path';
+
+/**
+ * @sveltejs/kit Adapter for Slice Runtime (`@slicevm/adapter-sveltekit`)
+ * Supports SvelteKit 3 (`generateServerInstance`) and SvelteKit 2 (`generateManifest`).
+ * Emits:
+ *   - `build/client/` (static assets & immutable client chunks for `--static`)
+ *   - `build/server/` (SvelteKit SSR server chunks + server instance)
+ *   - `build/slice-entry.js` (WinterTC `export default { fetch }` entrypoint)
+ */
+export default function adapterSlice(options = {}) {
+    const out = options.out || 'build';
+    return {
+        name: '@slicevm/adapter-sveltekit',
+        async adapt(builder) {
+            const tmp = builder.getBuildDirectory('adapter-slice');
+            builder.rimraf(out);
+            builder.rimraf(tmp);
+            builder.mkdirp(tmp);
+            builder.mkdirp(`${out}/client`);
+            builder.mkdirp(`${out}/server`);
+
+            builder.writeClient(`${out}/client`);
+            builder.writePrerendered(`${out}/client`);
+            builder.copy(builder.getServerDirectory(), `${out}/server`);
+
+            let entryHeader;
+            if (typeof builder.generateServerInstance === 'function') {
+                builder.generateServerInstance(`${out}/server/instance.js`, {
+                    serverDirectory: `${out}/server`
+                });
+                entryHeader = `import { server } from './server/instance.js';\n`;
+            } else {
+                const manifestStr = builder.generateManifest({ relativePath: '.' });
+                fs.writeFileSync(
+                    `${out}/server/manifest.js`,
+                    `export const manifest = ${manifestStr};\n`
+                );
+                entryHeader = `import { Server } from './server/index.js';\nimport { manifest } from './server/manifest.js';\nconst server = new Server(manifest);\n`;
+            }
+
+            const entryCode = `${entryHeader}
+let initPromise = null;
+
+export default {
+    async fetch(request, env, ctx) {
+        if (!initPromise) {
+            initPromise = server.init({ env: env || (typeof process !== 'undefined' && process.env) || {} });
+        }
+        await initPromise;
+        return await server.respond(request, {
+            getClientAddress() {
+                return request.headers.get('x-forwarded-for') || '127.0.0.1';
+            },
+            platform: {
+                env,
+                ctx,
+                Slice: typeof Slice !== 'undefined' ? Slice : undefined
+            }
+        });
+    }
+};
+`;
+            fs.writeFileSync(path.join(out, 'slice-entry.js'), entryCode);
+            builder.log.minor(`Wrote Slice WinterTC entrypoint to ${out}/slice-entry.js and client assets to ${out}/client`);
+        }
     };
+}
+"#;
+
+fn init_sveltekit_template(target_dir: &std::path::Path, project_name: &str) -> Result<()> {
+    std::fs::create_dir_all(target_dir.join("src").join("routes").join("api").join("items"))?;
+
+    let manifest_path = target_dir.join("slice.toml");
+    if !manifest_path.exists() {
+        let toml_content = format!(
+            r#"[project]
+name = "{project_name}"
+version = "0.1.0"
+entrypoint = "./build/slice-entry.js"
+static_dir = "./build/client"
+
+[runtime]
+fuel_limit = 50_000_000
+memory_limit_mb = 64
+
+[capabilities]
+allow_env = ["NODE_ENV", "ORIGIN", "PORT"]
+"#
+        );
+        std::fs::write(&manifest_path, toml_content)?;
+    }
+
+    let dts_path = target_dir.join("slice.d.ts");
+    if !dts_path.exists() {
+        std::fs::write(&dts_path, DEFAULT_SLICE_D_TS)?;
+    }
+
+    let pkg_path = target_dir.join("package.json");
+    if !pkg_path.exists() {
+        let pkg_json = format!(
+            r#"{{
+  "name": "{project_name}",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {{
+    "dev": "vite dev",
+    "build": "vite build",
+    "pack": "slice pack ./build/slice-entry.js ./build/app.cas --static=./build/client",
+    "serve": "slice serve ./build/app.cas"
+  }},
+  "devDependencies": {{
+    "@sveltejs/kit": "^3.1.1",
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "svelte": "^5.57.3",
+    "vite": "^8.3.7"
+  }}
+}}
+"#
+        );
+        std::fs::write(&pkg_path, pkg_json)?;
+    }
+
+    let adapter_path = target_dir.join("adapter-slice.js");
+    if !adapter_path.exists() {
+        std::fs::write(&adapter_path, SVELTEKIT_ADAPTER_SLICE_JS)?;
+    }
+
+    let vite_cfg_path = target_dir.join("vite.config.js");
+    if !vite_cfg_path.exists() {
+        let vite_cfg = r#"import { sveltekit } from '@sveltejs/kit/vite';
+import { defineConfig } from 'vite';
+import adapterSlice from './adapter-slice.js';
+
+export default defineConfig({
+    plugins: [
+        sveltekit({
+            adapter: adapterSlice({ out: 'build' })
+        })
+    ]
+});
+"#;
+        std::fs::write(&vite_cfg_path, vite_cfg)?;
+    }
+
+    let app_html_path = target_dir.join("src").join("app.html");
+    if !app_html_path.exists() {
+        let app_html = r#"<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>SvelteKit on Slice Runtime</title>
+        %sveltekit.head%
+    </head>
+    <body data-sveltekit-preload-data="hover">
+        <div style="display: contents">%sveltekit.body%</div>
+    </body>
+</html>
+"#;
+        std::fs::write(&app_html_path, app_html)?;
+    }
+
+    let hooks_path = target_dir.join("src").join("hooks.server.js");
+    if !hooks_path.exists() {
+        let hooks_js = r#"/** @type {import('@sveltejs/kit').Handle} */
+export async function handle({ event, resolve }) {
+    event.locals.requestId = 'req-slice-edge';
+    const response = await resolve(event);
+    response.headers.set('x-powered-by', 'SvelteKit-on-Slice');
+    return response;
+}
+
+/** @type {import('@sveltejs/kit').HandleServerError} */
+export function handleError({ status, error }) {
+    if (status !== 404 && error?.status !== 404) {
+        console.error(error);
+    }
+}
+"#;
+        std::fs::write(&hooks_path, hooks_js)?;
+    }
+
+    let page_srv_path = target_dir.join("src").join("routes").join("+page.server.js");
+    if !page_srv_path.exists() {
+        let page_srv = r#"/** @type {import('./$types').PageServerLoad} */
+export async function load({ url, cookies, locals }) {
+    const visitor = url.searchParams.get('name') || 'Edge Developer';
+    const theme = cookies.get('theme') || 'light';
+    const hits = typeof Slice !== 'undefined' && Slice.kv
+        ? Slice.kv.incr('sveltekit_page_views', 1)
+        : 1;
+
+    return {
+        title: 'SvelteKit 3 + Svelte 5 SSR on Slice',
+        visitor,
+        theme,
+        requestId: locals.requestId || 'none',
+        hits,
+        runtime: 'Slice WinterTC Isolate'
+    };
+}
+
+/** @type {import('./$types').Actions} */
+export const actions = {
+    setTheme: async ({ request, cookies }) => {
+        const form = await request.formData();
+        const theme = String(form.get('theme') || 'dark');
+        cookies.set('theme', theme, { path: '/', httpOnly: true });
+        return { success: true, theme };
+    }
+};
+"#;
+        std::fs::write(&page_srv_path, page_srv)?;
+    }
+
+    let page_svelte_path = target_dir.join("src").join("routes").join("+page.svelte");
+    if !page_svelte_path.exists() {
+        let page_svelte = r#"<script>
+    let { data, form } = $props();
+</script>
+
+<main data-theme={data.theme}>
+    <h1>{data.title}</h1>
+    <p class="greeting">Hello, <strong>{data.visitor}</strong>!</p>
+    <p class="stats">Runtime: <code>{data.runtime}</code> | Request ID: <code>{data.requestId}</code> | Theme: <code>{data.theme}</code> | KV Page Views: <span id="hits">{data.hits}</span></p>
+    {#if form?.success}
+        <p class="action-result">Updated theme to: <strong>{form.theme}</strong></p>
+    {/if}
+</main>
+"#;
+        std::fs::write(&page_svelte_path, page_svelte)?;
+    }
+
+    let api_srv_path = target_dir
+        .join("src")
+        .join("routes")
+        .join("api")
+        .join("items")
+        .join("+server.js");
+    if !api_srv_path.exists() {
+        let api_srv = r#"import { json } from '@sveltejs/kit';
+
+/** @type {import('./$types').RequestHandler} */
+export async function GET({ url }) {
+    const tag = url.searchParams.get('tag') || 'all';
+    const count = typeof Slice !== 'undefined' && Slice.kv
+        ? Slice.kv.incr('sveltekit_api_calls', 1)
+        : 1;
+
+    return json({
+        ok: true,
+        framework: 'SvelteKit',
+        tag,
+        count,
+        items: ['slice-cas', 'slice-engine', 'slice-sandbox']
+    });
+}
+
+/** @type {import('./$types').RequestHandler} */
+export async function POST({ request }) {
+    const body = await request.json();
+    return json({
+        created: true,
+        received: body
+    }, { status: 201 });
+}
+"#;
+        std::fs::write(&api_srv_path, api_srv)?;
+    }
+
+    println!(
+        "Initialized Slice SvelteKit (SvelteKit 3 + Svelte 5) project '{}' in {}",
+        project_name,
+        target_dir.display()
+    );
+    println!("  Created {}", manifest_path.display());
+    println!("  Created {}", pkg_path.display());
+    println!("  Created {}", adapter_path.display());
+    println!("  Created {}", vite_cfg_path.display());
+    println!("  Created {}", page_svelte_path.display());
+    println!("  Created {}", api_srv_path.display());
+    println!("Next steps:");
+    println!("  npm install && npm run build");
+    println!("  slice pack ./build/slice-entry.js ./build/app.cas --static=./build/client");
+    println!("  slice serve ./build/app.cas --port=3000");
+    Ok(())
+}
+
+pub(crate) fn cmd_init(args: &[String]) -> Result<()> {
+    let mut target_dir = PathBuf::from(".");
+    let mut template = String::from("default");
+    let mut dir_set = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if let Some(t) = arg.strip_prefix("--template=") {
+            template = t.to_ascii_lowercase();
+        } else if (arg == "--template" || arg == "-t") && i + 1 < args.len() {
+            template = args[i + 1].to_ascii_lowercase();
+            i += 1;
+        } else if !arg.starts_with('-') && !dir_set {
+            target_dir = PathBuf::from(arg);
+            dir_set = true;
+        }
+        i += 1;
+    }
 
     std::fs::create_dir_all(target_dir.join("src"))?;
     let project_name = target_dir
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("slice-edge-app");
+
+    if template == "sveltekit" || template == "svelte" {
+        return init_sveltekit_template(&target_dir, project_name);
+    }
 
     let manifest_path = target_dir.join("slice.toml");
     if !manifest_path.exists() {

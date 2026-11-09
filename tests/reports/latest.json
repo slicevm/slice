@@ -1,8 +1,8 @@
 {
   "metadata": {
     "version": "0.10.5",
-    "commit": "7a86dd6",
-    "timestampUtc": "2026-11-09T07:35:38Z",
+    "commit": "a0c723e",
+    "timestampUtc": "2026-11-09T20:29:07Z",
     "environment": "Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)",
     "runtimes": {
       "slice": "v0.10.5",
@@ -10,7 +10,7 @@
       "deno": "v2.9.8",
       "node": "v27.0.0-alpha.0.0.0"
     },
-    "archiveFile": "tests/reports/bench_v0.10.4_20261109_073538Z_7a86dd6.md",
+    "archiveFile": "tests/reports/bench_v0.10.5_20261109_202907Z_a0c723e.md",
     "latestFile": "tests/reports/latest.md"
   },
   "microvm": {
@@ -508,16 +508,16 @@
       "label": "`FW-01: frameworks/01-hono-edge-microservice` (`hono@4.6.20` + `hono/cookie` + `ms`)",
       "category": "frameworks",
       "flagship": true,
-      "sliceCasMinMs": 14.299,
-      "sliceCasAvgMs": 15.318,
-      "sliceBinMinMs": 14.859,
-      "sliceBinAvgMs": 16.199,
-      "sliceSrcAvgMs": 51.827,
-      "sliceWarmMs": 6.483,
-      "prevSliceCasAvgMs": 15.14,
-      "bunAvgMs": 20.415,
-      "denoAvgMs": 54.052,
-      "nodeAvgMs": 96.96
+      "sliceCasMinMs": 14.922,
+      "sliceCasAvgMs": 16.071,
+      "sliceBinMinMs": 14.861,
+      "sliceBinAvgMs": 15.859,
+      "sliceSrcAvgMs": 54.768,
+      "sliceWarmMs": 5.721,
+      "prevSliceCasAvgMs": 15.318,
+      "bunAvgMs": 19.913,
+      "denoAvgMs": 53.967,
+      "nodeAvgMs": 99.71
     },
     {
       "num": 26,
@@ -526,16 +526,16 @@
       "label": "`FW-02: frameworks/02-itty-router-unjs-nitro-stack` (`itty-router` + UnJS)",
       "category": "frameworks",
       "flagship": false,
-      "sliceCasMinMs": 17.047,
-      "sliceCasAvgMs": 18.321,
-      "sliceBinMinMs": 17.639,
-      "sliceBinAvgMs": 18.916,
-      "sliceSrcAvgMs": 46.887,
-      "sliceWarmMs": 8.79,
-      "prevSliceCasAvgMs": 17.873,
-      "bunAvgMs": 20.104,
-      "denoAvgMs": 47.45,
-      "nodeAvgMs": 89.334
+      "sliceCasMinMs": 18.246,
+      "sliceCasAvgMs": 19.468,
+      "sliceBinMinMs": 17.449,
+      "sliceBinAvgMs": 18.506,
+      "sliceSrcAvgMs": 49.744,
+      "sliceWarmMs": 9.528,
+      "prevSliceCasAvgMs": 18.321,
+      "bunAvgMs": 19.441,
+      "denoAvgMs": 47.715,
+      "nodeAvgMs": 91.467
     },
     {
       "num": 32,
@@ -544,16 +544,34 @@
       "label": "`FW-03: frameworks/03-node-http-express-compat` (`node:http` + `node:stream` Express/Polka)",
       "category": "frameworks",
       "flagship": false,
-      "sliceCasMinMs": 15.813,
-      "sliceCasAvgMs": 16.913,
-      "sliceBinMinMs": 16.137,
-      "sliceBinAvgMs": 17.379,
-      "sliceSrcAvgMs": 23.252,
-      "sliceWarmMs": 1.07,
-      "prevSliceCasAvgMs": 16.41,
-      "bunAvgMs": 35.105,
-      "denoAvgMs": 50.537,
-      "nodeAvgMs": 86.593
+      "sliceCasMinMs": 16.234,
+      "sliceCasAvgMs": 16.83,
+      "sliceBinMinMs": 16.08,
+      "sliceBinAvgMs": 17.159,
+      "sliceSrcAvgMs": 25.395,
+      "sliceWarmMs": 1.3,
+      "prevSliceCasAvgMs": 16.913,
+      "bunAvgMs": 49.313,
+      "denoAvgMs": 68.567,
+      "nodeAvgMs": 95.033
+    },
+    {
+      "num": 33,
+      "code": "FW-04",
+      "id": "frameworks/04-sveltekit-edge-ssr",
+      "label": "`FW-04: frameworks/04-sveltekit-edge-ssr` (`@sveltejs/kit@3.1.1` + `svelte@5.57.3` + `devalue@6.0.3`)",
+      "category": "frameworks",
+      "flagship": true,
+      "sliceCasMinMs": 33.804,
+      "sliceCasAvgMs": 36.16,
+      "sliceBinMinMs": 33.983,
+      "sliceBinAvgMs": 37.795,
+      "sliceSrcAvgMs": 160.588,
+      "sliceWarmMs": 17.019,
+      "prevSliceCasAvgMs": null,
+      "bunAvgMs": 46.579,
+      "denoAvgMs": 71.052,
+      "nodeAvgMs": 119.71
     },
     {
       "num": 27,
@@ -690,18 +708,18 @@
     {
       "id": "FW 1: Hono v4 Microservice",
       "label": "FW 1: Hono v4 Microservice",
-      "sliceKb": 15232,
-      "bunKb": 31224,
-      "denoKb": 49436,
-      "nodeKb": 89116
+      "sliceKb": 15104,
+      "bunKb": 30624,
+      "denoKb": 49008,
+      "nodeKb": 88988
     },
     {
       "id": "FW 2: itty-router + UnJS",
       "label": "FW 2: itty-router + UnJS",
-      "sliceKb": 14592,
-      "bunKb": 32128,
-      "denoKb": 48544,
-      "nodeKb": 87180
+      "sliceKb": 14720,
+      "bunKb": 31616,
+      "denoKb": 48628,
+      "nodeKb": 86796
     },
     {
       "id": "App 24: WASM + SSR",
@@ -715,9 +733,9 @@
       "id": "FW 3: Express node:http",
       "label": "FW 3: Express node:http",
       "sliceKb": 14976,
-      "bunKb": 33152,
-      "denoKb": 46956,
-      "nodeKb": 80136
+      "bunKb": 33024,
+      "denoKb": 46564,
+      "nodeKb": 79884
     },
     {
       "id": "01-tot-autonomous-sre-agent",
@@ -758,6 +776,14 @@
       "bunKb": 29184,
       "denoKb": 49780,
       "nodeKb": 81440
+    },
+    {
+      "id": "FW 4: SvelteKit 3 + Svelte 5",
+      "label": "FW 4: SvelteKit 3 + Svelte 5",
+      "sliceKb": 20992,
+      "bunKb": 41984,
+      "denoKb": 56580,
+      "nodeKb": 85412
     }
   ]
 }

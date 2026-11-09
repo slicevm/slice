@@ -4,6 +4,10 @@
 *.cas
 *.snap
 **/node_modules/
+**/.svelte-kit/
+tests/frameworks/04-sveltekit-edge-ssr/src/build/
+tests/frameworks/04-sveltekit-edge-ssr/build/
+tests/frameworks/04-sveltekit-edge-ssr/package-lock.json
 /docs/system/raw_results_*.json
 /docs/general/raw_results_*.json
 /docs/raw_results_*.json
