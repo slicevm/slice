@@ -48,6 +48,19 @@ pub fn is_builtin_module(spec: &str) -> bool {
             | "vm"
             | "string_decoder"
             | "querystring"
+            | "readline"
+            | "readline/promises"
+            | "diagnostics_channel"
+            | "dns"
+            | "dns/promises"
+            | "tls"
+            | "console"
+            | "v8"
+            | "inspector"
+            | "inspector/promises"
+            | "cluster"
+            | "http2"
+            | "wasi"
     )
 }
 
@@ -114,11 +127,64 @@ thread_local! {
         std::cell::RefCell::new(FxHashMap::default());
     pub(crate) static MUTABLE_EXPORTS_CACHE: std::cell::RefCell<FxHashMap<PathBuf, FxHashSet<String>>> =
         std::cell::RefCell::new(FxHashMap::default());
+    static WARNED_MISSING_PACKAGES: std::cell::RefCell<FxHashSet<String>> =
+        std::cell::RefCell::new(FxHashSet::default());
 }
 
 pub fn clear_canonical_mod_id_cache() {
     CANONICAL_MOD_ID_CACHE.with(|c| c.borrow_mut().clear());
     MUTABLE_EXPORTS_CACHE.with(|c| c.borrow_mut().clear());
+    WARNED_MISSING_PACKAGES.with(|c| c.borrow_mut().clear());
+}
+
+fn bare_package_name(spec: &str) -> Option<&str> {
+    if spec.is_empty() || spec.starts_with('.') || spec.starts_with('/') || spec.contains(':') {
+        return None;
+    }
+    if spec.starts_with('@') {
+        let mut parts = spec.splitn(3, '/');
+        let scope = parts.next()?;
+        let pkg = parts.next()?;
+        Some(&spec[..scope.len() + 1 + pkg.len()])
+    } else {
+        Some(spec.split('/').next().unwrap_or(spec))
+    }
+}
+
+fn warn_if_declared_in_package_json_but_uninstalled(spec: &str, from_dir: &Path) {
+    let Some(pkg_name) = bare_package_name(spec) else {
+        return;
+    };
+    let already_warned = WARNED_MISSING_PACKAGES.with(|w| !w.borrow_mut().insert(pkg_name.to_string()));
+    if already_warned {
+        return;
+    }
+    let mut cur = Some(from_dir);
+    while let Some(dir) = cur {
+        let pkg_json = dir.join("package.json");
+        if pkg_json.is_file() {
+            if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let declared = ["dependencies", "devDependencies", "peerDependencies"]
+                        .iter()
+                        .any(|sec| {
+                            val.get(*sec)
+                                .and_then(|v| v.as_object())
+                                .is_some_and(|obj| obj.contains_key(pkg_name))
+                        });
+                    if declared && !dir.join("node_modules").join(pkg_name).exists() {
+                        eprintln!(
+                            "Hint: package '{}' is declared in {} but missing from node_modules/ — run 'npm install' (or pnpm/bun install) before packing or running.",
+                            pkg_name,
+                            pkg_json.display()
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        cur = dir.parent();
+    }
 }
 
 #[inline]
@@ -147,6 +213,7 @@ pub fn resolve_spec_and_record(spec: &str, from_dir: &Path, deps_out: &mut Vec<P
     } else if is_jsx_runtime_builtin(spec) {
         normalize_builtin_specifier(spec)
     } else {
+        warn_if_declared_in_package_json_but_uninstalled(spec, from_dir);
         spec.to_string()
     }
 }

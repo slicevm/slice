@@ -51,4 +51,10 @@ pub struct CasIndexHeader {
     /// Compact source-line table (`(compacted_line_1, "#slice-source payload")`) for `.cas` and `SLICEEXE` stack traces
     #[serde(default)]
     pub source_map_markers: Vec<(usize, String)>,
+    /// Optional BLAKE3 hash of the project's lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`)
+    #[serde(default)]
+    pub lockfile_blake3: Option<String>,
+    /// Resolved `(package_name, resolved_version)` pairs recorded from `package.json` and `node_modules/`
+    #[serde(default)]
+    pub resolved_dependencies: Vec<(String, String)>,
 }

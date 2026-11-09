@@ -203,6 +203,15 @@ impl Shape {
         }
     }
 
+    /// Invokes `f` with a zero-allocation slice of `(PropertyKey, Slot)` in insertion order.
+    #[inline]
+    pub(crate) fn with_property_keys<R>(&self, f: impl FnOnce(&[(PropertyKey, Slot)]) -> R) -> R {
+        match &self.inner {
+            Inner::Shared(shape) => shape.with_property_keys(f),
+            Inner::Unique(shape) => shape.with_property_keys(f),
+        }
+    }
+
     /// Return location in memory of the [`Shape`].
     #[inline]
     #[must_use]

@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 pub struct CasBuilder {
     entrypoint: String,
     modules: Vec<(String, PathBuf, String, Vec<u8>)>, // (specifier, path, stripped_source, precompiled_bytecode)
+    lockfile_blake3: Option<String>,
+    resolved_dependencies: Vec<(String, String)>,
 }
 
 impl CasBuilder {
@@ -21,6 +23,76 @@ impl CasBuilder {
         Self {
             entrypoint: entrypoint.into(),
             modules: Vec::new(),
+            lockfile_blake3: None,
+            resolved_dependencies: Vec::new(),
+        }
+    }
+
+    /// Scans `project_path` (or its ancestor directories) for `package.json` and lockfiles
+    /// (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `bun.lockb`), recording
+    /// deterministic lockfile BLAKE3 provenance and resolved `node_modules/<pkg>/package.json` versions.
+    pub fn scan_project_dependencies(&mut self, project_path: &Path) {
+        let start_dir = if project_path.is_dir() {
+            project_path
+        } else {
+            project_path.parent().unwrap_or(project_path)
+        };
+        let mut cur = Some(start_dir);
+        while let Some(dir) = cur {
+            let pkg_json = dir.join("package.json");
+            if pkg_json.is_file() {
+                for lock_name in [
+                    "package-lock.json",
+                    "pnpm-lock.yaml",
+                    "yarn.lock",
+                    "bun.lock",
+                    "bun.lockb",
+                ] {
+                    let lock_path = dir.join(lock_name);
+                    if lock_path.is_file() {
+                        if let Ok(bytes) = std::fs::read(&lock_path) {
+                            self.lockfile_blake3 =
+                                Some(blake3::hash(&bytes).to_hex().to_string());
+                            break;
+                        }
+                    }
+                }
+                if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        let mut deps = Vec::new();
+                        for section in ["dependencies", "devDependencies"] {
+                            if let Some(obj) = val.get(section).and_then(|v| v.as_object()) {
+                                for (name, spec_val) in obj {
+                                    let declared =
+                                        spec_val.as_str().unwrap_or("*").to_string();
+                                    let resolved_pkg = dir
+                                        .join("node_modules")
+                                        .join(name)
+                                        .join("package.json");
+                                    let version = std::fs::read_to_string(&resolved_pkg)
+                                        .ok()
+                                        .and_then(|s| {
+                                            serde_json::from_str::<serde_json::Value>(&s).ok()
+                                        })
+                                        .and_then(|v| {
+                                            v.get("version")
+                                                .and_then(|ver| ver.as_str())
+                                                .map(|s| s.to_string())
+                                        })
+                                        .unwrap_or(declared);
+                                    if !deps.iter().any(|(n, _)| n == name) {
+                                        deps.push((name.clone(), version));
+                                    }
+                                }
+                            }
+                        }
+                        deps.sort_by(|a, b| a.0.cmp(&b.0));
+                        self.resolved_dependencies = deps;
+                    }
+                }
+                break;
+            }
+            cur = dir.parent();
         }
     }
 
@@ -49,6 +121,7 @@ impl CasBuilder {
         root_dir: &Path,
         bytecode_compiler_fn: &dyn Fn(&str) -> Vec<u8>,
     ) -> Result<usize> {
+        self.scan_project_dependencies(root_dir);
         let mut count = 0;
         let mut stack = vec![root_dir.to_path_buf()];
 
@@ -318,6 +391,8 @@ impl CasBuilder {
             radix_resolution_map: radix_map,
             blobs,
             source_map_markers,
+            lockfile_blake3: self.lockfile_blake3.clone(),
+            resolved_dependencies: self.resolved_dependencies.clone(),
         };
 
         let header_bytes = serde_json::to_vec(&header)?;

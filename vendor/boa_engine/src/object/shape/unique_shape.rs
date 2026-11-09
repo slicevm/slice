@@ -233,6 +233,13 @@ impl UniqueShape {
         self.property_table().borrow().keys()
     }
 
+    /// Invokes `f` with a zero-allocation slice of `(PropertyKey, Slot)` in creation order.
+    #[inline]
+    pub(crate) fn with_property_keys<R>(&self, f: impl FnOnce(&[(PropertyKey, Slot)]) -> R) -> R {
+        let property_table = self.property_table().borrow();
+        f(&property_table.keys)
+    }
+
     /// Return location in memory of the [`UniqueShape`].
     pub(crate) fn to_addr_usize(&self) -> usize {
         let ptr: *const _ = self.inner.as_ref();

@@ -137,7 +137,11 @@ pub fn map_bundled_error_location(bundled_js: &str, error_msg: &str) -> String {
             if line_1 > b_line {
                 break;
             }
-            if let Some(rest) = line.trim().strip_prefix("// #slice-source: ") {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed
+                .strip_prefix("// #slice-source: ")
+                .or_else(|| trimmed.strip_prefix("//@sm:"))
+            {
                 let (s, f, lm) = parse_slice_source_marker(rest);
                 active_short = s;
                 active_full = f;
@@ -146,9 +150,9 @@ pub fn map_bundled_error_location(bundled_js: &str, error_msg: &str) -> String {
             }
         }
         if !active_short.is_empty() && b_line > marker_line_idx {
-            let rel_idx_0 = (b_line - marker_line_idx).saturating_sub(1);
+            let rel_idx_0 = count_code_lines_between(&lines, marker_line_idx, b_line);
             let mut resolved_line = lookup_embedded_line_map(active_line_map, rel_idx_0)
-                .unwrap_or(b_line - marker_line_idx);
+                .unwrap_or(rel_idx_0 + 1);
             if let Some(stmt_text) = lines.get(b_line - 1).map(|s| s.trim()) {
                 if !stmt_text.is_empty() {
                     if let Ok(orig_src) = std::fs::read_to_string(active_full) {
@@ -176,13 +180,21 @@ pub fn map_bundled_error_location(bundled_js: &str, error_msg: &str) -> String {
         .trim();
 
     if !core_msg.is_empty() {
+        let prefix_probe = core_msg
+            .split_once(':')
+            .map(|(p, _)| p.trim())
+            .filter(|p| p.len() >= 6);
         let mut active_short = "";
         let mut active_full = "";
         let mut active_line_map = "";
         let mut marker_line_idx = 0usize;
         for (idx, line) in lines.iter().enumerate() {
             let line_1 = idx + 1;
-            if let Some(rest) = line.trim().strip_prefix("// #slice-source: ") {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed
+                .strip_prefix("// #slice-source: ")
+                .or_else(|| trimmed.strip_prefix("//@sm:"))
+            {
                 let (s, f, lm) = parse_slice_source_marker(rest);
                 active_short = s;
                 active_full = f;
@@ -190,16 +202,22 @@ pub fn map_bundled_error_location(bundled_js: &str, error_msg: &str) -> String {
                 marker_line_idx = line_1;
                 continue;
             }
-            if !active_short.is_empty() && line.contains(core_msg) {
-                let rel_idx_0 = (line_1 - marker_line_idx).saturating_sub(1);
+            let matches_line = !active_short.is_empty()
+                && (line.contains(core_msg)
+                    || prefix_probe.is_some_and(|pp| {
+                        (line.contains("throw ") || line.contains("Error(")) && line.contains(pp)
+                    }));
+            if matches_line {
+                let rel_idx_0 = count_code_lines_between(&lines, marker_line_idx, line_1);
                 let mut resolved_line = lookup_embedded_line_map(active_line_map, rel_idx_0)
-                    .unwrap_or(line_1 - marker_line_idx);
+                    .unwrap_or(rel_idx_0 + 1);
                 if let Ok(orig_src) = std::fs::read_to_string(active_full) {
-                    if let Some((orig_idx, _)) = orig_src
-                        .lines()
-                        .enumerate()
-                        .find(|(_, ol)| ol.contains(core_msg))
-                    {
+                    if let Some((orig_idx, _)) = orig_src.lines().enumerate().find(|(_, ol)| {
+                        ol.contains(core_msg)
+                            || prefix_probe.is_some_and(|pp| {
+                                (ol.contains("throw ") || ol.contains("Error(")) && ol.contains(pp)
+                            })
+                    }) {
                         resolved_line = orig_idx + 1;
                     }
                 }
@@ -362,17 +380,30 @@ pub fn map_bundled_stack_trace(bundled_js: &str, raw_stack: &str) -> String {
         let mut resolved: Option<(&str, usize)> = None;
 
         if let Some(fn_name) = fn_name_opt {
-            let fn_pat_1 = format!("function {}(", fn_name);
-            let fn_pat_2 = format!("function {} (", fn_name);
-            let fn_pat_3 = format!("{} = function", fn_name);
+            let bare_fn = fn_name
+                .rsplit_once('.')
+                .map(|(_, m)| m)
+                .unwrap_or(fn_name);
+            let fn_pat_1 = format!("function {}(", bare_fn);
+            let fn_pat_2 = format!("function {} (", bare_fn);
+            let fn_pat_3 = format!("{} = function", bare_fn);
+            let method_pat_1 = format!("{}(", bare_fn);
+            let method_pat_2 = format!("async {}(", bare_fn);
+            let method_pat_3 = format!("static {}(", bare_fn);
 
             for sec in &sections {
                 let mut decl_line_1 = None;
                 for l_1 in (sec.marker_line_1 + 1)..=sec.end_line_1.min(lines.len()) {
                     let text = lines[l_1 - 1];
+                    let trimmed_l = text.trim();
+                    let is_method_decl = (trimmed_l.starts_with(&method_pat_1)
+                        || trimmed_l.starts_with(&method_pat_2)
+                        || trimmed_l.starts_with(&method_pat_3))
+                        && trimmed_l.ends_with('{');
                     if text.contains(&fn_pat_1)
                         || text.contains(&fn_pat_2)
                         || text.contains(&fn_pat_3)
+                        || is_method_decl
                     {
                         decl_line_1 = Some(l_1);
                         break;
@@ -407,7 +438,9 @@ pub fn map_bundled_stack_trace(bundled_js: &str, raw_stack: &str) -> String {
                             }
                         }
                     } else if let Some(callee) = prev_callee_fn {
-                        let call_pat = format!("{}(", callee);
+                        let bare_callee =
+                            callee.rsplit_once('.').map(|(_, m)| m).unwrap_or(callee);
+                        let call_pat = format!("{}(", bare_callee);
                         for l_1 in d_line_1..=fn_end_1 {
                             if lines[l_1 - 1].contains(&call_pat) {
                                 target_line_1 = l_1;
@@ -428,13 +461,18 @@ pub fn map_bundled_stack_trace(bundled_js: &str, raw_stack: &str) -> String {
                     break;
                 }
             }
-        } else {
+        }
+        if resolved.is_none() {
             if let Some(callee) = prev_callee_fn {
-                let call_pat = format!("{}(", callee);
+                let bare_callee = callee.rsplit_once('.').map(|(_, m)| m).unwrap_or(callee);
+                let call_pat = format!("{}(", bare_callee);
                 for sec in sections.iter().rev() {
                     for l_1 in (sec.marker_line_1 + 1)..=sec.end_line_1.min(lines.len()) {
                         let t = lines[l_1 - 1].trim();
-                        if t.contains(&call_pat) && !t.starts_with("function ") {
+                        if t.contains(&call_pat)
+                            && !t.starts_with("function ")
+                            && !(t.starts_with(&call_pat) && t.ends_with('{'))
+                        {
                             let orig_line = resolve_section_line(&lines, sec, l_1);
                             resolved = Some((sec.short_label, orig_line));
                             break;

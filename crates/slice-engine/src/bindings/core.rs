@@ -31,6 +31,18 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
         return;
     }
 
+    static PERF_ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_perf_now"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let origin = PERF_ORIGIN.get_or_init(std::time::Instant::now);
+            let elapsed_ms = origin.elapsed().as_secs_f64() * 1000.0
+                + (crate::event_loop::virtual_time_warped_ms() as f64);
+            Ok(BoaVal::from(elapsed_ms))
+        }),
+    );
+
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_console_log"),
         1,

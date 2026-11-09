@@ -151,7 +151,6 @@ pub(crate) fn build_fused_prelude_prefix(
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(ULTRA_CORE_PRELUDE.len() + 8192);
     out.extend_from_slice(ULTRA_CORE_PRELUDE);
-    out.push(b'\n');
     let mut active_mask: u32 = 0;
     for shard_id in SHARD_LOAD_ORDER {
         let bit = 1u32 << shard_id;
@@ -159,7 +158,6 @@ pub(crate) fn build_fused_prelude_prefix(
             let shard_bytes = shard_prelude_bytes(shard_id);
             if !shard_bytes.is_empty() {
                 out.extend_from_slice(shard_bytes);
-                out.push(b'\n');
                 active_mask |= bit;
             }
         }
@@ -171,26 +169,27 @@ pub(crate) fn build_fused_prelude_prefix(
         let mut mask_buf = itoa::Buffer::new();
         out.extend_from_slice(b"globalThis.__shMask|=");
         out.extend_from_slice(mask_buf.format(active_mask).as_bytes());
-        out.extend_from_slice(b";\n");
+        out.push(b';');
     }
     for builtin_bit in 19..=28u32 {
         if (shards_mask & (1u32 << builtin_bit)) != 0 {
             let b_bytes = crate::node_builtins::builtin_snippet_for_bit(builtin_bit);
             if !b_bytes.is_empty() {
                 out.extend_from_slice(b_bytes);
-                out.push(b'\n');
+                if !b_bytes.ends_with(b";") {
+                    out.push(b';');
+                }
             }
         }
     }
     if init_lazy_getters {
         out.extend_from_slice(LAZY_GETTERS_INIT_PRELUDE);
-        out.push(b'\n');
     }
     if has_next_tick {
-        out.extend_from_slice(b"__slice_set_next_tick_hook(true);\n");
+        out.extend_from_slice(b"__slice_set_next_tick_hook(true);");
     }
     out.extend_from_slice(
-        b"if(globalThis.__slice_bf){if(globalThis.__slice_bf&1)__slice_sync_process_env(true);if(globalThis.__slice_bf&2)__slice_set_det_mode(true);if(globalThis.__slice_bf&4)globalThis.__slice_init_worker_self_env(true);}\n",
+        b"if(globalThis.__slice_bf){if(globalThis.__slice_bf&1)__slice_sync_process_env(true);if(globalThis.__slice_bf&2)__slice_set_det_mode(true);if(globalThis.__slice_bf&4)globalThis.__slice_init_worker_self_env(true);}",
     );
     out
 }

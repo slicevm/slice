@@ -3,7 +3,10 @@ pub(crate) mod tls;
 
 #[cfg(test)]
 pub(crate) use connection::serve_connection_keep_alive;
-pub(crate) use connection::serve_connection_keep_alive_with_tls_and_secrets;
+pub(crate) use connection::{
+    serve_connection_keep_alive_with_tls_and_secrets, serve_connection_with_isolate,
+    spawn_worker_isolate,
+};
 pub(crate) use tls::load_tls_server_config;
 
 use crate::config::{install_ctrlc_handler, ResolvedExecutionConfig};
@@ -193,17 +196,23 @@ console.log(route_res);
             let mut read_buf = vec![0u8; 65536];
             let mut write_buf = Vec::with_capacity(4096);
             let mut local_slot = (worker_idx as u32) << 20;
+            let mut isolate = spawn_worker_isolate(
+                local_slot,
+                deterministic_seed,
+                &caps_clone,
+                &secrets_clone,
+                fuel_limit,
+                mem_limit,
+            );
             while let Ok((stream, _)) = listener_clone.accept() {
                 local_slot = local_slot.wrapping_add(1);
-                let _ = serve_connection_keep_alive_with_tls_and_secrets(
+                let _ = serve_connection_with_isolate(
                     stream,
                     local_slot,
+                    &mut isolate,
                     &bc_clone,
                     td_clone.as_deref().map(|p| p.as_path()),
                     st_clone.as_deref(),
-                    deterministic_seed,
-                    &caps_clone,
-                    &secrets_clone,
                     fuel_limit,
                     mem_limit,
                     &mut read_buf,
@@ -219,17 +228,23 @@ console.log(route_res);
     let mut read_buf = vec![0u8; 65536];
     let mut write_buf = Vec::with_capacity(4096);
     let mut local_slot: u32 = 0;
+    let mut isolate = spawn_worker_isolate(
+        local_slot,
+        deterministic_seed,
+        &caps,
+        &audit_secrets,
+        fuel_limit,
+        mem_limit,
+    );
     while let Ok((stream, _)) = listener.accept() {
         local_slot = local_slot.wrapping_add(1);
-        let _ = serve_connection_keep_alive_with_tls_and_secrets(
+        let _ = serve_connection_with_isolate(
             stream,
             local_slot,
+            &mut isolate,
             &bytecode,
             tenant_dir_arc.as_deref().map(|p| p.as_path()),
             static_table_arc.as_deref(),
-            deterministic_seed,
-            &caps,
-            &audit_secrets,
             fuel_limit,
             mem_limit,
             &mut read_buf,

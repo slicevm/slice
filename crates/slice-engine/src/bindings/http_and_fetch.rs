@@ -45,6 +45,39 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
     );
 
     let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_url"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let url = BOA_HTTP_REQ.with(|r| {
+                let borrow = r.borrow();
+                let mut host = "localhost";
+                for (k, v) in &borrow.headers[..borrow.headers_len] {
+                    if k.eq_ignore_ascii_case("host") && !v.is_empty() {
+                        host = v.as_str();
+                        break;
+                    }
+                }
+                let path = if borrow.path.is_empty() {
+                    "/"
+                } else {
+                    borrow.path.as_str()
+                };
+                let q = borrow.query.as_str();
+                let mut s = String::with_capacity(7 + host.len() + path.len() + q.len() + 1);
+                s.push_str("http://");
+                s.push_str(host);
+                s.push_str(path);
+                if !q.is_empty() {
+                    s.push('?');
+                    s.push_str(q);
+                }
+                s
+            });
+            Ok(BoaVal::from(js_string!(url)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_http_path"),
         0,
         NativeFunction::from_fn_ptr(|_this, _args, _context| {

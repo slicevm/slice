@@ -570,7 +570,43 @@ impl SliceIsolate {
                     }
                 }
             }
-            Err(err) => Ok(JsValue::str(format!("Uncaught {}", err))),
+            Err(err) => {
+                let raw_err = format!("Uncaught {}", err);
+                let mut mapped = crate::boa_realm::map_error_with_active_source(&raw_err);
+                if mapped == raw_err {
+                    if let Some(opaque) = err.as_opaque() {
+                        if let Some(obj) = opaque.as_object() {
+                            if let Ok(stack_val) =
+                                obj.get(boa_engine::js_string!("stack"), &mut realm.ctx)
+                            {
+                                if let Some(s) = stack_val.as_string() {
+                                    let st = s.to_std_string_escaped();
+                                    for line in st.lines() {
+                                        let trimmed = line.trim();
+                                        if trimmed.starts_with("at ") && !trimmed.contains("<anonymous>") {
+                                            if let Some(open) = trimmed.rfind('(') {
+                                                if let Some(close) = trimmed[open + 1..].find(')') {
+                                                    let loc = &trimmed[open + 1..open + 1 + close];
+                                                    if loc.contains(':') {
+                                                        mapped = format!("{} ({})", raw_err, loc);
+                                                        break;
+                                                    }
+                                                }
+                                            } else if let Some(loc) = trimmed.strip_prefix("at ") {
+                                                if loc.contains(':') && !loc.contains(' ') {
+                                                    mapped = format!("{} ({})", raw_err, loc);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(JsValue::str(mapped))
+            }
         };
 
         release_warm_boa_realm(realm);

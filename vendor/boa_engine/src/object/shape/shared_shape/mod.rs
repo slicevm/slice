@@ -455,6 +455,14 @@ impl SharedShape {
         property_table.keys_cloned_n(self.property_count())
     }
 
+    /// Invokes `f` with a zero-allocation slice of `(PropertyKey, Slot)` in creation order.
+    #[inline]
+    pub(crate) fn with_property_keys<R>(&self, f: impl FnOnce(&[(PropertyKey, Slot)]) -> R) -> R {
+        let property_table = self.property_table().inner().borrow();
+        let n = (self.property_count() as usize).min(property_table.keys.len());
+        f(&property_table.keys[..n])
+    }
+
     /// Returns a new [`UniqueShape`] with the properties of the [`SharedShape`].
     pub(crate) fn to_unique(&self) -> UniqueShape {
         UniqueShape::new(

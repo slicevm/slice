@@ -447,3 +447,118 @@ console.log(APP_TITLE, INTERNAL_TAG, metaUrl, metaDir, cjsDir, dynMod.lazyBanner
         mapped
     );
 }
+
+#[test]
+fn test_issues_33_and_34_class_method_source_mapping_and_cas_lockfile_provenance() {
+    use crate::{map_bundled_stack_trace, CasBuilder, MappedCasArchive};
+
+    let test_dir = std::env::temp_dir().join(format!(
+        "slice_issues_33_34_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&test_dir);
+    std::fs::create_dir_all(test_dir.join("src")).unwrap();
+    std::fs::create_dir_all(test_dir.join("node_modules/ms")).unwrap();
+
+    std::fs::write(
+        test_dir.join("package.json"),
+        r#"{"name":"issue-34-app","dependencies":{"ms":"^2.1.0"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        test_dir.join("package-lock.json"),
+        r#"{"name":"issue-34-app","lockfileVersion":3}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        test_dir.join("node_modules/ms/package.json"),
+        r#"{"name":"ms","version":"2.1.3"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        test_dir.join("node_modules/ms/index.js"),
+        "module.exports = function(v) { return v; };\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        test_dir.join("src/pricing_engine.ts"),
+        r#"export interface CheckoutReq {
+  requestId: string;
+  items: number[];
+}
+
+export class PricingEngine {
+  processCheckout(req: CheckoutReq): number {
+    if (!req.requestId || req.items.length === 0) {
+      throw new Error("Invalid checkout request: " + req.requestId);
+    }
+    return req.items.reduce((a, b) => a + b, 0);
+  }
+}
+"#,
+    )
+    .unwrap();
+
+    let entry_path = test_dir.join("src/index.ts");
+    std::fs::write(
+        &entry_path,
+        r#"import { PricingEngine } from "./pricing_engine";
+const engine = new PricingEngine();
+engine.processCheckout({ requestId: "ORD-99", items: [] });
+"#,
+    )
+    .unwrap();
+
+    let bundled = bundle_entrypoint_with_deps(&entry_path).expect("bundle issue 33 app");
+    let mapped_err = map_bundled_error_location(
+        &bundled,
+        "Uncaught Error: Invalid checkout request: ORD-99",
+    );
+    assert!(
+        mapped_err.contains("(src/pricing_engine.ts:9)"),
+        "Dynamic error message in class method must map to src/pricing_engine.ts:9, got: {}",
+        mapped_err
+    );
+
+    let cas_path = test_dir.join("app.cas");
+    let mut builder = CasBuilder::new("./index.ts");
+    builder.scan_project_dependencies(&test_dir);
+    builder.add_module("./index.ts", entry_path.clone(), &bundled, |s| {
+        s.as_bytes().to_vec()
+    });
+    let header = builder.write_to_file(&cas_path).expect("write cas");
+    assert!(
+        header.lockfile_blake3.is_some(),
+        "CasIndexHeader must record lockfile_blake3"
+    );
+    assert_eq!(
+        header.resolved_dependencies,
+        vec![("ms".to_string(), "2.1.3".to_string())]
+    );
+
+    let archive = MappedCasArchive::open(&cas_path).expect("open cas");
+    let annotated = archive.reconstruct_annotated_source(
+        archive
+            .resolve_specifier("./index.ts")
+            .expect("resolve ./index.ts"),
+    );
+    let mapped_compacted_err = map_bundled_error_location(
+        &annotated,
+        "Uncaught Error: Invalid checkout request: ORD-99",
+    );
+    assert!(
+        mapped_compacted_err.contains("(src/pricing_engine.ts:9)"),
+        "Compacted CAS //@sm: source map must also resolve src/pricing_engine.ts:9, got: {}",
+        mapped_compacted_err
+    );
+    let fake_raw_stack = "Error: Invalid checkout request: ORD-99\n    at processCheckout (<anonymous>:10:13)";
+    let mapped_stack = map_bundled_stack_trace(&annotated, fake_raw_stack);
+    assert!(
+        mapped_stack.contains("src/pricing_engine.ts:"),
+        "ES6 class method stack frame must map to src/pricing_engine.ts, got: {}",
+        mapped_stack
+    );
+
+    let _ = std::fs::remove_dir_all(&test_dir);
+}

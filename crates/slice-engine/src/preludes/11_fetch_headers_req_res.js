@@ -203,21 +203,23 @@
     throwIfAborted: function() {}
   };
 
+  function __makeLiveReq() {
+    var r = Object.create(LiveReqProto);
+    r._m = null;
+    r._u = null;
+    r._h = null;
+    r._b = null;
+    r._u8 = null;
+    r._fd = null;
+    r.redirect = "follow";
+    r.signal = __defaultReqSignal;
+    r.bodyUsed = false;
+    return r;
+  }
+
   function Request(input, init) {
     if (input === "__SLICE_LIVE_REQ__") {
-      this.method = __slice_http_method() || "GET";
-      var h = __slice_http_header("host") || "localhost";
-      var p = __slice_http_path() || "/";
-      var q = __slice_http_query();
-      this.url = "http://" + h + p + (q ? "?" + q : "");
-      this.headers = new Headers("__SLICE_LIVE_REQ__");
-      this._body = __slice_http_body() || "";
-      this._u8 = null;
-      this._fd = null;
-      this.redirect = "follow";
-      this.signal = __defaultReqSignal;
-      this.bodyUsed = false;
-      return;
+      return __makeLiveReq();
     }
     if (!init && typeof input === "string") {
       this.url = input;
@@ -269,7 +271,46 @@
   Request.prototype._isSliceReq = true;
 
   function Response(body, init) {
-    var o = init || {};
+    if (!init) {
+      if (body === undefined || body === null || typeof body === "string") {
+        var rSimple = Object.create(LazyResProto);
+        rSimple.status = 200;
+        rSimple.statusText = "OK";
+        rSimple.ok = true;
+        rSimple._h = null;
+        rSimple._data = undefined;
+        rSimple._stream = null;
+        rSimple._body = typeof body === "string" ? body : "";
+        rSimple._u8 = null;
+        rSimple._fd = null;
+        rSimple._ct = "text/plain;charset=UTF-8";
+        rSimple._isSliceRes = true;
+        rSimple.bodyUsed = false;
+        return rSimple;
+      }
+      this.status = 200;
+      this.statusText = "OK";
+      this.ok = true;
+      this.headers = new Headers();
+      this._data = undefined;
+      this._stream = null;
+      if (typeof body === "object" && typeof body._toText === "function" && (!body._closed || body._startPromise)) {
+        this._stream = body;
+        this._body = "";
+        this._u8 = null;
+        this._fd = null;
+        this.headers._m["content-type"] = "text/plain;charset=UTF-8";
+      } else {
+        var nbFast = __normHttpBody(body, this.headers);
+        this._body = nbFast.str;
+        this._u8 = nbFast.u8;
+        this._fd = nbFast.fd;
+      }
+      this._isSliceRes = true;
+      this.bodyUsed = false;
+      return;
+    }
+    var o = init;
     var st = o.status !== undefined ? Number(o.status) : 200;
     this.status = st;
     this.statusText = o.statusText !== undefined ? String(o.statusText) : (st === 200 ? "OK" : "");
@@ -286,6 +327,9 @@
       this._body = body;
       this._u8 = null;
       this._fd = null;
+      if (!this.headers._m["content-type"]) {
+        this.headers._m["content-type"] = "text/plain;charset=UTF-8";
+      }
     } else if (typeof body === "object" && typeof body._toText === "function" && (!body._closed || body._startPromise)) {
       this._stream = body;
       this._body = "";
@@ -297,12 +341,57 @@
       this._u8 = nb.u8;
       this._fd = nb.fd;
     }
-    this._ct = (this.headers._m && this.headers._m["content-type"]) || "text/plain;charset=UTF-8";
     this._isSliceRes = true;
     this.bodyUsed = false;
   }
 
   var RP = Request.prototype, SP = Response.prototype;
+  var LiveReqProto = Object.create(RP);
+  Object.defineProperties(LiveReqProto, {
+    method: {
+      get: function() { return this._m || (this._m = __slice_http_method() || "GET"); },
+      set: function(v) { this._m = v; },
+      configurable: true,
+      enumerable: true
+    },
+    url: {
+      get: function() { return this._u || (this._u = __slice_http_url()); },
+      set: function(v) { this._u = v; },
+      configurable: true,
+      enumerable: true
+    },
+    headers: {
+      get: function() { return this._h || (this._h = new Headers("__SLICE_LIVE_REQ__")); },
+      set: function(v) { this._h = v; },
+      configurable: true,
+      enumerable: true
+    },
+    _body: {
+      get: function() {
+        if (this._b === null) this._b = __slice_http_body() || "";
+        return this._b;
+      },
+      set: function(v) { this._b = v; },
+      configurable: true,
+      enumerable: false
+    }
+  });
+  var LazyResProto = Object.create(SP);
+  Object.defineProperty(LazyResProto, "headers", {
+    get: function() {
+      if (!this._h) {
+        var h = new Headers();
+        if (this._ct) h._m["content-type"] = this._ct;
+        this._h = h;
+      }
+      return this._h;
+    },
+    set: function(v) {
+      this._h = v;
+    },
+    configurable: true,
+    enumerable: true
+  });
   RP.text = SP.text = function() {
     this.bodyUsed = true;
     if (this._stream) {
@@ -392,18 +481,13 @@
   Object.defineProperty(SP, "body", __bodyDesc);
   Response.json = function(data, init) {
     if (!init) {
-      var rFast = Object.create(SP);
+      var rFast = Object.create(LazyResProto);
       rFast.status = 200;
       rFast.statusText = "OK";
       rFast.ok = true;
-      var hFast = Object.create(Headers.prototype);
-      hFast._live = false;
-      hFast._sc = null;
-      var mFast = Object.create(null);
-      mFast["content-type"] = "application/json";
-      hFast._m = mFast;
-      rFast.headers = hFast;
+      rFast._h = null;
       rFast._data = data;
+      rFast._stream = null;
       rFast._body = "";
       rFast._u8 = null;
       rFast._fd = null;
@@ -415,7 +499,6 @@
     var r = new Response(null, typeof init === "number" ? { status: init } : init);
     if (!r.headers._m["content-type"]) r.headers._m["content-type"] = "application/json";
     r._data = data;
-    r._ct = r.headers._m["content-type"];
     return r;
   };
   Response.redirect = function(url, status) {
@@ -445,20 +528,23 @@
   }
 
   function __finishSliceRes(r) {
-    var ct = (r.headers && r.headers._m && r.headers._m["content-type"]) || r._ct;
+    var h = r._h !== undefined ? r._h : r.headers;
+    var ct = (h && h._m && h._m["content-type"]) || r._ct || "text/plain;charset=UTF-8";
+    var hdrJson = h ? __resHdrJson(h) : "";
     if (r._stream) {
       var st = r._stream;
       if (st._startPromise) {
         st._startPromise.then(function() {
-          __slice_http_respond(r.status, st._toText(), ct, __resHdrJson(r.headers));
+          var hs = r._h !== undefined ? r._h : r.headers;
+          __slice_http_respond(r.status, st._toText(), ct, hs ? __resHdrJson(hs) : "");
         });
         return;
       }
-      __slice_http_respond(r.status, st._toText(), ct, __resHdrJson(r.headers));
+      __slice_http_respond(r.status, st._toText(), ct, hdrJson);
       return;
     }
     var rb = r._body || (r._data !== undefined ? JSON.stringify(r._data) : "");
-    __slice_http_respond(r.status, rb, ct, __resHdrJson(r.headers));
+    __slice_http_respond(r.status, rb, ct, hdrJson);
   }
 
   globalThis.Headers = Headers;
@@ -469,14 +555,12 @@
     waitUntil: globalThis.Slice ? globalThis.Slice.waitUntil : function() {},
     passThroughOnException: function() {}
   };
-  globalThis.__slice_make_web_request = function() {
-    return new Request("__SLICE_LIVE_REQ__");
-  };
+  globalThis.__slice_make_web_request = __makeLiveReq;
   globalThis.__slice_dispatch_fetch = function(h) {
     if (!__slice_http_is_active()) return;
     var fn = typeof h.fetch === "function" ? h.fetch : (typeof h === "function" ? h : null);
     if (!fn) return;
-    var res = fn.call(h, new Request("__SLICE_LIVE_REQ__"), globalThis.process.env, __slice_web_ctx);
+    var res = fn.call(h, __makeLiveReq(), globalThis.process.env, __slice_web_ctx);
     if (res) {
       if (res._isSliceRes) {
         __finishSliceRes(res);

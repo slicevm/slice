@@ -167,6 +167,15 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
                 "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{}\"] = {} {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n__h = exports.default || module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n",
                 rc_key, rc_key, rc_key, fn_kw, direct_body
             ));
+        } else if (direct_body.contains("Slice.serve(")
+            || direct_body.contains("Deno.serve(")
+            || direct_body.contains("Bun.serve("))
+            && !direct_body.contains("Slice.respond(")
+        {
+            bundle.push_str(&format!(
+                "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{}\"] = {} {{\nif (__h && globalThis.__slice_active_http_server && typeof __slice_http_is_active === 'function' && __slice_http_is_active()) {{ globalThis.__slice_dispatch_fetch(__h); return; }}\nvar exports = {{}}, module = {{ exports: exports }};\n{}\nif (globalThis.__slice_active_http_server) __h = globalThis.__slice_active_http_server._handler;\n}};\n}}\n__run();\n",
+                rc_key, rc_key, rc_key, fn_kw, direct_body
+            ));
         } else {
             bundle.push_str(&format!(
                 "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"] || (__rc[\"{}\"] = {} {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n}});\n__run();\n",
@@ -320,6 +329,17 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         bundle.push_str("if (!__h) {\nvar require = __slice_require, exports = {}, module = { exports: exports };\n");
         bundle.push_str(&entry_body);
         bundle.push_str("\n__h = exports.default || module.exports;\n}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n};\n}\n__run();\n");
+    } else if (entry_body.contains("Slice.serve(")
+        || entry_body.contains("Deno.serve(")
+        || entry_body.contains("Bun.serve("))
+        && !entry_body.contains("Slice.respond(")
+    {
+        bundle.push_str("var __h = null;\n");
+        bundle.push_str(&format!("__run = __rc[\"{}\"] = {} {{\n", rc_key, fn_kw));
+        bundle.push_str("if (__h && globalThis.__slice_active_http_server && typeof __slice_http_is_active === 'function' && __slice_http_is_active()) { globalThis.__slice_dispatch_fetch(__h); return; }\n");
+        bundle.push_str("var require = __slice_require, exports = {}, module = { exports: exports };\n");
+        bundle.push_str(&entry_body);
+        bundle.push_str("\nif (globalThis.__slice_active_http_server) __h = globalThis.__slice_active_http_server._handler;\n};\n}\n__run();\n");
     } else {
         bundle.push_str(&format!("__run = __rc[\"{}\"] = {} {{\n", rc_key, fn_kw));
         bundle.push_str(

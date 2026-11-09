@@ -718,3 +718,179 @@ runWaveJ().catch((e) => console.log(JSON.stringify({ __err: String(e && e.stack 
     assert_eq!(out["urlPattern"]["p3AlphaReject"], true);
     assert_eq!(out["urlPattern"]["p3HasRegExp"], true);
 }
+
+#[test]
+fn test_issues_28_31_33_37_fs_readline_json_fastpath_and_uncaught_source_map() {
+    use slice_sandbox::CapabilityToken;
+
+    let script = r#"
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import readline from "node:readline";
+import readlinePromises from "node:readline/promises";
+import { PassThrough } from "node:stream";
+import v8 from "node:v8";
+import cluster from "node:cluster";
+import http2 from "node:http2";
+import { WASI } from "node:wasi";
+
+async function runAuditSuite() {
+  // 1. Issue #28: node:fs cpSync, truncateSync, utimesSync, readlinkSync, watch
+  fs.mkdirSync("/app/src_dir/nested", { recursive: true });
+  fs.writeFileSync("/app/src_dir/nested/hello.txt", "hello-world-12345");
+  fs.cpSync("/app/src_dir", "/app/dst_dir", { recursive: true });
+  const copiedText = fs.readFileSync("/app/dst_dir/nested/hello.txt", "utf8");
+  fs.truncateSync("/app/dst_dir/nested/hello.txt", 5);
+  const truncatedText = fs.readFileSync("/app/dst_dir/nested/hello.txt", "utf8");
+  fs.utimesSync("/app/dst_dir/nested/hello.txt", 1700000000, 1700000000);
+  fs.symlinkSync("/app/dst_dir/nested/hello.txt", "/app/dst_dir/link.txt");
+  const linkTarget = fs.readlinkSync("/app/dst_dir/link.txt");
+
+  let watchEvents: string[] = [];
+  const watcher = fs.watch("/app/dst_dir/nested/hello.txt", (evt, filename) => {
+    watchEvents.push(evt + ":" + filename);
+  });
+  fs.writeFileSync("/app/dst_dir/nested/hello.txt", "updated!");
+  watcher.close();
+
+  await fsp.cp("/app/dst_dir/nested/hello.txt", "/app/dst_dir/async_copy.txt");
+  await fsp.truncate("/app/dst_dir/async_copy.txt", 4);
+  const asyncTrunc = await fsp.readFile("/app/dst_dir/async_copy.txt", "utf8");
+
+  // 2. Issue #31: node:readline & node:readline/promises + core shims
+  const input1 = new PassThrough();
+  const rl1 = readline.createInterface({ input: input1 });
+  const lines1: string[] = [];
+  rl1.on("line", (l: string) => lines1.push(l));
+  input1.end("alpha\nbeta\ngamma\n");
+  await new Promise((r) => setTimeout(r, 5));
+
+  const input2 = new PassThrough();
+  const rl2 = readlinePromises.createInterface({ input: input2 });
+  const qPromise = rl2.question("Prompt> ");
+  input2.write("answer-42\n");
+  const qAnswer = await qPromise;
+  rl2.close();
+
+  const heapStats = v8.getHeapStatistics();
+  const wasiInst = new WASI({ args: ["app"] });
+
+  // 3. Issue #37: JSON.stringify fast path & sub-ms performance.now()
+  const t0 = performance.now();
+  const complexObj = {
+    id: 101,
+    active: true,
+    nil: null,
+    undef: undefined,
+    fnVal: () => 1,
+    symVal: Symbol("skip"),
+    text: "quote\"backslash\\newline\ntab\tctrl\x01",
+    ints: [1, 2, -3, 0, 42],
+    floats: [1.5, -0.25, 3.125],
+    mixed: ["a", undefined, () => {}, null, { k: "v" }],
+    customToJson: {
+      toJSON() {
+        return "custom-to-json-ok";
+      },
+    },
+  };
+  const jsonFast = JSON.stringify(complexObj);
+  const jsonPretty = JSON.stringify({ a: 1 }, null, 2);
+  let cyclicThrew = false;
+  const cyc: any = { a: 1 };
+  cyc.self = cyc;
+  try {
+    JSON.stringify(cyc);
+  } catch (e: any) {
+    cyclicThrew = e instanceof TypeError;
+  }
+  const t1 = performance.now();
+
+  console.log(JSON.stringify({
+    fs: {
+      copiedText,
+      truncatedText,
+      linkTarget,
+      watchEvents,
+      asyncTrunc,
+    },
+    readline: {
+      lines1,
+      qAnswer,
+      v8Ok: typeof heapStats.total_heap_size === "number",
+      clusterPrimary: cluster.isPrimary,
+      http2StatusOk: http2.constants.HTTP_STATUS_OK === 200,
+      wasiOk: typeof wasiInst.wasiImport.proc_exit === "function",
+    },
+    json: {
+      parsedFast: JSON.parse(jsonFast),
+      prettyHasNewline: jsonPretty.includes("\n  \"a\": 1"),
+      cyclicThrew,
+      perfDeltaValid: t1 >= t0,
+    },
+  }));
+}
+runAuditSuite().catch((e) => console.log(JSON.stringify({ __err: String(e && e.stack || e) })));
+"#;
+
+    let test_dir =
+        std::env::temp_dir().join(format!("slice_issues_audit_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&test_dir);
+    std::fs::create_dir_all(&test_dir).unwrap();
+    let entry_path = test_dir.join("index.ts");
+    std::fs::write(&entry_path, script).unwrap();
+    let bundled =
+        slice_cas::bundle_entrypoint_with_deps(&entry_path).expect("bundle audit suite script");
+    let _ = std::fs::remove_dir_all(&test_dir);
+
+    let caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/app")
+        .with_write_prefix("/app");
+    let m = run_source_isolated("issues-audit-tenant", &bundled, caps, 2_000_000, 16 * 1024 * 1024)
+        .expect("issues-audit execution");
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).expect("parse audit json");
+    assert!(out.get("__err").is_none(), "audit suite error: {}", out);
+
+    assert_eq!(out["fs"]["copiedText"], "hello-world-12345");
+    assert_eq!(out["fs"]["truncatedText"], "hello");
+    assert_eq!(out["fs"]["linkTarget"], "/app/dst_dir/nested/hello.txt");
+    assert_eq!(out["fs"]["watchEvents"][0], "change:hello.txt");
+    assert_eq!(out["fs"]["asyncTrunc"], "upda");
+
+    assert_eq!(
+        out["readline"]["lines1"],
+        serde_json::json!(["alpha", "beta", "gamma"])
+    );
+    assert_eq!(out["readline"]["qAnswer"], "answer-42");
+    assert_eq!(out["readline"]["v8Ok"], true);
+    assert_eq!(out["readline"]["clusterPrimary"], true);
+    assert_eq!(out["readline"]["http2StatusOk"], true);
+    assert_eq!(out["readline"]["wasiOk"], true);
+
+    assert_eq!(out["json"]["parsedFast"]["id"], 101);
+    assert_eq!(
+        out["json"]["parsedFast"]["text"],
+        "quote\"backslash\\newline\ntab\tctrl\x01"
+    );
+    assert_eq!(
+        out["json"]["parsedFast"]["ints"],
+        serde_json::json!([1, 2, -3, 0, 42])
+    );
+    assert_eq!(
+        out["json"]["parsedFast"]["floats"],
+        serde_json::json!([1.5, -0.25, 3.125])
+    );
+    assert_eq!(
+        out["json"]["parsedFast"]["mixed"],
+        serde_json::json!(["a", null, null, null, {"k": "v"}])
+    );
+    assert_eq!(
+        out["json"]["parsedFast"]["customToJson"],
+        "custom-to-json-ok"
+    );
+    assert!(out["json"]["parsedFast"].get("undef").is_none());
+    assert!(out["json"]["parsedFast"].get("fnVal").is_none());
+    assert_eq!(out["json"]["prettyHasNewline"], true);
+    assert_eq!(out["json"]["cyclicThrew"], true);
+    assert_eq!(out["json"]["perfDeltaValid"], true);
+}
