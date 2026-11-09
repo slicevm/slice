@@ -246,11 +246,7 @@ impl ResolvedExecutionConfig {
             }
         }
         if let Ok(v) = std::env::var("SLICE_AUDIT_EGRESS") {
-            for sec in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                if !audit_secrets.contains(&sec.to_string()) {
-                    audit_secrets.push(sec.to_string());
-                }
-            }
+            register_audit_egress_spec(&v, Some(Path::new(".")), &caps, &mut audit_secrets);
         }
         if let Ok(v) = std::env::var("SLICE_WARM") {
             if let Some(b) = slice_sandbox::parse_bool_setting(&v) {
@@ -363,8 +359,26 @@ impl ResolvedExecutionConfig {
                     env_files.push(PathBuf::from(ef));
                 }
             } else if let Some(sec) = arg.strip_prefix("--audit-egress=") {
-                if !sec.is_empty() && !audit_secrets.contains(&sec.to_string()) {
-                    audit_secrets.push(sec.to_string());
+                register_audit_egress_spec(sec, Some(Path::new(".")), &caps, &mut audit_secrets);
+            } else if let Some(sec_file) = arg.strip_prefix("--audit-egress-file=") {
+                if !sec_file.is_empty() {
+                    if let Ok(raw) = std::fs::read_to_string(sec_file) {
+                        let (_, dotenv_secs) = slice_sandbox::parse_dotenv_content(&raw);
+                        for s in dotenv_secs {
+                            if !audit_secrets.contains(&s) {
+                                audit_secrets.push(s);
+                            }
+                        }
+                        for line in raw.lines().map(str::trim) {
+                            if !line.is_empty()
+                                && !line.starts_with('#')
+                                && !line.contains('=')
+                                && !audit_secrets.contains(&line.to_string())
+                            {
+                                audit_secrets.push(line.to_string());
+                            }
+                        }
+                    }
                 }
             } else if let Some(f) = arg.strip_prefix("--fuel=") {
                 if let Some(parsed) = parse_u64_digits(f) {
@@ -632,9 +646,7 @@ impl ResolvedExecutionConfig {
             }
         }
         for sec in dirs.audit_egress {
-            if !sec.is_empty() && !self.audit_secrets.contains(&sec) {
-                self.audit_secrets.push(sec);
-            }
+            register_audit_egress_spec(&sec, base_dir, &self.caps, &mut self.audit_secrets);
         }
 
         if self.trust_directives {
@@ -825,9 +837,7 @@ pub(crate) fn merge_manifest_toml_into_caps_and_dlp(
         caps.allowed_env_keys.entry(k).or_insert(v);
     }
     for sec in m.audit_egress {
-        if !sec.is_empty() && !audit_secrets.contains(&sec) {
-            audit_secrets.push(sec);
-        }
+        register_audit_egress_spec(&sec, base_dir, caps, audit_secrets);
     }
     if let Some(env_file_rel) = m.env_file {
         let env_path = match base_dir {
@@ -835,6 +845,42 @@ pub(crate) fn merge_manifest_toml_into_caps_and_dlp(
             None => PathBuf::from(&env_file_rel),
         };
         let _ = apply_dotenv_file_to_caps_and_dlp(&env_path, caps, audit_secrets);
+    }
+}
+
+pub(crate) fn register_audit_egress_spec(
+    spec: &str,
+    base_dir: Option<&Path>,
+    caps: &CapabilityToken,
+    audit_secrets: &mut Vec<String>,
+) {
+    for token in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if token.eq_ignore_ascii_case("auto") {
+            let dotenv_path = match base_dir {
+                Some(dir) => dir.join(".env"),
+                None => PathBuf::from(".env"),
+            };
+            if dotenv_path.is_file() {
+                if let Ok(raw) = std::fs::read_to_string(&dotenv_path) {
+                    let (_, secrets) = slice_sandbox::parse_dotenv_content(&raw);
+                    for sec in secrets {
+                        if !audit_secrets.contains(&sec) {
+                            audit_secrets.push(sec);
+                        }
+                    }
+                }
+            }
+            for (k, v) in &caps.allowed_env_keys {
+                if v.len() >= 6
+                    && slice_sandbox::is_sensitive_env_key(k)
+                    && !audit_secrets.contains(v)
+                {
+                    audit_secrets.push(v.clone());
+                }
+            }
+        } else if !audit_secrets.contains(&token.to_string()) {
+            audit_secrets.push(token.to_string());
+        }
     }
 }
 

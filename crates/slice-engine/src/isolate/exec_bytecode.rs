@@ -26,7 +26,9 @@ impl SliceIsolate {
         {
             let instantiate_ns = start.elapsed().as_nanos() as u64;
             let exec_start = Instant::now();
-            self.compartment.consume_fuel(25)?;
+            let base_fuel = ((bytecode.len() as u64) / 16).clamp(10, 250);
+            let initial_charge = base_fuel.min(self.compartment.fuel_limit.max(1));
+            self.compartment.consume_fuel(initial_charge)?;
             self.current_tier = ExecutionTier::Tier1Baseline;
             let last_val = if &bytecode[0..8] == crate::boacas::BOACAS_MAGIC {
                 if let Some((hdr, precompiled_slice, fallback_js)) =

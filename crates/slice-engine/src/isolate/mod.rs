@@ -232,6 +232,7 @@ impl SliceIsolate {
         fuel_limit: u64,
         memory_limit_bytes: usize,
     ) {
+        crate::state_and_kv::clear_tenant_checkpoints(&self.compartment.tenant_id);
         if self.compartment.tenant_id != tenant_id {
             self.compartment.tenant_id.clear();
             self.compartment.tenant_id.push_str(tenant_id);

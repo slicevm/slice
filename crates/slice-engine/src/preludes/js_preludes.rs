@@ -680,6 +680,10 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
         ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX),
     ),
     (
+        "Slice.releaseCheckpoint",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX),
+    ),
+    (
         "Slice.evalSandbox",
         ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX),
     ),

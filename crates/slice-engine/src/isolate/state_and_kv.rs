@@ -8,8 +8,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use slice_sandbox::SandboxViolation;
 use std::sync::Arc;
 
+/// Maximum retained checkpoints per worker thread slab before FIFO eviction of the oldest snapshot.
+pub const MAX_CHECKPOINTS_PER_SLAB: usize = 64;
+
 #[derive(Clone, Debug)]
 pub(crate) struct StateCheckpoint {
+    pub(crate) owner_tenant: CompactString,
     pub(crate) vfs_files: FxHashMap<String, Arc<Vec<u8>>>,
     pub(crate) vfs_dirs: FxHashSet<String>,
     pub(crate) tenant_kv: [Option<KvTenantMap>; 16],
@@ -44,9 +48,24 @@ pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
         cur
     });
     CHECKPOINT_SLAB.with(|slab| {
-        slab.borrow_mut().insert(
+        let mut map = slab.borrow_mut();
+        while map.len() >= MAX_CHECKPOINTS_PER_SLAB {
+            let evict_id = map
+                .iter()
+                .filter(|(_, cp)| cp.owner_tenant.as_str() == tenant_id)
+                .map(|(&k, _)| k)
+                .min()
+                .or_else(|| map.keys().copied().min());
+            if let Some(old_id) = evict_id {
+                map.remove(&old_id);
+            } else {
+                break;
+            }
+        }
+        map.insert(
             id,
             StateCheckpoint {
+                owner_tenant: CompactString::new(tenant_id),
                 vfs_files,
                 vfs_dirs,
                 tenant_kv,
@@ -77,7 +96,12 @@ pub(crate) fn restore_tenant_state(tenant_id: &str, checkpoint_id: u64) -> bool 
     } else {
         None
     };
-    let snap_opt = CHECKPOINT_SLAB.with(|slab| slab.borrow().get(&checkpoint_id).cloned());
+    let snap_opt = CHECKPOINT_SLAB.with(|slab| {
+        slab.borrow()
+            .get(&checkpoint_id)
+            .filter(|cp| cp.owner_tenant.as_str() == tenant_id)
+            .cloned()
+    });
     let Some(snap) = snap_opt else {
         return false;
     };
@@ -108,6 +132,39 @@ pub(crate) fn restore_tenant_state(tenant_id: &str, checkpoint_id: u64) -> bool 
         );
     }
     true
+}
+
+pub(crate) fn release_tenant_checkpoint(tenant_id: &str, checkpoint_id: u64) -> bool {
+    CHECKPOINT_SLAB.with(|slab| {
+        let mut map = slab.borrow_mut();
+        if map
+            .get(&checkpoint_id)
+            .is_some_and(|cp| cp.owner_tenant.as_str() == tenant_id)
+        {
+            map.remove(&checkpoint_id);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[inline]
+pub(crate) fn clear_tenant_checkpoints(tenant_id: &str) -> usize {
+    CHECKPOINT_SLAB.with(|slab| {
+        if slab.borrow().is_empty() {
+            return 0;
+        }
+        let mut map = slab.borrow_mut();
+        let before = map.len();
+        map.retain(|_, cp| cp.owner_tenant.as_str() != tenant_id);
+        before.saturating_sub(map.len())
+    })
+}
+
+/// Returns the current number of active checkpoints retained in the thread-local `CHECKPOINT_SLAB`.
+pub fn checkpoint_slab_len() -> usize {
+    CHECKPOINT_SLAB.with(|slab| slab.borrow().len())
 }
 
 #[cold]

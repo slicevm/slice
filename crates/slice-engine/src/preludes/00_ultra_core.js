@@ -389,6 +389,7 @@
     },
     checkpoint: function() { return __slice_checkpoint(); },
     restore: function(id) { return __slice_restore(Number(id)); },
+    releaseCheckpoint: function(id) { return __slice_release_checkpoint(Number(id)); },
     evalSandbox: function(code, opts) {
       return JSON.parse(__slice_eval_sandbox(String(code), opts ? JSON.stringify(opts) : "{}"));
     },
@@ -478,5 +479,33 @@
       enumerable: false
     });
   }
+  var __origArrFill = Array.prototype.fill;
+  Object.defineProperty(Array.prototype, "fill", {
+    value: function(v, s, e) {
+      var len = this ? (this.length >>> 0) : 0;
+      if (len > 64) {
+        var st = s === undefined ? 0 : (s < 0 ? Math.max(len + Number(s), 0) : Math.min(Number(s), len));
+        var en = e === undefined ? len : (e < 0 ? Math.max(len + Number(e), 0) : Math.min(Number(e), len));
+        var cnt = en > st ? (en - st) : 0;
+        if (cnt > 64) __slice_charge_mem(cnt * 8, Math.floor(cnt / 16) + 1);
+      }
+      return __origArrFill.apply(this, arguments);
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false
+  });
+  var __origStrRepeat = String.prototype.repeat;
+  Object.defineProperty(String.prototype, "repeat", {
+    value: function(count) {
+      var n = Number(count) || 0;
+      var bytes = String(this).length * (n > 0 ? Math.floor(n) : 0);
+      if (bytes > 64) __slice_charge_mem(bytes, Math.floor(bytes / 64) + 1);
+      return __origStrRepeat.call(this, count);
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false
+  });
 })();
 

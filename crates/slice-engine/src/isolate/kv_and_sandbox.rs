@@ -3,8 +3,8 @@
 
 use crate::isolate::SliceIsolate;
 use crate::state_and_kv::{
-    checkpoint_tenant_state, edge_kv_del, edge_kv_get, edge_kv_incr, edge_kv_set,
-    restore_tenant_state,
+    checkpoint_tenant_state, clear_tenant_checkpoints, edge_kv_del, edge_kv_get, edge_kv_incr,
+    edge_kv_set, release_tenant_checkpoint, restore_tenant_state,
 };
 use serde::{Deserialize, Serialize};
 use slice_sandbox::{CapabilityToken, SandboxViolation};
@@ -39,6 +39,7 @@ pub struct SandboxEvalOutcome {
     pub ok: bool,
     pub stdout: Vec<String>,
     pub return_value: String,
+    pub error: Option<String>,
     pub fuel_used: u64,
     pub memory_used_bytes: usize,
     pub total_time_us: f64,
@@ -58,6 +59,18 @@ impl SliceIsolate {
     #[inline]
     pub fn restore(&self, checkpoint_id: u64) -> bool {
         restore_tenant_state(&self.compartment.tenant_id, checkpoint_id)
+    }
+
+    /// Releases a previously captured checkpoint owned by this tenant from `CHECKPOINT_SLAB`.
+    #[inline]
+    pub fn release_checkpoint(&self, checkpoint_id: u64) -> bool {
+        release_tenant_checkpoint(&self.compartment.tenant_id, checkpoint_id)
+    }
+
+    /// Releases all checkpoints owned by this tenant from `CHECKPOINT_SLAB`.
+    #[inline]
+    pub fn clear_checkpoints(&self) -> usize {
+        clear_tenant_checkpoints(&self.compartment.tenant_id)
     }
 
     /// Reads a value from this tenant's isolated partition in the 16-way sharded `Slice.kv` slab.
@@ -186,9 +199,15 @@ impl SliceIsolate {
             }
         }
 
-        let child_tenant = opts
+        let child_tenant = match opts
             .tenant_id
-            .unwrap_or_else(|| format!("{}:sub", self.compartment.tenant_id));
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(sub_id) => format!("{}:sub:{}", self.compartment.tenant_id, sub_id),
+            None => format!("{}:sub", self.compartment.tenant_id),
+        };
         let mut child_iso =
             SliceIsolate::spawn(child_tenant, 99, child_caps, child_fuel, child_mem);
         if let Some(seed) = opts.deterministic_seed.or(self.deterministic_seed) {
@@ -200,17 +219,26 @@ impl SliceIsolate {
         }
 
         let bc = crate::parser_and_compiler::compile_source_for_sandbox_eval(code);
-        let outcome = match child_iso.execute_bytecode(&bc, None) {
+        let exec_res = child_iso.execute_bytecode(&bc, None);
+        clear_tenant_checkpoints(&child_iso.compartment.tenant_id);
+        let outcome = match exec_res {
             Ok(metrics) => {
                 let _ = self.compartment.consume_fuel(metrics.fuel_consumed.max(1));
                 let net_mem = metrics.memory_used_bytes.saturating_sub(4096);
                 if net_mem > 0 {
                     let _ = self.compartment.alloc_memory(net_mem);
                 }
+                let is_uncaught = metrics.return_value.starts_with("Uncaught ");
+                let (return_value, error) = if is_uncaught {
+                    ("undefined".to_string(), Some(metrics.return_value))
+                } else {
+                    (metrics.return_value, None)
+                };
                 SandboxEvalOutcome {
-                    ok: true,
+                    ok: !is_uncaught,
                     stdout: metrics.stdout,
-                    return_value: metrics.return_value,
+                    return_value,
+                    error,
                     fuel_used: metrics.fuel_consumed,
                     memory_used_bytes: metrics.memory_used_bytes,
                     total_time_us: start.elapsed().as_nanos() as f64 / 1_000.0,
@@ -225,10 +253,20 @@ impl SliceIsolate {
                 if net_mem > 0 {
                     let _ = self.compartment.alloc_memory(net_mem);
                 }
+                let raw_stdout = std::mem::take(&mut child_iso.stdout);
+                let safe_stdout = if child_iso.egress_audit_secrets.is_empty() {
+                    raw_stdout
+                } else {
+                    raw_stdout
+                        .into_iter()
+                        .filter(|line| child_iso.verify_egress_not_leaked(line).is_ok())
+                        .collect()
+                };
                 SandboxEvalOutcome {
                     ok: false,
-                    stdout: Vec::new(),
+                    stdout: safe_stdout,
                     return_value: "undefined".to_string(),
+                    error: None,
                     fuel_used: child_iso.compartment.fuel_consumed,
                     memory_used_bytes: child_iso.compartment.memory_used_bytes,
                     total_time_us: start.elapsed().as_nanos() as f64 / 1_000.0,

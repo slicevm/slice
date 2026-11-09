@@ -21,7 +21,7 @@ Inside any Slice script or `slice serve` HTTP handler, you can call `Slice.evalS
 
 ```typescript
 interface SandboxEvalOptions {
-    /** Optional tenant identifier for the child sandbox (default: "sub-sandbox") */
+    /** Optional sub-tenant suffix namespaced under `<parent>:sub:<tenantId>` */
     tenantId?: string;
     /** Maximum CPU instruction fuel budget for the child (default: 500,000) */
     fuel?: number;
@@ -31,6 +31,12 @@ interface SandboxEvalOptions {
     allowRead?: string[];
     /** Allowed VFS write path prefixes (INTERSECTED with parent's allowed write prefixes!) */
     allowWrite?: string[];
+    /** Allowed outbound network hosts (INTERSECTED with parent's allowed network hosts!) */
+    allowNet?: string[];
+    /** Allowed subprocess binaries (INTERSECTED with parent's allowed exec binaries!) */
+    allowExec?: string[];
+    /** Allowed environment variables (INTERSECTED with parent's allowed env keys!) */
+    allowEnv?: string[];
     /** Optional deterministic seed for Math.random() and Date.now() inside the child */
     deterministicSeed?: number;
     /** Optional secret string to block from leaking in child stdout or returnValue */
@@ -38,20 +44,22 @@ interface SandboxEvalOptions {
 }
 
 interface SandboxEvalOutcome {
-    /** true if execution succeeded without any OCap, SES, Fuel, or Memory violations */
+    /** true if execution succeeded without any OCap, SES, Fuel, Memory, or uncaught JS error */
     ok: boolean;
-    /** Captured console.log / print lines emitted by the child sandbox */
+    /** Captured console.log / print lines emitted by the child sandbox (preserved even on trap) */
     stdout: string[];
-    /** Stringified final expression return value of the child script */
+    /** Stringified final expression return value of the child script (supports top-level await) */
     returnValue: string;
-    /** Exact CPU instruction fuel consumed by the child */
+    /** Exact CPU instruction fuel consumed by the child (clamped to fuel limit on trap) */
     fuelUsed: number;
     /** Peak memory bytes used by the child */
     memoryUsedBytes: number;
     /** Wall-clock execution time of the child sandbox in microseconds */
     totalTimeUs: number;
-    /** Human-readable violation message if `ok === false`, otherwise `null` */
+    /** Human-readable sandbox violation message if an OCap/SES/Fuel/Memory trap occurred, otherwise `null` */
     violation: string | null;
+    /** Uncaught JavaScript exception or SyntaxError message if `ok === false` due to a JS error, otherwise `null` */
+    error: string | null;
 }
 ```
 
@@ -98,7 +106,8 @@ Slice provides `< 5 microsecond` copy-on-write state snapshots:
 - **`const snapId: number = Slice.checkpoint()`**: Takes an immediate in-memory snapshot of:
   1. Every file and directory in the `node:fs` VFS slab (`BOA_VFS_CACHE` & `BOA_VFS_DIRS`), and
   2. Every key-value pair and counter belonging to the active tenant across all 16 shards of `Slice.kv`.
-- **`const restored: boolean = Slice.restore(snapId)`**: Rewinds both `node:fs` and `Slice.kv` back to the exact state at `snapId` in under 5 microseconds!
+- **`const restored: boolean = Slice.restore(snapId)`**: Rewinds both `node:fs` and `Slice.kv` back to the exact state at `snapId` in under 5 microseconds (verifying tenant ownership).
+- **`const released: boolean = Slice.releaseCheckpoint(snapId)`**: Explicitly frees snapshot `snapId` from the bounded per-thread checkpoint slab (capped at 64 snapshots with FIFO eviction and automatic cleanup on request/sandbox teardown).
 
 ### Recipe: Tree-of-Thought (ToT) AI Code Exploration with Instant Rollback
 
@@ -190,19 +199,19 @@ Slice ships with a built-in **Model Context Protocol (`2024-11-05` JSON-RPC 2.0)
 When your AI assistant connects to `slice mcp`, it discovers 4 tools via `tools/list`:
 
 #### 1. `slice_eval_ts`
-Compiles and executes TypeScript or JavaScript inside a capability-attenuated `SliceIsolate`.
+Compiles and executes TypeScript or JavaScript (including top-level `await`) inside a capability-attenuated `SliceIsolate`. Capability arguments (`allowRead`, `allowWrite`, `allowNet`, `allowExec`, `allowEnv`) accept either a string (comma-separated) or an array of strings (`string[]`).
 - **Input Arguments:**
   ```json
   {
-    "code": "const items: number[] = [10, 20, 30]; items.reduce((a, b) => a + b, 0)",
+    "code": "const items: number[] = [10, 20, 30]; await Promise.resolve(items.reduce((a, b) => a + b, 0))",
     "fuel": 500000,
     "memory": 4194304,
-    "allowRead": "/workspace",
-    "allowNet": "api.github.com:443",
+    "allowRead": ["/workspace"],
+    "allowNet": ["api.github.com:443"],
     "auditSecret": "sk_live_optional_extra_secret"
   }
   ```
-- **Returns:** JSON `SandboxEvalOutcome` (`ok`, `stdout`, `returnValue`, `fuelUsed`, `memoryUsedBytes`, `totalTimeUs`, `violation`).
+- **Returns:** JSON `SandboxEvalOutcome` (`ok`, `stdout`, `returnValue`, `fuelUsed`, `memoryUsedBytes`, `totalTimeUs`, `violation`, `error`).
 
 #### 2. `slice_kv_set`
 Stores a key-value pair inside the MCP host's sharded `Slice.kv` store so the agent can persist intermediate plans or results across tool calls.

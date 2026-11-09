@@ -390,7 +390,8 @@ Executes a `.ts`/`.js` file, a project folder (with `package.json`, `slice.toml`
 | `--allow-exec=<binary>` | Grant `node:child_process` execution authority (`ExecCap`) for `<binary>` (comma-separated or repeatable; Deny-All by default). |
 | `--allow-env=<KEY=VAL>` | Inject `KEY=VAL` (or import `KEY` from host environment) into the isolate. |
 | `--env-file=<path>` | Load `.env` file into `process.env` / `env()` with automatic Egress DLP secret protection. |
-| `--audit-egress=<secret>` | Explicitly register `<secret>` into the Egress DLP guard (blocks raw, Base64, and Base64URL leaks). |
+| `--audit-egress=<secret\|auto>` | Register `<secret>` into the Egress DLP guard (blocks raw, Base64, and Base64URL leaks), or pass `auto` to auto-discover `.env` and sensitive environment secrets without treating `"auto"` as a literal secret. |
+| `--audit-egress-file=<path>` | Register newline-delimited secrets from `<path>` into the Egress DLP guard. |
 | `--trust-directives` / `--no-trust-directives` | Allow (or forbid, default) top-of-file `// @slice-...` directives to grant additive OCap permissions and raise resource ceilings. |
 | `--no-directives` / `--untrusted` | Completely ignore all top-of-file `// @slice-...` inline source directives in the entrypoint. |
 | `--fuel=<u64>` | Set maximum CPU instruction fuel budget (default: `50,000,000`). |

@@ -286,10 +286,12 @@ impl TenantCompartment {
     /// Consumes `ops` deterministic instruction fuel units, trapping immediately if exceeded.
     #[inline(always)]
     pub fn consume_fuel(&mut self, ops: u64) -> Result<(), SandboxViolation> {
-        self.fuel_consumed = self.fuel_consumed.saturating_add(ops);
-        if self.fuel_consumed > self.fuel_limit {
+        let next = self.fuel_consumed.saturating_add(ops);
+        if next > self.fuel_limit {
+            self.fuel_consumed = self.fuel_limit;
             return Err(self.trap_fuel_exhausted());
         }
+        self.fuel_consumed = next;
         Ok(())
     }
 
