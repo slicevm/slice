@@ -96,7 +96,7 @@ make -C tests/case_studies test
 make -C tests/case_studies bench-docker
 ```
 
-### Verified Linux Docker (`x86_64`) Case Study Benchmark Results (`SLICEBC\x01` Default, [`bench_latest.md`](../../bench_latest.md))
+### Verified Linux Docker (`x86_64`) Case Study Benchmark Results (`SLICEBC\x01` Default, [`tests/reports/latest.md`](../reports/latest.md))
 
 | Case Study Workload | Slice Cold `.cas` (`SLICEBC\x01`) | Slice Standalone Bin (`SLICEBC\x01`) | Slice Warm (`--warm`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha`) | Slice Max RSS vs Bun / Node |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |

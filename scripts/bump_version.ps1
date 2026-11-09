@@ -66,8 +66,9 @@ $TargetFiles = @(
     "scripts/install.sh",
     "scripts/package_release.ps1",
     "tests/run_real_stack_benchmarks.sh",
+    "tests/reports/latest.md",
+    "tests/reports/latest.json",
     "README.md",
-    "bench_latest.md",
     "tests/README.md",
     "tests/frameworks/README.md"
 )
