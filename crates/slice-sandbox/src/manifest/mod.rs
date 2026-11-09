@@ -198,6 +198,25 @@ impl SliceManifest {
                             manifest.memory_limit_kb = ((n as usize) / 1024).max(1);
                         }
                     }
+                    ("limits", "max_checkpoints") | ("capabilities", "max_checkpoints") => {
+                        if let Some(n) = parse_u64_ignoring_underscores(val) {
+                            let max = n.min(u32::MAX as u64) as u32;
+                            manifest.capabilities.max_checkpoints = Some(max);
+                            if max == 0 {
+                                manifest.capabilities.allow_checkpoints = false;
+                            }
+                        }
+                    }
+                    ("capabilities", "checkpoints")
+                    | ("capabilities", "allow_checkpoints")
+                    | ("limits", "checkpoints") => {
+                        if let Some(b) = parse_bool_setting(val) {
+                            manifest.capabilities.allow_checkpoints = b;
+                            if !b {
+                                manifest.capabilities.max_checkpoints = Some(0);
+                            }
+                        }
+                    }
                     ("capabilities", "allow_read") => {
                         for item in parse_toml_string_array(val) {
                             manifest.capabilities.allowed_read_prefixes.push(item);

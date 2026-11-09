@@ -196,6 +196,20 @@ impl SliceIsolate {
             .memory_limit_bytes
             .saturating_sub(self.compartment.memory_used_bytes);
         BOA_KV_MEM_BUDGET.with(|m| m.set((0, remaining_mem)));
+        crate::boa_realm::BOA_CHECKPOINT_STATS.with(|s| {
+            s.set((
+                self.checkpoints_taken,
+                self.restores_performed,
+                self.restore_time_ns,
+            ));
+        });
+        let allow_cp = self.compartment.capabilities.allow_checkpoints;
+        let max_cp = self
+            .compartment
+            .capabilities
+            .max_checkpoints
+            .unwrap_or(u32::MAX);
+        crate::boa_realm::BOA_CHECKPOINT_CAP.with(|c| c.set((allow_cp, max_cp)));
         if let Some(seed) = self.deterministic_seed {
             BOA_DET_STATE.with(|s| s.set(Some((seed ^ 0x9E37_79B9_7F4A_7C15, 1_700_000_000_000))));
         }
@@ -399,6 +413,11 @@ impl SliceIsolate {
 
         self.teardown_boa_compartment_thread_locals(&mut realm, flags, has_next_tick);
         self.harvest_boa_stdout();
+        let (cp_taken, cp_restored, cp_restore_ns) =
+            crate::boa_realm::BOA_CHECKPOINT_STATS.with(|s| s.replace((0, 0, 0)));
+        self.checkpoints_taken = cp_taken;
+        self.restores_performed = cp_restored;
+        self.restore_time_ns = cp_restore_ns;
 
         let last_cp_violation = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
         if eval_res.is_err() {
@@ -449,11 +468,14 @@ impl SliceIsolate {
         let kv_used = BOA_KV_MEM_BUDGET.with(|m| m.get().0);
         if kv_used > 0 {
             if let Err(v) = self.compartment.alloc_memory(kv_used) {
+                self.compartment.memory_used_bytes =
+                    self.compartment.memory_used_bytes.saturating_add(kv_used);
                 release_warm_boa_realm(realm);
                 return Err(v);
             }
         }
 
+        self.last_return_json = None;
         let result = match eval_res {
             Ok(mut val) => {
                 if val.as_promise().is_some() {
@@ -484,6 +506,26 @@ impl SliceIsolate {
                                     .unwrap_or_else(|_| "Promise rejected".to_string());
                                 release_warm_boa_realm(realm);
                                 return Ok(JsValue::str(format!("Uncaught {}", err_msg)));
+                            }
+                        }
+                    }
+                }
+                if self.capture_return_json {
+                    if val.is_null() {
+                        self.last_return_json = Some("null".to_string());
+                    } else if let Some(b) = val.as_boolean() {
+                        self.last_return_json = Some(if b { "true" } else { "false" }.to_string());
+                    } else if let Some(n) = val.as_number() {
+                        if n.is_finite() {
+                            self.last_return_json = Some(JsValue::Number(n).to_string());
+                        }
+                    } else if let Some(s) = val.as_string() {
+                        self.last_return_json =
+                            serde_json::to_string(&s.to_std_string_escaped()).ok();
+                    } else if let Some(obj) = val.as_object() {
+                        if !obj.is_callable() {
+                            if let Ok(Some(json_val)) = val.to_json(&mut realm.ctx) {
+                                self.last_return_json = serde_json::to_string(&json_val).ok();
                             }
                         }
                     }

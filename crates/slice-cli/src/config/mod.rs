@@ -102,6 +102,7 @@ impl ResolvedExecutionConfig {
     pub(crate) fn from_cli_args(args: &[String]) -> Result<Self> {
         let (mut caps, mut fuel_limit, mut mem_limit) = load_manifest_or_default();
         let mut audit_secrets = Vec::new();
+        let mut audit_egress_specs = Vec::new();
         let mut env_files = Vec::new();
         let mut warm_pool = false;
         let mut deterministic_seed = None;
@@ -246,7 +247,17 @@ impl ResolvedExecutionConfig {
             }
         }
         if let Ok(v) = std::env::var("SLICE_AUDIT_EGRESS") {
-            register_audit_egress_spec(&v, Some(Path::new(".")), &caps, &mut audit_secrets);
+            audit_egress_specs.push(v);
+        }
+        if let Ok(v) = std::env::var("SLICE_CHECKPOINTS") {
+            if let Some(b) = slice_sandbox::parse_bool_setting(&v) {
+                caps = caps.with_checkpoints(b);
+            }
+        }
+        if let Ok(v) = std::env::var("SLICE_MAX_CHECKPOINTS") {
+            if let Some(n) = parse_u64_digits(&v) {
+                caps = caps.with_max_checkpoints(Some(n.min(u32::MAX as u64) as u32));
+            }
         }
         if let Ok(v) = std::env::var("SLICE_WARM") {
             if let Some(b) = slice_sandbox::parse_bool_setting(&v) {
@@ -359,7 +370,19 @@ impl ResolvedExecutionConfig {
                     env_files.push(PathBuf::from(ef));
                 }
             } else if let Some(sec) = arg.strip_prefix("--audit-egress=") {
-                register_audit_egress_spec(sec, Some(Path::new(".")), &caps, &mut audit_secrets);
+                audit_egress_specs.push(sec.to_string());
+            } else if arg == "--no-checkpoints" {
+                caps = caps.with_checkpoints(false);
+            } else if arg == "--checkpoints" {
+                caps = caps.with_checkpoints(true);
+            } else if let Some(cp_str) = arg.strip_prefix("--checkpoints=") {
+                if let Some(b) = slice_sandbox::parse_bool_setting(cp_str) {
+                    caps = caps.with_checkpoints(b);
+                }
+            } else if let Some(mcp_str) = arg.strip_prefix("--max-checkpoints=") {
+                if let Some(n) = parse_u64_digits(mcp_str) {
+                    caps = caps.with_max_checkpoints(Some(n.min(u32::MAX as u64) as u32));
+                }
             } else if let Some(sec_file) = arg.strip_prefix("--audit-egress-file=") {
                 if !sec_file.is_empty() {
                     if let Ok(raw) = std::fs::read_to_string(sec_file) {
@@ -479,6 +502,9 @@ impl ResolvedExecutionConfig {
 
         for ef in &env_files {
             apply_dotenv_file_to_caps_and_dlp(ef, &mut caps, &mut audit_secrets)?;
+        }
+        for spec in &audit_egress_specs {
+            register_audit_egress_spec(spec, Some(Path::new(".")), &caps, &mut audit_secrets);
         }
 
         Ok(Self {
@@ -828,6 +854,19 @@ pub(crate) fn merge_manifest_toml_into_caps_and_dlp(
     for eb in m.capabilities.allowed_exec_binaries {
         if !caps.allowed_exec_binaries.contains(&eb) {
             caps.allowed_exec_binaries.push(eb);
+        }
+    }
+    if !m.capabilities.allow_checkpoints {
+        caps.allow_checkpoints = false;
+        caps.max_checkpoints = Some(0);
+    }
+    if let Some(max_cp) = m.capabilities.max_checkpoints {
+        caps.max_checkpoints = Some(match caps.max_checkpoints {
+            Some(existing) => existing.min(max_cp),
+            None => max_cp,
+        });
+        if max_cp == 0 {
+            caps.allow_checkpoints = false;
         }
     }
     for (k, v) in m.capabilities.allowed_env_keys {

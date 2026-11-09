@@ -878,6 +878,149 @@ fn test_issue_5_fuel_used_clamped_to_limit_on_fuel_trap() {
     assert_eq!(outcome_boa.fuel_used, 150_000);
 }
 
+#[test]
+fn test_issue_12_checkpoint_and_restore_metrics_exposed() {
+    use crate::SandboxEvalOptions;
+
+    let mut iso = SliceIsolate::spawn(
+        "issue-12-parent",
+        112,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        4 * 1024 * 1024,
+    );
+    let outcome = iso.eval_sandbox(
+        r#"
+        Slice.kv.set("k", "v1", 0);
+        const s1 = Slice.checkpoint();
+        Slice.kv.set("k", "v2", 0);
+        const s2 = Slice.checkpoint();
+        Slice.restore(s1);
+        Slice.kv.get("k")
+        "#,
+        SandboxEvalOptions::default(),
+    );
+    assert!(outcome.ok);
+    assert_eq!(outcome.return_value, "v1");
+    assert_eq!(outcome.checkpoints_taken, 2);
+    assert_eq!(outcome.restores_performed, 1);
+    assert!(outcome.restore_time_ns >= 1);
+
+    // Parent isolate also accumulates checkpoint telemetry across execute_bytecode
+    assert_eq!(iso.checkpoints_taken, 2);
+    assert_eq!(iso.restores_performed, 1);
+    assert!(iso.restore_time_ns >= 1);
+}
+
+#[test]
+fn test_issue_13_disable_checkpoints_and_max_checkpoints_attenuation() {
+    use crate::SandboxEvalOptions;
+
+    // 1. Disabling checkpoints via SandboxEvalOptions traps when guest calls Slice.checkpoint()
+    let mut iso = SliceIsolate::spawn(
+        "issue-13-parent",
+        113,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        4 * 1024 * 1024,
+    );
+    let denied = iso.eval_sandbox(
+        "const snap = Slice.checkpoint(); snap",
+        SandboxEvalOptions {
+            checkpoints: Some(false),
+            ..Default::default()
+        },
+    );
+    assert!(!denied.ok);
+    let viol = denied.violation.unwrap_or_default();
+    assert!(
+        viol.contains("CapabilityDenied: checkpoints") || viol.contains("checkpoint denied"),
+        "Expected CheckpointDenied violation, got: {}",
+        viol
+    );
+
+    // 2. max_checkpoints enforcement: 2 allowed, 3rd traps even inside try/catch
+    let max_exceeded = iso.eval_sandbox(
+        r#"
+        const s1 = Slice.checkpoint();
+        const s2 = Slice.checkpoint();
+        try { Slice.checkpoint(); } catch (_) {}
+        s2
+        "#,
+        SandboxEvalOptions {
+            max_checkpoints: Some(2),
+            ..Default::default()
+        },
+    );
+    assert!(!max_exceeded.ok);
+    assert_eq!(max_exceeded.checkpoints_taken, 2);
+    assert!(
+        max_exceeded
+            .violation
+            .unwrap_or_default()
+            .contains("max_checkpoints"),
+        "Expected max_checkpoints violation"
+    );
+
+    // 3. Parent with checkpoints disabled cannot have child re-enable them via Slice.evalSandbox
+    let no_cp_parent_outcome = iso.eval_sandbox(
+        r#"
+        const child = Slice.evalSandbox("Slice.checkpoint()", { checkpoints: true });
+        child.ok ? "escaped" : child.violation
+        "#,
+        SandboxEvalOptions {
+            checkpoints: Some(false),
+            ..Default::default()
+        },
+    );
+    assert!(no_cp_parent_outcome.ok);
+    assert!(
+        no_cp_parent_outcome
+            .return_value
+            .contains("CapabilityDenied: checkpoints"),
+        "Got: {}",
+        no_cp_parent_outcome.return_value
+    );
+}
+
+#[test]
+fn test_issue_14_richer_sandbox_eval_outcome_phase_timings_and_return_json() {
+    use crate::SandboxEvalOptions;
+
+    let mut iso = SliceIsolate::spawn(
+        "issue-14-parent",
+        114,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        4 * 1024 * 1024,
+    );
+
+    // 1. Object return value provides valid JSON in return_json plus non-zero phase timings
+    let obj_out = iso.eval_sandbox(
+        "const res = { a: 1, b: [2, 3], ok: true }; res",
+        SandboxEvalOptions::default(),
+    );
+    assert!(obj_out.ok);
+    assert!(obj_out.error.is_none());
+    assert!(obj_out.violation.is_none());
+    assert!(obj_out.spawn_time_ns >= 1);
+    assert!(obj_out.compile_time_ns >= 1);
+    assert!(obj_out.exec_time_ns >= 1);
+    assert!(obj_out.peak_memory_bytes >= obj_out.memory_used_bytes);
+    let parsed_json: serde_json::Value =
+        serde_json::from_str(obj_out.return_json.as_deref().expect("expected return_json"))
+            .expect("valid JSON");
+    assert_eq!(parsed_json["a"], 1);
+    assert_eq!(parsed_json["b"], serde_json::json!([2, 3]));
+    assert_eq!(parsed_json["ok"], true);
+
+    // 2. Undefined return value yields return_json: None
+    let undef_out = iso.eval_sandbox("let x = 1; undefined", SandboxEvalOptions::default());
+    assert!(undef_out.ok);
+    assert_eq!(undef_out.return_value, "undefined");
+    assert!(undef_out.return_json.is_none());
+}
+
 
 
 

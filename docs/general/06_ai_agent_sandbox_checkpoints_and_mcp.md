@@ -41,6 +41,12 @@ interface SandboxEvalOptions {
     deterministicSeed?: number;
     /** Optional secret string to block from leaking in child stdout or returnValue */
     auditSecret?: string;
+    /** Optional list of secret strings to block from leaking in child stdout, returnValue, or outbound fetch() */
+    auditSecrets?: string[];
+    /** Whether guest Slice.checkpoint() and Slice.restore() calls are allowed (default: true, attenuated by parent) */
+    checkpoints?: boolean;
+    /** Maximum number of guest checkpoints allowed during evaluation (attenuated by parent) */
+    maxCheckpoints?: number;
 }
 
 interface SandboxEvalOutcome {
@@ -50,12 +56,28 @@ interface SandboxEvalOutcome {
     stdout: string[];
     /** Stringified final expression return value of the child script (supports top-level await) */
     returnValue: string;
+    /** JSON serialization of the final return value when JSON-safe, otherwise `null` */
+    returnJson: string | null;
     /** Exact CPU instruction fuel consumed by the child (clamped to fuel limit on trap) */
     fuelUsed: number;
-    /** Peak memory bytes used by the child */
+    /** Memory bytes used by the child */
     memoryUsedBytes: number;
-    /** Wall-clock execution time of the child sandbox in microseconds */
+    /** Peak memory bytes used by the child */
+    peakMemoryBytes: number;
+    /** Isolate instantiation time in nanoseconds */
+    spawnTimeNs: number;
+    /** Oxc TypeScript + bytecode compilation time in nanoseconds */
+    compileTimeNs: number;
+    /** VM execution time in nanoseconds */
+    execTimeNs: number;
+    /** Total wall-clock time of the child sandbox evaluation in microseconds */
     totalTimeUs: number;
+    /** Number of guest `Slice.checkpoint()` snapshots taken during evaluation */
+    checkpointsTaken: number;
+    /** Number of guest `Slice.restore()` rollbacks performed during evaluation */
+    restoresPerformed: number;
+    /** Total wall-clock time spent inside `Slice.restore()` in nanoseconds */
+    restoreTimeNs: number;
     /** Human-readable sandbox violation message if an OCap/SES/Fuel/Memory trap occurred, otherwise `null` */
     violation: string | null;
     /** Uncaught JavaScript exception or SyntaxError message if `ok === false` due to a JS error, otherwise `null` */
@@ -208,10 +230,13 @@ Compiles and executes TypeScript or JavaScript (including top-level `await`) ins
     "memory": 4194304,
     "allowRead": ["/workspace"],
     "allowNet": ["api.github.com:443"],
-    "auditSecret": "sk_live_optional_extra_secret"
+    "auditSecrets": ["sk_live_optional_extra_secret", "db_prod_secret"],
+    "deterministicSeed": 42,
+    "checkpoints": true,
+    "maxCheckpoints": 8
   }
   ```
-- **Returns:** JSON `SandboxEvalOutcome` (`ok`, `stdout`, `returnValue`, `fuelUsed`, `memoryUsedBytes`, `totalTimeUs`, `violation`, `error`).
+- **Returns:** JSON `SandboxEvalOutcome` (`ok`, `stdout`, `returnValue`, `returnJson`, `fuelUsed`, `memoryUsedBytes`, `peakMemoryBytes`, `spawnTimeNs`, `compileTimeNs`, `execTimeNs`, `totalTimeUs`, `checkpointsTaken`, `restoresPerformed`, `restoreTimeNs`, `violation`, `error`).
 
 #### 2. `slice_kv_set`
 Stores a key-value pair inside the MCP host's sharded `Slice.kv` store so the agent can persist intermediate plans or results across tool calls.

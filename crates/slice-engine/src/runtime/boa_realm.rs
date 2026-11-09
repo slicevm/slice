@@ -75,6 +75,10 @@ thread_local! {
         std::cell::RefCell::new(FxHashMap::default());
     pub(crate) static NEXT_CHECKPOINT_ID: std::cell::Cell<u64> =
         const { std::cell::Cell::new(1) };
+    pub(crate) static BOA_CHECKPOINT_STATS: std::cell::Cell<(u32, u32, u64)> =
+        const { std::cell::Cell::new((0, 0, 0)) };
+    pub(crate) static BOA_CHECKPOINT_CAP: std::cell::Cell<(bool, u32)> =
+        const { std::cell::Cell::new((true, u32::MAX)) };
     pub(crate) static BOA_ALS_ACTIVE: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
     pub(crate) static BOA_ALS_SNAP: std::cell::RefCell<boa_engine::JsValue> =
@@ -443,6 +447,8 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_sock_mocks: FxHashMap<String, String>,
     pub(crate) saved_kv_budget: (usize, usize),
     pub(crate) saved_fuel_budget: (u64, u64),
+    pub(crate) saved_checkpoint_stats: (u32, u32, u64),
+    pub(crate) saved_checkpoint_cap: (bool, u32),
     pub(crate) saved_det: Option<(u64, u64)>,
     pub(crate) saved_als_active: bool,
     pub(crate) saved_als_snap: boa_engine::JsValue,
@@ -469,6 +475,8 @@ impl SavedIsolateContextGuard {
         let saved_sock_mocks = crate::sockets::BOA_SOCKET_MOCKS.with(|m| m.borrow().clone());
         let saved_kv_budget = BOA_KV_MEM_BUDGET.with(|m| m.get());
         let saved_fuel_budget = BOA_FUEL_BUDGET.with(|f| f.get());
+        let saved_checkpoint_stats = BOA_CHECKPOINT_STATS.with(|s| s.replace((0, 0, 0)));
+        let saved_checkpoint_cap = BOA_CHECKPOINT_CAP.with(|c| c.get());
         let saved_det = BOA_DET_STATE.with(|s| s.get());
         let saved_als_active = BOA_ALS_ACTIVE.with(|a| a.replace(false));
         let saved_als_snap = BOA_ALS_SNAP.with(|s| s.replace(boa_engine::JsValue::undefined()));
@@ -497,6 +505,8 @@ impl SavedIsolateContextGuard {
             saved_sock_mocks,
             saved_kv_budget,
             saved_fuel_budget,
+            saved_checkpoint_stats,
+            saved_checkpoint_cap,
             saved_det,
             saved_als_active,
             saved_als_snap,
@@ -531,6 +541,8 @@ impl Drop for SavedIsolateContextGuard {
             .with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_sock_mocks));
         BOA_KV_MEM_BUDGET.with(|m| m.set(self.saved_kv_budget));
         BOA_FUEL_BUDGET.with(|f| f.set(self.saved_fuel_budget));
+        BOA_CHECKPOINT_STATS.with(|s| s.set(self.saved_checkpoint_stats));
+        BOA_CHECKPOINT_CAP.with(|c| c.set(self.saved_checkpoint_cap));
         BOA_DET_STATE.with(|s| s.set(self.saved_det));
         BOA_ALS_ACTIVE.with(|a| a.set(self.saved_als_active));
         BOA_ALS_SNAP.with(|s| *s.borrow_mut() = self.saved_als_snap.clone());

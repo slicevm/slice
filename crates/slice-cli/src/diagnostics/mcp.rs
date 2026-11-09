@@ -140,12 +140,17 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                             "code": { "type": "string", "description": "TypeScript or JavaScript source code to evaluate" },
                             "fuel": { "type": "integer", "description": "Maximum CPU instruction fuel budget" },
                             "memory": { "type": "integer", "description": "Maximum memory ceiling in bytes" },
+                            "memoryBytes": { "type": "integer", "description": "Maximum memory ceiling in bytes (alias for memory)" },
                             "allowRead": { "type": ["string", "array"], "description": "Optional allowed VFS read prefix(es) attenuated against server grants" },
                             "allowWrite": { "type": ["string", "array"], "description": "Optional allowed VFS write prefix(es) attenuated against server grants" },
                             "allowNet": { "type": ["string", "array"], "description": "Optional allowed network host(s) attenuated against server grants" },
                             "allowExec": { "type": ["string", "array"], "description": "Optional allowed subprocess binary(ies) attenuated against server grants" },
                             "allowEnv": { "type": ["string", "array"], "description": "Optional allowed environment variable key(s) attenuated against server grants" },
-                            "auditSecret": { "type": "string", "description": "Optional secret to guard against egress leakage" }
+                            "auditSecret": { "type": ["string", "array"], "description": "Optional secret(s) to guard against egress leakage" },
+                            "auditSecrets": { "type": ["string", "array"], "description": "Optional array of secrets to guard against egress leakage" },
+                            "deterministicSeed": { "type": "integer", "description": "Optional deterministic seed for Math.random() and Date.now()" },
+                            "checkpoints": { "type": "boolean", "description": "Whether guest Slice.checkpoint() / Slice.restore() calls are allowed" },
+                            "maxCheckpoints": { "type": "integer", "description": "Maximum number of guest checkpoints allowed during evaluation" }
                         },
                         "required": ["code"]
                     }
@@ -205,7 +210,11 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                     if let Some(f) = args.get("fuel").and_then(|v| v.as_u64()) {
                         opts.fuel = Some(f);
                     }
-                    if let Some(m) = args.get("memory").and_then(|v| v.as_u64()) {
+                    if let Some(m) = args
+                        .get("memory")
+                        .or_else(|| args.get("memoryBytes"))
+                        .and_then(|v| v.as_u64())
+                    {
                         opts.memory_bytes = Some(m as usize);
                     }
                     push_string_or_array_arg(&args, "allowRead", &mut opts.allow_read);
@@ -213,13 +222,28 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                     push_string_or_array_arg(&args, "allowNet", &mut opts.allow_net);
                     push_string_or_array_arg(&args, "allowExec", &mut opts.allow_exec);
                     push_string_or_array_arg(&args, "allowEnv", &mut opts.allow_env);
-                    if let Some(s) = args.get("auditSecret").and_then(|v| v.as_str()) {
-                        opts.audit_secret = Some(s.to_string());
+                    push_string_or_array_arg(&args, "auditSecret", &mut opts.audit_secrets);
+                    push_string_or_array_arg(&args, "auditSecrets", &mut opts.audit_secrets);
+                    if let Some(seed) = args.get("deterministicSeed").and_then(|v| v.as_u64()) {
+                        opts.deterministic_seed = Some(seed);
+                    }
+                    if let Some(cp) = args
+                        .get("checkpoints")
+                        .or_else(|| args.get("allowCheckpoints"))
+                        .and_then(|v| v.as_bool())
+                    {
+                        opts.checkpoints = Some(cp);
+                    }
+                    if let Some(max_cp) = args.get("maxCheckpoints").and_then(|v| v.as_u64()) {
+                        opts.max_checkpoints = Some(max_cp.min(u32::MAX as u64) as u32);
                     }
                     let saved_fuel_limit = isolate.compartment.fuel_limit;
                     let saved_mem_limit = isolate.compartment.memory_limit_bytes;
                     isolate.compartment.fuel_consumed = 0;
                     isolate.compartment.memory_used_bytes = 0;
+                    isolate.checkpoints_taken = 0;
+                    isolate.restores_performed = 0;
+                    isolate.restore_time_ns = 0;
                     if let Some(req_fuel) = opts.fuel {
                         if req_fuel > isolate.compartment.fuel_limit {
                             isolate.compartment.fuel_limit = req_fuel;
@@ -238,12 +262,22 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                     let payload = serde_json::json!({
                         "ok": outcome.ok,
                         "value": outcome.return_value,
+                        "returnValue": outcome.return_value,
+                        "returnJson": outcome.return_json,
                         "error": outcome.error,
+                        "violation": outcome.violation,
                         "stdout": outcome.stdout,
                         "fuelUsed": outcome.fuel_used,
                         "memoryUsedBytes": outcome.memory_used_bytes,
+                        "peakMemoryBytes": outcome.peak_memory_bytes,
+                        "spawnTimeNs": outcome.spawn_time_ns,
+                        "compileTimeNs": outcome.compile_time_ns,
+                        "execTimeNs": outcome.exec_time_ns,
                         "timeUs": outcome.total_time_us,
-                        "violation": outcome.violation
+                        "totalTimeUs": outcome.total_time_us,
+                        "checkpointsTaken": outcome.checkpoints_taken,
+                        "restoresPerformed": outcome.restores_performed,
+                        "restoreTimeNs": outcome.restore_time_ns
                     });
                     serde_json::json!({
                         "content": [{ "type": "text", "text": payload.to_string() }],

