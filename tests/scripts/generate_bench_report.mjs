@@ -232,6 +232,11 @@ function parseJsonlMetrics(jsonlPath, previousReport) {
     const denoRec = findMode("deno");
     const nodeRec = findMode("node");
 
+    const sameCommit =
+      previousReport?.metadata?.commit &&
+      metaRec.commit &&
+      previousReport.metadata.commit === metaRec.commit;
+
     return {
       num: meta.num,
       code: meta.code,
@@ -245,7 +250,11 @@ function parseJsonlMetrics(jsonlPath, previousReport) {
       sliceBinAvgMs: binRec ? binRec.avgMs : prev.sliceBinAvgMs ?? 0,
       sliceSrcAvgMs: srcRec ? srcRec.avgMs : prev.sliceSrcAvgMs ?? 0,
       sliceWarmMs: warmRec ? warmRec.totalMs : prev.sliceWarmMs ?? 0,
-      prevSliceCasAvgMs: prev.prevSliceCasAvgMs ?? prev.sliceCasAvgMs ?? null,
+      prevSliceCasAvgMs: casRec
+        ? sameCommit && prev.prevSliceCasAvgMs != null
+          ? prev.prevSliceCasAvgMs
+          : prev.sliceCasAvgMs ?? null
+        : prev.prevSliceCasAvgMs ?? prev.sliceCasAvgMs ?? null,
       bunAvgMs: bunRec ? bunRec.avgMs : prev.bunAvgMs ?? 0,
       denoAvgMs: denoRec ? denoRec.avgMs : prev.denoAvgMs ?? 0,
       nodeAvgMs: nodeRec ? nodeRec.avgMs : prev.nodeAvgMs ?? 0
@@ -254,6 +263,11 @@ function parseJsonlMetrics(jsonlPath, previousReport) {
 
   // RSS entries
   const rssMap = new Map();
+  if (previousReport && Array.isArray(previousReport.rss)) {
+    for (const prevRss of previousReport.rss) {
+      rssMap.set(prevRss.id, { ...prevRss });
+    }
+  }
   for (const r of records.filter((x) => x.type === "rss")) {
     if (!rssMap.has(r.suite)) {
       rssMap.set(r.suite, { id: r.suite, label: r.suite, sliceKb: 0, bunKb: 0, denoKb: 0, nodeKb: 0 });
@@ -293,9 +307,25 @@ function parseJsonlMetrics(jsonlPath, previousReport) {
       coldP50Us: microvmRec.coldP50Us ?? prevMicrovm.linux.coldP50Us,
       coldP99Us: microvmRec.coldP99Us ?? prevMicrovm.linux.coldP99Us,
       swarm1000Ms: microvmRec.swarm1000Ms ?? prevMicrovm.linux.swarm1000Ms,
-      swarm1000RssMb: microvmRec.swarm1000RssMb ?? prevMicrovm.linux.swarm1000RssMb
+      swarm1000RssMb: microvmRec.swarm1000RssMb ?? prevMicrovm.linux.swarm1000RssMb,
+      cas500MemUs: microvmRec.cas500MemUs ?? prevMicrovm.linux.cas500MemUs
     };
   }
+
+  const primKvRec = records.find((x) => x.type === "primitives_kv");
+  const primTotRec = records.find((x) => x.type === "primitives_tot");
+  const prevPrim = previousReport?.primitives || {
+    kv1001Us: 596.53,
+    kvMemBytes: 12362,
+    tot3SandboxesUs: 107.06,
+    totSingleSandboxUs: 15.22
+  };
+  const primitives = {
+    kv1001Us: primKvRec?.kv1001Us ?? prevPrim.kv1001Us,
+    kvMemBytes: primKvRec?.kvMemBytes ?? prevPrim.kvMemBytes,
+    tot3SandboxesUs: primTotRec?.tot3SandboxesUs ?? prevPrim.tot3SandboxesUs,
+    totSingleSandboxUs: primTotRec?.totSingleSandboxUs ?? prevPrim.totSingleSandboxUs
+  };
 
   return {
     metadata: {
@@ -312,12 +342,7 @@ function parseJsonlMetrics(jsonlPath, previousReport) {
     },
     microvm: prevMicrovm,
     httpKeepAlive,
-    primitives: previousReport?.primitives || {
-      kv1001Us: 596.53,
-      kvMemBytes: 12362,
-      tot3SandboxesUs: 107.06,
-      totSingleSandboxUs: 15.22
-    },
+    primitives,
     workloads,
     rss
   };
