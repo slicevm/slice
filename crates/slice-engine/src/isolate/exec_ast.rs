@@ -3,8 +3,9 @@
 use crate::isolate::{ControlFlow, SliceIsolate};
 use crate::parser_and_compiler::expr_to_dotted_chain;
 use crate::value_and_ast::{
-    js_value_to_json_string, serde_json_to_js_value, BinOp, ExecutionTier, Expr, JsFunction,
-    JsValue, Stmt, UnaryOp, TIER1_PROMOTION_THRESHOLD,
+    js_math_max, js_math_min, js_math_round, js_to_int32, js_to_uint32, js_value_to_json_string,
+    serde_json_to_js_value, BinOp, ExecutionTier, Expr, JsFunction, JsValue, Stmt, UnaryOp,
+    TIER1_PROMOTION_THRESHOLD,
 };
 use rustc_hash::FxHashMap;
 use slice_sandbox::SandboxViolation;
@@ -12,6 +13,39 @@ use slice_sandbox::SandboxViolation;
 /// Maximum Tier-0 AST function recursion depth (bounded so even unoptimized debug builds
 /// on 1 MB Windows thread stacks trap cleanly with `CpuFuelExhausted`).
 pub const MAX_TIER0_RECURSION_DEPTH: u32 = if cfg!(debug_assertions) { 32 } else { 128 };
+
+fn collect_local_var_names(stmts: &[Stmt], params: &[String], out: &mut Vec<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::VarDecl { name, .. } => {
+                if !params.contains(name) && !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                collect_local_var_names(then_branch, params, out);
+                collect_local_var_names(else_branch, params, out);
+            }
+            Stmt::While { body, .. } => {
+                collect_local_var_names(body, params, out);
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(init_s) = init {
+                    collect_local_var_names(std::slice::from_ref(init_s.as_ref()), params, out);
+                }
+                collect_local_var_names(body, params, out);
+            }
+            Stmt::Block(inner) => {
+                collect_local_var_names(inner, params, out);
+            }
+            _ => {}
+        }
+    }
+}
 
 impl SliceIsolate {
     pub(crate) fn eval_stmt(&mut self, stmt: &Stmt) -> Result<ControlFlow, SandboxViolation> {
@@ -152,6 +186,7 @@ impl SliceIsolate {
                     UnaryOp::Neg => Ok(JsValue::Number(-val.to_number())),
                     UnaryOp::Pos => Ok(JsValue::Number(val.to_number())),
                     UnaryOp::Not => Ok(JsValue::Bool(!val.is_truthy())),
+                    UnaryOp::BitNot => Ok(JsValue::Number((!js_to_int32(val.to_number())) as f64)),
                     UnaryOp::TypeOf => Ok(JsValue::str(val.type_of().to_string())),
                 }
             }
@@ -210,15 +245,19 @@ impl SliceIsolate {
                 let val = self.eval_expr(value)?;
                 self.apply_index_assign(target, idx_val, val)
             }
-            Expr::Update { name, increment } => {
+            Expr::Update {
+                name,
+                increment,
+                prefix,
+            } => {
                 let prev = self
                     .env_vars
                     .get(name)
                     .map(|v| v.to_number())
-                    .unwrap_or(0.0);
+                    .unwrap_or(f64::NAN);
                 let next = if *increment { prev + 1.0 } else { prev - 1.0 };
                 self.env_vars.insert(name.clone(), JsValue::Number(next));
-                Ok(JsValue::Number(next))
+                Ok(JsValue::Number(if *prefix { next } else { prev }))
             }
             Expr::Ternary {
                 cond,
@@ -263,6 +302,9 @@ impl SliceIsolate {
                         return Ok(match property.as_str() {
                             "PI" => JsValue::Number(std::f64::consts::PI),
                             "E" => JsValue::Number(std::f64::consts::E),
+                            "SQRT2" => JsValue::Number(std::f64::consts::SQRT_2),
+                            "LN2" => JsValue::Number(std::f64::consts::LN_2),
+                            "LN10" => JsValue::Number(std::f64::consts::LN_10),
                             _ => JsValue::Undefined,
                         });
                     }
@@ -284,15 +326,23 @@ impl SliceIsolate {
                 let idx = self.eval_expr(index)?;
                 match target {
                     JsValue::Array(a) => {
-                        let i = idx.to_number() as usize;
-                        Ok(a.get(i).cloned().unwrap_or(JsValue::Undefined))
+                        let idx_f = idx.to_number();
+                        if idx_f >= 0.0 && idx_f.fract() == 0.0 {
+                            Ok(a.get(idx_f as usize).cloned().unwrap_or(JsValue::Undefined))
+                        } else {
+                            Ok(JsValue::Undefined)
+                        }
                     }
                     JsValue::Str(s) => {
-                        let i = idx.to_number() as usize;
-                        Ok(s.chars()
-                            .nth(i)
-                            .map(|c| JsValue::str(c.to_string()))
-                            .unwrap_or(JsValue::Undefined))
+                        let idx_f = idx.to_number();
+                        if idx_f >= 0.0 && idx_f.fract() == 0.0 {
+                            Ok(s.chars()
+                                .nth(idx_f as usize)
+                                .map(|c| JsValue::str(c.to_string()))
+                                .unwrap_or(JsValue::Undefined))
+                        } else {
+                            Ok(JsValue::Undefined)
+                        }
                     }
                     JsValue::Object(map) => Ok(map
                         .get(&idx.to_string())
@@ -331,26 +381,31 @@ impl SliceIsolate {
             BinOp::Div => Ok(JsValue::Number(l.to_number() / r.to_number())),
             BinOp::Rem => Ok(JsValue::Number(l.to_number() % r.to_number())),
             BinOp::Pow => Ok(JsValue::Number(l.to_number().powf(r.to_number()))),
-            BinOp::Eq | BinOp::StrictEq => Ok(JsValue::Bool(l == r)),
-            BinOp::Neq | BinOp::StrictNeq => Ok(JsValue::Bool(l != r)),
+            BinOp::Eq => Ok(JsValue::Bool(l.abstract_eq(&r))),
+            BinOp::Neq => Ok(JsValue::Bool(!l.abstract_eq(&r))),
+            BinOp::StrictEq => Ok(JsValue::Bool(l == r)),
+            BinOp::StrictNeq => Ok(JsValue::Bool(l != r)),
             BinOp::Lt => Ok(JsValue::Bool(l.to_number() < r.to_number())),
             BinOp::Lte => Ok(JsValue::Bool(l.to_number() <= r.to_number())),
             BinOp::Gt => Ok(JsValue::Bool(l.to_number() > r.to_number())),
             BinOp::Gte => Ok(JsValue::Bool(l.to_number() >= r.to_number())),
             BinOp::BitAnd => Ok(JsValue::Number(
-                ((l.to_number() as i64) & (r.to_number() as i64)) as f64,
+                (js_to_int32(l.to_number()) & js_to_int32(r.to_number())) as f64,
             )),
             BinOp::BitOr => Ok(JsValue::Number(
-                ((l.to_number() as i64) | (r.to_number() as i64)) as f64,
+                (js_to_int32(l.to_number()) | js_to_int32(r.to_number())) as f64,
             )),
             BinOp::BitXor => Ok(JsValue::Number(
-                ((l.to_number() as i64) ^ (r.to_number() as i64)) as f64,
+                (js_to_int32(l.to_number()) ^ js_to_int32(r.to_number())) as f64,
             )),
             BinOp::Shl => Ok(JsValue::Number(
-                ((l.to_number() as i64) << ((r.to_number() as u32) & 31)) as f64,
+                (js_to_int32(l.to_number()).wrapping_shl(js_to_uint32(r.to_number()) & 31)) as f64,
             )),
             BinOp::Shr => Ok(JsValue::Number(
-                ((l.to_number() as i64) >> ((r.to_number() as u32) & 31)) as f64,
+                (js_to_int32(l.to_number()).wrapping_shr(js_to_uint32(r.to_number()) & 31)) as f64,
+            )),
+            BinOp::UShr => Ok(JsValue::Number(
+                (js_to_uint32(l.to_number()).wrapping_shr(js_to_uint32(r.to_number()) & 31)) as f64,
             )),
             BinOp::And | BinOp::Or => unreachable!(),
         }
@@ -380,6 +435,7 @@ impl SliceIsolate {
             BinOp::Sub => JsValue::Number(prev.to_number() - rhs.to_number()),
             BinOp::Mul => JsValue::Number(prev.to_number() * rhs.to_number()),
             BinOp::Div => JsValue::Number(prev.to_number() / rhs.to_number()),
+            BinOp::Rem => JsValue::Number(prev.to_number() % rhs.to_number()),
             _ => rhs,
         })
     }
@@ -467,13 +523,23 @@ impl SliceIsolate {
                 return Ok(Some(JsValue::Undefined));
             }
             ("Math", method) => {
-                let x = eval_args.first().map(|v| v.to_number()).unwrap_or(0.0);
-                let y = eval_args.get(1).map(|v| v.to_number()).unwrap_or(0.0);
+                let x = eval_args.first().map(|v| v.to_number()).unwrap_or(f64::NAN);
+                let y = eval_args.get(1).map(|v| v.to_number()).unwrap_or(f64::NAN);
                 let res = match method {
                     "abs" => x.abs(),
                     "floor" => x.floor(),
                     "ceil" => x.ceil(),
-                    "round" => x.round(),
+                    "round" => js_math_round(x),
+                    "trunc" => x.trunc(),
+                    "sign" => {
+                        if x == 0.0 || x.is_nan() {
+                            x
+                        } else if x > 0.0 {
+                            1.0
+                        } else {
+                            -1.0
+                        }
+                    }
                     "sqrt" => x.sqrt(),
                     "pow" => x.powf(y),
                     "sin" => x.sin(),
@@ -481,11 +547,21 @@ impl SliceIsolate {
                     "max" => eval_args
                         .iter()
                         .map(|v| v.to_number())
-                        .fold(f64::NEG_INFINITY, f64::max),
+                        .fold(f64::NEG_INFINITY, js_math_max),
                     "min" => eval_args
                         .iter()
                         .map(|v| v.to_number())
-                        .fold(f64::INFINITY, f64::min),
+                        .fold(f64::INFINITY, js_math_min),
+                    "imul" => {
+                        (js_to_int32(x).wrapping_mul(js_to_int32(
+                            eval_args.get(1).map(|v| v.to_number()).unwrap_or(0.0),
+                        ))) as f64
+                    }
+                    "clz32" => {
+                        (js_to_uint32(eval_args.first().map(|v| v.to_number()).unwrap_or(0.0))
+                            .leading_zeros()) as f64
+                    }
+                    "fround" => (x as f32) as f64,
                     _ => f64::NAN,
                 };
                 return Ok(Some(JsValue::Number(res)));
@@ -575,16 +651,24 @@ impl SliceIsolate {
         let target_val = self.eval_expr(object)?;
         match (target_val, property) {
             (JsValue::Array(items), "join") => {
-                let sep = eval_args
-                    .first()
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| ",".to_string());
-                let parts: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+                let sep = match eval_args.first() {
+                    None | Some(JsValue::Undefined) => ",".to_string(),
+                    Some(v) => v.to_string(),
+                };
+                let parts: Vec<String> = items
+                    .iter()
+                    .map(|v| match v {
+                        JsValue::Null | JsValue::Undefined => String::new(),
+                        other => other.to_string(),
+                    })
+                    .collect();
                 Ok(Some(JsValue::str(parts.join(&sep))))
             }
             (JsValue::Array(items), "includes") => {
                 let needle = eval_args.first().cloned().unwrap_or(JsValue::Undefined);
-                Ok(Some(JsValue::Bool(items.contains(&needle))))
+                Ok(Some(JsValue::Bool(
+                    items.iter().any(|item| item.same_value_zero(&needle)),
+                )))
             }
             (JsValue::Array(items), "map") => {
                 if let Some(cb) = eval_args.first() {
@@ -616,8 +700,15 @@ impl SliceIsolate {
             }
             (JsValue::Array(items), "reduce") => {
                 if let Some(cb) = eval_args.first() {
-                    let mut acc = eval_args.get(1).cloned().unwrap_or(JsValue::Number(0.0));
-                    for (idx, item) in items.into_iter().enumerate() {
+                    let mut iter = items.into_iter().enumerate();
+                    let mut acc = if let Some(init_val) = eval_args.get(1) {
+                        init_val.clone()
+                    } else if let Some((_, first_item)) = iter.next() {
+                        first_item
+                    } else {
+                        return Ok(Some(JsValue::Undefined));
+                    };
+                    for (idx, item) in iter {
                         acc = self
                             .invoke_function_val(cb, &[acc, item, JsValue::Number(idx as f64)])?;
                     }
@@ -684,8 +775,16 @@ impl SliceIsolate {
                 let n = eval_args
                     .first()
                     .map(|v| v.to_number().trunc())
-                    .unwrap_or(0.0);
+                    .unwrap_or(f64::NAN);
                 Ok(Some(JsValue::Number(n)))
+            }
+            "isNaN" => {
+                let n = eval_args.first().map(|v| v.to_number()).unwrap_or(f64::NAN);
+                Ok(Some(JsValue::Bool(n.is_nan())))
+            }
+            "isFinite" => {
+                let n = eval_args.first().map(|v| v.to_number()).unwrap_or(f64::NAN);
+                Ok(Some(JsValue::Bool(n.is_finite())))
             }
             "String" => {
                 let s = eval_args.first().map(|v| v.to_string()).unwrap_or_default();
@@ -721,13 +820,21 @@ impl SliceIsolate {
                         .fuel_limit
                         .saturating_sub(self.compartment.fuel_consumed);
                     let mut steps: u64 = 0;
-                    let res = num_ir.execute(
+                    let res = match num_ir.execute(
                         &unboxed_args[..args.len().min(6)],
                         &mut steps,
                         remaining_fuel,
                         0,
                         &self.compartment.tenant_id,
-                    )?;
+                    ) {
+                        Ok(val) => val,
+                        Err(err) => {
+                            let _ = self
+                                .compartment
+                                .consume_fuel(remaining_fuel.saturating_add(1));
+                            return Err(err);
+                        }
+                    };
                     let fuel_cost = (steps / 64).max(1);
                     self.compartment.consume_fuel(fuel_cost)?;
                     self.current_tier = ExecutionTier::Tier2PeakNative;
@@ -736,6 +843,11 @@ impl SliceIsolate {
             }
 
             if self.recursion_depth >= MAX_TIER0_RECURSION_DEPTH {
+                let remaining = self
+                    .compartment
+                    .fuel_limit
+                    .saturating_sub(self.compartment.fuel_consumed);
+                let _ = self.compartment.consume_fuel(remaining.saturating_add(1));
                 return Err(SandboxViolation::CpuFuelExhausted {
                     tenant_id: self.compartment.tenant_id.clone(),
                     limit: self.compartment.fuel_limit,
@@ -745,23 +857,30 @@ impl SliceIsolate {
             self.compartment.consume_fuel(2)?;
             self.recursion_depth += 1;
 
-            // Save shadowed bindings
-            let mut saved = Vec::with_capacity(func.params.len());
+            // Save shadowed parameter and local variable bindings so recursive/helper calls
+            // never clobber caller frame variables of the same name.
+            let mut local_names = Vec::new();
+            collect_local_var_names(&func.body, &func.params, &mut local_names);
+            let mut saved = Vec::with_capacity(func.params.len() + local_names.len());
             for (idx, param_name) in func.params.iter().enumerate() {
                 let prev = self.env_vars.get(param_name).cloned();
                 saved.push((param_name.clone(), prev));
                 let arg_val = args.get(idx).cloned().unwrap_or(JsValue::Undefined);
                 self.env_vars.insert(param_name.clone(), arg_val);
             }
+            for local_name in local_names {
+                let prev = self.env_vars.get(&local_name).cloned();
+                saved.push((local_name, prev));
+            }
 
             let block_res = self.eval_block(&func.body);
             self.recursion_depth = self.recursion_depth.saturating_sub(1);
 
-            for (param_name, prev_opt) in saved {
+            for (var_name, prev_opt) in saved {
                 if let Some(prev) = prev_opt {
-                    self.env_vars.insert(param_name, prev);
+                    self.env_vars.insert(var_name, prev);
                 } else {
-                    self.env_vars.remove(&param_name);
+                    self.env_vars.remove(&var_name);
                 }
             }
 

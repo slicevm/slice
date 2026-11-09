@@ -106,6 +106,122 @@ impl JsValue {
             JsValue::Function(_) => "function",
         }
     }
+
+    /// ECMAScript `SameValueZero` comparison (used by `Array.prototype.includes`, where `NaN` equals `NaN` and `-0` equals `+0`).
+    #[inline]
+    pub fn same_value_zero(&self, other: &Self) -> bool {
+        match (self, other) {
+            (JsValue::Number(a), JsValue::Number(b)) => a == b || (a.is_nan() && b.is_nan()),
+            _ => self == other,
+        }
+    }
+
+    /// ECMAScript Abstract Equality Comparison (`==`).
+    #[inline]
+    pub fn abstract_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (JsValue::Undefined, JsValue::Undefined) | (JsValue::Null, JsValue::Null) => true,
+            (JsValue::Null, JsValue::Undefined) | (JsValue::Undefined, JsValue::Null) => true,
+            (JsValue::Number(a), JsValue::Number(b)) => a == b,
+            (JsValue::Str(a), JsValue::Str(b)) => a == b,
+            (JsValue::Bool(a), JsValue::Bool(b)) => a == b,
+            (JsValue::Number(a), JsValue::Str(_)) => *a == other.to_number(),
+            (JsValue::Str(_), JsValue::Number(b)) => self.to_number() == *b,
+            (JsValue::Bool(_), _) => JsValue::Number(self.to_number()).abstract_eq(other),
+            (_, JsValue::Bool(_)) => self.abstract_eq(&JsValue::Number(other.to_number())),
+            _ => self == other,
+        }
+    }
+}
+
+/// ECMAScript `ToInt32` (§7.1.6): converts an IEEE-754 `f64` to a signed 32-bit integer modulo $2^{32}$,
+/// mapping `NaN`, `+0`, `-0`, `+Infinity`, and `-Infinity` to `0`.
+#[inline(always)]
+pub fn js_to_int32(x: f64) -> i32 {
+    if x.is_finite() && x.abs() <= 9.0e18 {
+        (x as i64) as i32
+    } else {
+        js_to_int32_slow(x)
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn js_to_int32_slow(x: f64) -> i32 {
+    if !x.is_finite() || x == 0.0 {
+        return 0;
+    }
+    let int = x.trunc();
+    let m = int.rem_euclid(4294967296.0);
+    (m as u32) as i32
+}
+
+/// ECMAScript `ToUint32` (§7.1.7): converts an IEEE-754 `f64` to an unsigned 32-bit integer modulo $2^{32}$.
+#[inline(always)]
+pub fn js_to_uint32(x: f64) -> u32 {
+    js_to_int32(x) as u32
+}
+
+/// ECMAScript `Math.round` (§21.3.2.28): rounds ties toward $+\infty$ (so `Math.round(-0.5)` is `-0.0`
+/// and `Math.round(0.49999999999999994)` is `0.0`).
+#[inline(always)]
+pub fn js_math_round(x: f64) -> f64 {
+    if !x.is_finite() || x.fract() == 0.0 {
+        return x;
+    }
+    if x > 0.0 {
+        let fl = x.floor();
+        if x - fl >= 0.5 {
+            fl + 1.0
+        } else {
+            fl
+        }
+    } else if x >= -0.5 {
+        -0.0
+    } else {
+        let cl = x.ceil();
+        if cl - x > 0.5 {
+            cl - 1.0
+        } else {
+            cl
+        }
+    }
+}
+
+/// ECMAScript `Math.max` for two `f64` values (propagates `NaN` and orders `+0.0 > -0.0`).
+#[inline(always)]
+pub fn js_math_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a == 0.0 && b == 0.0 {
+        if a.is_sign_positive() {
+            a
+        } else {
+            b
+        }
+    } else if a >= b {
+        a
+    } else {
+        b
+    }
+}
+
+/// ECMAScript `Math.min` for two `f64` values (propagates `NaN` and orders `-0.0 < +0.0`).
+#[inline(always)]
+pub fn js_math_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a == 0.0 && b == 0.0 {
+        if a.is_sign_negative() {
+            a
+        } else {
+            b
+        }
+    } else if a <= b {
+        a
+    } else {
+        b
+    }
 }
 
 impl fmt::Display for JsValue {
@@ -228,6 +344,7 @@ pub enum BinOp {
     BitXor,
     Shl,
     Shr,
+    UShr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +352,7 @@ pub enum UnaryOp {
     Neg,
     Pos,
     Not,
+    BitNot,
     TypeOf,
 }
 
@@ -269,6 +387,8 @@ pub enum Expr {
     Update {
         name: String,
         increment: bool,
+        #[serde(default)]
+        prefix: bool,
     },
     Ternary {
         cond: Box<Expr>,
