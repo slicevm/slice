@@ -2,6 +2,8 @@ param(
     [Parameter(Mandatory = $false)]
     [string]$Tags = "all",
     [Parameter(Mandatory = $false)]
+    [string]$OnlyApps = "",
+    [Parameter(Mandatory = $false)]
     [switch]$SkipDockerBuild
 )
 
@@ -44,6 +46,7 @@ if (-not $SkipDockerBuild) {
 Write-Host "[2/3] Running benchmarks and generating timestamped report in tests/reports/..."
 docker run --rm `
     -e "SLICE_BENCH_TAGS=$Tags" `
+    -e "SLICE_ONLY_APPS=$OnlyApps" `
     -e "SLICE_VERSION=$Version" `
     -e "SLICE_GIT_COMMIT=$Commit" `
     -e "SLICE_BENCH_TS_UTC=$TimestampUtc" `

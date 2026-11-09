@@ -4,9 +4,11 @@
 use crate::boa_realm::{
     acquire_warm_boa_realm, create_bare_boa_realm, create_warm_boa_realm, ensure_realm_shards,
     release_warm_boa_realm, try_acquire_pooled_boa_realm, WarmBoaRealm, BOA_ACTIVE_CAPS,
-    BOA_ACTIVE_TENANT, BOA_CONTEXT_POOL, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_ENV_MAP,
-    BOA_EXEC_BINS, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET,
-    BOA_LAST_CHILD_PROC_VIOLATION, BOA_NET_HOSTS, BOA_STDOUT, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
+    BOA_ACTIVE_TENANT, BOA_CHECKPOINT_STATS, BOA_CONTEXT_POOL, BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS,
+    BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ,
+    BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_NET_HOSTS, BOA_STDOUT,
+    BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT, CHECKPOINT_SLAB, DIRTY_FETCH_MOCK, DIRTY_SOCKETS,
+    DIRTY_WASM, DIRTY_WEBSOCKET, DIRTY_WORKERS,
 };
 use crate::boacas::{
     BOACAS_FLAG_HAS_HTTP_BRIDGE, BOACAS_FLAG_HAS_KV_SANDBOX, BOACAS_FLAG_HAS_NEXT_TICK,
@@ -90,6 +92,9 @@ impl SliceIsolate {
                         crate::websocket::clear_thread_websocket_state();
                         crate::sockets::clear_thread_socket_state();
                         crate::workers::clear_thread_worker_state();
+                        CHECKPOINT_SLAB.with(|s| s.borrow_mut().clear());
+                        BOA_CHECKPOINT_STATS.with(|s| s.set((0, 0, 0)));
+                        BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(0));
                         if BOA_WAIT_UNTIL_COUNT.with(|c| c.get()) > 0 {
                             let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
                                 b"if(globalThis.__slice_wu)globalThis.__slice_wu.length=0;",
@@ -164,6 +169,9 @@ impl SliceIsolate {
                     crate::websocket::clear_thread_websocket_state();
                     crate::sockets::clear_thread_socket_state();
                     crate::workers::clear_thread_worker_state();
+                    CHECKPOINT_SLAB.with(|s| s.borrow_mut().clear());
+                    BOA_CHECKPOINT_STATS.with(|s| s.set((0, 0, 0)));
+                    BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(0));
                     let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
                         b"globalThis.__slice_wu.length=0;",
                     ));
@@ -186,6 +194,7 @@ impl SliceIsolate {
     pub(crate) fn setup_boa_compartment_thread_locals(&self) -> BoaSessionFlags {
         BOA_STDOUT.with(|out| out.borrow_mut().clear());
         BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
+        BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(0));
         BOA_ACTIVE_TENANT.with(|t| {
             let mut b = t.borrow_mut();
             b.clear();
@@ -341,11 +350,22 @@ impl SliceIsolate {
                 b"__slice_set_next_tick_hook(false);",
             ));
         }
-        BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
-        crate::websocket::clear_thread_websocket_state();
-        crate::sockets::clear_thread_socket_state();
-        crate::workers::clear_thread_worker_state();
-        crate::wasm::clear_thread_wasm_state();
+        let dirty = BOA_DIRTY_SUBSYSTEMS.with(|d| d.replace(0));
+        if (dirty & DIRTY_FETCH_MOCK) != 0 {
+            BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
+        }
+        if (dirty & DIRTY_WEBSOCKET) != 0 {
+            crate::websocket::clear_thread_websocket_state();
+        }
+        if (dirty & DIRTY_SOCKETS) != 0 {
+            crate::sockets::clear_thread_socket_state();
+        }
+        if (dirty & DIRTY_WORKERS) != 0 {
+            crate::workers::clear_thread_worker_state();
+        }
+        if (dirty & DIRTY_WASM) != 0 {
+            crate::wasm::clear_thread_wasm_state();
+        }
     }
 
     #[inline]
@@ -510,38 +530,44 @@ impl SliceIsolate {
                         }
                     }
                 }
-                if self.capture_return_json {
-                    if val.is_null() {
-                        self.last_return_json = Some("null".to_string());
-                    } else if let Some(b) = val.as_boolean() {
-                        self.last_return_json = Some(if b { "true" } else { "false" }.to_string());
-                    } else if let Some(n) = val.as_number() {
-                        if n.is_finite() {
-                            self.last_return_json = Some(JsValue::Number(n).to_string());
-                        }
-                    } else if let Some(s) = val.as_string() {
-                        self.last_return_json =
-                            serde_json::to_string(&s.to_std_string_escaped()).ok();
-                    } else if let Some(obj) = val.as_object() {
-                        if !obj.is_callable() {
-                            if let Ok(Some(json_val)) = val.to_json(&mut realm.ctx) {
-                                self.last_return_json = serde_json::to_string(&json_val).ok();
-                            }
-                        }
-                    }
-                }
                 if val.is_undefined() {
                     Ok(JsValue::Undefined)
                 } else if val.is_null() {
+                    if self.capture_return_json {
+                        self.last_return_json = Some("null".to_string());
+                    }
                     Ok(JsValue::Null)
                 } else if let Some(b) = val.as_boolean() {
+                    if self.capture_return_json {
+                        self.last_return_json = Some(if b { "true" } else { "false" }.to_string());
+                    }
                     Ok(JsValue::Bool(b))
                 } else if let Some(n) = val.as_number() {
+                    if self.capture_return_json && n.is_finite() {
+                        self.last_return_json = Some(JsValue::Number(n).to_string());
+                    }
                     Ok(JsValue::Number(n))
-                } else if let Ok(s) = val.to_string(&mut realm.ctx) {
-                    Ok(JsValue::str(s.to_std_string_escaped()))
+                } else if let Some(s) = val.as_string() {
+                    let st = s.to_std_string_escaped();
+                    if self.capture_return_json {
+                        self.last_return_json = serde_json::to_string(&st).ok();
+                    }
+                    Ok(JsValue::str(st))
                 } else {
-                    Ok(JsValue::Undefined)
+                    if self.capture_return_json {
+                        if let Some(obj) = val.as_object() {
+                            if !obj.is_callable() {
+                                if let Ok(Some(json_val)) = val.to_json(&mut realm.ctx) {
+                                    self.last_return_json = serde_json::to_string(&json_val).ok();
+                                }
+                            }
+                        }
+                    }
+                    if let Ok(s) = val.to_string(&mut realm.ctx) {
+                        Ok(JsValue::str(s.to_std_string_escaped()))
+                    } else {
+                        Ok(JsValue::Undefined)
+                    }
                 }
             }
             Err(err) => Ok(JsValue::str(format!("Uncaught {}", err))),
@@ -683,11 +709,12 @@ impl SliceIsolate {
                 .eval(boa_engine::Source::from_bytes(scoped_code.as_bytes()))
         };
 
-        let check_ses = should_check_ses
-            && (js_code.contains("prototype")
-                || js_code.contains("__proto__")
-                || js_code.contains("Reflect")
-                || js_code.contains("Object["));
+        let has_ses_keywords = js_code.contains("prototype")
+            || js_code.contains("__proto__")
+            || js_code.contains("Reflect")
+            || js_code.contains("Object[");
+        self.last_exec_check_ses = has_ses_keywords;
+        let check_ses = should_check_ses && has_ses_keywords;
 
         self.finish_boa_compartment_execution(
             realm,
@@ -810,8 +837,9 @@ impl SliceIsolate {
             is_cold_bare_realm,
         );
 
-        let check_ses =
-            should_check_ses && (header.feature_flags & BOACAS_FLAG_NEEDS_SES_CHECK) != 0;
+        let has_ses_flag = (header.feature_flags & BOACAS_FLAG_NEEDS_SES_CHECK) != 0;
+        self.last_exec_check_ses = has_ses_flag;
+        let check_ses = should_check_ses && has_ses_flag;
 
         self.finish_boa_compartment_execution(
             realm,

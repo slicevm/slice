@@ -1,5 +1,5 @@
 import http from "node:http";
-import { Transform } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 type NextFn = (err?: unknown) => void;
@@ -72,7 +72,7 @@ app.use((req, res, next) => {
 });
 
 app.get("/health", (_req, res) => {
-  res.status(200).json({ status: "healthy:Node-HTTP-Express-Compat", methods: http.METHODS.length });
+  res.status(200).json({ status: "healthy:Node-HTTP-Express-Compat", hasMethods: http.METHODS.includes("GET") && http.METHODS.includes("POST") });
 });
 
 app.post("/api/echo-upper", async (req, res) => {
@@ -88,7 +88,6 @@ app.post("/api/echo-upper", async (req, res) => {
 });
 
 function stFromText(txt: string) {
-  const { Readable } = require("node:stream");
   return Readable.from([Buffer.from(txt, "utf8")]);
 }
 

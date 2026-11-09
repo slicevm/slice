@@ -11,7 +11,8 @@
 //! - Deterministic `Slice.mockWebSocket` support for offline replay and unit testing
 
 use crate::boa_realm::{
-    BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET, BOA_VIOLATION,
+    mark_subsystem_dirty, BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET,
+    BOA_VIOLATION, DIRTY_WEBSOCKET,
 };
 use crate::intrinsics::{base64_decode, base64_encode, fill_random_bytes, sha1_bytes};
 use crate::outbound_http::{
@@ -549,6 +550,7 @@ pub(crate) fn ws_client_connect(raw_url: &str, protocols: &str) -> Result<String
         c.set(id.wrapping_add(1).max(1));
         id
     });
+    mark_subsystem_dirty(DIRTY_WEBSOCKET);
 
     if let Some(mock_mode) = matched_mock {
         let selected_proto = protocols.split(',').next().unwrap_or("").trim().to_string();
@@ -1006,6 +1008,7 @@ pub(crate) fn ws_server_queue_send(is_binary: bool, data_str_or_b64: &str) -> Re
         data_str_or_b64.as_bytes().to_vec()
     };
     verify_ws_outbound_dlp("ws://server-upgrade", &bytes)?;
+    mark_subsystem_dirty(DIRTY_WEBSOCKET);
     BOA_WS_SERVER_OUTBOX.with(|q| {
         if is_binary {
             q.borrow_mut().push(ServerWsOutFrame::Binary(bytes));
@@ -1020,6 +1023,7 @@ pub(crate) fn ws_server_queue_send(is_binary: bool, data_str_or_b64: &str) -> Re
 /// Queues an outbound server-to-client `Close` frame after enforcing Egress DLP on `reason`.
 pub(crate) fn ws_server_queue_close(code: u16, reason: &str) -> Result<(), String> {
     verify_ws_outbound_dlp("ws://server-upgrade", reason.as_bytes())?;
+    mark_subsystem_dirty(DIRTY_WEBSOCKET);
     BOA_WS_SERVER_OUTBOX.with(|q| {
         q.borrow_mut()
             .push(ServerWsOutFrame::Close(code, reason.to_string()));

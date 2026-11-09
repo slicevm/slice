@@ -262,7 +262,9 @@ impl SliceIsolate {
         let exec_start = Instant::now();
         let exec_res = child_iso.execute_bytecode(&bc, None);
         let exec_time_ns = (exec_start.elapsed().as_nanos() as u64).max(1);
-        clear_tenant_checkpoints(&child_iso.compartment.tenant_id);
+        if child_iso.checkpoints_taken > 0 {
+            clear_tenant_checkpoints(&child_iso.compartment.tenant_id);
+        }
         self.checkpoints_taken = self
             .checkpoints_taken
             .saturating_add(child_iso.checkpoints_taken);

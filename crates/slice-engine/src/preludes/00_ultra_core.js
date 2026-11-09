@@ -322,6 +322,18 @@
   globalThis.expect = function(v) { return __tMod().expect(v); };
 
   globalThis.__slice_wu = [];
+  globalThis.__slice_drain_wu = function() {
+    var wu = globalThis.__slice_wu;
+    if (!wu || wu.length === 0) return;
+    try {
+      while (wu.length > 0) {
+        var f = wu.shift();
+        if (typeof f === "function") f();
+      }
+    } finally {
+      wu.length = 0;
+    }
+  };
   globalThis.Slice = {
     request: function() {
       var t = __slice_http_tenant();

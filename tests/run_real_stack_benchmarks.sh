@@ -221,6 +221,9 @@ echo "========================================================================="
 echo "  [TAG: apps] PACKING & COMPILING ALL 27 APPS & FRAMEWORK SUITES (OXC + CAS)"
 echo "========================================================================="
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 32; do
+    if [ -n "${SLICE_ONLY_APPS:-}" ] && [[ ",${SLICE_ONLY_APPS}," != *",${i},"* ]]; then
+        continue
+    fi
     eval "dir=\$APP${i}_DIR"
     "$SLICE_BIN" pack "$dir" "/tmp/app${i}.cas"
     "$SLICE_BIN" compile "/tmp/app${i}.cas" -o "/tmp/app${i}_bin"
@@ -260,7 +263,7 @@ verify_app_parity() {
     echo ""
 }
 
-if should_run_tag "apps"; then
+if should_run_tag "apps" && [ -z "${SLICE_ONLY_APPS:-}" ]; then
 echo "========================================================================="
 echo "  1. VERIFYING 100% OUTPUT PARITY ACROSS ALL 10 FOLDER APPS & 4 RUNTIMES"
 echo "========================================================================="
@@ -301,13 +304,18 @@ measure_ms() {
 
     local min_ns=999999999999
     local sum_ns=0
-    for _ in $(seq 1 "$runs"); do
+    local valid_runs=0
+    while [ "$valid_runs" -lt "$runs" ]; do
         local t0
         t0=$(date +%s%N)
         "$@" > /dev/null 2>&1
         local t1
         t1=$(date +%s%N)
         local diff=$((t1 - t0))
+        if [ "$diff" -le 100000 ]; then
+            continue
+        fi
+        valid_runs=$((valid_runs + 1))
         sum_ns=$((sum_ns + diff))
         if [ "$diff" -lt "$min_ns" ]; then
             min_ns="$diff"
@@ -418,6 +426,7 @@ bench_app 25 "FRAMEWORK 1: 01-HONO-EDGE-MICROSERVICE (Hono v4.6.20 + hono/cookie
 bench_app 26 "FRAMEWORK 2: 02-ITTY-ROUTER-UNJS-NITRO-STACK (itty-router v5 + ufo + destr + ohash + radix3)" "$APP26_DIR" "-A"
 bench_app 32 "FRAMEWORK 3: 03-NODE-HTTP-EXPRESS-COMPAT (node:http + node:stream Express/Polka)" "$APP32_DIR" "-A"
 
+if [ -z "${SLICE_ONLY_APPS:-}" ]; then
 echo "========================================================================="
 echo "  PEAK MEMORY FOOTPRINT (MAX RSS) ACROSS REPRESENTATIVE APPS"
 echo "========================================================================="
@@ -455,16 +464,23 @@ measure_rss_kb "Slice (FW 2: itty-router + UnJS)"   "$SLICE_BIN" run "/tmp/app26
 measure_rss_kb "Bun (FW 2: itty-router + UnJS)"     bun run "$APP26_DIR/src/index.ts"
 measure_rss_kb "Deno (FW 2: itty-router + UnJS)"    deno run -A "$APP26_DIR/src/index.ts"
 measure_rss_kb "Node (FW 2: itty-router + UnJS)"    node "$APP26_DIR/src/index.ts"
+fi
 
 echo "========================================================================="
 echo "  SLICE INTERNAL ISOLATE TELEMETRY ACROSS ALL 27 APPS (COLD VS WARM POOL)"
 echo "========================================================================="
 echo "  --- Cold Realm Telemetry ---"
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 32; do
+    if [ -n "${SLICE_ONLY_APPS:-}" ] && [[ ",${SLICE_ONLY_APPS}," != *",${i},"* ]]; then
+        continue
+    fi
     "$SLICE_BIN" run "/tmp/app${i}.cas" --quiet --metrics
 done
 echo "  --- Pre-Warmed Boa Pool Telemetry (--warm) ---"
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 32; do
+    if [ -n "${SLICE_ONLY_APPS:-}" ] && [[ ",${SLICE_ONLY_APPS}," != *",${i},"* ]]; then
+        continue
+    fi
     record_warm_metrics "$i" "/tmp/app${i}.cas"
 done
 fi
@@ -620,9 +636,10 @@ console.log(
 EOF
 
 run_http_bench() {
-    local label="$1"
-    local port="$2"
-    shift 2
+    local srv_key="$1"
+    local label="$2"
+    local port="$3"
+    shift 3
     "$@" >/dev/null 2>&1 &
     local srv_pid=$!
     # Wait up to 3s for port to accept connections
@@ -632,17 +649,26 @@ run_http_bench() {
         fi
         sleep 0.05
     done
-    node /tmp/n1_keepalive_bench.mjs "$label" "$port" 16000 8 8
+    local bench_line
+    bench_line=$(node /tmp/n1_keepalive_bench.mjs "$label" "$port" 16000 8 8)
+    echo "$bench_line"
+    local rps avg_us total_ms
+    rps=$(echo "$bench_line" | awk -F'|' '{print $2}' | awk '{print $1}')
+    avg_us=$(echo "$bench_line" | awk -F'|' '{print $3}' | awk '{print $2}')
+    total_ms=$(echo "$bench_line" | awk -F'|' '{print $4}' | awk '{print $2}')
+    if [ -n "$rps" ] && [ -n "$avg_us" ] && [ -n "$total_ms" ]; then
+        record_jsonl "{\"type\":\"http\",\"server\":\"$srv_key\",\"rps\":$rps,\"avgUs\":$avg_us,\"totalMs\":$total_ms}"
+    fi
     kill -9 "$srv_pid" >/dev/null 2>&1 || true
     wait "$srv_pid" 2>/dev/null || true
 }
 
 echo "  --- 16,000 HTTP/1.1 Keep-Alive Pipelined Requests (8 Sockets x 8 Pipeline Depth) ---"
-run_http_bench "Slice serve (Tier-0 CAS, --workers=8)"      18080 "$SLICE_BIN" serve /tmp/n1_tier0.cas --port=18080 --workers=8
-run_http_bench "Slice serve (Tier-1 WinterTC, --workers=8)" 18081 "$SLICE_BIN" serve /tmp/n1_wintertc.cas --port=18081 --workers=8
-run_http_bench "Bun.serve (Latest JSC, Single-Process)"     18082 bun run /tmp/n1_bun_server.ts
-run_http_bench "Deno.serve (Latest V8, Single-Process)"     18083 deno run -A /tmp/n1_deno_server.ts
-run_http_bench "Node.js http.createServer (Latest V8)"      18084 node /tmp/n1_node_server.mjs
+run_http_bench "slice_tier0" "Slice serve (Tier-0 CAS, --workers=8)"      18080 "$SLICE_BIN" serve /tmp/n1_tier0.cas --port=18080 --workers=8
+run_http_bench "slice_tier1" "Slice serve (Tier-1 WinterTC, --workers=8)" 18081 "$SLICE_BIN" serve /tmp/n1_wintertc.cas --port=18081 --workers=8
+run_http_bench "bun"         "Bun.serve (Latest JSC, Single-Process)"     18082 bun run /tmp/n1_bun_server.ts
+run_http_bench "deno"        "Deno.serve (Latest V8, Single-Process)"     18083 deno run -A /tmp/n1_deno_server.ts
+run_http_bench "node"        "Node.js http.createServer (Latest V8)"      18084 node /tmp/n1_node_server.mjs
 
 rm -f /tmp/n1_*.ts /tmp/n1_*.mjs /tmp/n1_*.cas
 fi
@@ -730,7 +756,13 @@ console.log(new EdgeKvBench().run());
 EOF
 "$SLICE_BIN" pack /tmp/n2_kv_bench.ts /tmp/n2_kv_bench.cas >/dev/null
 echo "  [3. Sharded Slice.kv 1,001-Op Stateful Rate-Limiter Telemetry (--warm)]"
-"$SLICE_BIN" run /tmp/n2_kv_bench.cas --warm --metrics
+n2_kv_out=$("$SLICE_BIN" run /tmp/n2_kv_bench.cas --warm --metrics)
+echo "$n2_kv_out"
+n2_kv_us=$(echo "$n2_kv_out" | grep "Slice Telemetry" | awk -F'Total: ' '{print $2}' | awk '{print $1}')
+n2_kv_mem=$(echo "$n2_kv_out" | grep "Slice Telemetry" | awk -F'Memory: ' '{print $2}' | awk '{print $1}')
+if [ -n "$n2_kv_us" ] && [ -n "$n2_kv_mem" ]; then
+    record_jsonl "{\"type\":\"primitives_kv\",\"kv1001Us\":$n2_kv_us,\"kvMemBytes\":$n2_kv_mem}"
+fi
 
 kill -9 "$n2_srv_pid" >/dev/null 2>&1 || true
 wait "$n2_srv_pid" 2>/dev/null || true
@@ -794,7 +826,13 @@ EOF
 
 "$SLICE_BIN" pack /tmp/n3_tot_agent.ts /tmp/n3_tot_agent.cas >/dev/null
 echo "  [1. Tree-of-Thought AI Agent (Slice.checkpoint + Slice.evalSandbox + Slice.restore)]"
-"$SLICE_BIN" run /tmp/n3_tot_agent.cas --allow-read=/workspace --allow-write=/workspace --warm --metrics
+n3_tot_out=$("$SLICE_BIN" run /tmp/n3_tot_agent.cas --allow-read=/workspace --allow-write=/workspace --warm --metrics)
+echo "$n3_tot_out"
+n3_tot_us=$(echo "$n3_tot_out" | grep "Slice Telemetry" | awk -F'Total: ' '{print $2}' | awk '{print $1}')
+n3_branch_us=$(echo "$n3_tot_out" | grep 'branch2TimeUs' | sed -E 's/.*"branch2TimeUs":([0-9.]+).*/\1/')
+if [ -n "$n3_tot_us" ] && [ -n "$n3_branch_us" ]; then
+    record_jsonl "{\"type\":\"primitives_tot\",\"tot3SandboxesUs\":$n3_tot_us,\"totSingleSandboxUs\":$n3_branch_us}"
+fi
 
 # 2. Egress Secret Guard (--audit-egress) Blocking Base64 Exfiltration
 cat << 'EOF' > /tmp/n3_exfil.ts
@@ -1172,7 +1210,17 @@ if should_run_tag "swarm"; then
 echo "========================================================================="
 echo "  [TAG: swarm] MICROVM SPEEDUP RETENTION CHECK (1,000 TENANT SWARM)"
 echo "========================================================================="
-"$SLICE_BIN" microvm-bench --tenants=1000
+swarm_out=$("$SLICE_BIN" microvm-bench --tenants=1000)
+echo "$swarm_out"
+cold_min_us=$(echo "$swarm_out" | grep "Isolate Cold-Start (Min)" | awk -F': ' '{print $2}' | awk '{print $1}')
+cold_p50_us=$(echo "$swarm_out" | grep "Isolate Cold-Start (P50)" | awk -F': ' '{print $2}' | awk '{print $1}')
+cold_p99_us=$(echo "$swarm_out" | grep "Isolate Cold-Start (P99)" | awk -F': ' '{print $2}' | awk '{print $1}')
+swarm_ms=$(echo "$swarm_out" | grep "Total 1,000-Tenant Swarm Time" | awk -F': ' '{print $2}' | awk '{print $1}')
+swarm_rss_mb=$(echo "$swarm_out" | grep "Total Host Process RSS" | sed -E 's/.*\(([0-9.]+) MB\).*/\1/')
+cas500_mem_us=$(echo "$swarm_out" | grep "500-Module Zero-Stat CAS Load" | awk -F': ' '{print $2}' | awk '{print $1}')
+if [ -n "$cold_min_us" ] && [ -n "$cas500_mem_us" ]; then
+    record_jsonl "{\"type\":\"microvm\",\"coldMinUs\":$cold_min_us,\"coldP50Us\":$cold_p50_us,\"coldP99Us\":$cold_p99_us,\"swarm1000Ms\":$swarm_ms,\"swarm1000RssMb\":$swarm_rss_mb,\"cas500MemUs\":$cas500_mem_us}"
+fi
 fi
 
 if [ -f "$ROOT_DIR/tests/scripts/generate_bench_report.mjs" ] && [ -f "$METRICS_JSONL" ]; then

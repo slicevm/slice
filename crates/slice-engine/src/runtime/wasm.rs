@@ -17,7 +17,10 @@
 //!   Word-aligned delta synchronization between JS `Uint8Array(memory.buffer)` views and WASM
 //!   linear memory without intermediate serialization.
 
-use crate::boa_realm::{BOA_ACTIVE_TENANT, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_VIOLATION};
+use crate::boa_realm::{
+    mark_subsystem_dirty, BOA_ACTIVE_TENANT, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_VIOLATION,
+    DIRTY_WASM,
+};
 use boa_engine::object::builtins::JsArrayBuffer;
 use boa_engine::{js_string, Context, JsNativeError, JsObject, JsResult, JsValue};
 use rustc_hash::FxHashMap;
@@ -120,6 +123,7 @@ struct WasmThreadState {
 
 impl WasmThreadState {
     fn alloc_id(&mut self) -> u32 {
+        mark_subsystem_dirty(DIRTY_WASM);
         self.next_id = self.next_id.wrapping_add(1).max(1);
         self.next_id
     }

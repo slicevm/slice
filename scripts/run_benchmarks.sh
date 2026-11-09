@@ -24,6 +24,7 @@ fi
 echo "[2/3] Running benchmarks and generating timestamped report in tests/reports/..."
 docker run --rm \
     -e "SLICE_BENCH_TAGS=$TAGS" \
+    -e "SLICE_ONLY_APPS=${SLICE_ONLY_APPS:-}" \
     -e "SLICE_VERSION=$VERSION" \
     -e "SLICE_GIT_COMMIT=$COMMIT" \
     -e "SLICE_BENCH_TS_UTC=$TIMESTAMP_UTC" \

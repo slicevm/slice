@@ -77,6 +77,7 @@ pub struct SliceIsolate {
     pub restore_time_ns: u64,
     pub(crate) capture_return_json: bool,
     pub(crate) last_return_json: Option<String>,
+    pub(crate) last_exec_check_ses: bool,
 }
 
 impl SliceIsolate {
@@ -114,6 +115,7 @@ impl SliceIsolate {
             restore_time_ns: 0,
             capture_return_json: false,
             last_return_json: None,
+            last_exec_check_ses: false,
         }
     }
 
@@ -248,7 +250,9 @@ impl SliceIsolate {
         fuel_limit: u64,
         memory_limit_bytes: usize,
     ) {
-        crate::state_and_kv::clear_tenant_checkpoints(&self.compartment.tenant_id);
+        if self.checkpoints_taken > 0 {
+            crate::state_and_kv::clear_tenant_checkpoints(&self.compartment.tenant_id);
+        }
         if self.compartment.tenant_id != tenant_id {
             self.compartment.tenant_id.clear();
             self.compartment.tenant_id.push_str(tenant_id);
@@ -268,6 +272,7 @@ impl SliceIsolate {
         self.restores_performed = 0;
         self.restore_time_ns = 0;
         self.last_return_json = None;
+        self.last_exec_check_ses = false;
         if let Some(s) = self.deterministic_seed {
             self.det_prng_state = s ^ 0x9E37_79B9_7F4A_7C15;
             self.det_clock_ms = 1_700_000_000_000;

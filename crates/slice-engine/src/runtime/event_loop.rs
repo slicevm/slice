@@ -3,8 +3,9 @@
 //! Outbound `fetch()` Multiplexer (`Promise.all([fetch(...), ...])`).
 
 use crate::boa_realm::{
-    BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, BOA_EGRESS_SECRETS,
-    BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VIOLATION,
+    mark_subsystem_dirty, BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE,
+    BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VIOLATION,
+    DIRTY_ALS, DIRTY_EVENT_LOOP, DIRTY_SOCKETS, DIRTY_WORKERS,
 };
 use crate::outbound_http::{
     execute_outbound_fetch_with_redirects, outbound_pool_reuse_count, record_outbound_pool_reuses,
@@ -285,14 +286,18 @@ pub(crate) struct SavedEventLoopSnapshot {
     active_items: u32,
 }
 
-pub(crate) fn save_and_reset_event_loop_state() -> SavedEventLoopSnapshot {
+pub(crate) fn save_and_reset_event_loop_state() -> Option<SavedEventLoopSnapshot> {
     let active_items = ACTIVE_ASYNC_ITEMS.with(|c| c.replace(0));
-    let state =
-        EVENT_LOOP_STATE.with(|st| std::mem::replace(&mut *st.borrow_mut(), EventLoopState::new()));
-    SavedEventLoopSnapshot {
-        state,
-        active_items,
-    }
+    EVENT_LOOP_STATE.with(|st| {
+        if active_items == 0 && !st.borrow().has_pending_work() {
+            return None;
+        }
+        let state = std::mem::replace(&mut *st.borrow_mut(), EventLoopState::new());
+        Some(SavedEventLoopSnapshot {
+            state,
+            active_items,
+        })
+    })
 }
 
 pub(crate) fn restore_event_loop_state(saved: SavedEventLoopSnapshot) {
@@ -301,12 +306,21 @@ pub(crate) fn restore_event_loop_state(saved: SavedEventLoopSnapshot) {
 }
 
 pub(crate) fn clear_event_loop_state() {
-    ACTIVE_ASYNC_ITEMS.with(|c| c.set(0));
-    BOA_ALS_ACTIVE.with(|a| a.set(false));
-    BOA_ALS_SNAP.with(|s| *s.borrow_mut() = JsValue::undefined());
-    EVENT_LOOP_STATE.with(|st| st.borrow_mut().reset());
-    crate::workers::clear_thread_worker_state();
-    crate::sockets::close_all_active_sockets();
+    let dirty = BOA_DIRTY_SUBSYSTEMS.with(|d| d.get());
+    let has_async = ACTIVE_ASYNC_ITEMS.with(|c| c.replace(0)) > 0;
+    if has_async || (dirty & DIRTY_EVENT_LOOP) != 0 {
+        EVENT_LOOP_STATE.with(|st| st.borrow_mut().reset());
+    }
+    if (dirty & DIRTY_ALS) != 0 || BOA_ALS_ACTIVE.with(|a| a.get()) {
+        BOA_ALS_ACTIVE.with(|a| a.set(false));
+        BOA_ALS_SNAP.with(|s| *s.borrow_mut() = JsValue::undefined());
+    }
+    if (dirty & DIRTY_WORKERS) != 0 {
+        crate::workers::clear_thread_worker_state();
+    }
+    if (dirty & DIRTY_SOCKETS) != 0 {
+        crate::sockets::close_all_active_sockets();
+    }
 }
 
 pub(crate) fn schedule_timer(
@@ -367,6 +381,7 @@ fn schedule_timer_internal(
             als_snap,
             cancelled: false,
         });
+        mark_subsystem_dirty(DIRTY_EVENT_LOOP);
         ACTIVE_ASYNC_ITEMS.with(|c| c.set(c.get().saturating_add(1)));
         Ok(id)
     })
@@ -423,6 +438,7 @@ pub(crate) fn enqueue_async_fetch(
             signal_obj,
             als_snap,
         });
+        mark_subsystem_dirty(DIRTY_EVENT_LOOP);
         ACTIVE_ASYNC_ITEMS.with(|c| c.set(c.get().saturating_add(1)));
         id
     })

@@ -144,11 +144,16 @@ impl SliceIsolate {
 
         self.apply_boa_realm_runtime_limits(&mut realm);
         let prev_stdout_len = self.stdout.len();
-        let eval_res = realm.ctx.eval(boa_engine::Source::from_bytes(
-            b"try{while(globalThis.__slice_wu.length>0){var __f=globalThis.__slice_wu.shift();if(typeof __f===\"function\")__f();}}finally{if(globalThis.__slice_wu)globalThis.__slice_wu.length=0;}",
-        ));
+        let eval_res = if let Some(ref drain_fn) = realm.drain_wu_fn {
+            drain_fn.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
+        } else {
+            realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"if(typeof globalThis.__slice_drain_wu===\"function\")globalThis.__slice_drain_wu();",
+            ))
+        };
 
-        self.finish_boa_compartment_execution(realm, flags, false, false, true, eval_res)?;
+        let check_ses = self.last_exec_check_ses;
+        self.finish_boa_compartment_execution(realm, flags, false, false, check_ses, eval_res)?;
 
         if !self.egress_audit_secrets.is_empty() {
             for line in &self.stdout[prev_stdout_len..] {
