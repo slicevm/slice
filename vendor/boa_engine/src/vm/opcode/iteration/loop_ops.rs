@@ -20,6 +20,7 @@ impl IncrementLoopIteration {
         }
 
         frame.loop_iteration_count = previous_iteration_count.wrapping_add(1);
+        context.vm.runtime_limits.increment_loop_iterations_executed();
         Ok(())
     }
 }

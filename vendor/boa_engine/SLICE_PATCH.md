@@ -21,7 +21,7 @@ By serializing the compiled `Gc<CodeBlock>` tree and global `Scope` bindings int
 
 ## 2. Modified Files
 
-Nine files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
+Eleven files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
 - [`vendor/boa_engine/src/script.rs`](./src/script.rs) & [`vendor/boa_engine/src/slice_precompile.rs`](./src/slice_precompile.rs):
   - `Script::compile_to_slicebc(&self, context: &mut Context) -> JsResult<Vec<u8>>`
   - `Script::from_slicebc_bytes(bytes: &[u8], context: &mut Context) -> Option<Self>`
@@ -35,6 +35,8 @@ Nine files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
   - `InlineCache::mono_shape_addr`, `InlineCache::mono_slot`, and `InlineCache::get_fast(&self, shape: &Shape) -> Option<(Option<Shape>, Slot)>`: Zero-borrow monomorphic fast-path for own-property `Shape -> Slot` hits without locking `GcRefCell` or upgrading `WeakGc` pointers, with automatic polymorphic (`PIC_CAPACITY = 4`) and megamorphic fallback.
 - [`vendor/boa_engine/src/vm/opcode/get/property.rs`](./src/vm/opcode/get/property.rs) & [`vendor/boa_engine/src/vm/opcode/set/property.rs`](./src/vm/opcode/set/property.rs):
   - Wired `get_by_name` and `set_by_name` to call `ic.get_fast(object_borrowed.shape())`.
+- [`vendor/boa_engine/src/vm/runtime_limits.rs`](./src/vm/runtime_limits.rs) & [`vendor/boa_engine/src/vm/opcode/iteration/loop_ops.rs`](./src/vm/opcode/iteration/loop_ops.rs):
+  - `RuntimeLimits::loop_iterations_executed()` and `RuntimeLimits::record_loop_iteration()`: Cumulative loop iteration counter incremented on `IncrementLoopIteration` so Tier-1 Boa loop executions report accurate `fuelUsed` telemetry.
 
 ---
 

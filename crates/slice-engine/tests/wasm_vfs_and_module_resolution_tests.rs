@@ -846,8 +846,14 @@ runAuditSuite().catch((e) => console.log(JSON.stringify({ __err: String(e && e.s
     let caps = CapabilityToken::pure_compute()
         .with_read_prefix("/app")
         .with_write_prefix("/app");
-    let m = run_source_isolated("issues-audit-tenant", &bundled, caps, 2_000_000, 16 * 1024 * 1024)
-        .expect("issues-audit execution");
+    let m = run_source_isolated(
+        "issues-audit-tenant",
+        &bundled,
+        caps,
+        2_000_000,
+        16 * 1024 * 1024,
+    )
+    .expect("issues-audit execution");
     let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).expect("parse audit json");
     assert!(out.get("__err").is_none(), "audit suite error: {}", out);
 
@@ -893,4 +899,198 @@ runAuditSuite().catch((e) => console.log(JSON.stringify({ __err: String(e && e.s
     assert_eq!(out["json"]["prettyHasNewline"], true);
     assert_eq!(out["json"]["cyclicThrew"], true);
     assert_eq!(out["json"]["perfDeltaValid"], true);
+}
+
+#[test]
+fn test_issues_42_43_44_45_sandbox_memory_loop_fuel_egress_dlp_and_error_location() {
+    // 1. Issue #42 & #45: Guest `Slice.evalSandbox` `{ memory }` alias, non-accumulating transient
+    //    child heap across repeated calls, and non-duplicated `:1:` error location.
+    let guest_script = r#"
+const memResults = {};
+for (const mem of [65536, 1048576, 16777216, 1073741824]) {
+  const r = Slice.evalSandbox(
+    'const a = new Array(1000000).fill(7); a.length',
+    { memory: mem }
+  );
+  memResults[mem] = {
+    ok: r.ok,
+    returnValue: r.returnValue,
+    violation: r.violation,
+    memoryUsedBytes: r.memoryUsedBytes,
+  };
+}
+const smallOk = Slice.evalSandbox('1 + 1', { memory: 65536 });
+const errBoom = Slice.evalSandbox('throw new Error("boom")');
+const errJson = Slice.evalSandbox('JSON.parse("{bad")');
+console.log(JSON.stringify({ memResults, smallOk, errBoom, errJson }));
+"#;
+    let m = run_source_isolated(
+        "issues-42-45-tenant",
+        guest_script,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        16 * 1024 * 1024,
+    )
+    .expect("issues 42 & 45 guest script execution");
+    let parsed: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+
+    // Issue #42 assertions
+    assert_eq!(parsed["memResults"]["65536"]["ok"], false);
+    assert!(
+        parsed["memResults"]["65536"]["violation"]
+            .as_str()
+            .unwrap_or("")
+            .contains("61440 bytes"),
+        "expected 65536 (61440 net) ceiling violation, got: {}",
+        parsed["memResults"]["65536"]
+    );
+    assert_eq!(parsed["memResults"]["1048576"]["ok"], false);
+    assert!(
+        parsed["memResults"]["1048576"]["violation"]
+            .as_str()
+            .unwrap_or("")
+            .contains("1044480 bytes"),
+        "expected 1048576 (1044480 net) ceiling violation, got: {}",
+        parsed["memResults"]["1048576"]
+    );
+    assert_eq!(
+        parsed["memResults"]["16777216"]["ok"], true,
+        "16 MB child sandbox should succeed: {}",
+        parsed["memResults"]["16777216"]
+    );
+    assert_eq!(parsed["memResults"]["16777216"]["returnValue"], "1000000");
+    assert_eq!(
+        parsed["memResults"]["1073741824"]["ok"], true,
+        "1 GB requested (clamped to parent 16 MB) should succeed on 8 MB allocation: {}",
+        parsed["memResults"]["1073741824"]
+    );
+    assert_eq!(parsed["memResults"]["1073741824"]["returnValue"], "1000000");
+    assert_eq!(parsed["smallOk"]["ok"], true);
+    assert_eq!(parsed["smallOk"]["returnValue"], "2");
+
+    // Issue #45 assertions: no repeated location on `at <main>` and line is `:1:` (not `:2:`)
+    let boom_err = parsed["errBoom"]["error"].as_str().unwrap_or("");
+    assert!(
+        boom_err.starts_with("Uncaught Error: boom"),
+        "unexpected boom error: {}",
+        boom_err
+    );
+    assert_eq!(
+        boom_err.matches("(unknown at ").count(),
+        1,
+        "source location must not be duplicated in error string: {}",
+        boom_err
+    );
+    assert!(
+        boom_err.contains("unknown at :1:"),
+        "single-line evalSandbox snippet should report line 1, got: {}",
+        boom_err
+    );
+    let json_err = parsed["errJson"]["error"].as_str().unwrap_or("");
+    assert!(
+        json_err.starts_with("Uncaught SyntaxError:"),
+        "unexpected JSON syntax error: {}",
+        json_err
+    );
+    assert!(
+        !json_err.contains(") ("),
+        "JSON.parse error must not have trailing duplicate parenthetical location: {}",
+        json_err
+    );
+
+    // 2. Issue #43: `while` and `do...while` loops report `fuel_used` proportional to iterations
+    let mut host_iso = SliceIsolate::spawn(
+        "issue-43-44-host",
+        1,
+        CapabilityToken::pure_compute().with_net_host("httpbin.org"),
+        50_000_000,
+        16 * 1024 * 1024,
+    );
+    let mut while_fuels = Vec::new();
+    let mut do_while_fuels = Vec::new();
+    for &n in &[1_000u64, 100_000, 1_000_000] {
+        let w_out = host_iso.eval_sandbox(
+            &format!("let i = 0; while (i < {n}) i++; i"),
+            crate::SandboxEvalOptions::default(),
+        );
+        assert!(w_out.ok);
+        while_fuels.push(w_out.fuel_used);
+
+        let dw_out = host_iso.eval_sandbox(
+            &format!("let i = 0; do {{ i++; }} while (i < {n}); i"),
+            crate::SandboxEvalOptions::default(),
+        );
+        assert!(dw_out.ok);
+        do_while_fuels.push(dw_out.fuel_used);
+    }
+    assert!(
+        while_fuels[0] < while_fuels[1] && while_fuels[1] < while_fuels[2],
+        "while loop fuelUsed must scale monotonically with iteration count: {:?}",
+        while_fuels
+    );
+    assert!(
+        do_while_fuels[0] < do_while_fuels[1] && do_while_fuels[1] < do_while_fuels[2],
+        "do...while loop fuelUsed must scale monotonically with iteration count: {:?}",
+        do_while_fuels
+    );
+    assert!(
+        while_fuels[2] >= 4_000 && do_while_fuels[2] >= 4_000,
+        "1M iterations should consume >= 4,000 fuel (got while={}, do_while={})",
+        while_fuels[2],
+        do_while_fuels[2]
+    );
+
+    let trapped_while = host_iso.eval_sandbox(
+        "let i = 0; while (i < 500000) i++; i",
+        crate::SandboxEvalOptions {
+            fuel: Some(100_000),
+            ..Default::default()
+        },
+    );
+    assert!(!trapped_while.ok);
+    assert!(
+        trapped_while
+            .violation
+            .as_deref()
+            .unwrap_or("")
+            .contains("exceeded deterministic CPU instruction fuel limit (100000 ops)"),
+        "unexpected trapped_while violation: {:?}",
+        trapped_while.violation
+    );
+
+    let ok_while = host_iso.eval_sandbox(
+        "let i = 0; while (i < 500000) i++; i",
+        crate::SandboxEvalOptions {
+            fuel: Some(10_000_000),
+            ..Default::default()
+        },
+    );
+    assert!(ok_while.ok);
+    assert!(
+        ok_while.fuel_used >= 2_000,
+        "500k while iterations under 10M budget must report proportional fuelUsed, got: {}",
+        ok_while.fuel_used
+    );
+
+    // 3. Issue #44: Egress DLP block uses dedicated `EgressSecretLeakBlocked` message, not env var message
+    let dlp_out = host_iso.eval_sandbox(
+        r#"Slice.fetchSync("https://httpbin.org/post", { method: "POST", body: "leak=sk-secret-xyz" })"#,
+        crate::SandboxEvalOptions {
+            allow_net: vec!["httpbin.org".to_string()],
+            audit_secret: Some("sk-secret-xyz".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(!dlp_out.ok);
+    let dlp_violation = dlp_out.violation.as_deref().unwrap_or("");
+    assert!(
+        dlp_violation.starts_with("Egress DLP Violation (EGRESS_SECRET_LEAK_BLOCKED):"),
+        "expected Egress DLP Violation prefix, got: {}",
+        dlp_violation
+    );
+    assert!(
+        !dlp_violation.contains("lacks environment variable authority"),
+        "must not report Egress DLP violation as an environment variable error: {}",
+        dlp_violation
+    );
 }

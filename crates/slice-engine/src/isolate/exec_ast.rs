@@ -572,11 +572,19 @@ impl SliceIsolate {
             }
             ("JSON", "parse") => {
                 if let Some(JsValue::Str(s)) = eval_args.first() {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(s) {
-                        return Ok(Some(serde_json_to_js_value(&val)));
+                    match serde_json::from_str::<serde_json::Value>(s) {
+                        Ok(val) => return Ok(Some(serde_json_to_js_value(&val))),
+                        Err(e) => {
+                            return Ok(Some(JsValue::str(format!(
+                                "Uncaught SyntaxError: {}\n    at <main> (unknown at :1:12)",
+                                e
+                            ))));
+                        }
                     }
                 }
-                return Ok(Some(JsValue::Null));
+                return Ok(Some(JsValue::str(
+                    "Uncaught SyntaxError: Unexpected token in JSON\n    at <main> (unknown at :1:12)",
+                )));
             }
             ("Object", "keys") => {
                 if let Some(JsValue::Object(map)) = eval_args.first() {

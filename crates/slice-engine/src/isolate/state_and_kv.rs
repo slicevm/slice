@@ -181,9 +181,8 @@ pub(crate) fn verify_egress_secrets_slice(
     let payload_bytes = payload.as_bytes();
     for pat in secrets {
         if !pat.is_empty() && memchr::memmem::find(payload_bytes, pat.as_bytes()).is_some() {
-            return Err(SandboxViolation::EnvAccessDenied {
+            return Err(SandboxViolation::EgressSecretLeakBlocked {
                 tenant_id: tenant_id.to_string(),
-                key: "EGRESS_SECRET_LEAK_BLOCKED".to_string(),
             });
         }
     }

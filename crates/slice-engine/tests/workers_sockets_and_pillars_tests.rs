@@ -395,7 +395,7 @@ run();
     let tcp_dlp_err = iso_tcp.execute_bytecode(&tcp_dlp_bc, None).unwrap_err();
     assert!(matches!(
         tcp_dlp_err,
-        SandboxViolation::EnvAccessDenied { ref key, .. } if key.contains("EGRESS_SECRET_LEAK_BLOCKED")
+        SandboxViolation::EgressSecretLeakBlocked { .. }
     ));
 
     // 5. Ring 3: Outbound Egress Secret DLP on UDP `dgram.Socket.send`
@@ -418,7 +418,7 @@ s.send("leak: ghp_UDP_DLP_TOKEN_888", 9999, "127.0.0.1");
     let udp_dlp_err = iso_udp.execute_bytecode(&udp_dlp_bc, None).unwrap_err();
     assert!(matches!(
         udp_dlp_err,
-        SandboxViolation::EnvAccessDenied { ref key, .. } if key.contains("EGRESS_SECRET_LEAK_BLOCKED")
+        SandboxViolation::EgressSecretLeakBlocked { .. }
     ));
 }
 

@@ -7,6 +7,9 @@ pub struct RuntimeLimits {
     /// Max loop iterations before an error is thrown.
     loop_iteration: u64,
 
+    /// Total loop iterations executed since the limit was last configured/reset.
+    loop_iterations_executed: u64,
+
     /// Max backtrace count in exception.
     backtrace_limit: usize,
 
@@ -19,6 +22,7 @@ impl Default for RuntimeLimits {
     fn default() -> Self {
         Self {
             loop_iteration: u64::MAX,
+            loop_iterations_executed: 0,
             recursion: 512,
             backtrace_limit: 50,
             stack_size: 1024 * 10,
@@ -46,12 +50,27 @@ impl RuntimeLimits {
     #[inline]
     pub fn set_loop_iteration_limit(&mut self, value: u64) {
         self.loop_iteration = value;
+        self.loop_iterations_executed = 0;
     }
 
     /// Disable loop iteration limit.
     #[inline]
     pub fn disable_loop_iteration_limit(&mut self) {
         self.loop_iteration = u64::MAX;
+        self.loop_iterations_executed = 0;
+    }
+
+    /// Returns the total number of loop iterations executed since the loop limit was set.
+    #[inline]
+    #[must_use]
+    pub const fn loop_iterations_executed(&self) -> u64 {
+        self.loop_iterations_executed
+    }
+
+    /// Increments the total number of loop iterations executed by 1.
+    #[inline(always)]
+    pub fn increment_loop_iterations_executed(&mut self) {
+        self.loop_iterations_executed = self.loop_iterations_executed.wrapping_add(1);
     }
 
     /// Get max backtrace limit for an exception.

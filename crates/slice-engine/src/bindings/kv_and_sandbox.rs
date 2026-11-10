@@ -334,13 +334,6 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                     f.set((used.saturating_add(outcome.fuel_used), limit));
                 });
             }
-            let child_net_mem = outcome.memory_used_bytes.saturating_sub(4096);
-            if child_net_mem > 0 {
-                crate::boa_realm::BOA_KV_MEM_BUDGET.with(|m| {
-                    let (used, limit) = m.get();
-                    m.set((used.saturating_add(child_net_mem), limit));
-                });
-            }
             if crate::boa_realm::is_trace_recording_enabled() {
                 crate::boa_realm::record_trace_event(
                     "sandbox.eval",

@@ -167,7 +167,7 @@ fn verify_socket_egress_dlp(payload: &[u8], target_label: &str) -> Result<(), St
     if let Some(violation) = dlp_err {
         BOA_VIOLATION.with(|v| *v.borrow_mut() = Some(violation));
         return Err(format!(
-            "EnvAccessDenied: EGRESS_SECRET_LEAK_BLOCKED on outbound socket write to '{}'",
+            "EgressSecretLeakBlocked: EGRESS_SECRET_LEAK_BLOCKED on outbound socket write to '{}'",
             target_label
         ));
     }

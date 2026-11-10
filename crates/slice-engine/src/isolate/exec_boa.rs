@@ -411,6 +411,7 @@ impl SliceIsolate {
         }
         clear_event_loop_state();
 
+        let loop_iters = realm.ctx.runtime_limits().loop_iterations_executed();
         realm
             .ctx
             .runtime_limits_mut()
@@ -460,6 +461,14 @@ impl SliceIsolate {
                 release_warm_boa_realm(realm);
                 return Err(v);
             }
+        }
+        if loop_iters > 0 {
+            let loop_fuel = (loop_iters / 250).max(1);
+            let avail_fuel = self
+                .compartment
+                .fuel_limit
+                .saturating_sub(self.compartment.fuel_consumed);
+            let _ = self.compartment.consume_fuel(loop_fuel.min(avail_fuel));
         }
         if !ses_mutated_target.is_empty() {
             // Do NOT return a realm whose SES intrinsics were mutated back to BOA_CONTEXT_POOL.
@@ -574,6 +583,14 @@ impl SliceIsolate {
                 let raw_err = format!("Uncaught {}", err);
                 let mut mapped = crate::boa_realm::map_error_with_active_source(&raw_err);
                 if mapped == raw_err {
+                    if let Some((first_line, rest)) = mapped.split_once('\n') {
+                        if let Some(open) = first_line.rfind(" (unknown at ") {
+                            let loc_paren = &first_line[open + 1..];
+                            if rest.contains(loc_paren) {
+                                mapped = format!("{}\n{}", &first_line[..open], rest);
+                            }
+                        }
+                    }
                     if let Some(opaque) = err.as_opaque() {
                         if let Some(obj) = opaque.as_object() {
                             if let Ok(stack_val) =
@@ -583,17 +600,22 @@ impl SliceIsolate {
                                     let st = s.to_std_string_escaped();
                                     for line in st.lines() {
                                         let trimmed = line.trim();
-                                        if trimmed.starts_with("at ") && !trimmed.contains("<anonymous>") {
+                                        if trimmed.starts_with("at ")
+                                            && !trimmed.contains("<anonymous>")
+                                        {
                                             if let Some(open) = trimmed.rfind('(') {
                                                 if let Some(close) = trimmed[open + 1..].find(')') {
                                                     let loc = &trimmed[open + 1..open + 1 + close];
-                                                    if loc.contains(':') {
+                                                    if loc.contains(':') && !raw_err.contains(loc) {
                                                         mapped = format!("{} ({})", raw_err, loc);
                                                         break;
                                                     }
                                                 }
                                             } else if let Some(loc) = trimmed.strip_prefix("at ") {
-                                                if loc.contains(':') && !loc.contains(' ') {
+                                                if loc.contains(':')
+                                                    && !loc.contains(' ')
+                                                    && !raw_err.contains(loc)
+                                                {
                                                     mapped = format!("{} ({})", raw_err, loc);
                                                     break;
                                                 }
@@ -739,7 +761,11 @@ impl SliceIsolate {
                 detect_needed_shards(js_code, is_http_req),
                 needs_lazy_global_getters(js_code),
             );
-            let scoped_code = format!("{{\n{}\n}}", js_code);
+            let scoped_code = if js_code.starts_with("//") {
+                format!("{{\n{}\n}}", js_code)
+            } else {
+                format!("{{{}\n}}", js_code)
+            };
             realm
                 .ctx
                 .eval(boa_engine::Source::from_bytes(scoped_code.as_bytes()))
