@@ -703,7 +703,7 @@ console.log(new TreeOfThoughtAgent().run());
     leak_iso1.add_egress_audit_secret("sk_live_99887766");
     assert!(matches!(
         leak_iso1.execute_bytecode(&raw_leak_bc, None),
-        Err(SandboxViolation::EnvAccessDenied { ref key, .. }) if key == "EGRESS_SECRET_LEAK_BLOCKED"
+        Err(SandboxViolation::EgressSecretLeakBlocked { .. })
     ));
 
     // Base64 of "sk_live_99887766" is "c2tfbGl2ZV85OTg4Nzc2Ng=="
@@ -719,7 +719,7 @@ console.log(new TreeOfThoughtAgent().run());
     leak_iso2.add_egress_audit_secret("sk_live_99887766");
     assert!(matches!(
         leak_iso2.execute_bytecode(&b64_leak_bc, None),
-        Err(SandboxViolation::EnvAccessDenied { ref key, .. }) if key == "EGRESS_SECRET_LEAK_BLOCKED"
+        Err(SandboxViolation::EgressSecretLeakBlocked { .. })
     ));
 }
 

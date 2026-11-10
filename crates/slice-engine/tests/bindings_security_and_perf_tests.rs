@@ -245,10 +245,7 @@ fn test_sec04_http_response_header_egress_dlp_blocking() {
         .expect_err("HTTP response header containing secret must be blocked by Egress DLP");
 
     assert!(
-        matches!(
-            &err,
-            SandboxViolation::EnvAccessDenied { key, .. } if key == "EGRESS_SECRET_LEAK_BLOCKED"
-        ),
+        matches!(&err, SandboxViolation::EgressSecretLeakBlocked { .. }),
         "expected EGRESS_SECRET_LEAK_BLOCKED violation, got: {:?}",
         err
     );

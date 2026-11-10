@@ -1936,7 +1936,11 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
             return crate::boacas::pack_boacas_container(&compacted);
         }
         let mut bytes = Vec::with_capacity(12 + compacted.len());
-        bytes.extend_from_slice(b"SLICEBOA{\n");
+        if compacted.starts_with("//") {
+            bytes.extend_from_slice(b"SLICEBOA{\n");
+        } else {
+            bytes.extend_from_slice(b"SLICEBOA{");
+        }
         bytes.extend_from_slice(compacted.trim_end().as_bytes());
         bytes.extend_from_slice(b"\n}");
         return bytes;

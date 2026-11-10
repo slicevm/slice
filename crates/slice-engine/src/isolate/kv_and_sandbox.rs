@@ -16,7 +16,7 @@ use std::time::Instant;
 pub struct SandboxEvalOptions {
     pub tenant_id: Option<String>,
     pub fuel: Option<u64>,
-    #[serde(alias = "maxMemoryBytes")]
+    #[serde(alias = "memory", alias = "maxMemoryBytes")]
     pub memory_bytes: Option<usize>,
     #[serde(default, alias = "readPrefixes", alias = "fsRead")]
     pub allow_read: Vec<String>,
@@ -126,10 +126,11 @@ impl SliceIsolate {
             .compartment
             .fuel_limit
             .saturating_sub(self.compartment.fuel_consumed);
+        let parent_net_used = self.compartment.memory_used_bytes.saturating_sub(4096);
         let parent_rem_mem = self
             .compartment
             .memory_limit_bytes
-            .saturating_sub(self.compartment.memory_used_bytes);
+            .saturating_sub(parent_net_used);
         let child_fuel = opts.fuel.unwrap_or(parent_rem_fuel).min(parent_rem_fuel);
         let child_mem = opts
             .memory_bytes
@@ -277,9 +278,13 @@ impl SliceIsolate {
         let outcome = match exec_res {
             Ok(metrics) => {
                 let _ = self.compartment.consume_fuel(metrics.fuel_consumed.max(1));
-                let net_mem = metrics.memory_used_bytes.saturating_sub(4096);
-                if net_mem > 0 {
-                    let _ = self.compartment.alloc_memory(net_mem);
+                let net_mem_used = metrics.memory_used_bytes.saturating_sub(4096);
+                if net_mem_used > 0 {
+                    self.compartment.memory_used_bytes = self
+                        .compartment
+                        .memory_used_bytes
+                        .saturating_add(net_mem_used)
+                        .min(self.compartment.memory_limit_bytes);
                 }
                 let is_uncaught = metrics.return_value.starts_with("Uncaught ");
                 let (return_value, return_json, error) = if is_uncaught {
@@ -314,10 +319,6 @@ impl SliceIsolate {
                 let _ = self
                     .compartment
                     .consume_fuel(child_iso.compartment.fuel_consumed.max(1));
-                let net_mem = child_iso.compartment.memory_used_bytes.saturating_sub(4096);
-                if net_mem > 0 {
-                    let _ = self.compartment.alloc_memory(net_mem);
-                }
                 let raw_stdout = std::mem::take(&mut child_iso.stdout);
                 let safe_stdout = if child_iso.egress_audit_secrets.is_empty() {
                     raw_stdout

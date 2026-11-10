@@ -483,8 +483,9 @@ fn verify_ws_outbound_dlp(url: &str, payload_bytes: &[u8]) -> Result<(), String>
             .err()
     });
     if let Some(violation) = dlp_err {
+        let msg = violation.to_string();
         BOA_VIOLATION.with(|v| *v.borrow_mut() = Some(violation));
-        return Err("EnvAccessDenied: EGRESS_SECRET_LEAK_BLOCKED".to_string());
+        return Err(msg);
     }
     Ok(())
 }

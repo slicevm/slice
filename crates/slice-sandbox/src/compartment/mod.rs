@@ -54,6 +54,9 @@ pub enum SandboxViolation {
 
     #[error("OCap Violation (CapabilityDenied: checkpoints): Compartment '{tenant_id}' checkpoint denied: {reason}")]
     CheckpointDenied { tenant_id: String, reason: String },
+
+    #[error("Egress DLP Violation (EGRESS_SECRET_LEAK_BLOCKED): Compartment '{tenant_id}' blocked from exfiltrating a registered audit secret")]
+    EgressSecretLeakBlocked { tenant_id: String },
 }
 
 fn default_allow_checkpoints() -> bool {

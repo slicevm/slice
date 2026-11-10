@@ -98,10 +98,7 @@ fn test_iso_sec01_wait_until_fuel_memory_dlp_and_ses_lockdown() {
         .drain_wait_until_tasks()
         .expect_err("secret logged inside Slice.waitUntil must be blocked by Egress DLP");
     assert!(
-        matches!(
-            &err_dlp,
-            SandboxViolation::EnvAccessDenied { key, .. } if key == "EGRESS_SECRET_LEAK_BLOCKED"
-        ),
+        matches!(&err_dlp, SandboxViolation::EgressSecretLeakBlocked { .. }),
         "expected EGRESS_SECRET_LEAK_BLOCKED, got: {:?}",
         err_dlp
     );

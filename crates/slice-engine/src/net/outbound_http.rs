@@ -512,8 +512,9 @@ pub(crate) fn check_boa_outbound_fetch_ocap_and_dlp(
     });
 
     if let Some(violation) = dlp_err {
+        let msg = violation.to_string();
         BOA_VIOLATION.with(|v| *v.borrow_mut() = Some(violation));
-        return Err("EnvAccessDenied: EGRESS_SECRET_LEAK_BLOCKED".to_string());
+        return Err(msg);
     }
 
     Ok(explicit_host_grant)
