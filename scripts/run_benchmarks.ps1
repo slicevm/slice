@@ -15,7 +15,7 @@ $CargoToml = Get-Content (Join-Path $RootDir "Cargo.toml") -Raw
 if ($CargoToml -match '(?m)^\[workspace\.package\]\s*\r?\nversion\s*=\s*"([^"]+)"') {
     $Version = $Matches[1]
 } else {
-    $Version = "0.10.7"
+    $Version = "0.10.8"
 }
 
 try {

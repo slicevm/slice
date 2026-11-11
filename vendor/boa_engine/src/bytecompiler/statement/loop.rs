@@ -183,7 +183,6 @@ impl ByteCompiler<'_> {
 
         let start_address = self.next_opcode_location();
         self.push_loop_control_info_for_of_in_loop(label, start_address, use_expr);
-        self.bytecode.emit_increment_loop_iteration();
 
         self.bytecode.emit_iterator_next();
 
@@ -191,6 +190,7 @@ impl ByteCompiler<'_> {
         self.bytecode.emit_iterator_done(done_reg.variable());
         let exit = self.jump_if_true(&done_reg);
         self.register_allocator.dealloc(done_reg);
+        self.bytecode.emit_increment_loop_iteration();
 
         let outer_scope = self.push_declarative_scope(for_in_loop.scope());
 
@@ -285,7 +285,6 @@ impl ByteCompiler<'_> {
         } else {
             self.push_loop_control_info_for_of_in_loop(label, start_address, use_expr);
         }
-        self.bytecode.emit_increment_loop_iteration();
 
         self.bytecode.emit_iterator_next();
         if for_of_loop.r#await() {
@@ -307,6 +306,7 @@ impl ByteCompiler<'_> {
         self.bytecode.emit_iterator_done(done_reg.variable());
         let exit = self.jump_if_true(&done_reg);
         self.register_allocator.dealloc(done_reg);
+        self.bytecode.emit_increment_loop_iteration();
 
         let outer_scope = self.push_declarative_scope(for_of_loop.scope());
 
@@ -428,10 +428,10 @@ impl ByteCompiler<'_> {
         let hoisted = self.try_hoist_loop_condition(Some(while_loop.condition()));
 
         let start_address = self.next_opcode_location();
-        self.bytecode.emit_increment_loop_iteration();
         self.push_loop_control_info(label, start_address, use_expr);
 
         let exit = self.compile_condition_and_branch(while_loop.condition(), hoisted.as_ref());
+        self.bytecode.emit_increment_loop_iteration();
 
         self.compile_stmt(while_loop.body(), use_expr, true);
 

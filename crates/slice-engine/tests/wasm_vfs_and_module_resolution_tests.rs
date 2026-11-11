@@ -1066,11 +1066,119 @@ console.log(JSON.stringify({ memResults, smallOk, errBoom, errJson }));
         },
     );
     assert!(ok_while.ok);
-    assert!(
-        ok_while.fuel_used >= 2_000,
-        "500k while iterations under 10M budget must report proportional fuelUsed, got: {}",
-        ok_while.fuel_used
-    );
+    assert_eq!(ok_while.fuel_used, 500_010);
+
+    // Issue #43 follow-up: `reported fuelUsed == smallest budget that completes` across `for`, `while`, `do-while`
+    // 1. Exact 1,000,000-iteration parity check (`4005` for `for`, `1000010` for `while` and `do-while`)
+    for (name, src, expected_fuel) in [
+        (
+            "for-1m",
+            "let s = 0; for (let i = 0; i < 1000000; i++) s += i; s",
+            4_005u64,
+        ),
+        (
+            "while-1m",
+            "let i = 0, s = 0; while (i < 1000000) { s += i; i++; } s",
+            1_000_010u64,
+        ),
+        (
+            "do-while-1m",
+            "let i = 0, s = 0; do { s += i; i++; } while (i < 1000000); s",
+            1_000_010u64,
+        ),
+    ] {
+        let reported = host_iso
+            .eval_sandbox(
+                src,
+                crate::SandboxEvalOptions {
+                    fuel: Some(10_000_000),
+                    ..Default::default()
+                },
+            )
+            .fuel_used;
+        assert_eq!(
+            reported, expected_fuel,
+            "{name}: unexpected reported fuelUsed"
+        );
+        let below = host_iso.eval_sandbox(
+            src,
+            crate::SandboxEvalOptions {
+                fuel: Some(reported - 1),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !below.ok,
+            "{name}: budget {}-1 must trap with CpuFuelExhausted",
+            reported
+        );
+        let exact = host_iso.eval_sandbox(
+            src,
+            crate::SandboxEvalOptions {
+                fuel: Some(reported),
+                ..Default::default()
+            },
+        );
+        assert!(
+            exact.ok && exact.fuel_used == reported,
+            "{name}: exact budget {reported} must complete with fuel_used == {reported}"
+        );
+    }
+
+    // 2. Full binary-search parity check across `for`, `while`, `do-while`
+    for (name, src, expected_fuel) in [
+        (
+            "for",
+            "let s = 0; for (let i = 0; i < 100000; i++) s += i; s",
+            405u64,
+        ),
+        (
+            "while",
+            "let i = 0, s = 0; while (i < 100000) { s += i; i++; } s",
+            100_010u64,
+        ),
+        (
+            "do-while",
+            "let i = 0, s = 0; do { s += i; i++; } while (i < 100000); s",
+            100_010u64,
+        ),
+    ] {
+        let reported = host_iso
+            .eval_sandbox(
+                src,
+                crate::SandboxEvalOptions {
+                    fuel: Some(10_000_000),
+                    ..Default::default()
+                },
+            )
+            .fuel_used;
+        assert_eq!(
+            reported, expected_fuel,
+            "{name}: unexpected reported fuelUsed"
+        );
+
+        let mut lo = 1u64;
+        let mut hi = 2_000_000u64;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let r = host_iso.eval_sandbox(
+                src,
+                crate::SandboxEvalOptions {
+                    fuel: Some(mid),
+                    ..Default::default()
+                },
+            );
+            if r.ok {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        assert_eq!(
+            reported, lo,
+            "{name}: reported fuelUsed ({reported}) must equal smallest budget that completes ({lo})"
+        );
+    }
 
     // 3. Issue #44: Egress DLP block uses dedicated `EgressSecretLeakBlocked` message, not env var message
     let dlp_out = host_iso.eval_sandbox(

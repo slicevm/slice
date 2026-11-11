@@ -304,9 +304,8 @@ impl SliceIsolate {
         let remaining_fuel = self
             .compartment
             .fuel_limit
-            .saturating_sub(self.compartment.fuel_consumed)
-            .max(1);
-        BOA_FUEL_BUDGET.with(|f| f.set((0, remaining_fuel)));
+            .saturating_sub(self.compartment.fuel_consumed);
+        BOA_FUEL_BUDGET.with(|f| f.set((0, remaining_fuel.max(1))));
         realm
             .ctx
             .runtime_limits_mut()
@@ -463,12 +462,11 @@ impl SliceIsolate {
             }
         }
         if loop_iters > 0 {
-            let loop_fuel = (loop_iters / 250).max(1);
-            let avail_fuel = self
-                .compartment
-                .fuel_limit
-                .saturating_sub(self.compartment.fuel_consumed);
-            let _ = self.compartment.consume_fuel(loop_fuel.min(avail_fuel));
+            if let Err(v) = self.compartment.consume_fuel(loop_iters) {
+                self.compartment.fuel_consumed = self.compartment.fuel_limit;
+                release_warm_boa_realm(realm);
+                return Err(v);
+            }
         }
         if !ses_mutated_target.is_empty() {
             // Do NOT return a realm whose SES intrinsics were mutated back to BOA_CONTEXT_POOL.
@@ -650,7 +648,6 @@ impl SliceIsolate {
         }
 
         let mut realm = acquire_warm_boa_realm();
-        self.apply_boa_realm_runtime_limits(&mut realm);
 
         if flags.has_env_keys {
             let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
@@ -684,9 +681,10 @@ impl SliceIsolate {
             }
         }
         let is_http_req = BOA_HTTP_REQ.with(|r| r.borrow().active);
+        let has_slice_dot = memchr::memmem::find(js_code.as_bytes(), b"Slice.").is_some();
         if is_http_req
-            || js_code.contains("Slice.request")
-            || js_code.contains("Slice.respond")
+            || (has_slice_dot
+                && (js_code.contains("Slice.request") || js_code.contains("Slice.respond")))
             || js_code.contains("__slice_http_")
         {
             crate::host_bindings::register_http_bridge_host_functions(&mut realm.ctx);
@@ -696,11 +694,12 @@ impl SliceIsolate {
                 &mut realm.ctx,
             );
         }
-        if js_code.contains("Slice.kv")
-            || js_code.contains("Slice.checkpoint")
-            || js_code.contains("Slice.restore")
-            || js_code.contains("Slice.releaseCheckpoint")
-            || js_code.contains("Slice.evalSandbox")
+        if has_slice_dot
+            && (js_code.contains("Slice.kv")
+                || js_code.contains("Slice.checkpoint")
+                || js_code.contains("Slice.restore")
+                || js_code.contains("Slice.releaseCheckpoint")
+                || js_code.contains("Slice.evalSandbox"))
         {
             crate::host_bindings::register_kv_and_sandbox_host_functions(&mut realm.ctx);
         }
@@ -715,6 +714,7 @@ impl SliceIsolate {
                 if is_http_req && (realm.loaded_shards_mask & (1 << 11)) == 0 {
                     ensure_realm_shards(&mut realm, 1 << 11, false);
                 }
+                self.apply_boa_realm_runtime_limits(&mut realm);
                 fn_obj.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
             } else {
                 should_check_ses = true;
@@ -723,6 +723,7 @@ impl SliceIsolate {
                     detect_needed_shards(js_code, is_http_req),
                     needs_lazy_global_getters(js_code),
                 );
+                self.apply_boa_realm_runtime_limits(&mut realm);
                 let res = realm
                     .ctx
                     .eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
@@ -752,6 +753,7 @@ impl SliceIsolate {
                 detect_needed_shards(js_code, is_http_req),
                 needs_lazy_global_getters(js_code),
             );
+            self.apply_boa_realm_runtime_limits(&mut realm);
             realm
                 .ctx
                 .eval(boa_engine::Source::from_bytes(js_code.as_bytes()))
@@ -761,6 +763,7 @@ impl SliceIsolate {
                 detect_needed_shards(js_code, is_http_req),
                 needs_lazy_global_getters(js_code),
             );
+            self.apply_boa_realm_runtime_limits(&mut realm);
             let scoped_code = if js_code.starts_with("//") {
                 format!("{{\n{}\n}}", js_code)
             } else {
@@ -771,10 +774,12 @@ impl SliceIsolate {
                 .eval(boa_engine::Source::from_bytes(scoped_code.as_bytes()))
         };
 
-        let has_ses_keywords = js_code.contains("prototype")
-            || js_code.contains("__proto__")
-            || js_code.contains("Reflect")
-            || js_code.contains("Object[");
+        let need_ses_scan = should_check_ses || BOA_WAIT_UNTIL_COUNT.with(|c| c.get()) > 0;
+        let has_ses_keywords = need_ses_scan
+            && (js_code.contains("prototype")
+                || js_code.contains("__proto__")
+                || js_code.contains("Reflect")
+                || js_code.contains("Object["));
         self.last_exec_check_ses = has_ses_keywords;
         let check_ses = should_check_ses && has_ses_keywords;
 
@@ -809,7 +814,6 @@ impl SliceIsolate {
             Some(r) => (r, false),
             None => (create_bare_boa_realm(), true),
         };
-        self.apply_boa_realm_runtime_limits(&mut realm);
 
         let has_next_tick = (header.feature_flags & BOACAS_FLAG_HAS_NEXT_TICK) != 0;
         if is_cold_bare_realm && header.approach_kind >= 1 && !precompiled_slice.is_empty() {
@@ -889,6 +893,7 @@ impl SliceIsolate {
             crate::host_bindings::register_kv_and_sandbox_host_functions(&mut realm.ctx);
         }
 
+        self.apply_boa_realm_runtime_limits(&mut realm);
         let (eval_res, should_check_ses) = crate::boacas::eval_boacas_on_realm(
             &mut realm,
             header,
