@@ -1245,8 +1245,8 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
         }
 
         // 6. Check if any work remains; if not, exit cleanly
-        let (in_flight_count, has_refed_timers, next_timer_deadline, has_queued) =
-            EVENT_LOOP_STATE.with(|st| {
+        let (in_flight_count, has_refed_timers, next_timer_deadline, has_queued) = EVENT_LOOP_STATE
+            .with(|st| {
                 let loop_st = st.borrow();
                 let has_refed = loop_st.timers.iter().any(|t| !t.cancelled && t.refed);
                 let next_dl = loop_st

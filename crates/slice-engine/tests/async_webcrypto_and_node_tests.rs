@@ -2960,13 +2960,7 @@ run();
         .with_exec_binary("cat")
         .with_exec_binary("false")
         .with_exec_binary("/nonexistent_slice_binary_xyz");
-    let mut iso = SliceIsolate::spawn(
-        "wave2-child-process",
-        1,
-        caps,
-        10_000_000,
-        16 * 1024 * 1024,
-    );
+    let mut iso = SliceIsolate::spawn("wave2-child-process", 1, caps, 10_000_000, 16 * 1024 * 1024);
     let m = iso.execute_bytecode(&bc, None).unwrap();
     let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
 
@@ -3189,7 +3183,10 @@ run();
 
     assert_eq!(out["timerAwait"], "ctx-timer");
     assert_eq!(out["externalAwait"], "ctx-external");
-    assert_eq!(out["thenChain"], serde_json::json!(["ctx-chain", "ctx-chain"]));
+    assert_eq!(
+        out["thenChain"],
+        serde_json::json!(["ctx-chain", "ctx-chain"])
+    );
     assert_eq!(out["concurrent"], serde_json::json!(["A", "B"]));
     assert_eq!(out["outsideAfter"], true);
 }
@@ -3500,5 +3497,3 @@ console.log(JSON.stringify(out));
     assert_eq!(out["ab2LenAndData"], serde_json::json!([16, 1, 4]));
     assert_eq!(out["ab3Len"], 4);
 }
-
-
