@@ -3,7 +3,7 @@
 use crate::bindings::helpers::{active_tenant_id_or_default, consume_crypto_kdf_fuel};
 use crate::boa_realm::{
     check_boa_fs_read_ocap, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, BOA_KV_MEM_BUDGET,
-    BOA_LAST_CHILD_PROC_VIOLATION, BOA_VIOLATION,
+    BOA_VIOLATION,
 };
 use crate::intrinsics::{base64_decode, base64_encode};
 use crate::state_and_kv::verify_egress_secrets_slice;
@@ -639,9 +639,7 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                     binary: exec_file,
                 };
                 let msg = violation.to_string();
-                BOA_LAST_CHILD_PROC_VIOLATION.with(|v| {
-                    *v.borrow_mut() = Some(violation);
-                });
+                crate::boa_realm::set_child_proc_violation(violation);
                 return Err(JsNativeError::error().with_message(msg).into());
             }
 
@@ -653,9 +651,7 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                         path: cwd_dir.clone(),
                     };
                     let msg = violation.to_string();
-                    BOA_LAST_CHILD_PROC_VIOLATION.with(|v| {
-                        *v.borrow_mut() = Some(violation);
-                    });
+                    crate::boa_realm::set_child_proc_violation(violation);
                     return Err(JsNativeError::error().with_message(msg).into());
                 }
             }
@@ -762,9 +758,7 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                     )
                 {
                     let msg = violation.to_string();
-                    BOA_LAST_CHILD_PROC_VIOLATION.with(|v| {
-                        *v.borrow_mut() = Some(violation);
-                    });
+                    crate::boa_realm::set_child_proc_violation(violation);
                     return Err(JsNativeError::error().with_message(msg).into());
                 }
             }

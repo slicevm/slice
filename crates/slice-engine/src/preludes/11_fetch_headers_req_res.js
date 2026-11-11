@@ -396,10 +396,10 @@
     this.bodyUsed = true;
     if (this._stream) {
       var st = this._stream, self = this;
-      st._drainSync();
+      if (!st._closed) st._drainSync();
       if (st._startPromise || !st._closed) {
         var waitP = st._startPromise ? st._startPromise : new Promise(function(res, rej) {
-          st._closeWaiters.push({ res: res, rej: rej });
+          (st._closeWaiters || (st._closeWaiters = [])).push({ res: res, rej: rej });
         });
         return waitP.then(function() {
           self._body = st._toText();

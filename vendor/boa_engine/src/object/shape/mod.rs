@@ -103,6 +103,22 @@ impl Shape {
         None
     }
 
+    #[inline]
+    pub(crate) const fn as_shared(&self) -> Option<&SharedShape> {
+        if let Inner::Shared(shape) = &self.inner {
+            return Some(shape);
+        }
+        None
+    }
+
+    #[inline]
+    pub(crate) fn from_shared_checked(shape: SharedShape) -> Self {
+        if shape.transition_count() >= Self::TRANSITION_COUNT_MAX {
+            return shape.to_unique().into();
+        }
+        shape.into()
+    }
+
     /// Create an insert property transitions returning the new transitioned [`Shape`].
     ///
     /// NOTE: This assumes that there is no property with the given key!

@@ -142,6 +142,17 @@ pub(crate) fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
         exec_cfg.fuel_limit,
         exec_cfg.mem_limit,
     );
+    if !args.is_empty() {
+        let mut standalone_argv = Vec::with_capacity(args.len() + 1);
+        standalone_argv.push("slice".to_string());
+        standalone_argv.push(args[0].clone());
+        for a in &args[1..] {
+            if a != "--quiet" && a != "-q" && a != "--metrics" && a != "--warm" {
+                standalone_argv.push(a.clone());
+            }
+        }
+        isolate.set_process_argv(standalone_argv);
+    }
     for sec in &exec_cfg.audit_secrets {
         isolate.add_egress_audit_secret(sec.clone());
     }

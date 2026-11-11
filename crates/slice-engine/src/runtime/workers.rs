@@ -1031,7 +1031,7 @@ pub(crate) fn poll_worker_self_inbox_and_dispatch(
                 let arg = JsValue::from(boa_engine::js_string!(msg_json));
                 let call_res = dispatch_fn.call(&JsValue::undefined(), &[arg], ctx);
                 let _ = ctx.run_jobs();
-                if crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+                if crate::boa_realm::has_process_exit() {
                     return true;
                 }
                 if let Err(err) = call_res {

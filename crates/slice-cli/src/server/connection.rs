@@ -669,7 +669,7 @@ pub(crate) fn serve_connection_with_isolate(
             .map(|v| v.as_slice())
             .unwrap_or(bytecode);
 
-        match isolate.execute_http_request(active_bytecode, None, &req_ctx) {
+        match isolate.execute_http_request_fast(active_bytecode, None, &req_ctx) {
             Ok(outcome) => {
                 // Check for RFC 6455 Server-Side WebSocket Upgrade (`Upgrade: websocket` + `Sec-WebSocket-Key`)
                 if is_ws_upgrade
@@ -685,7 +685,7 @@ pub(crate) fn serve_connection_with_isolate(
                     write_buf.extend_from_slice(accept_key.as_bytes());
                     write_buf
                         .extend_from_slice(b"\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: ");
-                    write_buf.extend_from_slice(outcome.metrics.tenant_id.as_bytes());
+                    write_buf.extend_from_slice(tenant_id.as_bytes());
                     write_buf.extend_from_slice(b"\r\n\r\n");
                     stream.write_all(write_buf)?;
                     stream.flush()?;
@@ -766,10 +766,10 @@ pub(crate) fn serve_connection_with_isolate(
                     return Ok(());
                 }
 
-                let isolate_us = outcome.metrics.total_time_ns / 1_000;
+                let isolate_us = outcome.total_time_ns / 1_000;
                 let total_us = (req_start.elapsed().as_nanos() / 1_000) as u64;
                 let safe_ct = if slice_engine::is_valid_http_header_value(&outcome.content_type) {
-                    outcome.content_type.as_str()
+                    outcome.content_type.as_ref()
                 } else {
                     "application/octet-stream"
                 };
@@ -791,13 +791,13 @@ pub(crate) fn serve_connection_with_isolate(
                 write_buf.extend_from_slice(b"\r\nConnection: ");
                 write_buf.extend_from_slice(conn_hdr.as_bytes());
                 write_buf.extend_from_slice(b"\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: ");
-                write_buf.extend_from_slice(outcome.metrics.tenant_id.as_bytes());
+                write_buf.extend_from_slice(tenant_id.as_bytes());
                 write_buf.extend_from_slice(b"\r\nX-Slice-Isolate-Us: ");
                 push_u64_ascii(write_buf, isolate_us);
                 write_buf.extend_from_slice(b"\r\nX-Slice-Total-Us: ");
                 push_u64_ascii(write_buf, total_us);
                 write_buf.extend_from_slice(b"\r\nX-Slice-Fuel-Used: ");
-                push_u64_ascii(write_buf, outcome.metrics.fuel_consumed);
+                push_u64_ascii(write_buf, outcome.fuel_consumed);
                 write_buf.extend_from_slice(b"\r\n");
 
                 // N-Sec-2: Validate all custom response headers against CRLF / control character injection

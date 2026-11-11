@@ -685,17 +685,64 @@ where
     }
 }
 
+#[inline]
+fn parse_u32_index_bytes(bytes: &[u8]) -> Option<NonMaxU32> {
+    let first = *bytes.first()?;
+    if !first.is_ascii_digit() || bytes.len() > 10 {
+        return None;
+    }
+    if first == b'0' {
+        return (bytes.len() == 1).then(|| {
+            // SAFETY: `0` is not `u32::MAX`.
+            unsafe { NonMaxU32::new_unchecked(0) }
+        });
+    }
+    let mut result = u32::from(first - b'0');
+    if bytes.len() == 10 {
+        for &b in &bytes[1..] {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            result = result.checked_mul(10)?.checked_add(u32::from(b - b'0'))?;
+        }
+        NonMaxU32::new(result)
+    } else {
+        for &b in &bytes[1..] {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            result = result * 10 + u32::from(b - b'0');
+        }
+        // SAFETY: `bytes.len() < 10`, so `result <= 999_999_999 < u32::MAX`.
+        Some(unsafe { NonMaxU32::new_unchecked(result) })
+    }
+}
+
+#[inline]
+fn parse_u32_index_js_str(string: JsStr<'_>) -> Option<NonMaxU32> {
+    match string.variant() {
+        boa_string::JsStrVariant::Latin1(bytes) => parse_u32_index_bytes(bytes),
+        boa_string::JsStrVariant::Utf16(units) => {
+            let first = *units.first()?;
+            if !matches!(first, 0x30..=0x39) || units.len() > 10 {
+                return None;
+            }
+            parse_u32_index(units.iter().copied())
+        }
+    }
+}
+
 impl From<JsStr<'_>> for PropertyKey {
     #[inline]
     fn from(string: JsStr<'_>) -> Self {
-        parse_u32_index(string.iter()).map_or_else(|| Self::String(string.into()), Self::Index)
+        parse_u32_index_js_str(string).map_or_else(|| Self::String(string.into()), Self::Index)
     }
 }
 
 impl From<JsString> for PropertyKey {
     #[inline]
     fn from(string: JsString) -> Self {
-        parse_u32_index(string.as_str().iter()).map_or(Self::String(string), Self::Index)
+        parse_u32_index_js_str(string.as_str()).map_or(Self::String(string), Self::Index)
     }
 }
 

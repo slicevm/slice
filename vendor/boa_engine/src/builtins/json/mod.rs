@@ -13,7 +13,7 @@
 //! [json]: https://www.json.org/json-en.html
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON
 
-use std::{borrow::Cow, iter::once};
+use std::{borrow::Cow, iter::once, rc::Rc};
 
 use rustc_hash::FxHashSet;
 
@@ -53,12 +53,84 @@ mod tests;
 #[derive(Debug, Trace, Finalize, JsData)]
 pub(crate) struct RawJson;
 
+/// Scans `bytes[pos..]` 8 bytes at a time for the first byte that is `< 0x20`, `b'"'`, or `b'\\'`.
+#[inline]
+fn scan_latin1_unescaped_json_bytes(bytes: &[u8], mut pos: usize) -> usize {
+    const QUOTE_MASK: u64 = 0x2222_2222_2222_2222;
+    const BS_MASK: u64 = 0x5C5C_5C5C_5C5C_5C5C;
+    const LO_ONES: u64 = 0x0101_0101_0101_0101;
+    const HI_BITS: u64 = 0x8080_8080_8080_8080;
+
+    let len = bytes.len();
+    while pos + 8 <= len {
+        let chunk = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
+        // Byte `b` is `>= 0x20` iff `(b & 0xE0) != 0` (at least one of bits 7, 6, 5 is set).
+        let ge_20 = (chunk | (chunk << 1) | (chunk << 2)) & HI_BITS;
+        let lt_20 = !ge_20 & HI_BITS;
+        let xq = chunk ^ QUOTE_MASK;
+        let eq_quote = xq.wrapping_sub(LO_ONES) & !xq & HI_BITS;
+        let xb = chunk ^ BS_MASK;
+        let eq_bs = xb.wrapping_sub(LO_ONES) & !xb & HI_BITS;
+        let stop_mask = lt_20 | eq_quote | eq_bs;
+        if stop_mask != 0 {
+            return pos + ((stop_mask.trailing_zeros() >> 3) as usize);
+        }
+        pos += 8;
+    }
+    while pos < len {
+        let b = bytes[pos];
+        if b == b'"' || b == b'\\' || b < 0x20 {
+            return pos;
+        }
+        pos += 1;
+    }
+    pos
+}
+
+/// Scans `bytes[pos..]` 8 bytes at a time for the first byte that requires JSON escaping or UTF-8
+/// expansion (`< 0x20`, `b'"'`, `b'\\'`, or `>= 0x80`).
+#[inline]
+fn scan_ascii_unescaped_json_bytes(bytes: &[u8], mut pos: usize) -> usize {
+    const QUOTE_MASK: u64 = 0x2222_2222_2222_2222;
+    const BS_MASK: u64 = 0x5C5C_5C5C_5C5C_5C5C;
+    const SPACE_MASK: u64 = 0x2020_2020_2020_2020;
+    const LO_ONES: u64 = 0x0101_0101_0101_0101;
+    const HI_BITS: u64 = 0x8080_8080_8080_8080;
+
+    let len = bytes.len();
+    while pos + 8 <= len {
+        let chunk = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
+        let non_ascii = chunk & HI_BITS;
+        let lt_20 = chunk.wrapping_sub(SPACE_MASK) & !chunk & HI_BITS;
+        let xq = chunk ^ QUOTE_MASK;
+        let eq_quote = xq.wrapping_sub(LO_ONES) & !xq & HI_BITS;
+        let xb = chunk ^ BS_MASK;
+        let eq_bs = xb.wrapping_sub(LO_ONES) & !xb & HI_BITS;
+        let stop_mask = non_ascii | lt_20 | eq_quote | eq_bs;
+        if stop_mask != 0 {
+            return pos + ((stop_mask.trailing_zeros() >> 3) as usize);
+        }
+        pos += 8;
+    }
+    while pos < len {
+        let b = bytes[pos];
+        if b < 0x20 || b == b'"' || b == b'\\' || b >= 0x80 {
+            return pos;
+        }
+        pos += 1;
+    }
+    pos
+}
+
 trait JsonInput<'a>: Copy {
     fn len(self) -> usize;
     fn code_unit(self, idx: usize) -> u16;
     fn slice_to_js_string(self, start: usize, end: usize) -> JsString;
-    fn ascii_bytes(self, start: usize, end: usize) -> Cow<'a, [u8]>;
     fn latin1_slice(self, start: usize, end: usize) -> Option<&'a [u8]>;
+    fn skip_ws(self, pos: usize) -> usize;
+    fn scan_unescaped_string(self, pos: usize) -> usize;
+    fn try_match_unescaped_key(self, pos: usize, expected: &JsString) -> Option<usize>;
+    fn parse_f64(self, start: usize, end: usize) -> Option<f64>;
 }
 
 impl<'a> JsonInput<'a> for &'a [u8] {
@@ -78,13 +150,50 @@ impl<'a> JsonInput<'a> for &'a [u8] {
     }
 
     #[inline]
-    fn ascii_bytes(self, start: usize, end: usize) -> Cow<'a, [u8]> {
-        Cow::Borrowed(&self[start..end])
+    fn latin1_slice(self, start: usize, end: usize) -> Option<&'a [u8]> {
+        Some(&self[start..end])
     }
 
     #[inline]
-    fn latin1_slice(self, start: usize, end: usize) -> Option<&'a [u8]> {
-        Some(&self[start..end])
+    fn skip_ws(self, mut pos: usize) -> usize {
+        let len = self.len();
+        if pos < len && self[pos] > 0x20 {
+            return pos;
+        }
+        while pos < len {
+            match self[pos] {
+                0x20 | 0x09 | 0x0A | 0x0D => pos += 1,
+                _ => break,
+            }
+        }
+        pos
+    }
+
+    #[inline]
+    fn scan_unescaped_string(self, pos: usize) -> usize {
+        scan_latin1_unescaped_json_bytes(self, pos)
+    }
+
+    #[inline]
+    fn try_match_unescaped_key(self, pos: usize, expected: &JsString) -> Option<usize> {
+        let boa_string::JsStrVariant::Latin1(exp_bytes) = expected.as_str().variant() else {
+            return None;
+        };
+        let content_start = pos + 1;
+        let content_end = content_start.checked_add(exp_bytes.len())?;
+        if content_end < self.len()
+            && self[content_end] == b'"'
+            && &self[content_start..content_end] == exp_bytes
+        {
+            Some(content_end + 1)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn parse_f64(self, start: usize, end: usize) -> Option<f64> {
+        fast_float2::parse(&self[start..end]).ok()
     }
 }
 
@@ -105,13 +214,105 @@ impl<'a> JsonInput<'a> for &'a [u16] {
     }
 
     #[inline]
-    fn ascii_bytes(self, start: usize, end: usize) -> Cow<'a, [u8]> {
-        Cow::Owned(self[start..end].iter().map(|&u| u as u8).collect())
+    fn latin1_slice(self, _start: usize, _end: usize) -> Option<&'a [u8]> {
+        None
     }
 
     #[inline]
-    fn latin1_slice(self, _start: usize, _end: usize) -> Option<&'a [u8]> {
-        None
+    fn skip_ws(self, mut pos: usize) -> usize {
+        let len = self.len();
+        if pos < len && self[pos] > 0x20 {
+            return pos;
+        }
+        while pos < len {
+            match self[pos] {
+                0x20 | 0x09 | 0x0A | 0x0D => pos += 1,
+                _ => break,
+            }
+        }
+        pos
+    }
+
+    #[inline]
+    fn scan_unescaped_string(self, mut pos: usize) -> usize {
+        let len = self.len();
+        while pos + 4 <= len {
+            let u0 = self[pos];
+            let u1 = self[pos + 1];
+            let u2 = self[pos + 2];
+            let u3 = self[pos + 3];
+            if u0 < 0x20
+                || u0 == 0x22
+                || u0 == 0x5C
+                || u1 < 0x20
+                || u1 == 0x22
+                || u1 == 0x5C
+                || u2 < 0x20
+                || u2 == 0x22
+                || u2 == 0x5C
+                || u3 < 0x20
+                || u3 == 0x22
+                || u3 == 0x5C
+            {
+                break;
+            }
+            pos += 4;
+        }
+        while pos < len {
+            let u = self[pos];
+            if u == 0x22 || u == 0x5C || u < 0x20 {
+                return pos;
+            }
+            pos += 1;
+        }
+        pos
+    }
+
+    #[inline]
+    fn try_match_unescaped_key(self, pos: usize, expected: &JsString) -> Option<usize> {
+        let content_start = pos + 1;
+        match expected.as_str().variant() {
+            boa_string::JsStrVariant::Latin1(exp_bytes) => {
+                let content_end = content_start.checked_add(exp_bytes.len())?;
+                if content_end < self.len()
+                    && self[content_end] == 0x22
+                    && self[content_start..content_end]
+                        .iter()
+                        .copied()
+                        .eq(exp_bytes.iter().copied().map(u16::from))
+                {
+                    Some(content_end + 1)
+                } else {
+                    None
+                }
+            }
+            boa_string::JsStrVariant::Utf16(exp_units) => {
+                let content_end = content_start.checked_add(exp_units.len())?;
+                if content_end < self.len()
+                    && self[content_end] == 0x22
+                    && &self[content_start..content_end] == exp_units
+                {
+                    Some(content_end + 1)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn parse_f64(self, start: usize, end: usize) -> Option<f64> {
+        let slice = &self[start..end];
+        if slice.len() <= 64 {
+            let mut stack_buf = [0u8; 64];
+            for (dst, &u) in stack_buf[..slice.len()].iter_mut().zip(slice.iter()) {
+                *dst = u as u8;
+            }
+            fast_float2::parse(&stack_buf[..slice.len()]).ok()
+        } else {
+            let heap_buf: Vec<u8> = slice.iter().map(|&u| u as u8).collect();
+            fast_float2::parse(&heap_buf).ok()
+        }
     }
 }
 
@@ -123,6 +324,111 @@ enum JsonNode {
     Array(Vec<JsonNode>),
     /// An object with key-value pairs.
     Object(Vec<(JsString, JsonNode)>),
+}
+
+trait SourceTracker {
+    type Node;
+    type ArrayNodes: Default;
+    type ObjEntries: Default;
+
+    fn primitive<'a, I: JsonInput<'a>>(
+        input: I,
+        start: usize,
+        end: usize,
+        val: &JsValue,
+    ) -> Self::Node;
+    fn literal_primitive(lit: JsString, val: &JsValue) -> Self::Node;
+    fn push_array_node(nodes: &mut Self::ArrayNodes, node: Self::Node);
+    fn finish_array(nodes: Self::ArrayNodes) -> Self::Node;
+    fn push_obj_entry(entries: &mut Self::ObjEntries, key: &JsString, node: Self::Node);
+    fn finish_object(entries: Self::ObjEntries) -> Self::Node;
+}
+
+struct NoSource;
+
+impl SourceTracker for NoSource {
+    type Node = ();
+    type ArrayNodes = ();
+    type ObjEntries = ();
+
+    #[inline(always)]
+    fn primitive<'a, I: JsonInput<'a>>(
+        _input: I,
+        _start: usize,
+        _end: usize,
+        _val: &JsValue,
+    ) -> Self::Node {
+    }
+
+    #[inline(always)]
+    fn literal_primitive(_lit: JsString, _val: &JsValue) -> Self::Node {}
+
+    #[inline(always)]
+    fn push_array_node(_nodes: &mut Self::ArrayNodes, _node: Self::Node) {}
+
+    #[inline(always)]
+    fn finish_array(_nodes: Self::ArrayNodes) -> Self::Node {}
+
+    #[inline(always)]
+    fn push_obj_entry(_entries: &mut Self::ObjEntries, _key: &JsString, _node: Self::Node) {}
+
+    #[inline(always)]
+    fn finish_object(_entries: Self::ObjEntries) -> Self::Node {}
+}
+
+struct WithSource;
+
+impl SourceTracker for WithSource {
+    type Node = JsonNode;
+    type ArrayNodes = Vec<JsonNode>;
+    type ObjEntries = Vec<(JsString, JsonNode)>;
+
+    #[inline]
+    fn primitive<'a, I: JsonInput<'a>>(
+        input: I,
+        start: usize,
+        end: usize,
+        val: &JsValue,
+    ) -> Self::Node {
+        JsonNode::Primitive(input.slice_to_js_string(start, end), val.clone())
+    }
+
+    #[inline]
+    fn literal_primitive(lit: JsString, val: &JsValue) -> Self::Node {
+        JsonNode::Primitive(lit, val.clone())
+    }
+
+    #[inline]
+    fn push_array_node(nodes: &mut Self::ArrayNodes, node: Self::Node) {
+        nodes.push(node);
+    }
+
+    #[inline]
+    fn finish_array(nodes: Self::ArrayNodes) -> Self::Node {
+        JsonNode::Array(nodes)
+    }
+
+    #[inline]
+    fn push_obj_entry(entries: &mut Self::ObjEntries, key: &JsString, node: Self::Node) {
+        entries.push((key.clone(), node));
+    }
+
+    #[inline]
+    fn finish_object(entries: Self::ObjEntries) -> Self::Node {
+        JsonNode::Object(entries)
+    }
+}
+
+#[inline]
+fn is_cacheable_chain_key(key: &JsString) -> bool {
+    match key.as_str().variant() {
+        boa_string::JsStrVariant::Latin1(bytes) => {
+            bytes.iter().all(|&b| b >= 0x20 && b != b'"' && b != b'\\')
+        }
+        boa_string::JsStrVariant::Utf16(units) => {
+            units.iter().all(|&u| u >= 0x20 && u != 0x22 && u != 0x5C)
+        }
+    }
 }
 
 /// JavaScript `JSON` global object.
@@ -180,19 +486,19 @@ impl Json {
         let (unfiltered, source_tree) = match js_str.as_str().variant() {
             boa_string::JsStrVariant::Latin1(bytes) => {
                 if reviver_obj.is_some() {
-                    let (val, node) = Self::parse_ecma404::<_, true>(bytes, context)?;
+                    let (val, node) = Self::parse_ecma404::<_, WithSource>(bytes, context)?;
                     (val, Some(node))
                 } else {
-                    let (val, _) = Self::parse_ecma404::<_, false>(bytes, context)?;
+                    let (val, ()) = Self::parse_ecma404::<_, NoSource>(bytes, context)?;
                     (val, None)
                 }
             }
             boa_string::JsStrVariant::Utf16(units) => {
                 if reviver_obj.is_some() {
-                    let (val, node) = Self::parse_ecma404::<_, true>(units, context)?;
+                    let (val, node) = Self::parse_ecma404::<_, WithSource>(units, context)?;
                     (val, Some(node))
                 } else {
-                    let (val, _) = Self::parse_ecma404::<_, false>(units, context)?;
+                    let (val, ()) = Self::parse_ecma404::<_, NoSource>(units, context)?;
                     (val, None)
                 }
             }
@@ -225,31 +531,50 @@ impl Json {
 
     /// Direct ECMA-404 iterative JSON parser over `Latin1(&[u8])` or `Utf16(&[u16])`.
     ///
-    /// - Uses `fast-float2` for exact IEEE-754 round-to-nearest-even `f64` conversion and `±Infinity` on overflow.
-    /// - Preserves lone UTF-16 surrogates (`\uD800`–`\uDFFF` and literal unpaired surrogates).
-    /// - Zero-copy `JsStr::latin1` / `utf16` slicing for unescaped strings.
+    /// - Uses `fast-float2` for exact IEEE-754 round-to-nearest-even `f64` conversion and `+-Infinity` on overflow.
+    /// - Preserves lone UTF-16 surrogates (`\uD800`..`\uDFFF` and literal unpaired surrogates).
+    /// - Zero-copy `JsStr::latin1` / `utf16` slicing with 8-byte SWAR string scanning.
+    /// - Uses `SharedShape` and per-depth shape-chain prediction for ordinary objects so homogeneous object arrays skip key allocation, hashing, and shape transitions.
     /// - Uses an explicit heap-allocated container stack (`O(1)` C/Rust call stack) supporting up to 2048 nesting levels.
-    fn parse_ecma404<'a, I: JsonInput<'a>, const WITH_SOURCE: bool>(
+    fn parse_ecma404<'a, I: JsonInput<'a>, S: SourceTracker>(
         input: I,
         context: &mut Context,
-    ) -> JsResult<(JsValue, JsonNode)> {
-        const MAX_DEPTH: usize = 2048;
+    ) -> JsResult<(JsValue, S::Node)> {
+        use crate::builtins::OrdinaryObject;
+        use crate::object::{IndexedProperties, PropertyMap, shape::SharedShape};
+        use crate::property::PropertyKey;
 
-        enum ContainerFrame {
+        const MAX_DEPTH: usize = 2048;
+        const SHAPE_CACHE_DEPTHS: usize = 16;
+        const MAX_CHAIN_KEYS: usize = 64;
+
+        type ShapeChain = Rc<[(JsString, SharedShape)]>;
+
+        enum ContainerFrame<S: SourceTracker> {
             Array {
                 elements: thin_vec::ThinVec<JsValue>,
-                child_nodes: Vec<JsonNode>,
+                child_nodes: S::ArrayNodes,
             },
-            Object {
-                obj: JsObject,
+            ObjectFast {
+                chain: ShapeChain,
+                matched_len: usize,
+                storage: Vec<JsValue>,
+                entries: S::ObjEntries,
+                depth: usize,
+            },
+            ObjectGeneric {
+                props: PropertyMap,
+                chain_builder: Option<Vec<(JsString, SharedShape)>>,
                 current_key: JsString,
-                entries: Vec<(JsString, JsonNode)>,
+                entries: S::ObjEntries,
+                depth: usize,
             },
         }
 
         struct ParserState<'a, I> {
             input: I,
             pos: usize,
+            depth_chains: [Option<ShapeChain>; SHAPE_CACHE_DEPTHS],
             _marker: std::marker::PhantomData<&'a ()>,
         }
 
@@ -269,25 +594,20 @@ impl Json {
 
             #[inline]
             fn skip_ws(&mut self) {
-                let len = self.input.len();
-                while self.pos < len {
-                    match self.input.code_unit(self.pos) {
-                        0x20 | 0x09 | 0x0A | 0x0D => self.pos += 1,
-                        _ => break,
-                    }
-                }
+                self.pos = self.input.skip_ws(self.pos);
             }
 
-            #[inline]
-            fn dummy_node() -> JsonNode {
-                JsonNode::Primitive(js_string!(), JsValue::undefined())
-            }
-
-            fn parse_root<const SRC: bool>(
+            fn parse_root<St: SourceTracker>(
                 &mut self,
                 context: &mut Context,
-            ) -> JsResult<(JsValue, JsonNode)> {
-                let mut stack: Vec<ContainerFrame> = Vec::new();
+            ) -> JsResult<(JsValue, St::Node)> {
+                let mut stack: Vec<ContainerFrame<St>> = Vec::new();
+                let base_obj_shape = context
+                    .intrinsics()
+                    .templates()
+                    .ordinary_object()
+                    .shape()
+                    .clone();
 
                 'parse_val: loop {
                     self.skip_ws();
@@ -299,14 +619,7 @@ impl Json {
                             let start = self.pos;
                             let s = self.parse_string()?;
                             let val = JsValue::new(s);
-                            let node = if SRC {
-                                JsonNode::Primitive(
-                                    self.input.slice_to_js_string(start, self.pos),
-                                    val.clone(),
-                                )
-                            } else {
-                                Self::dummy_node()
-                            };
+                            let node = St::primitive(self.input, start, self.pos, &val);
                             (val, node)
                         }
                         0x5B => {
@@ -319,35 +632,32 @@ impl Json {
                             {
                                 self.pos += 1;
                                 let arr = crate::builtins::Array::array_create(0, None, context)?;
-                                let node = if SRC {
-                                    JsonNode::Array(Vec::new())
-                                } else {
-                                    Self::dummy_node()
-                                };
+                                let node = St::finish_array(St::ArrayNodes::default());
                                 (arr.into(), node)
                             } else {
                                 stack.push(ContainerFrame::Array {
                                     elements: thin_vec::ThinVec::new(),
-                                    child_nodes: Vec::new(),
+                                    child_nodes: St::ArrayNodes::default(),
                                 });
                                 continue 'parse_val;
                             }
                         }
                         0x7B => {
-                            if stack.len() >= MAX_DEPTH {
+                            let depth = stack.len();
+                            if depth >= MAX_DEPTH {
                                 return Err(self.syntax_err("JSON nesting depth exceeded"));
                             }
                             self.pos += 1;
                             self.skip_ws();
-                            let obj = JsObject::with_object_proto(context.intrinsics());
                             if self.pos < self.input.len() && self.input.code_unit(self.pos) == 0x7D
                             {
                                 self.pos += 1;
-                                let node = if SRC {
-                                    JsonNode::Object(Vec::new())
-                                } else {
-                                    Self::dummy_node()
-                                };
+                                let obj = context
+                                    .intrinsics()
+                                    .templates()
+                                    .ordinary_object()
+                                    .create(OrdinaryObject, Vec::new());
+                                let node = St::finish_object(St::ObjEntries::default());
                                 (obj.into(), node)
                             } else {
                                 if self.pos >= self.input.len()
@@ -357,6 +667,34 @@ impl Json {
                                         self.syntax_err("expected string key in JSON object")
                                     );
                                 }
+                                if depth < SHAPE_CACHE_DEPTHS
+                                    && let Some(ref chain) = self.depth_chains[depth]
+                                    && let Some((exp_key, _)) = chain.first()
+                                    && let Some(after_quote) =
+                                        self.input.try_match_unescaped_key(self.pos, exp_key)
+                                {
+                                    let chain_cloned = chain.clone();
+                                    let cap = chain_cloned.len();
+                                    self.pos = after_quote;
+                                    self.skip_ws();
+                                    if self.pos >= self.input.len()
+                                        || self.input.code_unit(self.pos) != 0x3A
+                                    {
+                                        return Err(self.syntax_err(
+                                            "expected ':' after key in JSON object",
+                                        ));
+                                    }
+                                    self.pos += 1;
+                                    stack.push(ContainerFrame::ObjectFast {
+                                        chain: chain_cloned,
+                                        matched_len: 0,
+                                        storage: Vec::with_capacity(cap),
+                                        entries: St::ObjEntries::default(),
+                                        depth,
+                                    });
+                                    continue 'parse_val;
+                                }
+
                                 let key = self.parse_string()?;
                                 self.skip_ws();
                                 if self.pos >= self.input.len()
@@ -367,10 +705,19 @@ impl Json {
                                     );
                                 }
                                 self.pos += 1;
-                                stack.push(ContainerFrame::Object {
-                                    obj,
+                                let props = PropertyMap::from_parts(
+                                    base_obj_shape.clone().into(),
+                                    Vec::with_capacity(4),
+                                    IndexedProperties::default(),
+                                );
+                                let chain_builder = (depth < SHAPE_CACHE_DEPTHS)
+                                    .then(|| Vec::with_capacity(8));
+                                stack.push(ContainerFrame::ObjectGeneric {
+                                    props,
+                                    chain_builder,
                                     current_key: key,
-                                    entries: Vec::new(),
+                                    entries: St::ObjEntries::default(),
+                                    depth,
                                 });
                                 continue 'parse_val;
                             }
@@ -383,11 +730,7 @@ impl Json {
                             {
                                 self.pos += 4;
                                 let val = JsValue::new(true);
-                                let node = if SRC {
-                                    JsonNode::Primitive(js_string!("true"), val.clone())
-                                } else {
-                                    Self::dummy_node()
-                                };
+                                let node = St::literal_primitive(js_string!("true"), &val);
                                 (val, node)
                             } else {
                                 return Err(self.syntax_err("expected 'true'"));
@@ -402,11 +745,7 @@ impl Json {
                             {
                                 self.pos += 5;
                                 let val = JsValue::new(false);
-                                let node = if SRC {
-                                    JsonNode::Primitive(js_string!("false"), val.clone())
-                                } else {
-                                    Self::dummy_node()
-                                };
+                                let node = St::literal_primitive(js_string!("false"), &val);
                                 (val, node)
                             } else {
                                 return Err(self.syntax_err("expected 'false'"));
@@ -420,11 +759,7 @@ impl Json {
                             {
                                 self.pos += 4;
                                 let val = JsValue::null();
-                                let node = if SRC {
-                                    JsonNode::Primitive(js_string!("null"), val.clone())
-                                } else {
-                                    Self::dummy_node()
-                                };
+                                let node = St::literal_primitive(js_string!("null"), &val);
                                 (val, node)
                             } else {
                                 return Err(self.syntax_err("expected 'null'"));
@@ -433,14 +768,7 @@ impl Json {
                         0x2D | 0x30..=0x39 => {
                             let start = self.pos;
                             let val = self.parse_number()?;
-                            let node = if SRC {
-                                JsonNode::Primitive(
-                                    self.input.slice_to_js_string(start, self.pos),
-                                    val.clone(),
-                                )
-                            } else {
-                                Self::dummy_node()
-                            };
+                            let node = St::primitive(self.input, start, self.pos, &val);
                             (val, node)
                         }
                         _ => return Err(self.syntax_err("unexpected token in JSON")),
@@ -456,9 +784,7 @@ impl Json {
                                 child_nodes,
                             } => {
                                 elements.push(cur_val);
-                                if SRC {
-                                    child_nodes.push(cur_node);
-                                }
+                                St::push_array_node(child_nodes, cur_node);
                                 self.skip_ws();
                                 if self.pos >= self.input.len() {
                                     return Err(self.syntax_err("unterminated array in JSON"));
@@ -494,11 +820,7 @@ impl Json {
                                             .properties_mut()
                                             .override_indexed_properties(elements);
                                         cur_val = arr.into();
-                                        cur_node = if SRC {
-                                            JsonNode::Array(child_nodes)
-                                        } else {
-                                            Self::dummy_node()
-                                        };
+                                        cur_node = St::finish_array(child_nodes);
                                         continue 'attach;
                                     }
                                     _ => {
@@ -508,19 +830,155 @@ impl Json {
                                     }
                                 }
                             }
-                            ContainerFrame::Object {
-                                obj,
+                            ContainerFrame::ObjectFast {
+                                chain,
+                                matched_len,
+                                storage,
+                                entries,
+                                depth,
+                            } => {
+                                St::push_obj_entry(entries, &chain[*matched_len].0, cur_node);
+                                storage.push(cur_val);
+                                *matched_len += 1;
+                                self.skip_ws();
+                                if self.pos >= self.input.len() {
+                                    return Err(self.syntax_err("unterminated object in JSON"));
+                                }
+                                match self.input.code_unit(self.pos) {
+                                    0x2C => {
+                                        self.pos += 1;
+                                        self.skip_ws();
+                                        if self.pos < self.input.len()
+                                            && self.input.code_unit(self.pos) == 0x7D
+                                        {
+                                            return Err(
+                                                self.syntax_err("trailing comma in JSON object")
+                                            );
+                                        }
+                                        if self.pos >= self.input.len()
+                                            || self.input.code_unit(self.pos) != 0x22
+                                        {
+                                            return Err(self
+                                                .syntax_err("expected string key in JSON object"));
+                                        }
+                                        if *matched_len < chain.len()
+                                            && let Some(after_quote) = self
+                                                .input
+                                                .try_match_unescaped_key(
+                                                    self.pos,
+                                                    &chain[*matched_len].0,
+                                                )
+                                        {
+                                            self.pos = after_quote;
+                                            self.skip_ws();
+                                            if self.pos >= self.input.len()
+                                                || self.input.code_unit(self.pos) != 0x3A
+                                            {
+                                                return Err(self.syntax_err(
+                                                    "expected ':' after key in JSON object",
+                                                ));
+                                            }
+                                            self.pos += 1;
+                                            continue 'parse_val;
+                                        }
+
+                                        let next_key = self.parse_string()?;
+                                        self.skip_ws();
+                                        if self.pos >= self.input.len()
+                                            || self.input.code_unit(self.pos) != 0x3A
+                                        {
+                                            return Err(self.syntax_err(
+                                                "expected ':' after key in JSON object",
+                                            ));
+                                        }
+                                        self.pos += 1;
+                                        let matched = *matched_len;
+                                        let frame_depth = *depth;
+                                        let prev_shape = chain[matched - 1].1.clone();
+                                        let chain_builder = (frame_depth < SHAPE_CACHE_DEPTHS
+                                            && matched < MAX_CHAIN_KEYS)
+                                            .then(|| chain[..matched].to_vec());
+                                        let props = PropertyMap::from_parts(
+                                            prev_shape.into(),
+                                            std::mem::take(storage),
+                                            IndexedProperties::default(),
+                                        );
+                                        let entries_taken = std::mem::take(entries);
+                                        *top = ContainerFrame::ObjectGeneric {
+                                            props,
+                                            chain_builder,
+                                            current_key: next_key,
+                                            entries: entries_taken,
+                                            depth: frame_depth,
+                                        };
+                                        continue 'parse_val;
+                                    }
+                                    0x7D => {
+                                        self.pos += 1;
+                                        let Some(ContainerFrame::ObjectFast {
+                                            chain,
+                                            matched_len,
+                                            storage,
+                                            entries,
+                                            ..
+                                        }) = stack.pop()
+                                        else {
+                                            unreachable!()
+                                        };
+                                        let final_shape = chain[matched_len - 1].1.clone();
+                                        let obj = JsObject::from_property_map(
+                                            PropertyMap::from_parts(
+                                                final_shape.into(),
+                                                storage,
+                                                IndexedProperties::default(),
+                                            ),
+                                        );
+                                        cur_val = obj.into();
+                                        cur_node = St::finish_object(entries);
+                                        continue 'attach;
+                                    }
+                                    _ => {
+                                        return Err(
+                                            self.syntax_err("expected ',' or '}' in JSON object")
+                                        );
+                                    }
+                                }
+                            }
+                            ContainerFrame::ObjectGeneric {
+                                props,
+                                chain_builder,
                                 current_key,
                                 entries,
+                                ..
                             } => {
                                 let key = std::mem::take(current_key);
-                                if SRC {
-                                    entries.push((key.clone(), cur_node));
+                                St::push_obj_entry(entries, &key, cur_node);
+                                let prev_storage_len = props.storage.len();
+                                let pk = PropertyKey::from(key);
+                                let key_for_chain = if chain_builder.is_some() {
+                                    match &pk {
+                                        PropertyKey::String(s)
+                                            if prev_storage_len < MAX_CHAIN_KEYS
+                                                && is_cacheable_chain_key(s) =>
+                                        {
+                                            Some(s.clone())
+                                        }
+                                        _ => None,
+                                    }
+                                } else {
+                                    None
+                                };
+                                props.insert_data_property(pk, cur_val);
+                                if let Some(builder) = chain_builder {
+                                    if let Some(chain_key) = key_for_chain
+                                        && props.storage.len() == prev_storage_len + 1
+                                        && let Some(s) = props.shape.as_shared()
+                                    {
+                                        builder.push((chain_key, s.clone()));
+                                    } else {
+                                        *chain_builder = None;
+                                    }
                                 }
-                                obj.borrow_mut().properties_mut().insert_data_property(
-                                    crate::property::PropertyKey::from(key),
-                                    cur_val,
-                                );
                                 self.skip_ws();
                                 if self.pos >= self.input.len() {
                                     return Err(self.syntax_err("unterminated object in JSON"));
@@ -557,17 +1015,25 @@ impl Json {
                                     }
                                     0x7D => {
                                         self.pos += 1;
-                                        let Some(ContainerFrame::Object { obj, entries, .. }) =
-                                            stack.pop()
+                                        let Some(ContainerFrame::ObjectGeneric {
+                                            props,
+                                            chain_builder,
+                                            entries,
+                                            depth,
+                                            ..
+                                        }) = stack.pop()
                                         else {
                                             unreachable!()
                                         };
+                                        if depth < SHAPE_CACHE_DEPTHS
+                                            && let Some(built) = chain_builder
+                                            && !built.is_empty()
+                                        {
+                                            self.depth_chains[depth] = Some(built.into());
+                                        }
+                                        let obj = JsObject::from_property_map(props);
                                         cur_val = obj.into();
-                                        cur_node = if SRC {
-                                            JsonNode::Object(entries)
-                                        } else {
-                                            Self::dummy_node()
-                                        };
+                                        cur_node = St::finish_object(entries);
                                         continue 'attach;
                                     }
                                     _ => {
@@ -582,26 +1048,24 @@ impl Json {
                 }
             }
 
+            #[inline]
             fn parse_string(&mut self) -> JsResult<JsString> {
                 debug_assert_eq!(self.input.code_unit(self.pos), 0x22);
                 self.pos += 1;
                 let content_start = self.pos;
-                let len = self.input.len();
-
-                while self.pos < len {
-                    let c = self.input.code_unit(self.pos);
+                let stop = self.input.scan_unescaped_string(content_start);
+                self.pos = stop;
+                if stop < self.input.len() {
+                    let c = self.input.code_unit(stop);
                     if c == 0x22 {
-                        let s = self.input.slice_to_js_string(content_start, self.pos);
-                        self.pos += 1;
+                        let s = self.input.slice_to_js_string(content_start, stop);
+                        self.pos = stop + 1;
                         return Ok(s);
                     }
                     if c == 0x5C {
                         return self.parse_string_escaped(content_start);
                     }
-                    if c < 0x20 {
-                        return Err(self.syntax_err("unescaped control character in JSON string"));
-                    }
-                    self.pos += 1;
+                    return Err(self.syntax_err("unescaped control character in JSON string"));
                 }
                 Err(self.syntax_err("unterminated string in JSON"))
             }
@@ -680,14 +1144,7 @@ impl Json {
                             }
                         } else {
                             let chunk_start = self.pos;
-                            self.pos += 1;
-                            while self.pos < len {
-                                let ch = self.input.code_unit(self.pos);
-                                if ch == 0x22 || ch == 0x5C || ch < 0x20 {
-                                    break;
-                                }
-                                self.pos += 1;
-                            }
+                            self.pos = self.input.scan_unescaped_string(chunk_start + 1);
                             if let Some(chunk) = self.input.latin1_slice(chunk_start, self.pos) {
                                 latin1.extend_from_slice(chunk);
                             }
@@ -763,6 +1220,7 @@ impl Json {
                 Err(self.syntax_err("unterminated string in JSON"))
             }
 
+            #[inline]
             fn parse_number(&mut self) -> JsResult<JsValue> {
                 let start = self.pos;
                 let len = self.input.len();
@@ -774,18 +1232,30 @@ impl Json {
                 if self.pos >= len {
                     return Err(self.syntax_err("unexpected end of number in JSON"));
                 }
-                match self.input.code_unit(self.pos) {
+                let mut acc: u64 = 0;
+                let mut digits: usize;
+                let first = self.input.code_unit(self.pos);
+                match first {
                     0x30 => {
                         self.pos += 1;
+                        digits = 1;
                         if self.pos < len && matches!(self.input.code_unit(self.pos), 0x30..=0x39) {
                             return Err(self.syntax_err("leading zero in JSON number"));
                         }
                     }
                     0x31..=0x39 => {
+                        acc = u64::from(first - 0x30);
+                        digits = 1;
                         self.pos += 1;
-                        while self.pos < len
-                            && matches!(self.input.code_unit(self.pos), 0x30..=0x39)
-                        {
+                        while self.pos < len {
+                            let d = self.input.code_unit(self.pos);
+                            if !matches!(d, 0x30..=0x39) {
+                                break;
+                            }
+                            if digits < 19 {
+                                acc = acc * 10 + u64::from(d - 0x30);
+                            }
+                            digits += 1;
                             self.pos += 1;
                         }
                     }
@@ -799,6 +1269,7 @@ impl Json {
                     if self.pos >= len || !matches!(self.input.code_unit(self.pos), 0x30..=0x39) {
                         return Err(self.syntax_err("expected digit after decimal point in JSON"));
                     }
+                    self.pos += 1;
                     while self.pos < len && matches!(self.input.code_unit(self.pos), 0x30..=0x39) {
                         self.pos += 1;
                     }
@@ -813,36 +1284,34 @@ impl Json {
                     if self.pos >= len || !matches!(self.input.code_unit(self.pos), 0x30..=0x39) {
                         return Err(self.syntax_err("expected digit in JSON exponent"));
                     }
+                    self.pos += 1;
                     while self.pos < len && matches!(self.input.code_unit(self.pos), 0x30..=0x39) {
                         self.pos += 1;
                     }
                 }
 
-                let num_bytes = self.input.ascii_bytes(start, self.pos);
-                let bytes = num_bytes.as_ref();
-
                 if !is_float {
-                    if is_neg && bytes.len() == 2 && bytes[1] == b'0' {
+                    if is_neg && acc == 0 {
                         return Ok(JsValue::new(-0.0f64));
                     }
-                    let digits = if is_neg { &bytes[1..] } else { bytes };
-                    if digits.len() <= 15 {
-                        let mut acc: i64 = 0;
-                        for &b in digits {
-                            acc = acc * 10 + i64::from(b - b'0');
-                        }
+                    if digits <= 16 && acc <= 9_007_199_254_740_992 {
                         if is_neg {
-                            acc = -acc;
+                            if acc <= (i32::MAX as u64) + 1 {
+                                return Ok(JsValue::new((-(acc as i64)) as i32));
+                            }
+                            return Ok(JsValue::new(-(acc as f64)));
                         }
-                        if let Ok(i) = i32::try_from(acc) {
-                            return Ok(JsValue::new(i));
+                        if acc <= i32::MAX as u64 {
+                            return Ok(JsValue::new(acc as i32));
                         }
                         return Ok(JsValue::new(acc as f64));
                     }
                 }
 
-                let f: f64 = fast_float2::parse(bytes)
-                    .map_err(|_| self.syntax_err("invalid number in JSON"))?;
+                let f = self
+                    .input
+                    .parse_f64(start, self.pos)
+                    .ok_or_else(|| self.syntax_err("invalid number in JSON"))?;
                 Ok(JsValue::new(f))
             }
         }
@@ -850,9 +1319,10 @@ impl Json {
         let mut state = ParserState {
             input,
             pos: 0,
+            depth_chains: std::array::from_fn(|_| None),
             _marker: std::marker::PhantomData,
         };
-        let res = state.parse_root::<WITH_SOURCE>(context)?;
+        let res = state.parse_root::<S>(context)?;
         state.skip_ws();
         if state.pos != state.input.len() {
             return Err(state.syntax_err("unexpected trailing characters in JSON"));
@@ -1023,10 +1493,10 @@ impl Json {
         // 3. Parse StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
         match json_string.as_str().variant() {
             boa_string::JsStrVariant::Latin1(bytes) => {
-                Self::parse_ecma404::<_, false>(bytes, context)?;
+                Self::parse_ecma404::<_, NoSource>(bytes, context)?;
             }
             boa_string::JsStrVariant::Utf16(units) => {
-                Self::parse_ecma404::<_, false>(units, context)?;
+                Self::parse_ecma404::<_, NoSource>(units, context)?;
             }
         }
 
@@ -1286,40 +1756,41 @@ impl Json {
                 boa_string::JsStrVariant::Latin1(bytes) => {
                     buf.push(b'"');
                     let mut start = 0usize;
-                    for (i, &b) in bytes.iter().enumerate() {
-                        if b < 0x20 || b == b'"' || b == b'\\' || b >= 0x80 {
-                            if i > start {
-                                buf.extend_from_slice(&bytes[start..i]);
-                            }
-                            match b {
-                                b'"' => buf.extend_from_slice(b"\\\""),
-                                b'\\' => buf.extend_from_slice(b"\\\\"),
-                                0x08 => buf.extend_from_slice(b"\\b"),
-                                0x09 => buf.extend_from_slice(b"\\t"),
-                                0x0A => buf.extend_from_slice(b"\\n"),
-                                0x0C => buf.extend_from_slice(b"\\f"),
-                                0x0D => buf.extend_from_slice(b"\\r"),
-                                b if b < 0x20 => {
-                                    buf.extend_from_slice(&[
-                                        b'\\',
-                                        b'u',
-                                        b'0',
-                                        b'0',
-                                        HEX[(b >> 4) as usize],
-                                        HEX[(b & 0xF) as usize],
-                                    ]);
-                                }
-                                b => {
-                                    *all_ascii = false;
-                                    buf.push(0xC0 | (b >> 6));
-                                    buf.push(0x80 | (b & 0x3F));
-                                }
-                            }
-                            start = i + 1;
+                    let len = bytes.len();
+                    while start < len {
+                        let i = scan_ascii_unescaped_json_bytes(bytes, start);
+                        if i > start {
+                            buf.extend_from_slice(&bytes[start..i]);
                         }
-                    }
-                    if start < bytes.len() {
-                        buf.extend_from_slice(&bytes[start..]);
+                        if i >= len {
+                            break;
+                        }
+                        let b = bytes[i];
+                        match b {
+                            b'"' => buf.extend_from_slice(b"\\\""),
+                            b'\\' => buf.extend_from_slice(b"\\\\"),
+                            0x08 => buf.extend_from_slice(b"\\b"),
+                            0x09 => buf.extend_from_slice(b"\\t"),
+                            0x0A => buf.extend_from_slice(b"\\n"),
+                            0x0C => buf.extend_from_slice(b"\\f"),
+                            0x0D => buf.extend_from_slice(b"\\r"),
+                            b if b < 0x20 => {
+                                buf.extend_from_slice(&[
+                                    b'\\',
+                                    b'u',
+                                    b'0',
+                                    b'0',
+                                    HEX[(b >> 4) as usize],
+                                    HEX[(b & 0xF) as usize],
+                                ]);
+                            }
+                            b => {
+                                *all_ascii = false;
+                                buf.push(0xC0 | (b >> 6));
+                                buf.push(0x80 | (b & 0x3F));
+                            }
+                        }
+                        start = i + 1;
                     }
                     buf.push(b'"');
                     true
@@ -1387,6 +1858,7 @@ impl Json {
             obj_proto: &JsObject,
             arr_proto: &JsObject,
             arr_template_shape_addr: usize,
+            verified_obj_shape_addr: &mut usize,
             to_json_key: &PropertyKey,
         ) -> JsResult<FastStatus> {
             match val.variant() {
@@ -1418,7 +1890,10 @@ impl Json {
                 JsVariant::Object(obj) => {
                     let borrow = obj.borrow();
                     let props = borrow.properties();
-                    if props.shape.lookup(to_json_key).is_some() {
+                    let shape_addr = props.shape.to_addr_usize();
+                    let shape_preverified =
+                        shape_addr != 0 && shape_addr == *verified_obj_shape_addr;
+                    if !shape_preverified && props.shape.lookup(to_json_key).is_some() {
                         return Ok(FastStatus::Fallback);
                     }
                     if obj.is_callable() {
@@ -1432,7 +1907,7 @@ impl Json {
                     }
 
                     if obj.is_array() {
-                        if props.shape.to_addr_usize() != arr_template_shape_addr {
+                        if shape_addr != arr_template_shape_addr {
                             if let Some(ref p) = props.shape.prototype() {
                                 if p != arr_proto {
                                     return Ok(FastStatus::Fallback);
@@ -1489,6 +1964,7 @@ impl Json {
                                         obj_proto,
                                         arr_proto,
                                         arr_template_shape_addr,
+                                        verified_obj_shape_addr,
                                         to_json_key,
                                     ) {
                                         Ok(FastStatus::Written) => {}
@@ -1527,10 +2003,13 @@ impl Json {
                     if !obj.is_ordinary() || !indexed_empty {
                         return Ok(FastStatus::Fallback);
                     }
-                    if let Some(ref p) = props.shape.prototype() {
-                        if p != obj_proto {
-                            return Ok(FastStatus::Fallback);
+                    if !shape_preverified {
+                        if let Some(ref p) = props.shape.prototype() {
+                            if p != obj_proto {
+                                return Ok(FastStatus::Fallback);
+                            }
                         }
+                        *verified_obj_shape_addr = shape_addr;
                     }
 
                     stack.push(addr);
@@ -1581,6 +2060,7 @@ impl Json {
                                     obj_proto,
                                     arr_proto,
                                     arr_template_shape_addr,
+                                    verified_obj_shape_addr,
                                     to_json_key,
                                 )? {
                                     FastStatus::Written => {
@@ -1628,6 +2108,7 @@ impl Json {
         let mut buf = Vec::with_capacity(128);
         let mut all_ascii = true;
         let mut stack = Vec::with_capacity(8);
+        let mut verified_obj_shape_addr = 0usize;
 
         match write_val(
             value,
@@ -1637,6 +2118,7 @@ impl Json {
             &obj_proto,
             &arr_proto,
             arr_template_shape_addr,
+            &mut verified_obj_shape_addr,
             &to_json_key,
         )? {
             FastStatus::Written => {

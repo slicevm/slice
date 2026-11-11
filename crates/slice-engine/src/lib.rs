@@ -17,7 +17,7 @@
 //!   and sandboxed `wasmi` [`wasm`] engine.
 //! - [`net`]: Outbound `fetch()` HTTP/1.1 & HTTPS engine ([`outbound_http`]), OCap TCP/TLS/UDP [`sockets`],
 //!   and RFC 6455 [`websocket`] codec.
-//! - [`preludes`]: Sharded JavaScript micro-preludes (`00_ultra_core.js` .. `18_intl.js`), Aho-Corasick shard
+//! - [`preludes`]: Sharded JavaScript micro-preludes (`00_ultra_core.js` .. `19_process_cli.js`), Aho-Corasick shard
 //!   detector ([`js_preludes`]), compile-time minifier ([`js_minifier`]), and lazy `node:*` built-ins ([`node_builtins`]).
 
 pub mod bindings;
@@ -56,8 +56,8 @@ pub use event_loop::{
     reset_virtual_time_warped_ms, virtual_time_warped_ms, MAX_FETCH_REACTOR_WORKERS,
 };
 pub use isolate::{
-    run_source_isolated, ExecutionMetrics, HttpExecutionOutcome, HttpRequestContext,
-    SandboxEvalOptions, SandboxEvalOutcome, SliceIsolate,
+    run_source_isolated, ExecutionMetrics, HttpExecutionOutcome, HttpFastOutcome,
+    HttpRequestContext, SandboxEvalOptions, SandboxEvalOutcome, SliceIsolate,
 };
 pub use outbound_http::{
     clear_outbound_conn_pool, clear_outbound_conn_pool_for_tenant,

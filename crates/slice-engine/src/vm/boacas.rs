@@ -272,18 +272,7 @@ pub fn pack_boacas_container(compacted_js: &str) -> Vec<u8> {
         has_next_tick,
     );
 
-    let mut compiler_ctx = boa_engine::Context::default();
-    let precompiled = if let Ok(script) = boa_engine::Script::parse(
-        boa_engine::Source::from_bytes(&fused_bytes),
-        None,
-        &mut compiler_ctx,
-    ) {
-        script
-            .compile_to_slicebc(&mut compiler_ctx)
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let precompiled = crate::js_preludes::compile_static_js_to_slicebc(&fused_bytes);
 
     let header = BoaCasHeader {
         approach_kind: 3,
@@ -377,9 +366,7 @@ pub(crate) fn eval_boacas_on_realm(
             return (res, true);
         }
         // Fallback if CodeBlock deserialization fails
-        let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-            crate::js_preludes::ULTRA_CORE_PRELUDE,
-        ));
+        let _ = crate::js_preludes::eval_ultra_core_prelude(&mut realm.ctx);
         crate::boa_realm::populate_realm_cached_handles(realm);
     }
 
@@ -420,14 +407,10 @@ pub(crate) fn eval_boacas_on_realm(
     } else {
         ensure_realm_shards(realm, effective_shards, init_lazy);
         let res = if (header.feature_flags & BOACAS_FLAG_STARTS_WITH_BRACE) != 0 {
-            realm
-                .ctx
-                .eval(boa_engine::Source::from_bytes(fallback_js.as_bytes()))
+            crate::boa_realm::eval_or_reuse_cached_script(realm, fallback_js)
         } else {
             let scoped = format!("{{\n{}\n}}", fallback_js);
-            realm
-                .ctx
-                .eval(boa_engine::Source::from_bytes(scoped.as_bytes()))
+            crate::boa_realm::eval_or_reuse_cached_script(realm, &scoped)
         };
         (res, true)
     }

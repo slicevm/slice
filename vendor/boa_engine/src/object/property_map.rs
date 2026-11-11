@@ -503,6 +503,21 @@ impl PropertyMap {
         }
     }
 
+    /// Construct a [`PropertyMap`] directly from prebuilt [`Shape`], storage, and [`IndexedProperties`].
+    #[must_use]
+    #[inline]
+    pub(crate) const fn from_parts(
+        shape: Shape,
+        storage: Vec<JsValue>,
+        indexed_properties: IndexedProperties,
+    ) -> Self {
+        Self {
+            indexed_properties,
+            shape,
+            storage,
+        }
+    }
+
     /// Construct a [`PropertyMap`] with the given prototype with a unique [`Shape`].
     #[must_use]
     #[inline]
@@ -610,6 +625,29 @@ impl PropertyMap {
 
         let attributes =
             SlotAttributes::WRITABLE | SlotAttributes::ENUMERABLE | SlotAttributes::CONFIGURABLE;
+
+        if let Some(shared) = self.shape.as_shared() {
+            let transition_key = TransitionKey {
+                property_key: key,
+                attributes,
+            };
+            if let Some(next_shape) = shared.try_fast_insert_property_transition(&transition_key) {
+                self.shape = Shape::from_shared_checked(next_shape);
+                self.storage.push(value);
+                return;
+            }
+            if let Some(slot) = shared.lookup(&transition_key.property_key) {
+                let index = slot.index as usize;
+                if slot.attributes == attributes {
+                    self.storage[index] = value;
+                    return;
+                }
+            }
+            self.shape =
+                Shape::from_shared_checked(shared.insert_property_transition_missed(transition_key));
+            self.storage.push(value);
+            return;
+        }
 
         if let Some(slot) = self.shape.lookup(&key) {
             let index = slot.index as usize;

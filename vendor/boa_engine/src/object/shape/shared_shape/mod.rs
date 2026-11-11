@@ -211,17 +211,28 @@ impl SharedShape {
         new_shape
     }
 
-    /// Create a [`SharedShape`] insert property transition.
-    pub(crate) fn insert_property_transition(&self, key: TransitionKey) -> Self {
-        // Check if we have already created such a transition, if so use it!
-        if let Some(shape) = self.forward_transitions().get_property(&key) {
+    /// Fast lookup of an existing `insert_property_transition` without touching `PropertyTable`.
+    ///
+    /// Because an insert transition out of `self` is only created for a key not already present
+    /// in `self`, a hit here guarantees both that `key.property_key` is a new property on `self`
+    /// and that the resulting `SharedShape` already exists.
+    #[inline]
+    pub(crate) fn try_fast_insert_property_transition(&self, key: &TransitionKey) -> Option<Self> {
+        if let Some(shape) = self.forward_transitions().get_property(key) {
             if let Some(inner) = shape.upgrade() {
-                return Self { inner };
+                if inner.flags.is_insert_transition_type() {
+                    return Some(Self { inner });
+                }
+                return None;
             }
-
             self.forward_transitions().prune_property_transitions();
         }
+        None
+    }
 
+    /// Create a [`SharedShape`] insert property transition when the caller has already verified
+    /// `try_fast_insert_property_transition` missed and `lookup` returned `None`.
+    pub(crate) fn insert_property_transition_missed(&self, key: TransitionKey) -> Self {
         let property_table = self.property_table().add_property_deep_clone_if_needed(
             key.property_key.clone(),
             key.attributes,
@@ -242,6 +253,20 @@ impl SharedShape {
             .insert_property(key, &new_shape.inner);
 
         new_shape
+    }
+
+    /// Create a [`SharedShape`] insert property transition.
+    pub(crate) fn insert_property_transition(&self, key: TransitionKey) -> Self {
+        // Check if we have already created such a transition, if so use it!
+        if let Some(shape) = self.forward_transitions().get_property(&key) {
+            if let Some(inner) = shape.upgrade() {
+                return Self { inner };
+            }
+
+            self.forward_transitions().prune_property_transitions();
+        }
+
+        self.insert_property_transition_missed(key)
     }
 
     /// Create a [`SharedShape`] change prototype transition, returning [`ChangeTransition`].

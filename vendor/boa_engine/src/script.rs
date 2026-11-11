@@ -167,6 +167,15 @@ impl Script {
         Ok(cb)
     }
 
+    /// Returns `true` when this compiled script has no top-level lexical declarations
+    /// (`let`/`const`/`class` at global scope), allowing it to be evaluated repeatedly
+    /// on the same warm realm without `GlobalDeclarationInstantiation` lexical redeclaration errors.
+    pub fn can_reuse_across_runs(&self, context: &mut Context) -> bool {
+        self.codeblock(context)
+            .map(|cb| cb.global_lexs.is_empty())
+            .unwrap_or(false)
+    }
+
     /// Evaluates this script and returns its result.
     ///
     /// Note that this won't run any scheduled promise jobs; you need to call [`Context::run_jobs`]

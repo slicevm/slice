@@ -20,20 +20,40 @@ fn vfs_or_host_is_dir(norm: &str, raw_path: &str) -> bool {
     if norm == "/" || norm == "." {
         return true;
     }
-    if BOA_VFS_DIRS.with(|d| d.borrow().contains(norm)) {
+    if BOA_VFS_DIRS.with(|d| {
+        let dirs = d.borrow();
+        !dirs.is_empty() && dirs.contains(norm)
+    }) {
         return true;
     }
-    if BOA_VFS_CACHE.with(|c| c.borrow().contains_key(norm)) {
-        return false;
+    let vfs_state = BOA_VFS_CACHE.with(|c| {
+        let map = c.borrow();
+        if map.is_empty() {
+            return None;
+        }
+        if map.contains_key(norm) {
+            return Some(false);
+        }
+        let prefix = format!("{}/", norm);
+        if map.keys().any(|k| k.starts_with(&prefix)) {
+            Some(true)
+        } else {
+            None
+        }
+    });
+    if let Some(res) = vfs_state {
+        return res;
     }
-    let prefix = format!("{}/", norm);
-    BOA_VFS_CACHE.with(|c| c.borrow().keys().any(|k| k.starts_with(&prefix)))
-        || std::path::Path::new(norm).is_dir()
-        || std::path::Path::new(raw_path).is_dir()
+    std::path::Path::new(norm).is_dir()
+        || (raw_path != norm && std::path::Path::new(raw_path).is_dir())
 }
 
-pub(crate) fn resolve_vfs_symlink_norm(norm: &str) -> String {
-    let mut current = norm.to_string();
+#[inline]
+pub(crate) fn resolve_vfs_symlink_norm(mut current: String) -> String {
+    let has_vfs = BOA_VFS_CACHE.with(|c| !c.borrow().is_empty());
+    if !has_vfs {
+        return current;
+    }
     for _ in 0..8 {
         let next_opt = BOA_VFS_CACHE.with(|c| {
             c.borrow().get(&current).and_then(|bytes| {
@@ -49,6 +69,55 @@ pub(crate) fn resolve_vfs_symlink_norm(norm: &str) -> String {
         }
     }
     current
+}
+
+#[inline]
+fn read_host_bytes(norm: &str, raw_path: &str) -> std::io::Result<Vec<u8>> {
+    std::fs::read(norm).or_else(|e| {
+        if raw_path == norm {
+            Err(e)
+        } else {
+            std::fs::read(raw_path)
+        }
+    })
+}
+
+#[inline]
+fn host_metadata(norm: &str, raw_path: &str) -> std::io::Result<std::fs::Metadata> {
+    std::fs::metadata(norm).or_else(|e| {
+        if raw_path == norm {
+            Err(e)
+        } else {
+            std::fs::metadata(raw_path)
+        }
+    })
+}
+
+#[inline]
+fn utf8_slice_to_js_val(bytes: &[u8]) -> boa_engine::JsValue {
+    if bytes.is_ascii() {
+        return boa_engine::JsValue::from(boa_engine::js_string!(
+            boa_engine::string::JsStr::latin1(bytes)
+        ));
+    }
+    let content = String::from_utf8_lossy(bytes);
+    boa_engine::JsValue::from(boa_engine::js_string!(content.as_ref()))
+}
+
+#[inline]
+fn utf8_vec_to_js_val(bytes: Vec<u8>) -> boa_engine::JsValue {
+    if bytes.is_ascii() {
+        return boa_engine::JsValue::from(boa_engine::js_string!(
+            boa_engine::string::JsStr::latin1(&bytes)
+        ));
+    }
+    match String::from_utf8(bytes) {
+        Ok(s) => boa_engine::JsValue::from(boa_engine::js_string!(s)),
+        Err(e) => {
+            let content = String::from_utf8_lossy(e.as_bytes());
+            boa_engine::JsValue::from(boa_engine::js_string!(content.as_ref()))
+        }
+    }
 }
 
 pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
@@ -74,20 +143,34 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_read_ocap(&path) {
                 return Ok(BoaVal::from(js_string!("")));
             }
-            let norm = resolve_vfs_symlink_norm(&norm_vfs_path(&path));
-            if !check_boa_fs_read_ocap(&norm) {
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm != path && !check_boa_fs_read_ocap(&norm) {
                 return Ok(BoaVal::from(js_string!("")));
             }
-            if let Some(arc_bytes) = BOA_VFS_CACHE.with(|c| c.borrow().get(&norm).cloned()) {
-                let content = String::from_utf8_lossy(&arc_bytes).into_owned();
-                return Ok(BoaVal::from(js_string!(content)));
+            if let Some(arc_bytes) = BOA_VFS_CACHE.with(|c| {
+                let map = c.borrow();
+                if map.is_empty() {
+                    None
+                } else {
+                    map.get(&norm).cloned()
+                }
+            }) {
+                return Ok(utf8_slice_to_js_val(&arc_bytes));
+            }
+            if norm == "/"
+                || norm == "."
+                || BOA_VFS_DIRS.with(|d| {
+                    let dirs = d.borrow();
+                    !dirs.is_empty() && dirs.contains(&norm)
+                })
+            {
+                return Ok(BoaVal::from(-21));
+            }
+            if let Ok(bytes) = read_host_bytes(&norm, &path) {
+                return Ok(utf8_vec_to_js_val(bytes));
             }
             if vfs_or_host_is_dir(&norm, &path) {
                 return Ok(BoaVal::from(-21));
-            }
-            if let Ok(bytes) = std::fs::read(&norm).or_else(|_| std::fs::read(&path)) {
-                let content = String::from_utf8_lossy(&bytes).into_owned();
-                return Ok(BoaVal::from(js_string!(content)));
             }
             Ok(BoaVal::null())
         }),
@@ -106,18 +189,34 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_read_ocap(&path) {
                 return bytes_to_js_uint8_array(&[], context);
             }
-            let norm = resolve_vfs_symlink_norm(&norm_vfs_path(&path));
-            if !check_boa_fs_read_ocap(&norm) {
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm != path && !check_boa_fs_read_ocap(&norm) {
                 return bytes_to_js_uint8_array(&[], context);
             }
-            if let Some(arc_bytes) = BOA_VFS_CACHE.with(|c| c.borrow().get(&norm).cloned()) {
+            if let Some(arc_bytes) = BOA_VFS_CACHE.with(|c| {
+                let map = c.borrow();
+                if map.is_empty() {
+                    None
+                } else {
+                    map.get(&norm).cloned()
+                }
+            }) {
                 return bytes_to_js_uint8_array(&arc_bytes, context);
+            }
+            if norm == "/"
+                || norm == "."
+                || BOA_VFS_DIRS.with(|d| {
+                    let dirs = d.borrow();
+                    !dirs.is_empty() && dirs.contains(&norm)
+                })
+            {
+                return Ok(BoaVal::from(-21));
+            }
+            if let Ok(bytes) = read_host_bytes(&norm, &path) {
+                return bytes_to_js_uint8_array(&bytes, context);
             }
             if vfs_or_host_is_dir(&norm, &path) {
                 return Ok(BoaVal::from(-21));
-            }
-            if let Ok(bytes) = std::fs::read(&norm).or_else(|_| std::fs::read(&path)) {
-                return bytes_to_js_uint8_array(&bytes, context);
             }
             Ok(BoaVal::null())
         }),
@@ -136,8 +235,8 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_write_ocap(&path) {
                 return Ok(BoaVal::undefined());
             }
-            let norm = resolve_vfs_symlink_norm(&norm_vfs_path(&path));
-            if !check_boa_fs_write_ocap(&norm) {
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm != path && !check_boa_fs_write_ocap(&norm) {
                 return Ok(BoaVal::undefined());
             }
             if BOA_VFS_DIRS.with(|d| d.borrow().contains(&norm)) {
@@ -184,8 +283,8 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_write_ocap(&path) {
                 return Ok(BoaVal::undefined());
             }
-            let norm = resolve_vfs_symlink_norm(&norm_vfs_path(&path));
-            if !check_boa_fs_write_ocap(&norm) {
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm != path && !check_boa_fs_write_ocap(&norm) {
                 return Ok(BoaVal::undefined());
             }
             if BOA_VFS_DIRS.with(|d| d.borrow().contains(&norm)) {
@@ -234,19 +333,34 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_read_ocap(&path) {
                 return Ok(BoaVal::from(false));
             }
-            let norm = resolve_vfs_symlink_norm(&norm_vfs_path(&path));
-            if !check_boa_fs_read_ocap(&norm) {
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm != path && !check_boa_fs_read_ocap(&norm) {
                 return Ok(BoaVal::from(false));
             }
-            let prefix = format!("{}/", norm);
-            let exists = BOA_VFS_CACHE.with(|c| {
+            let vfs_exists = BOA_VFS_CACHE.with(|c| {
                 let map = c.borrow();
-                map.contains_key(&norm) || map.keys().any(|k| k.starts_with(&prefix))
+                if map.is_empty() {
+                    false
+                } else if map.contains_key(&norm) {
+                    true
+                } else {
+                    let prefix = format!("{}/", norm);
+                    map.keys().any(|k| k.starts_with(&prefix))
+                }
             }) || BOA_VFS_DIRS.with(|d| {
                 let dirs = d.borrow();
-                dirs.contains(&norm) || dirs.iter().any(|k| k.starts_with(&prefix))
-            }) || std::path::Path::new(&norm).exists()
-                || std::path::Path::new(&path).exists();
+                if dirs.is_empty() {
+                    false
+                } else if dirs.contains(&norm) {
+                    true
+                } else {
+                    let prefix = format!("{}/", norm);
+                    dirs.iter().any(|k| k.starts_with(&prefix))
+                }
+            });
+            let exists = vfs_exists
+                || std::path::Path::new(&norm).exists()
+                || (path != norm && std::path::Path::new(&path).exists());
             Ok(BoaVal::from(exists))
         }),
     );
@@ -294,8 +408,8 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_read_ocap(&path) {
                 return Ok(BoaVal::from(js_string!("[]")));
             }
-            let norm_dir = resolve_vfs_symlink_norm(&norm_vfs_path(&path));
-            if !check_boa_fs_read_ocap(&norm_dir) {
+            let norm_dir = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm_dir != path && !check_boa_fs_read_ocap(&norm_dir) {
                 return Ok(BoaVal::from(js_string!("[]")));
             }
             let prefix = format!("{}/", norm_dir);
@@ -350,19 +464,27 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_read_ocap(&path) {
                 return Ok(BoaVal::from(0));
             }
-            let norm = resolve_vfs_symlink_norm(&norm_vfs_path(&path));
-            if !check_boa_fs_read_ocap(&norm) {
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm != path && !check_boa_fs_read_ocap(&norm) {
                 return Ok(BoaVal::from(0));
             }
-            if let Some(size) =
-                BOA_VFS_CACHE.with(|c| c.borrow().get(&norm).map(|v| v.len() as u64))
-            {
+            if let Some(size) = BOA_VFS_CACHE.with(|c| {
+                let map = c.borrow();
+                if map.is_empty() {
+                    None
+                } else {
+                    map.get(&norm).map(|v| v.len() as u64)
+                }
+            }) {
                 return Ok(BoaVal::from(size as f64));
             }
-            if BOA_VFS_DIRS.with(|d| d.borrow().contains(&norm)) {
+            if BOA_VFS_DIRS.with(|d| {
+                let dirs = d.borrow();
+                !dirs.is_empty() && dirs.contains(&norm)
+            }) {
                 return Ok(BoaVal::from(0.0));
             }
-            if let Ok(meta) = std::fs::metadata(&norm).or_else(|_| std::fs::metadata(&path)) {
+            if let Ok(meta) = host_metadata(&norm, &path) {
                 return Ok(BoaVal::from(meta.len() as f64));
             }
             if vfs_or_host_is_dir(&norm, &path) {
@@ -385,8 +507,8 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_read_ocap(&path) {
                 return Ok(BoaVal::from(1_700_000_000_000.0));
             }
-            let norm = resolve_vfs_symlink_norm(&norm_vfs_path(&path));
-            if !check_boa_fs_read_ocap(&norm) {
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm != path && !check_boa_fs_read_ocap(&norm) {
                 return Ok(BoaVal::from(1_700_000_000_000.0));
             }
             if let Some(custom_mt) = BOA_VFS_MTIMES.with(|m| m.borrow().get(&norm).copied()) {
@@ -395,8 +517,7 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if BOA_DET_STATE.with(|s| s.get().is_some()) {
                 return Ok(BoaVal::from(1_700_000_000_000.0));
             }
-            let mtime_ms = std::fs::metadata(&norm)
-                .or_else(|_| std::fs::metadata(&path))
+            let mtime_ms = host_metadata(&norm, &path)
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -424,8 +545,8 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_read_ocap(&path) {
                 return Ok(BoaVal::from(false));
             }
-            let norm = resolve_vfs_symlink_norm(&norm_vfs_path(&path));
-            if !check_boa_fs_read_ocap(&norm) {
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm != path && !check_boa_fs_read_ocap(&norm) {
                 return Ok(BoaVal::from(false));
             }
             let is_dir = vfs_or_host_is_dir(&norm, &path);
@@ -452,8 +573,8 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_read_ocap(&src) || !check_boa_fs_write_ocap(&dest) {
                 return Ok(BoaVal::undefined());
             }
-            let norm_src = resolve_vfs_symlink_norm(&norm_vfs_path(&src));
-            let norm_dest = resolve_vfs_symlink_norm(&norm_vfs_path(&dest));
+            let norm_src = resolve_vfs_symlink_norm(norm_vfs_path(&src));
+            let norm_dest = resolve_vfs_symlink_norm(norm_vfs_path(&dest));
             if !check_boa_fs_read_ocap(&norm_src) || !check_boa_fs_write_ocap(&norm_dest) {
                 return Ok(BoaVal::undefined());
             }
@@ -504,8 +625,8 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             {
                 return Ok(BoaVal::undefined());
             }
-            let norm_old = resolve_vfs_symlink_norm(&norm_vfs_path(&old_p));
-            let norm_new = resolve_vfs_symlink_norm(&norm_vfs_path(&new_p));
+            let norm_old = resolve_vfs_symlink_norm(norm_vfs_path(&old_p));
+            let norm_new = resolve_vfs_symlink_norm(norm_vfs_path(&new_p));
             if !check_boa_fs_read_ocap(&norm_old) || !check_boa_fs_write_ocap(&norm_new) {
                 return Ok(BoaVal::undefined());
             }
@@ -586,8 +707,8 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_read_ocap(&path) {
                 return Ok(BoaVal::from(js_string!("")));
             }
-            let norm = resolve_vfs_symlink_norm(&norm_vfs_path(&path));
-            if !check_boa_fs_read_ocap(&norm) {
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm != path && !check_boa_fs_read_ocap(&norm) {
                 return Ok(BoaVal::from(js_string!("")));
             }
             if BOA_VFS_CACHE.with(|c| c.borrow().contains_key(&norm))
@@ -803,7 +924,7 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_read_ocap(&path) || !check_boa_fs_write_ocap(&path) {
                 return Ok(BoaVal::undefined());
             }
-            let norm = resolve_vfs_symlink_norm(&norm_vfs_path(&path));
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
             if !check_boa_fs_read_ocap(&norm) || !check_boa_fs_write_ocap(&norm) {
                 return Ok(BoaVal::undefined());
             }
@@ -840,8 +961,8 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_write_ocap(&path) {
                 return Ok(BoaVal::undefined());
             }
-            let norm = resolve_vfs_symlink_norm(&norm_vfs_path(&path));
-            if !check_boa_fs_write_ocap(&norm) {
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm != path && !check_boa_fs_write_ocap(&norm) {
                 return Ok(BoaVal::undefined());
             }
             let mtime_ms = args

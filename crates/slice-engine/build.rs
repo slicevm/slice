@@ -58,6 +58,7 @@ const PRELUDE_SPECS: &[(&str, &str)] = &[
         "src/preludes/17_buffer_binary_rw.js",
     ),
     ("INTL_PRELUDE", "src/preludes/18_intl.js"),
+    ("PROCESS_CLI_PRELUDE", "src/preludes/19_process_cli.js"),
 ];
 
 fn main() {

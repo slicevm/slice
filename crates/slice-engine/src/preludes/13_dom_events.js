@@ -39,7 +39,7 @@
   CustomEvent.prototype.constructor = CustomEvent;
 
   function EventTarget() {
-    this._et = Object.create(null);
+    this._et = null;
   }
   EventTarget.prototype._ensureEt = function() {
     if (!this._et) this._et = Object.create(null);
@@ -158,17 +158,23 @@
     this.message = message === undefined ? "" : String(message);
     this.name = name === undefined ? "Error" : String(name);
     this.code = __domCodes[this.name] || 0;
-    var err = new Error(this.message);
-    err.name = this.name;
-    if (err.stack) {
-      Object.defineProperty(this, "stack", { value: err.stack, writable: true, configurable: true });
-    }
   }
   DOMException.prototype = Object.create(Error.prototype);
   DOMException.prototype.constructor = DOMException;
-  for (var __dk in __domConsts) {
-    DOMException[__dk] = DOMException.prototype[__dk] = __domConsts[__dk];
-  }
+  Object.defineProperty(DOMException.prototype, "stack", {
+    get: function() {
+      var nm = this && this.name ? String(this.name) : "Error";
+      var msg = this && this.message ? String(this.message) : "";
+      return msg ? (nm + ": " + msg) : nm;
+    },
+    set: function(v) {
+      Object.defineProperty(this, "stack", { value: v, writable: true, configurable: true });
+    },
+    configurable: true,
+    enumerable: false
+  });
+  Object.assign(DOMException, __domConsts);
+  Object.assign(DOMException.prototype, __domConsts);
 
   globalThis.DOMException = DOMException;
   globalThis.Event = Event;

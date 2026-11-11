@@ -135,6 +135,24 @@ impl JsObject {
         JsObject { inner }.upcast()
     }
 
+    /// Creates a new ordinary `JsObject` directly from a prebuilt [`PropertyMap`].
+    #[inline]
+    #[must_use]
+    pub(crate) fn from_property_map(properties: PropertyMap) -> Self {
+        let internal_methods = OrdinaryObject.internal_methods();
+        let inner = Gc::new(VTableObject {
+            object: GcRefCell::new(Object {
+                data: ObjectData::new(OrdinaryObject),
+                properties,
+                extensible: true,
+                private_elements: ThinVec::new(),
+            }),
+            vtable: internal_methods,
+        });
+
+        JsObject { inner }.upcast()
+    }
+
     /// Creates a new ordinary object with its prototype set to the `Object` prototype.
     ///
     /// This is equivalent to calling the specification's abstract operation

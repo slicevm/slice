@@ -13,8 +13,8 @@ use crate::event_loop::{
     cancel_timer, refresh_timer, schedule_immediate, schedule_timer, set_timer_ref,
 };
 use crate::intrinsics::{
-    base64_decode, base64_encode, bytes_to_hex, hmac_sha256_bytes, hmac_sha256_hex, sha256_bytes,
-    sha256_hex,
+    base64_decode, base64_decoded_len_bytes, base64_encode, bytes_to_hex, hmac_sha256_bytes,
+    hmac_sha256_hex, sha256_bytes, sha256_hex,
 };
 use crate::js_preludes::eval_lazy_prelude_shard;
 use crate::node_builtins::eval_lazy_builtin_module;
@@ -340,8 +340,9 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
         js_string!("__slice_utf8_byte_len"),
         2,
         NativeFunction::from_fn_ptr(|_this, args, context| {
+            use boa_engine::builtins::dataview::DataView;
             let Some(first) = args.first() else {
-                return Ok(BoaVal::from(0.0));
+                return Ok(BoaVal::from(0));
             };
             if let Some(obj) = first.as_object() {
                 if let Some(ta) = obj.downcast_ref::<TypedArray>() {
@@ -352,6 +353,11 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 if let Ok(ab) = JsArrayBuffer::from_object(obj.clone()) {
                     let bl = ab.data().map(|d| d.len()).unwrap_or(0);
                     return Ok(BoaVal::from(bl as f64));
+                }
+                if let Some(dv) = obj.downcast_ref::<DataView>() {
+                    if let Some(bl) = dv.with_bytes(|b| b.len()) {
+                        return Ok(BoaVal::from(bl as f64));
+                    }
                 }
                 if let Ok(bl) = obj.get(js_string!("byteLength"), context) {
                     if let Some(n) = bl.as_number() {
@@ -364,30 +370,89 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                     }
                 }
             }
-            let s = first.to_string(context)?.to_std_string_escaped();
+            let js_s = match first.as_string() {
+                Some(s) => s,
+                None => first.to_string(context)?,
+            };
+            // Encoding kind: 0 = utf8, 1 = latin1/ascii/binary, 2 = utf16le/ucs2, 3 = hex, 4 = base64/base64url
+            let mut enc_kind: u8 = 0;
             if let Some(enc_val) = args.get(1).filter(|v| !v.is_undefined() && !v.is_null()) {
-                let e = enc_val.to_string(context)?.to_std_string_escaped();
-                if e.eq_ignore_ascii_case("hex") {
-                    return Ok(BoaVal::from((s.len() >> 1) as f64));
-                }
-                if e.eq_ignore_ascii_case("base64") || e.eq_ignore_ascii_case("base64url") {
-                    return Ok(BoaVal::from(base64_decode(&s).len() as f64));
-                }
-                if e.eq_ignore_ascii_case("latin1")
-                    || e.eq_ignore_ascii_case("binary")
-                    || e.eq_ignore_ascii_case("ascii")
-                {
-                    return Ok(BoaVal::from(s.chars().count() as f64));
-                }
-                if e.eq_ignore_ascii_case("utf16le")
-                    || e.eq_ignore_ascii_case("utf-16le")
-                    || e.eq_ignore_ascii_case("ucs2")
-                    || e.eq_ignore_ascii_case("ucs-2")
-                {
-                    return Ok(BoaVal::from((s.encode_utf16().count() * 2) as f64));
+                let enc_js = match enc_val.as_string() {
+                    Some(s) => s,
+                    None => enc_val.to_string(context)?,
+                };
+                if let boa_engine::string::JsStrVariant::Latin1(eb) = enc_js.as_str().variant() {
+                    if eb.eq_ignore_ascii_case(b"utf8") || eb.eq_ignore_ascii_case(b"utf-8") {
+                        enc_kind = 0;
+                    } else if eb.eq_ignore_ascii_case(b"latin1")
+                        || eb.eq_ignore_ascii_case(b"binary")
+                        || eb.eq_ignore_ascii_case(b"ascii")
+                    {
+                        enc_kind = 1;
+                    } else if eb.eq_ignore_ascii_case(b"utf16le")
+                        || eb.eq_ignore_ascii_case(b"utf-16le")
+                        || eb.eq_ignore_ascii_case(b"ucs2")
+                        || eb.eq_ignore_ascii_case(b"ucs-2")
+                    {
+                        enc_kind = 2;
+                    } else if eb.eq_ignore_ascii_case(b"hex") {
+                        enc_kind = 3;
+                    } else if eb.eq_ignore_ascii_case(b"base64")
+                        || eb.eq_ignore_ascii_case(b"base64url")
+                    {
+                        enc_kind = 4;
+                    }
+                } else {
+                    let e = enc_js.to_std_string_escaped();
+                    if e.eq_ignore_ascii_case("latin1")
+                        || e.eq_ignore_ascii_case("binary")
+                        || e.eq_ignore_ascii_case("ascii")
+                    {
+                        enc_kind = 1;
+                    } else if e.eq_ignore_ascii_case("utf16le")
+                        || e.eq_ignore_ascii_case("utf-16le")
+                        || e.eq_ignore_ascii_case("ucs2")
+                        || e.eq_ignore_ascii_case("ucs-2")
+                    {
+                        enc_kind = 2;
+                    } else if e.eq_ignore_ascii_case("hex") {
+                        enc_kind = 3;
+                    } else if e.eq_ignore_ascii_case("base64")
+                        || e.eq_ignore_ascii_case("base64url")
+                    {
+                        enc_kind = 4;
+                    }
                 }
             }
-            Ok(BoaVal::from(s.len() as f64))
+
+            let byte_len: usize = match (enc_kind, js_s.as_str().variant()) {
+                (0, boa_engine::string::JsStrVariant::Latin1(bytes)) => {
+                    // In Latin-1 (`0x00..=0xFF`), `0x00..=0x7F` encodes to 1 UTF-8 byte
+                    // and `0x80..=0xFF` encodes to 2 UTF-8 bytes.
+                    let high_count: usize = bytes.iter().map(|&b| usize::from(b >> 7)).sum();
+                    bytes.len() + high_count
+                }
+                (0, boa_engine::string::JsStrVariant::Utf16(units)) => {
+                    char::decode_utf16(units.iter().copied())
+                        .map(|r| match r {
+                            Ok(c) => c.len_utf8(),
+                            Err(_) => 3,
+                        })
+                        .sum()
+                }
+                (1, _) => js_s.len(),
+                (2, _) => js_s.len() * 2,
+                (3, _) => js_s.len() >> 1,
+                (4, boa_engine::string::JsStrVariant::Latin1(bytes)) => {
+                    base64_decoded_len_bytes(bytes)
+                }
+                (4, boa_engine::string::JsStrVariant::Utf16(_)) => {
+                    let owned = js_s.to_std_string_escaped();
+                    base64_decoded_len_bytes(owned.as_bytes())
+                }
+                _ => js_s.len(),
+            };
+            Ok(BoaVal::from(byte_len as f64))
         }),
     );
 
@@ -485,21 +550,7 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     );
 
     let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_timer_clear"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, _context| {
-            let id = args
-                .first()
-                .and_then(|v| v.as_number())
-                .map(|n| n.max(0.0) as u32)
-                .unwrap_or(0);
-            cancel_timer(id);
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_timer_ref"),
+        js_string!("__slice_timer_ctl"),
         2,
         NativeFunction::from_fn_ptr(|_this, args, _context| {
             let id = args
@@ -507,22 +558,18 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .and_then(|v| v.as_number())
                 .map(|n| n.max(0.0) as u32)
                 .unwrap_or(0);
-            let refed = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(true);
-            set_timer_ref(id, refed);
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_timer_refresh"),
-        1,
-        NativeFunction::from_fn_ptr(|_this, args, _context| {
-            let id = args
-                .first()
+            let op = args
+                .get(1)
                 .and_then(|v| v.as_number())
-                .map(|n| n.max(0.0) as u32)
+                .map(|n| n as i32)
                 .unwrap_or(0);
-            refresh_timer(id);
+            match op {
+                0 => cancel_timer(id),
+                1 => set_timer_ref(id, true),
+                2 => set_timer_ref(id, false),
+                3 => refresh_timer(id),
+                _ => {}
+            }
             Ok(BoaVal::undefined())
         }),
     );
@@ -567,25 +614,39 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     );
 
     let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_mark_proc_dirty"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| {
-            crate::boa_realm::mark_subsystem_dirty(crate::boa_realm::DIRTY_PROCESS);
-            Ok(BoaVal::undefined())
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_process_exit"),
-        1,
+        js_string!("__slice_process_ctl"),
+        2,
         NativeFunction::from_fn_ptr(|_this, args, context| {
+            let op = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as i32)
+                .unwrap_or(0);
             crate::boa_realm::mark_subsystem_dirty(crate::boa_realm::DIRTY_PROCESS);
+            if op == 0 {
+                return Ok(BoaVal::undefined());
+            }
+            if op == 1 {
+                let custom_opt = crate::boa_realm::BOA_CUSTOM_ARGV.with(|a| a.borrow().clone());
+                let arr = if let Some(items) = custom_opt {
+                    boa_engine::object::builtins::JsArray::from_iter(
+                        items.iter().map(|s| BoaVal::from(js_string!(s.as_str()))),
+                        context,
+                    )
+                } else {
+                    boa_engine::object::builtins::JsArray::from_iter(
+                        std::iter::once(BoaVal::from(js_string!("slice"))),
+                        context,
+                    )
+                };
+                return Ok(BoaVal::from(arr));
+            }
             let proc_obj = context
                 .global_object()
                 .get(js_string!("process"), context)
                 .ok()
                 .and_then(|v| v.as_object());
-            let mut code: i32 = match args.first() {
+            let mut code: i32 = match args.get(1) {
                 Some(v) if !v.is_undefined() && !v.is_null() => v.to_i32(context).unwrap_or(0),
                 _ => {
                     if let Some(ref p) = proc_obj {
@@ -630,8 +691,7 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                     }
                 }
             }
-            crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.set(Some(code)));
-            crate::boa_realm::BOA_LAST_EXIT_CODE.with(|e| e.set(Some(code)));
+            crate::boa_realm::set_process_exit(code);
             if crate::workers::is_worker_thread() {
                 crate::workers::worker_self_set_listening(false, Some(code));
             }

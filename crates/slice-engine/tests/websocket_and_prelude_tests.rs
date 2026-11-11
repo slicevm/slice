@@ -553,7 +553,8 @@ fn test_compile_time_prelude_minifier_and_lazy_sharded_globals() {
         DOM_EVENTS_PRELUDE, DOM_EVENTS_PRELUDE_SRC, ENCODING_EVENTS_PRELUDE,
         ENCODING_EVENTS_PRELUDE_SRC, FETCH_HEADERS_REQ_RES_PRELUDE,
         FETCH_HEADERS_REQ_RES_PRELUDE_SRC, FULL_BUFFER_PRELUDE, FULL_BUFFER_PRELUDE_SRC,
-        OUTBOUND_FETCH_SSE_PRELUDE, OUTBOUND_FETCH_SSE_PRELUDE_SRC, STREAMS_FORMDATA_PRELUDE,
+        INTL_PRELUDE, INTL_PRELUDE_SRC, OUTBOUND_FETCH_SSE_PRELUDE, OUTBOUND_FETCH_SSE_PRELUDE_SRC,
+        PROCESS_CLI_PRELUDE, PROCESS_CLI_PRELUDE_SRC, STREAMS_FORMDATA_PRELUDE,
         STREAMS_FORMDATA_PRELUDE_SRC, STRUCTURED_CLONE_PRELUDE, STRUCTURED_CLONE_PRELUDE_SRC,
         TRANSFORM_COMPRESSION_STREAMS_PRELUDE, TRANSFORM_COMPRESSION_STREAMS_PRELUDE_SRC,
         ULTRA_CORE_PRELUDE, ULTRA_CORE_PRELUDE_SRC, URL_PATTERN_PRELUDE, URL_PATTERN_PRELUDE_SRC,
@@ -646,6 +647,12 @@ fn test_compile_time_prelude_minifier_and_lazy_sharded_globals() {
             BUFFER_BINARY_RW_PRELUDE_SRC,
             BUFFER_BINARY_RW_PRELUDE,
         ),
+        ("18_intl.js", INTL_PRELUDE_SRC, INTL_PRELUDE),
+        (
+            "19_process_cli.js",
+            PROCESS_CLI_PRELUDE_SRC,
+            PROCESS_CLI_PRELUDE,
+        ),
     ];
 
     let mut total_src_bytes = 0usize;
@@ -710,4 +717,444 @@ console.log(JSON.stringify({
         m.stdout[0],
         r#"{"wasLazyGetter":true,"isFunc":true,"openConst":1,"replacedWithValue":true}"#
     );
+}
+
+#[test]
+fn test_process_argv_defaults_custom_cli_args_and_pooled_isolation() {
+    use crate::{compile_source_to_bytecode, SliceIsolate};
+    use slice_sandbox::CapabilityToken;
+
+    let check_argv_bc = compile_source_to_bytecode(r#"console.log(JSON.stringify(process.argv));"#);
+    let mutate_argv_bc = compile_source_to_bytecode(
+        r#"
+        process.argv.push("--injected");
+        const afterPush = process.argv.slice();
+        process.argv = ["replaced-bin", "replaced.js"];
+        console.log(JSON.stringify({ afterPush, replaced: process.argv }));
+        "#,
+    );
+
+    // 1. Default isolate sees `["slice"]`
+    let mut iso1 = SliceIsolate::spawn(
+        "argv-default",
+        1,
+        CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    );
+    let m1 = iso1.execute_bytecode(&check_argv_bc, None).unwrap();
+    assert_eq!(m1.stdout[0], r#"["slice"]"#);
+
+    // 2. Custom CLI argv forwarding (`set_process_argv`) and in-place mutation
+    let mut iso2 = SliceIsolate::spawn(
+        "argv-custom",
+        2,
+        CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    );
+    iso2.set_process_argv(vec![
+        "slice".to_string(),
+        "cli_tool.ts".to_string(),
+        "--port".to_string(),
+        "8080".to_string(),
+    ]);
+    let m2 = iso2.execute_bytecode(&mutate_argv_bc, None).unwrap();
+    assert_eq!(
+        m2.stdout[0],
+        r#"{"afterPush":["slice","cli_tool.ts","--port","8080","--injected"],"replaced":["replaced-bin","replaced.js"]}"#
+    );
+
+    // 3. Pooled warm realm resets `process.argv` cleanly back to `["slice"]`
+    let mut iso3 = SliceIsolate::spawn(
+        "argv-after-mutation",
+        3,
+        CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    );
+    let m3 = iso3.execute_bytecode(&check_argv_bc, None).unwrap();
+    assert_eq!(m3.stdout[0], r#"["slice"]"#);
+}
+
+#[test]
+fn test_json_parse_and_stringify_shapes_numbers_strings_and_reviver_source() {
+    use crate::run_source_isolated;
+    use slice_sandbox::CapabilityToken;
+
+    let js = r#"
+    const longAscii = "abcdefgh01234567".repeat(12);
+    const longUtf16 = "\u20ac\u00e9\u65e5\u672c\u8a9e_segment_".repeat(8);
+    const strPayload = JSON.stringify({
+        ascii: longAscii,
+        utf16: longUtf16,
+        esc: "line1\nline2\r\t\"quote\"\\slash\b\f",
+        loneHigh: "\ud800tail",
+        loneLow: "head\udc00"
+    });
+    const strParsed = JSON.parse(strPayload);
+
+    const nums = JSON.parse('[-0, 0, 42, -2147483648, 2147483647, 9007199254740991, -9007199254740991, 3.141592653589793, 1.5e-7, 1e400]');
+    const negZeroOk = Object.is(nums[0], -0);
+
+    // Homogeneous array of objects (exercises SharedShape chain prediction + monomorphic IC reads)
+    const batchText = JSON.stringify(
+        Array.from({ length: 32 }, (_, i) => ({
+            id: i,
+            label: "row-" + i,
+            nested: { x: i * 2, active: (i & 1) === 0 }
+        }))
+    );
+    const batch = JSON.parse(batchText);
+    let sum = 0;
+    for (let i = 0; i < batch.length; i++) {
+        sum += batch[i].id + batch[i].nested.x;
+    }
+
+    // Heterogeneous keys, duplicate keys, numeric index keys, and __proto__ own property
+    const hetero = JSON.parse('[{"a":1,"b":2},{"b":20,"a":10,"c":30},{"0":"zero","10":"ten","dup":1,"dup":2,"__proto__":{"admin":true}}]');
+    const protoNotPolluted = ({}).admin === undefined;
+    const ownProtoDesc = Object.getOwnPropertyDescriptor(hetero[2], "__proto__");
+
+    // Reviver with `context.source`
+    const sources = [];
+    const revived = JSON.parse('{"big":9007199254740993,"flag":true}', (k, v, ctx) => {
+        if (k) sources.push(k + "=" + ctx.source);
+        return k === "big" ? ctx.source : v;
+    });
+
+    console.log(JSON.stringify({
+        asciiEq: strParsed.ascii === longAscii,
+        utf16Eq: strParsed.utf16 === longUtf16,
+        loneOk: strParsed.loneHigh.charCodeAt(0) === 0xd800 && strParsed.loneLow.charCodeAt(4) === 0xdc00,
+        negZeroOk,
+        maxSafe: nums[5] === 9007199254740991,
+        minSafe: nums[6] === -9007199254740991,
+        infOk: nums[9] === Infinity,
+        sum,
+        heteroCheck: hetero[0].a === 1 && hetero[1].c === 30 && hetero[2]["0"] === "zero" && hetero[2]["10"] === "ten" && hetero[2].dup === 2,
+        protoNotPolluted,
+        ownProtoAdmin: Boolean(ownProtoDesc && ownProtoDesc.enumerable && ownProtoDesc.value.admin === true),
+        revivedBig: revived.big,
+        sources
+    }));
+    "#;
+
+    let m = run_source_isolated(
+        "json-shape-tenant",
+        js,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        8 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        m.stdout[0],
+        r#"{"asciiEq":true,"utf16Eq":true,"loneOk":true,"negZeroOk":true,"maxSafe":true,"minSafe":true,"infOk":true,"sum":1488,"heteroCheck":true,"protoNotPolluted":true,"ownProtoAdmin":true,"revivedBig":"9007199254740993","sources":["big=9007199254740993","flag=true"]}"#
+    );
+}
+
+#[test]
+fn test_fs_host_reads_directory_errors_symlinks_watch_and_lazy_promises() {
+    use crate::run_source_isolated;
+    use slice_sandbox::CapabilityToken;
+
+    let tmp_dir = std::env::temp_dir().join(format!("slice_fs_host_test_{}", std::process::id()));
+    let sub_dir = tmp_dir.join("nested_dir");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&sub_dir).unwrap();
+
+    let ascii_file = tmp_dir.join("ascii.txt");
+    let utf8_file = tmp_dir.join("utf8.txt");
+    std::fs::write(&ascii_file, b"hello-host-ascii-payload").unwrap();
+    std::fs::write(
+        &utf8_file,
+        "Cafe \u{20ac}100 \u{65e5}\u{672c}\u{8a9e}".as_bytes(),
+    )
+    .unwrap();
+
+    let tmp_norm = tmp_dir.to_string_lossy().replace('\\', "/");
+    let sub_norm = sub_dir.to_string_lossy().replace('\\', "/");
+    let ascii_norm = ascii_file.to_string_lossy().replace('\\', "/");
+    let utf8_norm = utf8_file.to_string_lossy().replace('\\', "/");
+
+    let js = format!(
+        r#"
+        const fs = require("node:fs");
+        const asciiTxt = fs.readFileSync({:?}, "utf8");
+        const utf8Txt = fs.readFileSync({:?}, "utf8");
+        const rawBytes = fs.readFileSync({:?});
+
+        let hostDirCode = "";
+        try {{ fs.readFileSync({:?}, "utf8"); }} catch (e) {{ hostDirCode = e.code; }}
+
+        fs.mkdirSync("/tmp/vfs-dir-check", {{ recursive: true }});
+        let vfsDirCode = "";
+        try {{ fs.readFileSync("/tmp/vfs-dir-check", "utf8"); }} catch (e) {{ vfsDirCode = e.code; }}
+
+        fs.writeFileSync("/tmp/vfs-dir-check/target.txt", "symlink-body");
+        fs.symlinkSync("/tmp/vfs-dir-check/target.txt", "/tmp/vfs-dir-check/link.txt");
+        const linkTxt = fs.readFileSync("/tmp/vfs-dir-check/link.txt", "utf8");
+        const isSym = fs.lstatSync("/tmp/vfs-dir-check/link.txt").isSymbolicLink();
+
+        const events = [];
+        const watcher = fs.watch("/tmp/vfs-dir-check", (ev, name) => events.push(ev + ":" + name));
+        fs.writeFileSync("/tmp/vfs-dir-check/watched.txt", "ok");
+        watcher.close();
+
+        const fsp = require("node:fs/promises");
+        const samePromisesRef = (fs.promises === fsp);
+        fsp.readFile({:?}, "utf8").then((asyncTxt) => {{
+            console.log(JSON.stringify({{
+                asciiTxt,
+                utf8Len: utf8Txt.length,
+                rawLen: rawBytes.length,
+                hostDirCode,
+                vfsDirCode,
+                linkTxt,
+                isSym,
+                watchEvents: events.length,
+                samePromisesRef,
+                asyncMatch: asyncTxt === asciiTxt
+            }}));
+        }});
+        "#,
+        ascii_norm, utf8_norm, ascii_norm, sub_norm, ascii_norm
+    );
+
+    let caps = CapabilityToken::pure_compute()
+        .with_read_prefix(&tmp_norm)
+        .with_read_prefix("/tmp")
+        .with_write_prefix("/tmp");
+    let m = run_source_isolated("fs-host-tenant", &js, caps, 2_000_000, 8 * 1024 * 1024).unwrap();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    assert_eq!(
+        m.stdout[0],
+        r#"{"asciiTxt":"hello-host-ascii-payload","utf8Len":13,"rawLen":24,"hostDirCode":"EISDIR","vfsDirCode":"EISDIR","linkTxt":"symlink-body","isSym":true,"watchEvents":1,"samePromisesRef":true,"asyncMatch":true}"#
+    );
+}
+
+#[test]
+fn test_buffer_byte_length_encodings_and_array_buffer_views() {
+    use crate::run_source_isolated;
+    use slice_sandbox::CapabilityToken;
+
+    let js = r#"
+    const asciiLen = Buffer.byteLength("hello-world", "utf8");
+    const latin1HighUtf8 = Buffer.byteLength("\u00e9\u00ffA", "utf8");
+    const latin1Raw = Buffer.byteLength("\u00e9\u00ffA", "latin1");
+    const bmpAndAstralUtf8 = Buffer.byteLength("\u20ac\ud83d\ude80", "utf8");
+    const loneSurrogateUtf8 = Buffer.byteLength("\ud800", "utf8");
+    const utf16leLen = Buffer.byteLength("abcd", "utf16le");
+    const hexLen = Buffer.byteLength("deadbeef01", "hex");
+    const b64Padded = Buffer.byteLength("aGVsbG8=", "base64");
+    const b64UrlUnpadded = Buffer.byteLength("aGVsbG8", "base64url");
+
+    const ab = new ArrayBuffer(32);
+    const sub = new Uint8Array(ab, 8, 12);
+    const dv = new DataView(ab, 4, 10);
+    const buf = Buffer.from("slice");
+
+    const { Writable } = require("node:stream");
+    const w = new Writable({ highWaterMark: 16, write(_c, _e, cb) { cb(null); } });
+    w.write("\u20ac\u20ac"); // 6 UTF-8 bytes without needing explicit Buffer import
+
+    console.log(JSON.stringify({
+        asciiLen,
+        latin1HighUtf8,
+        latin1Raw,
+        bmpAndAstralUtf8,
+        loneSurrogateUtf8,
+        utf16leLen,
+        hexLen,
+        b64Padded,
+        b64UrlUnpadded,
+        abLen: Buffer.byteLength(ab),
+        subLen: Buffer.byteLength(sub),
+        dvLen: Buffer.byteLength(dv),
+        bufLen: Buffer.byteLength(buf)
+    }));
+    "#;
+
+    let m = run_source_isolated(
+        "buf-bytelen-tenant",
+        js,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        4 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        m.stdout[0],
+        r#"{"asciiLen":11,"latin1HighUtf8":5,"latin1Raw":3,"bmpAndAstralUtf8":7,"loneSurrogateUtf8":3,"utf16leLen":8,"hexLen":5,"b64Padded":5,"b64UrlUnpadded":5,"abLen":32,"subLen":12,"dvLen":10,"bufLen":5}"#
+    );
+}
+
+#[test]
+fn test_shard_isolation_for_node_crypto_process_cli_intl_dom_exception_and_streams() {
+    use crate::boacas::compute_boacas_metadata;
+    use crate::run_source_isolated;
+    use slice_sandbox::CapabilityToken;
+
+    // 1. `node:crypto` (`crypto.createHash`) must NOT pull in Shard 4 (`WebCrypto`, bit 4)
+    let (_, node_crypto_mask, _) = compute_boacas_metadata(
+        r#"const crypto = require("node:crypto"); const h = crypto.createHash("sha256").update("x").digest("hex");"#,
+    );
+    assert_ne!(node_crypto_mask & (1u32 << 19), 0);
+    assert_eq!(node_crypto_mask & (1u32 << 4), 0);
+
+    // WebCrypto (`crypto.randomUUID`, `crypto.subtle`, `globalThis.crypto`) MUST pull in Shard 4
+    let (_, web_crypto_mask, _) = compute_boacas_metadata(r#"const id = crypto.randomUUID();"#);
+    assert_ne!(web_crypto_mask & (1u32 << 4), 0);
+
+    // 2. `AbortController` must NOT pull in Shard 6 (`06_console_ext.js`)
+    let (_, abort_mask, _) = compute_boacas_metadata(r#"const ac = new AbortController();"#);
+    assert_ne!(abort_mask & (1u32 << 10), 0);
+    assert_ne!(abort_mask & (1u32 << 13), 0);
+    assert_eq!(abort_mask & (1u32 << 6), 0);
+
+    // 3. `process.stdout` / `hrtime` / `node:process` must load Shard 29 (`19_process_cli.js`) without Shard 18 (`18_intl.js`)
+    let (_, proc_cli_mask, _) = compute_boacas_metadata(
+        r#"const p = require("node:process"); const t = process.hrtime.bigint(); process.stdout.write(String(t));"#,
+    );
+    assert_ne!(proc_cli_mask & (1u32 << 29), 0);
+    assert_eq!(proc_cli_mask & (1u32 << 18), 0);
+
+    let (_, intl_mask, _) =
+        compute_boacas_metadata(r#"const nf = new Intl.NumberFormat("en-US");"#);
+    assert_ne!(intl_mask & (1u32 << 18), 0);
+
+    // 4. Runtime execution of `process` CLI, `Intl`, `DOMException` lazy stack, and `ReadableStream`
+    let runtime_js = r#"
+    let evFired = false;
+    process.on("customCliEvent", (v) => { evFired = (v === 99); });
+    process.emit("customCliEvent", 99);
+    const hr = process.hrtime();
+    const formatted = new Intl.NumberFormat("en-US").format(12345);
+
+    const domErr = new DOMException("timed out", "TimeoutError");
+    const stackBefore = domErr.stack;
+    domErr.stack = "custom-stack";
+
+    const rs = new ReadableStream({
+        start(ctrl) {
+            ctrl.enqueue("chunk-1");
+        },
+        pull(ctrl) {
+            ctrl.enqueue("chunk-2");
+            ctrl.close();
+        }
+    });
+    const reader = rs.getReader();
+    Promise.all([reader.read(), reader.read(), reader.read()]).then((steps) => {
+        console.log(JSON.stringify({
+            evFired,
+            hrPair: Array.isArray(hr) && hr.length === 2,
+            formatted,
+            domCode: domErr.code,
+            domConst: DOMException.TIMEOUT_ERR,
+            stackHasName: stackBefore.indexOf("TimeoutError: timed out") === 0,
+            stackOverridden: domErr.stack === "custom-stack",
+            chunks: [steps[0].value, steps[1].value, steps[2].done]
+        }));
+    });
+    "#;
+    let m = run_source_isolated(
+        "shard-runtime-tenant",
+        runtime_js,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        8 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        m.stdout[0],
+        r#"{"evFired":true,"hrPair":true,"formatted":"12,345","domCode":23,"domConst":23,"stackHasName":true,"stackOverridden":true,"chunks":["chunk-1","chunk-2",true]}"#
+    );
+}
+
+#[test]
+fn test_http_fast_outcome_and_server_websocket_dispatch() {
+    use crate::{compile_source_to_bytecode, HttpRequestContext, ServerWsOutFrame, SliceIsolate};
+    use slice_sandbox::CapabilityToken;
+
+    // 1. Tier-0 SLICESNP fast HTTP dispatch + pointer-cached `decode_slicesnp_cached`
+    let tier0_bc = compile_source_to_bytecode("const a = 200; const b = 56; return a + b;");
+    let mut iso = SliceIsolate::spawn(
+        "http-fast-tenant",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        4 * 1024 * 1024,
+    );
+    let req = HttpRequestContext {
+        method: "GET",
+        path: "/calc",
+        query: "x=1",
+        tenant_id: "http-fast-tenant",
+        body: "",
+        headers: &[("host", "localhost")],
+    };
+    for slot in 1..=3 {
+        iso.reset_for_request("http-fast-tenant", slot, 5_000_000, 4 * 1024 * 1024);
+        let out = iso
+            .execute_http_request_fast(&tier0_bc, None, &req)
+            .unwrap();
+        assert_eq!(out.status_code, 200);
+        assert_eq!(out.content_type, "application/json");
+        assert_eq!(out.response_body, "256");
+    }
+
+    // 2. Tier-1 SLICEBC custom `Slice.respond` + `Slice.waitUntil` + Egress DLP guard
+    let wintertc_bc = compile_source_to_bytecode(
+        r#"
+        const r = Slice.request();
+        Slice.waitUntil(() => { Slice.kv.set("wu_path", r.path, 0); });
+        Slice.respond(201, JSON.stringify({ created: r.path }), "application/json", [["x-edge", "ok"]]);
+        "#,
+    );
+    iso.reset_for_request("http-fast-tenant", 10, 5_000_000, 4 * 1024 * 1024);
+    let out_w = iso
+        .execute_http_request_fast(&wintertc_bc, None, &req)
+        .unwrap();
+    assert_eq!(out_w.status_code, 201);
+    assert_eq!(out_w.response_body, r#"{"created":"/calc"}"#);
+    assert_eq!(out_w.wait_until_count, 1);
+    assert_eq!(iso.drain_wait_until_tasks().unwrap(), 1);
+    assert_eq!(iso.kv_get("wu_path").as_deref(), Some("/calc"));
+
+    // Egress DLP must also block secret exfiltration on `execute_http_request_fast`
+    iso.add_egress_audit_secret("sk_live_topsecret999");
+    let leak_bc =
+        compile_source_to_bytecode(r#"Slice.respond(200, "token=sk_live_topsecret999");"#);
+    iso.reset_for_request("http-fast-tenant", 11, 5_000_000, 4 * 1024 * 1024);
+    assert!(iso.execute_http_request_fast(&leak_bc, None, &req).is_err());
+
+    // 3. Direct callable server WebSocket frame dispatch (`execute_websocket_event`)
+    let mut ws_iso = SliceIsolate::spawn(
+        "ws-fast-tenant",
+        20,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        4 * 1024 * 1024,
+    );
+    let ws_setup_bc = compile_source_to_bytecode(
+        r#"
+        Slice.onWebSocket({
+            message(ws, data) {
+                ws.send("ack:" + String(data));
+            }
+        });
+        "#,
+    );
+    ws_iso.execute_bytecode(&ws_setup_bc, None).unwrap();
+    let frames = ws_iso
+        .execute_websocket_event("message", false, b"ping-payload", 0, "")
+        .unwrap();
+    assert_eq!(frames.len(), 1);
+    match &frames[0] {
+        ServerWsOutFrame::Text(t) => assert_eq!(t, "ack:ping-payload"),
+        other => panic!("expected text frame, got {:?}", other),
+    }
 }
