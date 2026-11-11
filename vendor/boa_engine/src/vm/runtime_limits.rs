@@ -73,6 +73,18 @@ impl RuntimeLimits {
         self.loop_iterations_executed = self.loop_iterations_executed.wrapping_add(1);
     }
 
+    /// Increments the total number of loop iterations executed by 1 and returns `false`
+    /// if the configured loop iteration limit is exceeded.
+    #[inline(always)]
+    pub(crate) fn check_and_increment_loop_iteration(&mut self) -> bool {
+        let next = self.loop_iterations_executed.wrapping_add(1);
+        if next > self.loop_iteration {
+            return false;
+        }
+        self.loop_iterations_executed = next;
+        true
+    }
+
     /// Get max backtrace limit for an exception.
     ///
     /// Default is 50.

@@ -1768,7 +1768,8 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                         .is_none_or(|alt| is_supported_stmt(alt, in_function_depth))
             }
             Statement::WhileStatement(ws) => {
-                is_supported_expr(&ws.test, in_function_depth)
+                in_function_depth > 0
+                    && is_supported_expr(&ws.test, in_function_depth)
                     && is_supported_stmt(&ws.body, in_function_depth)
             }
             Statement::ForStatement(fs) => {
