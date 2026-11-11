@@ -888,31 +888,32 @@ proc.emitWarning("experimental CLI flag", "CustomWarning", "WARN_01");
 let exitEmitted = -1;
 proc.once("exit", (code: number) => {
     exitEmitted = code;
+    console.log(JSON.stringify({
+        argv0: proc.argv0,
+        execPath: proc.execPath,
+        ppid: proc.ppid,
+        isTTYOut: proc.stdout.isTTY,
+        isTTYIn: proc.stdin.isTTY,
+        hrValid: Array.isArray(diff) && diff.length === 2 && typeof b0 === "bigint" && b1 >= b0,
+        memValid: mem.rss > 0 && mem.heapUsed > 0 && mem.heapTotal >= mem.heapUsed && rssVal === mem.rss,
+        uptimeValid: typeof proc.uptime() === "number" && proc.uptime() >= 0,
+        warningName,
+        warningMsg,
+        exitEmitted,
+        exitCaught,
+        exitCode: proc.exitCode
+    }));
 });
 let exitCaught = false;
+proc.stdout.write("stdout-line-1\n");
+proc.stderr.write("stderr-line-2\n");
 try {
     proc.exit(7);
 } catch (e: any) {
-    exitCaught = (e && e.code === "ERR_PROCESS_EXIT" && e.exitCode === 7);
+    exitCaught = true;
+    console.log("UNREACHABLE_AFTER_EXIT");
 }
-
-proc.stdout.write("stdout-line-1\n");
-proc.stderr.write("stderr-line-2\n");
-console.log(JSON.stringify({
-    argv0: proc.argv0,
-    execPath: proc.execPath,
-    ppid: proc.ppid,
-    isTTYOut: proc.stdout.isTTY,
-    isTTYIn: proc.stdin.isTTY,
-    hrValid: Array.isArray(diff) && diff.length === 2 && typeof b0 === "bigint" && b1 >= b0,
-    memValid: mem.rss > 0 && mem.heapUsed > 0 && mem.heapTotal >= mem.heapUsed && rssVal === mem.rss,
-    uptimeValid: typeof proc.uptime() === "number" && proc.uptime() >= 0,
-    warningName,
-    warningMsg,
-    exitEmitted,
-    exitCaught,
-    exitCode: proc.exitCode
-}));
+console.log("UNREACHABLE_AFTER_TRY");
 "#;
 
     let bundled = slice_cas::strip_typescript_and_normalize(script, true);
@@ -926,6 +927,8 @@ console.log(JSON.stringify({
     );
     iso.set_deterministic_seed(Some(20261106));
     let m = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(m.exit_code, Some(7));
+    assert_eq!(m.stdout.len(), 3);
     assert_eq!(m.stdout[0], "stdout-line-1");
     assert_eq!(m.stdout[1], "stderr-line-2");
     let out: serde_json::Value = serde_json::from_str(&m.stdout[2]).unwrap();
@@ -940,7 +943,7 @@ console.log(JSON.stringify({
     assert_eq!(out["warningName"], "CustomWarning");
     assert_eq!(out["warningMsg"], "experimental CLI flag");
     assert_eq!(out["exitEmitted"], 7);
-    assert_eq!(out["exitCaught"], true);
+    assert_eq!(out["exitCaught"], false);
     assert_eq!(out["exitCode"], 7);
 
     // Also verify DLP egress firewall catches secrets written to `process.stdout.write`

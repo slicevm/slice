@@ -452,10 +452,8 @@ console.log(APP_TITLE, INTERNAL_TAG, metaUrl, metaDir, cjsDir, dynMod.lazyBanner
 fn test_issues_33_and_34_class_method_source_mapping_and_cas_lockfile_provenance() {
     use crate::{map_bundled_stack_trace, CasBuilder, MappedCasArchive};
 
-    let test_dir = std::env::temp_dir().join(format!(
-        "slice_issues_33_34_test_{}",
-        std::process::id()
-    ));
+    let test_dir =
+        std::env::temp_dir().join(format!("slice_issues_33_34_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&test_dir);
     std::fs::create_dir_all(test_dir.join("src")).unwrap();
     std::fs::create_dir_all(test_dir.join("node_modules/ms")).unwrap();
@@ -511,10 +509,8 @@ engine.processCheckout({ requestId: "ORD-99", items: [] });
     .unwrap();
 
     let bundled = bundle_entrypoint_with_deps(&entry_path).expect("bundle issue 33 app");
-    let mapped_err = map_bundled_error_location(
-        &bundled,
-        "Uncaught Error: Invalid checkout request: ORD-99",
-    );
+    let mapped_err =
+        map_bundled_error_location(&bundled, "Uncaught Error: Invalid checkout request: ORD-99");
     assert!(
         mapped_err.contains("(src/pricing_engine.ts:9)"),
         "Dynamic error message in class method must map to src/pricing_engine.ts:9, got: {}",
@@ -552,7 +548,8 @@ engine.processCheckout({ requestId: "ORD-99", items: [] });
         "Compacted CAS //@sm: source map must also resolve src/pricing_engine.ts:9, got: {}",
         mapped_compacted_err
     );
-    let fake_raw_stack = "Error: Invalid checkout request: ORD-99\n    at processCheckout (<anonymous>:10:13)";
+    let fake_raw_stack =
+        "Error: Invalid checkout request: ORD-99\n    at processCheckout (<anonymous>:10:13)";
     let mapped_stack = map_bundled_stack_trace(&annotated, fake_raw_stack);
     assert!(
         mapped_stack.contains("src/pricing_engine.ts:"),

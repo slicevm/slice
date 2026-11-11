@@ -57,7 +57,9 @@ FILES=(
     "scripts/install.ps1"
     "scripts/install.sh"
     "scripts/package_release.ps1"
+    "scripts/run_benchmarks.ps1"
     "tests/run_real_stack_benchmarks.sh"
+    "tests/scripts/generate_bench_report.mjs"
     "README.md"
     "tests/README.md"
     "tests/frameworks/README.md"
@@ -68,11 +70,14 @@ FILES=(
 
 for f in "${FILES[@]}"; do
     if [[ -f "$f" ]]; then
-        if grep -qE "v${OLD_VERSION}|\"version\": ?\"${OLD_VERSION}\"|Slice-NexusJS/${OLD_VERSION}" "$f"; then
+        if grep -qE "v${OLD_VERSION}|\"version\": ?\"${OLD_VERSION}\"|SLICE_VERSION:-${OLD_VERSION}|\$Version = \"${OLD_VERSION}\"|\|\| \"${OLD_VERSION}\"|Slice-NexusJS/${OLD_VERSION}" "$f"; then
             sed -i.bak -E \
-                -e "s/v${OLD_VERSION}\b/v${NEW_VERSION}/g" \
+                -e "/<!-- BENCHMARK_SUMMARY_START -->/,/<!-- BENCHMARK_SUMMARY_END -->/! s/\bv${OLD_VERSION}\b/v${NEW_VERSION}/g" \
                 -e "s/\"version\": \"${OLD_VERSION}\"/\"version\": \"${NEW_VERSION}\"/g" \
                 -e "s/\"version\":\"${OLD_VERSION}\"/\"version\":\"${NEW_VERSION}\"/g" \
+                -e "s/SLICE_VERSION:-${OLD_VERSION}\b/SLICE_VERSION:-${NEW_VERSION}/g" \
+                -e "s/\\\$Version = \"${OLD_VERSION}\"/\$Version = \"${NEW_VERSION}\"/g" \
+                -e "s/\|\| \"${OLD_VERSION}\"/|| \"${NEW_VERSION}\"/g" \
                 -e "s/Slice-NexusJS\/${OLD_VERSION}\b/Slice-NexusJS\/${NEW_VERSION}/g" \
                 "$f"
             rm -f "${f}.bak"

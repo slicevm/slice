@@ -34,8 +34,8 @@ pub(crate) mod test_runner {
 mod cli_tests;
 
 pub(crate) use commands::{
-    cmd_compile, cmd_info, cmd_init, cmd_inspect, cmd_pack, cmd_run, cmd_test, print_usage,
-    run_embedded_standalone,
+    cmd_check, cmd_compile, cmd_info, cmd_init, cmd_inspect, cmd_pack, cmd_run, cmd_test,
+    print_usage, run_embedded_standalone, LAST_CLI_EXIT_CODE,
 };
 #[cfg(test)]
 pub(crate) use config::OsNativeFileWatcher;
@@ -54,7 +54,16 @@ fn main() -> Result<()> {
         .stack_size(16 * 1024 * 1024);
     let handle = builder.spawn(cli_entrypoint)?;
     match handle.join() {
-        Ok(res) => res,
+        Ok(Ok(())) => {
+            let exit_code = LAST_CLI_EXIT_CODE.load(std::sync::atomic::Ordering::Relaxed);
+            if exit_code != 0 {
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+                std::process::exit(exit_code);
+            }
+            Ok(())
+        }
+        Ok(Err(err)) => Err(err),
         Err(_) => bail!("Slice main thread panicked"),
     }
 }
@@ -67,6 +76,9 @@ fn cli_entrypoint() -> Result<()> {
 
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            return cmd_run(&["-".to_string()]);
+        }
         print_usage();
         return Ok(());
     }
@@ -77,20 +89,25 @@ fn cli_entrypoint() -> Result<()> {
         "test" => cmd_test(&args[2..]),
         "pack" => cmd_pack(&args[2..]),
         "compile" => cmd_compile(&args[2..]),
-        "inspect" | "check" => cmd_inspect(&args[2..]),
+        "inspect" => cmd_inspect(&args[2..]),
+        "check" | "--check" | "-c" => cmd_check(&args[2..]),
         "serve" => cmd_serve(&args[2..]),
         "mcp" => cmd_mcp(&args[2..]),
         "repl" => cmd_repl(),
         "doctor" => cmd_doctor(),
         "microvm-bench" => cmd_microvm_bench(&args[2..]),
         "verify-security" => cmd_verify_security(),
-        "info" | "version" | "--version" | "-v" | "-V" => cmd_info(),
+        "info" => cmd_info(),
+        "version" | "--version" | "-v" | "-V" => {
+            println!("v{}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             print_usage();
             Ok(())
         }
         _ => {
-            // Allow `slice <file.ts>` shorthand
+            // Allow `slice <file.ts>`, `slice -e <code>`, `slice -p <code>`, `slice -` shorthand
             cmd_run(&args[1..])
         }
     }

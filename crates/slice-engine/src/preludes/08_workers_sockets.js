@@ -5,6 +5,13 @@
   if (!globalThis.TextEncoder) __slice_ensure_shard(2);
 
   function __serReplacer(_k, v) {
+    var raw = (this && typeof this === "object") ? this[_k] : v;
+    if (raw instanceof Date) {
+      return { __slice_t: "date", t: raw.getTime() };
+    }
+    if (typeof raw === "number" && !Number.isFinite(raw)) {
+      return { __slice_t: "num", v: raw !== raw ? "NaN" : (raw > 0 ? "Inf" : "-Inf") };
+    }
     if (v instanceof Uint8Array) {
       return { __slice_t: "u8", a: Array.from(v) };
     }
@@ -32,6 +39,8 @@
   function __serReviver(_k, v) {
     if (v && typeof v === "object" && typeof v.__slice_t === "string") {
       var t = v.__slice_t;
+      if (t === "date") return new Date(v.t === null ? NaN : v.t);
+      if (t === "num") return v.v === "NaN" ? NaN : (v.v === "Inf" ? Infinity : -Infinity);
       if (t === "u8") return new Uint8Array(v.a || []);
       if (t === "ab") return new Uint8Array(v.a || []).buffer;
       if (t === "bi") return BigInt(v.s || "0");
@@ -472,9 +481,6 @@
       };
       globalThis.removeEventListener = function(type, fn, opts) {
         port.removeEventListener(type, fn, opts);
-      };
-      globalThis.process.exit = function(code) {
-        __slice_worker_self_set_listening(false, Number(code) || 0);
       };
     } else {
       globalThis.self = globalThis;

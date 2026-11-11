@@ -17,16 +17,14 @@ use std::{borrow::Cow, iter::once};
 
 use rustc_hash::FxHashSet;
 
-use boa_ast::scope::Scope;
-use boa_gc::{Finalize, Gc, Trace};
+use boa_gc::{Finalize, Trace};
 use boa_macros::utf16;
 use itertools::Itertools;
 
 use crate::JsExpect;
 use crate::{
-    Context, JsArgs, JsBigInt, JsData, JsResult, JsString, JsValue, SpannedSourceText,
+    Context, JsArgs, JsBigInt, JsData, JsResult, JsString, JsValue,
     builtins::BuiltInObject,
-    bytecompiler::ByteCompiler,
     context::intrinsics::Intrinsics,
     error::JsNativeError,
     js_string,
@@ -36,9 +34,7 @@ use crate::{
     string::{CodePoint, StaticJsStrings},
     symbol::JsSymbol,
     value::IntegerOrInfinity,
-    vm::{CallFrame, CallFrameFlags, source_info::SourcePath},
 };
-use boa_parser::{Parser, Source};
 
 use super::{BuiltInBuilder, IntrinsicObject};
 
@@ -57,142 +53,76 @@ mod tests;
 #[derive(Debug, Trace, Finalize, JsData)]
 pub(crate) struct RawJson;
 
-/// A tree node representing the structure of parsed JSON, preserving source
-/// text spans for primitive values. Used to provide `context.source` to
-/// the reviver function in `JSON.parse`.
+trait JsonInput<'a>: Copy {
+    fn len(self) -> usize;
+    fn code_unit(self, idx: usize) -> u16;
+    fn slice_to_js_string(self, start: usize, end: usize) -> JsString;
+    fn ascii_bytes(self, start: usize, end: usize) -> Cow<'a, [u8]>;
+    fn latin1_slice(self, start: usize, end: usize) -> Option<&'a [u8]>;
+}
+
+impl<'a> JsonInput<'a> for &'a [u8] {
+    #[inline]
+    fn len(self) -> usize {
+        <[u8]>::len(self)
+    }
+
+    #[inline]
+    fn code_unit(self, idx: usize) -> u16 {
+        u16::from(self[idx])
+    }
+
+    #[inline]
+    fn slice_to_js_string(self, start: usize, end: usize) -> JsString {
+        JsString::from(boa_string::JsStr::latin1(&self[start..end]))
+    }
+
+    #[inline]
+    fn ascii_bytes(self, start: usize, end: usize) -> Cow<'a, [u8]> {
+        Cow::Borrowed(&self[start..end])
+    }
+
+    #[inline]
+    fn latin1_slice(self, start: usize, end: usize) -> Option<&'a [u8]> {
+        Some(&self[start..end])
+    }
+}
+
+impl<'a> JsonInput<'a> for &'a [u16] {
+    #[inline]
+    fn len(self) -> usize {
+        <[u16]>::len(self)
+    }
+
+    #[inline]
+    fn code_unit(self, idx: usize) -> u16 {
+        self[idx]
+    }
+
+    #[inline]
+    fn slice_to_js_string(self, start: usize, end: usize) -> JsString {
+        js_string!(&self[start..end])
+    }
+
+    #[inline]
+    fn ascii_bytes(self, start: usize, end: usize) -> Cow<'a, [u8]> {
+        Cow::Owned(self[start..end].iter().map(|&u| u as u8).collect())
+    }
+
+    #[inline]
+    fn latin1_slice(self, _start: usize, _end: usize) -> Option<&'a [u8]> {
+        None
+    }
+}
+
 #[derive(Debug)]
 enum JsonNode {
-    /// A primitive value (string, number, boolean, null) with its original source text.
-    Primitive(String),
+    /// A primitive value (string, number, boolean, null) with its original source text and parsed value.
+    Primitive(JsString, JsValue),
     /// An array of child nodes.
     Array(Vec<JsonNode>),
     /// An object with key-value pairs.
-    Object(Vec<(String, JsonNode)>),
-}
-
-/// Visitor that builds a `JsonNode` source tree by walking the parsed AST,
-/// extracting source text from `LinearSpan` information tracked by the parser.
-/// Uses a stack to build the tree bottom-up during depth-first traversal.
-struct JsonSourceVisitor<'a> {
-    source_text: &'a boa_ast::SourceText,
-    interner: &'a boa_interner::Interner,
-    /// Stack used to build the tree bottom-up. Leaf nodes (literals) are pushed
-    /// first, then parent nodes (arrays/objects) pop their children and push themselves.
-    stack: Vec<JsonNode>,
-}
-
-impl<'a> JsonSourceVisitor<'a> {
-    /// Creates a new `JsonSourceVisitor`.
-    fn new(source_text: &'a boa_ast::SourceText, interner: &'a boa_interner::Interner) -> Self {
-        Self {
-            source_text,
-            interner,
-            stack: Vec::new(),
-        }
-    }
-
-    /// Consumes the visitor and returns the final `JsonNode` tree.
-    fn finish(mut self) -> Option<JsonNode> {
-        self.stack.pop()
-    }
-}
-
-impl<'ast> boa_ast::visitor::Visitor<'ast> for JsonSourceVisitor<'_> {
-    type BreakTy = std::convert::Infallible;
-
-    fn visit_literal(
-        &mut self,
-        node: &'ast boa_ast::expression::literal::Literal,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        let span = node.linear_span();
-        let code_points = self.source_text.get_code_points_from_span(span);
-        let text = String::from_utf16_lossy(code_points);
-        self.stack.push(JsonNode::Primitive(text));
-        std::ops::ControlFlow::Continue(())
-    }
-
-    fn visit_array_literal(
-        &mut self,
-        node: &'ast boa_ast::expression::literal::ArrayLiteral,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        let count = node.as_ref().len();
-        let base = self.stack.len();
-
-        // Visit each element, which pushes child nodes onto the stack
-        for elem in node.as_ref() {
-            if let Some(expr) = elem {
-                self.visit_expression(expr)?;
-            } else {
-                // Sparse element (should not happen in JSON)
-                self.stack.push(JsonNode::Primitive("null".to_string()));
-            }
-        }
-
-        // Pop the children that were just pushed and collect into array
-        let children: Vec<JsonNode> = self.stack.drain(base..).collect();
-        debug_assert_eq!(children.len(), count);
-        self.stack.push(JsonNode::Array(children));
-        std::ops::ControlFlow::Continue(())
-    }
-
-    fn visit_object_literal(
-        &mut self,
-        node: &'ast boa_ast::expression::literal::ObjectLiteral,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        use boa_ast::expression::literal::PropertyDefinition;
-
-        let base = self.stack.len();
-        let mut keys: Vec<String> = Vec::new();
-
-        for prop in node.properties() {
-            if let PropertyDefinition::Property(name, value) = prop {
-                let key = if let Some(ident) = name.literal() {
-                    self.interner.resolve_expect(ident.sym()).to_string()
-                } else {
-                    String::new()
-                };
-                keys.push(key);
-                // Visit the value expression, which pushes the child node
-                self.visit_expression(value)?;
-            }
-        }
-
-        // Pop the value nodes and zip with keys
-        let values: Vec<JsonNode> = self.stack.drain(base..).collect();
-        debug_assert_eq!(keys.len(), values.len());
-        let entries: Vec<(String, JsonNode)> = keys.into_iter().zip(values).collect();
-        self.stack.push(JsonNode::Object(entries));
-        std::ops::ControlFlow::Continue(())
-    }
-
-    fn visit_unary(
-        &mut self,
-        node: &'ast boa_ast::expression::operator::Unary,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        use boa_ast::expression::operator::unary::UnaryOp;
-        use boa_ast::visitor::VisitWith;
-
-        if node.op() == UnaryOp::Minus
-            && let boa_ast::Expression::Literal(lit) = node.target()
-        {
-            let span = lit.linear_span();
-            let code_points = self.source_text.get_code_points_from_span(span);
-            let num_text = String::from_utf16_lossy(code_points);
-            self.stack.push(JsonNode::Primitive(format!("-{num_text}")));
-            return std::ops::ControlFlow::Continue(());
-        }
-
-        // Default: recurse into children
-        node.visit_with(self)
-    }
-
-    fn visit_parenthesized(
-        &mut self,
-        node: &'ast boa_ast::expression::Parenthesized,
-    ) -> std::ops::ControlFlow<Self::BreakTy> {
-        // Unwrap parentheses and visit inner expression
-        self.visit_expression(node.expression())
-    }
+    Object(Vec<(JsString, JsonNode)>),
 }
 
 /// JavaScript `JSON` global object.
@@ -244,116 +174,32 @@ impl Json {
             .to_string(context)?;
 
         // Check if a reviver is provided, to determine if we need source text tracking
-        let has_reviver = args.get_or_undefined(1).is_callable();
+        let reviver_obj = args.get_or_undefined(1).as_callable();
 
-        // SLICE PATCH (P01): Direct streaming `serde_json::Deserializer -> JsValue` materialization
-        // when no `reviver` callback is supplied, preserving exact ECMAScript property insertion
-        // order and bypassing both intermediate `serde_json::Value` allocations and JS compilation.
-        if !has_reviver {
-            if let boa_string::JsStrVariant::Latin1(bytes) = js_str.as_str().variant() {
-                if let Ok(ascii_str) = std::str::from_utf8(bytes) {
-                    if let Some(js_val) = Self::try_fast_parse_json_str(ascii_str, context)? {
-                        return Ok(js_val);
-                    }
+        // 2-10. Parse JSON text directly per ECMA-404 & ECMAScript 25.5.1.
+        let (unfiltered, source_tree) = match js_str.as_str().variant() {
+            boa_string::JsStrVariant::Latin1(bytes) => {
+                if reviver_obj.is_some() {
+                    let (val, node) = Self::parse_ecma404::<_, true>(bytes, context)?;
+                    (val, Some(node))
+                } else {
+                    let (val, _) = Self::parse_ecma404::<_, false>(bytes, context)?;
+                    (val, None)
                 }
             }
-            let json_string = js_str
-                .to_std_string()
-                .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
-            if let Some(js_val) = Self::try_fast_parse_json_str(&json_string, context)? {
-                return Ok(js_val);
-            }
-        }
-
-        let json_string = js_str
-            .to_std_string()
-            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
-
-        // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
-        //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
-        serde_json::from_str::<serde_json::Value>(&json_string)
-            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
-
-        // 3. Let scriptString be the string-concatenation of "(", jsonString, and ");".
-        let script_string = format!("({json_string});");
-
-        // 4-10. Parse and evaluate the script
-        let source = Source::from_bytes(&script_string);
-        let mut parser = Parser::new(source);
-        parser.set_json_parse();
-
-        // Use parse_script_with_source to get SourceText for span-based source extraction
-        let (script, source_text) =
-            parser.parse_script_with_source(&Scope::new_global(), context.interner_mut())?;
-
-        // Build the source tree from the AST if a reviver is present.
-        // This walks the parsed AST and extracts source text from LinearSpan information,
-        // avoiding the need to re-parse the JSON string separately.
-        let source_tree = if has_reviver {
-            let expr = script.statements().statements().first().and_then(|item| {
-                if let boa_ast::StatementListItem::Statement(stmt) = item
-                    && let boa_ast::Statement::Expression(expr) = stmt.as_ref()
-                {
-                    return Some(expr);
+            boa_string::JsStrVariant::Utf16(units) => {
+                if reviver_obj.is_some() {
+                    let (val, node) = Self::parse_ecma404::<_, true>(units, context)?;
+                    (val, Some(node))
+                } else {
+                    let (val, _) = Self::parse_ecma404::<_, false>(units, context)?;
+                    (val, None)
                 }
-                None
-            });
-            expr.and_then(|e| {
-                use boa_ast::visitor::Visitor;
-                let mut visitor = JsonSourceVisitor::new(&source_text, context.interner());
-                let _ = visitor.visit_expression(e);
-                visitor.finish()
-            })
-        } else {
-            None
+            }
         };
-
-        let code_block = {
-            let in_with = context.vm.frame().environments.has_object_environment();
-            let spanned_source_text = SpannedSourceText::new_source_only(
-                crate::spanned_source_text::SourceText::new(source_text),
-            );
-            let mut compiler = ByteCompiler::new(
-                js_string!("<json>"),
-                script.strict(),
-                true,
-                context.realm().scope().clone(),
-                context.realm().scope().clone(),
-                false,
-                false,
-                context.interner_mut(),
-                in_with,
-                spanned_source_text,
-                SourcePath::Json,
-            );
-            compiler.compile_statement_list(script.statements(), true, false);
-            Gc::new(compiler.finish())
-        };
-
-        let realm = context.realm().clone();
-
-        let env_fp = context.vm.frame().environments.len() as u32;
-        context.vm.push_frame_with_stack(
-            CallFrame::new(
-                code_block,
-                None,
-                context.vm.frame().environments.clone(),
-                realm,
-            )
-            .with_env_fp(env_fp)
-            .with_flags(CallFrameFlags::EXIT_EARLY),
-            JsValue::undefined(),
-            JsValue::null(),
-        );
-
-        context.realm().resize_global_env();
-        let record = context.run();
-        context.vm.pop_frame();
-
-        let unfiltered = record.consume()?;
 
         // 11. If IsCallable(reviver) is true, then
-        if let Some(obj) = args.get_or_undefined(1).as_callable() {
+        if let Some(obj) = reviver_obj {
             // a. Let root be ! OrdinaryObjectCreate(%Object.prototype%).
             let root = JsObject::with_object_proto(context.intrinsics());
 
@@ -377,111 +223,641 @@ impl Json {
         }
     }
 
-    /// SLICE PATCH (P01): Direct streaming `serde_json::Deserializer -> JsValue` materialization.
+    /// Direct ECMA-404 iterative JSON parser over `Latin1(&[u8])` or `Utf16(&[u16])`.
     ///
-    /// Preserves exact ECMAScript property insertion order without allocating an intermediate
-    /// `serde_json::Value` (`BTreeMap`) tree or invoking `boa_parser` + `ByteCompiler`.
-    fn try_fast_parse_json_str(
-        json_str: &str,
+    /// - Uses `fast-float2` for exact IEEE-754 round-to-nearest-even `f64` conversion and `±Infinity` on overflow.
+    /// - Preserves lone UTF-16 surrogates (`\uD800`–`\uDFFF` and literal unpaired surrogates).
+    /// - Zero-copy `JsStr::latin1` / `utf16` slicing for unescaped strings.
+    /// - Uses an explicit heap-allocated container stack (`O(1)` C/Rust call stack) supporting up to 2048 nesting levels.
+    fn parse_ecma404<'a, I: JsonInput<'a>, const WITH_SOURCE: bool>(
+        input: I,
         context: &mut Context,
-    ) -> JsResult<Option<JsValue>> {
-        struct JsonSeed<'a>(&'a mut Context);
+    ) -> JsResult<(JsValue, JsonNode)> {
+        const MAX_DEPTH: usize = 2048;
 
-        impl<'de> serde::de::DeserializeSeed<'de> for JsonSeed<'_> {
-            type Value = JsValue;
+        enum ContainerFrame {
+            Array {
+                elements: thin_vec::ThinVec<JsValue>,
+                child_nodes: Vec<JsonNode>,
+            },
+            Object {
+                obj: JsObject,
+                current_key: JsString,
+                entries: Vec<(JsString, JsonNode)>,
+            },
+        }
 
-            fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                deserializer.deserialize_any(self)
+        struct ParserState<'a, I> {
+            input: I,
+            pos: usize,
+            _marker: std::marker::PhantomData<&'a ()>,
+        }
+
+        impl<'a, I: JsonInput<'a>> ParserState<'a, I> {
+            #[inline]
+            fn syntax_err(&self, msg: &str) -> crate::JsError {
+                if self.pos == 0 {
+                    JsNativeError::syntax()
+                        .with_message(format!("expected value at line 1 column 1: {msg}"))
+                        .into()
+                } else {
+                    JsNativeError::syntax()
+                        .with_message(format!("{msg} at position {}", self.pos))
+                        .into()
+                }
+            }
+
+            #[inline]
+            fn skip_ws(&mut self) {
+                let len = self.input.len();
+                while self.pos < len {
+                    match self.input.code_unit(self.pos) {
+                        0x20 | 0x09 | 0x0A | 0x0D => self.pos += 1,
+                        _ => break,
+                    }
+                }
+            }
+
+            #[inline]
+            fn dummy_node() -> JsonNode {
+                JsonNode::Primitive(js_string!(), JsValue::undefined())
+            }
+
+            fn parse_root<const SRC: bool>(
+                &mut self,
+                context: &mut Context,
+            ) -> JsResult<(JsValue, JsonNode)> {
+                let mut stack: Vec<ContainerFrame> = Vec::new();
+
+                'parse_val: loop {
+                    self.skip_ws();
+                    if self.pos >= self.input.len() {
+                        return Err(self.syntax_err("unexpected end of JSON input"));
+                    }
+                    let (mut cur_val, mut cur_node) = match self.input.code_unit(self.pos) {
+                        0x22 => {
+                            let start = self.pos;
+                            let s = self.parse_string()?;
+                            let val = JsValue::new(s);
+                            let node = if SRC {
+                                JsonNode::Primitive(
+                                    self.input.slice_to_js_string(start, self.pos),
+                                    val.clone(),
+                                )
+                            } else {
+                                Self::dummy_node()
+                            };
+                            (val, node)
+                        }
+                        0x5B => {
+                            if stack.len() >= MAX_DEPTH {
+                                return Err(self.syntax_err("JSON nesting depth exceeded"));
+                            }
+                            self.pos += 1;
+                            self.skip_ws();
+                            if self.pos < self.input.len() && self.input.code_unit(self.pos) == 0x5D
+                            {
+                                self.pos += 1;
+                                let arr = crate::builtins::Array::array_create(0, None, context)?;
+                                let node = if SRC {
+                                    JsonNode::Array(Vec::new())
+                                } else {
+                                    Self::dummy_node()
+                                };
+                                (arr.into(), node)
+                            } else {
+                                stack.push(ContainerFrame::Array {
+                                    elements: thin_vec::ThinVec::new(),
+                                    child_nodes: Vec::new(),
+                                });
+                                continue 'parse_val;
+                            }
+                        }
+                        0x7B => {
+                            if stack.len() >= MAX_DEPTH {
+                                return Err(self.syntax_err("JSON nesting depth exceeded"));
+                            }
+                            self.pos += 1;
+                            self.skip_ws();
+                            let obj = JsObject::with_object_proto(context.intrinsics());
+                            if self.pos < self.input.len() && self.input.code_unit(self.pos) == 0x7D
+                            {
+                                self.pos += 1;
+                                let node = if SRC {
+                                    JsonNode::Object(Vec::new())
+                                } else {
+                                    Self::dummy_node()
+                                };
+                                (obj.into(), node)
+                            } else {
+                                if self.pos >= self.input.len()
+                                    || self.input.code_unit(self.pos) != 0x22
+                                {
+                                    return Err(
+                                        self.syntax_err("expected string key in JSON object")
+                                    );
+                                }
+                                let key = self.parse_string()?;
+                                self.skip_ws();
+                                if self.pos >= self.input.len()
+                                    || self.input.code_unit(self.pos) != 0x3A
+                                {
+                                    return Err(
+                                        self.syntax_err("expected ':' after key in JSON object")
+                                    );
+                                }
+                                self.pos += 1;
+                                stack.push(ContainerFrame::Object {
+                                    obj,
+                                    current_key: key,
+                                    entries: Vec::new(),
+                                });
+                                continue 'parse_val;
+                            }
+                        }
+                        0x74 => {
+                            if self.pos + 4 <= self.input.len()
+                                && self.input.code_unit(self.pos + 1) == 0x72
+                                && self.input.code_unit(self.pos + 2) == 0x75
+                                && self.input.code_unit(self.pos + 3) == 0x65
+                            {
+                                self.pos += 4;
+                                let val = JsValue::new(true);
+                                let node = if SRC {
+                                    JsonNode::Primitive(js_string!("true"), val.clone())
+                                } else {
+                                    Self::dummy_node()
+                                };
+                                (val, node)
+                            } else {
+                                return Err(self.syntax_err("expected 'true'"));
+                            }
+                        }
+                        0x66 => {
+                            if self.pos + 5 <= self.input.len()
+                                && self.input.code_unit(self.pos + 1) == 0x61
+                                && self.input.code_unit(self.pos + 2) == 0x6C
+                                && self.input.code_unit(self.pos + 3) == 0x73
+                                && self.input.code_unit(self.pos + 4) == 0x65
+                            {
+                                self.pos += 5;
+                                let val = JsValue::new(false);
+                                let node = if SRC {
+                                    JsonNode::Primitive(js_string!("false"), val.clone())
+                                } else {
+                                    Self::dummy_node()
+                                };
+                                (val, node)
+                            } else {
+                                return Err(self.syntax_err("expected 'false'"));
+                            }
+                        }
+                        0x6E => {
+                            if self.pos + 4 <= self.input.len()
+                                && self.input.code_unit(self.pos + 1) == 0x75
+                                && self.input.code_unit(self.pos + 2) == 0x6C
+                                && self.input.code_unit(self.pos + 3) == 0x6C
+                            {
+                                self.pos += 4;
+                                let val = JsValue::null();
+                                let node = if SRC {
+                                    JsonNode::Primitive(js_string!("null"), val.clone())
+                                } else {
+                                    Self::dummy_node()
+                                };
+                                (val, node)
+                            } else {
+                                return Err(self.syntax_err("expected 'null'"));
+                            }
+                        }
+                        0x2D | 0x30..=0x39 => {
+                            let start = self.pos;
+                            let val = self.parse_number()?;
+                            let node = if SRC {
+                                JsonNode::Primitive(
+                                    self.input.slice_to_js_string(start, self.pos),
+                                    val.clone(),
+                                )
+                            } else {
+                                Self::dummy_node()
+                            };
+                            (val, node)
+                        }
+                        _ => return Err(self.syntax_err("unexpected token in JSON")),
+                    };
+
+                    'attach: loop {
+                        let Some(top) = stack.last_mut() else {
+                            return Ok((cur_val, cur_node));
+                        };
+                        match top {
+                            ContainerFrame::Array {
+                                elements,
+                                child_nodes,
+                            } => {
+                                elements.push(cur_val);
+                                if SRC {
+                                    child_nodes.push(cur_node);
+                                }
+                                self.skip_ws();
+                                if self.pos >= self.input.len() {
+                                    return Err(self.syntax_err("unterminated array in JSON"));
+                                }
+                                match self.input.code_unit(self.pos) {
+                                    0x2C => {
+                                        self.pos += 1;
+                                        self.skip_ws();
+                                        if self.pos < self.input.len()
+                                            && self.input.code_unit(self.pos) == 0x5D
+                                        {
+                                            return Err(
+                                                self.syntax_err("trailing comma in JSON array")
+                                            );
+                                        }
+                                        continue 'parse_val;
+                                    }
+                                    0x5D => {
+                                        self.pos += 1;
+                                        let Some(ContainerFrame::Array {
+                                            elements,
+                                            child_nodes,
+                                        }) = stack.pop()
+                                        else {
+                                            unreachable!()
+                                        };
+                                        let arr = crate::builtins::Array::array_create(
+                                            elements.len() as u64,
+                                            None,
+                                            context,
+                                        )?;
+                                        arr.borrow_mut()
+                                            .properties_mut()
+                                            .override_indexed_properties(elements);
+                                        cur_val = arr.into();
+                                        cur_node = if SRC {
+                                            JsonNode::Array(child_nodes)
+                                        } else {
+                                            Self::dummy_node()
+                                        };
+                                        continue 'attach;
+                                    }
+                                    _ => {
+                                        return Err(
+                                            self.syntax_err("expected ',' or ']' in JSON array")
+                                        );
+                                    }
+                                }
+                            }
+                            ContainerFrame::Object {
+                                obj,
+                                current_key,
+                                entries,
+                            } => {
+                                let key = std::mem::take(current_key);
+                                if SRC {
+                                    entries.push((key.clone(), cur_node));
+                                }
+                                obj.borrow_mut().properties_mut().insert_data_property(
+                                    crate::property::PropertyKey::from(key),
+                                    cur_val,
+                                );
+                                self.skip_ws();
+                                if self.pos >= self.input.len() {
+                                    return Err(self.syntax_err("unterminated object in JSON"));
+                                }
+                                match self.input.code_unit(self.pos) {
+                                    0x2C => {
+                                        self.pos += 1;
+                                        self.skip_ws();
+                                        if self.pos < self.input.len()
+                                            && self.input.code_unit(self.pos) == 0x7D
+                                        {
+                                            return Err(
+                                                self.syntax_err("trailing comma in JSON object")
+                                            );
+                                        }
+                                        if self.pos >= self.input.len()
+                                            || self.input.code_unit(self.pos) != 0x22
+                                        {
+                                            return Err(self
+                                                .syntax_err("expected string key in JSON object"));
+                                        }
+                                        let next_key = self.parse_string()?;
+                                        self.skip_ws();
+                                        if self.pos >= self.input.len()
+                                            || self.input.code_unit(self.pos) != 0x3A
+                                        {
+                                            return Err(self.syntax_err(
+                                                "expected ':' after key in JSON object",
+                                            ));
+                                        }
+                                        self.pos += 1;
+                                        *current_key = next_key;
+                                        continue 'parse_val;
+                                    }
+                                    0x7D => {
+                                        self.pos += 1;
+                                        let Some(ContainerFrame::Object { obj, entries, .. }) =
+                                            stack.pop()
+                                        else {
+                                            unreachable!()
+                                        };
+                                        cur_val = obj.into();
+                                        cur_node = if SRC {
+                                            JsonNode::Object(entries)
+                                        } else {
+                                            Self::dummy_node()
+                                        };
+                                        continue 'attach;
+                                    }
+                                    _ => {
+                                        return Err(
+                                            self.syntax_err("expected ',' or '}' in JSON object")
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            fn parse_string(&mut self) -> JsResult<JsString> {
+                debug_assert_eq!(self.input.code_unit(self.pos), 0x22);
+                self.pos += 1;
+                let content_start = self.pos;
+                let len = self.input.len();
+
+                while self.pos < len {
+                    let c = self.input.code_unit(self.pos);
+                    if c == 0x22 {
+                        let s = self.input.slice_to_js_string(content_start, self.pos);
+                        self.pos += 1;
+                        return Ok(s);
+                    }
+                    if c == 0x5C {
+                        return self.parse_string_escaped(content_start);
+                    }
+                    if c < 0x20 {
+                        return Err(self.syntax_err("unescaped control character in JSON string"));
+                    }
+                    self.pos += 1;
+                }
+                Err(self.syntax_err("unterminated string in JSON"))
+            }
+
+            fn parse_string_escaped(&mut self, content_start: usize) -> JsResult<JsString> {
+                let len = self.input.len();
+                if let Some(prefix_bytes) = self.input.latin1_slice(content_start, self.pos) {
+                    let mut latin1 = Vec::with_capacity(prefix_bytes.len() + 16);
+                    latin1.extend_from_slice(prefix_bytes);
+
+                    while self.pos < len {
+                        let c = self.input.code_unit(self.pos);
+                        if c == 0x22 {
+                            self.pos += 1;
+                            return Ok(JsString::from(boa_string::JsStr::latin1(&latin1)));
+                        }
+                        if c < 0x20 {
+                            return Err(
+                                self.syntax_err("unescaped control character in JSON string")
+                            );
+                        }
+                        if c == 0x5C {
+                            self.pos += 1;
+                            if self.pos >= len {
+                                return Err(
+                                    self.syntax_err("unterminated escape sequence in JSON")
+                                );
+                            }
+                            let esc = self.input.code_unit(self.pos);
+                            self.pos += 1;
+                            match esc {
+                                0x22 => latin1.push(0x22),
+                                0x5C => latin1.push(0x5C),
+                                0x2F => latin1.push(0x2F),
+                                0x62 => latin1.push(0x08),
+                                0x66 => latin1.push(0x0C),
+                                0x6E => latin1.push(0x0A),
+                                0x72 => latin1.push(0x0D),
+                                0x74 => latin1.push(0x09),
+                                0x75 => {
+                                    if self.pos + 4 > len {
+                                        return Err(
+                                            self.syntax_err("incomplete unicode escape in JSON")
+                                        );
+                                    }
+                                    let mut code: u16 = 0;
+                                    for _ in 0..4 {
+                                        let hex = self.input.code_unit(self.pos);
+                                        self.pos += 1;
+                                        let nibble = match hex {
+                                            0x30..=0x39 => hex - 0x30,
+                                            0x61..=0x66 => hex - 0x61 + 10,
+                                            0x41..=0x46 => hex - 0x41 + 10,
+                                            _ => {
+                                                return Err(self.syntax_err(
+                                                    "invalid unicode hex digit in JSON",
+                                                ));
+                                            }
+                                        };
+                                        code = (code << 4) | nibble;
+                                    }
+                                    if code <= 0xFF {
+                                        latin1.push(code as u8);
+                                    } else {
+                                        let mut units: Vec<u16> =
+                                            latin1.iter().map(|&b| u16::from(b)).collect();
+                                        units.push(code);
+                                        return self.parse_string_escaped_utf16_tail(units);
+                                    }
+                                }
+                                _ => {
+                                    return Err(
+                                        self.syntax_err("invalid escape character in JSON")
+                                    );
+                                }
+                            }
+                        } else {
+                            let chunk_start = self.pos;
+                            self.pos += 1;
+                            while self.pos < len {
+                                let ch = self.input.code_unit(self.pos);
+                                if ch == 0x22 || ch == 0x5C || ch < 0x20 {
+                                    break;
+                                }
+                                self.pos += 1;
+                            }
+                            if let Some(chunk) = self.input.latin1_slice(chunk_start, self.pos) {
+                                latin1.extend_from_slice(chunk);
+                            }
+                        }
+                    }
+                    return Err(self.syntax_err("unterminated string in JSON"));
+                }
+
+                let mut units = Vec::with_capacity((self.pos - content_start) + 16);
+                for idx in content_start..self.pos {
+                    units.push(self.input.code_unit(idx));
+                }
+                self.parse_string_escaped_utf16_tail(units)
+            }
+
+            fn parse_string_escaped_utf16_tail(&mut self, mut units: Vec<u16>) -> JsResult<JsString> {
+                let len = self.input.len();
+                while self.pos < len {
+                    let c = self.input.code_unit(self.pos);
+                    if c == 0x22 {
+                        self.pos += 1;
+                        return Ok(js_string!(&units[..]));
+                    }
+                    if c < 0x20 {
+                        return Err(self.syntax_err("unescaped control character in JSON string"));
+                    }
+                    if c == 0x5C {
+                        self.pos += 1;
+                        if self.pos >= len {
+                            return Err(self.syntax_err("unterminated escape sequence in JSON"));
+                        }
+                        let esc = self.input.code_unit(self.pos);
+                        self.pos += 1;
+                        match esc {
+                            0x22 => units.push(0x22),
+                            0x5C => units.push(0x5C),
+                            0x2F => units.push(0x2F),
+                            0x62 => units.push(0x08),
+                            0x66 => units.push(0x0C),
+                            0x6E => units.push(0x0A),
+                            0x72 => units.push(0x0D),
+                            0x74 => units.push(0x09),
+                            0x75 => {
+                                if self.pos + 4 > len {
+                                    return Err(
+                                        self.syntax_err("incomplete unicode escape in JSON")
+                                    );
+                                }
+                                let mut code: u16 = 0;
+                                for _ in 0..4 {
+                                    let hex = self.input.code_unit(self.pos);
+                                    self.pos += 1;
+                                    let nibble = match hex {
+                                        0x30..=0x39 => hex - 0x30,
+                                        0x61..=0x66 => hex - 0x61 + 10,
+                                        0x41..=0x46 => hex - 0x41 + 10,
+                                        _ => {
+                                            return Err(self
+                                                .syntax_err("invalid unicode hex digit in JSON"));
+                                        }
+                                    };
+                                    code = (code << 4) | nibble;
+                                }
+                                units.push(code);
+                            }
+                            _ => return Err(self.syntax_err("invalid escape character in JSON")),
+                        }
+                    } else {
+                        units.push(c);
+                        self.pos += 1;
+                    }
+                }
+                Err(self.syntax_err("unterminated string in JSON"))
+            }
+
+            fn parse_number(&mut self) -> JsResult<JsValue> {
+                let start = self.pos;
+                let len = self.input.len();
+                let mut is_neg = false;
+                if self.input.code_unit(self.pos) == 0x2D {
+                    is_neg = true;
+                    self.pos += 1;
+                }
+                if self.pos >= len {
+                    return Err(self.syntax_err("unexpected end of number in JSON"));
+                }
+                match self.input.code_unit(self.pos) {
+                    0x30 => {
+                        self.pos += 1;
+                        if self.pos < len && matches!(self.input.code_unit(self.pos), 0x30..=0x39) {
+                            return Err(self.syntax_err("leading zero in JSON number"));
+                        }
+                    }
+                    0x31..=0x39 => {
+                        self.pos += 1;
+                        while self.pos < len
+                            && matches!(self.input.code_unit(self.pos), 0x30..=0x39)
+                        {
+                            self.pos += 1;
+                        }
+                    }
+                    _ => return Err(self.syntax_err("expected digit in JSON number")),
+                }
+
+                let mut is_float = false;
+                if self.pos < len && self.input.code_unit(self.pos) == 0x2E {
+                    is_float = true;
+                    self.pos += 1;
+                    if self.pos >= len || !matches!(self.input.code_unit(self.pos), 0x30..=0x39) {
+                        return Err(self.syntax_err("expected digit after decimal point in JSON"));
+                    }
+                    while self.pos < len && matches!(self.input.code_unit(self.pos), 0x30..=0x39) {
+                        self.pos += 1;
+                    }
+                }
+
+                if self.pos < len && matches!(self.input.code_unit(self.pos), 0x65 | 0x45) {
+                    is_float = true;
+                    self.pos += 1;
+                    if self.pos < len && matches!(self.input.code_unit(self.pos), 0x2B | 0x2D) {
+                        self.pos += 1;
+                    }
+                    if self.pos >= len || !matches!(self.input.code_unit(self.pos), 0x30..=0x39) {
+                        return Err(self.syntax_err("expected digit in JSON exponent"));
+                    }
+                    while self.pos < len && matches!(self.input.code_unit(self.pos), 0x30..=0x39) {
+                        self.pos += 1;
+                    }
+                }
+
+                let num_bytes = self.input.ascii_bytes(start, self.pos);
+                let bytes = num_bytes.as_ref();
+
+                if !is_float {
+                    if is_neg && bytes.len() == 2 && bytes[1] == b'0' {
+                        return Ok(JsValue::new(-0.0f64));
+                    }
+                    let digits = if is_neg { &bytes[1..] } else { bytes };
+                    if digits.len() <= 15 {
+                        let mut acc: i64 = 0;
+                        for &b in digits {
+                            acc = acc * 10 + i64::from(b - b'0');
+                        }
+                        if is_neg {
+                            acc = -acc;
+                        }
+                        if let Ok(i) = i32::try_from(acc) {
+                            return Ok(JsValue::new(i));
+                        }
+                        return Ok(JsValue::new(acc as f64));
+                    }
+                }
+
+                let f: f64 = fast_float2::parse(bytes)
+                    .map_err(|_| self.syntax_err("invalid number in JSON"))?;
+                Ok(JsValue::new(f))
             }
         }
 
-        impl<'de> serde::de::Visitor<'de> for JsonSeed<'_> {
-            type Value = JsValue;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("any valid JSON value")
-            }
-
-            fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
-                Ok(JsValue::new(v))
-            }
-
-            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
-                if let Ok(i) = i32::try_from(v) {
-                    Ok(JsValue::new(i))
-                } else {
-                    Ok(JsValue::new(v as f64))
-                }
-            }
-
-            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
-                if let Ok(i) = i32::try_from(v) {
-                    Ok(JsValue::new(i))
-                } else {
-                    Ok(JsValue::new(v as f64))
-                }
-            }
-
-            fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> {
-                Ok(JsValue::new(v))
-            }
-
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
-                Ok(JsValue::new(js_string!(v)))
-            }
-
-            fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
-                Ok(JsValue::new(js_string!(v.as_str())))
-            }
-
-            fn visit_unit<E>(self) -> Result<Self::Value, E> {
-                Ok(JsValue::null())
-            }
-
-            fn visit_none<E>(self) -> Result<Self::Value, E> {
-                Ok(JsValue::null())
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                let mut elements = thin_vec::ThinVec::with_capacity(seq.size_hint().unwrap_or(0));
-                while let Some(elem) = seq.next_element_seed(JsonSeed(self.0))? {
-                    elements.push(elem);
-                }
-                let arr =
-                    crate::builtins::Array::array_create(elements.len() as u64, None, self.0)
-                        .map_err(serde::de::Error::custom)?;
-                arr.borrow_mut()
-                    .properties_mut()
-                    .override_indexed_properties(elements);
-                Ok(arr.into())
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::MapAccess<'de>,
-            {
-                let obj = JsObject::with_object_proto(self.0.intrinsics());
-                while let Some(key) = map.next_key::<Cow<'de, str>>()? {
-                    let val = map.next_value_seed(JsonSeed(self.0))?;
-                    obj.create_data_property_or_throw(js_string!(key.as_ref()), val, self.0)
-                        .map_err(serde::de::Error::custom)?;
-                }
-                Ok(obj.into())
-            }
+        let mut state = ParserState {
+            input,
+            pos: 0,
+            _marker: std::marker::PhantomData,
+        };
+        let res = state.parse_root::<WITH_SOURCE>(context)?;
+        state.skip_ws();
+        if state.pos != state.input.len() {
+            return Err(state.syntax_err("unexpected trailing characters in JSON"));
         }
-
-        let mut de = serde_json::Deserializer::from_str(json_str);
-        let val = serde::de::DeserializeSeed::deserialize(JsonSeed(context), &mut de)
-            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
-        de.end()
-            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
-        Ok(Some(val))
+        Ok(res)
     }
 
     /// `25.5.1.1 InternalizeJSONProperty ( holder, name, reviver )`
@@ -556,9 +932,8 @@ impl Json {
                         .as_string()
                         .js_expect("EnumerableOwnPropertyNames only returns strings")?;
 
-                    let p_std = p.to_std_string_escaped();
                     let child_node =
-                        entries.and_then(|e| e.iter().rfind(|(k, _)| k == &p_std).map(|(_, v)| v));
+                        entries.and_then(|e| e.iter().rfind(|(k, _)| k == &p).map(|(_, v)| v));
 
                     // 1. Let newElement be ? InternalizeJSONProperty(val, P, reviver).
                     let new_element = Self::internalize_json_property(
@@ -587,46 +962,15 @@ impl Json {
         }
 
         // Build the context object for the reviver call.
-        // For primitive JSON values: context = { source: "<original text>" }
-        // For objects/arrays or modified values: context = {} (no source property)
-        // Per spec, source is only provided when the value is still the same
-        // primitive that was produced by parsing the original JSON text.
         let ctx_obj = JsObject::with_object_proto(context.intrinsics());
-        if let Some(JsonNode::Primitive(source_text)) = source_node {
-            // Check if the current value matches what the source text produces.
-            // If the reviver modified the value, it won't match and we skip source.
-            let value_matches = match source_text.as_str() {
-                "null" => val.is_null(),
-                "true" => val.as_boolean() == Some(true),
-                "false" => val.as_boolean() == Some(false),
-                s if s.starts_with('"') => {
-                    // String: compare parsed string value
-                    if let Some(js_str) = val.as_string() {
-                        serde_json::from_str::<String>(s)
-                            .is_ok_and(|parsed| js_str.to_std_string_escaped() == parsed)
-                    } else {
-                        false
-                    }
-                }
-                s => {
-                    // Number: compare parsed number value
-                    // Exact comparison is intentional: we want to detect if the
-                    // value was replaced by the reviver, not approximate equality.
-                    #[allow(clippy::float_cmp)]
-                    if let Some(n) = val.as_number() {
-                        s.parse::<f64>().is_ok_and(|parsed| n == parsed)
-                    } else {
-                        false
-                    }
-                }
-            };
-            if value_matches {
-                ctx_obj.create_data_property_or_throw(
-                    js_string!("source"),
-                    JsValue::from(js_string!(source_text.as_str())),
-                    context,
-                )?;
-            }
+        if let Some(JsonNode::Primitive(source_text, original_val)) = source_node
+            && JsValue::same_value(&val, original_val)
+        {
+            ctx_obj.create_data_property_or_throw(
+                js_string!("source"),
+                JsValue::from(source_text.clone()),
+                context,
+            )?;
         }
 
         // 3. Return ? Call(reviver, holder, « name, val, context »).
@@ -657,40 +1001,33 @@ impl Json {
         //    either the first or last code unit of jsonString is any of 0x0009
         //    (CHARACTER TABULATION), 0x000A (LINE FEED), 0x000D (CARRIAGE RETURN), or
         //    0x0020 (SPACE).
-        let std_string = json_string
-            .to_std_string()
-            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
-
-        if std_string.is_empty() {
+        if json_string.is_empty() {
             return Err(JsNativeError::syntax()
                 .with_message("JSON.rawJSON text must not be the empty string")
                 .into());
         }
 
-        let first = std_string.as_bytes()[0];
-        let last = std_string.as_bytes()[std_string.len() - 1];
-        if matches!(first, b'\t' | b'\n' | b'\r' | b' ')
-            || matches!(last, b'\t' | b'\n' | b'\r' | b' ')
-        {
+        let first = json_string.code_unit_at(0).unwrap_or(0);
+        let last = json_string.code_unit_at(json_string.len() - 1).unwrap_or(0);
+        if matches!(first, 0x09 | 0x0A | 0x0D | 0x20) || matches!(last, 0x09 | 0x0A | 0x0D | 0x20) {
             return Err(JsNativeError::syntax()
                 .with_message("JSON.rawJSON text must not start or end with whitespace")
                 .into());
         }
+        if matches!(first, 0x7B | 0x5B) {
+            return Err(JsNativeError::syntax()
+                .with_message("JSON.rawJSON text must not be an object or array")
+                .into());
+        }
 
         // 3. Parse StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
-        //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that
-        //    specification, or if its outermost value is an object or array.
-        let parsed: serde_json::Value = serde_json::from_str(&std_string)
-            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
-
-        // Must not be an object or array
-        match parsed {
-            serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-                return Err(JsNativeError::syntax()
-                    .with_message("JSON.rawJSON text must not be an object or array")
-                    .into());
+        match json_string.as_str().variant() {
+            boa_string::JsStrVariant::Latin1(bytes) => {
+                Self::parse_ecma404::<_, false>(bytes, context)?;
             }
-            _ => {}
+            boa_string::JsStrVariant::Utf16(units) => {
+                Self::parse_ecma404::<_, false>(units, context)?;
+            }
         }
 
         // 3. Let internalSlotsList be « [[IsRawJSON]] ».
@@ -991,8 +1328,20 @@ impl Json {
                     buf.push(b'"');
                     let mut utf8_tmp = [0u8; 4];
                     for decoded in char::decode_utf16(units.iter().copied()) {
-                        let Ok(c) = decoded else {
-                            return false;
+                        let c = match decoded {
+                            Ok(c) => c,
+                            Err(unpaired) => {
+                                let u = unpaired.unpaired_surrogate();
+                                buf.extend_from_slice(&[
+                                    b'\\',
+                                    b'u',
+                                    HEX[((u >> 12) & 0xF) as usize],
+                                    HEX[((u >> 8) & 0xF) as usize],
+                                    HEX[((u >> 4) & 0xF) as usize],
+                                    HEX[(u & 0xF) as usize],
+                                ]);
+                                continue;
+                            }
                         };
                         match c {
                             '"' => buf.extend_from_slice(b"\\\""),
@@ -1185,64 +1534,66 @@ impl Json {
                     }
 
                     stack.push(addr);
-                    let res = props.shape.with_property_keys(|keys| -> JsResult<FastStatus> {
-                        buf.push(b'{');
-                        let mut first = true;
-                        for (key, slot) in keys {
-                            if slot.attributes.is_accessor_descriptor() {
-                                return Ok(FastStatus::Fallback);
-                            }
-                            if !slot.attributes.contains(SlotAttributes::ENUMERABLE) {
-                                continue;
-                            }
-                            let PropertyKey::String(key_str) = key else {
-                                continue;
-                            };
-                            let prop_val = &props.storage[slot.index as usize];
-                            match prop_val.variant() {
-                                JsVariant::Undefined | JsVariant::Symbol(_) => continue,
-                                JsVariant::Object(ref child_obj) if child_obj.is_callable() => {
-                                    if child_obj
-                                        .borrow()
-                                        .properties()
-                                        .shape
-                                        .lookup(to_json_key)
-                                        .is_some()
-                                    {
-                                        return Ok(FastStatus::Fallback);
-                                    }
-                                    continue;
-                                }
-                                _ => {}
-                            }
-                            if !first {
-                                buf.push(b',');
-                            }
-                            if !write_js_str(key_str, buf, all_ascii) {
-                                return Ok(FastStatus::Fallback);
-                            }
-                            buf.push(b':');
-                            match write_val(
-                                prop_val,
-                                buf,
-                                all_ascii,
-                                stack,
-                                obj_proto,
-                                arr_proto,
-                                arr_template_shape_addr,
-                                to_json_key,
-                            )? {
-                                FastStatus::Written => {
-                                    first = false;
-                                }
-                                FastStatus::UndefinedOrSkipped | FastStatus::Fallback => {
+                    let res = props
+                        .shape
+                        .with_property_keys(|keys| -> JsResult<FastStatus> {
+                            buf.push(b'{');
+                            let mut first = true;
+                            for (key, slot) in keys {
+                                if slot.attributes.is_accessor_descriptor() {
                                     return Ok(FastStatus::Fallback);
                                 }
+                                if !slot.attributes.contains(SlotAttributes::ENUMERABLE) {
+                                    continue;
+                                }
+                                let PropertyKey::String(key_str) = key else {
+                                    continue;
+                                };
+                                let prop_val = &props.storage[slot.index as usize];
+                                match prop_val.variant() {
+                                    JsVariant::Undefined | JsVariant::Symbol(_) => continue,
+                                    JsVariant::Object(ref child_obj) if child_obj.is_callable() => {
+                                        if child_obj
+                                            .borrow()
+                                            .properties()
+                                            .shape
+                                            .lookup(to_json_key)
+                                            .is_some()
+                                        {
+                                            return Ok(FastStatus::Fallback);
+                                        }
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
+                                if !first {
+                                    buf.push(b',');
+                                }
+                                if !write_js_str(key_str, buf, all_ascii) {
+                                    return Ok(FastStatus::Fallback);
+                                }
+                                buf.push(b':');
+                                match write_val(
+                                    prop_val,
+                                    buf,
+                                    all_ascii,
+                                    stack,
+                                    obj_proto,
+                                    arr_proto,
+                                    arr_template_shape_addr,
+                                    to_json_key,
+                                )? {
+                                    FastStatus::Written => {
+                                        first = false;
+                                    }
+                                    FastStatus::UndefinedOrSkipped | FastStatus::Fallback => {
+                                        return Ok(FastStatus::Fallback);
+                                    }
+                                }
                             }
-                        }
-                        buf.push(b'}');
-                        Ok(FastStatus::Written)
-                    });
+                            buf.push(b'}');
+                            Ok(FastStatus::Written)
+                        });
                     stack.pop();
                     res
                 }
@@ -1252,8 +1603,18 @@ impl Json {
         let to_json_key = PropertyKey::from(js_string!("toJSON"));
         let obj_proto = context.intrinsics().constructors().object().prototype();
         let arr_proto = context.intrinsics().constructors().array().prototype();
-        if obj_proto.borrow().properties().shape.lookup(&to_json_key).is_some()
-            || arr_proto.borrow().properties().shape.lookup(&to_json_key).is_some()
+        if obj_proto
+            .borrow()
+            .properties()
+            .shape
+            .lookup(&to_json_key)
+            .is_some()
+            || arr_proto
+                .borrow()
+                .properties()
+                .shape
+                .lookup(&to_json_key)
+                .is_some()
         {
             return Ok(None);
         }

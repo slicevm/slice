@@ -92,6 +92,7 @@ impl SliceIsolate {
                 checkpoints_taken: self.checkpoints_taken,
                 restores_performed: self.restores_performed,
                 restore_time_ns: self.restore_time_ns,
+                exit_code: self.last_exit_code,
             });
         }
 
@@ -318,6 +319,7 @@ impl SliceIsolate {
             checkpoints_taken: self.checkpoints_taken,
             restores_performed: self.restores_performed,
             restore_time_ns: self.restore_time_ns,
+            exit_code: self.last_exit_code,
         })
     }
 

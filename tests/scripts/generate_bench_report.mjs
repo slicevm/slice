@@ -140,7 +140,7 @@ export function renderFullReportMarkdown(report, archiveFileName) {
 * **Canonical Latest Report:** [\`tests/reports/latest.md\`](./latest.md)
 * **Environment:** \`${meta.environment}\`
 * **Compared Runtimes:**
-  * **Slice:** \`v${meta.version}\` (Default \`SLICEBC\\x01\` Precompiled Boa \`CodeBlock\` CAS + Monomorphic Inline Caching \`get_fast\` + Streaming \`JsonSeed\` \`JSON.parse\`)
+  * **Slice:** \`v${meta.version}\` (Default \`SLICEBC\\x01\` Precompiled Boa \`CodeBlock\` CAS + Monomorphic Inline Caching \`get_fast\` + Iterative ECMA-404 \`JSON.parse\`)
   * **Bun:** \`${meta.runtimes.bun}\` (JavaScriptCore)
   * **Deno:** \`${meta.runtimes.deno}\` (V8)
   * **Node.js:** \`${meta.runtimes.node}\` (V8 native TypeScript execution)
@@ -330,12 +330,12 @@ function parseJsonlMetrics(jsonlPath, previousReport) {
 
   return {
     metadata: {
-      version: metaRec.version || previousReport?.metadata?.version || "0.10.6",
+      version: metaRec.version || previousReport?.metadata?.version || "0.10.9",
       commit: metaRec.commit || previousReport?.metadata?.commit || "abdbf89",
       timestampUtc: metaRec.timestampUtc || new Date().toISOString(),
       environment: metaRec.environment || previousReport?.metadata?.environment || "Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)",
       runtimes: {
-        slice: `v${metaRec.version || "0.10.6"}`,
+        slice: `v${metaRec.version || "0.10.9"}`,
         bun: metaRec.bunVersion || previousReport?.metadata?.runtimes?.bun || "v1.4.4",
         deno: metaRec.denoVersion || previousReport?.metadata?.runtimes?.deno || "v2.9.8",
         node: metaRec.nodeVersion || previousReport?.metadata?.runtimes?.node || "v27.0.0-alpha"

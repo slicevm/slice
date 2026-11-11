@@ -221,9 +221,82 @@ fib(30);
     group.finish();
 }
 
+fn bench_json_operations(c: &mut Criterion) {
+    let mut group = c.benchmark_group("slice_engine::json");
+
+    let json_batch_src = r#"
+const payload = JSON.stringify(
+    Array.from({ length: 100 }, (_, i) => ({
+        id: i,
+        name: "item-" + i,
+        escaped: "line1\nline2\t\"quoted\"\\slash",
+        score: i * 1.25,
+        ts: 1731274800000 + i,
+        active: (i & 1) === 0,
+        tags: ["alpha", "beta", "gamma"],
+        meta: { nested: i + 100, ok: true }
+    }))
+);
+const parsed = JSON.parse(payload);
+const out = JSON.stringify(parsed);
+if (parsed.length !== 100 || out.length < 1000) throw new Error("json batch mismatch");
+"#;
+    let json_batch_bc = compile_source_to_bytecode(json_batch_src);
+    group.bench_function("json_parse_and_stringify_batch_100_records", |b| {
+        SliceIsolate::prewarm_boa_pool(1);
+        b.iter(|| {
+            let mut iso = SliceIsolate::spawn(
+                "bench-json-batch",
+                1,
+                CapabilityToken::pure_compute(),
+                50_000_000,
+                16 * 1024 * 1024,
+            );
+            let res = iso
+                .execute_bytecode(black_box(&json_batch_bc), None)
+                .expect("json batch execute");
+            black_box(res.highest_tier_reached)
+        });
+    });
+
+    let json_edge_src = r#"
+const deepArr = "[".repeat(256) + "42" + "]".repeat(256);
+const parsedDeep = JSON.parse(deepArr);
+const edgeObj = JSON.parse('{"f1":9007199254740993.0,"f2":1e23,"inf":1e400,"surr":"\\ud800"}');
+const revived = JSON.parse('{"id":9007199254740993,"tag":"ok"}', (k, v, ctx) => {
+    if (k === "id" && ctx && ctx.source) return ctx.source;
+    return v;
+});
+const out = JSON.stringify({ edgeObj, revived });
+if (!Array.isArray(parsedDeep) || revived.id !== "9007199254740993" || out.length < 20) {
+    throw new Error("json edge mismatch");
+}
+"#;
+    let json_edge_bc = compile_source_to_bytecode(json_edge_src);
+    group.bench_function("json_deep_nesting_reviver_and_edge_cases", |b| {
+        SliceIsolate::prewarm_boa_pool(1);
+        b.iter(|| {
+            let mut iso = SliceIsolate::spawn(
+                "bench-json-edge",
+                1,
+                CapabilityToken::pure_compute(),
+                50_000_000,
+                16 * 1024 * 1024,
+            );
+            let res = iso
+                .execute_bytecode(black_box(&json_edge_bc), None)
+                .expect("json edge execute");
+            black_box(res.highest_tier_reached)
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_boacas_and_automaton,
-    bench_intrinsics_and_numeric_vm
+    bench_intrinsics_and_numeric_vm,
+    bench_json_operations
 );
 criterion_main!(benches);

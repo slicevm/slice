@@ -151,8 +151,8 @@ pub fn map_bundled_error_location(bundled_js: &str, error_msg: &str) -> String {
         }
         if !active_short.is_empty() && b_line > marker_line_idx {
             let rel_idx_0 = count_code_lines_between(&lines, marker_line_idx, b_line);
-            let mut resolved_line = lookup_embedded_line_map(active_line_map, rel_idx_0)
-                .unwrap_or(rel_idx_0 + 1);
+            let mut resolved_line =
+                lookup_embedded_line_map(active_line_map, rel_idx_0).unwrap_or(rel_idx_0 + 1);
             if let Some(stmt_text) = lines.get(b_line - 1).map(|s| s.trim()) {
                 if !stmt_text.is_empty() {
                     if let Ok(orig_src) = std::fs::read_to_string(active_full) {
@@ -209,8 +209,8 @@ pub fn map_bundled_error_location(bundled_js: &str, error_msg: &str) -> String {
                     }));
             if matches_line {
                 let rel_idx_0 = count_code_lines_between(&lines, marker_line_idx, line_1);
-                let mut resolved_line = lookup_embedded_line_map(active_line_map, rel_idx_0)
-                    .unwrap_or(rel_idx_0 + 1);
+                let mut resolved_line =
+                    lookup_embedded_line_map(active_line_map, rel_idx_0).unwrap_or(rel_idx_0 + 1);
                 if let Ok(orig_src) = std::fs::read_to_string(active_full) {
                     if let Some((orig_idx, _)) = orig_src.lines().enumerate().find(|(_, ol)| {
                         ol.contains(core_msg)
@@ -380,10 +380,7 @@ pub fn map_bundled_stack_trace(bundled_js: &str, raw_stack: &str) -> String {
         let mut resolved: Option<(&str, usize)> = None;
 
         if let Some(fn_name) = fn_name_opt {
-            let bare_fn = fn_name
-                .rsplit_once('.')
-                .map(|(_, m)| m)
-                .unwrap_or(fn_name);
+            let bare_fn = fn_name.rsplit_once('.').map(|(_, m)| m).unwrap_or(fn_name);
             let fn_pat_1 = format!("function {}(", bare_fn);
             let fn_pat_2 = format!("function {} (", bare_fn);
             let fn_pat_3 = format!("{} = function", bare_fn);
@@ -438,8 +435,7 @@ pub fn map_bundled_stack_trace(bundled_js: &str, raw_stack: &str) -> String {
                             }
                         }
                     } else if let Some(callee) = prev_callee_fn {
-                        let bare_callee =
-                            callee.rsplit_once('.').map(|(_, m)| m).unwrap_or(callee);
+                        let bare_callee = callee.rsplit_once('.').map(|(_, m)| m).unwrap_or(callee);
                         let call_pat = format!("{}(", bare_callee);
                         for l_1 in d_line_1..=fn_end_1 {
                             if lines[l_1 - 1].contains(&call_pat) {

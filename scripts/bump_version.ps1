@@ -68,8 +68,6 @@ $TargetFiles = @(
     "scripts/run_benchmarks.ps1",
     "tests/run_real_stack_benchmarks.sh",
     "tests/scripts/generate_bench_report.mjs",
-    "tests/reports/latest.md",
-    "tests/reports/latest.json",
     "README.md",
     "tests/README.md",
     "tests/frameworks/README.md"
@@ -81,6 +79,8 @@ Get-ChildItem -Path (Join-Path $RootDir "docs") -Filter "*.md" -Recurse | ForEac
 }
 
 $EscOld = [regex]::Escape($OldVersion)
+$StartMarker = "<!-- BENCHMARK_SUMMARY_START -->"
+$EndMarker = "<!-- BENCHMARK_SUMMARY_END -->"
 
 foreach ($RelPath in $TargetFiles) {
     $FullPath = Join-Path $RootDir $RelPath
@@ -88,14 +88,28 @@ foreach ($RelPath in $TargetFiles) {
         continue
     }
     $Content = [System.IO.File]::ReadAllText($FullPath)
-    $Updated = $Content `
-        -replace "v$EscOld\b", "v$NewVersion" `
+    $SavedBlock = $null
+    $WorkContent = $Content
+    $StartIdx = $Content.IndexOf($StartMarker)
+    $EndIdx = $Content.IndexOf($EndMarker)
+    if ($StartIdx -ge 0 -and $EndIdx -gt $StartIdx) {
+        $BlockLen = ($EndIdx + $EndMarker.Length) - $StartIdx
+        $SavedBlock = $Content.Substring($StartIdx, $BlockLen)
+        $WorkContent = $Content.Substring(0, $StartIdx) + "__SLICE_BENCH_SUMMARY_PLACEHOLDER__" + $Content.Substring($StartIdx + $BlockLen)
+    }
+
+    $Updated = $WorkContent `
+        -replace "\bv$EscOld\b", "v$NewVersion" `
         -replace "`"version`":\s*`"$EscOld`"", "`"version`": `"$NewVersion`"" `
         -replace "`"version`":`"$EscOld`"", "`"version`":`"$NewVersion`"" `
         -replace "SLICE_VERSION:-$EscOld\b", "SLICE_VERSION:-$NewVersion" `
         -replace "\`$Version = `"$EscOld`"", "`$Version = `"$NewVersion`"" `
         -replace "\|\| `"$EscOld`"", "|| `"$NewVersion`"" `
         -replace "Slice-NexusJS/$EscOld\b", "Slice-NexusJS/$NewVersion"
+
+    if ($null -ne $SavedBlock) {
+        $Updated = $Updated.Replace("__SLICE_BENCH_SUMMARY_PLACEHOLDER__", $SavedBlock)
+    }
 
     if ($Updated -ne $Content) {
         [System.IO.File]::WriteAllText($FullPath, $Updated)

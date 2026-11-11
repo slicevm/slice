@@ -534,4 +534,77 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
             bytes_to_js_uint8_array(s.as_bytes(), context)
         }),
     );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_mark_proc_dirty"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            crate::boa_realm::mark_subsystem_dirty(crate::boa_realm::DIRTY_PROCESS);
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_process_exit"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            crate::boa_realm::mark_subsystem_dirty(crate::boa_realm::DIRTY_PROCESS);
+            let proc_obj = context
+                .global_object()
+                .get(js_string!("process"), context)
+                .ok()
+                .and_then(|v| v.as_object());
+            let mut code: i32 = match args.first() {
+                Some(v) if !v.is_undefined() && !v.is_null() => v.to_i32(context).unwrap_or(0),
+                _ => {
+                    if let Some(ref p) = proc_obj {
+                        p.get(js_string!("exitCode"), context)
+                            .ok()
+                            .filter(|v| !v.is_undefined() && !v.is_null())
+                            .and_then(|v| v.to_i32(context).ok())
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    }
+                }
+            };
+            if let Some(ref p) = proc_obj {
+                let _ = p.set(js_string!("exitCode"), BoaVal::from(code), false, context);
+                let already_exited = p
+                    .get(js_string!("_exited"), context)
+                    .ok()
+                    .and_then(|v| v.as_boolean())
+                    .unwrap_or(false);
+                if !already_exited {
+                    let _ = p.set(js_string!("_exited"), BoaVal::from(true), false, context);
+                    if let Ok(emit_val) = p.get(js_string!("emit"), context) {
+                        if let Some(emit_fn) = emit_val.as_object() {
+                            if emit_fn.is_callable() {
+                                let _ = emit_fn.call(
+                                    &BoaVal::from(p.clone()),
+                                    &[BoaVal::from(js_string!("exit")), BoaVal::from(code)],
+                                    context,
+                                );
+                            }
+                        }
+                    }
+                    if let Some(inner_code) = crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.get()) {
+                        code = inner_code;
+                    } else if let Ok(ec_val) = p.get(js_string!("exitCode"), context) {
+                        if !ec_val.is_undefined() && !ec_val.is_null() {
+                            if let Ok(updated) = ec_val.to_i32(context) {
+                                code = updated;
+                            }
+                        }
+                    }
+                }
+            }
+            crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.set(Some(code)));
+            crate::boa_realm::BOA_LAST_EXIT_CODE.with(|e| e.set(Some(code)));
+            if crate::workers::is_worker_thread() {
+                crate::workers::worker_self_set_listening(false, Some(code));
+            }
+            Err(boa_engine::error::PanicError::new(format!("__SLICE_PROCESS_EXIT__:{code}")).into())
+        }),
+    );
 }
