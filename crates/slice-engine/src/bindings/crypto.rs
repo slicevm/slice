@@ -15,10 +15,12 @@ use crate::intrinsics::{
     ecdsa_pub_to_spki, ecdsa_sign_bytes, ecdsa_verify_bytes, ed25519_keypair_from_seed,
     ed25519_pub_to_spki, ed25519_seed_to_pkcs8_v1, ed25519_sign_bytes, ed25519_verify_bytes,
     extract_ecdsa_pkcs8_components, extract_ecdsa_pub, extract_ed25519_pub, extract_ed25519_seed,
+    extract_rsa_pkcs8_spki, extract_rsa_spki, extract_x25519_pub, extract_x25519_seed,
     fill_random_bytes, generate_uuid_v4, hkdf_derive_bytes, insert_cached_crypto_key,
-    make_ring_aead_key, md5_bytes, pbkdf2_derive_bytes, scrypt_derive_bytes, sha1_bytes,
-    sha256_bytes, sha384_bytes, sha512_bytes, with_cached_crypto_key, AesExpandedKey,
-    CachedCryptoKeyMaterial,
+    make_ring_aead_key, md5_bytes, pbkdf2_derive_bytes, rsa_generate_2048_keypair, rsa_sign_bytes,
+    rsa_verify_bytes, scrypt_derive_bytes, sha1_bytes, sha256_bytes, sha384_bytes, sha512_bytes,
+    with_cached_crypto_key, x25519_keypair_from_seed, x25519_pub_to_spki, x25519_seed_to_pkcs8_v1,
+    AesExpandedKey, CachedCryptoKeyMaterial,
 };
 
 pub(crate) fn register_node_crypto_bootstrap_host_function(ctx: &mut boa_engine::Context) {
@@ -747,6 +749,76 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(js_string!(res.to_string())));
             }
 
+            if alg.eq_ignore_ascii_case("X25519") {
+                let mut seed = [0u8; 32];
+                BOA_DET_STATE.with(|s| {
+                    if let Some((mut prng, clk)) = s.get() {
+                        fill_random_bytes(&mut seed, Some(&mut prng));
+                        s.set(Some((prng, clk)));
+                    } else {
+                        fill_random_bytes(&mut seed, None);
+                    }
+                });
+                let (seed_bytes, pub_bytes) = x25519_keypair_from_seed(seed);
+                let pkcs8 = x25519_seed_to_pkcs8_v1(&seed_bytes);
+                let spki = x25519_pub_to_spki(&pub_bytes);
+                let priv_id = insert_cached_crypto_key(
+                    tenant.clone(),
+                    CachedCryptoKeyMaterial::X25519Private {
+                        seed: seed_bytes,
+                        pub_bytes,
+                    },
+                );
+                let pub_id = insert_cached_crypto_key(
+                    tenant,
+                    CachedCryptoKeyMaterial::X25519Public { pub_bytes },
+                );
+                let res = serde_json::json!({
+                    "privId": priv_id,
+                    "pubId": pub_id,
+                    "crv": "X25519",
+                    "d": base64_encode(&seed_bytes, true),
+                    "x": base64_encode(&pub_bytes, true),
+                    "pubRaw": base64_encode(&pub_bytes, false),
+                    "pkcs8": base64_encode(&pkcs8, false),
+                    "spki": base64_encode(&spki, false),
+                });
+                return Ok(BoaVal::from(js_string!(res.to_string())));
+            }
+
+            if alg.eq_ignore_ascii_case("RSA") || alg.eq_ignore_ascii_case("RSA-PSS") {
+                let mut pick_byte = [0u8; 1];
+                BOA_DET_STATE.with(|s| {
+                    if let Some((mut prng, clk)) = s.get() {
+                        fill_random_bytes(&mut pick_byte, Some(&mut prng));
+                        s.set(Some((prng, clk)));
+                    } else {
+                        fill_random_bytes(&mut pick_byte, None);
+                    }
+                });
+                let (pkcs8, spki) = rsa_generate_2048_keypair(pick_byte[0] as usize)
+                    .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                let priv_id = insert_cached_crypto_key(
+                    tenant.clone(),
+                    CachedCryptoKeyMaterial::RsaPrivate {
+                        pkcs8: pkcs8.clone(),
+                        spki: spki.clone(),
+                    },
+                );
+                let pub_id = insert_cached_crypto_key(
+                    tenant,
+                    CachedCryptoKeyMaterial::RsaPublic { spki: spki.clone() },
+                );
+                let res = serde_json::json!({
+                    "privId": priv_id,
+                    "pubId": pub_id,
+                    "pubRaw": base64_encode(&spki, false),
+                    "pkcs8": base64_encode(&pkcs8, false),
+                    "spki": base64_encode(&spki, false),
+                });
+                return Ok(BoaVal::from(js_string!(res.to_string())));
+            }
+
             if alg.eq_ignore_ascii_case("ECDSA") || alg.eq_ignore_ascii_case("ec") {
                 let norm_curve = if curve.eq_ignore_ascii_case("P-384")
                     || curve.eq_ignore_ascii_case("secp384r1")
@@ -1057,6 +1129,85 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 }
             }
 
+            if alg.eq_ignore_ascii_case("X25519") {
+                let raw = extract_buffer_source_bytes(data_arg, context)?;
+                if format.eq_ignore_ascii_case("pkcs8") {
+                    let seed = extract_x25519_seed(&raw)
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                    let (seed_bytes, pub_bytes) = x25519_keypair_from_seed(seed);
+                    let pkcs8 = x25519_seed_to_pkcs8_v1(&seed_bytes);
+                    let id = insert_cached_crypto_key(
+                        tenant,
+                        CachedCryptoKeyMaterial::X25519Private {
+                            seed: seed_bytes,
+                            pub_bytes,
+                        },
+                    );
+                    let out = serde_json::json!({
+                        "id": id,
+                        "type": "private",
+                        "crv": "X25519",
+                        "d": base64_encode(&seed_bytes, true),
+                        "x": base64_encode(&pub_bytes, true),
+                        "pkcs8": base64_encode(&pkcs8, false),
+                    });
+                    return Ok(BoaVal::from(js_string!(out.to_string())));
+                } else {
+                    let pub_bytes = extract_x25519_pub(&raw)
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                    let spki = x25519_pub_to_spki(&pub_bytes);
+                    let id = insert_cached_crypto_key(
+                        tenant,
+                        CachedCryptoKeyMaterial::X25519Public { pub_bytes },
+                    );
+                    let out = serde_json::json!({
+                        "id": id,
+                        "type": "public",
+                        "crv": "X25519",
+                        "x": base64_encode(&pub_bytes, true),
+                        "pubRaw": base64_encode(&pub_bytes, false),
+                        "spki": base64_encode(&spki, false),
+                    });
+                    return Ok(BoaVal::from(js_string!(out.to_string())));
+                }
+            }
+
+            if alg.eq_ignore_ascii_case("RSA") || alg.eq_ignore_ascii_case("RSA-PSS") {
+                let raw = extract_buffer_source_bytes(data_arg, context)?;
+                if format.eq_ignore_ascii_case("pkcs8") {
+                    let spki = extract_rsa_pkcs8_spki(&raw)
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                    let pkcs8_b64 = base64_encode(&raw, false);
+                    let spki_b64 = base64_encode(&spki, false);
+                    let id = insert_cached_crypto_key(
+                        tenant,
+                        CachedCryptoKeyMaterial::RsaPrivate { pkcs8: raw, spki },
+                    );
+                    let out = serde_json::json!({
+                        "id": id,
+                        "type": "private",
+                        "pkcs8": pkcs8_b64,
+                        "spki": spki_b64,
+                    });
+                    return Ok(BoaVal::from(js_string!(out.to_string())));
+                } else {
+                    let spki = extract_rsa_spki(&raw)
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                    let spki_b64 = base64_encode(&spki, false);
+                    let id = insert_cached_crypto_key(
+                        tenant,
+                        CachedCryptoKeyMaterial::RsaPublic { spki },
+                    );
+                    let out = serde_json::json!({
+                        "id": id,
+                        "type": "public",
+                        "pubRaw": spki_b64,
+                        "spki": spki_b64,
+                    });
+                    return Ok(BoaVal::from(js_string!(out.to_string())));
+                }
+            }
+
             Err(JsNativeError::error()
                 .with_message(format!(
                     "NotSupportedError: Unsupported import algorithm '{}'",
@@ -1141,6 +1292,26 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 let sig = match sig_res {
                     Some(r) => r,
                     None => ecdsa_sign_bytes(&curve, &key_fallback, &msg_bytes, asn1_der),
+                }
+                .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                return bytes_to_js_array_buffer(&sig, context);
+            }
+
+            if alg.eq_ignore_ascii_case("RSA") || alg.eq_ignore_ascii_case("RSA-PSS") {
+                let sig_res = if handle_id != 0 {
+                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
+                        CachedCryptoKeyMaterial::RsaPrivate { pkcs8, .. } => {
+                            Some(rsa_sign_bytes(pkcs8, &msg_bytes))
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                } else {
+                    None
+                };
+                let sig = match sig_res {
+                    Some(r) => r,
+                    None => rsa_sign_bytes(&key_fallback, &msg_bytes),
                 }
                 .map_err(|msg| JsNativeError::error().with_message(msg))?;
                 return bytes_to_js_array_buffer(&sig, context);
@@ -1246,6 +1417,26 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                         Ok(pk) => ecdsa_verify_bytes(&curve, &pk, &msg_bytes, &sig_bytes),
                         Err(_) => false,
                     },
+                };
+                return Ok(BoaVal::from(ok));
+            }
+
+            if alg.eq_ignore_ascii_case("RSA") || alg.eq_ignore_ascii_case("RSA-PSS") {
+                let verified = if handle_id != 0 {
+                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
+                        CachedCryptoKeyMaterial::RsaPublic { spki }
+                        | CachedCryptoKeyMaterial::RsaPrivate { spki, .. } => {
+                            Some(rsa_verify_bytes(spki, &msg_bytes, &sig_bytes))
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                } else {
+                    None
+                };
+                let ok = match verified {
+                    Some(v) => v,
+                    None => rsa_verify_bytes(&pub_fallback, &msg_bytes, &sig_bytes),
                 };
                 return Ok(BoaVal::from(ok));
             }

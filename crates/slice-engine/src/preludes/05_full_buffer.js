@@ -189,6 +189,82 @@
     return Buffer.compare(this, other) === 0;
   };
 
+  function __bufSearch(buf, val, byteOffset, encoding, isLast) {
+    if (typeof byteOffset === "string") {
+      encoding = byteOffset;
+      byteOffset = undefined;
+    }
+    var len = buf.length;
+    var off;
+    if (byteOffset === undefined) {
+      off = isLast ? len : 0;
+    } else {
+      off = Number(byteOffset);
+      if (Number.isNaN(off)) off = isLast ? len : 0;
+      else off = Math.trunc(off);
+      if (off < 0) off = len + off;
+    }
+    if (typeof val === "number") {
+      var b = val & 0xff;
+      if (isLast) {
+        var sLast = Math.min(off, len - 1);
+        for (var i = sLast; i >= 0; i--) {
+          if (buf[i] === b) return i;
+        }
+        return -1;
+      }
+      var sFirst = Math.max(0, off);
+      for (var j = sFirst; j < len; j++) {
+        if (buf[j] === b) return j;
+      }
+      return -1;
+    }
+    var needle;
+    if (typeof val === "string") {
+      needle = Buffer.from(val, encoding || "utf8");
+    } else if (val instanceof __U8) {
+      needle = val;
+    } else {
+      throw new TypeError("The \"value\" argument must be of type number or an instance of Buffer, Uint8Array, or string");
+    }
+    var nLen = needle.length;
+    if (nLen === 0) return Math.min(len, Math.max(0, off));
+    if (nLen > len) return -1;
+    var maxStart = len - nLen;
+    if (isLast) {
+      for (var k = Math.min(off, maxStart); k >= 0; k--) {
+        if (buf[k] === needle[0]) {
+          var ok = true;
+          for (var m = 1; m < nLen; m++) {
+            if (buf[k + m] !== needle[m]) { ok = false; break; }
+          }
+          if (ok) return k;
+        }
+      }
+      return -1;
+    }
+    for (var p = Math.max(0, off); p <= maxStart; p++) {
+      if (buf[p] === needle[0]) {
+        var ok2 = true;
+        for (var q = 1; q < nLen; q++) {
+          if (buf[p + q] !== needle[q]) { ok2 = false; break; }
+        }
+        if (ok2) return p;
+      }
+    }
+    return -1;
+  }
+
+  Buffer.prototype.indexOf = function(val, byteOffset, encoding) {
+    return __bufSearch(this, val, byteOffset, encoding, false);
+  };
+  Buffer.prototype.lastIndexOf = function(val, byteOffset, encoding) {
+    return __bufSearch(this, val, byteOffset, encoding, true);
+  };
+  Buffer.prototype.includes = function(val, byteOffset, encoding) {
+    return __bufSearch(this, val, byteOffset, encoding, false) !== -1;
+  };
+
   var __binM = [
     "compare","copy","fill","write","toJSON",
     "readUInt8","readInt8","readUInt16BE","readUInt16LE","readInt16BE","readInt16LE",

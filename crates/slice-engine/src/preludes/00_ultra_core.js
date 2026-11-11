@@ -205,26 +205,24 @@
   var __origThen = Promise.prototype.then;
 
   function __wrappedThen(onF, onR) {
-    var fF = (__alsWrap && typeof onF === "function") ? __alsWrap(onF) : onF;
-    var fR = (__alsWrap && typeof onR === "function") ? __alsWrap(onR) : onR;
-    var wF = typeof fF === "function" ? function(v) {
+    var wF = typeof onF === "function" ? function(v) {
       if (__ntQ.length > 0) {
         while (__ntQ.length > 0) {
           var n = __ntQ.shift();
           n.f.apply(undefined, n.a);
         }
       }
-      return fF(v);
-    } : fF;
-    var wR = typeof fR === "function" ? function(e) {
+      return onF(v);
+    } : onF;
+    var wR = typeof onR === "function" ? function(e) {
       if (__ntQ.length > 0) {
         while (__ntQ.length > 0) {
           var n = __ntQ.shift();
           n.f.apply(undefined, n.a);
         }
       }
-      return fR(e);
-    } : fR;
+      return onR(e);
+    } : onR;
     return __origThen.call(this, wF, wR);
   }
 
@@ -232,7 +230,7 @@
     if (enable && !__ntHooked) {
       __ntHooked = true;
       Promise.prototype.then = __wrappedThen;
-    } else if (!enable && __ntHooked && __ntQ.length === 0 && !__alsWrap) {
+    } else if (!enable && __ntHooked && __ntQ.length === 0) {
       __ntHooked = false;
       Promise.prototype.then = __origThen;
     }
@@ -246,10 +244,6 @@
 
   globalThis.__slice_set_als_wrap = function(wrapFn) {
     __alsWrap = wrapFn || null;
-    if (__alsWrap && !__ntHooked) {
-      __ntHooked = true;
-      Promise.prototype.then = __wrappedThen;
-    }
   };
 
   function __schedMt() {
@@ -295,18 +289,47 @@
     __schedMt();
   };
 
+  function __Timeout(id) {
+    this._id = id;
+    this._refed = true;
+  }
+  __Timeout.prototype.unref = function() {
+    this._refed = false;
+    __slice_timer_ref(this._id, false);
+    return this;
+  };
+  __Timeout.prototype.ref = function() {
+    this._refed = true;
+    __slice_timer_ref(this._id, true);
+    return this;
+  };
+  __Timeout.prototype.hasRef = function() {
+    return this._refed;
+  };
+  __Timeout.prototype.refresh = function() {
+    __slice_timer_refresh(this._id);
+    return this;
+  };
+  __Timeout.prototype[Symbol.toPrimitive] = function() {
+    return this._id;
+  };
+  __Timeout.prototype.valueOf = function() {
+    return this._id;
+  };
+
   globalThis.setTimeout = function(cb, ms) {
     var a = [];
     for (var i = 2; i < arguments.length; i++) a.push(arguments[i]);
-    return __slice_timer_set(cb, Number(ms) || 0, false, a);
+    return new __Timeout(__slice_timer_set(cb, Number(ms) || 0, false, a));
   };
   globalThis.clearTimeout = function(id) {
-    __slice_timer_clear(Number(id) || 0);
+    if (id == null) return;
+    __slice_timer_clear(typeof id === "object" ? (id._id | 0) : (Number(id) || 0));
   };
   globalThis.setInterval = function(cb, ms) {
     var a = [];
     for (var i = 2; i < arguments.length; i++) a.push(arguments[i]);
-    return __slice_timer_set(cb, Number(ms) || 0, true, a);
+    return new __Timeout(__slice_timer_set(cb, Number(ms) || 0, true, a));
   };
   globalThis.clearInterval = globalThis.clearTimeout;
   globalThis.setImmediate = function(cb) {
@@ -315,7 +338,7 @@
     }
     var a = [];
     for (var i = 1; i < arguments.length; i++) a.push(arguments[i]);
-    return __slice_immediate_set(cb, a);
+    return new __Timeout(__slice_immediate_set(cb, a));
   };
   globalThis.clearImmediate = globalThis.clearTimeout;
 

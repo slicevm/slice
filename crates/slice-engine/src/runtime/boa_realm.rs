@@ -111,9 +111,62 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+#[derive(Debug, Clone)]
+struct AlsCapturedSnap(boa_engine::JsValue);
+
+impl boa_engine::gc::Finalize for AlsCapturedSnap {}
+
+unsafe impl boa_engine::gc::Trace for AlsCapturedSnap {
+    unsafe fn trace(&self, tracer: &mut boa_engine::gc::Tracer) {
+        unsafe { self.0.trace(tracer) }
+    }
+    unsafe fn trace_non_roots(&self) {
+        unsafe { self.0.trace_non_roots() }
+    }
+    fn run_finalizer(&self) {
+        self.0.run_finalizer();
+    }
+}
+
+impl boa_engine::JsData for AlsCapturedSnap {}
+
 pub(crate) struct SliceHostHooks;
 
 impl boa_engine::context::HostHooks for SliceHostHooks {
+    fn make_job_callback(
+        &self,
+        callback: boa_engine::object::builtins::JsFunction,
+        _context: &mut boa_engine::Context,
+    ) -> boa_engine::job::JobCallback {
+        if BOA_ALS_ACTIVE.with(|a| a.get()) {
+            let snap = BOA_ALS_SNAP.with(|s| s.borrow().clone());
+            return boa_engine::job::JobCallback::new(callback, AlsCapturedSnap(snap));
+        }
+        boa_engine::job::JobCallback::new(callback, ())
+    }
+
+    fn call_job_callback(
+        &self,
+        job: &boa_engine::job::JobCallback,
+        this: &boa_engine::JsValue,
+        args: &[boa_engine::JsValue],
+        context: &mut boa_engine::Context,
+    ) -> boa_engine::JsResult<boa_engine::JsValue> {
+        if let Some(captured) = job.host_defined().downcast_ref::<AlsCapturedSnap>() {
+            let prev = BOA_ALS_SNAP.with(|s| s.replace(captured.0.clone()));
+            let res = job.callback().call(this, args, context);
+            BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
+            return res;
+        }
+        if BOA_ALS_ACTIVE.with(|a| a.get()) {
+            let prev = BOA_ALS_SNAP.with(|s| s.replace(boa_engine::JsValue::undefined()));
+            let res = job.callback().call(this, args, context);
+            BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
+            return res;
+        }
+        job.callback().call(this, args, context)
+    }
+
     fn promise_rejection_tracker(
         &self,
         promise: &boa_engine::object::JsObject<boa_engine::builtins::promise::Promise>,
@@ -242,9 +295,7 @@ pub(crate) fn map_error_with_active_source(raw_error: &str) -> String {
 }
 
 pub(crate) struct SliceJobExecutor {
-    promise_jobs: std::cell::RefCell<
-        std::collections::VecDeque<(boa_engine::job::PromiseJob, Option<boa_engine::JsValue>)>,
-    >,
+    promise_jobs: std::cell::RefCell<std::collections::VecDeque<boa_engine::job::PromiseJob>>,
     fallback: std::rc::Rc<boa_engine::job::SimpleJobExecutor>,
 }
 
@@ -265,12 +316,7 @@ impl boa_engine::job::JobExecutor for SliceJobExecutor {
     ) {
         match job {
             boa_engine::job::Job::PromiseJob(p) => {
-                let snap = if BOA_ALS_ACTIVE.with(|a| a.get()) {
-                    Some(BOA_ALS_SNAP.with(|s| s.borrow().clone()))
-                } else {
-                    None
-                };
-                self.promise_jobs.borrow_mut().push_back((p, snap));
+                self.promise_jobs.borrow_mut().push_back(p);
             }
             other => {
                 self.fallback.clone().enqueue_job(other, context);
@@ -288,15 +334,8 @@ impl boa_engine::job::JobExecutor for SliceJobExecutor {
         }
         loop {
             let next_job = self.promise_jobs.borrow_mut().pop_front();
-            if let Some((job, snap_opt)) = next_job {
-                let res = if let Some(snap) = snap_opt {
-                    let prev = BOA_ALS_SNAP.with(|s| s.replace(snap));
-                    let r = job.call(context);
-                    BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
-                    r
-                } else {
-                    job.call(context)
-                };
+            if let Some(job) = next_job {
+                let res = job.call(context);
                 if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
                     self.promise_jobs.borrow_mut().clear();
                     return Ok(());

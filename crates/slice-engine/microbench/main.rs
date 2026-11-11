@@ -365,11 +365,51 @@ if (out.length < 20) throw new Error("stream decoder mismatch");
     group.finish();
 }
 
+fn bench_wave3_als_intl_crypto_and_buffer(c: &mut Criterion) {
+    let mut group = c.benchmark_group("slice_engine::wave3");
+
+    let als_intl_src = r#"
+const { AsyncLocalStorage } = require("node:async_hooks");
+const als = new AsyncLocalStorage();
+const nf = new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR" });
+const dtf = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit", hour12: false });
+const seg = new Intl.Segmenter("en", { granularity: "grapheme" });
+const buf = Buffer.from("slice-edge-runtime-buffer-search-needle-benchmark-payload");
+const c1 = nf.format(1234567.89);
+const d1 = dtf.format(new Date(0));
+const gCount = [...seg.segment("a👍🏽é\r\n🇺🇸")].length;
+const idx = buf.indexOf("needle");
+const ab = new ArrayBuffer(64);
+const ab2 = ab.transfer(64);
+if (idx < 0 || gCount !== 5 || ab2.byteLength !== 64 || !c1 || !d1) throw new Error("wave3 bench mismatch");
+"#;
+    let als_intl_bc = compile_source_to_bytecode(als_intl_src);
+    group.bench_function("intl_buffer_indexof_and_arraybuffer_transfer", |b| {
+        SliceIsolate::prewarm_boa_pool(1);
+        b.iter(|| {
+            let mut iso = SliceIsolate::spawn(
+                "bench-wave3",
+                1,
+                CapabilityToken::pure_compute(),
+                50_000_000,
+                16 * 1024 * 1024,
+            );
+            let res = iso
+                .execute_bytecode(black_box(&als_intl_bc), None)
+                .expect("wave3 bench execute");
+            black_box(res.highest_tier_reached)
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_boacas_and_automaton,
     bench_intrinsics_and_numeric_vm,
     bench_json_operations,
-    bench_vfs_and_stream_operations
+    bench_vfs_and_stream_operations,
+    bench_wave3_als_intl_crypto_and_buffer
 );
 criterion_main!(benches);
