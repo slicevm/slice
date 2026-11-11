@@ -592,6 +592,41 @@ impl PropertyMap {
         self.insert_with_slot(key, property, &mut dummy_slot)
     }
 
+    /// Fast path for inserting a standard data property (`writable: true`, `enumerable: true`,
+    /// `configurable: true`) on a freshly created ordinary object (such as in `JSON.parse`),
+    /// avoiding `PropertyKey`/`JsValue` clones and `PropertyDescriptor` construction.
+    #[inline]
+    pub(crate) fn insert_data_property(&mut self, key: PropertyKey, value: JsValue) {
+        if let PropertyKey::Index(index) = &key {
+            let desc = PropertyDescriptorBuilder::new()
+                .value(value)
+                .writable(true)
+                .enumerable(true)
+                .configurable(true)
+                .build();
+            self.indexed_properties.insert(index.get(), desc);
+            return;
+        }
+
+        let attributes =
+            SlotAttributes::WRITABLE | SlotAttributes::ENUMERABLE | SlotAttributes::CONFIGURABLE;
+
+        if let Some(slot) = self.shape.lookup(&key) {
+            let index = slot.index as usize;
+            if slot.attributes == attributes {
+                self.storage[index] = value;
+                return;
+            }
+        }
+
+        let transition_key = TransitionKey {
+            property_key: key,
+            attributes,
+        };
+        self.shape = self.shape.insert_property_transition(transition_key);
+        self.storage.push(value);
+    }
+
     /// Insert the given property descriptor with the given key [`PropertyMap`].
     pub(crate) fn insert_with_slot(
         &mut self,

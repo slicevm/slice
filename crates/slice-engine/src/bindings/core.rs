@@ -536,9 +536,19 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     );
 
     let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_mark_proc_dirty"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            crate::boa_realm::mark_subsystem_dirty(crate::boa_realm::DIRTY_PROCESS);
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_process_exit"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
+            crate::boa_realm::mark_subsystem_dirty(crate::boa_realm::DIRTY_PROCESS);
             let proc_obj = context
                 .global_object()
                 .get(js_string!("process"), context)

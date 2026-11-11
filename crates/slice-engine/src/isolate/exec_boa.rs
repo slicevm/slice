@@ -521,16 +521,7 @@ impl SliceIsolate {
             Err(_) => boa_engine::JsValue::undefined(),
         };
 
-        if (realm.loaded_shards_mask & (1 << 18)) != 0
-            || realm
-                .ctx
-                .global_object()
-                .get(boa_engine::js_string!("__shMask"), &mut realm.ctx)
-                .ok()
-                .and_then(|v| v.as_number())
-                .is_some_and(|n| ((n as u32) & (1 << 18)) != 0)
-        {
-            realm.loaded_shards_mask |= 1 << 18;
+        if (BOA_DIRTY_SUBSYSTEMS.with(|d| d.get()) & crate::boa_realm::DIRTY_PROCESS) != 0 {
             crate::event_loop::finalize_and_reset_process_state(&mut realm.ctx);
         }
 

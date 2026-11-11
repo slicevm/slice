@@ -99,8 +99,10 @@
     return __slice_env_get(String(k));
   };
 
+  var __pExitCode = undefined;
   function __pLazy(m) {
     return function() {
+      __slice_mark_proc_dirty();
       __loadShard(18);
       return globalThis.process[m].apply(globalThis.process, arguments);
     };
@@ -112,6 +114,12 @@
     cwd: function() { return "."; },
     get platform() { return __slice_os_platform(); },
     get arch() { return __slice_os_arch(); },
+    get exitCode() { return __pExitCode; },
+    set exitCode(v) {
+      __pExitCode = v;
+      if (v !== undefined) __slice_mark_proc_dirty();
+    },
+    _resetExitCode: function() { __pExitCode = undefined; },
     version: "v24.0.0",
     versions: { node: "24.0.0" },
     argv: globalThis.__slice_argv || ["slice"],

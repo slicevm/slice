@@ -6,7 +6,6 @@
     p.argv0 = "slice";
     p.execArgv = [];
     p.execPath = "/usr/bin/slice";
-    p.exitCode = undefined;
     var __t0 = Date.now();
     p.uptime = function() {
       return Math.max(0, (Date.now() - __t0) / 1000);
@@ -104,6 +103,7 @@
     p._exited = false;
     p.on = p.addListener = function(ev, fn) {
       if (typeof fn === "function") {
+        __slice_mark_proc_dirty();
         var k = String(ev);
         (__pEv[k] || (__pEv[k] = [])).push(fn);
         __pEvCount++;
@@ -161,7 +161,8 @@
         __pEv = Object.create(null);
         __pEvCount = 0;
       }
-      p.exitCode = undefined;
+      if (p._resetExitCode) p._resetExitCode();
+      else p.exitCode = undefined;
       p._exited = false;
     };
     p.emit = function(ev) {

@@ -931,8 +931,8 @@ const highThenAscii = JSON.parse('"\\ud800A"');
 const validPair = JSON.parse('"\\ud83d\\ude00"');
 const surrogateObj = JSON.parse('{"\\ud800":"\\udfff"}');
 
-// Deep nesting (300 levels of arrays, 250 levels of objects)
-const deepArrJson = "[".repeat(300) + "42" + "]".repeat(300);
+// Deep nesting (1000 levels of arrays, 500 levels of objects)
+const deepArrJson = "[".repeat(1000) + "42" + "]".repeat(1000);
 let curArr = JSON.parse(deepArrJson);
 let arrDepth = 0;
 while (Array.isArray(curArr)) {
@@ -940,7 +940,7 @@ while (Array.isArray(curArr)) {
     curArr = curArr[0];
 }
 
-const deepObjJson = '{"k":'.repeat(250) + '"leaf"' + '}'.repeat(250);
+const deepObjJson = '{"k":'.repeat(500) + '"leaf"' + '}'.repeat(500);
 let curObj = JSON.parse(deepObjJson);
 let objDepth = 0;
 while (curObj && typeof curObj === "object") {
@@ -948,10 +948,10 @@ while (curObj && typeof curObj === "object") {
     curObj = curObj.k;
 }
 
-// Excessive nesting (> 512) must throw SyntaxError cleanly without stack overflow
+// Excessive nesting (> 2048) must throw SyntaxError cleanly without stack overflow
 let excessiveThrew = false;
 try {
-    JSON.parse("[".repeat(600) + "1" + "]".repeat(600));
+    JSON.parse("[".repeat(2500) + "1" + "]".repeat(2500));
 } catch (e) {
     excessiveThrew = e instanceof SyntaxError;
 }
@@ -1044,9 +1044,9 @@ console.log(JSON.stringify({
     assert_eq!(out["highThenAsciiOk"], true);
     assert_eq!(out["validPairOk"], true);
     assert_eq!(out["surrogateObjOk"], true);
-    assert_eq!(out["arrDepth"], 300);
+    assert_eq!(out["arrDepth"], 1000);
     assert_eq!(out["arrLeaf"], 42);
-    assert_eq!(out["objDepth"], 250);
+    assert_eq!(out["objDepth"], 500);
     assert_eq!(out["objLeaf"], "leaf");
     assert_eq!(out["excessiveThrew"], true);
     assert_eq!(out["reviverBigSource"], "9007199254740993");

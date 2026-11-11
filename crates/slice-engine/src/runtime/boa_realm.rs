@@ -13,6 +13,7 @@ pub(crate) const DIRTY_WEBSOCKET: u8 = 1 << 3;
 pub(crate) const DIRTY_SOCKETS: u8 = 1 << 4;
 pub(crate) const DIRTY_WORKERS: u8 = 1 << 5;
 pub(crate) const DIRTY_WASM: u8 = 1 << 6;
+pub(crate) const DIRTY_PROCESS: u8 = 1 << 7;
 
 #[derive(Default, Clone)]
 pub(crate) struct ActiveBoaHttpReq {

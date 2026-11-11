@@ -582,67 +582,69 @@ pub(crate) fn handle_uncaught_js_error(err: boa_engine::JsError, ctx: &mut Conte
         .into_opaque(ctx)
         .unwrap_or_else(|e| JsValue::from(js_string!(e.to_string())));
 
-    if let Some(proc_obj) = ctx
-        .global_object()
-        .get(js_string!("process"), ctx)
-        .ok()
-        .and_then(|v| v.as_object())
-    {
-        let has_listeners = proc_obj
-            .get(js_string!("_hasListeners"), ctx)
+    if (BOA_DIRTY_SUBSYSTEMS.with(|d| d.get()) & crate::boa_realm::DIRTY_PROCESS) != 0 {
+        if let Some(proc_obj) = ctx
+            .global_object()
+            .get(js_string!("process"), ctx)
             .ok()
             .and_then(|v| v.as_object())
-            .filter(|f| f.is_callable())
-            .and_then(|f| {
-                f.call(&JsValue::from(proc_obj.clone()), &[], ctx)
-                    .ok()
-                    .map(|v| v.to_boolean())
-            })
-            .unwrap_or(false);
-
-        if has_listeners {
-            if let Some(emit_fn) = proc_obj
-                .get(js_string!("emit"), ctx)
+        {
+            let has_listeners = proc_obj
+                .get(js_string!("_hasListeners"), ctx)
                 .ok()
                 .and_then(|v| v.as_object())
                 .filter(|f| f.is_callable())
-            {
-                let _ = emit_fn.call(
-                    &JsValue::from(proc_obj.clone()),
-                    &[
-                        JsValue::from(js_string!("uncaughtExceptionMonitor")),
-                        err_val.clone(),
-                        JsValue::from(js_string!("uncaughtException")),
-                    ],
-                    ctx,
-                );
-                if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
-                    return true;
-                }
-                match emit_fn.call(
-                    &JsValue::from(proc_obj),
-                    &[
-                        JsValue::from(js_string!("uncaughtException")),
-                        err_val,
-                        JsValue::from(js_string!("uncaughtException")),
-                    ],
-                    ctx,
-                ) {
-                    Ok(v) if v.to_boolean() => {
-                        let _ = run_jobs_and_check_rejections(ctx);
-                        return BOA_UNCAUGHT_ERROR.with(|e| e.borrow().is_none())
-                            && BOA_VIOLATION.with(|v| v.borrow().is_none());
+                .and_then(|f| {
+                    f.call(&JsValue::from(proc_obj.clone()), &[], ctx)
+                        .ok()
+                        .map(|v| v.to_boolean())
+                })
+                .unwrap_or(false);
+
+            if has_listeners {
+                if let Some(emit_fn) = proc_obj
+                    .get(js_string!("emit"), ctx)
+                    .ok()
+                    .and_then(|v| v.as_object())
+                    .filter(|f| f.is_callable())
+                {
+                    let _ = emit_fn.call(
+                        &JsValue::from(proc_obj.clone()),
+                        &[
+                            JsValue::from(js_string!("uncaughtExceptionMonitor")),
+                            err_val.clone(),
+                            JsValue::from(js_string!("uncaughtException")),
+                        ],
+                        ctx,
+                    );
+                    if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+                        return true;
                     }
-                    Err(handler_err) => {
-                        if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
-                            return true;
+                    match emit_fn.call(
+                        &JsValue::from(proc_obj),
+                        &[
+                            JsValue::from(js_string!("uncaughtException")),
+                            err_val,
+                            JsValue::from(js_string!("uncaughtException")),
+                        ],
+                        ctx,
+                    ) {
+                        Ok(v) if v.to_boolean() => {
+                            let _ = run_jobs_and_check_rejections(ctx);
+                            return BOA_UNCAUGHT_ERROR.with(|e| e.borrow().is_none())
+                                && BOA_VIOLATION.with(|v| v.borrow().is_none());
                         }
-                        let h_formatted = format_uncaught_js_error(&handler_err, ctx);
-                        BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = Some(h_formatted));
-                        BOA_LAST_EXIT_CODE.with(|c| c.set(Some(1)));
-                        return false;
+                        Err(handler_err) => {
+                            if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+                                return true;
+                            }
+                            let h_formatted = format_uncaught_js_error(&handler_err, ctx);
+                            BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = Some(h_formatted));
+                            BOA_LAST_EXIT_CODE.with(|c| c.set(Some(1)));
+                            return false;
+                        }
+                        Ok(_) => {}
                     }
-                    Ok(_) => {}
                 }
             }
         }
@@ -663,11 +665,16 @@ pub(crate) fn drain_unhandled_rejections(ctx: &mut Context) -> bool {
             return false;
         }
         let pending = BOA_UNHANDLED_REJECTIONS.with(|u| std::mem::take(&mut *u.borrow_mut()));
-        let proc_obj = ctx
-            .global_object()
-            .get(js_string!("process"), ctx)
-            .ok()
-            .and_then(|v| v.as_object());
+        let proc_dirty =
+            (BOA_DIRTY_SUBSYSTEMS.with(|d| d.get()) & crate::boa_realm::DIRTY_PROCESS) != 0;
+        let proc_obj = if proc_dirty {
+            ctx.global_object()
+                .get(js_string!("process"), ctx)
+                .ok()
+                .and_then(|v| v.as_object())
+        } else {
+            None
+        };
         let has_ur_listener = proc_obj
             .as_ref()
             .and_then(|p| {
@@ -770,7 +777,8 @@ pub(crate) fn run_jobs_and_check_rejections(ctx: &mut Context) -> bool {
 }
 
 fn try_emit_before_exit(ctx: &mut Context, before_exit_count: &mut usize) -> bool {
-    if *before_exit_count >= 64
+    if (BOA_DIRTY_SUBSYSTEMS.with(|d| d.get()) & crate::boa_realm::DIRTY_PROCESS) == 0
+        || *before_exit_count >= 64
         || BOA_PROCESS_EXIT.with(|e| e.get().is_some())
         || BOA_UNCAUGHT_ERROR.with(|e| e.borrow().is_some())
         || BOA_VIOLATION.with(|v| v.borrow().is_some())
@@ -890,6 +898,13 @@ pub(crate) fn finalize_and_reset_process_state(ctx: &mut Context) {
         .filter(|f| f.is_callable())
     {
         let _ = reset_fn.call(&JsValue::from(proc_obj), &[], ctx);
+    } else if let Some(reset_ec_fn) = proc_obj
+        .get(js_string!("_resetExitCode"), ctx)
+        .ok()
+        .and_then(|v| v.as_object())
+        .filter(|f| f.is_callable())
+    {
+        let _ = reset_ec_fn.call(&JsValue::from(proc_obj), &[], ctx);
     }
 }
 
