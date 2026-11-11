@@ -28,8 +28,9 @@ pub use archive::{
     CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION,
 };
 pub use bundler::{
-    bundle_entrypoint_with_deps, map_bundled_error_location, map_bundled_stack_trace,
-    resolve_project_entrypoint,
+    bundle_entrypoint_with_deps, map_bundled_error_location,
+    map_bundled_error_location_with_offset, map_bundled_stack_trace,
+    map_bundled_stack_trace_with_offset, resolve_project_entrypoint,
 };
 pub use compiler::{
     analyze_typescript_semantics, check_syntax_source, fuse_array_pipelines_ast,

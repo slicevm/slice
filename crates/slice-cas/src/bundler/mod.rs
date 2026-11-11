@@ -16,6 +16,6 @@ pub use resolver::{
     ResolverCacheGuard,
 };
 pub use source_map::{
-    compute_source_line_map, map_bundled_error_location, map_bundled_stack_trace,
-    short_source_label,
+    compute_source_line_map, map_bundled_error_location, map_bundled_error_location_with_offset,
+    map_bundled_stack_trace, map_bundled_stack_trace_with_offset, short_source_label,
 };
