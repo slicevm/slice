@@ -2547,3 +2547,460 @@ fn test_phase5_conformance_scorecard_ecmascript_wintertc_and_node() {
     assert_eq!(res["node_builtins_loaded"], 31);
     assert_eq!(res["node_builtins_total"], 31);
 }
+
+#[test]
+fn test_wave2_node_fs_and_fs_promises_error_codes_descriptors_and_semantics() {
+    let script = r#"
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+
+async function run() {
+    const out: Record<string, any> = {};
+
+    // 1. ENOENT error codes across sync and promises APIs
+    const syncEnoentOps: Array<[string, () => any]> = [
+        ["readFileSync", () => fs.readFileSync("/tmp/wave2-no-such-file.txt")],
+        ["statSync", () => fs.statSync("/tmp/wave2-no-such-file.txt")],
+        ["lstatSync", () => fs.lstatSync("/tmp/wave2-no-such-file.txt")],
+        ["unlinkSync", () => fs.unlinkSync("/tmp/wave2-no-such-file.txt")],
+        ["rmdirSync", () => fs.rmdirSync("/tmp/wave2-no-such-dir")],
+        ["readdirSync", () => fs.readdirSync("/tmp/wave2-no-such-dir")],
+        ["renameSync", () => fs.renameSync("/tmp/wave2-no-src", "/tmp/wave2-no-dst")],
+        ["copyFileSync", () => fs.copyFileSync("/tmp/wave2-no-src", "/tmp/wave2-no-dst")],
+        ["openSync", () => fs.openSync("/tmp/wave2-no-such-file.txt", "r")]
+    ];
+    out.syncEnoentAllMatch = syncEnoentOps.every(([name, fn]) => {
+        try {
+            fn();
+            return false;
+        } catch (e: any) {
+            return e && e.code === "ENOENT" && e.errno === -2 && typeof e.syscall === "string";
+        }
+    });
+
+    try {
+        await fsp.readFile("/tmp/wave2-no-such-async.txt");
+        out.asyncEnoent = false;
+    } catch (e: any) {
+        out.asyncEnoent = e && e.code === "ENOENT";
+    }
+
+    // 2. statSync / lstatSync with { throwIfNoEntry: false }
+    out.statNoThrow = fs.statSync("/tmp/wave2-no-such-file.txt", { throwIfNoEntry: false }) === undefined;
+    out.lstatNoThrow = fs.lstatSync("/tmp/wave2-no-such-file.txt", { throwIfNoEntry: false }) === undefined;
+
+    // 3. EEXIST, EISDIR, ENOTDIR, ENOTEMPTY
+    fs.mkdirSync("/tmp/wave2-dir", { recursive: true });
+    try {
+        fs.mkdirSync("/tmp/wave2-dir");
+        out.mkdirEexist = false;
+    } catch (e: any) {
+        out.mkdirEexist = e && e.code === "EEXIST";
+    }
+    out.mkdirRecursiveOk = fs.mkdirSync("/tmp/wave2-dir", { recursive: true }) === undefined || true;
+
+    try {
+        fs.readFileSync("/tmp/wave2-dir");
+        out.readDirEisdir = false;
+    } catch (e: any) {
+        out.readDirEisdir = e && e.code === "EISDIR";
+    }
+
+    fs.writeFileSync("/tmp/wave2-dir/child.txt", "hello");
+    try {
+        fs.readdirSync("/tmp/wave2-dir/child.txt");
+        out.readdirFileEnotdir = false;
+    } catch (e: any) {
+        out.readdirFileEnotdir = e && e.code === "ENOTDIR";
+    }
+
+    try {
+        fs.rmdirSync("/tmp/wave2-dir");
+        out.rmdirNonEmpty = false;
+    } catch (e: any) {
+        out.rmdirNonEmpty = e && e.code === "ENOTEMPTY";
+    }
+
+    try {
+        fs.writeFileSync("/tmp/wave2-dir/child.txt", "dup", { flag: "wx" });
+        out.wxEexist = false;
+    } catch (e: any) {
+        out.wxEexist = e && e.code === "EEXIST";
+    }
+
+    // 4. Default Buffer return vs string encoding on readFileSync / fsp.readFile
+    const rawBytes = new Uint8Array([0x00, 0xff, 0xfe, 0x41, 0x42, 0x80]);
+    fs.writeFileSync("/tmp/wave2-bin.dat", rawBytes);
+    const readBuf = fs.readFileSync("/tmp/wave2-bin.dat");
+    const readAsyncBuf = await fsp.readFile("/tmp/wave2-bin.dat");
+    out.readBufIsBuffer = Buffer.isBuffer(readBuf);
+    out.readAsyncBufIsBuffer = Buffer.isBuffer(readAsyncBuf);
+    out.readBufExact = readBuf.length === 6 && readBuf[0] === 0x00 && readBuf[1] === 0xff && readBuf[2] === 0xfe && readBuf[5] === 0x80;
+
+    // 5. writeFileSync & fsp.writeFile with { flag: "a" }
+    fs.writeFileSync("/tmp/wave2-append.txt", "part1");
+    fs.writeFileSync("/tmp/wave2-append.txt", "-part2", { flag: "a" });
+    await fsp.writeFile("/tmp/wave2-append.txt", "-part3", { flag: "a" });
+    out.appendResult = fs.readFileSync("/tmp/wave2-append.txt", "utf8");
+
+    // 6. utimesSync & mtime persistence
+    const targetMtimeSec = 1700000123;
+    fs.utimesSync("/tmp/wave2-append.txt", targetMtimeSec, targetMtimeSec);
+    const stAfterUtimes = fs.statSync("/tmp/wave2-append.txt");
+    out.utimesMtimeMs = stAfterUtimes.mtimeMs;
+    out.utimesDateMatch = stAfterUtimes.mtime.getTime() === targetMtimeSec * 1000;
+
+    // 7. readdirSync with { recursive: true } and { withFileTypes: true }
+    fs.mkdirSync("/tmp/wave2-tree/a/b", { recursive: true });
+    fs.writeFileSync("/tmp/wave2-tree/root.txt", "r");
+    fs.writeFileSync("/tmp/wave2-tree/a/mid.txt", "m");
+    fs.writeFileSync("/tmp/wave2-tree/a/b/leaf.txt", "l");
+    const recNames = fs.readdirSync("/tmp/wave2-tree", { recursive: true }).sort();
+    const recDirents = fs.readdirSync("/tmp/wave2-tree", { recursive: true, withFileTypes: true });
+    out.recNames = recNames;
+    out.recDirentsCount = recDirents.length;
+    out.recHasLeafFile = recDirents.some((d: any) => d.name === "leaf.txt" && d.parentPath === "/tmp/wave2-tree/a/b" && d.isFile() && !d.isDirectory());
+    out.recHasSubDir = recDirents.some((d: any) => d.name === "b" && d.parentPath === "/tmp/wave2-tree/a" && d.isDirectory());
+
+    // 8. File descriptor table: openSync, writeSync, readSync, fstatSync, ftruncateSync, closeSync, fsp.open
+    const fd = fs.openSync("/tmp/wave2-fd.txt", "w+");
+    const written1 = fs.writeSync(fd, Buffer.from("Hello FD World"));
+    const fst1 = fs.fstatSync(fd);
+    fs.ftruncateSync(fd, 8);
+    const fst2 = fs.fstatSync(fd);
+    const rbuf = Buffer.alloc(8);
+    const bytesRead = fs.readSync(fd, rbuf, 0, 8, 0);
+    fs.closeSync(fd);
+    let closedEbadf = false;
+    try {
+        fs.readSync(fd, rbuf, 0, 4, 0);
+    } catch (e: any) {
+        closedEbadf = e && e.code === "EBADF";
+    }
+
+    const fh = await fsp.open("/tmp/wave2-fd.txt", "r+");
+    await fh.write("!", 8, "utf8");
+    const fhBuf = Buffer.alloc(9);
+    const fhRead = await fh.read(fhBuf, 0, 9, 0);
+    await fh.close();
+
+    out.fdWritten1 = written1;
+    out.fdSizeBeforeTrunc = fst1.size;
+    out.fdSizeAfterTrunc = fst2.size;
+    out.fdReadStr = rbuf.toString("utf8", 0, bytesRead);
+    out.closedEbadf = closedEbadf;
+    out.fhReadStr = fhBuf.toString("utf8", 0, fhRead.bytesRead);
+
+    console.log(JSON.stringify(out));
+}
+run();
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/tmp")
+        .with_write_prefix("/tmp");
+    let mut iso = SliceIsolate::spawn("wave2-fs-semantics", 1, caps, 10_000_000, 16 * 1024 * 1024);
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+
+    assert_eq!(out["syncEnoentAllMatch"], true);
+    assert_eq!(out["asyncEnoent"], true);
+    assert_eq!(out["statNoThrow"], true);
+    assert_eq!(out["lstatNoThrow"], true);
+    assert_eq!(out["mkdirEexist"], true);
+    assert_eq!(out["mkdirRecursiveOk"], true);
+    assert_eq!(out["readDirEisdir"], true);
+    assert_eq!(out["readdirFileEnotdir"], true);
+    assert_eq!(out["rmdirNonEmpty"], true);
+    assert_eq!(out["wxEexist"], true);
+    assert_eq!(out["readBufIsBuffer"], true);
+    assert_eq!(out["readAsyncBufIsBuffer"], true);
+    assert_eq!(out["readBufExact"], true);
+    assert_eq!(out["appendResult"], "part1-part2-part3");
+    assert_eq!(out["utimesMtimeMs"], 1_700_000_123_000.0);
+    assert_eq!(out["utimesDateMatch"], true);
+    assert_eq!(
+        out["recNames"],
+        serde_json::json!(["a", "a/b", "a/b/leaf.txt", "a/mid.txt", "root.txt"])
+    );
+    assert_eq!(out["recDirentsCount"], 5);
+    assert_eq!(out["recHasLeafFile"], true);
+    assert_eq!(out["recHasSubDir"], true);
+    assert_eq!(out["fdWritten1"], 14);
+    assert_eq!(out["fdSizeBeforeTrunc"], 14);
+    assert_eq!(out["fdSizeAfterTrunc"], 8);
+    assert_eq!(out["fdReadStr"], "Hello FD");
+    assert_eq!(out["closedEbadf"], true);
+    assert_eq!(out["fhReadStr"], "Hello FD!");
+
+    // Verify OCap FsReadDenied still traps cleanly even if guest code wraps readFileSync in try/catch
+    let ocap_bypass_attempt = r#"
+import fs from "node:fs";
+try {
+    fs.readFileSync("/etc/passwd");
+} catch (_e) {}
+"#;
+    let ocap_bc = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        ocap_bypass_attempt,
+        true,
+    ));
+    let mut iso_no_fs = SliceIsolate::spawn(
+        "wave2-fs-ocap-guard",
+        1,
+        CapabilityToken::pure_compute().with_read_prefix("/tmp"),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    let err = iso_no_fs.execute_bytecode(&ocap_bc, None).unwrap_err();
+    assert!(
+        matches!(err, SandboxViolation::FsReadDenied { .. }),
+        "Expected FsReadDenied, got {:?}",
+        err
+    );
+}
+
+#[test]
+fn test_wave2_streams_string_decoder_backpressure_and_web_async_iteration() {
+    let script = r#"
+import { StringDecoder } from "node:string_decoder";
+import { Readable, Writable } from "node:stream";
+
+async function run() {
+    const out: Record<string, any> = {};
+
+    // 1. StringDecoder multi-byte UTF-8 (1-byte and 2-byte splits across 2/3/4-byte codepoints)
+    const fullUtf8Text = "Café €100 🎉 日本語";
+    const utf8Bytes = Buffer.from(fullUtf8Text, "utf8");
+    const sd1 = new StringDecoder("utf8");
+    let decoded1By1 = "";
+    for (let i = 0; i < utf8Bytes.length; i++) {
+        decoded1By1 += sd1.write(utf8Bytes.subarray(i, i + 1));
+    }
+    decoded1By1 += sd1.end();
+    out.utf8ByteByByteMatch = decoded1By1 === fullUtf8Text;
+
+    // 2. StringDecoder UTF-16LE odd-byte and surrogate splits
+    const utf16Bytes = Buffer.from("Hi 🎉!", "utf16le");
+    const sd16 = new StringDecoder("utf16le");
+    let decoded16 = "";
+    for (let i = 0; i < utf16Bytes.length; i++) {
+        decoded16 += sd16.write(utf16Bytes.subarray(i, i + 1));
+    }
+    decoded16 += sd16.end();
+    out.utf16ByteByByteMatch = decoded16 === "Hi 🎉!";
+
+    // 3. StringDecoder Base64 chunked streaming
+    const b64Input = Buffer.from("slice-stream-base64-payload");
+    const sdB64 = new StringDecoder("base64");
+    let b64Out = "";
+    for (let i = 0; i < b64Input.length; i += 2) {
+        b64Out += sdB64.write(b64Input.subarray(i, Math.min(i + 2, b64Input.length)));
+    }
+    b64Out += sdB64.end();
+    out.b64Match = b64Out === b64Input.toString("base64");
+
+    // 4. Readable with setEncoding("utf8") receiving split multi-byte buffers
+    const emojiBuf = Buffer.from("🎉🚀", "utf8"); // 8 bytes
+    const rEncoded = new Readable({
+        read() {
+            this.push(emojiBuf.subarray(0, 2));
+            this.push(emojiBuf.subarray(2, 5));
+            this.push(emojiBuf.subarray(5, 8));
+            this.push(null);
+        }
+    });
+    rEncoded.setEncoding("utf8");
+    let rEncodedStr = "";
+    for await (const chunk of rEncoded) {
+        rEncodedStr += chunk;
+    }
+    out.readableSetEncodingMatch = rEncodedStr === "🎉🚀";
+
+    // 5. Writable highWaterMark backpressure and 'drain' event
+    const pendingCallbacks: Array<() => void> = [];
+    const wBackpressure = new Writable({
+        highWaterMark: 4,
+        write(_chunk, _enc, cb) {
+            pendingCallbacks.push(() => cb(null));
+        }
+    });
+    const w1 = wBackpressure.write("abcd"); // 4 bytes >= hwm(4) -> false
+    let drained = false;
+    wBackpressure.on("drain", () => {
+        drained = true;
+    });
+    while (pendingCallbacks.length > 0) {
+        const fn = pendingCallbacks.shift()!;
+        fn();
+    }
+    out.backpressureReturnedFalse = w1 === false;
+    out.drainEventFired = drained === true;
+
+    // 6. ReadableStream async iteration (`for await...of` and `.values()`)
+    const asyncRs = new ReadableStream({
+        start(ctrl) {
+            setTimeout(() => {
+                ctrl.enqueue("chunk-1");
+                ctrl.enqueue("chunk-2");
+                ctrl.close();
+            }, 1);
+        }
+    });
+    const rsIterated: string[] = [];
+    for await (const item of asyncRs) {
+        rsIterated.push(String(item));
+    }
+    out.rsAsyncIterator = rsIterated;
+
+    // 7. Readable.toWeb(Readable.from(...)) -> new Response(webStream).text()
+    const nodeReadable = Readable.from([Buffer.from("hello "), Buffer.from("web "), Buffer.from("response")]);
+    const webConverted = Readable.toWeb(nodeReadable);
+    const respText = await new Response(webConverted).text();
+    out.toWebResponseText = respText;
+
+    console.log(JSON.stringify(out));
+}
+run();
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "wave2-streams-decoder",
+        1,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        16 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+
+    assert_eq!(out["utf8ByteByByteMatch"], true);
+    assert_eq!(out["utf16ByteByByteMatch"], true);
+    assert_eq!(out["b64Match"], true);
+    assert_eq!(out["readableSetEncodingMatch"], true);
+    assert_eq!(out["backpressureReturnedFalse"], true);
+    assert_eq!(out["drainEventFired"], true);
+    assert_eq!(
+        out["rsAsyncIterator"],
+        serde_json::json!(["chunk-1", "chunk-2"])
+    );
+    assert_eq!(out["toWebResponseText"], "hello web response");
+}
+
+#[test]
+fn test_wave2_child_process_shell_pipelines_stdin_and_enoent() {
+    let script = r#"
+import cp from "node:child_process";
+
+async function run() {
+    const out: Record<string, any> = {};
+
+    // 1. execSync with shell operators (&&, ||, ;) and pipeline (|)
+    out.chainAnd = cp.execSync("echo alpha && echo beta").toString().trim().replace(/\r\n/g, "\n");
+    out.chainOr = cp.execSync("false || echo fallback-ok").toString().trim();
+    out.pipelineUpper = cp.execSync("echo hello world | tr a-z A-Z").toString().trim();
+
+    // 2. execSync non-zero exit code attaches err.status
+    try {
+        cp.execSync("exit 42");
+        out.exit42Status = 0;
+    } catch (e: any) {
+        out.exit42Status = e.status;
+    }
+
+    // 3. async exec with shell pipeline
+    out.asyncExecPipe = await new Promise<string>((resolve, reject) => {
+        cp.exec("echo async-pipe | tr a-z A-Z", (err: any, stdout: any) => {
+            if (err) reject(err);
+            else resolve(String(stdout).trim());
+        });
+    });
+
+    // 4. spawn with stdin.write() + stdin.end() piped to child stdout
+    out.spawnStdinCat = await new Promise<string>((resolve, reject) => {
+        const child = cp.spawn("cat", []);
+        let collected = "";
+        child.stdout.on("data", (d: any) => {
+            collected += Buffer.isBuffer(d) ? d.toString("utf8") : String(d);
+        });
+        child.on("error", reject);
+        child.on("close", () => resolve(collected));
+        child.stdin.write("piped-line-1\n");
+        child.stdin.write(Buffer.from("piped-line-2"));
+        child.stdin.end();
+    });
+
+    // 5. spawnSync & spawn ENOENT handling for non-existent binary
+    const missingSync = cp.spawnSync("/nonexistent_slice_binary_xyz");
+    out.spawnSyncEnoentCode = missingSync.error ? missingSync.error.code : null;
+    out.spawnSyncStatusNull = missingSync.status === null;
+
+    out.spawnAsyncEnoentCode = await new Promise<string>((resolve) => {
+        const badChild = cp.spawn("/nonexistent_slice_binary_xyz");
+        badChild.on("error", (err: any) => {
+            resolve(String(err.code));
+        });
+    });
+
+    console.log(JSON.stringify(out));
+}
+run();
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let caps = CapabilityToken::pure_compute()
+        .with_exec_binary("/bin/sh")
+        .with_exec_binary("sh")
+        .with_exec_binary("echo")
+        .with_exec_binary("tr")
+        .with_exec_binary("cat")
+        .with_exec_binary("false")
+        .with_exec_binary("/nonexistent_slice_binary_xyz");
+    let mut iso = SliceIsolate::spawn(
+        "wave2-child-process",
+        1,
+        caps,
+        10_000_000,
+        16 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+
+    assert_eq!(out["chainAnd"], "alpha\nbeta");
+    assert_eq!(out["chainOr"], "fallback-ok");
+    assert_eq!(out["pipelineUpper"], "HELLO WORLD");
+    assert_eq!(out["exit42Status"], 42);
+    assert_eq!(out["asyncExecPipe"], "ASYNC-PIPE");
+    assert_eq!(out["spawnStdinCat"], "piped-line-1\npiped-line-2");
+    assert_eq!(out["spawnSyncEnoentCode"], "ENOENT");
+    assert_eq!(out["spawnSyncStatusNull"], true);
+    assert_eq!(out["spawnAsyncEnoentCode"], "ENOENT");
+
+    // Verify OCap ExecDenied when shell/binary is not permitted
+    let unauthorized_exec = r#"
+import cp from "node:child_process";
+cp.execSync("echo hi && echo bye");
+"#;
+    let unauth_bc = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        unauthorized_exec,
+        true,
+    ));
+    let mut iso_no_exec = SliceIsolate::spawn(
+        "wave2-exec-ocap-guard",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    let err = iso_no_exec.execute_bytecode(&unauth_bc, None).unwrap_err();
+    assert!(
+        matches!(err, SandboxViolation::ExecDenied { .. }),
+        "Expected ExecDenied, got {:?}",
+        err
+    );
+}
+

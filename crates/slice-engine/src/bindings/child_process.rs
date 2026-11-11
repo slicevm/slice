@@ -5,7 +5,7 @@ use crate::boa_realm::{
     check_boa_fs_read_ocap, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, BOA_KV_MEM_BUDGET,
     BOA_LAST_CHILD_PROC_VIOLATION, BOA_VIOLATION,
 };
-use crate::intrinsics::base64_encode;
+use crate::intrinsics::{base64_decode, base64_encode};
 use crate::state_and_kv::verify_egress_secrets_slice;
 use slice_sandbox::SandboxViolation;
 
@@ -17,6 +17,8 @@ struct ChildProcessSpawnOpts {
     env: Option<std::collections::BTreeMap<String, serde_json::Value>>,
     #[serde(default)]
     input: Option<String>,
+    #[serde(default, rename = "inputBase64")]
+    input_base64: Option<String>,
     #[serde(default)]
     timeout: Option<u64>,
     #[serde(default, rename = "maxBuffer")]
@@ -39,14 +41,284 @@ fn is_restricted_loader_env_key(key: &str) -> bool {
         )
 }
 
-type SubprocessSyncResult = Result<(i32, Vec<u8>, Vec<u8>, Option<String>), String>;
+type SubprocessSyncResult = Result<
+    (
+        Option<i32>,
+        Vec<u8>,
+        Vec<u8>,
+        Option<String>,
+        Option<(String, i32)>,
+    ),
+    String,
+>;
+
+fn expand_tr_set(spec: &str) -> Vec<u8> {
+    let bytes = spec.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 2 < bytes.len() && bytes[i + 1] == b'-' && bytes[i] <= bytes[i + 2] {
+            for b in bytes[i]..=bytes[i + 2] {
+                out.push(b);
+            }
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn split_shell_words(cmd: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for ch in cmd.chars() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else {
+                cur.push(ch);
+            }
+        } else if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+        } else if ch.is_whitespace() {
+            if !cur.is_empty() {
+                words.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(ch);
+        }
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
+fn try_eval_portable_shell_atom(
+    cmd: &str,
+    child_env: &std::collections::BTreeMap<String, String>,
+    stdin_bytes: &[u8],
+) -> Option<(i32, Vec<u8>, Vec<u8>)> {
+    let words = split_shell_words(cmd.trim());
+    let first = words.first()?;
+    let norm = first.replace('\\', "/");
+    let base = norm
+        .rsplit('/')
+        .next()
+        .unwrap_or(norm.as_str())
+        .to_ascii_lowercase();
+    let rest = &words[1..];
+    match base.as_str() {
+        "echo" => {
+            let mut out = String::new();
+            let (no_nl, slice) = if rest.first().map(|s| s.as_str()) == Some("-n") {
+                (true, &rest[1..])
+            } else {
+                (false, rest)
+            };
+            for (i, a) in slice.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                if let Some(var_name) = a.strip_prefix('$') {
+                    let clean = var_name.trim_matches(|c: char| c == '{' || c == '}');
+                    out.push_str(child_env.get(clean).map(|s| s.as_str()).unwrap_or(""));
+                } else {
+                    out.push_str(a);
+                }
+            }
+            if !no_nl {
+                out.push('\n');
+            }
+            Some((0, out.into_bytes(), Vec::new()))
+        }
+        "cat" if rest.is_empty() => Some((0, stdin_bytes.to_vec(), Vec::new())),
+        "tr" if rest.len() == 2 => {
+            let set1 = expand_tr_set(&rest[0]);
+            let set2 = expand_tr_set(&rest[1]);
+            let mut out = stdin_bytes.to_vec();
+            if !set1.is_empty() && !set2.is_empty() {
+                for b in &mut out {
+                    if let Some(pos) = set1.iter().position(|&x| x == *b) {
+                        let mapped_idx = pos.min(set2.len() - 1);
+                        *b = set2[mapped_idx];
+                    }
+                }
+            }
+            Some((0, out, Vec::new()))
+        }
+        "exit" => {
+            let code = rest
+                .first()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(0);
+            Some((code & 0xFF, Vec::new(), Vec::new()))
+        }
+        "true" => Some((0, Vec::new(), Vec::new())),
+        "false" => Some((1, Vec::new(), Vec::new())),
+        "env" if rest.is_empty() => {
+            let mut out = String::new();
+            for (k, v) in child_env {
+                out.push_str(k);
+                out.push('=');
+                out.push_str(v);
+                out.push('\n');
+            }
+            Some((0, out.into_bytes(), Vec::new()))
+        }
+        "printenv" => {
+            if rest.is_empty() {
+                let mut out = String::new();
+                for (k, v) in child_env {
+                    out.push_str(k);
+                    out.push('=');
+                    out.push_str(v);
+                    out.push('\n');
+                }
+                return Some((0, out.into_bytes(), Vec::new()));
+            }
+            if let Some(val) = child_env.get(&rest[0]) {
+                Some((0, format!("{}\n", val).into_bytes(), Vec::new()))
+            } else {
+                Some((1, Vec::new(), Vec::new()))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn try_eval_portable_shell_script(
+    script: &str,
+    child_env: &std::collections::BTreeMap<String, String>,
+    initial_stdin: &[u8],
+    max_buffer: usize,
+) -> Option<SubprocessSyncResult> {
+    if script
+        .bytes()
+        .any(|b| matches!(b, b'`' | b'>' | b'<' | b'(' | b')'))
+    {
+        return None;
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ChainOp {
+        Always,
+        And,
+        Or,
+    }
+    let mut clauses: Vec<(ChainOp, &str)> = Vec::new();
+    let bytes = script.as_bytes();
+    let mut start = 0;
+    let mut next_op = ChainOp::Always;
+    let mut i = 0;
+    let mut in_quote: Option<u8> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = in_quote {
+            if b == q {
+                in_quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'\'' || b == b'"' {
+            in_quote = Some(b);
+            i += 1;
+            continue;
+        }
+        if b == b';' {
+            clauses.push((next_op, &script[start..i]));
+            next_op = ChainOp::Always;
+            i += 1;
+            start = i;
+        } else if i + 1 < bytes.len() && b == b'&' && bytes[i + 1] == b'&' {
+            clauses.push((next_op, &script[start..i]));
+            next_op = ChainOp::And;
+            i += 2;
+            start = i;
+        } else if i + 1 < bytes.len() && b == b'|' && bytes[i + 1] == b'|' {
+            clauses.push((next_op, &script[start..i]));
+            next_op = ChainOp::Or;
+            i += 2;
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    if start < bytes.len() {
+        clauses.push((next_op, &script[start..]));
+    }
+    if clauses.is_empty() {
+        return Some(Ok((Some(0), Vec::new(), Vec::new(), None, None)));
+    }
+
+    let mut total_stdout = Vec::new();
+    let mut total_stderr = Vec::new();
+    let mut last_status = 0;
+
+    for (idx, (op, clause_raw)) in clauses.into_iter().enumerate() {
+        let clause = clause_raw.trim();
+        if clause.is_empty() {
+            continue;
+        }
+        match op {
+            ChainOp::Always => {}
+            ChainOp::And if last_status != 0 => continue,
+            ChainOp::Or if last_status == 0 => continue,
+            _ => {}
+        }
+        let stages: Vec<&str> = clause.split('|').collect();
+        let mut pipe_data = if idx == 0 {
+            initial_stdin.to_vec()
+        } else {
+            Vec::new()
+        };
+        let mut clause_status = 0;
+        let mut exited_early = false;
+        for (s_idx, stage) in stages.iter().enumerate() {
+            let trimmed = stage.trim();
+            let (st, out_b, err_b) =
+                try_eval_portable_shell_atom(trimmed, child_env, &pipe_data)?;
+            clause_status = st;
+            total_stderr.extend_from_slice(&err_b);
+            if s_idx + 1 < stages.len() {
+                pipe_data = out_b;
+            } else {
+                total_stdout.extend_from_slice(&out_b);
+            }
+            if trimmed == "exit" || trimmed.starts_with("exit ") {
+                exited_early = true;
+                break;
+            }
+        }
+        last_status = clause_status;
+        if total_stdout.len().saturating_add(total_stderr.len()) > max_buffer {
+            return Some(Err(
+                "RangeError [ERR_CHILD_PROCESS_STDIO_MAXBUFFER]: stdout/stderr maxBuffer length exceeded"
+                    .to_string(),
+            ));
+        }
+        if exited_early {
+            break;
+        }
+    }
+    Some(Ok((
+        Some(last_status),
+        total_stdout,
+        total_stderr,
+        None,
+        None,
+    )))
+}
 
 fn execute_sanitized_subprocess_sync(
     file: &str,
     args: &[String],
     child_env: &std::collections::BTreeMap<String, String>,
     cwd: Option<&str>,
-    stdin_input: Option<&str>,
+    stdin_input: Option<&[u8]>,
     timeout_ms: u64,
     max_buffer: usize,
 ) -> SubprocessSyncResult {
@@ -62,9 +334,36 @@ fn execute_sanitized_subprocess_sync(
         .unwrap_or(base_raw)
         .to_ascii_lowercase();
 
-    // Portable built-in handling for standard POSIX utilities (`echo`, `env`, `printenv`, `true`, `false`)
+    // Portable built-in handling for standard POSIX utilities (`echo`, `cat`, `tr`, `exit`, `env`, `printenv`, `true`, `false`, `sh -c`)
     // after Ring 1 (`ExecCap`) and Ring 2 (`BOA_ENV_MAP` sanitization) have verified authority.
     match base_cmd.as_str() {
+        "sh" if args.len() == 2 && args[0] == "-c" => {
+            if let Some(res) = try_eval_portable_shell_script(
+                &args[1],
+                child_env,
+                stdin_input.unwrap_or(&[]),
+                max_buffer,
+            ) {
+                return res;
+            }
+        }
+        "cat" if args.is_empty() => {
+            let out_bytes = stdin_input.unwrap_or(&[]).to_vec();
+            if out_bytes.len() > max_buffer {
+                return Err(
+                    "RangeError [ERR_CHILD_PROCESS_STDIO_MAXBUFFER]: stdout maxBuffer length exceeded"
+                        .to_string(),
+                );
+            }
+            return Ok((Some(0), out_bytes, Vec::new(), None, None));
+        }
+        "exit" => {
+            let code = args
+                .first()
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(0);
+            return Ok((Some(code & 0xFF), Vec::new(), Vec::new(), None, None));
+        }
         "echo" => {
             let mut out = String::new();
             let (no_newline, slice) = if args.first().map(|s| s.as_str()) == Some("-n") {
@@ -88,7 +387,7 @@ fn execute_sanitized_subprocess_sync(
                         .to_string(),
                 );
             }
-            return Ok((0, out_bytes, Vec::new(), None));
+            return Ok((Some(0), out_bytes, Vec::new(), None, None));
         }
         "env" if args.is_empty() => {
             let mut out = String::new();
@@ -105,7 +404,7 @@ fn execute_sanitized_subprocess_sync(
                         .to_string(),
                 );
             }
-            return Ok((0, out_bytes, Vec::new(), None));
+            return Ok((Some(0), out_bytes, Vec::new(), None, None));
         }
         "printenv" => {
             if args.is_empty() {
@@ -123,7 +422,7 @@ fn execute_sanitized_subprocess_sync(
                             .to_string(),
                     );
                 }
-                return Ok((0, out_bytes, Vec::new(), None));
+                return Ok((Some(0), out_bytes, Vec::new(), None, None));
             }
             let key = &args[0];
             if let Some(val) = child_env.get(key) {
@@ -134,12 +433,12 @@ fn execute_sanitized_subprocess_sync(
                             .to_string(),
                     );
                 }
-                return Ok((0, out_bytes, Vec::new(), None));
+                return Ok((Some(0), out_bytes, Vec::new(), None, None));
             }
-            return Ok((1, Vec::new(), Vec::new(), None));
+            return Ok((Some(1), Vec::new(), Vec::new(), None, None));
         }
-        "true" => return Ok((0, Vec::new(), Vec::new(), None)),
-        "false" => return Ok((1, Vec::new(), Vec::new(), None)),
+        "true" => return Ok((Some(0), Vec::new(), Vec::new(), None, None)),
+        "false" => return Ok((Some(1), Vec::new(), Vec::new(), None, None)),
         _ => {}
     }
 
@@ -161,13 +460,27 @@ fn execute_sanitized_subprocess_sync(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Error: spawn {} ENOENT ({})", file, e))?;
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let (err_code, err_no) = match e.kind() {
+                std::io::ErrorKind::NotFound => ("ENOENT", -2),
+                std::io::ErrorKind::PermissionDenied => ("EACCES", -13),
+                _ => ("ENOENT", -2),
+            };
+            return Ok((
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                Some((err_code.to_string(), err_no)),
+            ));
+        }
+    };
 
     if let Some(input_data) = stdin_input {
         if let Some(mut stdin_pipe) = child.stdin.take() {
-            let _ = stdin_pipe.write_all(input_data.as_bytes());
+            let _ = stdin_pipe.write_all(input_data);
         }
     }
 
@@ -212,9 +525,12 @@ fn execute_sanitized_subprocess_sync(
     let stderr_bytes = stderr_handle.join().unwrap_or_default();
 
     if timed_out {
-        return Err(format!(
-            "Error: spawnSync {} ETIMEDOUT (exceeded {} ms)",
-            file, timeout_ms
+        return Ok((
+            None,
+            stdout_bytes,
+            stderr_bytes,
+            Some("SIGTERM".to_string()),
+            Some(("ETIMEDOUT".to_string(), -110)),
         ));
     }
 
@@ -226,7 +542,7 @@ fn execute_sanitized_subprocess_sync(
         );
     }
 
-    Ok((exit_code, stdout_bytes, stderr_bytes, None))
+    Ok((Some(exit_code), stdout_bytes, stderr_bytes, None, None))
 }
 
 pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Context) {
@@ -267,16 +583,61 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
 
             let tenant_id = active_tenant_id_or_default();
 
+            let shell_opt: Option<&str> = match &opts.shell {
+                Some(serde_json::Value::Bool(true)) => Some("/bin/sh"),
+                Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.as_str()),
+                _ => None,
+            };
+
+            let (exec_file, exec_args) = if let Some(sh_bin) = shell_opt {
+                let full_cmd = if cmd_args.is_empty() {
+                    file.clone()
+                } else {
+                    format!("{} {}", file, cmd_args.join(" "))
+                };
+                (sh_bin.to_string(), vec!["-c".to_string(), full_cmd])
+            } else {
+                (file.clone(), cmd_args)
+            };
+
             // Ring 1: OCap `ExecCap` Allowlist Verification (Deny-All by default)
             let allowed_bins = BOA_EXEC_BINS.with(|eb| eb.borrow().clone());
-            let is_allowed = !file.trim().is_empty()
-                && allowed_bins
-                    .iter()
-                    .any(|allowed| slice_sandbox::exec_binary_matches(&file, allowed));
+            let is_allowed = if let Some(sh_bin) = shell_opt {
+                let shell_allowed = allowed_bins.iter().any(|allowed| {
+                    slice_sandbox::exec_binary_matches(sh_bin, allowed)
+                        || (sh_bin == "/bin/sh"
+                            && slice_sandbox::exec_binary_matches("sh", allowed))
+                });
+                if shell_allowed {
+                    true
+                } else {
+                    let full_cmd = &exec_args[1];
+                    let has_meta = full_cmd.bytes().any(|b| {
+                        matches!(
+                            b,
+                            b'&' | b'|' | b';' | b'`' | b'$' | b'>' | b'<' | b'(' | b')'
+                        )
+                    });
+                    if !has_meta {
+                        let first_tok = full_cmd.split_whitespace().next().unwrap_or("");
+                        !first_tok.is_empty()
+                            && allowed_bins
+                                .iter()
+                                .any(|allowed| slice_sandbox::exec_binary_matches(first_tok, allowed))
+                    } else {
+                        false
+                    }
+                }
+            } else {
+                !exec_file.trim().is_empty()
+                    && allowed_bins
+                        .iter()
+                        .any(|allowed| slice_sandbox::exec_binary_matches(&exec_file, allowed))
+            };
             if !is_allowed {
                 let violation = SandboxViolation::ExecDenied {
                     tenant_id,
-                    binary: file,
+                    binary: exec_file,
                 };
                 let msg = violation.to_string();
                 BOA_LAST_CHILD_PROC_VIOLATION.with(|v| {
@@ -297,32 +658,6 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                         *v.borrow_mut() = Some(violation);
                     });
                     return Err(JsNativeError::error().with_message(msg).into());
-                }
-            }
-
-            // If `shell` option is explicitly requested as a string path or boolean `true`,
-            // also verify that the shell binary itself is authorized in `allowed_exec_binaries`.
-            if let Some(ref sh_val) = opts.shell {
-                let shell_bin = match sh_val {
-                    serde_json::Value::Bool(true) => Some("/bin/sh"),
-                    serde_json::Value::String(s) if !s.is_empty() => Some(s.as_str()),
-                    _ => None,
-                };
-                if let Some(sb) = shell_bin {
-                    let shell_allowed = allowed_bins
-                        .iter()
-                        .any(|allowed| slice_sandbox::exec_binary_matches(sb, allowed));
-                    if !shell_allowed {
-                        let violation = SandboxViolation::ExecDenied {
-                            tenant_id,
-                            binary: sb.to_string(),
-                        };
-                        let msg = violation.to_string();
-                        BOA_LAST_CHILD_PROC_VIOLATION.with(|v| {
-                            *v.borrow_mut() = Some(violation);
-                        });
-                        return Err(JsNativeError::error().with_message(msg).into());
-                    }
                 }
             }
 
@@ -359,17 +694,27 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                     child_env.insert(k.clone(), v.clone());
                 }
             }
+            if shell_opt.is_some() {
+                child_env
+                    .entry("PATH".to_string())
+                    .or_insert_with(|| "/usr/local/bin:/usr/bin:/bin".to_string());
+            }
 
             let timeout_ms = opts.timeout.unwrap_or(30_000).min(120_000);
             let max_buffer = opts.max_buffer.unwrap_or(1024 * 1024).min(16 * 1024 * 1024);
+            let stdin_bytes: Option<Vec<u8>> = if let Some(ref b64) = opts.input_base64 {
+                Some(base64_decode(b64))
+            } else {
+                opts.input.as_ref().map(|s| s.as_bytes().to_vec())
+            };
 
-            let (status_code, stdout_bytes, stderr_bytes, signal) =
+            let (status_code, stdout_bytes, stderr_bytes, signal, spawn_err) =
                 match execute_sanitized_subprocess_sync(
-                    &file,
-                    &cmd_args,
+                    &exec_file,
+                    &exec_args,
                     &child_env,
                     opts.cwd.as_deref(),
-                    opts.input.as_deref(),
+                    stdin_bytes.as_deref(),
                     timeout_ms,
                     max_buffer,
                 ) {
@@ -425,15 +770,29 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                 }
             }
 
-            let resp = serde_json::json!({
-                "status": status_code,
-                "signal": signal,
-                "stdoutBase64": base64_encode(&stdout_bytes, false),
-                "stderrBase64": base64_encode(&stderr_bytes, false),
-                "stdout": stdout_str,
-                "stderr": stderr_str,
-                "pid": 4200,
-            });
+            let resp = if let Some((err_code, err_no)) = spawn_err {
+                serde_json::json!({
+                    "status": status_code,
+                    "signal": signal,
+                    "stdoutBase64": base64_encode(&stdout_bytes, false),
+                    "stderrBase64": base64_encode(&stderr_bytes, false),
+                    "stdout": stdout_str,
+                    "stderr": stderr_str,
+                    "pid": 0,
+                    "errorCode": err_code,
+                    "errorErrno": err_no,
+                })
+            } else {
+                serde_json::json!({
+                    "status": status_code,
+                    "signal": signal,
+                    "stdoutBase64": base64_encode(&stdout_bytes, false),
+                    "stderrBase64": base64_encode(&stderr_bytes, false),
+                    "stdout": stdout_str,
+                    "stderr": stderr_str,
+                    "pid": 4200,
+                })
+            };
             Ok(BoaVal::from(js_string!(resp.to_string())))
         }),
     );

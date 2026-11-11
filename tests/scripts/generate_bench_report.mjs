@@ -330,12 +330,12 @@ function parseJsonlMetrics(jsonlPath, previousReport) {
 
   return {
     metadata: {
-      version: metaRec.version || previousReport?.metadata?.version || "0.10.9",
+      version: metaRec.version || previousReport?.metadata?.version || "0.10.10",
       commit: metaRec.commit || previousReport?.metadata?.commit || "abdbf89",
       timestampUtc: metaRec.timestampUtc || new Date().toISOString(),
       environment: metaRec.environment || previousReport?.metadata?.environment || "Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)",
       runtimes: {
-        slice: `v${metaRec.version || "0.10.9"}`,
+        slice: `v${metaRec.version || "0.10.10"}`,
         bun: metaRec.bunVersion || previousReport?.metadata?.runtimes?.bun || "v1.4.4",
         deno: metaRec.denoVersion || previousReport?.metadata?.runtimes?.deno || "v2.9.8",
         node: metaRec.nodeVersion || previousReport?.metadata?.runtimes?.node || "v27.0.0-alpha"

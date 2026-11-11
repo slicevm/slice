@@ -396,8 +396,12 @@
     this.bodyUsed = true;
     if (this._stream) {
       var st = this._stream, self = this;
-      if (st._startPromise) {
-        return st._startPromise.then(function() {
+      st._drainSync();
+      if (st._startPromise || !st._closed) {
+        var waitP = st._startPromise ? st._startPromise : new Promise(function(res, rej) {
+          st._closeWaiters.push({ res: res, rej: rej });
+        });
+        return waitP.then(function() {
           self._body = st._toText();
           self._stream = null;
           return self._body;

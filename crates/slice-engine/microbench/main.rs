@@ -293,10 +293,83 @@ if (!Array.isArray(parsedDeep) || revived.id !== "9007199254740993" || out.lengt
     group.finish();
 }
 
+fn bench_vfs_and_stream_operations(c: &mut Criterion) {
+    let mut group = c.benchmark_group("slice_engine::vfs_and_streams");
+
+    let vfs_fd_src = r#"
+const fs = require("node:fs");
+fs.mkdirSync("/tmp/bench-dir/sub", { recursive: true });
+const fd = fs.openSync("/tmp/bench-dir/sub/data.bin", "w+");
+const payload = Buffer.from("slice-vfs-fd-benchmark-payload-64bytes-0123456789abcdef01234567");
+fs.writeSync(fd, payload, 0, payload.length, 0);
+const rbuf = Buffer.allocUnsafe(64);
+const n = fs.readSync(fd, rbuf, 0, 64, 0);
+fs.closeSync(fd);
+const raw = fs.readFileSync("/tmp/bench-dir/sub/data.bin");
+const entries = fs.readdirSync("/tmp/bench-dir", { recursive: true });
+if (n !== 64 || raw.length !== 64 || entries.length !== 2) throw new Error("vfs bench mismatch");
+"#;
+    let vfs_fd_bc = compile_source_to_bytecode(vfs_fd_src);
+    group.bench_function("vfs_fd_open_read_write_and_recursive_readdir", |b| {
+        SliceIsolate::prewarm_boa_pool(1);
+        b.iter(|| {
+            let caps = CapabilityToken::pure_compute()
+                .with_read_prefix("/tmp")
+                .with_write_prefix("/tmp");
+            let mut iso =
+                SliceIsolate::spawn("bench-vfs-fd", 1, caps, 50_000_000, 16 * 1024 * 1024);
+            let res = iso
+                .execute_bytecode(black_box(&vfs_fd_bc), None)
+                .expect("vfs fd execute");
+            black_box(res.highest_tier_reached)
+        });
+    });
+
+    let stream_decoder_src = r#"
+const { StringDecoder } = require("node:string_decoder");
+const { Readable, Writable } = require("node:stream");
+const sd = new StringDecoder("utf8");
+const chunk = Buffer.from("Café €100 🎉 日本語 — streaming benchmark payload ", "utf8");
+let out = "";
+for (let i = 0; i < chunk.length; i += 5) {
+    out += sd.write(chunk.subarray(i, Math.min(i + 5, chunk.length)));
+}
+out += sd.end();
+let drainedCount = 0;
+const w = new Writable({
+    highWaterMark: 32,
+    write(_c, _enc, cb) { cb(null); }
+});
+w.write(chunk);
+w.end();
+if (out.length < 20) throw new Error("stream decoder mismatch");
+"#;
+    let stream_decoder_bc = compile_source_to_bytecode(stream_decoder_src);
+    group.bench_function("string_decoder_multibyte_and_writable_hwm", |b| {
+        SliceIsolate::prewarm_boa_pool(1);
+        b.iter(|| {
+            let mut iso = SliceIsolate::spawn(
+                "bench-stream-decoder",
+                1,
+                CapabilityToken::pure_compute(),
+                50_000_000,
+                16 * 1024 * 1024,
+            );
+            let res = iso
+                .execute_bytecode(black_box(&stream_decoder_bc), None)
+                .expect("stream decoder execute");
+            black_box(res.highest_tier_reached)
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_boacas_and_automaton,
     bench_intrinsics_and_numeric_vm,
-    bench_json_operations
+    bench_json_operations,
+    bench_vfs_and_stream_operations
 );
 criterion_main!(benches);
