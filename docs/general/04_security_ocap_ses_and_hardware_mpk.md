@@ -42,8 +42,8 @@ allow_write = ["/tmp/cache"]
 slice run ./src/pipeline.ts --allow-read=/app/public,/tmp/cache --allow-write=/tmp/cache
 ```
 
-### 2.3 Automatic Path Traversal (`..`) Blocking
-Every `node:fs` function (`readFileSync`, `writeFileSync`, `appendFileSync`, `existsSync`, `mkdirSync`, `readdirSync`, `statSync`, `unlinkSync`, `rmSync`) normalizes path separators and **unconditionally rejects any path containing `..`**.
+### 2.3 Path Traversal (`..`), NUL Byte & Device/UNC Blocking
+Every `node:fs` function (`readFileSync`, `writeFileSync`, `appendFileSync`, `existsSync`, `mkdirSync`, `readdirSync`, `statSync`, `renameSync`, `unlinkSync`, `rmSync`, `symlinkSync`, `chmodSync`) normalizes path separators and **unconditionally rejects any path containing `..`, NUL bytes (`\0`), Win32 device namespaces (`\\.\`), or UNC network shares (`\\server\share`)**.
 For example, if you grant `--allow-read=/app/public`, an attacker attempting:
 ```typescript
 import * as fs from "node:fs";
@@ -53,6 +53,9 @@ is immediately blocked with:
 ```text
 OCap Violation: Compartment 'cli-tenant' lacks filesystem read authority for '/app/public/../../etc/passwd'
 ```
+
+### 2.4 Copy-on-Write VFS Mutations (Host Disk Preservation)
+Even when `allow_write` is granted for a directory, `writeFileSync`, `appendFileSync`, `copyFileSync`, `renameSync`, `unlinkSync`, and `rmSync` operate strictly inside the isolate's in-memory copy-on-write VFS (`BOA_VFS_CACHE` and VFS tombstones). Unlinking or removing a path masks any underlying host entry inside the isolate without deleting files from the host OS disk, and `Slice.checkpoint()` / `Slice.restore()` rolls VFS writes and tombstones back in `< 5 us`.
 
 ---
 

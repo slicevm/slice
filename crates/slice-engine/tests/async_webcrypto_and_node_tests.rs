@@ -644,23 +644,21 @@ main();
 "#;
 
     let bc = compile_source_to_bytecode(script);
+    let n4_caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/tmp")
+        .with_write_prefix("/tmp");
     let mut iso1 = SliceIsolate::spawn(
         "phase-n4-tenant-1",
         1,
-        CapabilityToken::pure_compute(),
+        n4_caps.clone(),
         25_000_000,
         8 * 1024 * 1024,
     );
     iso1.set_deterministic_seed(Some(20261104));
     let m1 = iso1.execute_bytecode(&bc, None).unwrap();
 
-    let mut iso2 = SliceIsolate::spawn(
-        "phase-n4-tenant-2",
-        2,
-        CapabilityToken::pure_compute(),
-        25_000_000,
-        8 * 1024 * 1024,
-    );
+    let mut iso2 =
+        SliceIsolate::spawn("phase-n4-tenant-2", 2, n4_caps, 25_000_000, 8 * 1024 * 1024);
     iso2.set_deterministic_seed(Some(20261104));
     let m2 = iso2.execute_bytecode(&bc, None).unwrap();
 

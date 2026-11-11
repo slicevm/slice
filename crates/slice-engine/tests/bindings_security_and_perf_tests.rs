@@ -347,3 +347,321 @@ fn test_perf01_02_03_zero_copy_typed_array_subarray_dataview_and_btoa_throughput
 
     assert_eq!(out.trim(), "OK");
 }
+
+#[test]
+fn test_default_pure_compute_fs_deny_by_default_across_all_surfaces() {
+    let host_dir =
+        std::env::temp_dir().join(format!("slice_default_ocap_probe_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&host_dir);
+    std::fs::create_dir_all(&host_dir).unwrap();
+    let host_file = host_dir.join("probe.txt");
+    std::fs::write(&host_file, "SENSITIVE_HOST_PAYLOAD").unwrap();
+    let p_file = host_file.to_string_lossy().replace('\\', "/");
+    let p_dir = host_dir.to_string_lossy().replace('\\', "/");
+
+    // 1. Default pure_compute() blocks readFileSync, readdirSync, existsSync, statSync
+    for (label, expr) in [
+        (
+            "readFileSync",
+            format!("fs.readFileSync({:?}, 'utf8')", p_file),
+        ),
+        ("readdirSync", format!("fs.readdirSync({:?})", p_dir)),
+        ("existsSync", format!("fs.existsSync({:?})", p_file)),
+        ("statSync", format!("fs.statSync({:?})", p_file)),
+    ] {
+        let script = format!("import * as fs from 'node:fs';\n{};\n", expr);
+        let err = eval_ts_with_caps(
+            "default-read-deny",
+            &script,
+            CapabilityToken::pure_compute(),
+        )
+        .expect_err("default pure_compute() must block host/VFS read");
+        assert!(
+            matches!(err, SandboxViolation::FsReadDenied { .. }),
+            "expected FsReadDenied for {}, got: {:?}",
+            label,
+            err
+        );
+    }
+
+    // 2. Default pure_compute() blocks writeFileSync, unlinkSync, rmSync, rmdirSync, mkdirSync
+    for (label, expr) in [
+        (
+            "writeFileSync",
+            format!("fs.writeFileSync({:?}, 'x')", p_file),
+        ),
+        ("unlinkSync", format!("fs.unlinkSync({:?})", p_file)),
+        (
+            "rmSync",
+            format!("fs.rmSync({:?}, {{ recursive: true, force: true }})", p_dir),
+        ),
+        (
+            "mkdirSync",
+            format!("fs.mkdirSync({:?} + '/sub', {{ recursive: true }})", p_dir),
+        ),
+    ] {
+        let script = format!("import * as fs from 'node:fs';\n{};\n", expr);
+        let err = eval_ts_with_caps(
+            "default-write-deny",
+            &script,
+            CapabilityToken::pure_compute(),
+        )
+        .expect_err("default pure_compute() must block host/VFS write and delete");
+        assert!(
+            matches!(err, SandboxViolation::FsWriteDenied { .. }),
+            "expected FsWriteDenied for {}, got: {:?}",
+            label,
+            err
+        );
+    }
+    assert!(
+        host_file.exists(),
+        "host file must remain untouched after denied rmSync/unlinkSync"
+    );
+
+    // 3. HTTP fast & standard request handlers and prewarm_boa_bundle also enforce default deny
+    let http_script = format!(
+        r#"
+        import * as fs from "node:fs";
+        let cached = "";
+        try {{ cached = fs.readFileSync({:?}, "utf8"); }} catch (_e) {{}}
+        (globalThis as any).__cachedLeak = cached;
+        Slice.respond(200, cached || "empty", "text/plain");
+        "#,
+        p_file
+    );
+    let http_bundled = slice_cas::strip_typescript_and_normalize(&http_script, true);
+    let http_bc = compile_source_to_bytecode(&http_bundled);
+    SliceIsolate::prewarm_boa_bundle(&http_bc);
+
+    let req = HttpRequestContext {
+        method: "GET",
+        path: "/leak",
+        query: "",
+        tenant_id: "http-default-deny",
+        body: "",
+        headers: &[],
+    };
+    let mut http_iso = SliceIsolate::spawn(
+        "http-default-deny",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        4 * 1024 * 1024,
+    );
+    let fast_err = http_iso
+        .execute_http_request_fast(&http_bc, None, &req)
+        .expect_err("execute_http_request_fast with pure_compute() must trap FsReadDenied");
+    assert!(matches!(fast_err, SandboxViolation::FsReadDenied { .. }));
+
+    // 4. Win32 device namespace and UNC share candidates are rejected even when "/" is granted
+    let broad_caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/")
+        .with_write_prefix("/");
+    for bad_path in [
+        r"\\.\PhysicalDrive0",
+        "//./pipe/docker_engine",
+        r"\\server\share\secret.txt",
+        "//?/UNC/server/share/secret.txt",
+    ] {
+        let bad_script = format!(
+            "import * as fs from 'node:fs';\nfs.readFileSync({:?}, 'utf8');\n",
+            bad_path
+        );
+        let err = eval_ts_with_caps("device-unc-deny", &bad_script, broad_caps.clone())
+            .expect_err("device/UNC path must be rejected");
+        assert!(matches!(err, SandboxViolation::FsReadDenied { .. }));
+    }
+
+    let _ = std::fs::remove_dir_all(&host_dir);
+}
+
+#[test]
+fn test_vfs_copy_on_write_rm_tombstones_and_checkpoint_restore_preserve_host_disk() {
+    let victim_dir =
+        std::env::temp_dir().join(format!("slice_cow_vfs_tombstone_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&victim_dir);
+    let sub_dir = victim_dir.join("dir").join("sub");
+    std::fs::create_dir_all(&sub_dir).unwrap();
+    let root_file = victim_dir.join("file.txt");
+    let nested_file = sub_dir.join("nested.txt");
+    let rename_src = victim_dir.join("rename_me.txt");
+    std::fs::write(&root_file, "host-root-data").unwrap();
+    std::fs::write(&nested_file, "host-nested-data").unwrap();
+    std::fs::write(&rename_src, "host-rename-payload").unwrap();
+
+    let v_norm = victim_dir.to_string_lossy().replace('\\', "/");
+    let caps = CapabilityToken::pure_compute()
+        .with_read_prefix(&v_norm)
+        .with_write_prefix(&v_norm);
+
+    let script = format!(
+        r#"
+        import * as fs from "node:fs";
+        const V = {:?};
+        const snap = Slice.checkpoint();
+
+        // Unlink file, recursively remove directory tree, and rename host-backed file
+        fs.unlinkSync(V + "/file.txt");
+        fs.rmSync(V + "/dir", {{ recursive: true, force: true }});
+        fs.renameSync(V + "/rename_me.txt", V + "/renamed.txt");
+
+        const goneAfterRm = !fs.existsSync(V + "/file.txt")
+            && !fs.existsSync(V + "/dir")
+            && !fs.existsSync(V + "/dir/sub/nested.txt")
+            && !fs.existsSync(V + "/rename_me.txt")
+            && fs.readFileSync(V + "/renamed.txt", "utf8") === "host-rename-payload";
+
+        let readUnlinkedThrew = false;
+        try {{ fs.readFileSync(V + "/file.txt", "utf8"); }} catch (_e) {{ readUnlinkedThrew = true; }}
+
+        const entriesAfterRm = fs.readdirSync(V);
+
+        // Recreate V + "/dir" in VFS and verify old host child does NOT reappear as a ghost
+        fs.mkdirSync(V + "/dir", {{ recursive: true }});
+        fs.writeFileSync(V + "/dir/fresh.txt", "fresh-vfs");
+        const dirEntriesRecreated = fs.readdirSync(V + "/dir");
+        const ghostStayedHidden = !fs.existsSync(V + "/dir/sub/nested.txt");
+
+        // Roll back to pre-deletion checkpoint
+        Slice.restore(snap);
+        const restoredOk = fs.readFileSync(V + "/file.txt", "utf8") === "host-root-data"
+            && fs.readFileSync(V + "/dir/sub/nested.txt", "utf8") === "host-nested-data"
+            && fs.readFileSync(V + "/rename_me.txt", "utf8") === "host-rename-payload"
+            && !fs.existsSync(V + "/renamed.txt");
+
+        console.log(JSON.stringify({{
+            goneAfterRm,
+            readUnlinkedThrew,
+            entriesAfterRm,
+            dirEntriesRecreated,
+            ghostStayedHidden,
+            restoredOk
+        }}));
+        "#,
+        v_norm
+    );
+
+    let out = eval_ts_with_caps("cow-tombstone-tenant", &script, caps).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(parsed["goneAfterRm"], true);
+    assert_eq!(parsed["readUnlinkedThrew"], true);
+    assert_eq!(parsed["entriesAfterRm"], serde_json::json!(["renamed.txt"]));
+    assert_eq!(
+        parsed["dirEntriesRecreated"],
+        serde_json::json!(["fresh.txt"])
+    );
+    assert_eq!(parsed["ghostStayedHidden"], true);
+    assert_eq!(parsed["restoredOk"], true);
+
+    // Real host files and directory hierarchy must remain 100% intact on disk
+    assert_eq!(
+        std::fs::read_to_string(&root_file).unwrap(),
+        "host-root-data"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&nested_file).unwrap(),
+        "host-nested-data"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&rename_src).unwrap(),
+        "host-rename-payload"
+    );
+
+    let _ = std::fs::remove_dir_all(&victim_dir);
+}
+
+#[test]
+fn test_worker_fs_capability_attenuation_and_symlink_write_containment() {
+    // 1. Zero-authority parent cannot mint allowRead/allowWrite for a spawned Worker
+    let zero_worker_script = r#"
+        async function main() {
+            const w = new Worker(
+                `const fs = require("node:fs"); fs.readFileSync("/tmp/probe.txt", "utf8");`,
+                {
+                    eval: true,
+                    slice: { allowRead: ["/tmp"], allowWrite: ["/tmp"], fuel: 500000 }
+                }
+            );
+            let errMsg = "";
+            w.on("error", (err: any) => { errMsg = String(err && err.message ? err.message : err); });
+            await new Promise<void>((resolve) => w.on("exit", () => resolve()));
+            console.log(errMsg);
+        }
+        main();
+    "#;
+    let out_zero = eval_ts_with_caps(
+        "worker-zero-parent",
+        zero_worker_script,
+        CapabilityToken::pure_compute(),
+    )
+    .unwrap();
+    assert!(
+        out_zero.contains("FsReadDenied") || out_zero.contains("filesystem read authority"),
+        "expected worker spawned by pure_compute() parent to trap FsReadDenied, got: {}",
+        out_zero
+    );
+
+    // 2. Scoped parent (/tmp/app) cannot escalate worker to sibling prefix (/tmp/app-secrets)
+    let boundary_caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/tmp/app")
+        .with_write_prefix("/tmp/app");
+    let boundary_script = r#"
+        async function main() {
+            const w = new Worker(
+                `const fs = require("node:fs"); fs.readFileSync("/tmp/app-secrets/token.txt", "utf8");`,
+                {
+                    eval: true,
+                    slice: { allowRead: ["/tmp/app-secrets"], fuel: 500000 }
+                }
+            );
+            let errMsg = "";
+            w.on("error", (err: any) => { errMsg = String(err && err.message ? err.message : err); });
+            await new Promise<void>((resolve) => w.on("exit", () => resolve()));
+            console.log(errMsg);
+        }
+        main();
+    "#;
+    let out_boundary =
+        eval_ts_with_caps("worker-boundary-parent", boundary_script, boundary_caps).unwrap();
+    assert!(
+        out_boundary.contains("FsReadDenied") || out_boundary.contains("filesystem read authority"),
+        "expected worker prefix-boundary escalation to trap FsReadDenied, got: {}",
+        out_boundary
+    );
+
+    // 3. VFS symlink pointing into read-only prefix blocks mkdirSync and chmodSync
+    let sym_caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/ro_zone")
+        .with_read_prefix("/rw_zone")
+        .with_write_prefix("/rw_zone");
+    let sym_chmod_err = eval_ts_with_caps(
+        "symlink-chmod-ro",
+        r#"
+        import * as fs from "node:fs";
+        fs.symlinkSync("/ro_zone/config.json", "/rw_zone/cfg_link");
+        fs.chmodSync("/rw_zone/cfg_link", 0o777);
+        "#,
+        sym_caps.clone(),
+    )
+    .expect_err("chmodSync through symlink into read-only prefix must fail FsWriteDenied");
+    assert!(matches!(
+        sym_chmod_err,
+        SandboxViolation::FsWriteDenied { .. }
+    ));
+
+    let sym_mkdir_err = eval_ts_with_caps(
+        "symlink-mkdir-ro",
+        r#"
+        import * as fs from "node:fs";
+        fs.symlinkSync("/ro_zone/new_dir", "/rw_zone/dir_link");
+        fs.mkdirSync("/rw_zone/dir_link", { recursive: true });
+        "#,
+        sym_caps,
+    )
+    .expect_err("mkdirSync through symlink into read-only prefix must fail FsWriteDenied");
+    assert!(matches!(
+        sym_mkdir_err,
+        SandboxViolation::FsWriteDenied { .. }
+    ));
+}

@@ -579,10 +579,27 @@ describe("Ledger Time-Travel Suite", () => {
     )
     .unwrap();
 
-    // 3. Execute `cmd_test` against `tmp_dir` with `--env-file` and `--json`
+    // 3a. Without filesystem capabilities, `slice test` must block `node:fs` access by default
+    let denied_args = vec![
+        tmp_dir.to_string_lossy().to_string(),
+        format!("--env-file={}", env_path.to_string_lossy()),
+        "--json".to_string(),
+    ];
+    let denied_err = cmd_test(&denied_args)
+        .expect_err("Expected `slice test` without --allow-read/--allow-write to reject node:fs")
+        .to_string();
+    assert!(
+        denied_err.contains("OCap Violation") && denied_err.contains("/tmp/f4_cli_ledger.json"),
+        "Unexpected error from zero-authority slice test: {}",
+        denied_err
+    );
+
+    // 3b. Execute `cmd_test` against `tmp_dir` with explicit `/tmp` VFS capabilities, `--env-file`, and `--json`
     let test_args = vec![
         tmp_dir.to_string_lossy().to_string(),
         format!("--env-file={}", env_path.to_string_lossy()),
+        "--allow-read=/tmp".to_string(),
+        "--allow-write=/tmp".to_string(),
         "--json".to_string(),
     ];
     cmd_test(&test_args).expect("Expected `slice test` to pass all 3 specs");

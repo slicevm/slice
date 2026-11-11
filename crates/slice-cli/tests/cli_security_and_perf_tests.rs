@@ -305,3 +305,126 @@ fn test_wave1_cli_eval_print_check_argv_and_exit_codes() {
     LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn test_default_cli_zero_fs_containment_across_run_cas_and_serve() {
+    use crate::commands::run::cmd_run;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    let tmp_dir =
+        std::env::temp_dir().join(format!("slice_cli_default_zero_fs_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let victim_sub = tmp_dir.join("victim").join("sub");
+    std::fs::create_dir_all(&victim_sub).unwrap();
+    let victim_file = tmp_dir.join("victim").join("secret.txt");
+    std::fs::write(&victim_file, "CLI_HOST_SECRET").unwrap();
+
+    let v_file_norm = victim_file.to_string_lossy().replace('\\', "/");
+    let v_dir_norm = tmp_dir.join("victim").to_string_lossy().replace('\\', "/");
+
+    let read_script = tmp_dir.join("read_probe.ts");
+    std::fs::write(
+        &read_script,
+        format!(
+            "import * as fs from 'node:fs';\nconsole.log(fs.readFileSync({:?}, 'utf8'));\n",
+            v_file_norm
+        ),
+    )
+    .unwrap();
+
+    let rm_script = tmp_dir.join("rm_probe.ts");
+    std::fs::write(
+        &rm_script,
+        format!(
+            "import * as fs from 'node:fs';\nfs.unlinkSync({:?});\nfs.rmSync({:?}, {{ recursive: true, force: true }});\n",
+            v_file_norm, v_dir_norm
+        ),
+    )
+    .unwrap();
+
+    // 1. Default `slice run` (cold and `--warm`) rejects host reads and deletes
+    for warm_flag in [false, true] {
+        let mut r_args = vec![read_script.to_string_lossy().to_string()];
+        if warm_flag {
+            r_args.push("--warm".to_string());
+        }
+        let r_err = cmd_run(&r_args).unwrap_err().to_string();
+        assert!(
+            r_err.contains("lacks filesystem read authority"),
+            "expected FsReadDenied on slice run (warm={}), got: {}",
+            warm_flag,
+            r_err
+        );
+
+        let mut w_args = vec![rm_script.to_string_lossy().to_string()];
+        if warm_flag {
+            w_args.push("--warm".to_string());
+        }
+        let w_err = cmd_run(&w_args).unwrap_err().to_string();
+        assert!(
+            w_err.contains("lacks filesystem write authority"),
+            "expected FsWriteDenied on slice run rm (warm={}), got: {}",
+            warm_flag,
+            w_err
+        );
+    }
+    assert!(
+        victim_file.exists() && victim_sub.exists(),
+        "host victim files must remain intact on disk"
+    );
+
+    // 2. Packed `.cas` archive executed with default flags also blocks host read
+    let cas_path = tmp_dir.join("read_probe.cas");
+    build_cas_archive(&read_script, &cas_path, "./read_probe.ts").unwrap();
+    let cas_err = cmd_run(&[cas_path.to_string_lossy().to_string()])
+        .unwrap_err()
+        .to_string();
+    assert!(cas_err.contains("lacks filesystem read authority"));
+
+    // 3. `slice serve` HTTP handler with default pure_compute() returns HTTP 403 on host FS probe
+    let srv_code = format!(
+        "import * as fs from 'node:fs';\nSlice.respond(200, fs.readFileSync({:?}, 'utf8'), 'text/plain');\n",
+        v_file_norm
+    );
+    let srv_bc =
+        compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(&srv_code, true));
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let srv_handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut rbuf = vec![0u8; 8192];
+        let mut wbuf = Vec::with_capacity(1024);
+        let _ = serve_connection_keep_alive_with_tls_and_secrets(
+            stream,
+            1,
+            &srv_bc,
+            None,
+            None,
+            None,
+            &CapabilityToken::pure_compute(),
+            &[],
+            5_000_000,
+            4 * 1024 * 1024,
+            &mut rbuf,
+            &mut wbuf,
+            None,
+            None,
+        );
+    });
+    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client
+        .write_all(b"GET /probe HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut http_resp = String::new();
+    client.read_to_string(&mut http_resp).unwrap();
+    srv_handle.join().unwrap();
+    assert!(
+        http_resp.starts_with("HTTP/1.1 403")
+            && http_resp.contains("lacks filesystem read authority"),
+        "expected HTTP 403 OCap violation from slice serve, got: {}",
+        http_resp
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

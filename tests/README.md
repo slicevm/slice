@@ -32,7 +32,7 @@ This directory (`tests/`) contains a reproducible Linux `x86_64` Docker benchmar
   ```
 
 ### 3. [`apps/03-disk-io-log-pipeline/`](./apps/03-disk-io-log-pipeline/src/index.ts) - High-Throughput Disk I/O, Directory Scan & JSONL Stream Processing
-- **Structure:** [`package.json`](./apps/03-disk-io-log-pipeline/package.json), [`src/log_generator.ts`](./apps/03-disk-io-log-pipeline/src/log_generator.ts), [`src/io_aggregator.ts`](./apps/03-disk-io-log-pipeline/src/io_aggregator.ts), [`src/index.ts`](./apps/03-disk-io-log-pipeline/src/index.ts).
+- **Structure:** [`package.json`](./apps/03-disk-io-log-pipeline/package.json), [`slice.toml`](./apps/03-disk-io-log-pipeline/slice.toml), [`src/log_generator.ts`](./apps/03-disk-io-log-pipeline/src/log_generator.ts), [`src/io_aggregator.ts`](./apps/03-disk-io-log-pipeline/src/io_aggregator.ts), [`src/index.ts`](./apps/03-disk-io-log-pipeline/src/index.ts).
 - **What it tests:** Intensive filesystem I/O (`node:fs`, `node:path`, `node:os`, `node:crypto`) creating, writing, stating, directory-scanning, reading, parsing, SHA-256 verifying, and unlinking 10 JSONL log shard files (`200` records, `15,796 bytes`).
 - **Identical Output Across All 4 Runtimes:**
   ```json
@@ -56,7 +56,7 @@ This directory (`tests/`) contains a reproducible Linux `x86_64` Docker benchmar
   ```
 
 ### 6. [`apps/06-telemetry-metrics-pipeline/`](./apps/06-telemetry-metrics-pipeline/src/index.ts) - OpenTelemetry Circular Span Graph, Flatted Serialization & Disk WAL (`bytes@3.1.2`, `flatted@3.3.1`)
-- **Structure:** [`package.json`](./apps/06-telemetry-metrics-pipeline/package.json), [`src/span_graph.ts`](./apps/06-telemetry-metrics-pipeline/src/span_graph.ts), [`src/histogram_wal.ts`](./apps/06-telemetry-metrics-pipeline/src/histogram_wal.ts), [`src/index.ts`](./apps/06-telemetry-metrics-pipeline/src/index.ts).
+- **Structure:** [`package.json`](./apps/06-telemetry-metrics-pipeline/package.json), [`slice.toml`](./apps/06-telemetry-metrics-pipeline/slice.toml), [`src/span_graph.ts`](./apps/06-telemetry-metrics-pipeline/src/span_graph.ts), [`src/histogram_wal.ts`](./apps/06-telemetry-metrics-pipeline/src/histogram_wal.ts), [`src/index.ts`](./apps/06-telemetry-metrics-pipeline/src/index.ts).
 - **What it tests:** Constructing parent<->child circular distributed trace span graphs (`SpanNode`), serializing and deserializing cyclic graphs with `flatted` (`stringify` / `parse`), human-readable memory budget formatting/parsing with `bytes` (`bytes.parse`, `bytes.format`), P50/P95 latency histogram calculation, and WAL persistence (`node:fs` + `node:crypto`).
 - **Identical Output Across All 4 Runtimes:**
   ```json
@@ -72,7 +72,7 @@ This directory (`tests/`) contains a reproducible Linux `x86_64` Docker benchmar
   ```
 
 ### 8. [`apps/08-event-driven-state-journal/`](./apps/08-event-driven-state-journal/src/index.ts) - CQRS Event-Sourced Ledger Bus & Append-Only JSONL WAL Replay (`mitt@3.0.1`, `ms@2.1.3`)
-- **Structure:** [`package.json`](./apps/08-event-driven-state-journal/package.json), [`src/event_ledger.ts`](./apps/08-event-driven-state-journal/src/event_ledger.ts), [`src/journal_replayer.ts`](./apps/08-event-driven-state-journal/src/journal_replayer.ts), [`src/index.ts`](./apps/08-event-driven-state-journal/src/index.ts).
+- **Structure:** [`package.json`](./apps/08-event-driven-state-journal/package.json), [`slice.toml`](./apps/08-event-driven-state-journal/slice.toml), [`src/event_ledger.ts`](./apps/08-event-driven-state-journal/src/event_ledger.ts), [`src/journal_replayer.ts`](./apps/08-event-driven-state-journal/src/journal_replayer.ts), [`src/index.ts`](./apps/08-event-driven-state-journal/src/index.ts).
 - **What it tests:** Pub/sub event-sourced state machine orchestration via `mitt`, append-only write-ahead log (WAL) streaming (`fs.appendFileSync`), full JSONL state replay, and deterministic state convergence verification across 75 ledger events.
 - **Identical Output Across All 4 Runtimes:**
   ```json

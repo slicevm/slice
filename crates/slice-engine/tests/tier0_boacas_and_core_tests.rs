@@ -140,7 +140,9 @@ console.log(JSON.stringify({ match: readBack === digest, size: statSize, prefix8
     let mut isolate = SliceIsolate::spawn(
         "boa-test-tenant",
         1,
-        CapabilityToken::pure_compute(),
+        CapabilityToken::pure_compute()
+            .with_read_prefix("/tmp")
+            .with_write_prefix("/tmp"),
         10_000_000,
         4 * 1024 * 1024,
     );
