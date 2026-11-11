@@ -2,7 +2,7 @@
 
 In addition to using the `slice` CLI binary directly, you can embed Slice's 4 modular Rust crates (`slice-engine`, `slice-cas`, `slice-sandbox`, and `slice-io`) as a library inside your own Rust backends, API gateways, database engines, or AI agent hosts.
 
-Because each `SliceIsolate` takes only **`4.0 KB` of memory** and **`0.98 microseconds` (`980 ns`)** to spawn, a single Rust process can host **1,000+ isolated tenant scripts in under `1.5 milliseconds`** using less than `10 MB` of total RAM.
+Because each `SliceIsolate` takes only **`4.0 KB` of memory** and **`~1 microsecond`** to spawn, a single Rust process can host **1,000+ isolated tenant scripts in under `2 milliseconds`** using less than `10 MB` of total RAM (see [`tests/reports/latest.md`](../../tests/reports/latest.md) for live hardware measurements).
 
 This chapter shows you how to add Slice to your Rust `Cargo.toml`, compile and cache TypeScript bundles, execute isolated HTTP handlers and AI sandboxes from Rust, and run 1,000-tenant microVM swarms.
 
@@ -240,4 +240,4 @@ slice microvm-bench --tenants=1000
 slice microvm-bench --tenants=1000 --json
 ```
 
-On a standard Linux `x86_64` container, `slice microvm-bench --tenants=1000` spawns and executes **all 1,000 isolated tenants in `1.26 ms` total** (`0.98 us` minimum cold start, `1.04 us` P50, `4.0 KB` per tenant, `9.93 MB` total host RSS).
+On a standard Linux `x86_64` container, `slice microvm-bench --tenants=1000` spawns and executes **all 1,000 isolated tenants in `< 2 ms` total** (`~1 us` P50 cold start, `4.0 KB` per tenant, `< 10 MB` total host RSS). For exact measurements from the latest benchmark run, see [`tests/reports/latest.md`](../../tests/reports/latest.md).

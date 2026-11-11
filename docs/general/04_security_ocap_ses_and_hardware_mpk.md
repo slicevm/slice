@@ -1,4 +1,4 @@
-# Chapter 04: Zero-Trust Security Guide — OCap Permissions, Fuel Limits, SSRF Shield & Egress DLP
+# Chapter 04: Zero-Trust Security Guide: OCap Permissions, Fuel Limits, SSRF Shield & Egress DLP
 
 In Node.js and Bun, every `npm` package you install and every script you run inherits **100% of your OS user's permissions**: it can read `~/.ssh/id_rsa`, modify `Object.prototype`, open sockets to AWS/GCP cloud metadata (`169.254.169.254`), exfiltrate `process.env` secrets, or lock up a CPU core with `while (true) {}`. Even Deno's CLI flags (`--allow-read`, `--allow-net`) apply to the **entire OS process**, not to individual HTTP requests or plugins inside the same process.
 
@@ -9,7 +9,7 @@ In Node.js and Bun, every `npm` package you install and every script you run inh
 | **Ring 1** | **SES Intrinsic Lockdown** | Prototype pollution (`Object.prototype.polluted = true`) across shared realms | `IntrinsicMutationBlocked` |
 | **Ring 2** | **OCap Filesystem & Subprocess Tokens (`FsCap` & `ExecCap`)** | Unauthorized file read/write, `..` traversal, & unlisted subprocess execution | `FsReadDenied` / `FsWriteDenied` / `ExecDenied` |
 | **Ring 3** | **OCap Network & Env Tokens (`NetCap` & `EnvCap`)** | Unauthorized outbound `fetch()` & `process.env` / `env()` credential harvesting | `NetAccessDenied` / `EnvAccessDenied` |
-| **Ring 4** | **Deterministic CPU Fuel & Memory Cage** | Infinite loop CPU DoS (`while(true){}`) & heap/KV memory exhaustion | `CpuFuelExhausted` / `MemoryCeilingExceeded` |
+| **Ring 4** | **Deterministic CPU Fuel, Memory & Checkpoint Cage** | Infinite loop CPU DoS (`while(true){}`), heap/KV exhaustion, & checkpoint abuse | `CpuFuelExhausted` / `MemoryCeilingExceeded` |
 | **Ring 5** | **Cloud Metadata SSRF Shield, Egress Secret DLP & Hardware MPK** | `169.254.169.254` SSRF, Base64/raw secret exfiltration, & cross-tenant memory access | `SSRF_METADATA_BLOCKED` / `EGRESS_SECRET_LEAK_BLOCKED` |
 
 This chapter shows you how to configure and test every security control in your applications.
@@ -20,7 +20,8 @@ This chapter shows you how to configure and test every security control in your 
 
 When you run a script with `slice run script.ts` (without a `slice.toml` or `--allow-*` flags), the isolate spawns with **`CapabilityToken::pure_compute()`**:
 - **Filesystem (`node:fs`):** `0` readable paths, `0` writable paths.
-- **Network (`fetch`):** `0` allowed outbound hosts.
+- **Network (`fetch`, WebSockets, Sockets):** `0` allowed outbound hosts.
+- **Subprocesses (`node:child_process`):** `0` allowed binaries (`allow_exec = []`, Deny-All).
 - **Environment (`env()` / `process.env`):** Only `NODE_ENV="production"` is exposed; host OS environment variables (such as `AWS_SECRET_ACCESS_KEY` or `GITHUB_TOKEN`) are **never** leaked into the isolate unless explicitly granted.
 
 ---
@@ -95,7 +96,7 @@ In Node.js, Bun, or Deno (`deno run --allow-net`), if a user passes `http://169.
 3. **Zero-Trust Hop-by-Hop Redirect Guard (`301` / `302` / `303` / `307` / `308`):**
    - When an allowed upstream server returns a `30x` redirect (`redirect: "follow"`), Slice re-verifies the target `Location` URL's host, port, and DNS-resolved IP against `allow_net` and the SSRF firewall **before following the hop** (up to 5 hops).
    - If a redirect crosses origins (different scheme, host, or port), Slice automatically strips sensitive `Authorization`, `Cookie`, and `Proxy-Authorization` headers so credentials are never leaked to a redirect target.
-   - Support `redirect: "follow"` (default), `redirect: "manual"` (returns the `30x` response with its `location` header), and `redirect: "error"`.
+   - Supports `redirect: "follow"` (default), `redirect: "manual"` (returns the `30x` response with its `location` header), and `redirect: "error"`.
 
 ---
 
@@ -121,7 +122,7 @@ Inside your TypeScript code:
 When your application or AI agent needs a secret key (such as `STRIPE_SECRET_KEY` or `OPENAI_API_TOKEN`) to sign a request, how do you guarantee that a bug or prompt injection never leaks that secret into:
 - `console.log()` / `stdout`
 - HTTP response bodies or Server-Sent Events (`Response.sse`)
-- Outbound `fetch()` URLs, headers, or `POST` bodies — even if the attacker encodes the secret in **Base64** or **Base64URL**?
+- Outbound `fetch()` URLs, headers, or `POST` bodies - even if the attacker encodes the secret in **Base64** or **Base64URL**?
 
 You have two ways to enable Slice's **Egress Data Loss Prevention (DLP) Firewall**:
 
@@ -156,63 +157,72 @@ console.log("Diagnostic trace:", leakedBase64);
 // -> Traps with: OCap Violation: Compartment '...' lacks environment variable authority for 'EGRESS_SECRET_LEAK_BLOCKED'
 ```
 
-### 4.4 Hardened HTTP/1.1 & RFC 6455 WebSocket Wire-Protocol Defenses
+### 4.3 Hardened HTTP/1.1 & RFC 6455 WebSocket Wire-Protocol Defenses
 Both the outbound `fetch()` / `WebSocket` client engine and the inbound `slice serve` HTTP/WebSocket server enforce strict wire-level security guards:
 - **Non-Canonical IP & Special-Use CIDR SSRF Blocking:** Under wildcard `allow_net = ["*"]`, the SSRF shield blocks octal (`0177.0.0.1`), hexadecimal (`0x7f.0.0.1`), integer/dword (`2130706433`), and shorthand (`127.1`, `169.254.43518`) IPv4 encodings alongside RFC 1918, loopback, link-local (`169.254.0.0/16`, `fe80::/10`), CGNAT (`100.64.0.0/10`), benchmark (`198.18.0.0/15`), IETF protocol (`192.0.0.0/24`), multicast (`224.0.0.0/4`, `ff00::/8`), and IPv6 Unique Local (`fc00::/7`) ranges.
 - **RFC 9110 `tchar` Header & CRLF Injection Prevention:** Outbound and inbound header names are validated against a compile-time RFC 9110 `tchar` lookup table, and header values / request targets reject `\r`, `\n`, `\0`, and ASCII control characters to prevent HTTP Request/Response Splitting.
 - **RFC 9112 Request Smuggling (`CL.TE` / `TE.CL`) & Chunked Arithmetic Guards:** `slice serve` immediately rejects requests containing both `Transfer-Encoding` and `Content-Length` or conflicting duplicate `Content-Length` headers with `400 Bad Request` (`Connection: close`), validates chunked hex sizes with checked arithmetic, and caps inbound bodies at `4 MB` (`413 Payload Too Large`) and headers at 64 fields / 64 KB (`431 Request Header Fields Too Large`).
 - **Tenant-Partitioned Keep-Alive Pool & Outbound Memory Ceilings:** Warm Keep-Alive sockets are keyed by `(tenant_id, is_https, host_port)` so tenants never share an upstream connection, and outbound HTTP responses (`64 KB` max headers, `16 MB` max body) and WebSocket frames (`4 MB` max) are strictly bounded by the active tenant's remaining memory budget (`SandboxViolation::MemoryCeilingExceeded`).
 
-### 4.5 5-Ring OCap Subprocess Containment (`node:child_process` & `ExecCap`)
+### 4.4 5-Ring OCap Subprocess Containment (`node:child_process`, `allow_exec` & `--allow-exec`)
 When CLI tools or AI Code-Mode agents use `node:child_process` (`execFileSync`, `spawnSync`, `execSync`, `spawn`, `exec`, `execFile`), Slice enforces all 5 security rings:
-1. **Ring 1 — OCap `ExecCap` Binary Allowlist (`--allow-exec`):** Deny-All by default (`allowed_exec_binaries: []`). Any attempt to execute a binary not explicitly granted via `--allow-exec=/usr/bin/git`, `SLICE_ALLOW_EXEC`, or `[capabilities] allow_exec` (or attempting path spoofing such as `/tmp/evil/git` when `/usr/bin/git` is granted) immediately traps with `SandboxViolation::ExecDenied`.
-2. **Ring 2 — Environment Sanitization (`env_clear()`):** Spawned child processes **never** inherit the host OS `std::env::vars()`; they receive only the active tenant's attenuated `allowed_env_keys`.
-3. **Ring 3 — Child Stdio Output Egress DLP:** Both `stdout` and `stderr` produced by a child process are scanned by `verify_egress_secrets_slice` (raw, Base64, and Base64URL forms of `--audit-egress` and `.env` Auto-DLP secrets) before returning to JavaScript (`EGRESS_SECRET_LEAK_BLOCKED`).
-4. **Ring 4 — Execution Timeout & `maxBuffer` Ceiling:** Enforces hard execution timeouts (killing timed-out subprocesses) and `maxBuffer` byte ceilings.
-5. **Ring 5 — CPU Fuel, Memory Accounting & Sub-Isolate Attenuation:** Subprocess output bytes are charged against the tenant's fuel and memory budgets, and `Slice.evalSandbox(code, { allowExec: [...] })` / `new Worker(url, { slice: { allowExec: [...] } })` enforce strict subset attenuation (`child.allowExec ⊆ parent.allowExec`).
+1. **Ring 1 - OCap `ExecCap` Binary Allowlist (`allow_exec` / `--allow-exec`):** Deny-All by default (`allowed_exec_binaries: []`). Any attempt to execute a binary not explicitly granted via `--allow-exec=/usr/bin/git`, `SLICE_ALLOW_EXEC=/usr/bin/git`, or `[capabilities] allow_exec = ["/usr/bin/git"]` in `slice.toml` (or attempting path spoofing such as `/tmp/evil/git` when `/usr/bin/git` is granted) immediately traps with `SandboxViolation::ExecDenied`.
+2. **Ring 2 - Environment Sanitization (`env_clear()`):** Spawned child processes **never** inherit the host OS `std::env::vars()`; they receive only the active tenant's attenuated `allowed_env_keys`.
+3. **Ring 3 - Child Stdio Output Egress DLP:** Both `stdout` and `stderr` produced by a child process are scanned by `verify_egress_secrets_slice` (raw, Base64, and Base64URL forms of `--audit-egress` and `.env` Auto-DLP secrets) before returning to JavaScript (`EGRESS_SECRET_LEAK_BLOCKED`).
+4. **Ring 4 - Execution Timeout & `maxBuffer` Ceiling:** Enforces hard execution timeouts (killing timed-out subprocesses) and `maxBuffer` byte ceilings.
+5. **Ring 5 - CPU Fuel, Memory Accounting & Sub-Isolate Attenuation:** Subprocess output bytes are charged against the tenant's fuel and memory budgets, and `Slice.evalSandbox(code, { allowExec: [...] })` / `new Worker(url, { slice: { allowExec: [...] } })` enforce strict subset attenuation (`child.allowExec` intersected with `parent.allowExec`).
 
 ---
 
-## 5. Deterministic CPU Fuel & Byte-Level Memory Cages (`--fuel` & `--memory`)
+## 5. Deterministic CPU Fuel, Byte-Level Memory & Checkpoint Cages (`--fuel`, `--memory`, `--no-checkpoints`, `--max-checkpoints`)
 
 Wall-clock timeouts (`setTimeout`) are unreliable for multi-tenant sandboxing because CPU load spikes cause false timeouts while still allowing an attacker to burn 100% of a CPU core for milliseconds.
 
-Slice meters **deterministic CPU instruction fuel** and **per-tenant memory bytes**:
+Slice meters **deterministic CPU instruction fuel**, **per-tenant memory bytes**, and **guest checkpoint quotas**:
 
-### 5.1 Setting Fuel and Memory Limits
+### 5.1 Setting Fuel, Memory, and Checkpoint Limits
 In `slice.toml`:
 ```toml
 [limits]
 fuel = 5_000_000     # Max CPU instructions per execution / HTTP request
 memory_kb = 4096     # Max 4 MB memory ceiling per tenant isolate
+
+[capabilities]
+allow_checkpoints = true
+max_checkpoints = 8  # Bound guest Slice.checkpoint() snapshots (default max: 64)
 ```
 Or on the CLI:
 ```bash
-slice run ./untrusted_plugin.ts --fuel=100000 --memory=1048576
+# Bound fuel, memory, and guest checkpoint count:
+slice run ./untrusted_plugin.ts --fuel=100000 --memory=1048576 --max-checkpoints=4
+
+# Or disable guest Slice.checkpoint() / Slice.restore() calls completely:
+slice run ./untrusted_plugin.ts --no-checkpoints
 ```
 
 ### 5.2 What Happens When a Limit Is Exceeded
 - **Infinite Loop / CPU DoS (`while (true) {}`):** Preempted deterministically on the exact instruction that exceeds `fuel`, returning `SandboxViolation::CpuFuelExhausted` (or `HTTP 403 Forbidden` in `slice serve`) while all other worker threads and tenants continue unaffected.
-- **Memory Exhaustion (`Slice.kv` / allocations):** Any `Slice.kv.set(key, val)` or compartment allocation that pushes `memory_used_bytes` past `memory_limit_bytes` traps immediately with `SandboxViolation::MemoryCeilingExceeded`.
+- **Memory Exhaustion (`Slice.kv` / allocations / buffers):** Any `Slice.kv.set(key, val)`, array/string expansion, or compartment allocation that pushes `memory_used_bytes` past `memory_limit_bytes` traps immediately with `SandboxViolation::MemoryCeilingExceeded`.
+- **Checkpoint Quota Enforcement:** If guest code calls `Slice.checkpoint()` when `--no-checkpoints` is set or after reaching `--max-checkpoints=<N>`, Slice blocks the unauthorized snapshot call immediately.
 
 ---
 
-## 6. Untrusted Entrypoint & AI Code-Mode Directive Lockdown (`// @slice-*`)
+## 6. Untrusted Entrypoint & AI Code-Mode Directive Lockdown (`// @slice-*`, `--trust-directives` & `--no-directives`)
 
-When running AI-generated scripts, user-submitted plugins, or downloaded snippets via `slice run <script.ts>`, an attacker or hallucinating LLM might place top-of-file inline source directives (`// @slice-allow-read: ["/"]`, `// @slice-allow-net: ["*"]`, `// @slice-env-file: .env`, `// @slice-fuel: 999999999999`) at the top of the file in an attempt to self-grant permissions.
+When running AI-generated scripts, user-submitted plugins, or downloaded snippets via `slice run <script.ts>`, an attacker or hallucinating LLM might place top-of-file inline source directives (`// @slice-allow-read: ["/"]`, `// @slice-allow-net: ["*"]`, `// @slice-allow-exec: ["/bin/sh"]`, `// @slice-env-file: .env`, `// @slice-fuel: 999999999999`) at the top of the file in an attempt to self-grant permissions.
 
 **Slice prevents inline directive privilege escalation by default (`trust_directives = false`):**
 1. **Default Monotonic Attenuation (`trust_directives = false`):**
-   - **Resource Limits (`// @slice-fuel`, `// @slice-memory-kb`, `// @slice-memory-mb`):** Clamped via `.min(...)` so an inline directive can only **reduce** (tighten) the host's configured CPU fuel or memory ceiling, never raise it.
-   - **Filesystem & Network Capabilities (`// @slice-allow-read`, `// @slice-allow-write`, `// @slice-allow-net`):** Strictly intersected against the capabilities already granted by `slice.toml`, `SLICE_*` environment variables, or CLI flags (`vfs_prefix_matches` / host allowlist intersection). If the host granted zero read paths, `// @slice-allow-read: ["/etc"]` results in zero read paths.
+   - **Resource & Checkpoint Limits (`// @slice-fuel`, `// @slice-memory-kb`, `// @slice-memory-mb`, `// @slice-checkpoints`, `// @slice-max-checkpoints`):** Clamped via `.min(...)` (and boolean AND for checkpoints) so an inline directive can only **reduce** (tighten) the host's configured CPU fuel, memory ceiling, or checkpoint quota, never raise it.
+   - **Filesystem, Network & Subprocess Capabilities (`// @slice-allow-read`, `// @slice-allow-write`, `// @slice-allow-net`, `// @slice-allow-exec`):** Strictly intersected against the capabilities already granted by `slice.toml`, `SLICE_*` environment variables, or CLI flags. If the host granted zero read paths or zero exec binaries, inline directives result in zero read paths and zero exec binaries.
    - **Environment Variables & `.env` Files (`// @slice-allow-env`, `// @slice-env-file`):** `// @slice-env-file` is ignored unless `trust_directives` is enabled, and `// @slice-allow-env` only permits keys already granted by the host.
-   - **Outbound Egress DLP (`// @slice-audit-egress`):** Always additive — a script can always register *additional* secrets to block from leaking.
-   - **Server Listener Settings (`// @slice-port`, `// @slice-workers`):** Ignored unless `trust_directives` is enabled.
+   - **Outbound Egress DLP (`// @slice-audit-egress`):** Always additive - a script can always register *additional* secrets to block from leaking.
+   - **Server Listener Settings (`// @slice-port`, `// @slice-workers`, `// @slice-tls-cert`, `// @slice-tls-key`):** Ignored unless `trust_directives` is enabled.
 2. **Nested Sub-Sandboxes (`Slice.evalSandbox`) & `slice mcp` (`slice_eval_ts`):**
-   - `Slice.evalSandbox(code, opts)` and the MCP `slice_eval_ts` tool **never** apply capability-granting or limit-raising `// @slice-*` directives from `code`; child capabilities are determined exclusively by `parent_caps ∩ opts`.
-3. **Explicit Opt-In for Trusted Local Scripts (`--trust-directives`):**
-   - When writing trusted single-file local utility scripts (`#!/usr/bin/env slice`) where you intentionally want top-of-file `// @slice-allow-*` comments to grant permissions without a separate `slice.toml`, opt in via `--trust-directives`, `SLICE_TRUST_DIRECTIVES=1`, or `[capabilities] trust_directives = true` in `slice.toml`.
-   - Conversely, passing `--no-directives` (or `--untrusted`) ignores all `// @slice-*` comments completely.
+   - `Slice.evalSandbox(code, opts)` and the MCP `slice_eval_ts` tool **never** apply capability-granting or limit-raising `// @slice-*` directives from `code`; child capabilities are determined exclusively by `parent_caps` intersected with `opts`.
+3. **Explicit Opt-In (`--trust-directives`) & Complete Directive Stripping (`--no-directives`):**
+   - When writing trusted single-file local utility scripts (`#!/usr/bin/env slice`) where you intentionally want top-of-file `// @slice-allow-*` comments to grant permissions without a separate `slice.toml`, opt in via `--trust-directives`, `SLICE_TRUST_DIRECTIVES=1`, or `[capabilities] trust_directives = true` in `slice.toml` (pass `--no-trust-directives` to explicitly enforce default attenuation).
+   - Passing `--no-directives` (or `--untrusted`) ignores all `// @slice-*` comments completely (even narrowing directives).
 
 ---
 

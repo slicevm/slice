@@ -1,6 +1,6 @@
 # Chapter 01: Installation, Upgrading, Quickstart, `slice.toml` & Complete CLI Reference
 
-This chapter is your complete day-one guide to installing, upgrading, configuring, and operating **Slice (Nexus-JS)** (`v0.10.12`). By the end of this chapter, you will know how to install and update Slice on any operating system, scaffold a new TypeScript project, configure your `slice.toml` manifest and `.env` vault, run live development with `< 3 ms` `--watch` reloads, use the interactive `slice repl` shell, and master all 13 CLI commands.
+This chapter is your complete day-one guide to installing, upgrading, configuring, and operating **Slice (Nexus-JS)** (`v0.10.12`). By the end of this chapter, you will know how to install and update Slice on any operating system, scaffold a new TypeScript or SvelteKit 3 + Svelte 5 project, configure your `slice.toml` manifest and `.env` vault, run live development with `< 3 ms` `--watch` reloads, syntax-check scripts with `slice check`, use the interactive `slice repl` shell, and master all 14 CLI commands.
 
 ---
 
@@ -47,11 +47,11 @@ The compiled binary is produced at:
 
 ### 1.4 Running Slice in Docker
 
-Slice includes a production multi-stage [`Dockerfile`](../../Dockerfile) at the repository root:
+Slice includes a multi-stage [`tests/Dockerfile`](../../tests/Dockerfile) for Linux `x86_64` builds and reproducible verification:
 ```bash
-docker build -t slice-runtime .
-docker run --rm slice-runtime info
-docker run --rm slice-runtime doctor
+docker build -f tests/Dockerfile -t slice-runtime .
+docker run --rm --entrypoint slice slice-runtime info
+docker run --rm --entrypoint slice slice-runtime doctor
 ```
 
 ---
@@ -133,9 +133,14 @@ This creates four files:
 - `tsconfig.json`: Pre-configured `"moduleResolution": "bundler"`, `"jsxImportSource": "slice:jsx"`, and `"noEmit": true` for instant IDE IntelliSense and `tsc --noEmit`.
 - `src/index.ts`: Your TypeScript entrypoint.
 
-### Step 1b: Type-Checking (`tsc --noEmit`) & Linting/Formatting (`oxlint` / `Biome`)
-At runtime and during `slice pack` / `slice compile`, Slice uses the native Rust **Oxc (`v0.152.0`)** compiler to transpile `.ts` and `.tsx` in microseconds without waiting for the TypeScript type-checker. For static type validation, linting, and code formatting in your IDE or CI pipeline:
+*(To scaffold a full-stack SvelteKit 3 + Svelte 5 SSR project with `@slicevm/adapter-sveltekit`, pass `--template=sveltekit`: `slice init ./my-app --template=sveltekit`.)*
+
+### Step 1b: Type-Checking (`tsc --noEmit`), Syntax Checking (`slice check`) & Linting (`oxlint` / `Biome`)
+At runtime and during `slice pack` / `slice compile`, Slice uses the native Rust **Oxc (`v0.152.0`)** compiler to transpile `.ts` and `.tsx` in microseconds without waiting for the TypeScript type-checker. For fast syntax checks, static type validation, linting, and code formatting in your IDE or CI pipeline:
 ```bash
+# Instant native Oxc syntax check without executing code:
+slice check ./src/index.ts
+
 # Type-check against slice.d.ts and tsconfig.json:
 npx tsc --noEmit
 
@@ -144,16 +149,22 @@ npx oxlint ./src
 npx @biomejs/biome check --write ./src
 ```
 
-### Step 2: Run Your TypeScript Code (`slice run`)
-You can run the project directory directly (Slice automatically reads `slice.toml`), or pass a specific `.ts` file:
+### Step 2: Run Your TypeScript Code (`slice run`, `-e` / `-p`, & Stdin)
+You can run the project directory directly (Slice automatically reads `slice.toml`), pass a specific `.ts` file, evaluate inline TypeScript snippets, or pipe from `stdin`:
 ```bash
 slice run
 # Or with microsecond execution telemetry and pre-warmed realm pool:
 slice run --warm --metrics
-```
-You can also use the shorthand `slice <file.ts>`:
-```bash
-slice ./src/index.ts
+
+# Shorthand file execution & forwarding CLI arguments to process.argv via `--`:
+slice ./src/index.ts -- --region=us-east-1
+
+# Inline evaluation (-e / --eval) and print expression result (-p / --print):
+slice -e 'const x: number = 21 * 2; console.log(x);'
+slice -p '({ runtime: "slice", version: process.version })'
+
+# Execute TypeScript piped over stdin (`slice -` or `slice run -`):
+echo 'console.log(2 + 2)' | slice -
 ```
 
 ### Step 3: Live Development with `< 3 ms` Reloads (`slice run --watch`)
@@ -193,30 +204,30 @@ slice compile . -o ./hello-slice-app
 
 ---
 
-## 5. Unified 4-Layer Configuration System (`slice.toml`, Inline Directives, `SLICE_*` Env Vars, & CLI Flags)
+## 5. Unified Configuration Precedence (`slice.toml`, Inline Directives, `SLICE_*` Env Vars, & CLI Flags)
 
-By default, Slice runs on its **optimal execution path (`Tier 1`, `boacas = true` `SLICEBC\x01` Precompiled Boa `CodeBlock` CAS)** with zero configuration required. When you want to customize engine behavior, resource limits, Object-Capability (`OCap`) permissions, or HTTP server settings, Slice resolves settings across **five well-defined precedence layers** (lowest to highest priority):
+By default, Slice runs on its **optimal execution path (`Tier 1`, `boacas = true` `SLICEBC\x01` Precompiled Boa `CodeBlock` CAS)** with zero configuration required. When you customize engine behavior, resource limits, Object-Capability (`OCap`) permissions, or HTTP server settings, Slice resolves settings across **five ordered precedence layers** (`Defaults < slice.toml < // @slice-* inline directives < SLICE_* env vars < CLI flags`):
 
 ```text
 1. Built-In Optimal Defaults (`tier = "tier1"`, `boacas = true`, `fuel = 50_000_000`, `memory = 16 MB`, `trust_directives = false`, zero ambient OCap)
        |
        v
-2. Project Manifest (`./slice.toml`, target folder `slice.toml`, or `.cas` embedded `manifest:/slice.toml`)
+2. Project Manifest (`./slice.toml`, target folder `slice.toml`, or `.cas` embedded `manifest:/slice.toml`; note: `SliceManifest` defaults `memory_kb` to `4096 KB` if `[limits] memory_kb` is omitted in `slice.toml`)
        |
        v
-3. Top-of-File Inline Source Directives (`// @slice-...` — monotonically attenuated by default; full additive authority only when `--trust-directives` / `SLICE_TRUST_DIRECTIVES=1` / `[capabilities] trust_directives = true` is set)
+3. Top-of-File Inline Source Directives (`// @slice-...` - monotonically attenuated by default; full additive authority only when `--trust-directives` / `SLICE_TRUST_DIRECTIVES=1` / `[capabilities] trust_directives = true` is set)
        |
        v
-4. Host Environment Variables (`SLICE_TIER`, `SLICE_BOACAS`, `SLICE_FUEL`, `SLICE_ALLOW_READ`, `SLICE_TRUST_DIRECTIVES`, `SLICE_PORT`, ...)
+4. Host Environment Variables (`SLICE_TIER`, `SLICE_BOACAS`, `SLICE_FUEL`, `SLICE_ALLOW_READ`, `SLICE_ALLOW_EXEC`, `SLICE_TRUST_DIRECTIVES`, `SLICE_PORT`, `SLICE_TRACE`, ...)
        |
        v
-5. Explicit CLI Flags (`--tier=`, `--boacas` / `--no-boacas`, `--fuel=`, `--memory=`, `--allow-read=`, `--trust-directives` / `--no-directives`, `--port=`, ...)
+5. Explicit CLI Flags (`--tier=`, `--boacas` / `--no-boacas`, `--fuel=`, `--memory=`, `--allow-read=`, `--allow-exec=`, `--trust-directives` / `--no-directives`, `--port=`, `--trace=`, ...)
 ```
 
-> **Capability Merging, Scalar Overrides, & Untrusted Script Privilege-Escalation Guard:**
-> - **Scalar settings** (`tier`, `boacas`, `warm`, `deterministic_seed`, `fuel`, `memory`, `port`, `workers`, `static_dir`) follow strict override precedence across trusted host layers (`slice.toml`, `SLICE_*` env vars, CLI flags).
-> - **OCap permissions and DLP secrets** (`allow_read`, `allow_write`, `allow_net`, `allow_env`, `env_file`, `audit_egress`) are **additive** across trusted host layers (`slice.toml`, `SLICE_*` env vars, CLI flags).
-> - **Untrusted Entrypoint Lockdown (`trust_directives = false` by default):** By default, top-of-file inline source directives (`// @slice-...`) inside a `.ts`/`.js` script can **only monotonically attenuate (narrow)** capabilities and resource limits already granted by the host (`slice.toml`, `SLICE_*` env vars, or CLI flags), and `// @slice-audit-egress` remains always-additive. An untrusted or AI-generated script can **never** self-grant new filesystem paths, network hosts, `.env` files, or higher fuel/memory ceilings unless the host explicitly opts in via `--trust-directives`, `SLICE_TRUST_DIRECTIVES=1`, or `[capabilities] trust_directives = true` in `slice.toml`. Passing `--no-directives` (or `--untrusted`) ignores inline directives completely.
+> **Capability Merging, Memory Defaults, & Untrusted Script Privilege-Escalation Guard:**
+> - **Scalar settings** (`tier`, `boacas`, `warm`, `deterministic_seed`, `fuel`, `memory`, `port`, `workers`, `static_dir`, `tls_cert`, `tls_key`) follow strict override precedence (`Defaults < slice.toml < // @slice-* < SLICE_* env vars < CLI flags`). When no `slice.toml` is present, the CLI default memory ceiling is `16 MB` (`16,384 KB`); when a `slice.toml` file is loaded, `SliceManifest` defaults `memory_kb` to `4096 KB` (`4 MB`) unless `[limits] memory_kb` (or `memory_mb` / `memory_bytes`) is specified (`slice init` scaffolds `memory_kb = 16384`).
+> - **OCap permissions and DLP secrets** (`allow_read`, `allow_write`, `allow_net`, `allow_exec`, `allow_env`, `env_file`, `audit_egress`) are **additive** across trusted host layers (`slice.toml`, `SLICE_*` env vars, CLI flags).
+> - **Untrusted Entrypoint Lockdown (`trust_directives = false` by default):** By default, top-of-file inline source directives (`// @slice-...`) inside a `.ts`/`.js` script can **only monotonically attenuate (narrow)** capabilities and resource limits already granted by the host (`slice.toml`, `SLICE_*` env vars, or CLI flags), and `// @slice-audit-egress` remains always-additive. An untrusted or AI-generated script can **never** self-grant new filesystem paths, network hosts, subprocess binaries, `.env` files, or higher fuel/memory ceilings unless the host explicitly opts in via `--trust-directives`, `SLICE_TRUST_DIRECTIVES=1`, or `[capabilities] trust_directives = true` in `slice.toml`. Passing `--no-directives` (or `--untrusted`) ignores inline directives completely.
 
 ---
 
@@ -266,9 +277,13 @@ allow_write = ["/tmp"]
 # Use ["*"] to allow all public hosts (Cloud Metadata 169.254.169.254 and RFC1918 private IPs remain blocked!).
 allow_net = ["api.stripe.com:443", "127.0.0.1:18095"]
 
-# Allowed subprocess binaries for node:child_process (`ExecCap` — Deny-All by default).
+# Allowed subprocess binaries for node:child_process (`ExecCap` - Deny-All by default).
 # Child processes receive ONLY tenant-attenuated environment variables and their stdout/stderr are scanned by Egress DLP.
 allow_exec = ["/usr/bin/git", "/bin/echo"]
+
+# Optional guest checkpoint controls (default: allow_checkpoints = true, max_checkpoints = 64).
+# allow_checkpoints = true
+# max_checkpoints = 16
 
 # Optional .env file loaded automatically into process.env and env().
 # Any key matching *_SECRET*, *_TOKEN*, *_KEY*, *_PASSWORD*, or *_PRIVATE*
@@ -338,14 +353,15 @@ console.log("Running with self-contained inline directives!");
 | **Warm Realm Pool** | `false` (`true` in `serve`) | `[engine] warm = true` | `// @slice-warm: true` | `SLICE_WARM=1` | `--warm` / `--no-warm` |
 | **Deterministic Seed** | Disabled (`None`) | `[engine] deterministic_seed = 42` | `// @slice-deterministic: 42` | `SLICE_DETERMINISTIC_SEED=42` | `--deterministic[=42]` / `--no-deterministic` |
 | **CPU Fuel Limit** | `50_000_000` | `[limits] fuel = 50_000_000` | `// @slice-fuel: 50_000_000` | `SLICE_FUEL=50000000` | `--fuel=50000000` |
-| **Memory Cage** | `16 MB` (`16384 KB`) | `[limits] memory_kb = 16384` (`memory_mb`) | `// @slice-memory-kb: 16384` (`memory-mb`) | `SLICE_MEMORY_KB=16384` (`SLICE_MEMORY`) | `--memory=16777216` / `--memory-kb=16384` |
+| **Memory Cage** | `16 MB` CLI (`4096 KB` in bare `SliceManifest`) | `[limits] memory_kb = 16384` (`memory_mb`) | `// @slice-memory-kb: 16384` (`memory-mb`) | `SLICE_MEMORY_KB=16384` (`SLICE_MEMORY`) | `--memory=16777216` / `--memory-kb=16384` |
 | **VFS Read Prefixes** | `[]` (Zero access) | `[capabilities] allow_read = [...]` | `// @slice-allow-read: ["/tmp"]` | `SLICE_ALLOW_READ=/tmp,./data` | `--allow-read=/tmp` |
 | **VFS Write Prefixes** | `[]` (Zero access) | `[capabilities] allow_write = [...]` | `// @slice-allow-write: ["/tmp"]` | `SLICE_ALLOW_WRITE=/tmp` | `--allow-write=/tmp` |
 | **Network Hosts** | `[]` (Zero access) | `[capabilities] allow_net = [...]` | `// @slice-allow-net: ["host:443"]` | `SLICE_ALLOW_NET=host:443` | `--allow-net=host:443` |
 | **Exec Binaries (`ExecCap`)** | `[]` (Deny-All) | `[capabilities] allow_exec = [...]` | `// @slice-allow-exec: ["/usr/bin/git"]` | `SLICE_ALLOW_EXEC=/usr/bin/git` | `--allow-exec=/usr/bin/git` |
+| **Guest Checkpoints** | `true` (`max = 64`) | `[capabilities] allow_checkpoints` / `max_checkpoints` | `// @slice-checkpoints: false` / `// @slice-max-checkpoints: 8` | `SLICE_CHECKPOINTS=0` / `SLICE_MAX_CHECKPOINTS=8` | `--no-checkpoints` / `--max-checkpoints=8` |
 | **Env Variables** | `{}` (Zero access) | `[capabilities.env] KEY = "VAL"` | `// @slice-allow-env: ["KEY=VAL"]` | `SLICE_ALLOW_ENV=KEY=VAL` | `--allow-env=KEY=VAL` |
 | **Dotenv Vault File** | `None` | `[capabilities] env_file = ".env"` | `// @slice-env-file: .env` | `SLICE_ENV_FILE=.env` | `--env-file=.env` |
-| **Egress DLP Secrets** | Auto from `.env` | `[capabilities] audit_egress = [...]` | `// @slice-audit-egress: ["sec"]` | `SLICE_AUDIT_EGRESS=sec1,sec2` | `--audit-egress=sec1` |
+| **Egress DLP Secrets** | Auto from `.env` | `[capabilities] audit_egress = [...]` | `// @slice-audit-egress: ["sec"]` | `SLICE_AUDIT_EGRESS=sec1,sec2` | `--audit-egress=sec1` / `--audit-egress-file=path` |
 | **Trust Inline Directives** | `false` (Attenuate only) | `[capabilities] trust_directives = true` | *(Host-only setting)* | `SLICE_TRUST_DIRECTIVES=1` (`0`) | `--trust-directives` / `--no-directives` |
 | **HTTP Server Port** | `3000` | `[server] port = 3000` | `// @slice-port: 3000` | `SLICE_PORT=3000` | `--port=3000` |
 | **HTTP Worker Threads** | `clamp(cpus, 1, 8)` | `[server] workers = 4` | `// @slice-workers: 4` | `SLICE_WORKERS=4` | `--workers=4` |
@@ -365,28 +381,36 @@ In Slice, when you pass `--env-file=.env` (or set `env_file = ".env"` in `slice.
 1. **Standard `.env` Syntax Support:** Supports `KEY=VALUE`, `export KEY="VALUE"`, single-quoted `'VALUE'`, double-quoted `"VALUE"` (with `\n`, `\r`, `\t`, `\"` unescaping), and inline `# comments`.
 2. **Accessible via `process.env` and `env()`:** All loaded variables are available in `process.env.KEY` (and injected as the second parameter `fetch(req, env, ctx)` in `slice serve`), as well as via the global `env("KEY")` function.
 3. **Automatic Egress DLP Registration:** Any `.env` key whose name contains `SECRET`, `TOKEN`, `KEY`, `PASSWORD`, or `PRIVATE` (excluding `PUBLIC_KEY` and `PUBLISHABLE_KEY`) with a value at least 6 characters long is **automatically registered into Slice's Egress DLP firewall**:
-   - If your code (or a third-party dependency) tries to print that secret to `stdout`, return it in an HTTP response, or send it in an outbound `fetch()` URL, header, or body — in **plaintext**, **Base64**, or **Base64URL** — Slice blocks the leak and traps with `EGRESS_SECRET_LEAK_BLOCKED`!
+   - If your code (or a third-party dependency) tries to print that secret to `stdout`, return it in an HTTP response, or send it in an outbound `fetch()` URL, header, or body - in **plaintext**, **Base64**, or **Base64URL** - Slice blocks the leak and traps with `EGRESS_SECRET_LEAK_BLOCKED`!
 
 ---
 
-## 7. Complete CLI Reference (All 13 Subcommands)
+## 7. Complete CLI Reference (All 14 Subcommands)
 
-### 7.1 `slice init [dir]`
-Scaffolds a new TypeScript edge project containing `slice.toml` and `src/index.ts`.
+### 7.1 `slice init [dir] [--template=sveltekit]`
+Scaffolds a new TypeScript edge project (`slice.toml`, `slice.d.ts`, `tsconfig.json`, and `src/index.ts`) or a full-stack **SvelteKit 3 + Svelte 5 SSR** application (including `adapter-slice.js`, `svelte.config.js`, `vite.config.js`, `+page.svelte`, `+page.server.js`, and `+server.js`).
 ```bash
+# Default TypeScript Edge project:
 slice init ./my-service
+
+# Full-stack SvelteKit 3 + Svelte 5 SSR template:
+slice init ./my-sveltekit-app --template=sveltekit
 ```
 
 ---
 
-### 7.2 `slice run [target] [flags]`
-Executes a `.ts`/`.js` file, a project folder (with `package.json`, `slice.toml`, or `src/index.ts` + `node_modules/`), or a pre-packed `.cas` archive. If `[target]` is omitted, executes `entrypoint` from `./slice.toml`.
+### 7.2 `slice run [target | -] [flags] [-- <args...>]`
+Executes a `.ts`/`.tsx`/`.js`/`.jsx` file, a project folder (with `package.json`, `slice.toml`, or `src/index.ts` + `node_modules/`), a pre-packed `.cas` archive, piped `stdin` (`slice -` or `slice run -`), or an inline code snippet (`-e` / `-p`). If `[target]` is omitted, executes `entrypoint` from `./slice.toml` (or reads from `stdin` when `stdin` is piped). Top-level shorthands (`slice <file.ts>`, `slice -e <code>`, `slice -p <code>`, `slice -`) route directly to `slice run`.
 
 | Flag | Description |
 | :--- | :--- |
+| `-e <code>` / `--eval=<code>` | Compile and evaluate an inline TypeScript/JavaScript snippet directly from the command line. |
+| `-p <code>` / `--print=<code>` | Evaluate an inline TypeScript/JavaScript snippet and print the final expression value (or JSON object) to `stdout`. |
+| `-` | Read TypeScript/JavaScript source from piped `stdin` (`cat app.ts \| slice -` or `slice run -`). |
+| `-- <args...>` | Forward all remaining arguments directly into `process.argv` inside the guest isolate without parsing them as Slice flags. |
 | `--allow-read=<prefix>` | Grant read access to paths starting with `<prefix>` (comma-separated or repeatable). |
 | `--allow-write=<prefix>` | Grant write/append/mkdir/unlink access to paths starting with `<prefix>`. |
-| `--allow-net=<host:port>` | Grant outbound `fetch()` network access to `<host:port>` (or `*` for public internet). |
+| `--allow-net=<host:port>` | Grant outbound `fetch()` / socket access to `<host:port>` (or `*` for public internet). |
 | `--allow-exec=<binary>` | Grant `node:child_process` execution authority (`ExecCap`) for `<binary>` (comma-separated or repeatable; Deny-All by default). |
 | `--allow-env=<KEY=VAL>` | Inject `KEY=VAL` (or import `KEY` from host environment) into the isolate. |
 | `--env-file=<path>` | Load `.env` file into `process.env` / `env()` with automatic Egress DLP secret protection. |
@@ -396,14 +420,14 @@ Executes a `.ts`/`.js` file, a project folder (with `package.json`, `slice.toml`
 | `--trust-directives` / `--no-trust-directives` | Allow (or forbid, default) top-of-file `// @slice-...` directives to grant additive OCap permissions and raise resource ceilings. |
 | `--no-directives` / `--untrusted` | Completely ignore all top-of-file `// @slice-...` inline source directives in the entrypoint. |
 | `--fuel=<u64>` | Set maximum CPU instruction fuel budget (default: `50,000,000`). |
-| `--memory=<bytes>` / `--memory-kb=<kb>` | Set maximum per-isolate memory ceiling in bytes or kilobytes (default: `16,777,216` bytes / `16,384` KB). |
+| `--memory=<bytes>` / `--memory-kb=<kb>` | Set maximum per-isolate memory ceiling in bytes or kilobytes (default: `16,777,216` bytes / `16,384` KB when no `slice.toml` is present). |
 | `--tier=<tier1\|tier0\|auto>` | Override execution tier (`tier1` default, `tier0` for SLICESNP snapshot VM, or `auto`). |
 | `--boacas` / `--no-boacas` | Enable (default) or disable Precompiled Boa `CodeBlock` (`SLICEBC\x01`) bytecode execution. |
 | `--warm` / `--no-warm` | Pre-warm the thread-local `BOA_CONTEXT_POOL` and `__slice_rc` bundle closure before measurement. |
-| `--trace=<out.json>` | Export a Chrome DevTools / Perfetto (`ui.perfetto.dev`) execution timeline (`traceEvents`) with instantiate, execute, checkpoint, restore, and nested sandbox spans. |
+| `--trace=<out.json>` | Export a Chrome DevTools / Perfetto (`ui.perfetto.dev`) execution timeline (`traceEvents`) (`SLICE_TRACE`). |
 | `--watch` | Watch source files (`src/`, `slice.toml`, `.env`) and live-reload in `< 3 ms` on save. |
 | `--watch-once` | Run once, wait for a single file modification, re-execute in `< 3 ms`, and exit (ideal for CI/scripts). |
-| `--deterministic[=<seed>]` | Enable deterministic `Math.random()`, `Date.now()`, `performance.now()`, and `fetch()` cassette replay (default seed: `42`). |
+| `--deterministic[=<seed>]` / `--no-deterministic` | Enable or disable deterministic `Math.random()`, `Date.now()`, `performance.now()`, and `fetch()` cassette replay (default seed: `42`). |
 | `--metrics` | Print microsecond instantiation, execution, total time, tier, memory bytes, and `stat` syscall count. |
 | `--quiet` / `-q` | Suppress script `stdout` output (useful when benchmarking with `--metrics`). |
 
@@ -412,8 +436,11 @@ Executes a `.ts`/`.js` file, a project folder (with `package.json`, `slice.toml`
 # Run a TypeScript file with explicit read/net permissions and .env file
 slice run ./src/worker.ts --env-file=.env --allow-read=./data --allow-net=api.github.com:443
 
-# Run an entire folder application with warm pool telemetry
-slice run ./tests/apps/02-npm-ecosystem-suite --warm --metrics
+# Evaluate an inline TypeScript expression and print its result
+slice -p 'const nums: number[] = [10, 20, 30]; nums.reduce((a, b) => a + b, 0)'
+
+# Forward custom flags to process.argv after `--`
+slice run ./src/cli.ts -- --input=report.csv --dry-run
 
 # Live development mode with automatic < 3 ms rebuilds on save
 slice run ./src/index.ts --watch --metrics
@@ -421,20 +448,35 @@ slice run ./src/index.ts --watch --metrics
 
 ---
 
-### 7.3 `slice test [target] [flags]`
-Runs Slice's built-in **Time-Travel Test Runner** (`"slice:test"` / `"node:test"` / `"bun:test"`). Automatically discovers all `*.test.ts`, `*.spec.ts`, `*.test.js`, and `*.spec.js` files in `[target]` (defaulting to `.`) or runs a single test file.
+### 7.3 `slice check <target | ->` (or `slice --check` / `slice -c`)
+Parses and syntax-checks TypeScript, TSX, JavaScript, JSX, `.cas` archives, inline `-e`/`-p` snippets, or piped `stdin` (`-`) using Oxc without executing any guest code. Exits with code `0` if valid or `1` with source-mapped syntax diagnostics if invalid.
+```bash
+slice check ./src/index.ts
+slice -c -e 'const broken: number = ;'
+cat ./src/worker.ts | slice check -
+```
+
+---
+
+### 7.4 `slice test [target] [flags]`
+Runs Slice's built-in **Time-Travel Test Runner** (`"slice:test"` / `"node:test"` / `"bun:test"`). Automatically discovers all `*.test.ts`, `*.spec.ts`, `*_test.ts`, `*.test.tsx`, `*.spec.tsx`, `*.test.js`, and `*.spec.js` files in `[target]` (defaulting to `.`) or runs a single test file.
 Before every `test(...)` / `it(...)` block, Slice takes a `< 5 us` VFS (`node:fs`) + `Slice.kv` snapshot and restores it in `finally`, guaranteeing zero state leakage between tests.
 
 | Flag | Description |
 | :--- | :--- |
 | `--filter=<substring>` | Only run tests whose `"Suite > Test Name"` contains `<substring>`. |
-| `--deterministic[=<seed>]` | Run all tests with a deterministic PRNG and virtual clock (default seed: `20261024`). |
+| `--deterministic[=<seed>]` | Run all tests with a deterministic PRNG and virtual clock (enabled by default with seed `20261024`). |
+| `--no-deterministic` | Disable the default deterministic PRNG and virtual clock during test runs. |
+| `--watch` | Watch project files and re-run the test suite automatically in milliseconds on save. |
+| `--watch-once` | Run the test suite once, wait for a single file change, re-run, and exit. |
 | `--env-file=<path>` | Load `.env` variables and auto-register secrets into the Egress DLP guard. |
-| `--allow-read=<prefix>` | Grant additional read prefixes (defaults to allowing `/tmp` and system temp dir). |
-| `--allow-write=<prefix>` | Grant additional write prefixes (defaults to allowing `/tmp` and system temp dir). |
-| `--allow-net=<host:port>` | Grant outbound network hosts during tests. |
-| `--fuel=<u64>` | Override fuel limit per test file. |
-| `--memory=<bytes>` | Override memory limit per test file. |
+| `--allow-read=<prefix>` / `--allow-write=<prefix>` | Grant additional VFS read/write prefixes. |
+| `--allow-net=<host:port>` / `--allow-exec=<bin>` | Grant outbound network hosts or `ExecCap` subprocess binaries during tests. |
+| `--audit-egress=<secret\|auto>` / `--audit-egress-file=<path>` | Register secrets into the Egress DLP guard during tests. |
+| `--no-checkpoints` / `--max-checkpoints=<N>` | Configure guest checkpoint limits for nested sandboxes under test. |
+| `--trust-directives` / `--no-directives` | Control how top-of-file `// @slice-*` directives in test files are applied. |
+| `--fuel=<u64>` / `--memory=<bytes>` | Override fuel or memory ceiling per test file. |
+| `--trace=<out.json>` | Export Chrome DevTools / Perfetto trace spans for the test run. |
 | `--json` | Output a machine-readable JSON test report (`files`, `total`, `passed`, `failed`, `skipped`, `checkpointsRestored`). |
 
 **Examples:**
@@ -442,17 +484,18 @@ Before every `test(...)` / `it(...)` block, Slice takes a `< 5 us` VFS (`node:fs
 # Run all discovered *.test.ts and *.spec.ts files in the project
 slice test
 
-# Filter tests by name and run with a fixed deterministic seed
-slice test ./tests/state_machine.test.ts --filter="rollback" --deterministic=20261024
+# Live test watcher or real wall-clock mode
+slice test --watch
+slice test --no-deterministic
 
-# Emit JSON report for CI pipelines
-slice test --json
+# Filter tests by name and emit JSON report for CI pipelines
+slice test ./tests/state_machine.test.ts --filter="rollback" --json
 ```
 
 ---
 
-### 7.4 `slice serve [target] [flags]`
-Launches the multi-tenant WinterTC HTTP/1.1 `Keep-Alive` and pipelined MicroVM web server (`163,766 req/s` Tier-0 CAS, `126,566 req/s` Tier-1 WinterTC).
+### 7.5 `slice serve [target] [flags]`
+Launches the multi-tenant WinterTC HTTP/1.1 `Keep-Alive`, TLS 1.3, SSE, and WebSocket MicroVM server. See [`tests/reports/latest.md`](../../tests/reports/latest.md) for live multi-worker HTTP/1.1 Keep-Alive throughput benchmarks against `Bun.serve`, `Deno.serve`, and `Node.js`.
 
 | Flag | Description |
 | :--- | :--- |
@@ -462,9 +505,12 @@ Launches the multi-tenant WinterTC HTTP/1.1 `Keep-Alive` and pipelined MicroVM w
 | `--tls-cert=<path>` | PEM certificate chain path for native `rustls` TLS 1.3 termination (`[server] tls_cert` / `SLICE_TLS_CERT`). |
 | `--tls-key=<path>` | PEM private key path for native `rustls` TLS 1.3 termination (`[server] tls_key` / `SLICE_TLS_KEY`). |
 | `--tenant-dir=<dir>` | Dynamically route `X-Slice-Tenant: <id>` or `/t/<id>/...` to `<dir>/<id>.cas` with zero-downtime live hot-swapping. |
+| `--allow-read` / `--allow-write` / `--allow-net` / `--allow-exec` / `--allow-env` | Grant OCap permissions to served request isolates. |
 | `--env-file=<path>` | Load `.env` variables and register sensitive keys into the Egress DLP guard. |
-| `--audit-egress=<secret>` | Scan all HTTP responses, SSE streams, and outbound `fetch()` calls for raw/Base64 leaks of `<secret>`. |
-| `--deterministic[=<seed>]` | Enable deterministic PRNG, virtual clock, and `fetch()` cassette replay across served requests. |
+| `--audit-egress=<secret\|auto>` / `--audit-egress-file=<path>` | Scan all HTTP responses, SSE streams, WebSocket frames, and outbound `fetch()` calls for raw/Base64/Base64URL secret leaks. |
+| `--no-checkpoints` / `--max-checkpoints=<N>` | Disable or bound guest `Slice.checkpoint()` calls per HTTP request. |
+| `--trust-directives` / `--no-directives` | Control top-of-file `// @slice-*` directive handling for the served entrypoint. |
+| `--deterministic[=<seed>]` / `--no-deterministic` | Enable or disable deterministic PRNG, virtual clock, and `fetch()` cassette replay across served requests. |
 | `--tier=<tier1\|tier0\|auto>` | Override execution tier across HTTP worker threads. |
 | `--boacas` / `--no-boacas` | Enable (default) or disable Precompiled Boa `CodeBlock` (`SLICEBC\x01`) bytecode execution. |
 | `--max-requests=<usize>` | Exit cleanly after serving `<usize>` requests (ideal for automated load tests). |
@@ -475,6 +521,9 @@ Launches the multi-tenant WinterTC HTTP/1.1 `Keep-Alive` and pipelined MicroVM w
 # Serve a full-stack TypeScript app + ./public static assets on port 8080 across 8 workers
 slice serve ./src/server.ts --static=./public --port=8080 --workers=8 --env-file=.env
 
+# Serve over native TLS 1.3
+slice serve ./src/server.ts --port=8443 --tls-cert=./certs/fullchain.pem --tls-key=./certs/privkey.pem
+
 # Serve a multi-tenant directory of .cas bundles with zero-downtime hot-swapping
 slice serve --port=3000 --workers=8 --tenant-dir=./tenants
 
@@ -484,7 +533,7 @@ slice serve ./src/server.ts --smoke-test
 
 ---
 
-### 7.5 `slice pack <input_file_or_dir> <output.cas> [flags]`
+### 7.6 `slice pack <input_file_or_dir> <output.cas> [flags]`
 Compiles TypeScript via Oxc, bundles transitive ESM/CommonJS/JSON modules from `src/` and `node_modules/`, tree-shakes unused barrel submodules, ahead-of-time compiles top-level scripts into **`SLICEBC\x01` Precompiled Boa `CodeBlock`** bytecode (with Oxc AST deferred function module spans and pre-fused `node:*` built-in bindings), optionally embeds `--static` web assets and `slice.toml`, and writes a 64-byte cache-line aligned BLAKE3 `.cas` archive.
 
 | Flag | Description |
@@ -501,7 +550,7 @@ slice pack ./my-fullstack-app ./production.cas --static=./public
 
 ---
 
-### 7.6 `slice compile <input_file_or_dir_or_cas> [-o <output_binary>] [flags]`
+### 7.7 `slice compile <input_file_or_dir_or_cas> [-o <output_binary>] [flags]`
 Embeds a `.ts` script, folder application (including `node_modules/` and `slice.toml`), or `.cas` archive directly into a standalone, zero-dependency native executable (`SLICEEXE` format) with `SLICEBC\x01` Precompiled Boa `CodeBlock` bytecode enabled by default.
 
 | Flag | Description |
@@ -519,7 +568,7 @@ slice compile ./tests/apps/01-fintech-checkout -o ./fintech-service
 
 ---
 
-### 7.7 `slice inspect <archive.cas | script.ts | folder>`
+### 7.8 `slice inspect <archive.cas | script.ts | folder>`
 Inspects the internal structure of any `.cas` archive, `.ts`/`.js` script, or project folder:
 - For `.cas` archives: Prints the CAS format version, entrypoint hash, embedded static asset count, and every module's BLAKE3 hash, 64-byte aligned byte offset, source size, and bytecode size, followed by the bytecode disassembly.
 - For `.ts`/`.js` files or folders: Compiles the source and disassembles the resulting `SLICEBC\x01` (`BOACAS_PRECOMP`), `SLICESNP` (`CONST_NUM`, `MONO_FOR_T2`, `EXPORT_SYM`), or `SLICEBOA` bundle payload.
@@ -531,22 +580,21 @@ slice inspect ./src/index.ts
 
 ---
 
-### 7.8 `slice repl`
+### 7.9 `slice repl`
 Launches an interactive **SES-Locked TypeScript/JavaScript Compartment Shell** where you can test expressions, inspect fuel and memory consumption in real time, and verify Object-Capability permissions.
 
 | REPL Command | Description |
 | :--- | :--- |
-| `:help` / `.help` | Show available REPL meta-commands. |
+| `:help` / `:h` / `.help` / `help` | Show available REPL meta-commands. |
 | `:metrics` | Display current Execution Tier, CPU Fuel (`consumed/limit`), Memory (`used/limit`), and Hardware `PKEY`. |
-| `:caps` | Display active `CapabilityToken` (`allow_read`, `allow_write`, `allow_net`, `allow_env`) loaded from `./slice.toml`. |
+| `:caps` | Display active `CapabilityToken` (`allow_read`, `allow_write`, `allow_net`, `allow_exec`, `allow_env`) loaded from `./slice.toml`. |
 | `:reset` / `.clear` | Reset the compartment state, SES intrinsics, and fuel counter to a clean slate. |
-| `:quit` / `:q` / `.exit` | Exit the interactive shell. |
+| `:quit` / `:q` / `:exit` / `.exit` / `.quit` | Exit the interactive shell. |
 
 **Example REPL Session:**
 ```text
 $ slice repl
 Slice (Nexus-JS) v0.10.12 Interactive SES-Locked Compartment Shell
-Commands: :help, :metrics, :caps, :vars, :reset, :quit
 slice(ses)> const price: number = 250 * 4;
 => 1000
 slice(ses)> fib(20)
@@ -562,7 +610,7 @@ slice(ses)> :quit
 
 ---
 
-### 7.9 `slice mcp [flags]`
+### 7.10 `slice mcp [flags]`
 Starts the built-in **JSON-RPC 2.0 Model Context Protocol (`2024-11-05`)** server over `stdin`/`stdout` for AI coding assistants (Claude Code, Cursor, custom LLM agents). Exposes `slice_eval_ts`, `slice_kv_get`, `slice_kv_set`, and `slice_checkpoint`.
 
 | Flag | Description |
@@ -570,17 +618,19 @@ Starts the built-in **JSON-RPC 2.0 Model Context Protocol (`2024-11-05`)** serve
 | `--allow-read=<prefix>` | Grant VFS read prefix to the MCP host compartment. |
 | `--allow-write=<prefix>` | Grant VFS write prefix to the MCP host compartment. |
 | `--allow-net=<host:port>` | Grant outbound network host to the MCP host compartment. |
-| `--audit-egress=<secret>` | Block raw, Base64, or Base64URL exfiltration of `<secret>` across all MCP tool calls. |
+| `--allow-exec=<binary>` | Grant `ExecCap` binary execution authority to the MCP host compartment. |
+| `--audit-egress=<secret\|auto>` / `--audit-egress-file=<path>` | Block raw, Base64, or Base64URL exfiltration of secrets across all MCP tool calls. |
+| `--no-checkpoints` / `--max-checkpoints=<N>` | Configure guest checkpoint limits for `slice_eval_ts` calls. |
 | `--smoke-test` | Run a 6-step JSON-RPC 2.0 self-test (`initialize`, `tools/list`, `slice_eval_ts`, `slice_kv_set`, `slice_kv_get`, `slice_checkpoint`) and exit. |
 
 ---
 
-### 7.10 `slice doctor`
+### 7.11 `slice doctor`
 Runs a comprehensive diagnostic check of your OS kernel completion ring (`io_uring` / `IOCP`), registered fixed slab buffers, hardware `MPK/PKU` status, CAS 64-byte cache-line alignment, pre-warmed `Boa` pool, process RSS, and 5-vector OCap/SES security containment.
 
 ---
 
-### 7.11 `slice verify-security`
+### 7.12 `slice verify-security`
 Executes all 5 multi-tenant attack vectors against live `SliceIsolate` compartments and verifies 100% deterministic containment:
 1. **Vector 1:** SES Intrinsic Lockdown (`Object.prototype.polluted = true`) -> Blocked (`IntrinsicMutationBlocked`)
 2. **Vector 2:** OCap VFS Token (`fs.readFileSync("/etc/shadow")`) -> Blocked (`FsReadDenied`)
@@ -590,15 +640,15 @@ Executes all 5 multi-tenant attack vectors against live `SliceIsolate` compartme
 
 ---
 
-### 7.12 `slice microvm-bench [--tenants=1000] [--json]`
+### 7.13 `slice microvm-bench [--tenants=1000] [--json]`
 Spawns `N` isolated tenant compartments (`default: 1000`) in a single process and benchmarks:
-- Min / P50 / P99 isolate cold-start latency (`0.98 us` min on Linux `x86_64`)
-- Total 1,000-tenant swarm boot time (`1.26 ms`) and per-tenant memory footprint (`4,096 B`)
+- Min / P50 / P99 isolate cold-start latency (`~1 us` P50 on Linux `x86_64`)
+- Total 1,000-tenant swarm boot + execution time and per-tenant memory footprint (`4,096 B` per tenant; see [`tests/reports/latest.md`](../../tests/reports/latest.md) for live numbers)
 - 500-module Zero-Stat CAS graph resolution (`0` OS `stat()` syscalls)
 - 10,000 kernel completion ring operations
 - Tier-2 `Fib(40)` + `10M` numeric loop compute kernel
 
 ---
 
-### 7.13 `slice info` (or `slice --version` / `slice -v`)
+### 7.14 `slice info` (or `slice --version` / `slice -v`)
 Prints the Slice version, host OS/architecture, active I/O completion engine, CAS version, compiler pipeline, and security architecture summary.

@@ -7,7 +7,7 @@ Traditional approaches force an impossible choice:
 - Booting a Docker container or Firecracker microVM for every LLM tool call takes **`125+ milliseconds`** and **`30+ MB` of RAM**, making parallel Tree-of-Thought exploration slow and expensive.
 
 **Slice gives you three purpose-built AI & Plugin Sandbox primitives that operate in microseconds:**
-1. **`Slice.evalSandbox(code, options)`**: Spawn a nested, capability-attenuated TypeScript sub-sandbox from inside your TypeScript code in **`~27 microseconds`**.
+1. **`Slice.evalSandbox(code, options)`**: Spawn a nested, capability-attenuated TypeScript sub-sandbox from inside your TypeScript code in tens of microseconds (see [`tests/reports/latest.md`](../../tests/reports/latest.md)).
 2. **`Slice.checkpoint()` & `Slice.restore(snapId)`**: Capture and roll back the entire in-memory filesystem (`node:fs`) and `Slice.kv` state in **`< 5 microseconds`**.
 3. **`slice mcp`**: A built-in JSON-RPC 2.0 **Model Context Protocol (MCP)** server over `stdio` ready to plug directly into Claude Code, Cursor, or your own LLM orchestrator.
 
@@ -112,7 +112,7 @@ const result = Slice.evalSandbox(userFormulaTs, {
 if (result.ok) {
     console.log("Final Price Cents:", result.returnValue); // "10200"
     console.log("Plugin Logs:", result.stdout);            // ["Calculated discount: 1800"]
-    console.log(" Ran in:", result.totalTimeUs, "us");     // ~27 - 50 us
+    console.log("Ran in:", result.totalTimeUs, "us");
 } else {
     console.error("Plugin blocked:", result.violation);
 }
@@ -133,7 +133,7 @@ Slice provides `< 5 microsecond` copy-on-write state snapshots:
 
 ### Recipe: Tree-of-Thought (ToT) AI Code Exploration with Instant Rollback
 
- Suppose an LLM agent generates 3 candidate patches that mutate files and state. You can test each candidate against your invariants and roll back failed candidates in microseconds:
+Suppose an LLM agent generates 3 candidate patches that mutate files and state. You can test each candidate against your invariants and roll back failed candidates in microseconds:
 
 ```typescript
 import * as fs from "node:fs";

@@ -39,8 +39,9 @@ pub(crate) fn print_usage() {
     );
     println!();
     println!("Core Commands:");
-    println!("  slice init [dir] [--template=sveltekit]        Scaffold a new TypeScript Edge or SvelteKit 2 project");
+    println!("  slice init [dir] [--template=sveltekit]        Scaffold a new TypeScript Edge or SvelteKit 3 project");
     println!("  slice run [target] [--warm] [--watch]          Execute a script, folder app, .cas bundle, or slice.toml");
+    println!("  slice check <target>                           Parse and syntax-check TypeScript/JavaScript without executing");
     println!("  slice test [target] [--filter=PAT] [--json]    Run Time-Travel Test Suite (< 5us VFS+KV rollback per test)");
     println!("  slice serve [target] [--port=N] [--smoke-test] Launch multi-tenant WinterTC HTTP MicroVM server");
     println!("  slice pack <input> <output.cas>                Pack a file or folder app into a Zero-Stat BLAKE3 .cas archive");

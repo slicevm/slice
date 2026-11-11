@@ -1,6 +1,6 @@
 # Chapter 05: Building Full-Stack Web Apps, APIs, Static Sites & SSE Streams (`slice serve`)
 
-`slice serve` is a high-throughput, multi-tenant HTTP/1.1 `Keep-Alive` and pipelined web server that executes **every incoming HTTP request inside an isolated, fuel-metered `SliceIsolate`** — while achieving **`163,766 req/s`** in Tier-0 CAS mode and **`126,566 req/s`** in Tier-1 WinterTC mode (outperforming `Deno.serve`, `Bun.serve`, and `Node.js http.createServer`).
+`slice serve` is a high-throughput, multi-tenant HTTP/1.1 `Keep-Alive` and pipelined web server that executes **every incoming HTTP request inside an isolated, fuel-metered `SliceIsolate`** - sustaining **`> 145k-154k req/s`** across Tier-1 WinterTC and Tier-0 CAS modes and outperforming `Deno.serve`, `Bun.serve`, and `Node.js http.createServer` (see [`tests/reports/latest.md`](../../tests/reports/latest.md) for live benchmark numbers).
 
 This chapter is a hands-on guide to building full-stack web applications, REST/BFF APIs, static frontend CDNs, Server-Sent Events (SSE) token streams, outbound `fetch()` webhooks, and multi-tenant hot-swapped SaaS platforms with `slice serve`.
 
@@ -107,21 +107,23 @@ X-Slice-Fuel-Used: 120
 
 ---
 
-## 2. WinterTC Web API Reference (`Request`, `Response`, `Headers`, `URL`, `WebCrypto`, `Streams`, `Timers`)
+## 2. WinterTC Web API Reference (`Request`, `Response`, `Headers`, `URL`, `URLPattern`, `WebCrypto`, `Streams`, `Intl`, `Timers`)
 
 | Web API Class / Global | Supported Constructors, Properties & Methods |
 | :--- | :--- |
-| **`URL`** | `new URL(input, base?)` — `.href`, `.origin`, `.protocol`, `.username`, `.password`, `.host`, `.hostname`, `.port`, `.pathname`, `.search`, `.hash`, `.searchParams`, `.toString()`, `.toJSON()`. Automatically normalizes `/a/b/../c` dot segments and strips default `:80`/`:443` ports. |
-| **`URLSearchParams`** | `new URLSearchParams(init?)` — `.get(k)`, `.getAll(k)`, `.has(k)`, `.set(k, v)`, `.append(k, v)`, `.delete(k)`, `.sort()`, `.forEach(cb)`, `.entries()`, `.keys()`, `.values()`, `.toString()`, `.size`, `for (const [k, v] of params)`. Live two-way synced with `URL`. |
-| **`Headers`** | `new Headers(init?)` — Case-insensitive map supporting `.get(k)`, `.set(k, v)`, `.append(k, v)`, `.has(k)`, `.delete(k)`, **`getSetCookie()`**, `.entries()`, `.keys()`, `.values()`, `.forEach(cb)`, `for (const [k, v] of headers)`. Incoming `req.headers` uses a **zero-copy lazy view** (`__SLICE_LIVE_REQ__`) over the Rust socket buffer! |
-| **`Request`** | `new Request(input, init?)` — `.method`, `.url`, `.headers`, `.signal`, `.body`, `.bodyUsed`, `await req.text()`, `await req.json()`, **`await req.arrayBuffer()`**, **`await req.bytes()`**, **`await req.blob()`**, **`await req.formData()`**, `req.textSync()`, `req.jsonSync()`, `req.clone()`. |
-| **`Response`** | `new Response(body?, init?)` — `.status`, `.statusText`, `.ok`, `.redirected`, `.url`, `.headers`, `.body`, `.bodyUsed`, `await res.text()`, `await res.json()`, **`await res.arrayBuffer()`**, **`await res.bytes()`**, **`await res.blob()`**, **`await res.formData()`**, `res.textSync()`, `res.jsonSync()`, `res.clone()`, **`Response.json(data, init?)`**, **`Response.redirect(url, status?)`**, **`Response.sse(source, init?)`**. |
-| **`crypto` & `crypto.subtle`** | `crypto.randomUUID()`, `crypto.getRandomValues(typedArray)`, and native Rust `SubtleCrypto`: `digest("SHA-256"\|"SHA-384"\|"SHA-512"\|"SHA-1")`, `sign`/`verify` (`HMAC`, `Ed25519`), `encrypt`/`decrypt` (`AES-GCM` 128/256-bit), `deriveBits`/`deriveKey` (`PBKDF2`, `HKDF`), `generateKey`, `importKey`, `exportKey` (`"raw"`, `"jwk"`). |
+| **`URL` & `URLPattern`** | `new URL(input, base?)` (`URL.canParse`, `URL.createObjectURL`, `URL.revokeObjectURL`, `.href`, `.origin`, `.protocol`, `.username`, `.password`, `.host`, `.hostname`, `.port`, `.pathname`, `.search`, `.hash`, `.searchParams`, `.toString()`, `.toJSON()`) and **`new URLPattern(input, baseURL?, opts?)`** (`.test()`, `.exec()`, named `:param` groups, wildcards). |
+| **`URLSearchParams`** | `new URLSearchParams(init?)` - `.get(k)`, `.getAll(k)`, `.has(k)`, `.set(k, v)`, `.append(k, v)`, `.delete(k)`, `.sort()`, `.forEach(cb)`, `.entries()`, `.keys()`, `.values()`, `.toString()`, `.size`, `for (const [k, v] of params)`. Live two-way synced with `URL`. |
+| **`Headers`** | `new Headers(init?)` - Case-insensitive map supporting `.get(k)`, `.set(k, v)`, `.append(k, v)`, `.has(k)`, `.delete(k)`, **`getSetCookie()`**, `.entries()`, `.keys()`, `.values()`, `.forEach(cb)`, `for (const [k, v] of headers)`. Incoming `req.headers` uses a **zero-copy lazy view** (`__SLICE_LIVE_REQ__`) over the Rust socket buffer! |
+| **`Request`** | `new Request(input, init?)` - `.method`, `.url`, `.headers`, `.signal`, `.body`, `.bodyUsed`, `await req.text()`, `await req.json()`, **`await req.arrayBuffer()`**, **`await req.bytes()`**, **`await req.blob()`**, **`await req.formData()`**, `req.textSync()`, `req.jsonSync()`, `req.clone()`. |
+| **`Response`** | `new Response(body?, init?)` - `.status`, `.statusText`, `.ok`, `.redirected`, `.url`, `.headers`, `.body`, `.bodyUsed`, `await res.text()`, `await res.json()`, **`await res.arrayBuffer()`**, **`await res.bytes()`**, **`await res.blob()`**, **`await res.formData()`**, `res.textSync()`, `res.jsonSync()`, `res.clone()`, **`Response.json(data, init?)`**, **`Response.redirect(url, status?)`**, **`Response.sse(source, init?)`**. |
+| **`crypto` & `crypto.subtle`** | `crypto.randomUUID()`, `crypto.getRandomValues(typedArray)`, and native Rust `SubtleCrypto`: `digest("SHA-256"\|"SHA-384"\|"SHA-512"\|"SHA-1")`, `sign`/`verify` (`HMAC`, `Ed25519`, `ECDSA` `P-256`/`P-384`, `RSASSA-PKCS1-v1_5`, `RSA-PSS`), `encrypt`/`decrypt` (`AES-GCM` & `AES-CBC` 128/256-bit, `RSA-OAEP`), `deriveBits`/`deriveKey` (`PBKDF2`, `HKDF`, `X25519`, `ECDH` `P-256`/`P-384`), `generateKey`, `importKey`, `exportKey` (`"raw"`, `"jwk"`, `"pkcs8"`, `"spki"`). |
 | **`ReadableStream` / `WritableStream` / `TransformStream`** | Full WHATWG Streams pipeline with `.getReader()`, `.getWriter()`, `.pipeThrough(transform)`, `.pipeTo(dest)`, `.tee()`, `for await (const chunk of stream)`, `TextEncoderStream`, and `TextDecoderStream`. |
+| **`CompressionStream` & `DecompressionStream`** | Pure-Rust zero-dependency RFC 1950/1951/1952 streaming compression and decompression supporting `"gzip"`, `"deflate"`, and `"deflate-raw"` via `.pipeThrough()`. |
 | **`TextEncoder` & `TextDecoder`** | `new TextEncoder()` (`.encode(str)`, `.encodeInto(str, u8)`), `new TextDecoder(label?, opts?)` (`.decode(buf)`). |
 | **`Blob`, `File`, & `FormData`** | `new Blob(parts, opts)` (`.size`, `.type`, `.text()`, `.arrayBuffer()`, `.bytes()`, `.slice()`, `.stream()`), `new File(parts, name, opts)`, `new FormData()` (`.append()`, `.set()`, `.get()`, `.getAll()`, `multipart/form-data` serialization & parsing). |
-| **`AbortController` & `AbortSignal`** | `new AbortController()`, `AbortSignal.abort(reason?)`, `AbortSignal.timeout(ms)`, `AbortSignal.any(signals)`, `.throwIfAborted()`. Integrated with `fetch(url, { signal })` and `ReadableStream.pipeTo`. |
-| **`setTimeout` / `setInterval` / `queueMicrotask`** | $O(1)$ slab timer wheel (`setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `queueMicrotask`) with **`0 ns` deterministic virtual time-warp** when `--deterministic` is active. |
+| **`AbortController`, `AbortSignal` & `DOMException`** | `new AbortController()`, `AbortSignal.abort(reason?)`, `AbortSignal.timeout(ms)`, `AbortSignal.any(signals)`, `.throwIfAborted()`, and standard **`DOMException`** (`name`, `message`, `code`). Integrated with `fetch(url, { signal })` and `ReadableStream.pipeTo`. |
+| **`Intl`, `navigator`, & `location`** | Deterministic zero-ICU **`Intl`** (`DateTimeFormat`, `NumberFormat`, `Collator`, `PluralRules`, `Segmenter`, `getCanonicalLocales`, `supportedValuesOf`), plus WinterTC `navigator` and `location` globals. |
+| **`setTimeout` / `setInterval` / `queueMicrotask`** | $O(1)$ slab timer wheel (`setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `setImmediate`, `clearImmediate`, `queueMicrotask`) with **`0 ns` deterministic virtual time-warp** when `--deterministic` is active. |
 | **`EventTarget`, `Event`, `CustomEvent`, `structuredClone`** | Standard DOM-compatible `EventTarget` (`addEventListener`, `removeEventListener`, `dispatchEvent`), `CustomEvent`, `structuredClone`, `atob`, and `btoa`. |
 
 > **Performance Tip (`jsonSync` & Synchronous `fetch`):**
@@ -153,7 +155,7 @@ Slice.respond(200, { status: "healthy", tenant: req.tenant }, "application/json"
 
 ## 4. Using the 16-Way Sharded Edge KV Store (`Slice.kv`)
 
-Every `slice` process includes a built-in, lock-free-sharded (`16` shards) in-memory key-value and atomic counter store (`Slice.kv`) that operates in **`~0.57 microseconds` per call**.
+Every `slice` process includes a built-in, lock-free-sharded (`16` shards) in-memory key-value and atomic counter store (`Slice.kv`) that operates in **`< 1 microsecond` per call**.
 
 Crucially, **`Slice.kv` is automatically isolated per tenant**:
 - When `Tenant A` (`X-Slice-Tenant: tenant-a`) calls `Slice.kv.set("config", "dark")`, `Tenant B` (`X-Slice-Tenant: tenant-b`) calling `Slice.kv.get("config")` receives `null`.
@@ -172,15 +174,16 @@ const raw = Slice.kv.get("session:user-42");
 const count: number = Slice.kv.incr("ratelimit:ip:203.0.113.5", 1);
 const remaining: number = Slice.kv.incr("credits:balance", -50);
 
-// 4. Delete a key (returns true if the key existed)
+// 4. Delete a key (returns true if the key existed) or clear all keys for the active tenant
 const deleted: boolean = Slice.kv.del("session:user-42");
+Slice.kv.clear();
 ```
 
 ---
 
 ## 5. Serving Static Frontend Assets (`--static`) with `< 2 us` BLAKE3 `ETag` `304`
 
-You don't need Nginx or a separate CDN container to serve your React, Vite, Vue, or static HTML/CSS/JS frontend alongside your TypeScript API.
+You don't need Nginx or a separate CDN container to serve your React, Vite, Vue, SvelteKit, or static HTML/CSS/JS frontend alongside your TypeScript API.
 
 Pass `--static=./public` to `slice serve`, `slice pack`, or `slice compile`:
 
@@ -207,7 +210,7 @@ slice compile ./src/server.ts -o ./my-fullstack-app --static=./public
 
 ## 6. Streaming Server-Sent Events (`Response.sse` & `Slice.streamSSE`)
 
-Building an AI chat interface, real-time notification feed, or live telemetry dashboard? Slice has first-class support for **WHATWG Server-Sent Events (SSE)** and **`ReadableStream`** — with automatic Egress DLP scanning on every emitted frame.
+Building an AI chat interface, real-time notification feed, or live telemetry dashboard? Slice has first-class support for **WHATWG Server-Sent Events (SSE)** and **`ReadableStream`** - with automatic Egress DLP scanning on every emitted frame.
 
 ### 6.1 Using `Response.sse(source, init?)` inside `export default { fetch }`
 `Response.sse` accepts an array of event objects/strings, a callback function `emit(event)`, or a generator/iterator:
@@ -267,7 +270,7 @@ while (true) {
 Inside your scripts or HTTP handlers, you can call upstream HTTP/1.1 and **HTTPS (TLS 1.3 / 1.2 via pure-Rust `rustls` + Mozilla WebPKI root certificates)** APIs and webhooks using standard `await fetch(url, init)` or synchronous `Slice.fetchSync(url, init)`.
 
 ### 7.1 Outbound `fetch()` Architecture: Connection Pooling, Concurrent Fan-Out & Redirects
-- **Thread-Local Keep-Alive Connection Pool (`OUTBOUND_CONN_POOL`):** Idle TCP and TLS 1.3 streams are pooled per `(scheme, host, port)` (up to 4 streams per origin), eliminating repeated TCP + TLS handshakes on sequential webhook calls.
+- **Thread-Local Keep-Alive Connection Pool (`OUTBOUND_CONN_POOL`):** Idle TCP and TLS 1.3 streams are pooled per `(tenant_id, scheme, host, port)` (up to 4 streams per origin), eliminating repeated TCP + TLS handshakes on sequential webhook calls.
 - **Concurrent `Promise.all([fetch(...), ...])` Fan-Out (`OUTBOUND_FETCH_POOL`):** Multiple `fetch()` calls initiated in the same microtask tick are dispatched in parallel across a background OS thread pool so `await Promise.all([fetch(a), fetch(b), fetch(c)])` runs in $\max(T_a, T_b, T_c)$ wall time instead of $\sum T_i$.
 - **HTTP Chunked Transfer-Encoding & Binary Bodies:** Automatically decodes `Transfer-Encoding: chunked` upstream responses and preserves raw bytes (`latin1` 1:1 byte string) for `await res.arrayBuffer()`, `await res.bytes()`, and `await res.blob()`.
 - **Hop-by-Hop Redirect Validation (`redirect: "follow" | "manual" | "error"`):** Follows up to 5 `301`/`302`/`303`/`307`/`308` redirects, re-verifying each hop's `Location` URL and DNS-resolved IP against `allow_net` and the SSRF firewall while stripping `Authorization` and `Cookie` headers on cross-origin hops.
@@ -298,7 +301,7 @@ async function dispatchWebhook(orderId: string, amountCents: number): Promise<nu
 ```
 Remember to allowlist the upstream host in `slice.toml` (`allow_net = ["127.0.0.1:18095"]`) or on the command line (`--allow-net=127.0.0.1:18095`).
 
-### 7.2 Mocking Outbound `fetch()` in Tests (`Slice.mockFetch`) & Cassette Replay
+### 7.3 Mocking Outbound `fetch()` in Tests (`Slice.mockFetch`) & Cassette Replay
 - **In Unit Tests (`Slice.mockFetch`):** Mock any upstream endpoint in memory without starting a mock server:
   ```typescript
   Slice.mockFetch("POST", "https://api.stripe.com/v1/charges", {
@@ -332,7 +335,7 @@ slice serve --port=3000 --workers=8 --tenant-dir=./tenants
    - A request with header `X-Slice-Tenant: tenant-alpha` **or** URL path `/t/tenant-alpha/checkout` automatically executes `./tenants/tenant-alpha.cas` inside `tenant-alpha`'s isolated `SliceIsolate` and `Slice.kv` partition.
    - Unknown tenants automatically fall back to `./tenants/default.cas` (if present).
 2. **Zero-Downtime Atomic Hot-Swapping:**
-    - When `tenant-alpha` deploys new code, simply run `slice pack ./alpha-src ./tenants/tenant-alpha.cas`.
+   - When `tenant-alpha` deploys new code, simply run `slice pack ./alpha-src ./tenants/tenant-alpha.cas`.
    - On the very next HTTP request for `tenant-alpha`, `slice serve` detects the new file modification timestamp (`mtime_ns`), memory-maps the updated `.cas` archive, pre-warms its realm closure, and serves the new version with **0 dropped connections and 0 server restarts**.
 
 ---

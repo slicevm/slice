@@ -56,22 +56,22 @@ export const CATEGORY_DEFINITIONS = [
   },
   {
     id: "wintertc_fetch_dlp",
-    title: "WinterTC Web Standards, Fetch Mesh & DLP (`Apps 09–14, 17–19`)",
+    title: "WinterTC Web Standards, Fetch Mesh & DLP (`Apps 09-14, 17-19`)",
     focus: "`Request`/`Response`, Static CDN `304`, SSE, Live `fetch`, WebCrypto"
   },
   {
     id: "realtime_workers_wasm",
-    title: "Realtime WebSockets, Workers & Wasm/TSX (`Apps 15, 21–24`)",
+    title: "Realtime WebSockets, Workers & Wasm/TSX (`Apps 15, 21-24`)",
     focus: "RFC 6455 WS, `worker_threads` + TCP/UDP, Pure-Rust `wasmi` Wasm, TSX SSR"
   },
   {
     id: "frameworks",
-    title: "Full-Stack Edge & Node Frameworks (`FW 01–04`)",
+    title: "Full-Stack Edge & Node Frameworks (`FW 01-04`)",
     focus: "`Hono v4.6.20`, `itty-router + UnJS Nitro`, `Express/Polka node:http`, `SvelteKit 3.1.1 + Svelte 5.57.3`"
   },
   {
     id: "case_studies",
-    title: "AI Agent, Multi-Tenant SaaS & Chaos Case Studies (`CS 01–05`)",
+    title: "AI Agent, Multi-Tenant SaaS & Chaos Case Studies (`CS 01-05`)",
     focus: "Depth-4 ToT Agent, MCP Code Mode, 12-Tenant Mesh, Wasm CDR, 48 Payment Sagas"
   }
 ];
@@ -118,7 +118,7 @@ export function renderFullReportMarkdown(report, archiveFileName) {
           : `**\`${bunRatioWarm}x Bun Warm\` / \`${nodeRatioCold}x Node\`**`;
       const prevCell = w.prevSliceCasAvgMs
         ? `\`${fmtMs(w.prevSliceCasAvgMs)}\` (\`${(((w.sliceCasAvgMs - w.prevSliceCasAvgMs) / w.prevSliceCasAvgMs) * 100).toFixed(1)}%\`)`
-        : "—";
+        : "N/A";
 
       return `| **${w.code}** | ${w.label} | **\`${fmtMs(w.sliceCasAvgMs)}\`** (\`${w.sliceCasMinMs.toFixed(2)} ms\` Min) | **\`${fmtMs(w.sliceBinAvgMs)}\`** | **\`${fmtMs(w.sliceWarmMs)}\`** | ${prevCell} | \`${fmtMs(w.bunAvgMs)}\` | \`${fmtMs(w.denoAvgMs)}\` | \`${fmtMs(w.nodeAvgMs)}\` | ${speedupText} |`;
     })
@@ -132,7 +132,7 @@ export function renderFullReportMarkdown(report, archiveFileName) {
     })
     .join("\n");
 
-  return `# Slice (Nexus-JS) — Full ${totalCount}-Workload & MicroVM Benchmark Report
+  return `# Slice (Nexus-JS) - Full ${totalCount}-Workload & MicroVM Benchmark Report
 
 * **Slice Version:** \`v${meta.version}\` (Commit \`${meta.commit}\`)
 * **Generated Timestamp (UTC):** \`${meta.timestampUtc}\`
