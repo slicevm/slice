@@ -5,6 +5,8 @@
   function ReadableStream(underlyingSource) {
     var self = this;
     this._chunks = [];
+    this._waiters = [];
+    this._closeWaiters = [];
     this._closed = false;
     this._errored = null;
     this.locked = false;
@@ -17,13 +19,29 @@
           throw new RangeError("ReadableStream buffer limit exceeded (" + MAX_STREAM_CHUNKS + " chunks)");
         }
         self._chunks.push(chunk);
+        if (self._waiters.length > 0) {
+          var w = self._waiters.shift();
+          w.res({ value: self._chunks[w.idx()], done: false });
+        }
       },
       close: function() {
         self._closed = true;
+        while (self._waiters.length > 0) {
+          self._waiters.shift().res({ value: undefined, done: true });
+        }
+        while (self._closeWaiters.length > 0) {
+          self._closeWaiters.shift().res(undefined);
+        }
       },
       error: function(e) {
         self._errored = e || new Error("ReadableStream error");
         self._closed = true;
+        while (self._waiters.length > 0) {
+          self._waiters.shift().rej(self._errored);
+        }
+        while (self._closeWaiters.length > 0) {
+          self._closeWaiters.shift().rej(self._errored);
+        }
       }
     };
     this._ctrl = ctrl;
@@ -115,6 +133,15 @@
             return Promise.resolve({ value: self._chunks[idx++], done: false });
           }
         }
+        if (!self._closed) {
+          return new Promise(function(res, rej) {
+            self._waiters.push({
+              idx: function() { return idx++; },
+              res: res,
+              rej: rej
+            });
+          });
+        }
         return Promise.resolve({ value: undefined, done: true });
       },
       cancel: function(reason) {
@@ -125,6 +152,35 @@
       }
     };
   };
+  ReadableStream.prototype.values = function(opts) {
+    var preventCancel = Boolean(opts && opts.preventCancel);
+    var reader = this.getReader();
+    return {
+      next: function() {
+        return reader.read().then(function(step) {
+          if (step.done) reader.releaseLock();
+          return step;
+        }, function(e) {
+          reader.releaseLock();
+          throw e;
+        });
+      },
+      return: function(val) {
+        if (!preventCancel) {
+          return reader.cancel(val).then(function() {
+            reader.releaseLock();
+            return { value: val, done: true };
+          });
+        }
+        reader.releaseLock();
+        return Promise.resolve({ value: val, done: true });
+      },
+      [Symbol.asyncIterator]: function() { return this; }
+    };
+  };
+  if (typeof Symbol !== "undefined" && Symbol.asyncIterator) {
+    ReadableStream.prototype[Symbol.asyncIterator] = ReadableStream.prototype.values;
+  }
   ReadableStream.prototype.tee = function() {
     this._drainSync();
     var copy1 = this._chunks.slice(), copy2 = this._chunks.slice();

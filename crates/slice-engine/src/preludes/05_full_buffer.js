@@ -45,6 +45,15 @@
         for (var i = 0; i < n; i++) u[i] = value.charCodeAt(i) & mask;
         return __wrapBuf(u);
       }
+      if (e === "utf16le" || e === "utf-16le" || e === "ucs2" || e === "ucs-2") {
+        var n16 = value.length, u16 = new __U8(n16 * 2);
+        for (var k = 0; k < n16; k++) {
+          var code = value.charCodeAt(k);
+          u16[k * 2] = code & 0xff;
+          u16[k * 2 + 1] = (code >>> 8) & 0xff;
+        }
+        return __wrapBuf(u16);
+      }
       return __wrapBuf(__slice_text_encode(value));
     }
     if (value instanceof ArrayBuffer) {
@@ -85,7 +94,20 @@
     return Buffer.alloc(size);
   };
 
-  Buffer.byteLength = __slice_utf8_byte_len;
+  Buffer.byteLength = function(str, encoding) {
+    if (typeof str !== "string") {
+      if (str && typeof str.byteLength === "number") return str.byteLength;
+      str = String(str);
+    }
+    if (!encoding) return __slice_utf8_byte_len(str);
+    var e = String(encoding).toLowerCase();
+    if (e === "utf8" || e === "utf-8") return __slice_utf8_byte_len(str);
+    if (e === "utf16le" || e === "utf-16le" || e === "ucs2" || e === "ucs-2") return str.length * 2;
+    if (e === "latin1" || e === "binary" || e === "ascii") return str.length;
+    if (e === "hex") return str.length >>> 1;
+    if (e === "base64" || e === "base64url") return __slice_base64_decode_bytes(str).byteLength;
+    return __slice_utf8_byte_len(str);
+  };
 
   Buffer.concat = function(list, totalLength) {
     if (!Array.isArray(list)) throw new TypeError("The \"list\" argument must be an instance of Array");
@@ -141,6 +163,13 @@
       var out = "";
       for (var i = 0; i < view.length; i++) out += String.fromCharCode(view[i] & 0x7f);
       return out;
+    }
+    if (enc === "utf16le" || enc === "utf-16le" || enc === "ucs2" || enc === "ucs-2") {
+      var out16 = "", pairLen = view.length - (view.length % 2);
+      for (var j = 0; j < pairLen; j += 2) {
+        out16 += String.fromCharCode(view[j] | (view[j + 1] << 8));
+      }
+      return out16;
     }
     return __slice_text_decode(view, "utf-8", false, true);
   };
