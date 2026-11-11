@@ -1,17 +1,21 @@
 # Guide 02: TypeScript IDE Setup (`slice.d.ts`), Linting (`oxlint` / `Biome`), & Replacing `.node` Addons with `.wasm`
 
-This guide covers day-to-day TypeScript IDE tooling, static type-checking (`tsc --noEmit`), fast Rust-based linting and formatting (`oxlint` and `Biome`), and migrating native C/C++ `.node` addons to zero-stat `.wasm` modules.
+This guide covers day-to-day TypeScript IDE tooling, sub-millisecond syntax checking (`slice check`), static type-checking (`tsc --noEmit`), fast Rust-based linting and formatting (`oxlint` and `Biome`), and migrating native C/C++ `.node` addons to zero-stat `.wasm` modules.
 
 ---
 
-## 1. Automatic IDE IntelliSense & `tsc --noEmit` (`slice.d.ts` + `tsconfig.json`)
+## 1. Automatic IDE IntelliSense, `slice check`, & `tsc --noEmit` (`slice.d.ts` + `tsconfig.json`)
 
-Running `slice init` generates both `slice.d.ts` and `tsconfig.json` in your project root:
-- **`slice.d.ts`** provides ambient TypeScript types for `Slice.*` (`Slice.kv`, `Slice.evalSandbox`, `Slice.checkpoint`, `Slice.restore`, `Slice.connect`, `Slice.mockFetch`, `Slice.mockSocket`, `Slice.mockWebSocket`), `WinterTC.route`, `env()`, `slice:test`, `slice:jsx`, and `cloudflare:sockets`.
+Running `slice init` generates both `slice.d.ts` and `tsconfig.json` in your project root (and `slice init [dir] --template=sveltekit` scaffolds a full SvelteKit 3 + Svelte 5 project):
+- **`slice.d.ts`** provides ambient TypeScript types for `Slice.*` (`Slice.kv`, `Slice.evalSandbox`, `Slice.checkpoint`, `Slice.restore`, `Slice.releaseCheckpoint`, `Slice.connect`, `Slice.streamSSE`, `Slice.waitUntil`), `WinterTC.route`, `env()`, `slice:test`, `slice:jsx`, and `cloudflare:sockets`.
 - **`tsconfig.json`** configures `"moduleResolution": "bundler"`, `"jsx": "react-jsx"`, `"jsxImportSource": "slice:jsx"`, and `"noEmit": true`.
 
-Run full static type-checking in CI or pre-commit hooks without emitting `.js` files:
+Run sub-millisecond Oxc AST + module-graph syntax validation or full TypeScript type-checking in CI and pre-commit hooks without emitting `.js` files:
 ```bash
+# Fast Oxc AST + module dependency graph syntax validation (zero code execution):
+slice check .
+
+# Full TypeScript type-checking via tsc:
 npx tsc --noEmit
 ```
 
@@ -52,4 +56,3 @@ const exports = instance.exports as {
 };
 ```
 See [`tests/apps/23-wasm-crypto-and-simd-kernel`](../../tests/apps/23-wasm-crypto-and-simd-kernel/src/index.ts) and [`tests/apps/24-tsx-ssr-and-wasm-edge-pipeline`](../../tests/apps/24-tsx-ssr-and-wasm-edge-pipeline/src/index.ts) for working examples.
-

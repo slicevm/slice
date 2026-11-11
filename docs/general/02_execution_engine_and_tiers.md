@@ -1,6 +1,6 @@
 # Chapter 02: Writing TypeScript & JavaScript for Maximum Performance
 
-In Node.js, Deno, and Bun, TypeScript type annotations (`: number`, `interface Order { ... }`) are simply erased before your code runs — they do nothing to make your program faster at runtime.
+In Node.js, Deno, and Bun, TypeScript type annotations (`: number`, `interface Order { ... }`) are simply erased before your code runs - they do nothing to make your program faster at runtime.
 
 In **Slice**, TypeScript is a first-class performance tool. Before Slice's Oxc compiler strips your TypeScript types, it analyzes your `: number` variables and `interface` definitions to unlock **compile-time native optimizations** alongside a **three-tier execution pipeline**.
 
@@ -23,12 +23,12 @@ Whenever you run a script or bundle (`slice run`, `slice serve`, `slice test`, o
 |         |         Request/Response/URL, node:* modules, Slice.kv, and npm packages              |
 |         |       - Build Time: Oxc AST deferred module spans + node:* pre-fusion +               |
 |         |         32-byte BoaCasHeader + SLICEBC1 recursive CodeBlock serialization             |
-|         |       - Cold Start: ~3.26 - 6.95 ms (0 runtime JS lexing/parsing!)                    |
-|         |       - Warm Pool (--warm / slice serve): ~0.18 - 0.56 ms (0.02 - 0.25 us instantiate)|
+|         |       - Cold Start: Single-digit milliseconds (0 runtime JS lexing/parsing!)          |
+|         |       - Warm Pool (--warm / slice serve): Sub-millisecond (~0.02 - 0.25 us spawn)     |
 |         |                                                                                       |
 |         +---> [Tier 0: SLICESNP Snapshot VM] (`Tier0LLIntSnapshot`)                             |
 |         |       - Used for: Lightweight scalar routing, arithmetic, env(), static exports       |
-|         |       - Cold Start: ~1.27 microseconds P50 | Memory: 4.0 KB                           |
+|         |       - Cold Start: ~1 microsecond P50 | Memory: 4.0 KB                               |
 |         |                                                                                       |
 |         +---> [Tier 2: Peak Native SIMD & Typed Kernels] (`Tier2PeakNative`)                    |
 |                 - Used when: Your code runs typed `: number` loops, SHA-256 / HMAC-SHA256,      |
@@ -36,7 +36,9 @@ Whenever you run a script or bundle (`slice run`, `slice serve`, `slice test`, o
 +-------------------------------------------------------------------------------------------------+
 ```
 
-You never have to manually configure which tier to use — Slice runs on its optimal **Tier 1 + `SLICEBC\x01`** path out of the box. If you ever want to override the tier or toggle `SLICEBC\x01` precompilation for a specific script or project, you can set it via `slice.toml` (`[engine] tier = "tier1"`, `boacas = true`), top-of-file inline directives (`// @slice-tier: tier1`, `// @slice-boacas: false`), environment variables (`SLICE_TIER`, `SLICE_BOACAS`), or CLI flags (`--tier=`, `--boacas` / `--no-boacas`).
+> See [`tests/reports/latest.md`](../../tests/reports/latest.md) for live cold-start, `--warm`, and standalone binary latencies across all 33 real-world benchmark suites.
+
+You never have to manually configure which tier to use - Slice runs on its optimal **Tier 1 + `SLICEBC\x01`** path out of the box. If you ever want to override the tier or toggle `SLICEBC\x01` precompilation for a specific script or project, you can set it via `slice.toml` (`[engine] tier = "tier1"`, `boacas = true`), top-of-file inline directives (`// @slice-tier: tier1`, `// @slice-boacas: false`), environment variables (`SLICE_TIER`, `SLICE_BOACAS`), or CLI flags (`--tier=`, `--boacas` / `--no-boacas`).
 
 ---
 
@@ -67,8 +69,8 @@ Output:
 
 When running full ES2024+ applications with classes and external `node_modules` packages (`Tier1Baseline`), Slice embeds a 16-character content fingerprint (`//__SLICE_RC:<hash>`) into the compiled bundle.
 
-- **Without `--warm` (Cold Process):** Slice initializes a fresh ECMAScript realm, evaluates your `node_modules` CommonJS factory wrappers once, and runs your entrypoint (`~5 - 15 ms`).
-- **With `--warm` (or automatically inside `slice serve` workers):** Slice pre-warms its thread-local realm pool (`BOA_CONTEXT_POOL`) and caches the compiled entrypoint function handle (`JsObject`). Subsequent executions invoke your entrypoint **directly in Rust without lexing, parsing, or re-initializing `node_modules`**, dropping execution time from `6.76 ms` down to **`0.27 ms`** (`25x` faster!).
+- **Without `--warm` (Cold Process):** Slice initializes a fresh ECMAScript realm, evaluates your `node_modules` CommonJS factory wrappers once, and runs your entrypoint in single-digit to low-double-digit milliseconds.
+- **With `--warm` (or automatically inside `slice serve` workers):** Slice pre-warms its thread-local realm pool (`BOA_CONTEXT_POOL`) and caches the compiled entrypoint function handle (`JsObject`). Subsequent executions invoke your entrypoint **directly in Rust without lexing, parsing, or re-initializing `node_modules`**, cutting execution latency down to sub-millisecond or low-millisecond runtimes (often `3x-50x` faster; see [`tests/reports/latest.md`](../../tests/reports/latest.md)).
 
 ```bash
 # Pack your app once
@@ -77,7 +79,7 @@ slice pack ./my-app ./my-app.cas
 # Run with --warm to use the pre-warmed realm pool
 slice run ./my-app.cas --warm --metrics
 ```
-> **Note:** In `slice serve`, every worker thread automatically pre-warms both the realm pool and your `.cas` bundle at server startup — you get `--warm` performance on every HTTP request automatically.
+> **Note:** In `slice serve`, every worker thread automatically pre-warms both the realm pool and your `.cas` bundle at server startup - you get `--warm` performance on every HTTP request automatically.
 
 ---
 
@@ -163,20 +165,20 @@ Beyond explicit `: number` loop annotations, Slice includes two general-purpose 
 1. **Unboxed 64-Bit Numeric Register VM ([`numeric_vm.rs`](../../crates/slice-engine/src/vm/numeric_vm.rs)):**
    - Any pure numeric JS/TS function (`function fn(a, b) { ... }`) using arithmetic (`+`, `-`, `*`, `/`, `%`, `**`), bitwise operators (`|`, `&`, `^`, `<<`, `>>`, `>>>`), `while`/`for` loops, `if`/`else` branches, `Math.*` intrinsics (`Math.abs`, `Math.min`, `Math.max`, `Math.floor`, `Math.ceil`, `Math.round`, `Math.trunc`, `Math.sqrt`, `Math.imul`), or recursive calls is automatically compiled into unboxed 64-bit register instructions (`NumericOp`) on a 32-register stack file (`[f64; 32]`).
    - 2-term linear recurrences (`return f(n - 1) + f(n - 2)`) are automatically recognized and lowered to $O(n)$ register accumulation while charging deterministic CPU fuel per step.
-2. **Oxc AST Array Pipeline Fusion ([`fuse_array_pipelines_ast`](../../crates/slice-cas/src/lib.rs#L231-L575)):**
-   - During `slice pack` and `slice compile`, Slice's Oxc AST pass detects chained functional array pipelines (such as `arr.filter(...).map(...).reduce(...)`, `arr.map(...).reduce(...)`, `arr.some(...)`, and `arr.every(...)`) on any arbitrary receiver expression and fuses them into a single-pass, zero-allocation `for` loop IIFE — eliminating intermediate array allocations on hot paths.
+2. **Oxc AST Array Pipeline Fusion ([`pipeline_fusion.rs`](../../crates/slice-cas/src/compiler/pipeline_fusion.rs)):**
+   - During `slice pack` and `slice compile`, Slice's Oxc AST pass (`fuse_array_pipelines_ast`) detects chained functional array pipelines (such as `arr.filter(...).map(...).reduce(...)`, `arr.map(...).reduce(...)`, `arr.some(...)`, and `arr.every(...)`) on any arbitrary receiver expression and fuses them into a single-pass, zero-allocation `for` loop IIFE - eliminating intermediate array allocations on hot paths.
 
 ---
 
 ## 7. Developer Optimization #5: Hardware-Accelerated Crypto, Encoding & Ecosystem Fast Paths
 
-When writing applications in Slice, prefer standard `node:crypto`, WebCrypto (`crypto.subtle`), `Buffer`, and supported ecosystem packages — Slice intercepts the hottest operations and runs them in **native Rust and hardware SIMD**:
+When writing applications in Slice, prefer standard `node:crypto`, WebCrypto (`crypto.subtle`), `Buffer`, and supported ecosystem packages - Slice intercepts the hottest operations and runs them in **native Rust and hardware SIMD**:
 
 | Standard TypeScript / JS Code You Write | How Slice Executes It Under the Hood |
 | :--- | :--- |
 | `crypto.createHash("sha256" \| "sha384" \| "sha512" \| "sha1").update(data).digest("hex")` | Lowered directly to native Rust cryptographic intrinsics (`__slice_crypto_hash`) using **Intel/AMD `SHA-NI` hardware instructions** for SHA-256 and pure-Rust `sha2`/`sha1` for SHA-384/SHA-512/SHA-1 (`Buffer` or string output). |
 | `crypto.createHmac("sha256" \| "sha384" \| "sha512" \| "sha1", key).update(msg).digest("hex")` | Lowered directly to native Rust RFC-2104 HMAC (`__slice_crypto_hmac` / `__slice_crypto_hmac_sha256`). |
-| `await crypto.subtle.encrypt("AES-GCM", key, data)`<br>`await crypto.subtle.sign("Ed25519", key, data)` | Executed in native Rust (`aes-gcm`, `ed25519-dalek`, `pbkdf2`, `hkdf`, `sha2`) with zero OpenSSL dependency. |
+| `await crypto.subtle.encrypt("AES-GCM", key, data)`<br>`await crypto.subtle.sign("Ed25519", key, data)` | Executed in native Rust (`ring` + pure-Rust asymmetric/AEAD/KDF primitives supporting `AES-GCM`, `AES-CBC`, `Ed25519`, `ECDSA` `P-256`/`P-384`, `RSASSA-PKCS1-v1_5`, `RSA-PSS`, `RSA-OAEP`, `X25519`, `ECDH`, `PBKDF2`, `HKDF`) with zero OpenSSL dependency. |
 | `Buffer.from(str, "utf8").toString("base64url")`<br>`buf.readUInt32BE(0)` / `buf.writeBigUInt64BE(val, 0)` | Backed by a real `Uint8Array` instance (`Object.setPrototypeOf(u8, Buffer.prototype)`) with native Rust Base64/Base64URL/Hex codecs and full big/little-endian wire-protocol readers/writers. |
 | `semver.valid(v)`, `semver.coerce(v)`, `semver.gt(a, b)`, `semver.satisfies(v, range)` | Executed in `~150 ns` by Slice's zero-regex Rust SemVer engine (`__slice_semver_*`), with automatic fallback for complex ranges. |
 | `ms("15m")`, `ms(60000, { long: true })`<br>`bytes.parse("64KB")`, `bytes.format(4781506)` | Executed by native Rust zero-regex parsers/formatters (`__slice_fast_ms`, `__slice_fast_bytes_*`) + compile-time constant folding for literals like `bytes.parse("64KB")` -> `65536`. |
@@ -188,15 +190,15 @@ When writing applications in Slice, prefer standard `node:crypto`, WebCrypto (`c
 
 Every Slice script has immediate access to the following globals without needing any imports:
 
-- **Standard Console & Output:** `console.log(...)`, `console.info(...)`, `console.warn(...)`, `console.error(...)`, `print(...)`
-- **WinterTC Web Standards:** `fetch(input, init)`, `Request`, `Response` (`Response.json`, `Response.redirect`, `Response.sse`), `Headers`, `URL`, `URLSearchParams`, `ReadableStream`, `WritableStream`, `TransformStream`, `TextEncoder`, `TextDecoder`, `TextEncoderStream`, `TextDecoderStream`, `Blob`, `File`, `FormData`, `Event`, `CustomEvent`, `EventTarget`, `AbortController`, `AbortSignal` (`AbortSignal.abort`, `AbortSignal.timeout`, `AbortSignal.any`), `structuredClone`, `atob`, `btoa`, `crypto` (`crypto.randomUUID()`, `crypto.getRandomValues(typedArray)`, `crypto.subtle`)
-- **Timers & Microtasks:** `setTimeout(fn, delayMs, ...args)`, `clearTimeout(id)`, `setInterval(fn, delayMs, ...args)`, `clearInterval(id)`, `queueMicrotask(fn)` (powered by a $O(1)$ slab timer wheel with `0 ns` virtual time-warp in `--deterministic` mode)
-- **Environment & Node Globals:** `process` (`process.env`, `process.cwd()`, `process.platform`, `process.arch`, `process.version`, `process.argv`, `process.hrtime.bigint()`, `process.nextTick()`), `env(key)`, `Buffer` (real `Uint8Array` subclass), `require(id)`
+- **Standard Console & Output:** `console.log(...)`, `console.info(...)`, `console.warn(...)`, `console.error(...)`, `console.table(...)`, `console.time(...)` / `console.timeEnd(...)`, `print(...)`
+- **WinterTC Web Standards:** `fetch(input, init)`, `Request`, `Response` (`Response.json`, `Response.redirect`, `Response.sse`), `Headers`, `URL`, `URLSearchParams`, `URLPattern`, `ReadableStream`, `WritableStream`, `TransformStream`, `CompressionStream`, `DecompressionStream`, `TextEncoder`, `TextDecoder`, `TextEncoderStream`, `TextDecoderStream`, `Blob`, `File`, `FormData`, `Event`, `CustomEvent`, `EventTarget`, `DOMException`, `AbortController`, `AbortSignal` (`AbortSignal.abort`, `AbortSignal.timeout`, `AbortSignal.any`), `WebSocket`, `MessageEvent`, `CloseEvent`, `Worker`, `MessageChannel`, `MessagePort`, `WebAssembly`, `Intl` (`DateTimeFormat`, `NumberFormat`, `Collator`, `PluralRules`, `Segmenter`), `navigator`, `location`, `structuredClone`, `atob`, `btoa`, `crypto` (`crypto.randomUUID()`, `crypto.getRandomValues(typedArray)`, `crypto.subtle`, `CryptoKey`)
+- **Timers & Microtasks:** `setTimeout(fn, delayMs, ...args)`, `clearTimeout(id)`, `setInterval(fn, delayMs, ...args)`, `clearInterval(id)`, `setImmediate(fn, ...args)`, `clearImmediate(id)`, `queueMicrotask(fn)` (powered by an $O(1)$ slab timer wheel with `0 ns` virtual time-warp in `--deterministic` mode)
+- **Environment & Node Globals:** `process` (`process.env`, `process.cwd()`, `process.platform`, `process.arch`, `process.version`, `process.argv`, `process.hrtime.bigint()`, `process.nextTick()`, `process.stdout`, `process.stderr`), `env(key)`, `Buffer` (real `Uint8Array` subclass), `require(id)`
 - **Timing & Determinism:** `Date.now()`, `performance.now()`, `Math.random()` (all automatically deterministic when `--deterministic=<seed>` is enabled!)
 - **Test Runner Globals (Zero-Cost Lazy Loaded):** `describe(name, fn)`, `test(name, fn, opts)`, `it(name, fn, opts)`, `beforeEach(fn)`, `afterEach(fn)`, `expect(actual)`
 - **The `Slice` Host Namespace:**
-  - `Slice.request()`, `Slice.respond(status, body, contentType?)`, `Slice.streamSSE(source, init?)`, `Slice.waitUntil(fn)`
-  - `Slice.fetchSync(input, init?)`, `Slice.mockFetch(methodOrUrl, urlOrOpts, opts?)`
-  - `Slice.kv.get(key)`, `Slice.kv.set(key, val, ttlMs?)`, `Slice.kv.del(key)`, `Slice.kv.incr(key, delta?)`
-  - `Slice.checkpoint()`, `Slice.restore(snapshotId)`, `Slice.evalSandbox(code, opts?)`
+  - `Slice.serve(optsOrHandler, handler?)` (`Deno.serve` / `Bun.serve` compatible), `Slice.request()`, `Slice.respond(status, body, contentType?)`, `Slice.streamSSE(source, init?)`, `Slice.upgradeWebSocket(handlers)`, `Slice.waitUntil(fn)`
+  - `Slice.fetchSync(input, init?)`, `Slice.mockFetch(methodOrUrl, urlOrOpts, opts?)`, `Slice.connect(addr, opts?)`, `Slice.mockSocket(addr, spec)`, `Slice.mockWebSocket(urlPattern, spec)`
+  - `Slice.kv.get(key)`, `Slice.kv.set(key, val, ttlMs?)`, `Slice.kv.del(key)`, `Slice.kv.incr(key, delta?)`, `Slice.kv.clear()`
+  - `Slice.checkpoint()`, `Slice.restore(snapshotId)`, `Slice.releaseCheckpoint(snapshotId)`, `Slice.evalSandbox(code, opts?)`
   - `Slice.testSummary()`, `Slice.resetTests()`

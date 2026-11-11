@@ -1,6 +1,6 @@
-# Guide 01: Building & Deploying Hono (`v4`), UnJS, and SvelteKit (`v3`) Edge Microservices on Slice
+# Guide 01: Building & Deploying Hono (`v4`), UnJS, Express, and SvelteKit (`v3`) Edge Microservices on Slice
 
-Because Slice implements the WinterTC Minimum Common Web Platform API (`Request`, `Response`, `Headers`, `URL`, `URLSearchParams`, `ReadableStream`, `crypto.subtle`, `TextEncoder`/`TextDecoder`, and `export default { fetch }`) and compiles bundles ahead-of-time into **`SLICEBC\x01` Precompiled Boa `CodeBlock` CAS** containers with Oxc AST deferred function module spans and live ES module bindings, WinterTC frameworks like **Hono (`v4`)**, **`itty-router` (`v5`)**, the **UnJS / Nitro ecosystem (`ufo`, `destr`, `ohash`, `radix3`, `cookie`)**, and **SvelteKit (`@sveltejs/kit@3.1.1` + `svelte@5.57.3`)** run unmodified on Slice.
+Because Slice implements the WinterTC Minimum Common Web Platform API (`Request`, `Response`, `Headers`, `URL`, `URLSearchParams`, `URLPattern`, `ReadableStream`, `CompressionStream`, `crypto.subtle`, `Intl`, `TextEncoder`/`TextDecoder`, and `export default { fetch }`), bridges `node:http` (`http.createServer`) directly in-memory to `slice serve`, and compiles bundles ahead-of-time into **`SLICEBC\x01` Precompiled Boa `CodeBlock` CAS** containers with Oxc AST deferred function module spans and live ES module bindings, frameworks like **Hono (`v4`)**, **`itty-router` (`v5`)**, the **UnJS / Nitro ecosystem (`ufo`, `destr`, `ohash`, `radix3`, `cookie`)**, **Express / Polka (`node:http`)**, and **SvelteKit (`@sveltejs/kit@3.1.1` + `svelte@5.57.3`)** run unmodified on Slice.
 
 ---
 
@@ -58,22 +58,22 @@ slice compile . -o ./my-hono-bin
 
 ---
 
-## 2. Building an `itty-router` + UnJS (`radix3`, `ufo`, `destr`, `ohash`) Edge Stack
+## 2. Building an `itty-router` + UnJS (`radix3`, `ufo`, `destr`, `ohash`) or Express (`node:http`) Stack
 
-See [`tests/frameworks/01-hono-edge-microservice`](../../tests/frameworks/01-hono-edge-microservice/src/index.ts) and [`tests/frameworks/02-itty-router-unjs-nitro-stack`](../../tests/frameworks/02-itty-router-unjs-nitro-stack/src/index.ts) for complete, benchmarked reference implementations verified across Slice, Bun, Deno, and Node.js.
+See [`tests/frameworks/01-hono-edge-microservice`](../../tests/frameworks/01-hono-edge-microservice/src/index.ts), [`tests/frameworks/02-itty-router-unjs-nitro-stack`](../../tests/frameworks/02-itty-router-unjs-nitro-stack/src/index.ts), and [`tests/frameworks/03-node-http-express-compat`](../../tests/frameworks/03-node-http-express-compat/src/index.ts) for complete, benchmarked reference implementations verified across Slice, Bun, Deno, and Node.js (live metrics in [`tests/reports/latest.md`](../../tests/reports/latest.md)).
 
 ---
 
 ## 3. Scaffolding & Deploying a Full-Stack SvelteKit (`v3.1.1`) + Svelte 5 (`v5.57.3`) SSR Application
 
-Slice includes a built-in project scaffolder (`slice init --template=sveltekit`) and custom WinterTC adapter (`adapter-slice.js`) for full-stack SvelteKit 3 + Svelte 5 SSR applications (`+page.svelte`, `+page.server.js` `load` & `actions`, `+server.js` JSON endpoints, `hooks.server.js`, and `devalue` `__data.json` hydration):
+Slice includes a built-in project scaffolder (`slice init [dir] --template=sveltekit` or `-t sveltekit`) and custom WinterTC adapter (`adapter-slice.js`) for full-stack SvelteKit 3 + Svelte 5 SSR applications (`+page.svelte`, `+page.server.js` `load` & `actions`, `+server.js` JSON endpoints, `hooks.server.js`, and `devalue` `__data.json` hydration):
 
 ```bash
 # 1. Scaffold a SvelteKit 3 + Svelte 5 project with adapter-slice:
 slice init ./my-sveltekit-app --template=sveltekit
 cd ./my-sveltekit-app
 
-# 2. Install dependencies & run the Vite 8 + SvelteKit SSR build:
+# 2. Install dependencies & run the Vite + SvelteKit SSR build:
 npm install
 npm run build
 
@@ -85,5 +85,3 @@ slice serve ./build/app.cas --port=3000 --workers=8
 ```
 
 See [`tests/frameworks/04-sveltekit-edge-ssr`](../../tests/frameworks/04-sveltekit-edge-ssr/src/index.ts) for the full 12-request benchmark and verification suite.
-
-

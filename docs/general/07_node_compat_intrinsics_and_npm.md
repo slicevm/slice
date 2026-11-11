@@ -30,7 +30,7 @@ const rawBuf: Buffer = fs.readFileSync("/tmp/report.json");
 
 // Directories, metadata, symlinks, temp dirs & cleanup
 fs.mkdirSync("/tmp/shards", { recursive: true });
-const tmpDir: string = fs.mkdtempSync("/tmp/job-"); // CoW VFS-aware — rolls back in < 5 us on Slice.restore()!
+const tmpDir: string = fs.mkdtempSync("/tmp/job-"); // CoW VFS-aware - rolls back in < 5 us on Slice.restore()!
 fs.symlinkSync("/tmp/report.json", `${tmpDir}/latest.json`);
 const realTarget: string = fs.realpathSync(`${tmpDir}/latest.json`);
 const lstats = fs.lstatSync(`${tmpDir}/latest.json`); // lstats.isSymbolicLink() === true
@@ -88,10 +88,17 @@ cipher.setAAD(Buffer.from("aad-header"));
 const encHex = cipher.update("confidential-payload", "utf8", "hex") + cipher.final("hex");
 const authTag = cipher.getAuthTag();
 
-// Asymmetric Key Generation & Signing (Ed25519 & ECDSA P-256 / P-384)
+// Asymmetric Key Generation, Signing & Key Agreement (Ed25519, ECDSA/ECDH P-256 & P-384, X25519, RSA 2048/3072/4096 & RSA-PSS / RSA-OAEP)
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
 const sig = crypto.sign(null, Buffer.from("token-body"), privateKey);
 const verified = crypto.verify(null, Buffer.from("token-body"), publicKey, sig);
+
+const rsaPair = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+const rsaSig = crypto.sign("sha256", Buffer.from("jwt-header.payload"), rsaPair.privateKey);
+const rsaOk = crypto.verify("sha256", Buffer.from("jwt-header.payload"), rsaPair.publicKey, rsaSig);
+
+// WebCrypto subtle (including RSASSA-PKCS1-v1_5, RSA-PSS, RSA-OAEP, X25519, and ECDH P-256/P-384) is also exposed as crypto.subtle:
+const x25519Pair = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
 ```
 
 ### 1.3 `node:path` / `path` (and `path.posix` / `path.win32`)
@@ -145,13 +152,14 @@ u.searchParams.sort();
 console.log(u.href); // "https://api.slice.dev/v2/search?q=slice&tag=edge&tag=rust"
 ```
 
-### 1.7 `node:util`, `node:util/types`, `node:assert`, `node:os`, `node:process`, & Secondary `node:*` Modules (`perf_hooks`, `tty`, `module`, `vm`, `string_decoder`, `querystring`, `stream`)
+### 1.7 `node:util`, `node:util/types`, `node:assert`, `node:os`, `node:process`, & Secondary `node:*` Modules (`perf_hooks`, `diagnostics_channel`, `readline`, `dns`, `tls`, `http2`, `tty`, `module`, `vm`, `v8`, `wasi`, `inspector`, `cluster`, `console`, `querystring`)
 ```typescript
 import * as os from "node:os";
 import * as util from "node:util";
 import * as assert from "node:assert/strict";
 import process from "node:process";
 import { performance, PerformanceObserver } from "node:perf_hooks";
+import * as diagnostics_channel from "node:diagnostics_channel";
 import { createRequire, isBuiltin } from "node:module";
 import * as vm from "node:vm";
 
@@ -166,7 +174,8 @@ const colored = util.styleText(["bold", "green"], "READY");
 assert.strictEqual(util.stripVTControlCharacters(colored), "READY");
 const mime = new util.MIMEType("application/json; charset=utf-8");
 
-// Full process CLI surface (stdout/stderr/stdin, memoryUsage, hrtime.bigint, uptime, events):
+// Diagnostics channels & full process CLI surface (stdout/stderr/stdin, memoryUsage, hrtime.bigint, uptime, events):
+const ch = diagnostics_channel.channel("http.server.request");
 process.stdout.write(`Stage: ${process.env.NODE_ENV || "production"}\n`);
 const mem = process.memoryUsage(); // { rss, heapTotal, heapUsed, external, arrayBuffers }
 const t0: bigint = process.hrtime.bigint();
@@ -174,6 +183,31 @@ const t0: bigint = process.hrtime.bigint();
 // Sandboxed node:vm backed by Slice.evalSandbox (5-Ring OCap + fuel metered):
 const ctx = vm.createContext({ count: 10 });
 const vmOut = vm.runInContext("count += 32; count", ctx, { timeout: 50 }); // 42
+```
+
+### 1.7a `node:async_hooks`, `node:zlib`, & `node:string_decoder`
+Slice includes full asynchronous context propagation, zero-dependency native Rust compression, and multibyte streaming string decoding:
+- **`node:async_hooks` (`AsyncLocalStorage` & `AsyncResource`)**: Supports `run`, `getStore`, `enterWith`, `disable`, `exit`, `AsyncLocalStorage.bind`, `AsyncLocalStorage.snapshot`, and `AsyncResource` (`runInAsyncScope`, `bind`) with automatic context propagation across `Promise.then`/`catch`/`finally`, `queueMicrotask`, `process.nextTick`, `setTimeout`, `setInterval`, and `setImmediate`.
+- **`node:zlib` (Pure-Rust Zero-Dependency DEFLATE / GZIP / Zlib)**: Backed by Slice's self-contained RFC 1950/1951/1952 compression engine (`gzipSync`, `gunzipSync`, `deflateSync`, `inflateSync`, `deflateRawSync`, `inflateRawSync`, `unzipSync`, async callback equivalents, and `zlib.constants`) with decompression bomb protection enforced against the tenant's memory ceiling.
+- **`node:string_decoder` (`StringDecoder`)**: Stateful multibyte chunk streaming (`.write(buf)`, `.end(buf?)`) preserving split UTF-8 sequences, UTF-16LE surrogate pairs, and Base64 / Base64URL byte triplets across chunk boundaries.
+
+```typescript
+import { AsyncLocalStorage } from "node:async_hooks";
+import * as zlib from "node:zlib";
+import { StringDecoder } from "node:string_decoder";
+
+const requestContext = new AsyncLocalStorage<{ traceId: string }>();
+await requestContext.run({ traceId: "req-9001" }, async () => {
+    await Promise.resolve();
+    console.log(requestContext.getStore()?.traceId); // "req-9001"
+});
+
+const gz = zlib.gzipSync(Buffer.from("edge-payload-v1"));
+const plain = zlib.gunzipSync(gz).toString("utf8"); // "edge-payload-v1"
+
+const decoder = new StringDecoder("utf8");
+const part1 = decoder.write(Buffer.from([0xf0, 0x9f]));       // "" (holds incomplete 4-byte sequence)
+const part2 = decoder.end(Buffer.from([0x9a, 0x80]));         // completes multibyte codepoint
 ```
 
 ### 1.7b `node:stream`, `node:stream/promises`, `node:stream/web`, `node:http`, `node:https`, & `Slice.serve`
@@ -330,27 +364,29 @@ npm install hono itty-router ufo destr ohash radix3 jose zod nanoid superjson ul
 slice run . --warm --metrics
 ```
 
-### 2.2 Why `.node` C++ Addons Are Excluded — and How to Use `.wasm` Instead
+### 2.2 Why `.node` C++ Addons Are Excluded - and How to Use `.wasm` Instead
 Traditional Node.js C/C++ native addons (`.node` shared libraries loaded via `process.dlopen` / N-API) execute arbitrary native machine code with full ambient OS authority, bypassing CPU fuel metering, per-tenant memory ceilings, and hardware `WRPKRU` Memory Protection Keys.
 
 In Slice, native performance extensions are written as **WebAssembly (`.wasm`)** modules and executed inside Slice's **5-Ring Pure-Rust `wasmi` (`v2.0.0`) Cage**:
 - Import `.wasm` files directly (`import wasmBytes from "./kernel.wasm"`), which `slice-cas` embeds as zero-stat `Uint8Array` slices inside `.cas` archives and compiled binaries.
 - Every WASM instruction and `memory.grow()` call is metered against the tenant's deterministic CPU fuel and memory budget (`< 15 us` warm instantiation via `GLOBAL_WASM_MODULE_CACHE`).
 
-### 2.3 Verified Production NPM Packages & Edge Frameworks in Slice's 31-Workload Suite
-All 25 production applications in [`tests/apps/`](../../tests/README.md), 2 full-stack framework suites in [`tests/frameworks/`](../../tests/frameworks/README.md), and 4 architectural differentiation case studies in [`tests/case_studies/`](../../tests/case_studies/README.md) bundle and execute unmodified third-party `node_modules` libraries and verify **100% byte-for-byte identical output** against Node.js, Deno, and Bun:
+### 2.3 Verified Production NPM Packages & Edge Frameworks in Slice's 33-Workload Suite
+All **33 production workloads** - `24` applications in [`tests/apps/`](../../tests/README.md) (`01..24`), `4` full-stack framework suites in [`tests/frameworks/`](../../tests/frameworks/README.md) (`Hono`, `itty-router + UnJS`, `Express/Polka` over `node:http`, and `SvelteKit 3 + Svelte 5` SSR), and `5` architectural differentiation case studies in [`tests/case_studies/`](../../tests/case_studies/README.md) (`01..05`) - bundle and execute unmodified third-party `node_modules` libraries and verify **100% byte-for-byte identical output** against Node.js, Deno, and Bun (see [`tests/reports/latest.md`](../../tests/reports/latest.md) for live cold and warm latency numbers):
 
 | NPM Package / Framework | Common Use Case | General-Purpose Slice Compiler / Runtime Mechanism Applied |
 | :--- | :--- | :--- |
-| **`hono`** (`@4.6.20`, `hono/cookie`) | Ultrafast WinterTC Edge Web Framework (`RegExpRouter`, middleware, cookies) | `SLICEBC\x01` Precompiled `CodeBlock` CAS + Oxc AST Deferred Module Spans (`13.11 ms` cold / `0.56 ms` warm, **`2.54x` faster than Bun cold & `59x` faster warm**) |
-| **`itty-router`** (`@5.0.18`) | Compact WinterTC `AutoRouter` & middleware pipeline | `SLICEBC\x01` Precompiled `CodeBlock` CAS + Oxc AST Deferred Module Spans (`15.52 ms` cold / `0.55 ms` warm, **`2.65x` faster than Bun cold & `75x` faster warm**) |
+| **`hono`** (`@4.6.20`, `hono/cookie`) | Ultrafast WinterTC Edge Web Framework (`RegExpRouter`, middleware, cookies) | `SLICEBC\x01` Precompiled `CodeBlock` CAS + Oxc AST Deferred Module Spans |
+| **`@sveltejs/kit`** (`@3.1.1`) + **`svelte`** (`@5.57.3`) + **`devalue`** (`@6.0.3`) | Full-stack SvelteKit 3 + Svelte 5 Edge SSR, form actions, `hooks.server.js`, and hydration | `adapter-slice.js` WinterTC entry + `SLICEBC\x01` Precompiled CAS + zero-stat static asset table |
+| **`express` / `@polka`** (`node:http`) | Node.js `http.createServer(app)` middleware & REST routing | Zero-copy in-memory `node:http` <-> `slice serve` request/response bridge + `node:stream` |
+| **`itty-router`** (`@5.0.18`) | Compact WinterTC `AutoRouter` & middleware pipeline | `SLICEBC\x01` Precompiled `CodeBlock` CAS + Oxc AST Deferred Module Spans |
 | **`ufo`** (`@1.5.4`), **`destr`** (`@2.0.3`), **`ohash`** (`@1.1.4`) | UnJS / Nitro URL normalization, safe JSON parsing, & MurmurHash3 ETag hashing | Oxc Semantic Scope-Resolved Dead-Export Pruning (prunes unused SHA-256 class in `ohash` when only `murmurHash` is imported) |
 | **`jose`** (`@5.9.6`) | Edge JWS (`HS256`), JWE (`A256GCM`), & JWKS cryptography | Conditional `"exports"` subpath resolution (`jose/jwt/sign`, `jose/flattened/encrypt`) + Native Rust `crypto.subtle` |
 | **`zod`** (`@3.23.8`) | TypeScript-first schema validation & transformation | Oxc AST ESM-to-CJS bundling + warm realm closure caching |
 | **`radix3`** (`@1.1.2`) | High-speed Radix-tree HTTP route matching (`UnJS` / `Nitro`) | Conditional `"exports"` ESM entry resolution + Oxc AST ESM-to-CJS transformation |
 | **`superjson`** (`@2.2.1`) | Rich TypeScript serialization (`Date`, `Map`, `Set`, `BigInt`, `RegExp`) | Transitive ESM graph resolution (`superjson` + `copy-anything` + `is-what`) |
 | **`nanoid`** (`@5.0.7`) & **`ulid`** (`@2.3.0`) | Collision-resistant URL-safe IDs & lexicographically sortable ULIDs | Pure ESM bundling + `crypto.getRandomValues` hardware CSPRNG |
-| **`semver`** (`@7.6.3`) | Semantic version parsing, coercion & range matching | Barrel tree-shaking (prunes 30+ unused files) + Native Rust `__slice_semver_*` fast path (`0.27 ms` warm!) |
+| **`semver`** (`@7.6.3`) | Semantic version parsing, coercion & range matching | Barrel tree-shaking (prunes 30+ unused files) + Native Rust `__slice_semver_*` fast path |
 | **`ms`** (`@2.1.3`) | Human-readable time window parsing/formatting (`"14d"`, `"2h"`) | Oxc AST CJS bundling + warm `__slice_rc` closure cache |
 | **`bytes`** (`@3.1.2`) | Byte unit parsing/formatting (`"64KB"`, `"4.56MB"`) | Oxc AST CJS bundling + warm `__slice_rc` closure cache |
 | **`cookie`** (`@0.6.0` / `@0.7.2`) | RFC 6265 HTTP `Cookie` parsing & `Set-Cookie` serialization | Oxc Semantic Dead-Export Pruning + warm `__slice_rc` closure cache |
@@ -367,6 +403,8 @@ All 25 production applications in [`tests/apps/`](../../tests/README.md), 2 full
 ## 3. Step-by-Step Migration Guides
 
 ### 3.1 Migrating from Node.js (`Express` / `Fastify` / `http.createServer`) to `slice serve`
+
+> **Zero-Rewrite Option:** Existing `http.createServer(app)` / Express / Polka servers already run directly under `slice serve` via Slice's zero-copy in-memory `node:http` bridge (see [`tests/frameworks/03-node-http-express-compat`](../../tests/frameworks/03-node-http-express-compat/src/index.ts)). When you want maximum Tier-0/Tier-1 WinterTC throughput, migrate your handler to `export default { fetch }`:
 
 **Before (Node.js + Express):**
 ```typescript
@@ -406,8 +444,8 @@ export default {
 };
 ```
 **What you gain immediately:**
-- `2.7x` higher HTTP throughput than Node.js (`152k req/s` Tier-0 / `107k req/s` Tier-1 vs `55k req/s` Node.js).
-- `10x` lower memory footprint (`~10 MB` vs `~70 MB`).
+- Multi-worker HTTP/1.1 Keep-Alive throughput exceeding `145k-154k req/s` (`> 2.5x` faster than Node.js; see [`tests/reports/latest.md`](../../tests/reports/latest.md)).
+- Dramatically lower memory footprint (`~13-21 MB` RSS vs `70-93 MB` in Node.js).
 - Every request runs inside an isolated compartment with CPU fuel limits (`--fuel`) and Egress DLP (`--env-file=.env`).
 
 ---
@@ -415,10 +453,10 @@ export default {
 ### 3.2 Migrating from Bun (`Bun.serve` & `bun test`) to Slice
 
 1. **HTTP Server (`Bun.serve` -> `export default { fetch }`):**
-   - Bun already supports `export default { fetch(req) }`. Your existing `fetch(req)` handler runs unchanged under `slice serve`!
+   - Bun already supports `export default { fetch(req) }`, and Slice also aliases `Bun.serve` to `Slice.serve`. Your existing `fetch(req)` handler runs unchanged under `slice serve`!
    - If your project serves static files, pass `--static=./public` to `slice serve` or `slice compile`.
 2. **Test Suite (`import { describe, test, expect } from "bun:test"`):**
-   - Slice natively recognizes `"bun:test"`! You don't even have to change your import statement — just run `slice test` and your tests automatically gain `< 5 us` VFS + KV state rollback after every `test()` block.
+   - Slice natively recognizes `"bun:test"`! You don't even have to change your import statement - just run `slice test` and your tests automatically gain `< 5 us` VFS + KV state rollback after every `test()` block.
 
 ---
 
@@ -427,6 +465,6 @@ export default {
 1. **Relative TypeScript Imports (`.ts` extensions):**
    - Like Deno, Slice supports explicit `.ts` extensions in imports (`import { foo } from "./foo.ts"`) as well as extensionless (`"./foo"`) and `.js` (`"./foo.js"`) imports.
 2. **CLI Permission Flags:**
-   - Deno's `--allow-read=/path`, `--allow-write=/path`, `--allow-net=host`, and `--allow-env=KEY=VAL` work with the **exact same flag names** in `slice run` and `slice serve` — plus you can persist them cleanly in `slice.toml` so you don't have to repeat long CLI flags!
+   - Deno's `--allow-read=/path`, `--allow-write=/path`, `--allow-net=host`, `--allow-exec=/bin/tool`, and `--allow-env=KEY=VAL` work with the **exact same flag names** in `slice run` and `slice serve` - plus you can persist them cleanly in `slice.toml` so you don't have to repeat long CLI flags!
 3. **Key-Value Store (`Deno.openKv` -> `Slice.kv`):**
    - Replace async `await kv.get(["rate", id])` / `await kv.set(["rate", id], val)` with synchronous, `< 0.6 us` sharded `Slice.kv.get("rate:" + id)`, `Slice.kv.set("rate:" + id, val, ttlMs)`, and `Slice.kv.incr("rate:" + id, 1)`.

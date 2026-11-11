@@ -1,10 +1,10 @@
 # Chapter 09: Time-Travel Testing (`slice test`), Deterministic Replay & Production Benchmarks
 
-In traditional test runners (`jest`, `vitest`, `bun test`, `deno test`), if Test #1 writes a temporary file to disk or mutates a shared key-value store and fails mid-test, Test #2 inherits dirty state — leading to flaky tests that pass in isolation and fail in CI. Furthermore, no standard test runner lets you assert that a function stays within a strict **CPU instruction fuel budget**, **memory ceiling**, or **Object-Capability security policy**.
+In traditional test runners (`jest`, `vitest`, `bun test`, `deno test`), if Test #1 writes a temporary file to disk or mutates a shared key-value store and fails mid-test, Test #2 inherits dirty state - leading to flaky tests that pass in isolation and fail in CI. Furthermore, no standard test runner lets you assert that a function stays within a strict **CPU instruction fuel budget**, **memory ceiling**, or **Object-Capability security policy**.
 
-Slice solves both problems with **`slice test` — the Time-Travel Test Runner**.
+Slice solves both problems with **`slice test`: the Time-Travel Test Runner**.
 
-This chapter shows you how to write unit, integration, and security tests with `slice test`, how to eliminate flaky time/randomness bugs with `--deterministic`, and how to run Slice's 20-application Docker benchmark suite against Node.js, Deno, and Bun.
+This chapter shows you how to write unit, integration, and security tests with `slice test`, how to eliminate flaky time/randomness bugs with `--deterministic`, and how to run Slice's 33-workload Docker benchmark suite against Node.js, Deno, and Bun.
 
 ---
 
@@ -127,7 +127,7 @@ slice run ./src/simulation.ts --deterministic=998877
 When deterministic mode is active:
 1. **`Math.random()`, `crypto.randomUUID()`, `crypto.getRandomValues()`, and `crypto.subtle.generateKey()`** use a seeded SplitMix64 PRNG that produces the exact same sequence of values on every run.
 2. **`Date.now()` and `performance.now()`** use a monotonic virtual clock (`1700000000000 + tick_ms`) that advances deterministically.
-3. **`setTimeout(fn, delayMs)` and `setInterval(fn, delayMs)`** execute via **Deterministic Virtual Time-Warp (`0 ns` wall-clock sleep)** — a `setTimeout(fn, 5000)` advances the virtual clock by `+5000 ms` and runs `fn` immediately without sleeping the OS thread!
+3. **`setTimeout(fn, delayMs)` and `setInterval(fn, delayMs)`** execute via **Deterministic Virtual Time-Warp (`0 ns` wall-clock sleep)**: a `setTimeout(fn, 5000)` advances the virtual clock by `+5000 ms` and runs `fn` immediately without sleeping the OS thread!
 4. **Outbound `fetch()`** automatically records upstream HTTP responses into `Slice.kv` (`fetch_cassette:<METHOD>:<URL>`) and replays them deterministically.
 
 ---
@@ -148,7 +148,7 @@ Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`]
 
 <!-- BENCHMARK_SUMMARY_START -->
 > **Latest Verified Benchmark Report:** **[`tests/reports/latest.md`](../../tests/reports/latest.md)** (Archive: [`bench_v0.10.12_20261111_175836Z_dc31f74.md`](../../tests/reports/bench_v0.10.12_20261111_175836Z_dc31f74.md))  
-> **Provenance:** Slice `v0.10.12` (`dc31f74`) · Generated `2026-11-11T17:58:36Z` · Environment: `Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)`  
+> **Provenance:** Slice `v0.10.12` (`dc31f74`) | Generated `2026-11-11T17:58:36Z` | Environment: `Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)`  
 > **Scorecard Across All 33 Production Workloads:** Beats **Deno (`v2.9.8`)** on **33/33**, **Node.js (`v27.0.0-alpha.0.0.0`)** on **33/33**, **Bun (`v1.4.4`)** on **29/33** cold one-shot, and **all 3 runtimes on 33/33 workloads in `--warm` pooled execution**.
 
 #### 1. Core Architecture, HTTP Throughput & 1,000-Tenant MicroVM Density
@@ -159,19 +159,19 @@ Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`]
 | **1,000-Tenant MicroVM Swarm (Boot + Exec)** | **`1.74 ms` (`9.82 MB` RSS)** | > 5,000 ms | > 15,000 ms | > 30,000 ms | **> 3,900x faster / ~32,000x denser** |
 | **500-Module Monorepo Cold Boot (`stat()` Calls)** | **`3.41 ms` (`0 stat()`)** | `12.72 ms` (`500+ stat`) | `41.80 ms` (`500+ stat`) | `70.38 ms` (`1,500+ stat`) | **`3.7x` faster than Bun / `20.6x` Node.js** |
 | **HTTP/1.1 Keep-Alive Throughput (`16k` Reqs)** | **`154,794 req/s`** (Tier-0)<br>**`147,564 req/s`** (Tier-1) | `100,562 req/s` | `99,082 req/s` | `56,447 req/s` | **`1.54x` (`Tier-0`) / `1.47x` (`Tier-1`) vs `Bun.serve`** |
-| **Peak Process Memory (`Max RSS` Across Suite)** | **`13.45 – 21.63 MB`** | `26.13 – 40.25 MB` | `45.69 – 62.38 MB` | `70.15 – 93.00 MB` | **`2.0x–2.3x` less than Bun / `4.3x–6.8x` less than Node** |
+| **Peak Process Memory (`Max RSS` Across Suite)** | **`13.45 - 21.63 MB`** | `26.13 - 40.25 MB` | `45.69 - 62.38 MB` | `70.15 - 93.00 MB` | **`1.5x-2.4x` less than Bun / `3.9x-6.8x` less than Node** |
 | **Multi-Tenant Security Containment** | **`5 / 5 PASS`** (OCap+SES+Fuel+DLP) | `0 / 5` (Ambient) | `2 / 5` (Coarse CLI) | `0 / 5` (Ambient) | **Hardware & Language Zero-Trust Isolation** |
 
 #### 2. Real-Life Workload Summary by Domain (All 33 Workloads Aggregated)
 
 | Workload Domain & Stack Coverage | Suites | Slice Cold `.cas` Avg (Range) | Slice Warm (`--warm`) Avg | Bun `v1.4.4` Avg | Deno `v2.9.8` Avg | Node.js `v27.0.0-alpha.0.0.0` Avg | Category Speedup vs Bun / Node.js |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **Core Edge, Auth & Crypto (`Apps 01, 04, 05, 16`)**<br><sub>Multi-file TS, SHA-256/HMAC, JWT/OAuth2, `.env` Auto-DLP</sub> | `4` | **`7.84 ms`** (`6.28–10.07 ms`) | **`2.17 ms`** | `14.52 ms` | `42.60 ms` | `62.07 ms` | **`1.85x Bun` (`6.69x` Warm) / `7.92x Node`** |
-| **NPM Ecosystem, AST & Disk I/O (`Apps 02, 03, 06, 07, 08, 20`)**<br><sub>`semver`, `flatted`, `dlv`/`dset`, `mitt`, 10-Shard JSONL I/O, `Buffer`</sub> | `6` | **`10.94 ms`** (`7.25–14.23 ms`) | **`3.16 ms`** | `17.64 ms` | `48.12 ms` | `65.89 ms` | **`1.61x Bun` (`5.59x` Warm) / `6.02x Node`** |
-| **WinterTC Web Standards, Fetch Mesh & DLP (`Apps 09–14, 17–19`)**<br><sub>`Request`/`Response`, Static CDN `304`, SSE, Live `fetch`, WebCrypto</sub> | `9` | **`15.45 ms`** (`8.12–29.33 ms`) | **`7.31 ms`** | `18.48 ms` | `52.47 ms` | `93.96 ms` | **`1.20x Bun` (`2.53x` Warm) / `6.08x Node`** |
-| **Realtime WebSockets, Workers & Wasm/TSX (`Apps 15, 21–24`)**<br><sub>RFC 6455 WS, `worker_threads` + TCP/UDP, Pure-Rust `wasmi` Wasm, TSX SSR</sub> | `5` | **`14.25 ms`** (`8.72–20.99 ms`) | **`2.48 ms`** | `28.68 ms` | `62.87 ms` | `86.44 ms` | **`2.01x Bun` (`11.57x` Warm) / `6.07x Node`** |
-| **Full-Stack Edge & Node Frameworks (`FW 01–04`)**<br><sub>`Hono v4.6.20`, `itty-router + UnJS Nitro`, `Express/Polka node:http`, `SvelteKit 3.1.1 + Svelte 5.57.3`</sub> | `4` | **`20.74 ms`** (`14.65–34.19 ms`) | **`7.47 ms`** | `29.22 ms` | `54.14 ms` | `93.40 ms` | **`1.41x Bun` (`3.91x` Warm) / `4.50x Node`** |
-| **AI Agent, Multi-Tenant SaaS & Chaos Case Studies (`CS 01–05`)**<br><sub>Depth-4 ToT Agent, MCP Code Mode, 12-Tenant Mesh, Wasm CDR, 48 Payment Sagas</sub> | `5` | **`21.17 ms`** (`13.17–34.84 ms`) | **`6.27 ms`** | `20.96 ms` | `56.54 ms` | `80.98 ms` | **`0.99x Bun` (`3.34x` Warm) / `3.82x Node`** |
+| **Core Edge, Auth & Crypto (`Apps 01, 04, 05, 16`)**<br><sub>Multi-file TS, SHA-256/HMAC, JWT/OAuth2, `.env` Auto-DLP</sub> | `4` | **`7.84 ms`** (`6.28-10.07 ms`) | **`2.17 ms`** | `14.52 ms` | `42.60 ms` | `62.07 ms` | **`1.85x Bun` (`6.69x` Warm) / `7.92x Node`** |
+| **NPM Ecosystem, AST & Disk I/O (`Apps 02, 03, 06, 07, 08, 20`)**<br><sub>`semver`, `flatted`, `dlv`/`dset`, `mitt`, 10-Shard JSONL I/O, `Buffer`</sub> | `6` | **`10.94 ms`** (`7.25-14.23 ms`) | **`3.16 ms`** | `17.64 ms` | `48.12 ms` | `65.89 ms` | **`1.61x Bun` (`5.59x` Warm) / `6.02x Node`** |
+| **WinterTC Web Standards, Fetch Mesh & DLP (`Apps 09-14, 17-19`)**<br><sub>`Request`/`Response`, Static CDN `304`, SSE, Live `fetch`, WebCrypto</sub> | `9` | **`15.45 ms`** (`8.12-29.33 ms`) | **`7.31 ms`** | `18.48 ms` | `52.47 ms` | `93.96 ms` | **`1.20x Bun` (`2.53x` Warm) / `6.08x Node`** |
+| **Realtime WebSockets, Workers & Wasm/TSX (`Apps 15, 21-24`)**<br><sub>RFC 6455 WS, `worker_threads` + TCP/UDP, Pure-Rust `wasmi` Wasm, TSX SSR</sub> | `5` | **`14.25 ms`** (`8.72-20.99 ms`) | **`2.48 ms`** | `28.68 ms` | `62.87 ms` | `86.44 ms` | **`2.01x Bun` (`11.57x` Warm) / `6.07x Node`** |
+| **Full-Stack Edge & Node Frameworks (`FW 01-04`)**<br><sub>`Hono v4.6.20`, `itty-router + UnJS Nitro`, `Express/Polka node:http`, `SvelteKit 3.1.1 + Svelte 5.57.3`</sub> | `4` | **`20.74 ms`** (`14.65-34.19 ms`) | **`7.47 ms`** | `29.22 ms` | `54.14 ms` | `93.40 ms` | **`1.41x Bun` (`3.91x` Warm) / `4.50x Node`** |
+| **AI Agent, Multi-Tenant SaaS & Chaos Case Studies (`CS 01-05`)**<br><sub>Depth-4 ToT Agent, MCP Code Mode, 12-Tenant Mesh, Wasm CDR, 48 Payment Sagas</sub> | `5` | **`21.17 ms`** (`13.17-34.84 ms`) | **`6.27 ms`** | `20.96 ms` | `56.54 ms` | `80.98 ms` | **`0.99x Bun` (`3.34x` Warm) / `3.82x Node`** |
 
 #### 3. Flagship Real-World Representative Workloads (9 of 33 Highlights)
 
@@ -196,6 +196,6 @@ Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`]
 
 If you are building Slice from source and want to verify the internal Rust unit test suites:
 ```bash
-# Run all 172 workspace unit and integration tests across all crates
+# Run all workspace unit and integration tests across all crates
 cargo test --workspace
 ```

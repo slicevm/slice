@@ -1,6 +1,6 @@
 # Chapter 03: Bundling Apps (`slice pack`), Single-File Executables (`slice compile`) & Bytecode Inspection
 
-When you deploy a Node.js, Deno, or Bun application to production, you typically have to ship hundreds of source files or a massive `node_modules/` directory — and on every cold start, the runtime has to issue hundreds of OS `stat()`, `open()`, and `read()` syscalls just to locate your modules on disk.
+When you deploy a Node.js, Deno, or Bun application to production, you typically have to ship hundreds of source files or a massive `node_modules/` directory - and on every cold start, the runtime has to issue hundreds of OS `stat()`, `open()`, and `read()` syscalls just to locate your modules on disk.
 
 Slice solves this with **Zero-Stat Content-Addressed Storage (`.cas`)** and **Self-Contained Native Executables (`SLICEEXE`)**.
 
@@ -37,12 +37,16 @@ Inside your project, you can freely mix and match:
   const ms = require("ms");
   const { parse } = require("fast-querystring");
   ```
-- **JSON Files (`.json`):**
+- **JSON & WebAssembly Files (`.json` & `.wasm`):**
   ```typescript
   import config from "./config/default.json";
+  import wasmBytes from "./kernel.wasm";
   ```
-- **Node & Slice Built-Ins:**
-  - `"node:crypto"`, `"node:fs"`, `"node:fs/promises"`, `"node:path"`, `"node:os"`, `"node:buffer"`, `"node:events"`, `"node:timers"`, `"node:timers/promises"`, `"node:url"`, `"node:util"`, `"node:util/types"`, `"node:assert"`, `"node:assert/strict"`, `"node:process"`, `"node:test"`, `"slice:test"`, `"bun:test"`, `"slice:jsx"`, `"react/jsx-runtime"`, `"preact/jsx-runtime"`, `"hono/jsx"`
+- **Node, WinterTC & Slice Built-Ins:**
+  - **Core I/O, Streams, HTTP & Crypto:** `"node:crypto"`, `"node:fs"`, `"node:fs/promises"`, `"node:stream"`, `"node:stream/promises"`, `"node:stream/web"`, `"node:http"`, `"node:https"`, `"node:http2"`, `"node:zlib"`, `"node:buffer"`, `"node:string_decoder"`
+  - **Concurrency, Networking & Subprocesses:** `"node:async_hooks"`, `"node:worker_threads"`, `"node:child_process"`, `"node:net"`, `"node:tls"`, `"node:dgram"`, `"node:dns"`, `"node:dns/promises"`, `"cloudflare:sockets"`, `"slice:sockets"`
+  - **Paths, Diagnostics, CLI & Runtime:** `"node:path"`, `"node:os"`, `"node:events"`, `"node:timers"`, `"node:timers/promises"`, `"node:url"`, `"node:querystring"`, `"node:util"`, `"node:util/types"`, `"node:assert"`, `"node:assert/strict"`, `"node:process"`, `"node:readline"`, `"node:readline/promises"`, `"node:perf_hooks"`, `"node:diagnostics_channel"`, `"node:tty"`, `"node:module"`, `"node:vm"`, `"node:v8"`, `"node:wasi"`, `"node:console"`, `"node:inspector"`, `"node:cluster"`
+  - **Testing & JSX SSR:** `"node:test"`, `"slice:test"`, `"bun:test"`, `"slice:jsx"`, `"react/jsx-runtime"`, `"preact/jsx-runtime"`, `"hono/jsx"`
 
 ### Modern ESM NPM Packages & Conditional `"exports"` Resolution
 Slice's zero-stat bundler ([`crates/slice-cas/src/lib.rs`](../../crates/slice-cas/src/lib.rs)) includes a full **Oxc AST-driven ESM-to-CJS module linker** (`try_transform_esm_to_cjs_ast`) and **Node.js `package.json` `"exports"` resolver** (`resolve_package_exports_value`):
@@ -71,7 +75,7 @@ slice pack ./my-webapp ./webapp.cas --entry=./src/server.ts --static=./public
 
 ### 2.2 What Happens Inside `slice pack` (And Why It Makes Cold Starts So Fast)
 
-1. **Oxc Ahead-of-Time TypeScript Compilation & Comment Stripping:**
+1. **Oxc (`v0.152.0`) Ahead-of-Time TypeScript Compilation & Comment Stripping:**
    - All TypeScript types, interfaces, and JSDoc/license comments are stripped at build time.
 2. **Dense Integer Module IDs (`0..N-1`):**
    - Instead of resolving string paths like `"./node_modules/semver/classes/semver.js"` at runtime, Slice assigns every module a dense integer ID (`0`, `1`, `2`, ...) so internal `require()` calls are O(1) array lookups.
@@ -79,9 +83,9 @@ slice pack ./my-webapp ./webapp.cas --entry=./src/server.ts --static=./public
    - Many popular npm packages (like `semver`) have an `index.js` barrel file that `require()`s 35+ submodules even if your app only calls `semver.satisfies()`.
    - Slice's bundler statically analyzes which exports your application actually uses and **prunes unused barrel submodules before reading them from disk**, cutting `.cas` bundle size in half.
 4. **Ahead-of-Time `SLICEBC\x01` Precompiled Boa `CodeBlock` Serialization (Default):**
-   - By default (`boacas = true`), `slice pack` and `slice compile` compile your bundled JavaScript into a **32-byte `BoaCasHeader` + `SLICEBC1` binary `CodeBlock` container** ([`crates/slice-engine/src/boacas.rs`](../../crates/slice-engine/src/vm/boacas.rs), [`vendor/boa_engine/SLICE_PATCH.md`](../../vendor/boa_engine/SLICE_PATCH.md)).
+   - By default (`boacas = true`), `slice pack` and `slice compile` compile your bundled JavaScript into a **32-byte `BoaCasHeader` + `SLICEBC1` binary `CodeBlock` container** ([`crates/slice-engine/src/vm/boacas.rs`](../../crates/slice-engine/src/vm/boacas.rs), [`vendor/boa_engine/SLICE_PATCH.md`](../../vendor/boa_engine/SLICE_PATCH.md)).
    - Inner functions inside `__slice_modules = [function(...) { ... }]` are recorded via **Oxc AST deferred source spans** (`0x11` tag) so uncalled `node_modules` functions are never byte-compiled until invoked, while `node:*` core built-ins and runtime shards are pre-fused into a single `CodeBlock`.
-   - At runtime, `slice run ./app.cas` reconstructs `Gc<CodeBlock>` directly from the `mmap` slice in microseconds — skipping **100% of runtime JavaScript lexing, AST parsing, scope analysis, and bytecode compilation**.
+   - At runtime, `slice run ./app.cas` reconstructs `Gc<CodeBlock>` directly from the `mmap` slice in microseconds - skipping **100% of runtime JavaScript lexing, AST parsing, scope analysis, and bytecode compilation**.
 5. **Embedded `slice.toml` Security Manifest (`manifest:/slice.toml`):**
    - If your project folder contains a `slice.toml` file, `slice pack` embeds it directly inside the `.cas` archive. When you run `slice run ./app.cas` or `slice serve ./app.cas`, Slice automatically applies your `[engine]`, `[limits]`, `[capabilities]`, and `[server]` settings!
 6. **Memory-Mapped Execution (`0` `stat()` Syscalls):**
@@ -104,7 +108,7 @@ slice compile ./my-webapp -o ./my-webapp-bin --static=./public
 ```
 
 ### Running Your Compiled Binary
-The generated binary (`./fintech-checkout` on Linux/macOS, `.\fintech-checkout.exe` on Windows) runs directly and accepts `--warm`, `--metrics`, and `--quiet`:
+The generated binary (`./fintech-checkout` on Linux/macOS, `.\fintech-checkout.exe` on Windows) runs directly, honors any embedded `slice.toml` manifest, accepts runtime flags (`--warm`, `--metrics`, `--quiet`, `--allow-*`, `--fuel`, `--memory`), and forwards remaining CLI arguments into `process.argv`:
 
 ```bash
 ./fintech-checkout --warm --metrics

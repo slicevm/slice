@@ -1,6 +1,6 @@
 # Networking, WinterTC Web Platform & Async Event Loop Architecture
 
-This document details Slice's multi-worker HTTP/1.1 server (`slice serve`), 3-level asynchronous concurrency model, outbound HTTPS/TLS 1.3 client (`outbound_http.rs`), deterministic time-travel event loop (`event_loop.rs`), RFC 6455 WebSocket engine (`websocket.rs`), raw TCP/TLS/UDP sockets (`sockets.rs`), and WinterTC + Node Core Tier-1 API surface.
+This document details Slice's multi-worker HTTP/1.1 server (`slice serve` in [`crates/slice-cli/src/server/mod.rs`](../../crates/slice-cli/src/server/mod.rs)), 3-level asynchronous concurrency model, outbound HTTPS/TLS 1.3 client ([`outbound_http.rs`](../../crates/slice-engine/src/net/outbound_http.rs)), deterministic time-travel event loop ([`event_loop.rs`](../../crates/slice-engine/src/runtime/event_loop.rs)), RFC 6455 WebSocket engine ([`websocket.rs`](../../crates/slice-engine/src/net/websocket.rs)), raw TCP/TLS/UDP sockets ([`sockets.rs`](../../crates/slice-engine/src/net/sockets.rs)), and WinterTC + Node Core Tier-1 API surface.
 
 ---
 
@@ -18,7 +18,7 @@ This document details Slice's multi-worker HTTP/1.1 server (`slice serve`), 3-le
 |  | - In-place reset_for_request|  | - In-place reset_for_request|  | - In-place reset          |  |
 |  +--------------+--------------+  +--------------+--------------+  +-------------+-------------+  |
 |                 |                                |                               |                |
-|  Level 2: Per-Isolate Deterministic Event Loop (`crates/slice-engine/src/event_loop.rs`)          |
+|  Level 2: Per-Isolate Deterministic Event Loop (`crates/slice-engine/src/runtime/event_loop.rs`)  |
 |  +--------------+--------------------------------+-------------------------------+-------------+  |
 |  | - Zero-Cost Sync Fast-Path (`ACTIVE_ASYNC_ITEMS == 0` -> 0.00 ns scheduler overhead)        |  |
 |  | - Priority Queue: Sync -> `process.nextTick` -> `Promise.then`/`queueMicrotask`             |  |
@@ -34,17 +34,17 @@ This document details Slice's multi-worker HTTP/1.1 server (`slice serve`), 3-le
 +---------------------------------------------------------------------------------------------------+
 ```
 
-- **Zero-Allocation Stack HTTP/1.1 Parser & Vectorized Pipelined Flushing ([`serve_connection_keep_alive`](../../crates/slice-cli/src/http_server.rs)):**
+- **Zero-Allocation Stack HTTP/1.1 Parser & Vectorized Pipelined Flushing ([`server/mod.rs`](../../crates/slice-cli/src/server/mod.rs) & [`serve_connection_keep_alive`](../../crates/slice-cli/src/server/connection.rs)):**
   - Each worker thread in the `--workers=N` shared-nothing pool pre-allocates a reusable `64 KB` socket read buffer (`read_buf`) and `4 KB` write buffer (`write_buf`).
-  - Incoming HTTP/1.1 requests are scanned in-place via [`find_http_header_end`](../../crates/slice-cli/src/http_server.rs) with zero heap `String` allocations, extracting up to 16 headers into a stack-allocated `[(&str, &str); 16]` array (`headers_stack`).
+  - Incoming HTTP/1.1 requests are scanned in-place via [`find_http_header_end`](../../crates/slice-cli/src/server/connection.rs) with zero heap `String` allocations, extracting up to 16 headers into a stack-allocated `[(&str, &str); 16]` array (`headers_stack`).
   - When multiple pipelined HTTP/1.1 requests arrive in a single TCP read (`has_more_pipelined`), responses are accumulated into `write_buf` and flushed in a single vectorized `stream.write_all(write_buf)` system call.
 - **In-Place Isolate Reset ([`SliceIsolate::reset_for_request`](../../crates/slice-engine/src/isolate/mod.rs)) & Direct `JsObject::call`:**
   - Each worker resets its `SliceIsolate` in place, entering a fresh `HardwareProtectionDomain` (`WRPKRU`) and resetting CPU fuel and memory counters in nanoseconds.
-  - On warm `SLICEBOA` hits, [`WarmBoaRealm::loaded_bundles`](../../crates/slice-engine/src/runtime/boa_realm.rs) stores the compiled `boa_engine::JsObject` entrypoint function handle and invokes `fn_obj.call(...)` directly in Rust, completely bypassing JS source lexing and `ctx.eval`.
+  - On warm `SLICEBC\x01`/`SLICEBOA` hits, [`WarmBoaRealm::loaded_bundles`](../../crates/slice-engine/src/runtime/boa_realm.rs) stores the compiled `boa_engine::JsObject` entrypoint function handle and invokes `fn_obj.call(...)` directly in Rust, completely bypassing JS source lexing and `ctx.eval`.
 - **WinterTC Request/Response, Static Assets (`ETag`), `Response.sse`, & Post-Response `Slice.waitUntil(fn)`:**
   - Supports both `export default { async fetch(request, env, ctx) }` and `Slice.request()` / `Slice.respond(...)`.
   - In-memory static asset table serves `304 Not Modified` `BLAKE3` `ETag` hits in `< 2 us`.
-  - Deferred `ctx.waitUntil` / `Slice.waitUntil` callbacks are drained via [`drain_wait_until_tasks`](../../crates/slice-engine/src/isolate/mod.rs) **after** the HTTP response bytes have been flushed to the client socket, while still charging CPU fuel to the tenant's compartment budget.
+  - Deferred `ctx.waitUntil` / `Slice.waitUntil` callbacks are drained via [`drain_wait_until_tasks`](../../crates/slice-engine/src/isolate/http_and_ws.rs) **after** the HTTP response bytes have been flushed to the client socket, while still charging CPU fuel to the tenant's compartment budget.
 
 ---
 
@@ -69,16 +69,15 @@ This document details Slice's multi-worker HTTP/1.1 server (`slice serve`), 3-le
 
 ## 4. RFC 6455 WebSocket Engine (`websocket.rs`) & 5-Ring Raw TCP/TLS/UDP Sockets (`sockets.rs`)
 
-- **RFC 6455 WebSockets ([`crates/slice-engine/src/websocket.rs`](../../crates/slice-engine/src/net/websocket.rs)):**
+- **RFC 6455 WebSockets ([`crates/slice-engine/src/net/websocket.rs`](../../crates/slice-engine/src/net/websocket.rs)):**
   - Zero-dependency RFC 6455 engine (`compute_websocket_accept_key`, 4-byte `u32` XOR masking `apply_websocket_mask_in_place`, `encode_websocket_frame`, `decode_websocket_frame`, `read_websocket_message_from_stream` with fragmented continuation reassembly and automatic `Ping`/`Pong` heartbeats, client `ws://`/`wss://` sessions, server upgrade `Response.websocket`, `Slice.mockWebSocket`, and per-frame Outbound Egress Secret DLP).
-- **Zero-Trust OCap TCP/TLS/UDP Sockets ([`crates/slice-engine/src/sockets.rs`](../../crates/slice-engine/src/net/sockets.rs)):**
+- **Zero-Trust OCap TCP/TLS/UDP Sockets ([`crates/slice-engine/src/net/sockets.rs`](../../crates/slice-engine/src/net/sockets.rs)):**
   - Powers WinterTC `Slice.connect` / `import { connect } from "cloudflare:sockets"`, `node:net`, `node:tls` (including `startTls()`), and `node:dgram` under all 5 security rings (`NetCap`, Pre-Connect DNS SSRF, Egress Secret DLP, CPU Fuel, and Memory Cage), plus deterministic `Slice.mockSocket` / `Slice.mockUdpSocket`.
 
 ---
 
 ## 5. WinterTC Minimum Common Web Platform API & `Uint8Array`-Backed `Buffer` + Node Core Tier-1
 
-- **WinterTC Web Platform API:** `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`, `fetch`, `TextEncoder` (`encode`, `encodeInto`), `TextDecoder` (`utf-8`, `ascii`, `iso-8859-1`, `fatal: true`), `btoa`/`atob`, `crypto.randomUUID`, `crypto.getRandomValues`, `crypto.subtle` (`SHA-1/256/384/512`, `HMAC`, `timingSafeEqual`, JWK/raw), `Event`, `CustomEvent`, `EventTarget`, `AbortController`, `AbortSignal.any`, `Blob`, `File`, `FormData`, `structuredClone`, `ReadableStream`, `WritableStream`, `TransformStream`, `TextEncoderStream`, `TextDecoderStream`, and ECMA-262 Annex B `escape`/`unescape`.
+- **WinterTC Web Platform API ([`crates/slice-engine/src/preludes/js_preludes.rs`](../../crates/slice-engine/src/preludes/js_preludes.rs)):** `URL` (`canParse`), `URLPattern`, `URLSearchParams`, `Headers`, `Request`, `Response` (`Response.sse`), `fetch`, `EventSource`, `TextEncoder` (`encode`, `encodeInto`), `TextDecoder` (`utf-8`, `ascii`, `iso-8859-1`, `fatal: true`), `btoa`/`atob`, `crypto.randomUUID`, `crypto.getRandomValues`, `crypto.subtle` (`SHA-1/256/384/512`, `HMAC`, `AES-GCM`/`AES-CBC`, `Ed25519`, `ECDSA`, `RSA`, `X25519`/`ECDH`, `PBKDF2`/`HKDF`, `timingSafeEqual`, JWK/PKCS#8/SPKI/raw), `DOMException`, `Event`, `CustomEvent`, `EventTarget`, `AbortController`, `AbortSignal` (`timeout`, `any`, `abort`), `Blob`, `File`, `FormData`, `structuredClone`, `ReadableStream`, `WritableStream`, `TransformStream`, `TextEncoderStream`, `TextDecoderStream`, `CompressionStream`, `DecompressionStream`, `Intl` (`DateTimeFormat`, `NumberFormat`, `Collator`, `PluralRules`, `Segmenter`), `navigator`, `location`, and `WebAssembly`.
 - **Real `Uint8Array`-Backed `Buffer` (`Object.setPrototypeOf(Buffer.prototype, Uint8Array.prototype)`):** True `Uint8Array` subclass (`b instanceof Uint8Array === true`, `Buffer.isBuffer(b) === true`) with `DataView`-accelerated wire-protocol integer readers/writers (`readUInt8/16/32BE/LE`, `readBigUInt64BE/LE`, `writeUInt8/16/32BE/LE`, `writeBigUInt64BE/LE`).
-- **Lazy IIFE-Isolated `node:*` Core Modules ([`crates/slice-engine/src/node_builtins.rs`](../../crates/slice-engine/src/preludes/node_builtins.rs)):** `node:events`, `node:path` (`posix`/`win32`), `node:crypto`, `node:fs` & `node:fs/promises`, `node:util` & `node:util/types`, `node:assert` / `node:assert/strict`, `node:timers` & `node:timers/promises`, `node:os`, `node:url`, `node:buffer`, `node:net`, `node:tls`, `node:dgram`, and `node:worker_threads`.
-
+- **Lazy IIFE-Isolated `node:*` Core Modules ([`crates/slice-engine/src/preludes/node_builtins.rs`](../../crates/slice-engine/src/preludes/node_builtins.rs)):** `node:events`, `node:path` (`posix`/`win32`), `node:crypto`, `node:fs` & `node:fs/promises`, `node:util` & `node:util/types`, `node:assert` / `node:assert/strict`, `node:timers` & `node:timers/promises`, `node:os`, `node:url`, `node:buffer`, `node:stream` & `node:stream/web`, `node:http` & `node:https`, `node:zlib`, `node:async_hooks`, `node:string_decoder`, `node:querystring`, `node:net`, `node:tls`, `node:dgram`, `node:dns`, `node:vm`, `node:child_process`, and `node:worker_threads`.

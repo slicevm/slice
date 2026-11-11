@@ -70,7 +70,8 @@ $TargetFiles = @(
     "tests/scripts/generate_bench_report.mjs",
     "README.md",
     "tests/README.md",
-    "tests/frameworks/README.md"
+    "tests/frameworks/README.md",
+    "tests/case_studies/README.md"
 )
 
 Get-ChildItem -Path (Join-Path $RootDir "docs") -Filter "*.md" -Recurse | ForEach-Object {
