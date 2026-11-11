@@ -155,7 +155,8 @@ fn warn_if_declared_in_package_json_but_uninstalled(spec: &str, from_dir: &Path)
     let Some(pkg_name) = bare_package_name(spec) else {
         return;
     };
-    let already_warned = WARNED_MISSING_PACKAGES.with(|w| !w.borrow_mut().insert(pkg_name.to_string()));
+    let already_warned =
+        WARNED_MISSING_PACKAGES.with(|w| !w.borrow_mut().insert(pkg_name.to_string()));
     if already_warned {
         return;
     }

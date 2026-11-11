@@ -1376,4 +1376,3 @@ pub fn collect_live_import_reference_edits(
         walk_stmt(stmt, &top_shadow, live_map, edits);
     }
 }
-

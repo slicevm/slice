@@ -377,10 +377,8 @@ fn try_transform_esm_to_cjs_ast(
                             if live_import_map.contains_key(loc_s) {
                                 continue;
                             }
-                            named_specs.push((
-                                named.imported.name().to_string(),
-                                loc_s.to_string(),
-                            ));
+                            named_specs
+                                .push((named.imported.name().to_string(), loc_s.to_string()));
                         }
                     }
                 }

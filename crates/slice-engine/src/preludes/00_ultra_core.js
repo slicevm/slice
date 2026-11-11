@@ -99,6 +99,13 @@
     return __slice_env_get(String(k));
   };
 
+  function __pLazy(m) {
+    return function() {
+      __loadShard(18);
+      return globalThis.process[m].apply(globalThis.process, arguments);
+    };
+  }
+
   globalThis.process = {
     pid: 1,
     env: { NODE_ENV: "production" },
@@ -107,7 +114,22 @@
     get arch() { return __slice_os_arch(); },
     version: "v24.0.0",
     versions: { node: "24.0.0" },
-    argv: ["slice"]
+    argv: globalThis.__slice_argv || ["slice"],
+    on: __pLazy("on"),
+    once: __pLazy("once"),
+    off: __pLazy("off"),
+    addListener: __pLazy("addListener"),
+    removeListener: __pLazy("removeListener"),
+    removeAllListeners: __pLazy("removeAllListeners"),
+    listeners: __pLazy("listeners"),
+    listenerCount: __pLazy("listenerCount"),
+    emitWarning: __pLazy("emitWarning"),
+    exit: function(code) {
+      __ntQ.length = 0;
+      __qmQ.length = 0;
+      __mtS = false;
+      __slice_process_exit(code);
+    }
   };
 
   globalThis.__slice_check_ses = function() {
@@ -206,6 +228,12 @@
       __ntHooked = false;
       Promise.prototype.then = __origThen;
     }
+  };
+
+  globalThis.__slice_reset_mt = function() {
+    __ntQ.length = 0;
+    __qmQ.length = 0;
+    __mtS = false;
   };
 
   globalThis.__slice_set_als_wrap = function(wrapFn) {

@@ -337,7 +337,9 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         bundle.push_str("var __h = null;\n");
         bundle.push_str(&format!("__run = __rc[\"{}\"] = {} {{\n", rc_key, fn_kw));
         bundle.push_str("if (__h && globalThis.__slice_active_http_server && typeof __slice_http_is_active === 'function' && __slice_http_is_active()) { globalThis.__slice_dispatch_fetch(__h); return; }\n");
-        bundle.push_str("var require = __slice_require, exports = {}, module = { exports: exports };\n");
+        bundle.push_str(
+            "var require = __slice_require, exports = {}, module = { exports: exports };\n",
+        );
         bundle.push_str(&entry_body);
         bundle.push_str("\nif (globalThis.__slice_active_http_server) __h = globalThis.__slice_active_http_server._handler;\n};\n}\n__run();\n");
     } else {

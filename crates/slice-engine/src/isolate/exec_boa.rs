@@ -195,6 +195,10 @@ impl SliceIsolate {
         BOA_STDOUT.with(|out| out.borrow_mut().clear());
         BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
         BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(0));
+        crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.set(None));
+        crate::boa_realm::BOA_LAST_EXIT_CODE.with(|e| e.set(None));
+        crate::boa_realm::BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
+        crate::boa_realm::BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = None);
         BOA_ACTIVE_TENANT.with(|t| {
             let mut b = t.borrow_mut();
             b.clear();
@@ -326,6 +330,11 @@ impl SliceIsolate {
             ));
             BOA_DET_STATE.with(|s| s.set(None));
         }
+        if !self.process_argv.is_empty() {
+            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
+                b"globalThis.__slice_argv=undefined;if(globalThis.process)globalThis.process.argv=[\"slice\"];",
+            ));
+        }
         if flags.has_fs_restrictions {
             BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = None);
         }
@@ -393,16 +402,55 @@ impl SliceIsolate {
         is_http_req: bool,
         has_next_tick: bool,
         check_ses: bool,
-        eval_res: boa_engine::JsResult<boa_engine::JsValue>,
+        mut eval_res: boa_engine::JsResult<boa_engine::JsValue>,
     ) -> Result<JsValue, SandboxViolation> {
-        if (!flags.is_worker || eval_res.is_ok())
-            && (!BOA_HTTP_REQ.with(|r| r.borrow().active)
-                || BOA_HTTP_RES.with(|res| res.borrow().is_none())
-                || has_pending_event_loop_work())
+        let last_cp_violation = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
+        if eval_res.is_err() {
+            if let Some(cp_v) = last_cp_violation {
+                BOA_VIOLATION.with(|v| {
+                    if v.borrow().is_none() {
+                        *v.borrow_mut() = Some(cp_v);
+                    }
+                });
+            }
+        }
+
+        if crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+            let _ = realm.ctx.run_jobs();
+            crate::boa_realm::BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
+            eval_res = Ok(boa_engine::JsValue::undefined());
+        } else if let Err(err) = eval_res {
+            let _ = realm
+                .ctx
+                .eval(boa_engine::Source::from_bytes(b"__slice_reset_mt();"));
+            if BOA_VIOLATION.with(|v| v.borrow().is_none())
+                && crate::event_loop::handle_uncaught_js_error(err, &mut realm.ctx)
+            {
+                eval_res = Ok(boa_engine::JsValue::undefined());
+                if crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.get().is_none())
+                    && (!BOA_HTTP_REQ.with(|r| r.borrow().active)
+                        || BOA_HTTP_RES.with(|res| res.borrow().is_none())
+                        || has_pending_event_loop_work())
+                {
+                    drive_event_loop_to_completion(&mut realm.ctx);
+                }
+            } else {
+                let _ = realm.ctx.run_jobs();
+                crate::boa_realm::BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
+                eval_res = Ok(boa_engine::JsValue::undefined());
+            }
+        } else if !BOA_HTTP_REQ.with(|r| r.borrow().active)
+            || BOA_HTTP_RES.with(|res| res.borrow().is_none())
+            || has_pending_event_loop_work()
         {
             drive_event_loop_to_completion(&mut realm.ctx);
         }
-        if is_http_req && BOA_HTTP_RES.with(|res| res.borrow().is_none()) {
+
+        if is_http_req
+            && crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.get().is_none())
+            && crate::boa_realm::BOA_UNCAUGHT_ERROR.with(|e| e.borrow().is_none())
+            && BOA_HTTP_RES.with(|res| res.borrow().is_none())
+        {
             let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
                 b"if(globalThis.__slice_active_http_server&&typeof globalThis.__slice_active_http_server._dispatchActiveHttpBridge==='function'){globalThis.__slice_active_http_server._dispatchActiveHttpBridge();}",
             ));
@@ -431,6 +479,61 @@ impl SliceIsolate {
             }
         }
 
+        let mut final_val = match eval_res {
+            Ok(mut val) => {
+                if val.as_promise().is_some() {
+                    if let Ok(st_val) = realm
+                        .ctx
+                        .global_object()
+                        .get(boa_engine::js_string!("__slice_tla_st"), &mut realm.ctx)
+                    {
+                        let st = st_val.as_number().unwrap_or(0.0) as i32;
+                        if st == 1 || st == 2 {
+                            let _ = realm.ctx.global_object().set(
+                                boa_engine::js_string!("__slice_tla_st"),
+                                boa_engine::JsValue::from(0),
+                                false,
+                                &mut realm.ctx,
+                            );
+                            let tla_v = realm
+                                .ctx
+                                .global_object()
+                                .get(boa_engine::js_string!("__slice_tla_v"), &mut realm.ctx)
+                                .unwrap_or_default();
+                            if st == 1 {
+                                val = tla_v;
+                            } else if crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.get().is_none())
+                            {
+                                let tla_err = boa_engine::JsError::from_opaque(tla_v);
+                                let _ = crate::event_loop::handle_uncaught_js_error(
+                                    tla_err,
+                                    &mut realm.ctx,
+                                );
+                                val = boa_engine::JsValue::undefined();
+                            } else {
+                                val = boa_engine::JsValue::undefined();
+                            }
+                        }
+                    }
+                }
+                val
+            }
+            Err(_) => boa_engine::JsValue::undefined(),
+        };
+
+        if (realm.loaded_shards_mask & (1 << 18)) != 0
+            || realm
+                .ctx
+                .global_object()
+                .get(boa_engine::js_string!("__shMask"), &mut realm.ctx)
+                .ok()
+                .and_then(|v| v.as_number())
+                .is_some_and(|n| ((n as u32) & (1 << 18)) != 0)
+        {
+            realm.loaded_shards_mask |= 1 << 18;
+            crate::event_loop::finalize_and_reset_process_state(&mut realm.ctx);
+        }
+
         self.teardown_boa_compartment_thread_locals(&mut realm, flags, has_next_tick);
         self.harvest_boa_stdout();
         let (cp_taken, cp_restored, cp_restore_ns) =
@@ -439,18 +542,20 @@ impl SliceIsolate {
         self.restores_performed = cp_restored;
         self.restore_time_ns = cp_restore_ns;
 
-        let last_cp_violation = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
-        if eval_res.is_err() {
-            if let Some(cp_v) = last_cp_violation {
-                BOA_VIOLATION.with(|v| {
-                    if v.borrow().is_none() {
-                        *v.borrow_mut() = Some(cp_v);
-                    }
-                });
-            }
-        }
+        let exit_code_opt = crate::boa_realm::BOA_PROCESS_EXIT
+            .with(|e| e.replace(None))
+            .or_else(|| crate::boa_realm::BOA_LAST_EXIT_CODE.with(|e| e.replace(None)));
+        self.last_exit_code = exit_code_opt;
+        let uncaught_err_opt = crate::boa_realm::BOA_UNCAUGHT_ERROR.with(|e| e.borrow_mut().take());
+        crate::boa_realm::BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
 
-        if let Some(violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
+        if let Some(mut violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
+            if let SandboxViolation::CpuFuelExhausted { ref mut limit, .. } = violation {
+                if *limit == 0 {
+                    self.compartment.fuel_consumed = self.compartment.fuel_limit;
+                    *limit = self.compartment.fuel_limit;
+                }
+            }
             release_warm_boa_realm(realm);
             return Err(violation);
         }
@@ -476,22 +581,6 @@ impl SliceIsolate {
                 intrinsic: ses_mutated_target,
             });
         }
-        if let Err(ref err) = eval_res {
-            let msg = err.to_string();
-            if msg.contains("RuntimeLimitError")
-                || msg.contains("iteration loops")
-                || msg.contains("loop iteration limit")
-                || msg.contains("Maximum call stack")
-                || msg.contains("recursion limit")
-            {
-                self.compartment.fuel_consumed = self.compartment.fuel_limit;
-                release_warm_boa_realm(realm);
-                return Err(SandboxViolation::CpuFuelExhausted {
-                    tenant_id: self.compartment.tenant_id.clone(),
-                    limit: self.compartment.fuel_limit,
-                });
-            }
-        }
         let kv_used = BOA_KV_MEM_BUDGET.with(|m| m.get().0);
         if kv_used > 0 {
             if let Err(v) = self.compartment.alloc_memory(kv_used) {
@@ -503,134 +592,88 @@ impl SliceIsolate {
         }
 
         self.last_return_json = None;
-        let result = match eval_res {
-            Ok(mut val) => {
-                if val.as_promise().is_some() {
-                    if let Ok(st_val) = realm
-                        .ctx
-                        .global_object()
-                        .get(boa_engine::js_string!("__slice_tla_st"), &mut realm.ctx)
-                    {
-                        let st = st_val.as_number().unwrap_or(0.0) as i32;
-                        if st == 1 || st == 2 {
-                            let _ = realm.ctx.global_object().set(
-                                boa_engine::js_string!("__slice_tla_st"),
-                                boa_engine::JsValue::from(0),
-                                false,
-                                &mut realm.ctx,
-                            );
-                            let tla_v = realm
-                                .ctx
-                                .global_object()
-                                .get(boa_engine::js_string!("__slice_tla_v"), &mut realm.ctx)
-                                .unwrap_or_default();
-                            if st == 1 {
-                                val = tla_v;
-                            } else {
-                                let err_msg = tla_v
-                                    .to_string(&mut realm.ctx)
-                                    .map(|s| s.to_std_string_escaped())
-                                    .unwrap_or_else(|_| "Promise rejected".to_string());
-                                release_warm_boa_realm(realm);
-                                return Ok(JsValue::str(format!("Uncaught {}", err_msg)));
-                            }
+        if let Some(err_str) = uncaught_err_opt {
+            release_warm_boa_realm(realm);
+            return Ok(JsValue::str(err_str));
+        }
+        if exit_code_opt.is_some() && final_val.as_promise().is_some() {
+            final_val = boa_engine::JsValue::undefined();
+        }
+        let result = if final_val.is_undefined() {
+            Ok(JsValue::Undefined)
+        } else if final_val.is_null() {
+            if self.capture_return_json {
+                self.last_return_json = Some("null".to_string());
+            }
+            Ok(JsValue::Null)
+        } else if let Some(b) = final_val.as_boolean() {
+            if self.capture_return_json {
+                self.last_return_json = Some(if b { "true" } else { "false" }.to_string());
+            }
+            Ok(JsValue::Bool(b))
+        } else if let Some(n) = final_val.as_number() {
+            if self.capture_return_json && n.is_finite() {
+                self.last_return_json = Some(JsValue::Number(n).to_string());
+            }
+            Ok(JsValue::Number(n))
+        } else if let Some(s) = final_val.as_string() {
+            let st = s.to_std_string_escaped();
+            if self.capture_return_json {
+                self.last_return_json = serde_json::to_string(&st).ok();
+            }
+            Ok(JsValue::str(st))
+        } else {
+            if self.capture_return_json {
+                if let Some(obj) = final_val.as_object() {
+                    if !obj.is_callable() {
+                        if let Ok(Some(json_val)) = final_val.to_json(&mut realm.ctx) {
+                            self.last_return_json = serde_json::to_string(&json_val).ok();
                         }
-                    }
-                }
-                if val.is_undefined() {
-                    Ok(JsValue::Undefined)
-                } else if val.is_null() {
-                    if self.capture_return_json {
-                        self.last_return_json = Some("null".to_string());
-                    }
-                    Ok(JsValue::Null)
-                } else if let Some(b) = val.as_boolean() {
-                    if self.capture_return_json {
-                        self.last_return_json = Some(if b { "true" } else { "false" }.to_string());
-                    }
-                    Ok(JsValue::Bool(b))
-                } else if let Some(n) = val.as_number() {
-                    if self.capture_return_json && n.is_finite() {
-                        self.last_return_json = Some(JsValue::Number(n).to_string());
-                    }
-                    Ok(JsValue::Number(n))
-                } else if let Some(s) = val.as_string() {
-                    let st = s.to_std_string_escaped();
-                    if self.capture_return_json {
-                        self.last_return_json = serde_json::to_string(&st).ok();
-                    }
-                    Ok(JsValue::str(st))
-                } else {
-                    if self.capture_return_json {
-                        if let Some(obj) = val.as_object() {
-                            if !obj.is_callable() {
-                                if let Ok(Some(json_val)) = val.to_json(&mut realm.ctx) {
-                                    self.last_return_json = serde_json::to_string(&json_val).ok();
-                                }
-                            }
-                        }
-                    }
-                    if let Ok(s) = val.to_string(&mut realm.ctx) {
-                        Ok(JsValue::str(s.to_std_string_escaped()))
-                    } else {
-                        Ok(JsValue::Undefined)
                     }
                 }
             }
-            Err(err) => {
-                let raw_err = format!("Uncaught {}", err);
-                let mut mapped = crate::boa_realm::map_error_with_active_source(&raw_err);
-                if mapped == raw_err {
-                    if let Some((first_line, rest)) = mapped.split_once('\n') {
-                        if let Some(open) = first_line.rfind(" (unknown at ") {
-                            let loc_paren = &first_line[open + 1..];
-                            if rest.contains(loc_paren) {
-                                mapped = format!("{}\n{}", &first_line[..open], rest);
-                            }
-                        }
-                    }
-                    if let Some(opaque) = err.as_opaque() {
-                        if let Some(obj) = opaque.as_object() {
-                            if let Ok(stack_val) =
-                                obj.get(boa_engine::js_string!("stack"), &mut realm.ctx)
-                            {
-                                if let Some(s) = stack_val.as_string() {
-                                    let st = s.to_std_string_escaped();
-                                    for line in st.lines() {
-                                        let trimmed = line.trim();
-                                        if trimmed.starts_with("at ")
-                                            && !trimmed.contains("<anonymous>")
-                                        {
-                                            if let Some(open) = trimmed.rfind('(') {
-                                                if let Some(close) = trimmed[open + 1..].find(')') {
-                                                    let loc = &trimmed[open + 1..open + 1 + close];
-                                                    if loc.contains(':') && !raw_err.contains(loc) {
-                                                        mapped = format!("{} ({})", raw_err, loc);
-                                                        break;
-                                                    }
-                                                }
-                                            } else if let Some(loc) = trimmed.strip_prefix("at ") {
-                                                if loc.contains(':')
-                                                    && !loc.contains(' ')
-                                                    && !raw_err.contains(loc)
-                                                {
-                                                    mapped = format!("{} ({})", raw_err, loc);
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(JsValue::str(mapped))
+            if let Ok(s) = final_val.to_string(&mut realm.ctx) {
+                Ok(JsValue::str(s.to_std_string_escaped()))
+            } else {
+                Ok(JsValue::Undefined)
             }
         };
 
         release_warm_boa_realm(realm);
         result
+    }
+
+    #[inline]
+    fn apply_process_argv_to_realm(&self, realm: &mut WarmBoaRealm) {
+        if self.process_argv.is_empty() {
+            return;
+        }
+        let argv_arr = boa_engine::object::builtins::JsArray::from_iter(
+            self.process_argv
+                .iter()
+                .map(|s| boa_engine::JsValue::from(boa_engine::js_string!(s.as_str()))),
+            &mut realm.ctx,
+        );
+        let _ = realm.ctx.global_object().set(
+            boa_engine::js_string!("__slice_argv"),
+            boa_engine::JsValue::from(argv_arr.clone()),
+            false,
+            &mut realm.ctx,
+        );
+        if let Some(proc_obj) = realm
+            .ctx
+            .global_object()
+            .get(boa_engine::js_string!("process"), &mut realm.ctx)
+            .ok()
+            .and_then(|v| v.as_object())
+        {
+            let _ = proc_obj.set(
+                boa_engine::js_string!("argv"),
+                boa_engine::JsValue::from(argv_arr),
+                false,
+                &mut realm.ctx,
+            );
+        }
     }
 
     /// Executes full ES2024+ JavaScript inside the production **Boa (`boa_engine`)** ECMAScript VM,
@@ -648,6 +691,7 @@ impl SliceIsolate {
         }
 
         let mut realm = acquire_warm_boa_realm();
+        self.apply_process_argv_to_realm(&mut realm);
 
         if flags.has_env_keys {
             let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
@@ -814,6 +858,7 @@ impl SliceIsolate {
             Some(r) => (r, false),
             None => (create_bare_boa_realm(), true),
         };
+        self.apply_process_argv_to_realm(&mut realm);
 
         let has_next_tick = (header.feature_flags & BOACAS_FLAG_HAS_NEXT_TICK) != 0;
         if is_cold_bare_realm && header.approach_kind >= 1 && !precompiled_slice.is_empty() {

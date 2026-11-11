@@ -199,3 +199,109 @@ fn test_cli_perf_01_02_tenant_hotswap_and_itoa_header_microbench() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn test_wave1_cli_eval_print_check_argv_and_exit_codes() {
+    use crate::{cmd_check, cmd_run, LAST_CLI_EXIT_CODE};
+    use std::sync::atomic::Ordering;
+
+    let tmp_dir = std::env::temp_dir().join("slice_wave1_cli_ergonomics");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // 1. `-c` / `--check` / `cmd_check` on valid TS/JS vs invalid syntax (must NOT execute side effects)
+    let valid_script = tmp_dir.join("valid.ts");
+    let side_effect_marker = tmp_dir.join("side_effect_ran.txt");
+    std::fs::write(
+        &valid_script,
+        format!(
+            "import fs from 'node:fs';\nfs.writeFileSync({:?}, 'ran');\nconst x: number = 40 + 2;\nexport {{ x }};\n",
+            side_effect_marker.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    cmd_check(&[valid_script.to_string_lossy().to_string()]).unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+    assert!(
+        !side_effect_marker.exists(),
+        "syntax check must not execute script side effects"
+    );
+
+    cmd_run(&[
+        "--check".to_string(),
+        valid_script.to_string_lossy().to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    let invalid_script = tmp_dir.join("invalid.js");
+    std::fs::write(&invalid_script, "const x = (\n").unwrap();
+    let err1 = cmd_check(&[invalid_script.to_string_lossy().to_string()]).unwrap_err();
+    assert!(err1.to_string().contains("SyntaxError"));
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 1);
+
+    let err2 = cmd_run(&[
+        "-c".to_string(),
+        invalid_script.to_string_lossy().to_string(),
+    ])
+    .unwrap_err();
+    assert!(err2.to_string().contains("SyntaxError"));
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 1);
+
+    // 2. `-e` / `--eval` with `process.argv` and exit code propagation
+    let eval_code = r#"
+        if (JSON.stringify(process.argv) !== JSON.stringify(["slice", "arg1", "--flag2"])) {
+            process.exit(99);
+        }
+        process.exit(37);
+    "#;
+    cmd_run(&[
+        "-e".to_string(),
+        eval_code.to_string(),
+        "arg1".to_string(),
+        "--flag2".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 37);
+
+    // 3. Script file execution with trailing script arguments in `process.argv` and `process.exitCode`
+    let argv_script = tmp_dir.join("script_argv.js");
+    std::fs::write(
+        &argv_script,
+        r#"
+        if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(["--alpha", "beta", "gamma"])) {
+            process.exit(98);
+        }
+        process.exitCode = 11;
+        "#,
+    )
+    .unwrap();
+    cmd_run(&[
+        argv_script.to_string_lossy().to_string(),
+        "--alpha".to_string(),
+        "beta".to_string(),
+        "gamma".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 11);
+
+    // 4. `-p` / `--print` evaluates expressions and sets exit code 0
+    cmd_run(&["-p".to_string(), "({ sum: 20 + 22 })".to_string()]).unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    // 5. Unhandled Promise rejection in `-e` sets LAST_CLI_EXIT_CODE = 1 and returns Uncaught (in promise)
+    let rej_err = cmd_run(&[
+        "-e".to_string(),
+        "Promise.reject(new Error('cli-unhandled'))".to_string(),
+    ])
+    .unwrap_err();
+    assert!(rej_err
+        .to_string()
+        .contains("Uncaught (in promise) Error: cli-unhandled"));
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 1);
+
+    // Reset LAST_CLI_EXIT_CODE so test harness exits 0
+    LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

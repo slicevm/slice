@@ -314,7 +314,13 @@ export default {
 "#;
 
 fn init_sveltekit_template(target_dir: &std::path::Path, project_name: &str) -> Result<()> {
-    std::fs::create_dir_all(target_dir.join("src").join("routes").join("api").join("items"))?;
+    std::fs::create_dir_all(
+        target_dir
+            .join("src")
+            .join("routes")
+            .join("api")
+            .join("items"),
+    )?;
 
     let manifest_path = target_dir.join("slice.toml");
     if !manifest_path.exists() {
@@ -427,7 +433,10 @@ export function handleError({ status, error }) {
         std::fs::write(&hooks_path, hooks_js)?;
     }
 
-    let page_srv_path = target_dir.join("src").join("routes").join("+page.server.js");
+    let page_srv_path = target_dir
+        .join("src")
+        .join("routes")
+        .join("+page.server.js");
     if !page_srv_path.exists() {
         let page_srv = r#"/** @type {import('./$types').PageServerLoad} */
 export async function load({ url, cookies, locals }) {

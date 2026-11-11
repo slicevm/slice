@@ -350,3 +350,45 @@ pub fn rewrite_cjs_require(source: &str) -> String {
     }
     source.replace("require(", "__slice_cjs_require(")
 }
+
+/// Validates JS/TS/JSX/TSX syntax using Oxc's parser (`oxc::parser::Parser`).
+/// Returns `Ok(())` if the source has no syntax errors, or `Err(SyntaxError message)` if invalid.
+pub fn check_syntax_source(source: &str, path_hint: Option<&Path>) -> Result<(), String> {
+    let allocator = oxc::allocator::Allocator::default();
+    let parse_opts = oxc::parser::ParseOptions {
+        allow_return_outside_function: true,
+        ..Default::default()
+    };
+    let is_jsx_ext = path_hint
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("tsx") || ext.eq_ignore_ascii_case("jsx"));
+    let src_type = if is_jsx_ext {
+        oxc::span::SourceType::tsx().with_module(true)
+    } else {
+        oxc::span::SourceType::ts().with_module(true)
+    };
+    let parsed = oxc::parser::Parser::new(&allocator, source, src_type)
+        .with_options(parse_opts)
+        .parse();
+    if parsed.diagnostics.is_empty() {
+        return Ok(());
+    }
+    if !is_jsx_ext {
+        let retry_tsx = oxc::parser::Parser::new(
+            &allocator,
+            source,
+            oxc::span::SourceType::tsx().with_module(true),
+        )
+        .with_options(parse_opts)
+        .parse();
+        if retry_tsx.diagnostics.is_empty() {
+            return Ok(());
+        }
+    }
+    let first_err = &parsed.diagnostics[0];
+    let file_label = path_hint
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<eval>".to_string());
+    Err(format!("SyntaxError in {}: {}", file_label, first_err))
+}

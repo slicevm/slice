@@ -100,6 +100,42 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     pub(crate) static BOA_DIRTY_SUBSYSTEMS: std::cell::Cell<u8> =
         const { std::cell::Cell::new(0) };
+    pub(crate) static BOA_PROCESS_EXIT: std::cell::Cell<Option<i32>> =
+        const { std::cell::Cell::new(None) };
+    pub(crate) static BOA_LAST_EXIT_CODE: std::cell::Cell<Option<i32>> =
+        const { std::cell::Cell::new(None) };
+    pub(crate) static BOA_UNHANDLED_REJECTIONS: std::cell::RefCell<Vec<boa_engine::JsObject>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    pub(crate) static BOA_UNCAUGHT_ERROR: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) struct SliceHostHooks;
+
+impl boa_engine::context::HostHooks for SliceHostHooks {
+    fn promise_rejection_tracker(
+        &self,
+        promise: &boa_engine::object::JsObject<boa_engine::builtins::promise::Promise>,
+        operation: boa_engine::builtins::promise::OperationType,
+        _context: &mut boa_engine::Context,
+    ) {
+        let upcast = promise.clone().upcast();
+        match operation {
+            boa_engine::builtins::promise::OperationType::Reject => {
+                BOA_UNHANDLED_REJECTIONS.with(|list| {
+                    let mut b = list.borrow_mut();
+                    if !b.contains(&upcast) {
+                        b.push(upcast);
+                    }
+                });
+            }
+            boa_engine::builtins::promise::OperationType::Handle => {
+                BOA_UNHANDLED_REJECTIONS.with(|list| {
+                    list.borrow_mut().retain(|p| p != &upcast);
+                });
+            }
+        }
+    }
 }
 
 #[inline]
@@ -245,19 +281,32 @@ impl boa_engine::job::JobExecutor for SliceJobExecutor {
         self: std::rc::Rc<Self>,
         context: &mut boa_engine::Context,
     ) -> boa_engine::JsResult<()> {
+        if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+            self.promise_jobs.borrow_mut().clear();
+            return Ok(());
+        }
         loop {
             let next_job = self.promise_jobs.borrow_mut().pop_front();
             if let Some((job, snap_opt)) = next_job {
-                if let Some(snap) = snap_opt {
+                let res = if let Some(snap) = snap_opt {
                     let prev = BOA_ALS_SNAP.with(|s| s.replace(snap));
-                    let res = job.call(context);
+                    let r = job.call(context);
                     BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
-                    res?;
+                    r
                 } else {
-                    job.call(context)?;
+                    job.call(context)
+                };
+                if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+                    self.promise_jobs.borrow_mut().clear();
+                    return Ok(());
                 }
+                res?;
             } else {
                 self.fallback.clone().run_jobs(context)?;
+                if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+                    self.promise_jobs.borrow_mut().clear();
+                    return Ok(());
+                }
                 if self.promise_jobs.borrow().is_empty() {
                     break;
                 }
@@ -364,6 +413,7 @@ pub(crate) fn release_warm_boa_realm(realm: WarmBoaRealm) {
 pub(crate) fn create_bare_boa_realm() -> WarmBoaRealm {
     let mut ctx = boa_engine::context::ContextBuilder::new()
         .job_executor(std::rc::Rc::new(SliceJobExecutor::new()))
+        .host_hooks(std::rc::Rc::new(SliceHostHooks))
         .build()
         .unwrap_or_else(|_| boa_engine::Context::default());
     register_slice_native_host_functions(&mut ctx);
@@ -493,6 +543,10 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_http_res: Option<CapturedBoaHttpRes>,
     pub(crate) saved_wait_until_count: usize,
     pub(crate) saved_dirty_subsystems: u8,
+    pub(crate) saved_process_exit: Option<i32>,
+    pub(crate) saved_last_exit_code: Option<i32>,
+    pub(crate) saved_unhandled_rejections: Vec<boa_engine::JsObject>,
+    pub(crate) saved_uncaught_error: Option<String>,
     pub(crate) saved_ev_loop: Option<crate::event_loop::SavedEventLoopSnapshot>,
 }
 
@@ -554,6 +608,11 @@ impl SavedIsolateContextGuard {
         let saved_http_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
         let saved_wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.replace(0));
         let saved_dirty_subsystems = BOA_DIRTY_SUBSYSTEMS.with(|d| d.replace(0));
+        let saved_process_exit = BOA_PROCESS_EXIT.with(|e| e.replace(None));
+        let saved_last_exit_code = BOA_LAST_EXIT_CODE.with(|e| e.replace(None));
+        let saved_unhandled_rejections =
+            BOA_UNHANDLED_REJECTIONS.with(|u| std::mem::take(&mut *u.borrow_mut()));
+        let saved_uncaught_error = BOA_UNCAUGHT_ERROR.with(|e| e.borrow_mut().take());
         let saved_ev_loop = crate::event_loop::save_and_reset_event_loop_state();
 
         Self {
@@ -580,6 +639,10 @@ impl SavedIsolateContextGuard {
             saved_http_res,
             saved_wait_until_count,
             saved_dirty_subsystems,
+            saved_process_exit,
+            saved_last_exit_code,
+            saved_unhandled_rejections,
+            saved_uncaught_error,
             saved_ev_loop,
         }
     }
@@ -592,6 +655,11 @@ impl Drop for SavedIsolateContextGuard {
         }
         let child_dirty = BOA_DIRTY_SUBSYSTEMS.with(|d| d.get());
         BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(self.saved_dirty_subsystems));
+        BOA_PROCESS_EXIT.with(|e| e.set(self.saved_process_exit));
+        BOA_LAST_EXIT_CODE.with(|e| e.set(self.saved_last_exit_code));
+        BOA_UNHANDLED_REJECTIONS
+            .with(|u| *u.borrow_mut() = std::mem::take(&mut self.saved_unhandled_rejections));
+        BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = self.saved_uncaught_error.take());
         BOA_STDOUT.with(|out| *out.borrow_mut() = std::mem::take(&mut self.saved_stdout));
         BOA_VIOLATION.with(|v| *v.borrow_mut() = self.saved_violation.take());
         BOA_ACTIVE_TENANT.with(|t| *t.borrow_mut() = std::mem::take(&mut self.saved_tenant));

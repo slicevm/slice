@@ -906,3 +906,492 @@ fn test_pillar5_sliceboa_payload_compaction_and_multiline_template_preservation(
         r#"{"rxOk":true,"strOk":true,"lines":["line1","    indented_line2","        indented_line3"]}"#
     );
 }
+
+#[test]
+fn test_wave1_json_parse_ecma404_float_precision_surrogates_nesting_reviver_and_perf() {
+    let js = r#"
+const exact993 = JSON.parse("9007199254740993.0");
+const exact994 = JSON.parse("9007199254740994.0");
+const exact1e23 = JSON.parse("1e23");
+const subnormal = JSON.parse("5e-324");
+const maxVal = JSON.parse("1.7976931348623157e308");
+const posInf = JSON.parse("1e400");
+const negInf = JSON.parse("-1e400");
+const posInf309 = JSON.parse("1e309");
+const negZeroInt = JSON.parse("-0");
+const negZeroFloat = JSON.parse("-0.0");
+const negZeroExp = JSON.parse("-1e-400");
+const posZeroExp = JSON.parse("1e-400");
+
+// Lone surrogates, reversed pairs, and valid surrogate pairs
+const loneHigh = JSON.parse('"\\ud800"');
+const loneLow = JSON.parse('"\\udfff"');
+const reversedPair = JSON.parse('"\\udc00\\ud800"');
+const highThenAscii = JSON.parse('"\\ud800A"');
+const validPair = JSON.parse('"\\ud83d\\ude00"');
+const surrogateObj = JSON.parse('{"\\ud800":"\\udfff"}');
+
+// Deep nesting (300 levels of arrays, 250 levels of objects)
+const deepArrJson = "[".repeat(300) + "42" + "]".repeat(300);
+let curArr = JSON.parse(deepArrJson);
+let arrDepth = 0;
+while (Array.isArray(curArr)) {
+    arrDepth++;
+    curArr = curArr[0];
+}
+
+const deepObjJson = '{"k":'.repeat(250) + '"leaf"' + '}'.repeat(250);
+let curObj = JSON.parse(deepObjJson);
+let objDepth = 0;
+while (curObj && typeof curObj === "object") {
+    objDepth++;
+    curObj = curObj.k;
+}
+
+// Excessive nesting (> 512) must throw SyntaxError cleanly without stack overflow
+let excessiveThrew = false;
+try {
+    JSON.parse("[".repeat(600) + "1" + "]".repeat(600));
+} catch (e) {
+    excessiveThrew = e instanceof SyntaxError;
+}
+
+// Reviver with context.source and JSON.rawJSON
+const reviverSources = {};
+const revived = JSON.parse('{"big":9007199254740993,"inf":1e400,"nested":{"s":"\\ud800"}}', (k, v, ctx) => {
+    if (ctx && typeof ctx.source === "string") {
+        reviverSources[k] = ctx.source;
+    } else if (k === "nested") {
+        reviverSources[k] = ctx ? typeof ctx.source : "no-ctx";
+    }
+    return v;
+});
+
+// Throughput benchmark on 2,000-record mixed payload
+const records = [];
+for (let i = 0; i < 200; i++) {
+    records.push({
+        id: i,
+        score: i * 1.25,
+        big: 9007199254740992,
+        name: "record_" + i,
+        escaped: "line1\\nline2\\t" + i,
+        active: (i & 1) === 0,
+        nil: null,
+        tags: ["alpha", "beta", "gamma"]
+    });
+}
+const benchPayload = JSON.stringify(records);
+const t0 = Date.now();
+let benchSum = 0;
+for (let it = 0; it < 20; it++) {
+    const parsed = JSON.parse(benchPayload);
+    benchSum += parsed.length + parsed[199].id;
+}
+const elapsedMs = Date.now() - t0;
+
+console.log(JSON.stringify({
+    exact993Ok: exact993 === 9007199254740992,
+    exact994Ok: exact994 === 9007199254740994,
+    exact1e23Ok: exact1e23 === 1e23,
+    subnormalOk: subnormal === Number.MIN_VALUE,
+    maxValOk: maxVal === Number.MAX_VALUE,
+    posInfOk: posInf === Infinity && posInf309 === Infinity,
+    negInfOk: negInf === -Infinity,
+    negZeroOk: Object.is(negZeroInt, -0) && Object.is(negZeroFloat, -0) && Object.is(negZeroExp, -0) && Object.is(posZeroExp, 0),
+    loneHighOk: loneHigh.length === 1 && loneHigh.charCodeAt(0) === 0xD800,
+    loneLowOk: loneLow.length === 1 && loneLow.charCodeAt(0) === 0xDFFF,
+    reversedPairOk: reversedPair.length === 2 && reversedPair.charCodeAt(0) === 0xDC00 && reversedPair.charCodeAt(1) === 0xD800,
+    highThenAsciiOk: highThenAscii.length === 2 && highThenAscii.charCodeAt(0) === 0xD800 && highThenAscii.charCodeAt(1) === 65,
+    validPairOk: validPair.length === 2 && validPair.codePointAt(0) === 0x1F600,
+    surrogateObjOk: surrogateObj["\ud800"].charCodeAt(0) === 0xDFFF,
+    arrDepth,
+    arrLeaf: curArr,
+    objDepth,
+    objLeaf: curObj,
+    excessiveThrew,
+    reviverBigSource: reviverSources.big,
+    reviverInfSource: reviverSources.inf,
+    reviverStrSource: reviverSources.s,
+    reviverNestedSource: reviverSources.nested,
+    revivedInfIsInf: revived.inf === Infinity,
+    benchSum,
+    elapsedMs
+}));
+"#;
+
+    let bc = crate::compile_source_to_bytecode(js);
+    let mut isolate = SliceIsolate::spawn(
+        "wave1-json-test",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        32 * 1024 * 1024,
+    );
+    let m = isolate.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(out["exact993Ok"], true);
+    assert_eq!(out["exact994Ok"], true);
+    assert_eq!(out["exact1e23Ok"], true);
+    assert_eq!(out["subnormalOk"], true);
+    assert_eq!(out["maxValOk"], true);
+    assert_eq!(out["posInfOk"], true);
+    assert_eq!(out["negInfOk"], true);
+    assert_eq!(out["negZeroOk"], true);
+    assert_eq!(out["loneHighOk"], true);
+    assert_eq!(out["loneLowOk"], true);
+    assert_eq!(out["reversedPairOk"], true);
+    assert_eq!(out["highThenAsciiOk"], true);
+    assert_eq!(out["validPairOk"], true);
+    assert_eq!(out["surrogateObjOk"], true);
+    assert_eq!(out["arrDepth"], 300);
+    assert_eq!(out["arrLeaf"], 42);
+    assert_eq!(out["objDepth"], 250);
+    assert_eq!(out["objLeaf"], "leaf");
+    assert_eq!(out["excessiveThrew"], true);
+    assert_eq!(out["reviverBigSource"], "9007199254740993");
+    assert_eq!(out["reviverInfSource"], "1e400");
+    assert_eq!(out["reviverStrSource"], "\"\\ud800\"");
+    assert_eq!(out["reviverNestedSource"], "undefined");
+    assert_eq!(out["revivedInfIsInf"], true);
+    assert_eq!(out["benchSum"], 20 * (200 + 199));
+}
+
+#[test]
+fn test_wave1_process_exit_lifecycle_unhandled_rejection_and_uncaught_exception() {
+    // 1. process.exit(42) inside try/catch/finally must NOT be caught by catch and must set exit_code = 42
+    {
+        let js = r#"
+let events = [];
+process.on("exit", (code) => {
+    events.push("exit:" + code);
+    console.log(JSON.stringify(events));
+});
+process.on("beforeExit", (code) => {
+    events.push("beforeExit:" + code);
+});
+try {
+    events.push("before-exit-call");
+    process.exit(42);
+    events.push("after-exit-call");
+} catch (e) {
+    events.push("caught:" + e);
+}
+events.push("after-try");
+"#;
+        let bc = crate::compile_source_to_bytecode(js);
+        let mut iso = SliceIsolate::spawn(
+            "wave1-exit-try",
+            1,
+            CapabilityToken::pure_compute(),
+            5_000_000,
+            16 * 1024 * 1024,
+        );
+        let m = iso.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(m.exit_code, Some(42));
+        assert_eq!(m.stdout, vec![r#"["before-exit-call","exit:42"]"#]);
+    }
+
+    // 2. process.exit(19) inside a Promise.then microtask stops subsequent microtasks & timers
+    {
+        let js = r#"
+let log = [];
+process.on("exit", (code) => {
+    log.push("exit:" + code);
+    console.log(JSON.stringify(log));
+});
+setTimeout(() => {
+    log.push("timer-should-not-run");
+}, 0);
+Promise.resolve().then(() => {
+    log.push("promise-1");
+    process.exit(19);
+    log.push("promise-1-after");
+}).catch((e) => {
+    log.push("promise-catch-should-not-run");
+});
+Promise.resolve().then(() => {
+    log.push("promise-2-should-not-run");
+});
+"#;
+        let bc = crate::compile_source_to_bytecode(js);
+        let mut iso = SliceIsolate::spawn(
+            "wave1-exit-promise",
+            1,
+            CapabilityToken::pure_compute(),
+            5_000_000,
+            16 * 1024 * 1024,
+        );
+        let m = iso.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(m.exit_code, Some(19));
+        assert_eq!(m.stdout, vec![r#"["promise-1","exit:19"]"#]);
+    }
+
+    // 3. Natural exit: beforeExit can schedule additional work once, then exit fires and process.exitCode is honored
+    {
+        let js = r#"
+let seq = [];
+let scheduled = false;
+process.exitCode = 5;
+process.on("beforeExit", (code) => {
+    seq.push("beforeExit:" + code);
+    if (!scheduled) {
+        scheduled = true;
+        setTimeout(() => {
+            seq.push("timer-from-beforeExit");
+            process.exitCode = 9;
+        }, 1);
+    }
+});
+process.on("exit", (code) => {
+    seq.push("exit:" + code);
+    console.log(JSON.stringify(seq));
+});
+seq.push("sync-done");
+"#;
+        let bc = crate::compile_source_to_bytecode(js);
+        let mut iso = SliceIsolate::spawn(
+            "wave1-before-exit",
+            1,
+            CapabilityToken::pure_compute(),
+            5_000_000,
+            16 * 1024 * 1024,
+        );
+        iso.set_deterministic_seed(Some(42));
+        let m = iso.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(m.exit_code, Some(9));
+        assert_eq!(
+            m.stdout,
+            vec![r#"["sync-done","beforeExit:5","timer-from-beforeExit","beforeExit:9","exit:9"]"#]
+        );
+    }
+
+    // 4. Unhandled Promise rejection WITHOUT listener produces `Uncaught (in promise)` and exit_code = 1
+    {
+        let js = r#"
+Promise.reject(new Error("unhandled-async-boom"));
+"#;
+        let bc = crate::compile_source_to_bytecode(js);
+        let mut iso = SliceIsolate::spawn(
+            "wave1-unhandled-rej",
+            1,
+            CapabilityToken::pure_compute(),
+            5_000_000,
+            16 * 1024 * 1024,
+        );
+        let m = iso.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(m.exit_code, Some(1));
+        assert!(
+            m.return_value
+                .contains("Uncaught (in promise) Error: unhandled-async-boom"),
+            "unexpected return_value: {}",
+            m.return_value
+        );
+    }
+
+    // 5. Unhandled Promise rejection WITH `process.on('unhandledRejection')` listener is caught cleanly
+    //    AND a rejection handled in the same microtask turn does NOT fire `unhandledRejection`
+    {
+        let js = r#"
+const caughtReasons = [];
+process.on("unhandledRejection", (reason, p) => {
+    caughtReasons.push(reason instanceof Error ? reason.message : String(reason));
+});
+const handled = Promise.reject(new Error("handled-in-turn"));
+handled.catch(() => {});
+Promise.reject(new Error("intercepted-by-process"));
+process.on("exit", (code) => {
+    console.log(JSON.stringify({ code, caughtReasons }));
+});
+"#;
+        let bc = crate::compile_source_to_bytecode(js);
+        let mut iso = SliceIsolate::spawn(
+            "wave1-handled-rej",
+            1,
+            CapabilityToken::pure_compute(),
+            5_000_000,
+            16 * 1024 * 1024,
+        );
+        let m = iso.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(m.exit_code.unwrap_or(0), 0);
+        assert!(
+            !m.return_value.starts_with("Uncaught"),
+            "unexpected uncaught error: {}",
+            m.return_value
+        );
+        assert_eq!(
+            m.stdout,
+            vec![r#"{"code":0,"caughtReasons":["intercepted-by-process"]}"#]
+        );
+    }
+
+    // 6. process.on('uncaughtException') and 'uncaughtExceptionMonitor' intercept synchronous & timer errors
+    {
+        let js = r#"
+const log = [];
+process.on("uncaughtExceptionMonitor", (err, origin) => {
+    log.push("monitor:" + err.message + ":" + origin);
+});
+process.on("uncaughtException", (err, origin) => {
+    log.push("caught:" + err.message + ":" + origin);
+});
+setTimeout(() => {
+    throw new Error("timer-boom");
+}, 1);
+process.on("exit", (code) => {
+    console.log(JSON.stringify({ code, log }));
+});
+throw new Error("sync-boom");
+"#;
+        let bc = crate::compile_source_to_bytecode(js);
+        let mut iso = SliceIsolate::spawn(
+            "wave1-uncaught-exc",
+            1,
+            CapabilityToken::pure_compute(),
+            5_000_000,
+            16 * 1024 * 1024,
+        );
+        iso.set_deterministic_seed(Some(99));
+        let m = iso.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(m.exit_code.unwrap_or(0), 0);
+        assert!(
+            !m.return_value.starts_with("Uncaught"),
+            "unexpected uncaught error: {}",
+            m.return_value
+        );
+        assert_eq!(
+            m.stdout,
+            vec![
+                r#"{"code":0,"log":["monitor:sync-boom:uncaughtException","caught:sync-boom:uncaughtException","monitor:timer-boom:uncaughtException","caught:timer-boom:uncaughtException"]}"#
+            ]
+        );
+    }
+}
+
+#[test]
+fn test_wave1_worker_threads_date_special_numbers_and_process_exit() {
+    let js = r#"
+const { Worker, MessageChannel } = require("node:worker_threads");
+
+async function runTests() {
+    // 1. Date, Invalid Date, NaN, Infinity, -Infinity across MessageChannel
+    const mc = new MessageChannel();
+    const mcResult = await new Promise((resolve) => {
+        mc.port2.on("message", (msg) => {
+            mc.port1.close();
+            mc.port2.close();
+            resolve({
+                dValid: msg.d instanceof Date && msg.d.getTime() === 1750000000123,
+                dEpoch: msg.epoch instanceof Date && msg.epoch.getTime() === 0,
+                dInvalid: msg.inv instanceof Date && Number.isNaN(msg.inv.getTime()),
+                nanOk: Number.isNaN(msg.nan),
+                posInfOk: msg.posInf === Infinity,
+                negInfOk: msg.negInf === -Infinity,
+            });
+        });
+        mc.port1.postMessage({
+            d: new Date(1750000000123),
+            epoch: new Date(0),
+            inv: new Date(NaN),
+            nan: NaN,
+            posInf: Infinity,
+            negInf: -Infinity,
+        });
+    });
+
+    // 2. Date & special numbers across workerData, worker.postMessage, parentPort.postMessage,
+    //    AND process.exit(42) inside worker when `process` is referenced
+    const workerCode = `
+        const { parentPort, workerData } = require("node:worker_threads");
+        const procRef = process;
+        parentPort.on("message", (incoming) => {
+            parentPort.postMessage({
+                wdDateOk: workerData.created instanceof Date && workerData.created.getTime() === 1700000000000,
+                wdInfOk: workerData.limit === Infinity,
+                inDateOk: incoming.when instanceof Date && incoming.when.getTime() === 1712345678901,
+                inInvalidDateOk: incoming.badDate instanceof Date && Number.isNaN(incoming.badDate.getTime()),
+                inNanOk: Number.isNaN(incoming.score),
+                replyDate: new Date(1720000000555),
+                replyNegInf: -Infinity,
+            });
+            procRef.exit(42);
+        });
+    `;
+
+    const wResult = await new Promise((resolve, reject) => {
+        const w = new Worker(workerCode, {
+            eval: true,
+            workerData: {
+                created: new Date(1700000000000),
+                limit: Infinity,
+            },
+        });
+        let msgReply = null;
+        w.on("message", (m) => {
+            msgReply = {
+                wdDateOk: m.wdDateOk,
+                wdInfOk: m.wdInfOk,
+                inDateOk: m.inDateOk,
+                inInvalidDateOk: m.inInvalidDateOk,
+                inNanOk: m.inNanOk,
+                replyDateOk: m.replyDate instanceof Date && m.replyDate.getTime() === 1720000000555,
+                replyNegInfOk: m.replyNegInf === -Infinity,
+            };
+        });
+        w.on("error", reject);
+        w.on("exit", (code) => {
+            resolve({ exitCode: code, msgReply });
+        });
+        w.postMessage({
+            when: new Date(1712345678901),
+            badDate: new Date(NaN),
+            score: NaN,
+        });
+    });
+
+    // 3. Immediate top-level process.exit(17) inside Worker with `process` referenced
+    const immediateExitCode = await new Promise((resolve, reject) => {
+        const w2 = new Worker(`const p = process; p.exit(17);`, { eval: true });
+        w2.on("error", reject);
+        w2.on("exit", (code) => resolve(code));
+    });
+
+    console.log(JSON.stringify({ mcResult, wResult, immediateExitCode }));
+}
+runTests();
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(js, true);
+    let bc = crate::compile_source_to_bytecode(&bundled);
+    let mut isolate = SliceIsolate::spawn(
+        "wave1-worker-date-exit",
+        1,
+        CapabilityToken::pure_compute(),
+        20_000_000,
+        32 * 1024 * 1024,
+    );
+    let m = isolate.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(
+        m.stdout.len(),
+        1,
+        "stdout={:?}, ret={}",
+        m.stdout,
+        m.return_value
+    );
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(out["mcResult"]["dValid"], true);
+    assert_eq!(out["mcResult"]["dEpoch"], true);
+    assert_eq!(out["mcResult"]["dInvalid"], true);
+    assert_eq!(out["mcResult"]["nanOk"], true);
+    assert_eq!(out["mcResult"]["posInfOk"], true);
+    assert_eq!(out["mcResult"]["negInfOk"], true);
+    assert_eq!(out["wResult"]["exitCode"], 42);
+    assert_eq!(out["wResult"]["msgReply"]["wdDateOk"], true);
+    assert_eq!(out["wResult"]["msgReply"]["wdInfOk"], true);
+    assert_eq!(out["wResult"]["msgReply"]["inDateOk"], true);
+    assert_eq!(out["wResult"]["msgReply"]["inInvalidDateOk"], true);
+    assert_eq!(out["wResult"]["msgReply"]["inNanOk"], true);
+    assert_eq!(out["wResult"]["msgReply"]["replyDateOk"], true);
+    assert_eq!(out["wResult"]["msgReply"]["replyNegInfOk"], true);
+    assert_eq!(out["immediateExitCode"], 17);
+}

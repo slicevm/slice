@@ -807,7 +807,9 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
 
     let exec_res = child_isolate.execute_bytecode(&job.bytecode, None);
     let was_terminated = terminated_clone.load(Ordering::Acquire);
-    let explicit_code = WORKER_SELF_ENV.with(|env| env.borrow().explicit_exit_code);
+    let explicit_code = WORKER_SELF_ENV
+        .with(|env| env.borrow().explicit_exit_code)
+        .or_else(|| child_isolate.last_exit_code());
 
     // Scrub thread-local worker state and return this thread to `IDLE_WORKER_POOL`
     // BEFORE sending `Exit` to the parent isolate so sequential `await worker` loops
@@ -1029,8 +1031,14 @@ pub(crate) fn poll_worker_self_inbox_and_dispatch(
                 let arg = JsValue::from(boa_engine::js_string!(msg_json));
                 let call_res = dispatch_fn.call(&JsValue::undefined(), &[arg], ctx);
                 let _ = ctx.run_jobs();
+                if crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+                    return true;
+                }
                 if let Err(err) = call_res {
                     let msg = err.to_string();
+                    if msg.starts_with("__SLICE_PROCESS_EXIT__:") {
+                        return true;
+                    }
                     if msg.contains("RuntimeLimitError")
                         || msg.contains("iteration loops")
                         || msg.contains("loop iteration limit")

@@ -7,5 +7,5 @@ pub(crate) use init::cmd_init;
 pub(crate) use pack_and_compile::{
     cmd_compile, cmd_info, cmd_inspect, cmd_pack, print_usage, unique_temp_cas_path,
 };
-pub(crate) use run::{cmd_run, run_embedded_standalone};
+pub(crate) use run::{cmd_check, cmd_run, run_embedded_standalone, LAST_CLI_EXIT_CODE};
 pub(crate) use test_runner::cmd_test;

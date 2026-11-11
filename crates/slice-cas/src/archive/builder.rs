@@ -51,8 +51,7 @@ impl CasBuilder {
                     let lock_path = dir.join(lock_name);
                     if lock_path.is_file() {
                         if let Ok(bytes) = std::fs::read(&lock_path) {
-                            self.lockfile_blake3 =
-                                Some(blake3::hash(&bytes).to_hex().to_string());
+                            self.lockfile_blake3 = Some(blake3::hash(&bytes).to_hex().to_string());
                             break;
                         }
                     }
@@ -63,12 +62,9 @@ impl CasBuilder {
                         for section in ["dependencies", "devDependencies"] {
                             if let Some(obj) = val.get(section).and_then(|v| v.as_object()) {
                                 for (name, spec_val) in obj {
-                                    let declared =
-                                        spec_val.as_str().unwrap_or("*").to_string();
-                                    let resolved_pkg = dir
-                                        .join("node_modules")
-                                        .join(name)
-                                        .join("package.json");
+                                    let declared = spec_val.as_str().unwrap_or("*").to_string();
+                                    let resolved_pkg =
+                                        dir.join("node_modules").join(name).join("package.json");
                                     let version = std::fs::read_to_string(&resolved_pkg)
                                         .ok()
                                         .and_then(|s| {

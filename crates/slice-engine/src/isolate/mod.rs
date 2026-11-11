@@ -49,6 +49,8 @@ pub struct ExecutionMetrics {
     pub restores_performed: u32,
     #[serde(default)]
     pub restore_time_ns: u64,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +80,8 @@ pub struct SliceIsolate {
     pub(crate) capture_return_json: bool,
     pub(crate) last_return_json: Option<String>,
     pub(crate) last_exec_check_ses: bool,
+    pub(crate) last_exit_code: Option<i32>,
+    pub(crate) process_argv: Vec<String>,
 }
 
 impl SliceIsolate {
@@ -116,7 +120,34 @@ impl SliceIsolate {
             capture_return_json: false,
             last_return_json: None,
             last_exec_check_ses: false,
+            last_exit_code: None,
+            process_argv: Vec::new(),
         }
+    }
+
+    /// Returns the explicit or implicit process exit code (`process.exit(code)`, `process.exitCode`,
+    /// or `1` on uncaught exception / unhandled rejection) from the most recent execution, if set.
+    #[inline]
+    pub fn last_exit_code(&self) -> Option<i32> {
+        self.last_exit_code
+    }
+
+    /// Enables or disables capturing the JSON representation of the last evaluated expression (`-p` / `--print`).
+    #[inline]
+    pub fn set_capture_return_json(&mut self, enable: bool) {
+        self.capture_return_json = enable;
+    }
+
+    /// Returns the captured JSON representation of the last evaluated expression, if available.
+    #[inline]
+    pub fn last_return_json(&self) -> Option<&str> {
+        self.last_return_json.as_deref()
+    }
+
+    /// Configures `process.argv` for CLI script execution (`["slice", script_path, ...args]`).
+    #[inline]
+    pub fn set_process_argv(&mut self, argv: Vec<String>) {
+        self.process_argv = argv;
     }
 
     /// Registers a sensitive secret token to be guarded against egress exfiltration (`--audit-egress`).
@@ -273,6 +304,7 @@ impl SliceIsolate {
         self.restore_time_ns = 0;
         self.last_return_json = None;
         self.last_exec_check_ses = false;
+        self.last_exit_code = None;
         if let Some(s) = self.deterministic_seed {
             self.det_prng_state = s ^ 0x9E37_79B9_7F4A_7C15;
             self.det_clock_ms = 1_700_000_000_000;

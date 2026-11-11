@@ -100,10 +100,13 @@
     };
 
     var __pEv = Object.create(null);
+    var __pEvCount = 0;
+    p._exited = false;
     p.on = p.addListener = function(ev, fn) {
       if (typeof fn === "function") {
         var k = String(ev);
         (__pEv[k] || (__pEv[k] = [])).push(fn);
+        __pEvCount++;
       }
       return p;
     };
@@ -121,19 +124,48 @@
     p.off = p.removeListener = function(ev, fn) {
       var k = String(ev), list = __pEv[k];
       if (list) {
+        var prevLen = list.length;
         __pEv[k] = list.filter(function(f) { return f !== fn && f.listener !== fn; });
+        __pEvCount = Math.max(0, __pEvCount - (prevLen - __pEv[k].length));
       }
       return p;
     };
     p.removeAllListeners = function(ev) {
-      if (arguments.length === 0) __pEv = Object.create(null);
-      else delete __pEv[String(ev)];
+      if (arguments.length === 0) {
+        __pEv = Object.create(null);
+        __pEvCount = 0;
+      } else {
+        var k = String(ev);
+        if (__pEv[k]) {
+          __pEvCount = Math.max(0, __pEvCount - __pEv[k].length);
+          delete __pEv[k];
+        }
+      }
       return p;
     };
     p.listeners = function(ev) {
       return (__pEv[String(ev)] || []).slice();
     };
+    p.listenerCount = function(ev) {
+      var l = __pEv[String(ev)];
+      return l ? l.length : 0;
+    };
+    p._hasListeners = function(ev) {
+      if (__pEvCount === 0) return false;
+      if (!ev) return true;
+      var l = __pEv[String(ev)];
+      return Boolean(l && l.length > 0);
+    };
+    p._resetProcessState = function() {
+      if (__pEvCount > 0) {
+        __pEv = Object.create(null);
+        __pEvCount = 0;
+      }
+      p.exitCode = undefined;
+      p._exited = false;
+    };
     p.emit = function(ev) {
+      if (__pEvCount === 0) return false;
       var list = __pEv[String(ev)];
       if (!list || list.length === 0) return false;
       var args = [];
@@ -156,15 +188,6 @@
       w.name = t;
       if (c) w.code = c;
       p.emit("warning", w);
-    };
-    p.exit = function(code) {
-      var c = code !== undefined ? Number(code) : (p.exitCode !== undefined ? Number(p.exitCode) : 0);
-      p.exitCode = c;
-      p.emit("exit", c);
-      var err = new Error("process.exit(" + c + ")");
-      err.code = "ERR_PROCESS_EXIT";
-      err.exitCode = c;
-      throw err;
     };
   }
 
