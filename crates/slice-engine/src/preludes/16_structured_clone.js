@@ -3,7 +3,8 @@
   function __cloneDeep(val, seenSrc, seenDst) {
     if (val === null || typeof val !== "object") {
       if (typeof val === "function" || typeof val === "symbol") {
-        throw new Error("DataCloneError: Function or Symbol cannot be cloned by structuredClone");
+        if (!globalThis.DOMException) __slice_ensure_shard(13);
+        throw new DOMException("DataCloneError: Function or Symbol cannot be cloned by structuredClone", "DataCloneError");
       }
       return val;
     }

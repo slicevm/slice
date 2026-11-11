@@ -172,9 +172,11 @@ pub(crate) fn current_event_loop_clock_ms() -> u64 {
 
 pub(crate) struct ScheduledTimer {
     pub(crate) id: u32,
+    pub(crate) delay_ms: u64,
     pub(crate) deadline_ms: u64,
     pub(crate) interval_ms: Option<u64>,
     pub(crate) is_immediate: bool,
+    pub(crate) refed: bool,
     pub(crate) callback: JsObject,
     pub(crate) args: Vec<JsValue>,
     pub(crate) als_snap: Option<JsValue>,
@@ -250,7 +252,7 @@ impl EventLoopState {
     fn has_pending_work(&self) -> bool {
         !self.queued_fetches.is_empty()
             || !self.in_flight_fetches.is_empty()
-            || self.timers.iter().any(|t| !t.cancelled)
+            || self.timers.iter().any(|t| !t.cancelled && t.refed)
     }
 }
 
@@ -374,9 +376,11 @@ fn schedule_timer_internal(
         };
         loop_st.timers.push(ScheduledTimer {
             id,
+            delay_ms,
             deadline_ms,
             interval_ms,
             is_immediate,
+            refed: true,
             callback,
             args,
             als_snap,
@@ -386,6 +390,53 @@ fn schedule_timer_internal(
         ACTIVE_ASYNC_ITEMS.with(|c| c.set(c.get().saturating_add(1)));
         Ok(id)
     })
+}
+
+pub(crate) fn set_timer_ref(timer_id: u32, refed: bool) {
+    if timer_id == 0 {
+        return;
+    }
+    EVENT_LOOP_STATE.with(|st| {
+        let mut loop_st = st.borrow_mut();
+        for timer in &mut loop_st.timers {
+            if timer.id == timer_id && !timer.cancelled {
+                timer.refed = refed;
+                break;
+            }
+        }
+        if loop_st.has_pending_work() {
+            ACTIVE_ASYNC_ITEMS.with(|c| {
+                if c.get() == 0 {
+                    c.set(1);
+                }
+            });
+        } else {
+            ACTIVE_ASYNC_ITEMS.with(|c| c.set(0));
+        }
+    });
+}
+
+pub(crate) fn refresh_timer(timer_id: u32) {
+    if timer_id == 0 {
+        return;
+    }
+    let now_ms = current_event_loop_clock_ms();
+    EVENT_LOOP_STATE.with(|st| {
+        let mut loop_st = st.borrow_mut();
+        for timer in &mut loop_st.timers {
+            if timer.id == timer_id && !timer.cancelled {
+                timer.deadline_ms = now_ms.saturating_add(timer.delay_ms);
+                break;
+            }
+        }
+        if loop_st.has_pending_work() {
+            ACTIVE_ASYNC_ITEMS.with(|c| {
+                if c.get() == 0 {
+                    c.set(1);
+                }
+            });
+        }
+    });
 }
 
 pub(crate) fn cancel_timer(timer_id: u32) {
@@ -1161,9 +1212,13 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                     clear_event_loop_state();
                     return;
                 }
-                let prev_als = als_snap
-                    .as_ref()
-                    .map(|snap| BOA_ALS_SNAP.with(|s| s.replace(snap.clone())));
+                let prev_als = if let Some(ref snap) = als_snap {
+                    Some(BOA_ALS_SNAP.with(|s| s.replace(snap.clone())))
+                } else if BOA_ALS_ACTIVE.with(|a| a.get()) {
+                    Some(BOA_ALS_SNAP.with(|s| s.replace(JsValue::undefined())))
+                } else {
+                    None
+                };
                 let call_res = cb.call(&JsValue::undefined(), &args, ctx);
                 if let Some(prev) = prev_als {
                     BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
@@ -1190,29 +1245,33 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
         }
 
         // 6. Check if any work remains; if not, exit cleanly
-        let (in_flight_count, next_timer_deadline, has_queued) = EVENT_LOOP_STATE.with(|st| {
-            let loop_st = st.borrow();
-            let next_dl = loop_st
-                .timers
-                .iter()
-                .filter(|t| !t.cancelled)
-                .map(|t| t.deadline_ms)
-                .min();
-            (
-                loop_st.in_flight_fetches.len(),
-                next_dl,
-                !loop_st.queued_fetches.is_empty(),
-            )
-        });
+        let (in_flight_count, has_refed_timers, next_timer_deadline, has_queued) = EVENT_LOOP_STATE
+            .with(|st| {
+                let loop_st = st.borrow();
+                let has_refed = loop_st.timers.iter().any(|t| !t.cancelled && t.refed);
+                let next_dl = loop_st
+                    .timers
+                    .iter()
+                    .filter(|t| !t.cancelled)
+                    .map(|t| t.deadline_ms)
+                    .min();
+                (
+                    loop_st.in_flight_fetches.len(),
+                    has_refed,
+                    next_dl,
+                    !loop_st.queued_fetches.is_empty(),
+                )
+            });
 
         if has_queued {
             continue;
         }
         let has_worker_work = crate::workers::has_pending_worker_work();
-        if in_flight_count == 0 && next_timer_deadline.is_none() && !has_worker_work {
+        if in_flight_count == 0 && !has_refed_timers && !has_worker_work {
             if try_emit_before_exit(ctx, &mut before_exit_count) {
                 continue;
             }
+            EVENT_LOOP_STATE.with(|st| st.borrow_mut().timers.clear());
             ACTIVE_ASYNC_ITEMS.with(|c| c.set(0));
             break;
         }

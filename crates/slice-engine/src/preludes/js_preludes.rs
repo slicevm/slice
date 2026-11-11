@@ -55,7 +55,7 @@ pub const INTL_PRELUDE_SRC: &str = include_str!("18_intl.js");
 
 /// On-demand self-replacing lazy property getter registration (`__defLazy`) evaluated ONLY when
 /// `needs_lazy_global_getters(js_code)` is true (`globalThis.*` dynamic probes).
-pub(crate) const LAZY_GETTERS_INIT_PRELUDE: &[u8] = br#"(function(){var __loadShard=globalThis.__slice_ensure_shard,__shardProps=globalThis.__shardProps,__shMask=globalThis.__shMask;globalThis.__slice_mark_lazy_inited();function __defLazy(names,shardId){__shardProps[shardId]=names;for(var i=0;i<names.length;i++){(function(prop){Object.defineProperty(globalThis,prop,{configurable:true,enumerable:false,get:function(){__loadShard(shardId);return globalThis[prop];},set:function(val){Object.defineProperty(globalThis,prop,{value:val,writable:true,enumerable:false,configurable:true});}});})(names[i]);}}if((__shMask&2)===0)__defLazy(["URLSearchParams","URL"],1);if((__shMask&2048)===0)__defLazy(["Headers","Request","Response","__slice_make_web_request"],11);if((__shMask&4096)===0)__defLazy(["URLPattern"],12);if((__shMask&1024)===0)__defLazy(["AbortSignal","AbortController","fetch"],10);if((__shMask&4)===0)__defLazy(["btoa","atob","TextEncoder","TextDecoder"],2);if((__shMask&8192)===0)__defLazy(["Event","CustomEvent","EventTarget"],13);if((__shMask&8)===0)__defLazy(["ReadableStream"],3);if((__shMask&16384)===0)__defLazy(["WritableStream","TransformStream","TextEncoderStream","TextDecoderStream","CompressionStream","DecompressionStream"],14);if((__shMask&32768)===0)__defLazy(["Blob","File","FormData"],15);if((__shMask&16)===0)__defLazy(["crypto","CryptoKey"],4);if((__shMask&65536)===0)__defLazy(["structuredClone"],16);if((__shMask&32)===0)__defLazy(["Buffer"],5);if((__shMask&64)===0){var __cMethods=["dir","dirxml","table","trace","assert","clear","count","countReset","group","groupCollapsed","groupEnd","time","timeLog","timeEnd"];for(var c=0;c<__cMethods.length;c++){(function(m){globalThis.console[m]=function(){__loadShard(6);return globalThis.console[m].apply(globalThis.console,arguments);};})(__cMethods[c]);}}if((__shMask&128)===0)__defLazy(["WebSocket","MessageEvent","CloseEvent","__slice_dispatch_server_ws"],7);if((__shMask&256)===0)__defLazy(["Worker","MessageChannel","MessagePort","__slice_receiveMessageOnPort","__slice_wintertc_connect","__slice_init_worker_self_env","__slice_worker_host_deliver","__slice_worker_self_deliver"],8);if((__shMask&512)===0)__defLazy(["WebAssembly"],9);if((__shMask&262144)===0)__defLazy(["Intl","navigator","location"],18);})();"#;
+pub(crate) const LAZY_GETTERS_INIT_PRELUDE: &[u8] = br#"(function(){var __loadShard=globalThis.__slice_ensure_shard,__shardProps=globalThis.__shardProps,__shMask=globalThis.__shMask;globalThis.__slice_mark_lazy_inited();function __defLazy(names,shardId){__shardProps[shardId]=names;for(var i=0;i<names.length;i++){(function(prop){Object.defineProperty(globalThis,prop,{configurable:true,enumerable:false,get:function(){__loadShard(shardId);return globalThis[prop];},set:function(val){Object.defineProperty(globalThis,prop,{value:val,writable:true,enumerable:false,configurable:true});}});})(names[i]);}}if((__shMask&2)===0)__defLazy(["URLSearchParams","URL"],1);if((__shMask&2048)===0)__defLazy(["Headers","Request","Response","__slice_make_web_request"],11);if((__shMask&4096)===0)__defLazy(["URLPattern"],12);if((__shMask&1024)===0)__defLazy(["AbortSignal","AbortController","fetch"],10);if((__shMask&4)===0)__defLazy(["btoa","atob","TextEncoder","TextDecoder"],2);if((__shMask&8192)===0)__defLazy(["Event","CustomEvent","EventTarget","DOMException"],13);if((__shMask&8)===0)__defLazy(["ReadableStream"],3);if((__shMask&16384)===0)__defLazy(["WritableStream","TransformStream","TextEncoderStream","TextDecoderStream","CompressionStream","DecompressionStream"],14);if((__shMask&32768)===0)__defLazy(["Blob","File","FormData"],15);if((__shMask&16)===0)__defLazy(["crypto","CryptoKey"],4);if((__shMask&65536)===0)__defLazy(["structuredClone"],16);if((__shMask&32)===0)__defLazy(["Buffer"],5);if((__shMask&64)===0){var __cMethods=["dir","dirxml","table","trace","assert","clear","count","countReset","group","groupCollapsed","groupEnd","time","timeLog","timeEnd"];for(var c=0;c<__cMethods.length;c++){(function(m){globalThis.console[m]=function(){__loadShard(6);return globalThis.console[m].apply(globalThis.console,arguments);};})(__cMethods[c]);}}if((__shMask&128)===0)__defLazy(["WebSocket","MessageEvent","CloseEvent","__slice_dispatch_server_ws"],7);if((__shMask&256)===0)__defLazy(["Worker","MessageChannel","MessagePort","__slice_receiveMessageOnPort","__slice_wintertc_connect","__slice_init_worker_self_env","__slice_worker_host_deliver","__slice_worker_self_deliver"],8);if((__shMask&512)===0)__defLazy(["WebAssembly"],9);if((__shMask&262144)===0)__defLazy(["Intl","navigator","location"],18);})();"#;
 
 /// Canonical topological order for loading prelude shards (`1..=18`) so base dependencies
 /// (`TextEncoder`, `EventTarget`, `URL`, `Request`/`Response`, `ReadableStream`, `Buffer`) are
@@ -366,11 +366,11 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ),
     (
         "AbortController",
-        ShardTriggerAction::Mask((1 << 10) | (1 << 11) | (1 << 6)),
+        ShardTriggerAction::Mask((1 << 10) | (1 << 11) | (1 << 13) | (1 << 6)),
     ),
     (
         "AbortSignal",
-        ShardTriggerAction::Mask((1 << 10) | (1 << 11) | (1 << 6)),
+        ShardTriggerAction::Mask((1 << 10) | (1 << 11) | (1 << 13) | (1 << 6)),
     ),
     // HTTP Request / Response / Headers (`1 << 11`)
     (".fetch(", ShardTriggerAction::Mask(1 << 11)),
@@ -407,11 +407,12 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ("TextDecoder", ShardTriggerAction::Mask(1 << 2)),
     ("btoa(", ShardTriggerAction::Mask(1 << 2)),
     ("atob(", ShardTriggerAction::Mask(1 << 2)),
-    // Event / EventTarget (`1 << 13`)
+    // Event / EventTarget / DOMException (`1 << 13`)
     ("new Event(", ShardTriggerAction::Mask(1 << 13)),
     ("typeof Event", ShardTriggerAction::Mask(1 << 13)),
     ("CustomEvent", ShardTriggerAction::Mask(1 << 13)),
     ("EventTarget", ShardTriggerAction::Mask(1 << 13)),
+    ("DOMException", ShardTriggerAction::Mask(1 << 13)),
     // Streams (`(1 << 14) | (1 << 3)` and `1 << 3`)
     (
         "WritableStream",

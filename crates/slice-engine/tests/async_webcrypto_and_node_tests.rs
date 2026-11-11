@@ -2960,13 +2960,7 @@ run();
         .with_exec_binary("cat")
         .with_exec_binary("false")
         .with_exec_binary("/nonexistent_slice_binary_xyz");
-    let mut iso = SliceIsolate::spawn(
-        "wave2-child-process",
-        1,
-        caps,
-        10_000_000,
-        16 * 1024 * 1024,
-    );
+    let mut iso = SliceIsolate::spawn("wave2-child-process", 1, caps, 10_000_000, 16 * 1024 * 1024);
     let m = iso.execute_bytecode(&bc, None).unwrap();
     let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
 
@@ -3004,3 +2998,502 @@ cp.execSync("echo hi && echo bye");
     );
 }
 
+#[test]
+fn test_wave3_dom_exception_abort_signal_timeout_fetch_and_timers_promises() {
+    let script = r#"
+import timersPromises from "node:timers/promises";
+
+async function run() {
+    const out: Record<string, any> = {};
+
+    // 1. DOMException constructor & legacy error codes
+    out.hasDOMException = typeof DOMException === "function";
+    const d1 = new DOMException("aborted Custom", "AbortError");
+    out.d1InstanceError = d1 instanceof Error;
+    out.d1InstanceDOM = d1 instanceof DOMException;
+    out.d1Name = d1.name;
+    out.d1Message = d1.message;
+    out.d1Code = d1.code;
+    out.staticCodes = [
+        DOMException.INDEX_SIZE_ERR,
+        DOMException.ABORT_ERR,
+        DOMException.TIMEOUT_ERR,
+        DOMException.DATA_CLONE_ERR,
+        new DOMException("clone", "DataCloneError").code
+    ];
+
+    // 2. AbortSignal.abort() & AbortController.abort() default reasons
+    const s1 = AbortSignal.abort();
+    out.s1IsDOM = s1.reason instanceof DOMException;
+    out.s1Name = s1.reason.name;
+    out.s1Code = s1.reason.code;
+
+    const ac = new AbortController();
+    ac.abort();
+    out.acIsDOM = ac.signal.reason instanceof DOMException;
+    out.acName = ac.signal.reason.name;
+    out.acCode = ac.signal.reason.code;
+
+    // 3. AbortSignal.timeout(ms)
+    const ts = AbortSignal.timeout(5);
+    await new Promise<void>((resolve) => {
+        ts.addEventListener("abort", () => resolve(), { once: true });
+    });
+    out.tsAborted = ts.aborted;
+    out.tsIsDOM = ts.reason instanceof DOMException;
+    out.tsName = ts.reason.name;
+    out.tsCode = ts.reason.code;
+
+    // 4. fetch() with aborted signal (default DOMException and custom reason)
+    try {
+        await fetch("http://example.com", { signal: AbortSignal.abort() });
+    } catch (e: any) {
+        out.fetchAbortIsDOM = e instanceof DOMException;
+        out.fetchAbortName = e.name;
+        out.fetchAbortCode = e.code;
+    }
+    try {
+        await fetch("http://example.com", { signal: AbortSignal.abort("custom-fetch-reason") });
+    } catch (e: any) {
+        out.fetchCustomReason = e;
+    }
+
+    // 5. node:timers/promises AbortError wrapper with .code === "ABORT_ERR" and .cause
+    const acTp = new AbortController();
+    setTimeout(() => acTp.abort("my-custom-cause"), 5);
+    try {
+        await timersPromises.setTimeout(500, "never", { signal: acTp.signal });
+    } catch (e: any) {
+        out.tpName = e.name;
+        out.tpCode = e.code;
+        out.tpCause = e.cause;
+    }
+
+    console.log(JSON.stringify(out));
+}
+run();
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "wave3-dom-abort",
+        1,
+        CapabilityToken::pure_compute().with_net_host("example.com"),
+        10_000_000,
+        16 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+
+    assert_eq!(out["hasDOMException"], true);
+    assert_eq!(out["d1InstanceError"], true);
+    assert_eq!(out["d1InstanceDOM"], true);
+    assert_eq!(out["d1Name"], "AbortError");
+    assert_eq!(out["d1Message"], "aborted Custom");
+    assert_eq!(out["d1Code"], 20);
+    assert_eq!(out["staticCodes"], serde_json::json!([1, 20, 23, 25, 25]));
+    assert_eq!(out["s1IsDOM"], true);
+    assert_eq!(out["s1Name"], "AbortError");
+    assert_eq!(out["s1Code"], 20);
+    assert_eq!(out["acIsDOM"], true);
+    assert_eq!(out["acName"], "AbortError");
+    assert_eq!(out["acCode"], 20);
+    assert_eq!(out["tsAborted"], true);
+    assert_eq!(out["tsIsDOM"], true);
+    assert_eq!(out["tsName"], "TimeoutError");
+    assert_eq!(out["tsCode"], 23);
+    assert_eq!(out["fetchAbortIsDOM"], true);
+    assert_eq!(out["fetchAbortName"], "AbortError");
+    assert_eq!(out["fetchAbortCode"], 20);
+    assert_eq!(out["fetchCustomReason"], "custom-fetch-reason");
+    assert_eq!(out["tpName"], "AbortError");
+    assert_eq!(out["tpCode"], "ABORT_ERR");
+    assert_eq!(out["tpCause"], "my-custom-cause");
+}
+
+#[test]
+fn test_wave3_async_local_storage_external_promises_then_chains_and_timers() {
+    let script = r#"
+import { AsyncLocalStorage } from "node:async_hooks";
+
+async function run() {
+    const als = new AsyncLocalStorage();
+    const out: Record<string, any> = {};
+
+    // 1. Timer promise inside als.run
+    out.timerAwait = await als.run("ctx-timer", async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        return als.getStore();
+    });
+
+    // 2. External promise created outside als.run and resolved outside als.run
+    let extResolve!: () => void;
+    const extPromise = new Promise<void>((r) => { extResolve = r; });
+    const extTask = als.run("ctx-external", async () => {
+        await extPromise;
+        return als.getStore();
+    });
+    setTimeout(() => extResolve(), 5);
+    out.externalAwait = await extTask;
+
+    // 3. Multi-hop .then().then() chain registered inside als.run and settled outside
+    let chainResolve!: () => void;
+    const chainRoot = new Promise<void>((r) => { chainResolve = r; });
+    const chainTask = als.run("ctx-chain", () =>
+        chainRoot
+            .then(() => als.getStore())
+            .then((first) => [first, als.getStore()])
+    );
+    setTimeout(() => chainResolve(), 5);
+    out.thenChain = await chainTask;
+
+    // 4. Concurrent overlapping ALS contexts across interleaved timers & microtasks
+    const [resA, resB] = await Promise.all([
+        als.run({ tenant: "A" }, async () => {
+            await new Promise((r) => setTimeout(r, 6));
+            await Promise.resolve();
+            return (als.getStore() as any)?.tenant;
+        }),
+        als.run({ tenant: "B" }, async () => {
+            await new Promise((r) => setTimeout(r, 3));
+            await Promise.resolve();
+            return (als.getStore() as any)?.tenant;
+        })
+    ]);
+    out.concurrent = [resA, resB];
+    out.outsideAfter = als.getStore() === undefined;
+
+    console.log(JSON.stringify(out));
+}
+run();
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "wave3-als-context",
+        1,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        16 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+
+    assert_eq!(out["timerAwait"], "ctx-timer");
+    assert_eq!(out["externalAwait"], "ctx-external");
+    assert_eq!(
+        out["thenChain"],
+        serde_json::json!(["ctx-chain", "ctx-chain"])
+    );
+    assert_eq!(out["concurrent"], serde_json::json!(["A", "B"]));
+    assert_eq!(out["outsideAfter"], true);
+}
+
+#[test]
+fn test_wave3_timer_handles_ref_unref_hasref_refresh_and_primitive_coercion() {
+    let script = r#"
+async function run() {
+    const out: Record<string, any> = {};
+
+    const t = setTimeout(() => {}, 1000);
+    out.typeofTimeout = typeof t;
+    out.initialHasRef = t.hasRef();
+    out.unrefReturnsSelf = t.unref() === t;
+    out.afterUnref = t.hasRef();
+    out.refReturnsSelf = t.ref() === t;
+    out.afterRef = t.hasRef();
+    out.refreshReturnsSelf = t.refresh() === t;
+    out.coercedPositive = (+t) > 0 && Number(t) === t.valueOf();
+    clearTimeout(t);
+
+    const iv = setInterval(() => {}, 1000);
+    out.typeofInterval = typeof iv;
+    clearInterval(+iv);
+
+    const im = setImmediate(() => {});
+    out.typeofImmediate = typeof im;
+    clearImmediate(im);
+
+    // Schedule an unref'd 60-second timer that must NOT block event loop exit
+    let unrefFired = false;
+    setTimeout(() => { unrefFired = true; }, 60_000).unref();
+
+    // Schedule a ref'd 5ms timer that DOES run before exit
+    let refFired = false;
+    await new Promise<void>((resolve) => {
+        setTimeout(() => {
+            refFired = true;
+            resolve();
+        }, 5);
+    });
+    out.refFired = refFired;
+    out.unrefFired = unrefFired;
+
+    console.log(JSON.stringify(out));
+}
+run();
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "wave3-timer-handles",
+        1,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        16 * 1024 * 1024,
+    );
+    let start = std::time::Instant::now();
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    assert!(
+        start.elapsed().as_secs() < 5,
+        "Unref'd 60s timer should not keep event loop alive"
+    );
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+
+    assert_eq!(out["typeofTimeout"], "object");
+    assert_eq!(out["initialHasRef"], true);
+    assert_eq!(out["unrefReturnsSelf"], true);
+    assert_eq!(out["afterUnref"], false);
+    assert_eq!(out["refReturnsSelf"], true);
+    assert_eq!(out["afterRef"], true);
+    assert_eq!(out["refreshReturnsSelf"], true);
+    assert_eq!(out["coercedPositive"], true);
+    assert_eq!(out["typeofInterval"], "object");
+    assert_eq!(out["typeofImmediate"], "object");
+    assert_eq!(out["refFired"], true);
+    assert_eq!(out["unrefFired"], false);
+}
+
+#[test]
+fn test_wave3_intl_locales_timezones_scientific_numbers_collator_plural_segmenter() {
+    let script = r#"
+const out: Record<string, any> = {};
+
+// 1. NumberFormat: scientific notation >= 1e21 and locale separators / currency
+out.sci1e21 = (1e21).toLocaleString("en-US");
+out.deCurrency = new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR" }).format(1234.5);
+out.deDecimal = (1234567.89).toLocaleString("de-DE");
+
+// 2. DateTimeFormat: IANA timezones, locale patterns, dateStyle/timeStyle, RangeError on invalid TZ
+out.tokyoTime = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Tokyo",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+}).format(new Date(0));
+out.deDate = new Intl.DateTimeFormat("de-DE", {
+    timeZone: "UTC",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+}).format(new Date(0));
+out.deLocaleStr = new Date(0).toLocaleString("de-DE", { timeZone: "UTC" });
+out.enMedShort = new Date(0).toLocaleString("en-US", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: "UTC"
+});
+let invalidTzThrewRange = false;
+try {
+    new Intl.DateTimeFormat("en-US", { timeZone: "Mars/Phobos" });
+} catch (e: any) {
+    invalidTzThrewRange = e instanceof RangeError;
+}
+out.invalidTzThrewRange = invalidTzThrewRange;
+
+// 3. PluralRules: CLDR Arabic, Russian, English ordinal
+const prAr = new Intl.PluralRules("ar");
+out.arPlurals = [prAr.select(0), prAr.select(1), prAr.select(2), prAr.select(3), prAr.select(11), prAr.select(100)];
+const prRu = new Intl.PluralRules("ru");
+out.ruPlurals = [prRu.select(1), prRu.select(2), prRu.select(5), prRu.select(21)];
+const prEnOrd = new Intl.PluralRules("en", { type: "ordinal" });
+out.enOrdinals = [prEnOrd.select(1), prEnOrd.select(2), prEnOrd.select(3), prEnOrd.select(4), prEnOrd.select(11)];
+
+// 4. Collator: Unicode diacritic / umlaut sorting & sensitivity
+out.deSorted = ["b", "a", "ä", "z"].sort(new Intl.Collator("de").compare);
+out.baseSensitivityEq = new Intl.Collator("de", { sensitivity: "base" }).compare("a", "ä") === 0;
+
+// 5. Segmenter: UAX #29 grapheme clusters (emoji + skin-tone modifier, CRLF, flag pair)
+out.graphemes = [...new Intl.Segmenter("en", { granularity: "grapheme" }).segment("a👍🏽é\r\n🇺🇸")].map((s: any) => s.segment);
+
+console.log(JSON.stringify(out));
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "wave3-intl",
+        1,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        16 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+
+    assert_eq!(out["sci1e21"], "1,000,000,000,000,000,000,000");
+    assert_eq!(out["deCurrency"], "1.234,50\u{00a0}€");
+    assert_eq!(out["deDecimal"], "1.234.567,89");
+    assert_eq!(out["tokyoTime"], "09:00");
+    assert_eq!(out["deDate"], "01.01.1970");
+    assert_eq!(out["deLocaleStr"], "1.1.1970, 00:00:00");
+    assert_eq!(out["enMedShort"], "Jan 1, 1970, 12:00 AM");
+    assert_eq!(out["invalidTzThrewRange"], true);
+    assert_eq!(
+        out["arPlurals"],
+        serde_json::json!(["zero", "one", "two", "few", "many", "other"])
+    );
+    assert_eq!(
+        out["ruPlurals"],
+        serde_json::json!(["one", "few", "many", "one"])
+    );
+    assert_eq!(
+        out["enOrdinals"],
+        serde_json::json!(["one", "two", "few", "other", "other"])
+    );
+    assert_eq!(out["deSorted"], serde_json::json!(["a", "ä", "b", "z"]));
+    assert_eq!(out["baseSensitivityEq"], true);
+    assert_eq!(
+        out["graphemes"],
+        serde_json::json!(["a", "👍🏽", "é", "\r\n", "🇺🇸"])
+    );
+}
+
+#[test]
+fn test_wave3_crypto_rsa_x25519_dsa_and_targeted_node_web_apis() {
+    let script = r#"
+import crypto from "node:crypto";
+import util from "node:util";
+import url from "node:url";
+import { EventEmitter } from "node:events";
+
+const out: Record<string, any> = {};
+
+// 1. Issue #58: RSA-2048, X25519, DSA keygen, DER sizes, RSA-SHA256 sign/verify, invalid key type
+const rsaKeys = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+out.rsaKeyTypes = [rsaKeys.publicKey.asymmetricKeyType, rsaKeys.privateKey.asymmetricKeyType];
+
+const rsaDer = crypto.generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: "spki", format: "der" },
+    privateKeyEncoding: { type: "pkcs8", format: "der" }
+});
+out.rsaSpkiLen = rsaDer.publicKey.length;
+const signer = crypto.createSign("RSA-SHA256");
+signer.update("hello rsa");
+const rsaSig = signer.sign(rsaDer.privateKey);
+out.rsaSigLen = rsaSig.length;
+out.rsaVerifyOk = crypto.createVerify("RSA-SHA256").update("hello rsa").verify(rsaDer.publicKey, rsaSig);
+out.rsaVerifyBad = crypto.createVerify("RSA-SHA256").update("tampered").verify(rsaDer.publicKey, rsaSig);
+
+const x25519Keys = crypto.generateKeyPairSync("x25519");
+out.x25519Type = x25519Keys.publicKey.asymmetricKeyType;
+
+const dsaKeys = crypto.generateKeyPairSync("dsa", { modulusLength: 2048, divisorLength: 256 });
+out.dsaType = dsaKeys.publicKey.asymmetricKeyType;
+
+try {
+    crypto.generateKeyPairSync("no-such-type" as any);
+} catch (e: any) {
+    out.invalidKeyCode = e.code;
+    out.invalidKeyIsTypeErr = e instanceof TypeError;
+}
+
+// 2. Issue #59: util.inspect depth, Map, Set, Error, and util.format("%s", Map)
+out.inspectDepth0 = util.inspect({ a: { b: { c: 1 } } }, { depth: 0 });
+out.inspectMap = util.inspect(new Map([[1, { a: 1 }]]));
+out.inspectSet = util.inspect(new Set([1, "a"]));
+out.formatMap = util.format("%s", new Map([[1, 2]]));
+
+// 3. Issue #59: Buffer#indexOf / lastIndexOf / includes & utf16le
+const bSearch = Buffer.from("abcabc");
+out.bufIndexOfStr = bSearch.indexOf("ca");
+out.bufLastIndexOfStr = bSearch.lastIndexOf("ab");
+out.bufIncludes = bSearch.includes("b");
+out.bufIndexOfBuf = bSearch.indexOf(Buffer.from("c"));
+out.bufIndexOfByte = bSearch.indexOf(0x62);
+out.bufUtf16Len = Buffer.from("ab", "utf16le").length;
+
+// 4. Issue #59: url.pathToFileURL percent-encoding & fileURLToPath roundtrip
+const fileUrl = url.pathToFileURL("/tmp/a b#c?d%e.txt");
+out.fileUrlHref = fileUrl.href;
+out.fileUrlRoundtrip = url.fileURLToPath(fileUrl);
+
+// 5. Issue #59: EventEmitter newListener and removeListener events
+const ee = new EventEmitter();
+const eeLog: string[] = [];
+ee.on("newListener", (ev: string) => eeLog.push("new:" + ev));
+ee.on("removeListener", (ev: string) => eeLog.push("rm:" + ev));
+const fn = () => {};
+ee.on("data", fn);
+ee.off("data", fn);
+out.eeLog = eeLog;
+
+// 6. Issue #59: crypto.createHash.copy()
+const h1 = crypto.createHash("sha256").update("hello ");
+const h2 = h1.copy();
+h1.update("world");
+h2.update("slice");
+out.hashCopyDistinct = h1.digest("hex") !== h2.digest("hex");
+out.hashCopyMatchesFull = h2.digest !== undefined &&
+    crypto.createHash("sha256").update("hello slice").digest("hex") ===
+    crypto.createHash("sha256").update("hello ").copy().update("slice").digest("hex");
+
+// 7. Issue #59: ArrayBuffer.prototype.transfer / transferToFixedLength / detached
+const ab = new ArrayBuffer(8);
+new Uint8Array(ab).set([1, 2, 3, 4]);
+const ab2 = (ab as any).transfer(16);
+out.abDetachedAfter = (ab as any).detached === true && ab.byteLength === 0;
+out.ab2LenAndData = [ab2.byteLength, new Uint8Array(ab2)[0], new Uint8Array(ab2)[3]];
+const ab3 = ab2.transferToFixedLength(4);
+out.ab3Len = ab3.byteLength;
+
+console.log(JSON.stringify(out));
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "wave3-crypto-and-apis",
+        1,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        16 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+
+    assert_eq!(out["rsaKeyTypes"], serde_json::json!(["rsa", "rsa"]));
+    assert_eq!(out["rsaSpkiLen"], 294);
+    assert_eq!(out["rsaSigLen"], 256);
+    assert_eq!(out["rsaVerifyOk"], true);
+    assert_eq!(out["rsaVerifyBad"], false);
+    assert_eq!(out["x25519Type"], "x25519");
+    assert_eq!(out["dsaType"], "dsa");
+    assert_eq!(out["invalidKeyCode"], "ERR_INVALID_ARG_VALUE");
+    assert_eq!(out["invalidKeyIsTypeErr"], true);
+    assert_eq!(out["inspectDepth0"], "{ a: [Object] }");
+    assert_eq!(out["inspectMap"], "Map(1) { 1 => { a: 1 } }");
+    assert_eq!(out["inspectSet"], "Set(2) { 1, 'a' }");
+    assert_eq!(out["formatMap"], "Map(1) { 1 => 2 }");
+    assert_eq!(out["bufIndexOfStr"], 2);
+    assert_eq!(out["bufLastIndexOfStr"], 3);
+    assert_eq!(out["bufIncludes"], true);
+    assert_eq!(out["bufIndexOfBuf"], 2);
+    assert_eq!(out["bufIndexOfByte"], 1);
+    assert_eq!(out["bufUtf16Len"], 4);
+    assert_eq!(out["fileUrlHref"], "file:///tmp/a%20b%23c%3Fd%25e.txt");
+    assert_eq!(out["fileUrlRoundtrip"], "/tmp/a b#c?d%e.txt");
+    assert_eq!(
+        out["eeLog"],
+        serde_json::json!(["new:removeListener", "new:data", "rm:data"])
+    );
+    assert_eq!(out["hashCopyDistinct"], true);
+    assert_eq!(out["hashCopyMatchesFull"], true);
+    assert_eq!(out["abDetachedAfter"], true);
+    assert_eq!(out["ab2LenAndData"], serde_json::json!([16, 1, 4]));
+    assert_eq!(out["ab3Len"], 4);
+}

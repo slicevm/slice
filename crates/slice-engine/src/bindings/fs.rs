@@ -354,7 +354,8 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_read_ocap(&norm) {
                 return Ok(BoaVal::from(0));
             }
-            if let Some(size) = BOA_VFS_CACHE.with(|c| c.borrow().get(&norm).map(|v| v.len() as u64))
+            if let Some(size) =
+                BOA_VFS_CACHE.with(|c| c.borrow().get(&norm).map(|v| v.len() as u64))
             {
                 return Ok(BoaVal::from(size as f64));
             }
@@ -763,9 +764,7 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if let Some(target) = BOA_VFS_CACHE.with(|c| {
                 c.borrow().get(&norm).and_then(|b| {
                     if b.starts_with(VFS_SYMLINK_PREFIX) {
-                        Some(
-                            String::from_utf8_lossy(&b[VFS_SYMLINK_PREFIX.len()..]).into_owned(),
-                        )
+                        Some(String::from_utf8_lossy(&b[VFS_SYMLINK_PREFIX.len()..]).into_owned())
                     } else {
                         None
                     }

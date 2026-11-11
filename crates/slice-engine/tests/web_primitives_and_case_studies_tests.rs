@@ -414,7 +414,10 @@ fn test_sveltekit_whatwg_opaque_url_signal_and_async_stream_response() {
     assert_eq!(u_a.href, "a:");
     assert!(can_parse_whatwg_url("a:", None));
     assert!(can_parse_whatwg_url("about:blank", None));
-    assert!(can_parse_whatwg_url("data:text/plain;base64,SGVsbG8=", None));
+    assert!(can_parse_whatwg_url(
+        "data:text/plain;base64,SGVsbG8=",
+        None
+    ));
     assert!(!can_parse_whatwg_url("http:foo", None));
 
     // 2. JS `new URL("a:")`, `Request.prototype.signal`, and async `ReadableStream` `Response` body
@@ -471,5 +474,8 @@ fn test_sveltekit_whatwg_opaque_url_signal_and_async_stream_response() {
     assert_eq!(res["canParseA"], true);
     assert_eq!(res["abortListenerOk"], true);
     assert_eq!(res["text"], "chunk-1:chunk-2");
-    assert_eq!(res["cookies"], serde_json::json!(["a=1; Path=/", "b=2; Path=/"]));
+    assert_eq!(
+        res["cookies"],
+        serde_json::json!(["a=1; Path=/", "b=2; Path=/"])
+    );
 }

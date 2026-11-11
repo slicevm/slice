@@ -279,8 +279,7 @@ fn try_eval_portable_shell_script(
         let mut exited_early = false;
         for (s_idx, stage) in stages.iter().enumerate() {
             let trimmed = stage.trim();
-            let (st, out_b, err_b) =
-                try_eval_portable_shell_atom(trimmed, child_env, &pipe_data)?;
+            let (st, out_b, err_b) = try_eval_portable_shell_atom(trimmed, child_env, &pipe_data)?;
             clause_status = st;
             total_stderr.extend_from_slice(&err_b);
             if s_idx + 1 < stages.len() {
@@ -621,9 +620,9 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                     if !has_meta {
                         let first_tok = full_cmd.split_whitespace().next().unwrap_or("");
                         !first_tok.is_empty()
-                            && allowed_bins
-                                .iter()
-                                .any(|allowed| slice_sandbox::exec_binary_matches(first_tok, allowed))
+                            && allowed_bins.iter().any(|allowed| {
+                                slice_sandbox::exec_binary_matches(first_tok, allowed)
+                            })
                     } else {
                         false
                     }

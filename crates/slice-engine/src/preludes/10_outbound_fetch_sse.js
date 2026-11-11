@@ -1,5 +1,13 @@
 // Slice (Nexus-JS) Lazy Prelude Shard 10: Outbound Fetch, AbortSignal/AbortController & SSE (`10_outbound_fetch_sse.js`)
 (function() {
+  if (!globalThis.DOMException) __slice_ensure_shard(13);
+  function __mkAbortErr() {
+    return new DOMException("The operation was aborted.", "AbortError");
+  }
+  function __mkTimeoutErr() {
+    return new DOMException("TimeoutError: The operation was aborted due to timeout", "TimeoutError");
+  }
+
   function AbortSignal() {
     this.aborted = false;
     this.reason = undefined;
@@ -24,7 +32,7 @@
   AbortSignal.prototype._fire = function(r) {
     if (this.aborted) return;
     this.aborted = true;
-    this.reason = r !== undefined ? r : new Error("AbortError: The operation was aborted");
+    this.reason = r !== undefined ? r : __mkAbortErr();
     var ev = { type: "abort", target: this };
     if (typeof this.onabort === "function") {
       try { this.onabort(ev); } catch (_e) {}
@@ -44,13 +52,13 @@
   };
   AbortSignal.abort = function(r) {
     var s = new AbortSignal();
-    s._fire(r !== undefined ? r : new Error("AbortError: The operation was aborted"));
+    s._fire(r !== undefined ? r : __mkAbortErr());
     return s;
   };
   AbortSignal.timeout = function(ms) {
     var s = new AbortSignal();
     setTimeout(function() {
-      s._fire(new Error("TimeoutError: The operation was aborted due to timeout"));
+      s._fire(__mkTimeoutErr());
     }, Number(ms) || 0);
     return s;
   };
@@ -154,7 +162,7 @@
   function __doFetch(input, init) {
     var req = new Request(input, init);
     var sig = (init && init.signal) || req.signal || null;
-    if (sig && sig.aborted) throw (sig.reason || new Error("AbortError: The operation was aborted"));
+    if (sig && sig.aborted) throw (sig.reason !== undefined ? sig.reason : __mkAbortErr());
     var raw = JSON.parse(
       __slice_fetch_sync(req.url, req.method, JSON.stringify(req.headers.entries()), req._body, req.redirect || "follow")
     );
@@ -170,7 +178,7 @@
       var req = new Request(input, init);
       var sig = (init && init.signal) || req.signal || null;
       if (sig && sig.aborted) {
-        return Promise.reject(sig.reason || new Error("AbortError: The operation was aborted"));
+        return Promise.reject(sig.reason !== undefined ? sig.reason : __mkAbortErr());
       }
       var hdrs = JSON.stringify(req.headers.entries());
       var fast = __slice_fetch_try_fast(req.url, req.method, hdrs, req._body, req.redirect || "follow");
@@ -188,7 +196,7 @@
           sig.addEventListener("abort", function() {
             if (!settled) {
               settled = true;
-              rej(sig.reason || new Error("AbortError: The operation was aborted"));
+              rej(sig.reason !== undefined ? sig.reason : __mkAbortErr());
             }
           });
         }
@@ -214,7 +222,7 @@
           function(errReason) {
             if (settled) return;
             settled = true;
-            rej(errReason instanceof Error ? errReason : new Error(String(errReason)));
+            rej(errReason !== undefined ? errReason : __mkAbortErr());
           },
           sig
         );

@@ -9,7 +9,9 @@ use crate::boa_realm::{
     BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_ENV_MAP, BOA_HTTP_REQ, BOA_KV_MEM_BUDGET, BOA_STDOUT,
     BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
 };
-use crate::event_loop::{cancel_timer, schedule_immediate, schedule_timer};
+use crate::event_loop::{
+    cancel_timer, refresh_timer, schedule_immediate, schedule_timer, set_timer_ref,
+};
 use crate::intrinsics::{
     base64_decode, base64_encode, bytes_to_hex, hmac_sha256_bytes, hmac_sha256_hex, sha256_bytes,
     sha256_hex,
@@ -492,6 +494,35 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .map(|n| n.max(0.0) as u32)
                 .unwrap_or(0);
             cancel_timer(id);
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_timer_ref"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, _context| {
+            let id = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n.max(0.0) as u32)
+                .unwrap_or(0);
+            let refed = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(true);
+            set_timer_ref(id, refed);
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_timer_refresh"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, _context| {
+            let id = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n.max(0.0) as u32)
+                .unwrap_or(0);
+            refresh_timer(id);
             Ok(BoaVal::undefined())
         }),
     );
