@@ -44,7 +44,7 @@ BENCH_TAGS="${1:-${SLICE_BENCH_TAGS:-all}}"
 METRICS_JSONL="${SLICE_BENCH_JSONL:-/tmp/slice_bench_metrics.jsonl}"
 rm -f "$METRICS_JSONL"
 
-SLICE_VERSION="${SLICE_VERSION:-0.10.11}"
+SLICE_VERSION="${SLICE_VERSION:-0.10.12}"
 SLICE_GIT_COMMIT="${SLICE_GIT_COMMIT:-$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo "abdbf89")}"
 SLICE_BENCH_TS_UTC="${SLICE_BENCH_TS_UTC:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
 CURRENT_APP_IDX=""
@@ -358,14 +358,26 @@ measure_rss_kb() {
 record_warm_metrics() {
     local app_idx="$1"
     local cas_path="$2"
-    local out
-    out=$("$SLICE_BIN" run "$cas_path" --warm --quiet --metrics)
-    echo "$out"
-    local total_us
-    total_us=$(echo "$out" | awk -F'Total: ' '{print $2}' | awk '{print $1}')
-    if [ -n "$total_us" ]; then
+    local samples=""
+    local last_out=""
+    local r out us
+    for r in 1 2 3 4 5; do
+        out=$("$SLICE_BIN" run "$cas_path" --warm --quiet --metrics)
+        last_out="$out"
+        us=$(echo "$out" | awk -F'Total: ' '{print $2}' | awk '{print $1}')
+        if [ -n "$us" ]; then
+            samples="$samples $us"
+        fi
+    done
+    echo "$last_out"
+    local median_us
+    median_us=$(echo "$samples" | tr ' ' '\n' | grep -E '^[0-9.]+' | sort -n | sed -n '3p')
+    if [ -z "$median_us" ]; then
+        median_us=$(echo "$samples" | tr ' ' '\n' | grep -E '^[0-9.]+' | sort -n | head -n 1)
+    fi
+    if [ -n "$median_us" ]; then
         local total_ms
-        total_ms=$(awk -v us="$total_us" 'BEGIN { printf "%.3f", us / 1000.0 }')
+        total_ms=$(awk -v us="$median_us" 'BEGIN { printf "%.3f", us / 1000.0 }')
         record_jsonl "{\"type\":\"warm_metrics\",\"appIdx\":$app_idx,\"totalMs\":$total_ms}"
     fi
 }

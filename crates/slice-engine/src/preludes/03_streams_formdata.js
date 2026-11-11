@@ -5,8 +5,8 @@
   function ReadableStream(underlyingSource) {
     var self = this;
     this._chunks = [];
-    this._waiters = [];
-    this._closeWaiters = [];
+    this._waiters = null;
+    this._closeWaiters = null;
     this._closed = false;
     this._errored = null;
     this.locked = false;
@@ -19,28 +19,36 @@
           throw new RangeError("ReadableStream buffer limit exceeded (" + MAX_STREAM_CHUNKS + " chunks)");
         }
         self._chunks.push(chunk);
-        if (self._waiters.length > 0) {
+        if (self._waiters && self._waiters.length > 0) {
           var w = self._waiters.shift();
           w.res({ value: self._chunks[w.idx()], done: false });
         }
       },
       close: function() {
         self._closed = true;
-        while (self._waiters.length > 0) {
-          self._waiters.shift().res({ value: undefined, done: true });
+        if (self._waiters) {
+          while (self._waiters.length > 0) {
+            self._waiters.shift().res({ value: undefined, done: true });
+          }
         }
-        while (self._closeWaiters.length > 0) {
-          self._closeWaiters.shift().res(undefined);
+        if (self._closeWaiters) {
+          while (self._closeWaiters.length > 0) {
+            self._closeWaiters.shift().res(undefined);
+          }
         }
       },
       error: function(e) {
         self._errored = e || new Error("ReadableStream error");
         self._closed = true;
-        while (self._waiters.length > 0) {
-          self._waiters.shift().rej(self._errored);
+        if (self._waiters) {
+          while (self._waiters.length > 0) {
+            self._waiters.shift().rej(self._errored);
+          }
         }
-        while (self._closeWaiters.length > 0) {
-          self._closeWaiters.shift().rej(self._errored);
+        if (self._closeWaiters) {
+          while (self._closeWaiters.length > 0) {
+            self._closeWaiters.shift().rej(self._errored);
+          }
         }
       }
     };
@@ -135,7 +143,7 @@
         }
         if (!self._closed) {
           return new Promise(function(res, rej) {
-            self._waiters.push({
+            (self._waiters || (self._waiters = [])).push({
               idx: function() { return idx++; },
               res: res,
               rej: rej

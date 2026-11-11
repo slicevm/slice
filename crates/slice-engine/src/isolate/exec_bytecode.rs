@@ -11,12 +11,15 @@ use slice_sandbox::SandboxViolation;
 use std::time::Instant;
 
 impl SliceIsolate {
-    /// Executes pre-compiled `SLICEBC\x01`, `SLICEBOA`, or `SLICESNP` bytecode directly from an in-memory or `mmap` CAS slice.
-    pub fn execute_bytecode(
+    /// Internal zero-clone execution core shared by `execute_bytecode` and `execute_http_request_fast`.
+    /// When `need_return_str` is `false` and `egress_audit_secrets` is empty, skips formatting `last_val`
+    /// into a heap `String` (saving `"undefined".to_string()` on every `Slice.respond` HTTP request).
+    pub(crate) fn execute_bytecode_core(
         &mut self,
         bytecode: &[u8],
         cas: Option<&MappedCasArchive>,
-    ) -> Result<ExecutionMetrics, SandboxViolation> {
+        need_return_str: bool,
+    ) -> Result<(u64, u64, String), SandboxViolation> {
         let start = Instant::now();
         self.compartment.pkey_domain.enter_domain();
 
@@ -55,8 +58,18 @@ impl SliceIsolate {
                 let js_code = std::str::from_utf8(&bytecode[8..]).unwrap_or_default();
                 self.exec_boa_full_es_vm(js_code)?
             };
-            let ret_str = last_val.to_string();
-            if !self.egress_audit_secrets.is_empty() {
+            let has_secrets = !self.egress_audit_secrets.is_empty();
+            let has_custom_http_res =
+                !need_return_str && BOA_HTTP_RES.with(|res| res.borrow().is_some());
+            let ret_str = if need_return_str
+                || has_secrets
+                || (!has_custom_http_res && self.stdout.is_empty())
+            {
+                last_val.to_string()
+            } else {
+                String::new()
+            };
+            if has_secrets {
                 for line in &self.stdout {
                     self.verify_egress_not_leaked(line)?;
                 }
@@ -75,25 +88,7 @@ impl SliceIsolate {
                 })?;
             }
             let total_ns = start.elapsed().as_nanos() as u64;
-            let exec_ns = total_ns.saturating_sub(instantiate_ns).max(1);
-            return Ok(ExecutionMetrics {
-                tenant_id: self.compartment.tenant_id.clone(),
-                highest_tier_reached: self.current_tier,
-                instantiate_time_ns: instantiate_ns,
-                execution_time_ns: exec_ns,
-                total_time_ns: total_ns,
-                fuel_consumed: self.compartment.fuel_consumed,
-                memory_used_bytes: self.compartment.memory_used_bytes,
-                pkey_domain: self.compartment.pkey_domain.pkey,
-                cas_modules_resolved: self.cas_modules_resolved,
-                os_stat_syscalls: 0,
-                stdout: self.stdout.clone(),
-                return_value: ret_str,
-                checkpoints_taken: self.checkpoints_taken,
-                restores_performed: self.restores_performed,
-                restore_time_ns: self.restore_time_ns,
-                exit_code: self.last_exit_code,
-            });
+            return Ok((instantiate_ns, total_ns, ret_str));
         }
 
         let module = decode_slicesnp_cached(bytecode);
@@ -287,13 +282,17 @@ impl SliceIsolate {
         }
 
         let total_ns = start.elapsed().as_nanos() as u64;
-        let exec_ns = total_ns.saturating_sub(instantiate_ns).max(1);
         if self.capture_return_json && self.last_return_json.is_none() {
             self.last_return_json =
                 crate::value_and_ast::js_value_to_optional_json_string(&last_val);
         }
-        let ret_str = last_val.to_string();
-        if !self.egress_audit_secrets.is_empty() {
+        let has_secrets = !self.egress_audit_secrets.is_empty();
+        let ret_str = if need_return_str || has_secrets || self.stdout.is_empty() {
+            last_val.to_string()
+        } else {
+            String::new()
+        };
+        if has_secrets {
             for line in &self.stdout {
                 self.verify_egress_not_leaked(line)?;
             }
@@ -303,6 +302,18 @@ impl SliceIsolate {
             }
         }
 
+        Ok((instantiate_ns, total_ns, ret_str))
+    }
+
+    /// Executes pre-compiled `SLICEBC\x01`, `SLICEBOA`, or `SLICESNP` bytecode directly from an in-memory or `mmap` CAS slice.
+    pub fn execute_bytecode(
+        &mut self,
+        bytecode: &[u8],
+        cas: Option<&MappedCasArchive>,
+    ) -> Result<ExecutionMetrics, SandboxViolation> {
+        let (instantiate_ns, total_ns, ret_str) =
+            self.execute_bytecode_core(bytecode, cas, true)?;
+        let exec_ns = total_ns.saturating_sub(instantiate_ns).max(1);
         Ok(ExecutionMetrics {
             tenant_id: self.compartment.tenant_id.clone(),
             highest_tier_reached: self.current_tier,

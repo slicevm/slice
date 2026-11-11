@@ -7,7 +7,7 @@ use slice_engine::intrinsics::{
     fast_parse_ms, hmac_sha256_hex, make_ring_aead_key, parse_whatwg_url, sha256_hex,
     zlib_compress_bytes, zlib_decompress_bytes, AesExpandedKey,
 };
-use slice_engine::{compile_source_to_bytecode, SliceIsolate};
+use slice_engine::{compile_source_to_bytecode, HttpRequestContext, SliceIsolate};
 use slice_sandbox::CapabilityToken;
 use std::hint::black_box;
 
@@ -404,12 +404,147 @@ if (idx < 0 || gCount !== 5 || ab2.byteLength !== 64 || !c1 || !d1) throw new Er
     group.finish();
 }
 
+fn bench_http_cli_and_host_fs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("slice_engine::http_and_cli");
+
+    let tier0_http_bc =
+        compile_source_to_bytecode("const base = 1400; const fee = 37; return base + fee;");
+    group.bench_function("http_fast_dispatch_tier0_slicesnp", |b| {
+        let mut iso = SliceIsolate::spawn(
+            "tenant-default",
+            1,
+            CapabilityToken::pure_compute(),
+            10_000_000,
+            16 * 1024 * 1024,
+        );
+        let hdrs = [("host", "localhost"), ("accept", "application/json")];
+        let req = HttpRequestContext {
+            method: "GET",
+            path: "/v1/quote",
+            query: "tier=0",
+            tenant_id: "tenant-default",
+            body: "",
+            headers: &hdrs,
+        };
+        let mut slot = 1u32;
+        b.iter(|| {
+            slot = slot.wrapping_add(1);
+            iso.reset_for_request("tenant-default", slot, 10_000_000, 16 * 1024 * 1024);
+            let out = iso
+                .execute_http_request_fast(black_box(&tier0_http_bc), None, black_box(&req))
+                .expect("tier0 http fast");
+            black_box(out.response_body.len())
+        });
+    });
+
+    let wintertc_http_src = r#"
+const req = Slice.request();
+Slice.respond(
+    200,
+    JSON.stringify({ ok: true, method: req.method, path: req.path, tenant: req.tenant }),
+    "application/json"
+);
+"#;
+    let wintertc_http_bc = compile_source_to_bytecode(wintertc_http_src);
+    group.bench_function("http_fast_dispatch_wintertc_boacas", |b| {
+        SliceIsolate::prewarm_boa_pool(1);
+        let mut iso = SliceIsolate::spawn(
+            "tenant-default",
+            1,
+            CapabilityToken::pure_compute(),
+            10_000_000,
+            16 * 1024 * 1024,
+        );
+        let hdrs = [("host", "localhost"), ("user-agent", "slice-bench/1.0")];
+        let req = HttpRequestContext {
+            method: "GET",
+            path: "/v1/health",
+            query: "region=iad",
+            tenant_id: "tenant-default",
+            body: "",
+            headers: &hdrs,
+        };
+        let mut slot = 1u32;
+        b.iter(|| {
+            slot = slot.wrapping_add(1);
+            iso.reset_for_request("tenant-default", slot, 10_000_000, 16 * 1024 * 1024);
+            let out = iso
+                .execute_http_request_fast(black_box(&wintertc_http_bc), None, black_box(&req))
+                .expect("wintertc http fast");
+            black_box(out.response_body.len())
+        });
+    });
+
+    let kv_cli_src = r#"
+Slice.kv.set("bench:k1", "alpha-value", 0);
+const val = Slice.kv.get("bench:k1");
+const bl = Buffer.byteLength(val + process.argv[0], "utf8");
+if (bl < 10) throw new Error("kv cli bench mismatch");
+"#;
+    let kv_cli_bc = compile_source_to_bytecode(kv_cli_src);
+    group.bench_function("warm_kv_and_process_cli_boacas", |b| {
+        SliceIsolate::prewarm_boa_pool(1);
+        b.iter(|| {
+            let mut iso = SliceIsolate::spawn(
+                "bench-kv-cli",
+                1,
+                CapabilityToken::pure_compute(),
+                10_000_000,
+                16 * 1024 * 1024,
+            );
+            let res = iso
+                .execute_bytecode(black_box(&kv_cli_bc), None)
+                .expect("kv cli execute");
+            black_box(res.fuel_consumed)
+        });
+    });
+
+    let tmp_dir = std::env::temp_dir().join("slice_microbench_host_fs");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let host_file = tmp_dir.join("sample_payload.json");
+    let sample_json = r#"{"service":"slice-runtime","ok":true,"count":42,"tags":["fast","safe","deterministic"]}"#
+        .repeat(8);
+    let _ = std::fs::write(&host_file, sample_json.as_bytes());
+    let host_file_norm = host_file.to_string_lossy().replace('\\', "/");
+    let tmp_dir_norm = tmp_dir.to_string_lossy().replace('\\', "/");
+    let host_fs_src = format!(
+        r#"
+const fs = require("node:fs");
+const txt = fs.readFileSync({:?}, "utf8");
+const raw = fs.readFileSync({:?});
+if (txt.length !== raw.length || txt.length < 64) throw new Error("host fs mismatch");
+"#,
+        host_file_norm, host_file_norm
+    );
+    let host_fs_bc = compile_source_to_bytecode(&host_fs_src);
+    group.bench_function("host_fs_read_file_sync_utf8_and_bytes", |b| {
+        SliceIsolate::prewarm_boa_pool(1);
+        let caps = CapabilityToken::pure_compute().with_read_prefix(&tmp_dir_norm);
+        b.iter(|| {
+            let mut iso = SliceIsolate::spawn(
+                "bench-host-fs",
+                1,
+                caps.clone(),
+                10_000_000,
+                16 * 1024 * 1024,
+            );
+            let res = iso
+                .execute_bytecode(black_box(&host_fs_bc), None)
+                .expect("host fs execute");
+            black_box(res.fuel_consumed)
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_boacas_and_automaton,
     bench_intrinsics_and_numeric_vm,
     bench_json_operations,
     bench_vfs_and_stream_operations,
-    bench_wave3_als_intl_crypto_and_buffer
+    bench_wave3_als_intl_crypto_and_buffer,
+    bench_http_cli_and_host_fs
 );
 criterion_main!(benches);

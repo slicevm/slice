@@ -107,6 +107,17 @@ pub fn base64_encode(data: &[u8], url_safe: bool) -> String {
     unsafe { String::from_utf8_unchecked(out) }
 }
 
+#[inline]
+pub fn base64_decoded_len_bytes(bytes: &[u8]) -> usize {
+    let mut valid = 0usize;
+    for &b in bytes {
+        if B64_LENIENT_LUT[b as usize] != 0xFF {
+            valid += 1;
+        }
+    }
+    (valid * 3) >> 2
+}
+
 pub fn base64_decode(input: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity((input.len() * 3) / 4);
     let mut buf = 0u32;

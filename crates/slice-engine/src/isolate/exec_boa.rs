@@ -2,13 +2,18 @@
 //! Warm Realm Pool Management, and Shared OCap/DLP/SES Compartment Lifecycle Guards.
 
 use crate::boa_realm::{
-    acquire_warm_boa_realm, create_bare_boa_realm, create_warm_boa_realm, ensure_realm_shards,
-    release_warm_boa_realm, try_acquire_pooled_boa_realm, WarmBoaRealm, BOA_ACTIVE_CAPS,
-    BOA_ACTIVE_TENANT, BOA_CHECKPOINT_STATS, BOA_CONTEXT_POOL, BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS,
-    BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ,
-    BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_NET_HOSTS, BOA_STDOUT,
-    BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT, CHECKPOINT_SLAB, DIRTY_FETCH_MOCK, DIRTY_SOCKETS,
-    DIRTY_WASM, DIRTY_WEBSOCKET, DIRTY_WORKERS,
+    acquire_warm_boa_realm, call_realm_ctl, create_bare_boa_realm, create_warm_boa_realm,
+    ensure_realm_shards, eval_or_reuse_cached_script, has_process_exit, has_uncaught_error,
+    mark_exec_dirty, release_warm_boa_realm, try_acquire_pooled_boa_realm, WarmBoaRealm,
+    BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_CHECKPOINT_STATS, BOA_CONTEXT_POOL, BOA_CUSTOM_ARGV,
+    BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS,
+    BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES,
+    BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_LAST_EXIT_CODE, BOA_NET_HOSTS,
+    BOA_PROCESS_EXIT, BOA_STDOUT, BOA_UNCAUGHT_ERROR, BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION,
+    BOA_WAIT_UNTIL_COUNT, CHECKPOINT_SLAB, DIRTY_FETCH_MOCK, DIRTY_SOCKETS, DIRTY_WASM,
+    DIRTY_WEBSOCKET, DIRTY_WORKERS, EXEC_DIRTY_ARGV, EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT,
+    EXEC_DIRTY_REJECTIONS, EXEC_DIRTY_UNCAUGHT, REALM_CTL_DISPATCH_HTTP_BRIDGE, REALM_CTL_RESET_MT,
+    REALM_CTL_RESET_WU, REALM_CTL_SET_DET_MODE, REALM_CTL_SET_NEXT_TICK, REALM_CTL_SYNC_ENV,
 };
 use crate::boacas::{
     BOACAS_FLAG_HAS_HTTP_BRIDGE, BOACAS_FLAG_HAS_KV_SANDBOX, BOACAS_FLAG_HAS_NEXT_TICK,
@@ -96,9 +101,7 @@ impl SliceIsolate {
                         BOA_CHECKPOINT_STATS.with(|s| s.set((0, 0, 0)));
                         BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(0));
                         if BOA_WAIT_UNTIL_COUNT.with(|c| c.get()) > 0 {
-                            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                                b"if(globalThis.__slice_wu)globalThis.__slice_wu.length=0;",
-                            ));
+                            call_realm_ctl(&mut realm, REALM_CTL_RESET_WU, false);
                         }
                         BOA_STDOUT.with(|out| out.borrow_mut().clear());
                         BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
@@ -172,9 +175,9 @@ impl SliceIsolate {
                     CHECKPOINT_SLAB.with(|s| s.borrow_mut().clear());
                     BOA_CHECKPOINT_STATS.with(|s| s.set((0, 0, 0)));
                     BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(0));
-                    let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                        b"globalThis.__slice_wu.length=0;",
-                    ));
+                    if BOA_WAIT_UNTIL_COUNT.with(|c| c.get()) > 0 {
+                        call_realm_ctl(&mut realm, REALM_CTL_RESET_WU, false);
+                    }
                     BOA_STDOUT.with(|out| out.borrow_mut().clear());
                     BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
                     BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
@@ -195,10 +198,29 @@ impl SliceIsolate {
         BOA_STDOUT.with(|out| out.borrow_mut().clear());
         BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
         BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(0));
-        crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.set(None));
-        crate::boa_realm::BOA_LAST_EXIT_CODE.with(|e| e.set(None));
-        crate::boa_realm::BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
-        crate::boa_realm::BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = None);
+        let stale_exec_dirty = BOA_EXEC_DIRTY.with(|c| c.replace(0));
+        if stale_exec_dirty != 0 {
+            if (stale_exec_dirty & EXEC_DIRTY_EXIT) != 0 {
+                BOA_PROCESS_EXIT.with(|e| e.set(None));
+                BOA_LAST_EXIT_CODE.with(|e| e.set(None));
+            }
+            if (stale_exec_dirty & EXEC_DIRTY_REJECTIONS) != 0 {
+                BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
+            }
+            if (stale_exec_dirty & EXEC_DIRTY_UNCAUGHT) != 0 {
+                BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = None);
+            }
+            if (stale_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
+                BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
+            }
+            if (stale_exec_dirty & EXEC_DIRTY_ARGV) != 0 {
+                BOA_CUSTOM_ARGV.with(|a| *a.borrow_mut() = None);
+            }
+        }
+        if !self.process_argv.is_empty() {
+            mark_exec_dirty(EXEC_DIRTY_ARGV);
+            BOA_CUSTOM_ARGV.with(|a| *a.borrow_mut() = Some(self.process_argv.clone()));
+        }
         BOA_ACTIVE_TENANT.with(|t| {
             let mut b = t.borrow_mut();
             b.clear();
@@ -291,7 +313,6 @@ impl SliceIsolate {
                 *b.borrow_mut() = self.compartment.capabilities.allowed_exec_binaries.clone();
             });
         }
-        BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
 
         BoaSessionFlags {
             has_fs_restrictions,
@@ -325,15 +346,8 @@ impl SliceIsolate {
         has_next_tick: bool,
     ) {
         if self.deterministic_seed.is_some() {
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"__slice_set_det_mode(false);",
-            ));
+            call_realm_ctl(realm, REALM_CTL_SET_DET_MODE, false);
             BOA_DET_STATE.with(|s| s.set(None));
-        }
-        if !self.process_argv.is_empty() {
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"globalThis.__slice_argv=undefined;if(globalThis.process)globalThis.process.argv=[\"slice\"];",
-            ));
         }
         if flags.has_fs_restrictions {
             BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = None);
@@ -345,18 +359,14 @@ impl SliceIsolate {
             BOA_EGRESS_SECRETS.with(|s| s.borrow_mut().clear());
         }
         if flags.has_env_keys {
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"__slice_sync_process_env(false);",
-            ));
+            call_realm_ctl(realm, REALM_CTL_SYNC_ENV, false);
             BOA_ENV_MAP.with(|m| m.borrow_mut().clear());
         }
         if flags.has_exec_bins {
             BOA_EXEC_BINS.with(|b| b.borrow_mut().clear());
         }
         if has_next_tick {
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"__slice_set_next_tick_hook(false);",
-            ));
+            call_realm_ctl(realm, REALM_CTL_SET_NEXT_TICK, false);
         }
         let dirty = BOA_DIRTY_SUBSYSTEMS.with(|d| d.replace(0));
         if (dirty & DIRTY_FETCH_MOCK) != 0 {
@@ -404,9 +414,8 @@ impl SliceIsolate {
         check_ses: bool,
         mut eval_res: boa_engine::JsResult<boa_engine::JsValue>,
     ) -> Result<JsValue, SandboxViolation> {
-        let last_cp_violation = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
-        if eval_res.is_err() {
-            if let Some(cp_v) = last_cp_violation {
+        if eval_res.is_err() && (BOA_EXEC_DIRTY.with(|c| c.get()) & EXEC_DIRTY_CHILD_PROC) != 0 {
+            if let Some(cp_v) = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take()) {
                 BOA_VIOLATION.with(|v| {
                     if v.borrow().is_none() {
                         *v.borrow_mut() = Some(cp_v);
@@ -415,19 +424,19 @@ impl SliceIsolate {
             }
         }
 
-        if crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+        if has_process_exit() {
             let _ = realm.ctx.run_jobs();
-            crate::boa_realm::BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
+            if (BOA_EXEC_DIRTY.with(|c| c.get()) & EXEC_DIRTY_REJECTIONS) != 0 {
+                BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
+            }
             eval_res = Ok(boa_engine::JsValue::undefined());
         } else if let Err(err) = eval_res {
-            let _ = realm
-                .ctx
-                .eval(boa_engine::Source::from_bytes(b"__slice_reset_mt();"));
+            call_realm_ctl(&mut realm, REALM_CTL_RESET_MT, false);
             if BOA_VIOLATION.with(|v| v.borrow().is_none())
                 && crate::event_loop::handle_uncaught_js_error(err, &mut realm.ctx)
             {
                 eval_res = Ok(boa_engine::JsValue::undefined());
-                if crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.get().is_none())
+                if !has_process_exit()
                     && (!BOA_HTTP_REQ.with(|r| r.borrow().active)
                         || BOA_HTTP_RES.with(|res| res.borrow().is_none())
                         || has_pending_event_loop_work())
@@ -436,7 +445,9 @@ impl SliceIsolate {
                 }
             } else {
                 let _ = realm.ctx.run_jobs();
-                crate::boa_realm::BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
+                if (BOA_EXEC_DIRTY.with(|c| c.get()) & EXEC_DIRTY_REJECTIONS) != 0 {
+                    BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
+                }
                 eval_res = Ok(boa_engine::JsValue::undefined());
             }
         } else if !BOA_HTTP_REQ.with(|r| r.borrow().active)
@@ -447,13 +458,11 @@ impl SliceIsolate {
         }
 
         if is_http_req
-            && crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.get().is_none())
-            && crate::boa_realm::BOA_UNCAUGHT_ERROR.with(|e| e.borrow().is_none())
+            && !has_process_exit()
+            && !has_uncaught_error()
             && BOA_HTTP_RES.with(|res| res.borrow().is_none())
         {
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"if(globalThis.__slice_active_http_server&&typeof globalThis.__slice_active_http_server._dispatchActiveHttpBridge==='function'){globalThis.__slice_active_http_server._dispatchActiveHttpBridge();}",
-            ));
+            call_realm_ctl(&mut realm, REALM_CTL_DISPATCH_HTTP_BRIDGE, false);
             drive_event_loop_to_completion(&mut realm.ctx);
         }
         clear_event_loop_state();
@@ -502,8 +511,7 @@ impl SliceIsolate {
                                 .unwrap_or_default();
                             if st == 1 {
                                 val = tla_v;
-                            } else if crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.get().is_none())
-                            {
+                            } else if !has_process_exit() {
                                 let tla_err = boa_engine::JsError::from_opaque(tla_v);
                                 let _ = crate::event_loop::handle_uncaught_js_error(
                                     tla_err,
@@ -528,17 +536,40 @@ impl SliceIsolate {
         self.teardown_boa_compartment_thread_locals(&mut realm, flags, has_next_tick);
         self.harvest_boa_stdout();
         let (cp_taken, cp_restored, cp_restore_ns) =
-            crate::boa_realm::BOA_CHECKPOINT_STATS.with(|s| s.replace((0, 0, 0)));
+            BOA_CHECKPOINT_STATS.with(|s| s.replace((0, 0, 0)));
         self.checkpoints_taken = cp_taken;
         self.restores_performed = cp_restored;
         self.restore_time_ns = cp_restore_ns;
 
-        let exit_code_opt = crate::boa_realm::BOA_PROCESS_EXIT
-            .with(|e| e.replace(None))
-            .or_else(|| crate::boa_realm::BOA_LAST_EXIT_CODE.with(|e| e.replace(None)));
-        self.last_exit_code = exit_code_opt;
-        let uncaught_err_opt = crate::boa_realm::BOA_UNCAUGHT_ERROR.with(|e| e.borrow_mut().take());
-        crate::boa_realm::BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
+        let final_exec_dirty = BOA_EXEC_DIRTY.with(|c| c.replace(0));
+        let (exit_code_opt, uncaught_err_opt) = if final_exec_dirty == 0 {
+            self.last_exit_code = None;
+            (None, None)
+        } else {
+            if (final_exec_dirty & EXEC_DIRTY_ARGV) != 0 {
+                BOA_CUSTOM_ARGV.with(|a| *a.borrow_mut() = None);
+            }
+            if (final_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
+                BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
+            }
+            let exit_opt = if (final_exec_dirty & EXEC_DIRTY_EXIT) != 0 {
+                BOA_PROCESS_EXIT
+                    .with(|e| e.replace(None))
+                    .or_else(|| BOA_LAST_EXIT_CODE.with(|e| e.replace(None)))
+            } else {
+                None
+            };
+            self.last_exit_code = exit_opt;
+            let err_opt = if (final_exec_dirty & EXEC_DIRTY_UNCAUGHT) != 0 {
+                BOA_UNCAUGHT_ERROR.with(|e| e.borrow_mut().take())
+            } else {
+                None
+            };
+            if (final_exec_dirty & EXEC_DIRTY_REJECTIONS) != 0 {
+                BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
+            }
+            (exit_opt, err_opt)
+        };
 
         if let Some(mut violation) = BOA_VIOLATION.with(|v| v.borrow_mut().take()) {
             if let SandboxViolation::CpuFuelExhausted { ref mut limit, .. } = violation {
@@ -634,39 +665,6 @@ impl SliceIsolate {
         result
     }
 
-    #[inline]
-    fn apply_process_argv_to_realm(&self, realm: &mut WarmBoaRealm) {
-        if self.process_argv.is_empty() {
-            return;
-        }
-        let argv_arr = boa_engine::object::builtins::JsArray::from_iter(
-            self.process_argv
-                .iter()
-                .map(|s| boa_engine::JsValue::from(boa_engine::js_string!(s.as_str()))),
-            &mut realm.ctx,
-        );
-        let _ = realm.ctx.global_object().set(
-            boa_engine::js_string!("__slice_argv"),
-            boa_engine::JsValue::from(argv_arr.clone()),
-            false,
-            &mut realm.ctx,
-        );
-        if let Some(proc_obj) = realm
-            .ctx
-            .global_object()
-            .get(boa_engine::js_string!("process"), &mut realm.ctx)
-            .ok()
-            .and_then(|v| v.as_object())
-        {
-            let _ = proc_obj.set(
-                boa_engine::js_string!("argv"),
-                boa_engine::JsValue::from(argv_arr),
-                false,
-                &mut realm.ctx,
-            );
-        }
-    }
-
     /// Executes full ES2024+ JavaScript inside the production **Boa (`boa_engine`)** ECMAScript VM,
     /// reusing pre-warmed contexts from `BOA_CONTEXT_POOL`, capturing `console.log` / `print` output
     /// via zero-eval native host hooks, and enforcing SES compartment limits.
@@ -682,24 +680,17 @@ impl SliceIsolate {
         }
 
         let mut realm = acquire_warm_boa_realm();
-        self.apply_process_argv_to_realm(&mut realm);
 
         if flags.has_env_keys {
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"__slice_sync_process_env(true);",
-            ));
+            call_realm_ctl(&mut realm, REALM_CTL_SYNC_ENV, true);
         }
         if self.deterministic_seed.is_some() {
             crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"__slice_set_det_mode(true);",
-            ));
+            call_realm_ctl(&mut realm, REALM_CTL_SET_DET_MODE, true);
         }
         let has_next_tick = js_code.contains("nextTick");
         if has_next_tick {
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"__slice_set_next_tick_hook(true);",
-            ));
+            call_realm_ctl(&mut realm, REALM_CTL_SET_NEXT_TICK, true);
         }
         if flags.is_worker {
             ensure_realm_shards(&mut realm, (1 << 8) | (1 << 13) | (1 << 2), false);
@@ -789,9 +780,7 @@ impl SliceIsolate {
                 needs_lazy_global_getters(js_code),
             );
             self.apply_boa_realm_runtime_limits(&mut realm);
-            realm
-                .ctx
-                .eval(boa_engine::Source::from_bytes(js_code.as_bytes()))
+            eval_or_reuse_cached_script(&mut realm, js_code)
         } else {
             ensure_realm_shards(
                 &mut realm,
@@ -804,9 +793,7 @@ impl SliceIsolate {
             } else {
                 format!("{{{}\n}}", js_code)
             };
-            realm
-                .ctx
-                .eval(boa_engine::Source::from_bytes(scoped_code.as_bytes()))
+            eval_or_reuse_cached_script(&mut realm, &scoped_code)
         };
 
         let need_ses_scan = should_check_ses || BOA_WAIT_UNTIL_COUNT.with(|c| c.get()) > 0;
@@ -849,7 +836,6 @@ impl SliceIsolate {
             Some(r) => (r, false),
             None => (create_bare_boa_realm(), true),
         };
-        self.apply_process_argv_to_realm(&mut realm);
 
         let has_next_tick = (header.feature_flags & BOACAS_FLAG_HAS_NEXT_TICK) != 0;
         if is_cold_bare_realm && header.approach_kind >= 1 && !precompiled_slice.is_empty() {
@@ -880,26 +866,18 @@ impl SliceIsolate {
             }
         } else {
             if is_cold_bare_realm {
-                let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                    crate::js_preludes::ULTRA_CORE_PRELUDE,
-                ));
+                let _ = crate::js_preludes::eval_ultra_core_prelude(&mut realm.ctx);
                 crate::boa_realm::populate_realm_cached_handles(&mut realm);
             }
             if flags.has_env_keys {
-                let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                    b"__slice_sync_process_env(true);",
-                ));
+                call_realm_ctl(&mut realm, REALM_CTL_SYNC_ENV, true);
             }
             if self.deterministic_seed.is_some() {
                 crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
-                let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                    b"__slice_set_det_mode(true);",
-                ));
+                call_realm_ctl(&mut realm, REALM_CTL_SET_DET_MODE, true);
             }
             if has_next_tick {
-                let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                    b"__slice_set_next_tick_hook(true);",
-                ));
+                call_realm_ctl(&mut realm, REALM_CTL_SET_NEXT_TICK, true);
             }
             if flags.is_worker {
                 ensure_realm_shards(&mut realm, (1 << 8) | (1 << 13) | (1 << 2), false);

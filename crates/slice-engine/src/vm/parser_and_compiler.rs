@@ -2105,6 +2105,11 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
     bytes
 }
 
+thread_local! {
+    static SNP_LAST_HIT: std::cell::RefCell<(usize, usize, Option<std::sync::Arc<BytecodeModule>>)> =
+        const { std::cell::RefCell::new((0, 0, None)) };
+}
+
 #[inline]
 pub(crate) fn decode_slicesnp_cached(bytecode: &[u8]) -> std::sync::Arc<BytecodeModule> {
     if bytecode.len() < 8 || &bytecode[0..8] != SNAPSHOT_MAGIC {
@@ -2113,11 +2118,23 @@ pub(crate) fn decode_slicesnp_cached(bytecode: &[u8]) -> std::sync::Arc<Bytecode
             static_exports: FxHashMap::default(),
         });
     }
+    let ptr = bytecode.as_ptr() as usize;
+    let len = bytecode.len();
+    if let Some(hit) = SNP_LAST_HIT.with(|slot| {
+        let b = slot.borrow();
+        if b.0 == ptr && b.1 == len {
+            b.2.as_ref().map(std::sync::Arc::clone)
+        } else {
+            None
+        }
+    }) {
+        return hit;
+    }
     use std::hash::{Hash, Hasher};
     let mut hasher = rustc_hash::FxHasher::default();
     bytecode[8..].hash(&mut hasher);
     let key = hasher.finish();
-    SNP_MODULE_CACHE.with(|cache| {
+    let module = SNP_MODULE_CACHE.with(|cache| {
         if let Some(existing) = cache.borrow().get(&key) {
             return std::sync::Arc::clone(existing);
         }
@@ -2130,7 +2147,11 @@ pub(crate) fn decode_slicesnp_cached(bytecode: &[u8]) -> std::sync::Arc<Bytecode
             .borrow_mut()
             .insert(key, std::sync::Arc::clone(&arc_mod));
         arc_mod
-    })
+    });
+    SNP_LAST_HIT.with(|slot| {
+        *slot.borrow_mut() = (ptr, len, Some(std::sync::Arc::clone(&module)));
+    });
+    module
 }
 
 #[inline]

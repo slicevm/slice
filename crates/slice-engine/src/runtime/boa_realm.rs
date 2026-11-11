@@ -15,6 +15,19 @@ pub(crate) const DIRTY_WORKERS: u8 = 1 << 5;
 pub(crate) const DIRTY_WASM: u8 = 1 << 6;
 pub(crate) const DIRTY_PROCESS: u8 = 1 << 7;
 
+pub(crate) const EXEC_DIRTY_EXIT: u8 = 1 << 0;
+pub(crate) const EXEC_DIRTY_REJECTIONS: u8 = 1 << 1;
+pub(crate) const EXEC_DIRTY_UNCAUGHT: u8 = 1 << 2;
+pub(crate) const EXEC_DIRTY_CHILD_PROC: u8 = 1 << 3;
+pub(crate) const EXEC_DIRTY_ARGV: u8 = 1 << 4;
+
+pub(crate) const REALM_CTL_RESET_MT: i32 = 0;
+pub(crate) const REALM_CTL_SET_DET_MODE: i32 = 1;
+pub(crate) const REALM_CTL_SYNC_ENV: i32 = 2;
+pub(crate) const REALM_CTL_SET_NEXT_TICK: i32 = 3;
+pub(crate) const REALM_CTL_RESET_WU: i32 = 4;
+pub(crate) const REALM_CTL_DISPATCH_HTTP_BRIDGE: i32 = 5;
+
 #[derive(Default, Clone)]
 pub(crate) struct ActiveBoaHttpReq {
     pub(crate) active: bool,
@@ -30,10 +43,12 @@ pub(crate) struct ActiveBoaHttpReq {
 pub(crate) struct WarmBoaRealm {
     pub(crate) ctx: boa_engine::Context,
     pub(crate) loaded_bundles: FxHashMap<u64, boa_engine::JsObject>,
+    pub(crate) compiled_scripts: FxHashMap<u64, boa_engine::Script>,
     pub(crate) ses_check_fn: Option<boa_engine::JsObject>,
     pub(crate) ensure_shard_fn: Option<boa_engine::JsObject>,
     pub(crate) init_worker_self_fn: Option<boa_engine::JsObject>,
     pub(crate) drain_wu_fn: Option<boa_engine::JsObject>,
+    pub(crate) ctl_fn: Option<boa_engine::JsObject>,
     pub(crate) loaded_shards_mask: u32,
 }
 
@@ -101,6 +116,10 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     pub(crate) static BOA_DIRTY_SUBSYSTEMS: std::cell::Cell<u8> =
         const { std::cell::Cell::new(0) };
+    pub(crate) static BOA_EXEC_DIRTY: std::cell::Cell<u8> =
+        const { std::cell::Cell::new(0) };
+    pub(crate) static BOA_CUSTOM_ARGV: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
     pub(crate) static BOA_PROCESS_EXIT: std::cell::Cell<Option<i32>> =
         const { std::cell::Cell::new(None) };
     pub(crate) static BOA_LAST_EXIT_CODE: std::cell::Cell<Option<i32>> =
@@ -109,6 +128,48 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     pub(crate) static BOA_UNCAUGHT_ERROR: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+}
+
+#[inline]
+pub(crate) fn mark_exec_dirty(bit: u8) {
+    BOA_EXEC_DIRTY.with(|c| c.set(c.get() | bit));
+}
+
+#[inline]
+pub(crate) fn set_process_exit(code: i32) {
+    mark_exec_dirty(EXEC_DIRTY_EXIT);
+    BOA_PROCESS_EXIT.with(|e| e.set(Some(code)));
+    BOA_LAST_EXIT_CODE.with(|e| e.set(Some(code)));
+}
+
+#[inline]
+pub(crate) fn set_last_exit_code(code: i32) {
+    mark_exec_dirty(EXEC_DIRTY_EXIT);
+    BOA_LAST_EXIT_CODE.with(|e| e.set(Some(code)));
+}
+
+#[inline]
+pub(crate) fn set_uncaught_error(err: String) {
+    mark_exec_dirty(EXEC_DIRTY_UNCAUGHT);
+    BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = Some(err));
+}
+
+#[inline]
+pub(crate) fn set_child_proc_violation(violation: SandboxViolation) {
+    mark_exec_dirty(EXEC_DIRTY_CHILD_PROC);
+    BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = Some(violation));
+}
+
+#[inline]
+pub(crate) fn has_process_exit() -> bool {
+    (BOA_EXEC_DIRTY.with(|c| c.get()) & EXEC_DIRTY_EXIT) != 0
+        && BOA_PROCESS_EXIT.with(|e| e.get().is_some())
+}
+
+#[inline]
+pub(crate) fn has_uncaught_error() -> bool {
+    (BOA_EXEC_DIRTY.with(|c| c.get()) & EXEC_DIRTY_UNCAUGHT) != 0
+        && BOA_UNCAUGHT_ERROR.with(|e| e.borrow().is_some())
 }
 
 #[derive(Debug, Clone)]
@@ -152,19 +213,19 @@ impl boa_engine::context::HostHooks for SliceHostHooks {
         args: &[boa_engine::JsValue],
         context: &mut boa_engine::Context,
     ) -> boa_engine::JsResult<boa_engine::JsValue> {
+        if !BOA_ALS_ACTIVE.with(|a| a.get()) {
+            return job.callback().call(this, args, context);
+        }
         if let Some(captured) = job.host_defined().downcast_ref::<AlsCapturedSnap>() {
             let prev = BOA_ALS_SNAP.with(|s| s.replace(captured.0.clone()));
             let res = job.callback().call(this, args, context);
             BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
             return res;
         }
-        if BOA_ALS_ACTIVE.with(|a| a.get()) {
-            let prev = BOA_ALS_SNAP.with(|s| s.replace(boa_engine::JsValue::undefined()));
-            let res = job.callback().call(this, args, context);
-            BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
-            return res;
-        }
-        job.callback().call(this, args, context)
+        let prev = BOA_ALS_SNAP.with(|s| s.replace(boa_engine::JsValue::undefined()));
+        let res = job.callback().call(this, args, context);
+        BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
+        res
     }
 
     fn promise_rejection_tracker(
@@ -173,9 +234,10 @@ impl boa_engine::context::HostHooks for SliceHostHooks {
         operation: boa_engine::builtins::promise::OperationType,
         _context: &mut boa_engine::Context,
     ) {
-        let upcast = promise.clone().upcast();
         match operation {
             boa_engine::builtins::promise::OperationType::Reject => {
+                mark_exec_dirty(EXEC_DIRTY_REJECTIONS);
+                let upcast = promise.clone().upcast();
                 BOA_UNHANDLED_REJECTIONS.with(|list| {
                     let mut b = list.borrow_mut();
                     if !b.contains(&upcast) {
@@ -184,8 +246,16 @@ impl boa_engine::context::HostHooks for SliceHostHooks {
                 });
             }
             boa_engine::builtins::promise::OperationType::Handle => {
+                if (BOA_EXEC_DIRTY.with(|c| c.get()) & EXEC_DIRTY_REJECTIONS) == 0 {
+                    return;
+                }
                 BOA_UNHANDLED_REJECTIONS.with(|list| {
-                    list.borrow_mut().retain(|p| p != &upcast);
+                    let mut b = list.borrow_mut();
+                    if b.is_empty() {
+                        return;
+                    }
+                    let upcast = promise.clone().upcast();
+                    b.retain(|p| p != &upcast);
                 });
             }
         }
@@ -328,7 +398,7 @@ impl boa_engine::job::JobExecutor for SliceJobExecutor {
         self: std::rc::Rc<Self>,
         context: &mut boa_engine::Context,
     ) -> boa_engine::JsResult<()> {
-        if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+        if has_process_exit() {
             self.promise_jobs.borrow_mut().clear();
             return Ok(());
         }
@@ -336,14 +406,14 @@ impl boa_engine::job::JobExecutor for SliceJobExecutor {
             let next_job = self.promise_jobs.borrow_mut().pop_front();
             if let Some(job) = next_job {
                 let res = job.call(context);
-                if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+                if has_process_exit() {
                     self.promise_jobs.borrow_mut().clear();
                     return Ok(());
                 }
                 res?;
             } else {
                 self.fallback.clone().run_jobs(context)?;
-                if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+                if has_process_exit() {
                     self.promise_jobs.borrow_mut().clear();
                     return Ok(());
                 }
@@ -460,16 +530,18 @@ pub(crate) fn create_bare_boa_realm() -> WarmBoaRealm {
     WarmBoaRealm {
         ctx,
         loaded_bundles: FxHashMap::default(),
+        compiled_scripts: FxHashMap::default(),
         ses_check_fn: None,
         ensure_shard_fn: None,
         init_worker_self_fn: None,
         drain_wu_fn: None,
+        ctl_fn: None,
         loaded_shards_mask: 0,
     }
 }
 
-/// Refreshes the cached JS function handles (`__slice_check_ses`, `__slice_ensure_shard`, `__slice_drain_wu`)
-/// on `realm` after `ULTRA_CORE_PRELUDE` has been evaluated.
+/// Refreshes the cached JS function handles (`__slice_check_ses`, `__slice_ensure_shard`,
+/// `__slice_drain_wu`, `__slice_ctl`) on `realm` after `ULTRA_CORE_PRELUDE` has been evaluated.
 #[inline]
 pub(crate) fn populate_realm_cached_handles(realm: &mut WarmBoaRealm) {
     let global = realm.ctx.global_object();
@@ -494,6 +566,66 @@ pub(crate) fn populate_realm_cached_handles(realm: &mut WarmBoaRealm) {
             .ok()
             .and_then(|v| v.as_object());
     }
+    if realm.ctl_fn.is_none() {
+        realm.ctl_fn = global
+            .get(boa_engine::js_string!("__slice_ctl"), &mut realm.ctx)
+            .ok()
+            .and_then(|v| v.as_object());
+    }
+}
+
+#[inline]
+pub(crate) fn call_realm_ctl(realm: &mut WarmBoaRealm, op: i32, flag: bool) {
+    if realm.ctl_fn.is_none() {
+        populate_realm_cached_handles(realm);
+    }
+    if let Some(ctl) = realm.ctl_fn.clone() {
+        let _ = ctl.call(
+            &boa_engine::JsValue::undefined(),
+            &[
+                boa_engine::JsValue::from(op),
+                boa_engine::JsValue::from(flag),
+            ],
+            &mut realm.ctx,
+        );
+    }
+}
+
+#[inline]
+fn fnv1a_script_key(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ (bytes.len() as u64);
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+/// Evaluates a scoped JS script (`{ ... }`) on a warm realm, caching its compiled `boa_engine::Script`
+/// (`Gc<CodeBlock>`) so subsequent warm invocations skip lexing, parsing, scope analysis, and byte compilation.
+pub(crate) fn eval_or_reuse_cached_script(
+    realm: &mut WarmBoaRealm,
+    scoped_js: &str,
+) -> boa_engine::JsResult<boa_engine::JsValue> {
+    let key = fnv1a_script_key(scoped_js.as_bytes());
+    if let Some(cached) = realm.compiled_scripts.get(&key).cloned() {
+        return cached.evaluate(&mut realm.ctx);
+    }
+    let script = boa_engine::Script::parse(
+        boa_engine::Source::from_bytes(scoped_js.as_bytes()),
+        None,
+        &mut realm.ctx,
+    )?;
+    let reusable = script.can_reuse_across_runs(&mut realm.ctx);
+    let res = script.evaluate(&mut realm.ctx);
+    if reusable
+        && res.is_ok()
+        && BOA_VIOLATION.with(|v| v.borrow().is_none())
+        && realm.compiled_scripts.len() < 32
+    {
+        realm.compiled_scripts.insert(key, script);
+    }
+    res
 }
 
 /// Creates a warm `boa_engine::Context` initialized with Slice's native host functions,
@@ -522,9 +654,7 @@ pub(crate) fn ensure_realm_shards(
         return;
     }
     let lazy_getters_active = (realm.loaded_shards_mask & 1) != 0;
-    for shard_id in [
-        2u32, 13, 1, 11, 12, 10, 3, 14, 15, 4, 16, 5, 17, 6, 7, 8, 9, 18,
-    ] {
+    for shard_id in crate::js_preludes::SHARD_LOAD_ORDER {
         let bit = 1u32 << shard_id;
         if (missing & bit) != 0 {
             if lazy_getters_active {
@@ -583,6 +713,8 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_http_res: Option<CapturedBoaHttpRes>,
     pub(crate) saved_wait_until_count: usize,
     pub(crate) saved_dirty_subsystems: u8,
+    pub(crate) saved_exec_dirty: u8,
+    pub(crate) saved_custom_argv: Option<Vec<String>>,
     pub(crate) saved_process_exit: Option<i32>,
     pub(crate) saved_last_exit_code: Option<i32>,
     pub(crate) saved_unhandled_rejections: Vec<boa_engine::JsObject>,
@@ -592,6 +724,7 @@ pub(crate) struct SavedIsolateContextGuard {
 
 impl SavedIsolateContextGuard {
     pub(crate) fn enter() -> Self {
+        let saved_exec_dirty = BOA_EXEC_DIRTY.with(|c| c.replace(0));
         let saved_stdout = BOA_STDOUT.with(|out| std::mem::take(&mut *out.borrow_mut()));
         let saved_violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
         let saved_tenant = BOA_ACTIVE_TENANT.with(|t| std::mem::take(&mut *t.borrow_mut()));
@@ -601,7 +734,11 @@ impl SavedIsolateContextGuard {
             BOA_EGRESS_SECRETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
         let saved_env_map = BOA_ENV_MAP.with(|m| std::mem::take(&mut *m.borrow_mut()));
         let saved_exec_bins = BOA_EXEC_BINS.with(|b| std::mem::take(&mut *b.borrow_mut()));
-        let saved_last_cp_violation = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
+        let saved_last_cp_violation = if (saved_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
+            BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take())
+        } else {
+            None
+        };
         let saved_fetch_mocks = BOA_FETCH_MOCKS.with(|m| {
             let b = m.borrow();
             if b.is_empty() {
@@ -648,11 +785,30 @@ impl SavedIsolateContextGuard {
         let saved_http_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
         let saved_wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.replace(0));
         let saved_dirty_subsystems = BOA_DIRTY_SUBSYSTEMS.with(|d| d.replace(0));
-        let saved_process_exit = BOA_PROCESS_EXIT.with(|e| e.replace(None));
-        let saved_last_exit_code = BOA_LAST_EXIT_CODE.with(|e| e.replace(None));
-        let saved_unhandled_rejections =
-            BOA_UNHANDLED_REJECTIONS.with(|u| std::mem::take(&mut *u.borrow_mut()));
-        let saved_uncaught_error = BOA_UNCAUGHT_ERROR.with(|e| e.borrow_mut().take());
+        let saved_custom_argv = if (saved_exec_dirty & EXEC_DIRTY_ARGV) != 0 {
+            BOA_CUSTOM_ARGV.with(|a| a.borrow_mut().take())
+        } else {
+            None
+        };
+        let (saved_process_exit, saved_last_exit_code) =
+            if (saved_exec_dirty & EXEC_DIRTY_EXIT) != 0 {
+                (
+                    BOA_PROCESS_EXIT.with(|e| e.replace(None)),
+                    BOA_LAST_EXIT_CODE.with(|e| e.replace(None)),
+                )
+            } else {
+                (None, None)
+            };
+        let saved_unhandled_rejections = if (saved_exec_dirty & EXEC_DIRTY_REJECTIONS) != 0 {
+            BOA_UNHANDLED_REJECTIONS.with(|u| std::mem::take(&mut *u.borrow_mut()))
+        } else {
+            Vec::new()
+        };
+        let saved_uncaught_error = if (saved_exec_dirty & EXEC_DIRTY_UNCAUGHT) != 0 {
+            BOA_UNCAUGHT_ERROR.with(|e| e.borrow_mut().take())
+        } else {
+            None
+        };
         let saved_ev_loop = crate::event_loop::save_and_reset_event_loop_state();
 
         Self {
@@ -679,6 +835,8 @@ impl SavedIsolateContextGuard {
             saved_http_res,
             saved_wait_until_count,
             saved_dirty_subsystems,
+            saved_exec_dirty,
+            saved_custom_argv,
             saved_process_exit,
             saved_last_exit_code,
             saved_unhandled_rejections,
@@ -694,12 +852,24 @@ impl Drop for SavedIsolateContextGuard {
             crate::event_loop::restore_event_loop_state(ev);
         }
         let child_dirty = BOA_DIRTY_SUBSYSTEMS.with(|d| d.get());
+        let child_exec_dirty = BOA_EXEC_DIRTY.with(|c| c.get());
+        let union_exec_dirty = self.saved_exec_dirty | child_exec_dirty;
         BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(self.saved_dirty_subsystems));
-        BOA_PROCESS_EXIT.with(|e| e.set(self.saved_process_exit));
-        BOA_LAST_EXIT_CODE.with(|e| e.set(self.saved_last_exit_code));
-        BOA_UNHANDLED_REJECTIONS
-            .with(|u| *u.borrow_mut() = std::mem::take(&mut self.saved_unhandled_rejections));
-        BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = self.saved_uncaught_error.take());
+        BOA_EXEC_DIRTY.with(|c| c.set(self.saved_exec_dirty));
+        if (union_exec_dirty & EXEC_DIRTY_EXIT) != 0 {
+            BOA_PROCESS_EXIT.with(|e| e.set(self.saved_process_exit));
+            BOA_LAST_EXIT_CODE.with(|e| e.set(self.saved_last_exit_code));
+        }
+        if (union_exec_dirty & EXEC_DIRTY_REJECTIONS) != 0 {
+            BOA_UNHANDLED_REJECTIONS
+                .with(|u| *u.borrow_mut() = std::mem::take(&mut self.saved_unhandled_rejections));
+        }
+        if (union_exec_dirty & EXEC_DIRTY_UNCAUGHT) != 0 {
+            BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = self.saved_uncaught_error.take());
+        }
+        if (union_exec_dirty & EXEC_DIRTY_ARGV) != 0 {
+            BOA_CUSTOM_ARGV.with(|a| *a.borrow_mut() = self.saved_custom_argv.take());
+        }
         BOA_STDOUT.with(|out| *out.borrow_mut() = std::mem::take(&mut self.saved_stdout));
         BOA_VIOLATION.with(|v| *v.borrow_mut() = self.saved_violation.take());
         BOA_ACTIVE_TENANT.with(|t| *t.borrow_mut() = std::mem::take(&mut self.saved_tenant));
@@ -709,8 +879,10 @@ impl Drop for SavedIsolateContextGuard {
             .with(|s| *s.borrow_mut() = std::mem::take(&mut self.saved_egress_secrets));
         BOA_ENV_MAP.with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_env_map));
         BOA_EXEC_BINS.with(|b| *b.borrow_mut() = std::mem::take(&mut self.saved_exec_bins));
-        BOA_LAST_CHILD_PROC_VIOLATION
-            .with(|v| *v.borrow_mut() = self.saved_last_cp_violation.take());
+        if (union_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
+            BOA_LAST_CHILD_PROC_VIOLATION
+                .with(|v| *v.borrow_mut() = self.saved_last_cp_violation.take());
+        }
         if let Some(fm) = self.saved_fetch_mocks.take() {
             BOA_FETCH_MOCKS.with(|m| *m.borrow_mut() = fm);
         } else if (child_dirty & DIRTY_FETCH_MOCK) != 0 {

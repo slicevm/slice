@@ -94,20 +94,7 @@
     return Buffer.alloc(size);
   };
 
-  Buffer.byteLength = function(str, encoding) {
-    if (typeof str !== "string") {
-      if (str && typeof str.byteLength === "number") return str.byteLength;
-      str = String(str);
-    }
-    if (!encoding) return __slice_utf8_byte_len(str);
-    var e = String(encoding).toLowerCase();
-    if (e === "utf8" || e === "utf-8") return __slice_utf8_byte_len(str);
-    if (e === "utf16le" || e === "utf-16le" || e === "ucs2" || e === "ucs-2") return str.length * 2;
-    if (e === "latin1" || e === "binary" || e === "ascii") return str.length;
-    if (e === "hex") return str.length >>> 1;
-    if (e === "base64" || e === "base64url") return __slice_base64_decode_bytes(str).byteLength;
-    return __slice_utf8_byte_len(str);
-  };
+  Buffer.byteLength = __slice_utf8_byte_len;
 
   Buffer.concat = function(list, totalLength) {
     if (!Array.isArray(list)) throw new TypeError("The \"list\" argument must be an instance of Array");

@@ -31,7 +31,8 @@
         (id === 15 && globalThis.FormData) ||
         (id === 16 && globalThis.structuredClone) ||
         (id === 17 && globalThis.Buffer && globalThis.Buffer.prototype._hasBinRW) ||
-        (id === 18 && globalThis.Intl)
+        (id === 18 && globalThis.Intl) ||
+        (id === 29 && globalThis.navigator)
       ) {
         globalThis.__shMask |= (1 << id);
         return;
@@ -100,29 +101,16 @@
   };
 
   var __pExitCode = undefined;
+  var __argvCache = null;
   function __pLazy(m) {
     return function() {
-      __slice_mark_proc_dirty();
-      __loadShard(18);
+      __slice_process_ctl(0);
+      __loadShard(29);
       return globalThis.process[m].apply(globalThis.process, arguments);
     };
   }
 
-  globalThis.process = {
-    pid: 1,
-    env: { NODE_ENV: "production" },
-    cwd: function() { return "."; },
-    get platform() { return __slice_os_platform(); },
-    get arch() { return __slice_os_arch(); },
-    get exitCode() { return __pExitCode; },
-    set exitCode(v) {
-      __pExitCode = v;
-      if (v !== undefined) __slice_mark_proc_dirty();
-    },
-    _resetExitCode: function() { __pExitCode = undefined; },
-    version: "v24.0.0",
-    versions: { node: "24.0.0" },
-    argv: globalThis.__slice_argv || ["slice"],
+  var __ProcProto = {
     on: __pLazy("on"),
     once: __pLazy("once"),
     off: __pLazy("off"),
@@ -131,14 +119,53 @@
     removeAllListeners: __pLazy("removeAllListeners"),
     listeners: __pLazy("listeners"),
     listenerCount: __pLazy("listenerCount"),
-    emitWarning: __pLazy("emitWarning"),
-    exit: function(code) {
-      __ntQ.length = 0;
-      __qmQ.length = 0;
-      __mtS = false;
-      __slice_process_exit(code);
-    }
+    emitWarning: __pLazy("emitWarning")
   };
+
+  var __proc = Object.create(__ProcProto);
+  __proc.pid = 1;
+  __proc.env = { NODE_ENV: "production" };
+  __proc.cwd = function() { return "."; };
+  __proc._exited = false;
+  __proc._resetExitCode = function() {
+    __pExitCode = undefined;
+    __argvCache = null;
+    __proc._exited = false;
+  };
+  __proc.version = "v24.0.0";
+  __proc.versions = { node: "24.0.0" };
+  __proc.exit = function(code) {
+    __ntQ.length = 0;
+    __qmQ.length = 0;
+    __mtS = false;
+    __slice_process_ctl(2, code);
+  };
+  Object.defineProperties(__proc, {
+    platform: { get: __slice_os_platform, enumerable: true, configurable: true },
+    arch: { get: __slice_os_arch, enumerable: true, configurable: true },
+    exitCode: {
+      get: function() { return __pExitCode; },
+      set: function(v) {
+        __pExitCode = v;
+        if (v !== undefined) __slice_process_ctl(0);
+      },
+      enumerable: true,
+      configurable: true
+    },
+    argv: {
+      get: function() {
+        if (!__argvCache) __argvCache = __slice_process_ctl(1);
+        return __argvCache;
+      },
+      set: function(v) {
+        __slice_process_ctl(0);
+        __argvCache = v;
+      },
+      enumerable: true,
+      configurable: true
+    }
+  });
+  globalThis.process = __proc;
 
   globalThis.__slice_check_ses = function() {
     var p = [Object.prototype, Array.prototype, Function.prototype, String.prototype];
@@ -209,7 +236,8 @@
       if (__ntQ.length > 0) {
         while (__ntQ.length > 0) {
           var n = __ntQ.shift();
-          n.f.apply(undefined, n.a);
+          if (n.a) n.f.apply(undefined, n.a);
+          else n.f();
         }
       }
       return onF(v);
@@ -218,7 +246,8 @@
       if (__ntQ.length > 0) {
         while (__ntQ.length > 0) {
           var n = __ntQ.shift();
-          n.f.apply(undefined, n.a);
+          if (n.a) n.f.apply(undefined, n.a);
+          else n.f();
         }
       }
       return onR(e);
@@ -242,6 +271,27 @@
     __mtS = false;
   };
 
+  globalThis.__slice_ctl = function(op, flag) {
+    if (op === 0) {
+      __ntQ.length = 0;
+      __qmQ.length = 0;
+      __mtS = false;
+    } else if (op === 1) {
+      globalThis.__slice_set_det_mode(flag);
+    } else if (op === 2) {
+      globalThis.__slice_sync_process_env(flag);
+    } else if (op === 3) {
+      globalThis.__slice_set_next_tick_hook(flag);
+    } else if (op === 4) {
+      if (globalThis.__slice_wu) globalThis.__slice_wu.length = 0;
+    } else if (op === 5) {
+      var s = globalThis.__slice_active_http_server;
+      if (s && typeof s._dispatchActiveHttpBridge === "function") {
+        s._dispatchActiveHttpBridge();
+      }
+    }
+  };
+
   globalThis.__slice_set_als_wrap = function(wrapFn) {
     __alsWrap = wrapFn || null;
   };
@@ -256,7 +306,8 @@
     while (__ntQ.length > 0 || __qmQ.length > 0) {
       while (__ntQ.length > 0) {
         var n = __ntQ.shift();
-        n.f.apply(undefined, n.a);
+        if (n.a) n.f.apply(undefined, n.a);
+        else n.f();
       }
       if (__qmQ.length > 0) {
         var q = __qmQ.shift();
@@ -275,8 +326,11 @@
       __ntHooked = true;
       Promise.prototype.then = __wrappedThen;
     }
-    var a = [];
-    for (var i = 1; i < arguments.length; i++) a.push(arguments[i]);
+    var a = undefined;
+    if (arguments.length > 1) {
+      a = [];
+      for (var i = 1; i < arguments.length; i++) a.push(arguments[i]);
+    }
     __ntQ.push({ f: __alsWrap ? __alsWrap(cb) : cb, a: a });
     __schedMt();
   };
@@ -295,19 +349,19 @@
   }
   __Timeout.prototype.unref = function() {
     this._refed = false;
-    __slice_timer_ref(this._id, false);
+    __slice_timer_ctl(this._id, 2);
     return this;
   };
   __Timeout.prototype.ref = function() {
     this._refed = true;
-    __slice_timer_ref(this._id, true);
+    __slice_timer_ctl(this._id, 1);
     return this;
   };
   __Timeout.prototype.hasRef = function() {
     return this._refed;
   };
   __Timeout.prototype.refresh = function() {
-    __slice_timer_refresh(this._id);
+    __slice_timer_ctl(this._id, 3);
     return this;
   };
   __Timeout.prototype[Symbol.toPrimitive] = function() {
@@ -318,17 +372,23 @@
   };
 
   globalThis.setTimeout = function(cb, ms) {
-    var a = [];
-    for (var i = 2; i < arguments.length; i++) a.push(arguments[i]);
+    var a = undefined;
+    if (arguments.length > 2) {
+      a = [];
+      for (var i = 2; i < arguments.length; i++) a.push(arguments[i]);
+    }
     return new __Timeout(__slice_timer_set(cb, Number(ms) || 0, false, a));
   };
   globalThis.clearTimeout = function(id) {
     if (id == null) return;
-    __slice_timer_clear(typeof id === "object" ? (id._id | 0) : (Number(id) || 0));
+    __slice_timer_ctl(typeof id === "object" ? (id._id | 0) : (Number(id) || 0), 0);
   };
   globalThis.setInterval = function(cb, ms) {
-    var a = [];
-    for (var i = 2; i < arguments.length; i++) a.push(arguments[i]);
+    var a = undefined;
+    if (arguments.length > 2) {
+      a = [];
+      for (var i = 2; i < arguments.length; i++) a.push(arguments[i]);
+    }
     return new __Timeout(__slice_timer_set(cb, Number(ms) || 0, true, a));
   };
   globalThis.clearInterval = globalThis.clearTimeout;
@@ -336,8 +396,11 @@
     if (typeof cb !== "function") {
       throw new TypeError("setImmediate requires a callback function");
     }
-    var a = [];
-    for (var i = 1; i < arguments.length; i++) a.push(arguments[i]);
+    var a = undefined;
+    if (arguments.length > 1) {
+      a = [];
+      for (var i = 1; i < arguments.length; i++) a.push(arguments[i]);
+    }
     return new __Timeout(__slice_immediate_set(cb, a));
   };
   globalThis.clearImmediate = globalThis.clearTimeout;

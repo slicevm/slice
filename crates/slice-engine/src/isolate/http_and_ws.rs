@@ -2,11 +2,13 @@
 //! Task Draining (`drain_wait_until_tasks`), and Server WebSocket Frame Dispatch (`execute_websocket_event`).
 
 use crate::boa_realm::{
-    acquire_warm_boa_realm, ensure_realm_shards, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_WAIT_UNTIL_COUNT,
+    acquire_warm_boa_realm, call_realm_ctl, ensure_realm_shards, BOA_HTTP_REQ, BOA_HTTP_RES,
+    BOA_WAIT_UNTIL_COUNT, REALM_CTL_SET_DET_MODE, REALM_CTL_SYNC_ENV,
 };
 use crate::isolate::{ExecutionMetrics, SliceIsolate};
 use slice_cas::MappedCasArchive;
 use slice_sandbox::SandboxViolation;
+use std::borrow::Cow;
 
 /// Zero-copy HTTP/1.1 request view borrowed directly from the worker thread's 64 KB socket read buffer.
 #[derive(Debug, Clone, Copy)]
@@ -24,10 +26,53 @@ pub struct HttpRequestContext<'a> {
 pub struct HttpExecutionOutcome {
     pub metrics: ExecutionMetrics,
     pub status_code: u16,
-    pub content_type: String,
+    pub content_type: Cow<'static, str>,
     pub response_body: String,
     pub response_headers: Vec<(String, String)>,
     pub wait_until_count: usize,
+}
+
+/// Zero-clone HTTP outcome used on the hot `slice serve` worker path (`execute_http_request_fast`).
+#[derive(Debug, Clone)]
+pub struct HttpFastOutcome {
+    pub total_time_ns: u64,
+    pub fuel_consumed: u64,
+    pub status_code: u16,
+    pub content_type: Cow<'static, str>,
+    pub response_body: String,
+    pub response_headers: Vec<(String, String)>,
+    pub wait_until_count: usize,
+}
+
+#[inline]
+fn populate_boa_http_req(req: &HttpRequestContext<'_>) {
+    BOA_HTTP_REQ.with(|r| {
+        let mut borrow = r.borrow_mut();
+        borrow.active = true;
+        borrow.method.clear();
+        borrow.method.push_str(req.method);
+        borrow.path.clear();
+        borrow.path.push_str(req.path);
+        borrow.query.clear();
+        borrow.query.push_str(req.query);
+        borrow.tenant_id.clear();
+        borrow.tenant_id.push_str(req.tenant_id);
+        borrow.body.clear();
+        borrow.body.push_str(req.body);
+        borrow.headers_len = req.headers.len();
+        for (idx, &(k, v)) in req.headers.iter().enumerate() {
+            if idx < borrow.headers.len() {
+                borrow.headers[idx].0.clear();
+                borrow.headers[idx].0.push_str(k);
+                borrow.headers[idx].1.clear();
+                borrow.headers[idx].1.push_str(v);
+            } else {
+                borrow.headers.push((k.to_string(), v.to_string()));
+            }
+        }
+    });
+    BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
+    BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
 }
 
 impl SliceIsolate {
@@ -43,52 +88,24 @@ impl SliceIsolate {
         if bytecode.len() >= 8
             && (&bytecode[0..8] == b"SLICEBOA" || &bytecode[0..8] == crate::boacas::BOACAS_MAGIC)
         {
-            BOA_HTTP_REQ.with(|r| {
-                let mut borrow = r.borrow_mut();
-                borrow.active = true;
-                borrow.method.clear();
-                borrow.method.push_str(req.method);
-                borrow.path.clear();
-                borrow.path.push_str(req.path);
-                borrow.query.clear();
-                borrow.query.push_str(req.query);
-                borrow.tenant_id.clear();
-                borrow.tenant_id.push_str(req.tenant_id);
-                borrow.body.clear();
-                borrow.body.push_str(req.body);
-                borrow.headers_len = req.headers.len();
-                for (idx, &(k, v)) in req.headers.iter().enumerate() {
-                    if idx < borrow.headers.len() {
-                        borrow.headers[idx].0.clear();
-                        borrow.headers[idx].0.push_str(k);
-                        borrow.headers[idx].1.clear();
-                        borrow.headers[idx].1.push_str(v);
-                    } else {
-                        borrow.headers.push((k.to_string(), v.to_string()));
-                    }
-                }
-            });
-            BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
-            BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
-
+            populate_boa_http_req(req);
             let metrics_res = self.execute_bytecode(bytecode, cas);
-
             BOA_HTTP_REQ.with(|r| r.borrow_mut().active = false);
-            let metrics = metrics_res?;
+            let mut metrics = metrics_res?;
 
             let custom_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
             let wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.get());
 
             let (status_code, content_type, response_body, response_headers) =
                 if let Some((st, body, ct, hdrs)) = custom_res {
-                    (st, ct, body, hdrs)
+                    (st, Cow::Owned(ct), body, hdrs)
                 } else {
                     let body = if !metrics.stdout.is_empty() {
                         metrics.stdout.join("\n")
                     } else {
-                        metrics.return_value.clone()
+                        std::mem::take(&mut metrics.return_value)
                     };
-                    (200, "application/json".to_string(), body, Vec::new())
+                    (200, Cow::Borrowed("application/json"), body, Vec::new())
                 };
 
             return Ok(HttpExecutionOutcome {
@@ -101,16 +118,76 @@ impl SliceIsolate {
             });
         }
 
-        let metrics = self.execute_bytecode(bytecode, cas)?;
+        let mut metrics = self.execute_bytecode(bytecode, cas)?;
         let body = if !metrics.stdout.is_empty() {
             metrics.stdout.join("\n")
         } else {
-            metrics.return_value.clone()
+            std::mem::take(&mut metrics.return_value)
         };
         Ok(HttpExecutionOutcome {
             metrics,
             status_code: 200,
-            content_type: "application/json".to_string(),
+            content_type: Cow::Borrowed("application/json"),
+            response_body: body,
+            response_headers: Vec::new(),
+            wait_until_count: 0,
+        })
+    }
+
+    /// Zero-clone HTTP request dispatcher for `slice serve` worker loops.
+    /// Avoids cloning `tenant_id`, `stdout`, `"application/json"`, and `"undefined"` on every request.
+    pub fn execute_http_request_fast(
+        &mut self,
+        bytecode: &[u8],
+        cas: Option<&MappedCasArchive>,
+        req: &HttpRequestContext<'_>,
+    ) -> Result<HttpFastOutcome, SandboxViolation> {
+        if bytecode.len() >= 8
+            && (&bytecode[0..8] == b"SLICEBOA" || &bytecode[0..8] == crate::boacas::BOACAS_MAGIC)
+        {
+            populate_boa_http_req(req);
+            let core_res = self.execute_bytecode_core(bytecode, cas, false);
+            BOA_HTTP_REQ.with(|r| r.borrow_mut().active = false);
+            let (_instantiate_ns, total_time_ns, ret_str) = core_res?;
+
+            let custom_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
+            let wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.get());
+
+            let (status_code, content_type, response_body, response_headers) =
+                if let Some((st, body, ct, hdrs)) = custom_res {
+                    (st, Cow::Owned(ct), body, hdrs)
+                } else {
+                    let body = if !self.stdout.is_empty() {
+                        self.stdout.join("\n")
+                    } else {
+                        ret_str
+                    };
+                    (200, Cow::Borrowed("application/json"), body, Vec::new())
+                };
+
+            return Ok(HttpFastOutcome {
+                total_time_ns,
+                fuel_consumed: self.compartment.fuel_consumed,
+                status_code,
+                content_type,
+                response_body,
+                response_headers,
+                wait_until_count,
+            });
+        }
+
+        let (_instantiate_ns, total_time_ns, ret_str) =
+            self.execute_bytecode_core(bytecode, cas, false)?;
+        let body = if !self.stdout.is_empty() {
+            self.stdout.join("\n")
+        } else {
+            ret_str
+        };
+        Ok(HttpFastOutcome {
+            total_time_ns,
+            fuel_consumed: self.compartment.fuel_consumed,
+            status_code: 200,
+            content_type: Cow::Borrowed("application/json"),
             response_body: body,
             response_headers: Vec::new(),
             wait_until_count: 0,
@@ -131,15 +208,11 @@ impl SliceIsolate {
         let mut realm = acquire_warm_boa_realm();
 
         if flags.has_env_keys {
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"__slice_sync_process_env(true);",
-            ));
+            call_realm_ctl(&mut realm, REALM_CTL_SYNC_ENV, true);
         }
         if self.deterministic_seed.is_some() {
             crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"__slice_set_det_mode(true);",
-            ));
+            call_realm_ctl(&mut realm, REALM_CTL_SET_DET_MODE, true);
         }
 
         self.apply_boa_realm_runtime_limits(&mut realm);
@@ -187,31 +260,40 @@ impl SliceIsolate {
         ensure_realm_shards(&mut realm, (1 << 13) | (1 << 7), false);
 
         if flags.has_env_keys {
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"__slice_sync_process_env(true);",
-            ));
+            call_realm_ctl(&mut realm, REALM_CTL_SYNC_ENV, true);
         }
         if self.deterministic_seed.is_some() {
             crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
-            let _ = realm.ctx.eval(boa_engine::Source::from_bytes(
-                b"__slice_set_det_mode(true);",
-            ));
+            call_realm_ctl(&mut realm, REALM_CTL_SET_DET_MODE, true);
         }
 
         self.apply_boa_realm_runtime_limits(&mut realm);
 
         let prev_stdout_len = self.stdout.len();
-        let js_call = format!(
-            "globalThis.__slice_dispatch_server_ws({}, {}, {}, {}, {});",
-            serde_json::to_string(event_type).unwrap_or_else(|_| "\"message\"".to_string()),
-            if is_binary { "true" } else { "false" },
-            serde_json::to_string(&payload_arg).unwrap_or_else(|_| "\"\"".to_string()),
-            code,
-            serde_json::to_string(reason).unwrap_or_else(|_| "\"\"".to_string()),
-        );
-        let eval_res = realm
+        let dispatch_fn = realm
             .ctx
-            .eval(boa_engine::Source::from_bytes(js_call.as_bytes()));
+            .global_object()
+            .get(
+                boa_engine::js_string!("__slice_dispatch_server_ws"),
+                &mut realm.ctx,
+            )
+            .ok()
+            .and_then(|v| v.as_object());
+        let eval_res = if let Some(fn_obj) = dispatch_fn {
+            fn_obj.call(
+                &boa_engine::JsValue::undefined(),
+                &[
+                    boa_engine::JsValue::from(boa_engine::js_string!(event_type)),
+                    boa_engine::JsValue::from(is_binary),
+                    boa_engine::JsValue::from(boa_engine::js_string!(payload_arg)),
+                    boa_engine::JsValue::from(i32::from(code)),
+                    boa_engine::JsValue::from(boa_engine::js_string!(reason)),
+                ],
+                &mut realm.ctx,
+            )
+        } else {
+            Ok(boa_engine::JsValue::undefined())
+        };
 
         // Drive microtasks/timers before draining the server WebSocket outbox (since
         // `finish_boa_compartment_execution` clears thread-local WebSocket state on teardown).

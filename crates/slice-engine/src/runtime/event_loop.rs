@@ -3,10 +3,11 @@
 //! Outbound `fetch()` Multiplexer (`Promise.all([fetch(...), ...])`).
 
 use crate::boa_realm::{
-    mark_subsystem_dirty, BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE,
-    BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET, BOA_LAST_EXIT_CODE, BOA_NET_HOSTS,
-    BOA_PROCESS_EXIT, BOA_UNCAUGHT_ERROR, BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION, DIRTY_ALS,
-    DIRTY_EVENT_LOOP, DIRTY_SOCKETS, DIRTY_WORKERS,
+    has_process_exit, has_uncaught_error, mark_subsystem_dirty, set_last_exit_code,
+    set_uncaught_error, BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE,
+    BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_EXEC_DIRTY, BOA_KV_MEM_BUDGET,
+    BOA_LAST_EXIT_CODE, BOA_NET_HOSTS, BOA_PROCESS_EXIT, BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION,
+    DIRTY_ALS, DIRTY_EVENT_LOOP, DIRTY_SOCKETS, DIRTY_WORKERS, EXEC_DIRTY_REJECTIONS,
 };
 use crate::outbound_http::{
     execute_outbound_fetch_with_redirects, outbound_pool_reuse_count, record_outbound_pool_reuses,
@@ -603,7 +604,7 @@ pub(crate) fn format_uncaught_js_error(err: &boa_engine::JsError, ctx: &mut Cont
 }
 
 pub(crate) fn handle_uncaught_js_error(err: boa_engine::JsError, ctx: &mut Context) -> bool {
-    if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+    if has_process_exit() {
         return true;
     }
     let msg = err.to_string();
@@ -668,7 +669,7 @@ pub(crate) fn handle_uncaught_js_error(err: boa_engine::JsError, ctx: &mut Conte
                         ],
                         ctx,
                     );
-                    if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+                    if has_process_exit() {
                         return true;
                     }
                     match emit_fn.call(
@@ -682,16 +683,16 @@ pub(crate) fn handle_uncaught_js_error(err: boa_engine::JsError, ctx: &mut Conte
                     ) {
                         Ok(v) if v.to_boolean() => {
                             let _ = run_jobs_and_check_rejections(ctx);
-                            return BOA_UNCAUGHT_ERROR.with(|e| e.borrow().is_none())
+                            return !has_uncaught_error()
                                 && BOA_VIOLATION.with(|v| v.borrow().is_none());
                         }
                         Err(handler_err) => {
-                            if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+                            if has_process_exit() {
                                 return true;
                             }
                             let h_formatted = format_uncaught_js_error(&handler_err, ctx);
-                            BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = Some(h_formatted));
-                            BOA_LAST_EXIT_CODE.with(|c| c.set(Some(1)));
+                            set_uncaught_error(h_formatted);
+                            set_last_exit_code(1);
                             return false;
                         }
                         Ok(_) => {}
@@ -701,15 +702,18 @@ pub(crate) fn handle_uncaught_js_error(err: boa_engine::JsError, ctx: &mut Conte
         }
     }
 
-    BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = Some(formatted));
-    BOA_LAST_EXIT_CODE.with(|c| c.set(Some(1)));
+    set_uncaught_error(formatted);
+    set_last_exit_code(1);
     false
 }
 
 pub(crate) fn drain_unhandled_rejections(ctx: &mut Context) -> bool {
+    if (BOA_EXEC_DIRTY.with(|c| c.get()) & EXEC_DIRTY_REJECTIONS) == 0 {
+        return true;
+    }
     while BOA_UNHANDLED_REJECTIONS.with(|u| !u.borrow().is_empty()) {
-        if BOA_PROCESS_EXIT.with(|e| e.get().is_some())
-            || BOA_UNCAUGHT_ERROR.with(|e| e.borrow().is_some())
+        if has_process_exit()
+            || has_uncaught_error()
             || BOA_VIOLATION.with(|v| v.borrow().is_some())
         {
             BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
@@ -780,7 +784,7 @@ pub(crate) fn drain_unhandled_rejections(ctx: &mut Context) -> bool {
                                         return false;
                                     }
                                 }
-                                if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+                                if has_process_exit() {
                                     return false;
                                 }
                                 continue;
@@ -789,7 +793,7 @@ pub(crate) fn drain_unhandled_rejections(ctx: &mut Context) -> bool {
                                 if !handle_uncaught_js_error(handler_err, ctx) {
                                     return false;
                                 }
-                                if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+                                if has_process_exit() {
                                     return false;
                                 }
                                 continue;
@@ -804,9 +808,8 @@ pub(crate) fn drain_unhandled_rejections(ctx: &mut Context) -> bool {
                 .to_string(ctx)
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_else(|_| reason.display().to_string());
-            BOA_UNCAUGHT_ERROR
-                .with(|e| *e.borrow_mut() = Some(format!("Uncaught (in promise) {}", reason_str)));
-            BOA_LAST_EXIT_CODE.with(|c| c.set(Some(1)));
+            set_uncaught_error(format!("Uncaught (in promise) {}", reason_str));
+            set_last_exit_code(1);
             BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
             return false;
         }
@@ -821,7 +824,7 @@ pub(crate) fn run_jobs_and_check_rejections(ctx: &mut Context) -> bool {
             return false;
         }
     }
-    if BOA_PROCESS_EXIT.with(|e| e.get().is_some()) {
+    if has_process_exit() {
         return false;
     }
     drain_unhandled_rejections(ctx)
@@ -830,8 +833,8 @@ pub(crate) fn run_jobs_and_check_rejections(ctx: &mut Context) -> bool {
 fn try_emit_before_exit(ctx: &mut Context, before_exit_count: &mut usize) -> bool {
     if (BOA_DIRTY_SUBSYSTEMS.with(|d| d.get()) & crate::boa_realm::DIRTY_PROCESS) == 0
         || *before_exit_count >= 64
-        || BOA_PROCESS_EXIT.with(|e| e.get().is_some())
-        || BOA_UNCAUGHT_ERROR.with(|e| e.borrow().is_some())
+        || has_process_exit()
+        || has_uncaught_error()
         || BOA_VIOLATION.with(|v| v.borrow().is_some())
     {
         return false;
@@ -936,7 +939,7 @@ pub(crate) fn finalize_and_reset_process_state(ctx: &mut Context) {
             }
         }
         if code != 0 || BOA_LAST_EXIT_CODE.with(|e| e.get().is_some()) {
-            BOA_LAST_EXIT_CODE.with(|e| e.set(Some(code)));
+            set_last_exit_code(code);
         }
         if crate::workers::is_worker_thread() && code != 0 {
             crate::workers::worker_self_set_listening(false, Some(code));
@@ -982,8 +985,8 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
 
     loop {
         if BOA_VIOLATION.with(|v| v.borrow().is_some())
-            || BOA_PROCESS_EXIT.with(|e| e.get().is_some())
-            || BOA_UNCAUGHT_ERROR.with(|e| e.borrow().is_some())
+            || has_process_exit()
+            || has_uncaught_error()
             || crate::workers::is_current_worker_terminated()
         {
             clear_event_loop_state();
@@ -1000,8 +1003,8 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
         if did_parent_w || did_self_w {
             idle_worker_polls = 0;
             if BOA_VIOLATION.with(|v| v.borrow().is_some())
-                || BOA_PROCESS_EXIT.with(|e| e.get().is_some())
-                || BOA_UNCAUGHT_ERROR.with(|e| e.borrow().is_some())
+                || has_process_exit()
+                || has_uncaught_error()
                 || crate::workers::is_current_worker_terminated()
             {
                 clear_event_loop_state();
@@ -1023,15 +1026,22 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                     i += 1;
                 }
             }
-            let in_flight_ids: Vec<u32> = loop_st.in_flight_fetches.keys().copied().collect();
-            for fid in in_flight_ids {
-                let abort_opt = loop_st
+            if !loop_st.in_flight_fetches.is_empty()
+                && loop_st
                     .in_flight_fetches
-                    .get(&fid)
-                    .and_then(|h| is_signal_aborted(&h.signal_obj, ctx));
-                if let Some(reason) = abort_opt {
-                    if let Some(removed) = loop_st.in_flight_fetches.remove(&fid) {
-                        aborted_callbacks.push((removed.reject_fn, reason));
+                    .values()
+                    .any(|h| h.signal_obj.is_some())
+            {
+                let in_flight_ids: Vec<u32> = loop_st.in_flight_fetches.keys().copied().collect();
+                for fid in in_flight_ids {
+                    let abort_opt = loop_st
+                        .in_flight_fetches
+                        .get(&fid)
+                        .and_then(|h| is_signal_aborted(&h.signal_obj, ctx));
+                    if let Some(reason) = abort_opt {
+                        if let Some(removed) = loop_st.in_flight_fetches.remove(&fid) {
+                            aborted_callbacks.push((removed.reject_fn, reason));
+                        }
                     }
                 }
             }
@@ -1234,8 +1244,8 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                     return;
                 }
                 if BOA_VIOLATION.with(|v| v.borrow().is_some())
-                    || BOA_PROCESS_EXIT.with(|e| e.get().is_some())
-                    || BOA_UNCAUGHT_ERROR.with(|e| e.borrow().is_some())
+                    || has_process_exit()
+                    || has_uncaught_error()
                 {
                     clear_event_loop_state();
                     return;
