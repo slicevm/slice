@@ -28,6 +28,11 @@ pub(crate) const REALM_CTL_SET_NEXT_TICK: i32 = 3;
 pub(crate) const REALM_CTL_RESET_WU: i32 = 4;
 pub(crate) const REALM_CTL_DISPATCH_HTTP_BRIDGE: i32 = 5;
 
+pub(crate) const HOST_GROUP_HTTP_BRIDGE: u8 = 1 << 0;
+pub(crate) const HOST_GROUP_SEMVER_FAST: u8 = 1 << 1;
+pub(crate) const HOST_GROUP_KV_SANDBOX: u8 = 1 << 2;
+pub(crate) const HOST_GROUP_DET: u8 = 1 << 3;
+
 #[derive(Default, Clone)]
 pub(crate) struct ActiveBoaHttpReq {
     pub(crate) active: bool,
@@ -43,6 +48,8 @@ pub(crate) struct ActiveBoaHttpReq {
 pub(crate) struct WarmBoaRealm {
     pub(crate) ctx: boa_engine::Context,
     pub(crate) loaded_bundles: FxHashMap<u64, boa_engine::JsObject>,
+    pub(crate) loaded_bundle_flags: FxHashMap<u64, u16>,
+    pub(crate) loaded_bundle_fused_specs: FxHashMap<u64, u64>,
     pub(crate) compiled_scripts: FxHashMap<u64, boa_engine::Script>,
     pub(crate) ses_check_fn: Option<boa_engine::JsObject>,
     pub(crate) ensure_shard_fn: Option<boa_engine::JsObject>,
@@ -50,6 +57,7 @@ pub(crate) struct WarmBoaRealm {
     pub(crate) drain_wu_fn: Option<boa_engine::JsObject>,
     pub(crate) ctl_fn: Option<boa_engine::JsObject>,
     pub(crate) loaded_shards_mask: u32,
+    pub(crate) registered_host_groups: u8,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -122,6 +130,8 @@ thread_local! {
         const { std::cell::RefCell::new(boa_engine::JsValue::undefined()) };
     pub(crate) static BOA_ACTIVE_SOURCE_PTR_LEN: std::cell::Cell<(usize, usize)> =
         const { std::cell::Cell::new((0, 0)) };
+    pub(crate) static BOA_ACTIVE_SOURCE_FUSED_SPEC: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
     pub(crate) static BOA_TRACE_ENABLED: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
     pub(crate) static BOA_TRACE_EVENTS: std::cell::RefCell<Vec<ChromeTraceEvent>> =
@@ -323,6 +333,7 @@ pub(crate) fn record_trace_event(
 /// without copying or allocating the source string on the hot execution path.
 pub(crate) struct ActiveSourceSliceGuard<'a> {
     prev: (usize, usize),
+    prev_fused_spec: u64,
     _marker: std::marker::PhantomData<&'a str>,
 }
 
@@ -334,8 +345,10 @@ impl<'a> ActiveSourceSliceGuard<'a> {
             c.set((src.as_ptr() as usize, src.len()));
             p
         });
+        let prev_fused_spec = BOA_ACTIVE_SOURCE_FUSED_SPEC.with(|c| c.replace(0));
         Self {
             prev,
+            prev_fused_spec,
             _marker: std::marker::PhantomData,
         }
     }
@@ -345,7 +358,29 @@ impl<'a> Drop for ActiveSourceSliceGuard<'a> {
     #[inline]
     fn drop(&mut self) {
         BOA_ACTIVE_SOURCE_PTR_LEN.with(|c| c.set(self.prev));
+        BOA_ACTIVE_SOURCE_FUSED_SPEC.with(|c| c.set(self.prev_fused_spec));
     }
+}
+
+#[inline]
+pub(crate) fn encode_fused_source_spec(shards_mask: u32, init_lazy: bool) -> u64 {
+    (1u64 << 63) | ((u64::from(init_lazy)) << 32) | u64::from(shards_mask)
+}
+
+#[inline]
+pub(crate) fn set_active_source_fused_spec(spec: u64) {
+    BOA_ACTIVE_SOURCE_FUSED_SPEC.with(|c| c.set(spec));
+}
+
+#[cold]
+fn active_source_line_offset() -> usize {
+    let spec = BOA_ACTIVE_SOURCE_FUSED_SPEC.with(|c| c.get());
+    if (spec & (1u64 << 63)) == 0 {
+        return 0;
+    }
+    let shards_mask = spec as u32;
+    let init_lazy = ((spec >> 32) & 1) != 0;
+    crate::js_preludes::count_fused_prelude_newlines(shards_mask, init_lazy)
 }
 
 pub(crate) fn map_stack_with_active_source(raw_stack: &str) -> String {
@@ -359,7 +394,8 @@ pub(crate) fn map_stack_with_active_source(raw_stack: &str) -> String {
         let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
         std::str::from_utf8_unchecked(bytes)
     };
-    slice_cas::map_bundled_stack_trace(active_src, raw_stack)
+    let line_offset = active_source_line_offset();
+    slice_cas::map_bundled_stack_trace_with_offset(active_src, raw_stack, line_offset)
 }
 
 pub(crate) fn map_error_with_active_source(raw_error: &str) -> String {
@@ -373,7 +409,8 @@ pub(crate) fn map_error_with_active_source(raw_error: &str) -> String {
         let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
         std::str::from_utf8_unchecked(bytes)
     };
-    slice_cas::map_bundled_error_location(active_src, raw_error)
+    let line_offset = active_source_line_offset();
+    slice_cas::map_bundled_error_location_with_offset(active_src, raw_error, line_offset)
 }
 
 pub(crate) struct SliceJobExecutor {
@@ -568,6 +605,8 @@ pub(crate) fn create_bare_boa_realm() -> WarmBoaRealm {
     WarmBoaRealm {
         ctx,
         loaded_bundles: FxHashMap::default(),
+        loaded_bundle_flags: FxHashMap::default(),
+        loaded_bundle_fused_specs: FxHashMap::default(),
         compiled_scripts: FxHashMap::default(),
         ses_check_fn: None,
         ensure_shard_fn: None,
@@ -575,6 +614,7 @@ pub(crate) fn create_bare_boa_realm() -> WarmBoaRealm {
         drain_wu_fn: None,
         ctl_fn: None,
         loaded_shards_mask: 0,
+        registered_host_groups: 0,
     }
 }
 

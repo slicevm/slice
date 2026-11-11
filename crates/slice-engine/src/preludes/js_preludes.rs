@@ -197,6 +197,33 @@ pub(crate) fn build_fused_prelude_prefix(
     out
 }
 
+/// Computes the exact newline count emitted by [`build_fused_prelude_prefix`] so runtime stack
+/// traces from precompiled `SLICEBC\x01` `CodeBlock`s subtract the prelude prefix offset accurately.
+#[cold]
+pub(crate) fn count_fused_prelude_newlines(shards_mask: u32, init_lazy_getters: bool) -> usize {
+    let mut nl = ULTRA_CORE_PRELUDE.iter().filter(|&&b| b == b'\n').count();
+    for shard_id in SHARD_LOAD_ORDER {
+        let bit = 1u32 << shard_id;
+        if (shards_mask & bit) != 0 {
+            let shard_bytes = shard_prelude_bytes(shard_id);
+            nl += shard_bytes.iter().filter(|&&b| b == b'\n').count();
+        }
+    }
+    for builtin_bit in 19..=28u32 {
+        if (shards_mask & (1u32 << builtin_bit)) != 0 {
+            let b_bytes = crate::node_builtins::builtin_snippet_for_bit(builtin_bit);
+            nl += b_bytes.iter().filter(|&&b| b == b'\n').count();
+        }
+    }
+    if init_lazy_getters {
+        nl += LAZY_GETTERS_INIT_PRELUDE
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count();
+    }
+    nl
+}
+
 /// Concatenates `build_fused_prelude_prefix` and `js_code` into a single contiguous
 /// ECMAScript compilation unit so `boa_engine` parses and compiles everything in one pass.
 #[allow(dead_code)]

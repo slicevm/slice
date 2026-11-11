@@ -166,10 +166,11 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
                 .unwrap_or_default();
 
             // Egress DLP inspection across response body, Content-Type, and serialized response headers.
-            let egress_secrets = BOA_EGRESS_SECRETS.with(|s| s.borrow().clone());
-            if !egress_secrets.is_empty() {
+            let has_secrets = BOA_EGRESS_SECRETS.with(|s| !s.borrow().is_empty());
+            if has_secrets {
                 let tenant_id = active_tenant_id_or_default();
-                if let Err(violation) =
+                let dlp_res = BOA_EGRESS_SECRETS.with(|s| {
+                    let egress_secrets = s.borrow();
                     verify_egress_secrets_slice(&tenant_id, &egress_secrets, &body)
                         .and_then(|()| {
                             verify_egress_secrets_slice(&tenant_id, &egress_secrets, &content_type)
@@ -177,7 +178,8 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
                         .and_then(|()| {
                             verify_egress_secrets_slice(&tenant_id, &egress_secrets, &headers_json)
                         })
-                {
+                });
+                if let Err(violation) = dlp_res {
                     let msg = violation.to_string();
                     BOA_VIOLATION.with(|v| {
                         if v.borrow().is_none() {

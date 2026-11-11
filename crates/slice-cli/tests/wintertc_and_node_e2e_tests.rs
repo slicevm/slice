@@ -722,3 +722,225 @@ describe("TSX SSR & Event Loop Suite", () => {
         "<!doctype html><section class=\"edge-card\" data-count=\"2\"><h2>Wave A &lt;Rust&gt;</h2><ul><li>Oxc TSX</li><li>Slice SSR &amp; &lt;Safe&gt;</li></ul></section>"
     ));
 }
+
+#[test]
+fn test_multiframe_caught_and_uncaught_stack_traces_across_project_file_and_cas() {
+    let tmp_dir =
+        env::temp_dir().join(format!("slice_multiframe_stack_e2e_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(tmp_dir.join("src")).unwrap();
+
+    std::fs::write(
+        tmp_dir.join("package.json"),
+        r#"{"name":"stack-trace-suite","main":"src/index.ts"}"#,
+    )
+    .unwrap();
+
+    // Exact line numbers:
+    // 5: export function validate(o: Order): number {
+    // 6:   if (o.qty <= 0) throw new RangeError("bad qty for " + o.id);
+    // 10: export class Ledger {
+    // 11:   post(o: Order): number {
+    // 12:     return validate(o);
+    std::fs::write(
+        tmp_dir.join("src/lib.ts"),
+        "export interface Order {\n  id: string;\n  qty: number;\n}\nexport function validate(o: Order): number {\n  if (o.qty <= 0) throw new RangeError(\"bad qty for \" + o.id);\n  return o.qty * 100;\n}\n\nexport class Ledger {\n  post(o: Order): number {\n    return validate(o);\n  }\n}\n",
+    )
+    .unwrap();
+
+    // Exact line numbers in src/index.ts:
+    // 6: function run() {
+    // 7:   return ledger.post({ id: "ORD-1", qty: 0 });
+    // 8: }
+    // 10: try {
+    // 11:   run();
+    // 12: } catch (e: any) { ... }
+    // 26: ledger.post({ id: "ORD-2", qty: -1 });
+    std::fs::write(
+        tmp_dir.join("src/index.ts"),
+        "import { Ledger } from \"./lib\";\n\nconst ledger = new Ledger();\n\n\nfunction run() {\n  return ledger.post({ id: \"ORD-1\", qty: 0 });\n}\n\ntry {\n  run();\n} catch (e: any) {\n  const st = String(e.stack);\n  if (\n    !st.includes(\"at validate (src/lib.ts:6:\") ||\n    !st.includes(\"at Ledger.post (src/lib.ts:12:\") ||\n    !st.includes(\"at run (src/index.ts:7:\") ||\n    !st.includes(\"at src/index.ts:11:\") ||\n    st.includes(\"unknown at :\") ||\n    st.includes(\"<main>\")\n  ) {\n    throw new Error(\"CAUGHT_STACK_MISMATCH: \" + st);\n  }\n}\n\nledger.post({ id: \"ORD-2\", qty: -1 });\n",
+    )
+    .unwrap();
+
+    let assert_uncaught_stack = |mode: &str, err_msg: &str| {
+        assert!(
+            !err_msg.contains("CAUGHT_STACK_MISMATCH"),
+            "[{}] caught stack failed validation:\n{}",
+            mode,
+            err_msg
+        );
+        assert!(
+            err_msg.starts_with("Uncaught RangeError: bad qty for ORD-2\n"),
+            "[{}] header should strip raw bundle location:\n{}",
+            mode,
+            err_msg
+        );
+        assert!(
+            err_msg.contains("    at validate (src/lib.ts:6:"),
+            "[{}] missing validate frame:\n{}",
+            mode,
+            err_msg
+        );
+        assert!(
+            err_msg.contains("    at Ledger.post (src/lib.ts:12:"),
+            "[{}] missing Ledger.post class method frame:\n{}",
+            mode,
+            err_msg
+        );
+        assert!(
+            err_msg.contains("    at src/index.ts:26:"),
+            "[{}] missing top-level caller frame:\n{}",
+            mode,
+            err_msg
+        );
+        assert!(
+            !err_msg.contains("unknown at :") && !err_msg.contains("<main>"),
+            "[{}] leaked unmapped bundle frame or <main>:\n{}",
+            mode,
+            err_msg
+        );
+    };
+
+    // 1. Folder entrypoint
+    let folder_err = cmd_run(&[tmp_dir.to_string_lossy().to_string(), "--quiet".to_string()])
+        .expect_err("folder run must fail with uncaught RangeError");
+    assert_uncaught_stack("folder", &folder_err.to_string());
+
+    // 2. Direct file entrypoint
+    let file_err = cmd_run(&[
+        tmp_dir.join("src/index.ts").to_string_lossy().to_string(),
+        "--quiet".to_string(),
+    ])
+    .expect_err("file run must fail with uncaught RangeError");
+    assert_uncaught_stack("file", &file_err.to_string());
+
+    // 3. Packed .cas archive with original TypeScript sources deleted from disk
+    let cas_path = tmp_dir.join("app.cas");
+    build_cas_archive(&tmp_dir, &cas_path, "./index.ts").expect("pack cas archive");
+    std::fs::remove_dir_all(tmp_dir.join("src")).unwrap();
+
+    let cas_err = cmd_run(&[
+        cas_path.to_string_lossy().to_string(),
+        "--quiet".to_string(),
+    ])
+    .expect_err("cas run must fail with uncaught RangeError");
+    assert_uncaught_stack("cas", &cas_err.to_string());
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_wintertc_fast_url_search_params_and_lazy_response_headers_keep_alive() {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+
+    let handler_src = r#"
+export default {
+  fetch(req: Request): Response {
+    const u = new URL(req.url);
+    const n = Number(u.searchParams.get("n") ?? "0");
+    const tag = u.searchParams.get("tag") ?? "";
+    const hasFlag = u.searchParams.has("flag");
+
+    // Verify FastUrlProto property accessors and mutation materialization
+    const cloneUrl = new URL(req.url);
+    cloneUrl.searchParams.set("extra", "1");
+    const syncedHref = cloneUrl.href;
+    cloneUrl.pathname = "/mutated";
+
+    let acc = 0;
+    for (let i = 0; i < n; i++) {
+      acc = (acc + i * 7) % 1000003;
+    }
+    const body = JSON.stringify({
+      n,
+      acc,
+      tag,
+      hasFlag,
+      pathname: u.pathname,
+      originOk: u.origin.startsWith("http://localhost"),
+      syncedHasExtra: syncedHref.includes("extra=1"),
+      mutatedPath: cloneUrl.pathname,
+    });
+    return new Response(body, {
+      status: 201,
+      headers: {
+        "content-type": "application/json",
+        "content-length": String(body.length),
+        "x-edge-route": "fast-ka",
+      },
+    });
+  }
+};
+"#;
+
+    let tmp_dir = env::temp_dir().join(format!("slice_fast_url_ka_e2e_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let entry_path = tmp_dir.join("handler.ts");
+    std::fs::write(&entry_path, handler_src).unwrap();
+    let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_path).unwrap();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    let bytecode = Arc::new(compile_source_to_bytecode(&bundled));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let bc_srv = Arc::clone(&bytecode);
+    let counter_srv = Arc::clone(&counter);
+
+    let srv = std::thread::spawn(move || {
+        SliceIsolate::prewarm_boa_bundle_with_caps(&bc_srv, &CapabilityToken::pure_compute());
+        let mut read_buf = vec![0u8; 65536];
+        let mut write_buf = Vec::with_capacity(4096);
+        if let Ok((stream, _)) = listener.accept() {
+            let _ = serve_connection_keep_alive(
+                stream,
+                0,
+                &bc_srv,
+                None,
+                None,
+                None,
+                &CapabilityToken::pure_compute(),
+                2_000_000,
+                4 * 1024 * 1024,
+                &mut read_buf,
+                &mut write_buf,
+                Some((&counter_srv, 2)),
+            );
+        }
+    });
+
+    let mut client = TcpStream::connect(addr).unwrap();
+    // Request 1: plain ASCII query parameters on keep-alive connection
+    client
+        .write_all(
+            b"GET /compute?n=100&tag=plain&flag HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+        )
+        .unwrap();
+
+    // Request 2: percent-encoded and plus-encoded query parameters on the same TCP socket
+    client
+        .write_all(
+            b"GET /compute?n=10&tag=hello+world%21 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+
+    let mut raw_all = String::new();
+    client.read_to_string(&mut raw_all).unwrap();
+    srv.join().unwrap();
+
+    assert_eq!(
+        raw_all.matches("HTTP/1.1 201 Created").count(),
+        2,
+        "both keep-alive responses must return 201 Created:\n{}",
+        raw_all
+    );
+    assert!(raw_all.contains("x-edge-route: fast-ka"));
+    assert!(raw_all.contains("\"acc\":34650"));
+    assert!(raw_all.contains("\"tag\":\"plain\""));
+    assert!(raw_all.contains("\"hasFlag\":true"));
+    assert!(raw_all.contains("\"tag\":\"hello world!\""));
+    assert!(raw_all.contains("\"syncedHasExtra\":true"));
+    assert!(raw_all.contains("\"mutatedPath\":\"/mutated\""));
+}

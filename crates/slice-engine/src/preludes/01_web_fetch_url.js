@@ -33,29 +33,32 @@
   }
 
   function URLSearchParams(init, u) {
-    this._p = [];
     this._u = u || null;
-    if (!init) return;
+    this._raw = "";
+    if (!init) {
+      this._p = [];
+      return;
+    }
     if (typeof init === "string") {
       var q = init.charCodeAt(0) === 63 ? init.slice(1) : init;
-      if (q.length > 0) {
-        var ps = q.split("&");
-        for (var i = 0; i < ps.length; i++) {
-          var sg = ps[i];
-          if (!sg) continue;
-          var eq = sg.indexOf("=");
-          if (eq === -1) this._p.push([__uspD(sg), ""]);
-          else this._p.push([__uspD(sg.slice(0, eq)), __uspD(sg.slice(eq + 1))]);
-        }
+      if (q.length === 0) {
+        this._p = [];
+      } else {
+        this._raw = q;
+        this._p = null;
       }
-    } else if (Array.isArray(init)) {
+      return;
+    }
+    this._p = [];
+    if (Array.isArray(init)) {
       for (var j = 0; j < init.length; j++) {
         var pr = init[j];
         if (pr && pr.length >= 2) this._p.push([String(pr[0]), String(pr[1])]);
       }
     } else if (typeof init === "object") {
-      if (Array.isArray(init._p)) {
-        for (var m = 0; m < init._p.length; m++) this._p.push([init._p[m][0], init._p[m][1]]);
+      if (init._isUSP) {
+        var sp = init._ensureP();
+        for (var m = 0; m < sp.length; m++) this._p.push([sp[m][0], sp[m][1]]);
       } else {
         var ks = Object.keys(init);
         for (var k = 0; k < ks.length; k++) this._p.push([ks[k], String(init[ks[k]])]);
@@ -63,24 +66,69 @@
     }
   }
   URLSearchParams.prototype._isUSP = true;
+  URLSearchParams.prototype._ensureP = function() {
+    var p = this._p;
+    if (p !== null) return p;
+    p = [];
+    this._p = p;
+    var q = this._raw;
+    this._raw = "";
+    if (q.length > 0) {
+      var ps = q.split("&");
+      for (var i = 0; i < ps.length; i++) {
+        var sg = ps[i];
+        if (!sg) continue;
+        var eq = sg.indexOf("=");
+        if (eq === -1) p.push([__uspD(sg), ""]);
+        else p.push([__uspD(sg.slice(0, eq)), __uspD(sg.slice(eq + 1))]);
+      }
+    }
+    return p;
+  };
   URLSearchParams.prototype._sync = function() {
     if (this._u) this._u._syncSearch();
   };
   URLSearchParams.prototype.get = function(n) {
-    var k = typeof n === "string" ? n : String(n), p = this._p;
+    var k = typeof n === "string" ? n : String(n);
+    var p = this._p;
+    if (p === null) {
+      var q = this._raw;
+      if (!q) return null;
+      if (q.indexOf("+") === -1 && q.indexOf("%") === -1) {
+        var qLen = q.length, kLen = k.length, pos = 0;
+        while (pos < qLen) {
+          var amp = q.indexOf("&", pos);
+          var end = amp === -1 ? qLen : amp;
+          var sgLen = end - pos;
+          if (sgLen > 0) {
+            if (sgLen > kLen && q.charCodeAt(pos + kLen) === 61 && q.startsWith(k, pos)) {
+              return q.slice(pos + kLen + 1, end);
+            }
+            if (sgLen === kLen && q.startsWith(k, pos)) {
+              return "";
+            }
+          }
+          if (amp === -1) break;
+          pos = amp + 1;
+        }
+        return null;
+      }
+      p = this._ensureP();
+    }
     for (var i = 0; i < p.length; i++) {
       if (p[i][0] === k) return p[i][1];
     }
     return null;
   };
   URLSearchParams.prototype.getAll = function(n) {
-    var k = typeof n === "string" ? n : String(n), p = this._p, r = [];
+    var k = typeof n === "string" ? n : String(n), p = this._ensureP(), r = [];
     for (var i = 0; i < p.length; i++) {
       if (p[i][0] === k) r.push(p[i][1]);
     }
     return r;
   };
   URLSearchParams.prototype.has = function(n) {
+    if (this._p === null) return this.get(n) !== null;
     var k = typeof n === "string" ? n : String(n), p = this._p;
     for (var i = 0; i < p.length; i++) {
       if (p[i][0] === k) return true;
@@ -90,7 +138,7 @@
   URLSearchParams.prototype.set = function(n, v) {
     var k = typeof n === "string" ? n : String(n);
     var s = typeof v === "string" ? v : String(v);
-    var p = this._p, len = p.length, fi = -1;
+    var p = this._ensureP(), len = p.length, fi = -1;
     for (var i = 0; i < len; i++) {
       if (p[i][0] === k) {
         if (fi === -1) {
@@ -107,11 +155,11 @@
     if (this._u) this._u._syncSearch();
   };
   URLSearchParams.prototype.append = function(n, v) {
-    this._p.push([typeof n === "string" ? n : String(n), typeof v === "string" ? v : String(v)]);
+    this._ensureP().push([typeof n === "string" ? n : String(n), typeof v === "string" ? v : String(v)]);
     if (this._u) this._u._syncSearch();
   };
   URLSearchParams.prototype.delete = function(n) {
-    var k = typeof n === "string" ? n : String(n), p = this._p, nx = [];
+    var k = typeof n === "string" ? n : String(n), p = this._ensureP(), nx = [];
     for (var i = 0; i < p.length; i++) {
       if (p[i][0] !== k) nx.push(p[i]);
     }
@@ -119,32 +167,32 @@
     if (this._u) this._u._syncSearch();
   };
   URLSearchParams.prototype.sort = function() {
-    this._p.sort(function(a, b) {
+    this._ensureP().sort(function(a, b) {
       return a[0] < b[0] ? -1 : (a[0] > b[0] ? 1 : 0);
     });
     if (this._u) this._u._syncSearch();
   };
   URLSearchParams.prototype.forEach = function(cb, ta) {
-    var p = this._p;
+    var p = this._ensureP();
     for (var i = 0; i < p.length; i++) {
       cb.call(ta, p[i][1], p[i][0], this);
     }
   };
   URLSearchParams.prototype.entries = function() {
-    return this._p.slice();
+    return this._ensureP().slice();
   };
   URLSearchParams.prototype.keys = function() {
-    var p = this._p, r = [];
+    var p = this._ensureP(), r = [];
     for (var i = 0; i < p.length; i++) r.push(p[i][0]);
     return r;
   };
   URLSearchParams.prototype.values = function() {
-    var p = this._p, r = [];
+    var p = this._ensureP(), r = [];
     for (var i = 0; i < p.length; i++) r.push(p[i][1]);
     return r;
   };
   URLSearchParams.prototype.toString = function() {
-    var p = this._p, len = p.length;
+    var p = this._ensureP(), len = p.length;
     if (len === 0) return "";
     var s = "";
     for (var i = 0; i < len; i++) {
@@ -155,11 +203,11 @@
   };
   if (typeof Symbol !== "undefined" && Symbol.iterator) {
     URLSearchParams.prototype[Symbol.iterator] = function() {
-      return this._p[Symbol.iterator]();
+      return this._ensureP()[Symbol.iterator]();
     };
   }
   Object.defineProperty(URLSearchParams.prototype, "size", {
-    get: function() { return this._p.length; }
+    get: function() { return this._ensureP().length; }
   });
 
   function __normP(p) {
@@ -185,7 +233,54 @@
     return p !== "http:" && p !== "https:" && p !== "ws:" && p !== "wss:" && p !== "file:" && p !== "ftp:";
   }
 
+  var FastUrlProto;
+
+  function __tryFastHttpUrl(s) {
+    var len = s.length;
+    if (len < 8 || s.charCodeAt(0) !== 104 || s.charCodeAt(len - 1) <= 32) return null;
+    var rs = 0;
+    if (s.charCodeAt(1) === 116 && s.charCodeAt(2) === 116 && s.charCodeAt(3) === 112) {
+      if (s.charCodeAt(4) === 58 && s.charCodeAt(5) === 47 && s.charCodeAt(6) === 47) rs = 7;
+      else if (s.charCodeAt(4) === 115 && s.charCodeAt(5) === 58 && s.charCodeAt(6) === 47 && s.charCodeAt(7) === 47) rs = 8;
+    }
+    if (rs === 0 || s.indexOf("#", rs) !== -1) return null;
+    var qi = s.indexOf("?", rs);
+    var pathEnd = qi === -1 ? len : qi;
+    var pi = s.indexOf("/", rs);
+    if (pi <= rs || pi > pathEnd) return null;
+    for (var i = rs; i < pi; i++) {
+      var c = s.charCodeAt(i);
+      if (c <= 32 || c === 64 || (c >= 65 && c <= 90)) return null;
+    }
+    if (
+      (rs === 7 && pi - rs > 3 && s.charCodeAt(pi - 3) === 58 && s.charCodeAt(pi - 2) === 56 && s.charCodeAt(pi - 1) === 48) ||
+      (rs === 8 && pi - rs > 4 && s.charCodeAt(pi - 4) === 58 && s.charCodeAt(pi - 3) === 52 && s.charCodeAt(pi - 2) === 52 && s.charCodeAt(pi - 1) === 51)
+    ) {
+      return null;
+    }
+    if (pathEnd - pi > 1) {
+      for (var p = pi; p < pathEnd - 1; p++) {
+        if (s.charCodeAt(p) === 47) {
+          var nx = s.charCodeAt(p + 1);
+          if (nx === 47 || nx === 46) return null;
+        }
+      }
+    }
+    if (qi !== -1 && qi + 1 === len) return null;
+    var u = Object.create(FastUrlProto);
+    u._r = s;
+    u._rs = rs;
+    u._pi = pi;
+    u._qi = qi;
+    u._sp = null;
+    return u;
+  }
+
   function URL(input, base) {
+    if (base === undefined && typeof input === "string") {
+      var fastU = __tryFastHttpUrl(input);
+      if (fastU !== null) return fastU;
+    }
     var raw = (input && input._isSliceUrl) ? input.href : (typeof input === "string" ? input.trim() : String(input).trim());
     if (base !== undefined && raw.indexOf("https://") !== 0 && raw.indexOf("http://") !== 0 && raw.indexOf("://") === -1 && !__hasNonSpecialScheme(raw)) {
       if (typeof base === "string" && raw.charCodeAt(0) === 47 && raw.charCodeAt(1) !== 47) {
@@ -283,7 +378,7 @@
   });
   URL.prototype._syncSearch = function() {
     var baseHref = (this.origin === "null" ? this.protocol : this.origin) + this.pathname;
-    if (!this._sp || this._sp._p.length === 0) {
+    if (!this._sp || this._sp._ensureP().length === 0) {
       this.search = "";
       this.href = baseHref + this.hash;
       return;
@@ -294,6 +389,135 @@
   };
   URL.prototype.toString = URL.prototype.toJSON = function() {
     return this.href;
+  };
+
+  FastUrlProto = Object.create(URL.prototype);
+  function __matFastUrl(u, field, val) {
+    var proto = u._rs === 7 ? "http:" : "https:";
+    var host = u._r.slice(u._rs, u._pi);
+    var pci = host.lastIndexOf(":");
+    var hasPort = pci !== -1 && host.indexOf("]") < pci;
+    var hostname = hasPort ? host.slice(0, pci) : host;
+    var port = hasPort ? host.slice(pci + 1) : "";
+    var origin = u._r.slice(0, u._pi);
+    var pathname = u._qi === -1 ? u._r.slice(u._pi) : u._r.slice(u._pi, u._qi);
+    var search = u._qi === -1 ? "" : u._r.slice(u._qi);
+    var href = u._r;
+    Object.setPrototypeOf(u, URL.prototype);
+    u.protocol = proto;
+    u.username = "";
+    u.password = "";
+    u.hostname = hostname;
+    u.port = port;
+    u.host = host;
+    u.origin = origin;
+    u.pathname = pathname;
+    u.hash = "";
+    u.search = search;
+    u.href = href;
+    u[field] = val;
+  }
+  Object.defineProperties(FastUrlProto, {
+    href: {
+      get: function() { return this._r; },
+      set: function(v) { __matFastUrl(this, "href", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    protocol: {
+      get: function() { return this._rs === 7 ? "http:" : "https:"; },
+      set: function(v) { __matFastUrl(this, "protocol", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    username: {
+      get: function() { return ""; },
+      set: function(v) { __matFastUrl(this, "username", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    password: {
+      get: function() { return ""; },
+      set: function(v) { __matFastUrl(this, "password", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    host: {
+      get: function() { return this._r.slice(this._rs, this._pi); },
+      set: function(v) { __matFastUrl(this, "host", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    hostname: {
+      get: function() {
+        var h = this._r.slice(this._rs, this._pi);
+        var pci = h.lastIndexOf(":");
+        return (pci !== -1 && h.indexOf("]") < pci) ? h.slice(0, pci) : h;
+      },
+      set: function(v) { __matFastUrl(this, "hostname", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    port: {
+      get: function() {
+        var h = this._r.slice(this._rs, this._pi);
+        var pci = h.lastIndexOf(":");
+        return (pci !== -1 && h.indexOf("]") < pci) ? h.slice(pci + 1) : "";
+      },
+      set: function(v) { __matFastUrl(this, "port", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    origin: {
+      get: function() { return this._r.slice(0, this._pi); },
+      set: function(v) { __matFastUrl(this, "origin", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    pathname: {
+      get: function() {
+        return this._qi === -1 ? this._r.slice(this._pi) : this._r.slice(this._pi, this._qi);
+      },
+      set: function(v) { __matFastUrl(this, "pathname", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    search: {
+      get: function() {
+        return this._qi === -1 ? "" : this._r.slice(this._qi);
+      },
+      set: function(v) { __matFastUrl(this, "search", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    hash: {
+      get: function() { return ""; },
+      set: function(v) { __matFastUrl(this, "hash", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    searchParams: {
+      get: function() {
+        return this._sp || (this._sp = new URLSearchParams(this._qi === -1 ? "" : this._r.slice(this._qi + 1), this));
+      },
+      configurable: true
+    }
+  });
+  FastUrlProto._syncSearch = function() {
+    var baseHref = this._qi === -1 ? this._r : this._r.slice(0, this._qi);
+    if (!this._sp || this._sp._ensureP().length === 0) {
+      this._r = baseHref;
+      this._qi = -1;
+      return;
+    }
+    var qs = this._sp.toString();
+    if (qs) {
+      this._qi = baseHref.length;
+      this._r = baseHref + "?" + qs;
+    } else {
+      this._r = baseHref;
+      this._qi = -1;
+    }
   };
   URL.canParse = function(url, base) {
     if (arguments.length === 0) return false;
