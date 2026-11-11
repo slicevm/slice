@@ -142,9 +142,10 @@ impl SliceIsolate {
         let parent_reads = &self.compartment.capabilities.allowed_read_prefixes;
         if !opts.allow_read.is_empty() {
             for req_prefix in &opts.allow_read {
-                if parent_reads
-                    .iter()
-                    .any(|p| slice_sandbox::vfs_prefix_matches(req_prefix, p))
+                if !slice_sandbox::is_rejected_vfs_candidate(req_prefix)
+                    && parent_reads
+                        .iter()
+                        .any(|p| slice_sandbox::vfs_prefix_matches(req_prefix, p))
                 {
                     child_caps = child_caps.with_read_prefix(req_prefix.clone());
                 }
@@ -154,16 +155,14 @@ impl SliceIsolate {
                 child_caps = child_caps.with_read_prefix(p.clone());
             }
         }
-        if child_caps.allowed_read_prefixes.is_empty() {
-            child_caps = child_caps.with_read_prefix("/__slice_denied__");
-        }
 
         let parent_writes = &self.compartment.capabilities.allowed_write_prefixes;
         if !opts.allow_write.is_empty() {
             for req_prefix in &opts.allow_write {
-                if parent_writes
-                    .iter()
-                    .any(|p| slice_sandbox::vfs_prefix_matches(req_prefix, p))
+                if !slice_sandbox::is_rejected_vfs_candidate(req_prefix)
+                    && parent_writes
+                        .iter()
+                        .any(|p| slice_sandbox::vfs_prefix_matches(req_prefix, p))
                 {
                     child_caps = child_caps.with_write_prefix(req_prefix.clone());
                 }
@@ -172,9 +171,6 @@ impl SliceIsolate {
             for p in parent_writes {
                 child_caps = child_caps.with_write_prefix(p.clone());
             }
-        }
-        if child_caps.allowed_write_prefixes.is_empty() {
-            child_caps = child_caps.with_write_prefix("/__slice_denied__");
         }
 
         let parent_nets = &self.compartment.capabilities.allowed_net_hosts;

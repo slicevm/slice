@@ -9,10 +9,10 @@
 //! - Lock-free `mpsc` bidirectional message channels integrated directly into `event_loop.rs`
 
 use crate::boa_realm::{
-    check_boa_fs_read_ocap, mark_subsystem_dirty, norm_vfs_path, BOA_ACTIVE_CAPS,
+    check_boa_fs_read_ocap, mark_subsystem_dirty, norm_vfs_path, BoaFsCaps, BOA_ACTIVE_CAPS,
     BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS,
-    BOA_FETCH_MOCKS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VIOLATION,
-    DIRTY_WORKERS,
+    BOA_FETCH_MOCKS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VFS_CACHE, BOA_VFS_DIRS,
+    BOA_VFS_TOMBSTONES, BOA_VIOLATION, DIRTY_WORKERS,
 };
 use crate::intrinsics::base64_decode;
 use crate::isolate::SliceIsolate;
@@ -63,6 +63,7 @@ struct WorkerJob {
     parent_egress_secrets: Vec<String>,
     parent_vfs_cache: FxHashMap<String, Arc<Vec<u8>>>,
     parent_vfs_dirs: FxHashSet<String>,
+    parent_vfs_tombstones: FxHashSet<String>,
     parent_fetch_mocks: FxHashMap<String, String>,
     parent_ws_mocks: FxHashMap<String, String>,
     parent_sock_mocks: FxHashMap<String, String>,
@@ -312,8 +313,14 @@ fn resolve_worker_script_source(specifier_or_code: &str, is_eval: bool) -> Resul
     }
 
     let raw_path = trimmed.strip_prefix("file://").unwrap_or(trimmed);
+    if !check_boa_fs_read_ocap(raw_path) {
+        return Err(format!(
+            "SandboxViolation: Worker script read '{}' denied by OCap read policy",
+            raw_path
+        ));
+    }
     let norm = norm_vfs_path(raw_path);
-    if !check_boa_fs_read_ocap(&norm) {
+    if norm != raw_path && !check_boa_fs_read_ocap(&norm) {
         return Err(format!(
             "SandboxViolation: Worker script read '{}' denied by OCap read policy",
             norm
@@ -334,6 +341,13 @@ fn resolve_worker_script_source(specifier_or_code: &str, is_eval: bool) -> Resul
         return Ok(String::from_utf8_lossy(&vfs_src).into_owned());
     }
 
+    if crate::bindings::fs::is_vfs_tombstoned(&norm) {
+        return Err(format!(
+            "WorkerError: Cannot read worker module '{}': file removed in VFS",
+            raw_path
+        ));
+    }
+
     // 2. Fallback to host filesystem if OCap permits
     std::fs::read_to_string(raw_path).map_err(|e| {
         format!(
@@ -345,58 +359,43 @@ fn resolve_worker_script_source(specifier_or_code: &str, is_eval: bool) -> Resul
 
 fn build_attenuated_worker_caps(
     attenuation: Option<&WorkerSliceAttenuationOpts>,
-    parent_caps_opt: &Option<(String, Vec<String>, Vec<String>)>,
+    parent_caps: &BoaFsCaps,
     parent_net_hosts: &FxHashSet<String>,
     parent_env_map: &FxHashMap<String, String>,
 ) -> CapabilityToken {
     let mut child_caps = CapabilityToken::pure_compute();
-    let parent_reads: &[String] = parent_caps_opt
-        .as_ref()
-        .map(|(_, r, _)| r.as_slice())
-        .unwrap_or(&[]);
-    let parent_writes: &[String] = parent_caps_opt
-        .as_ref()
-        .map(|(_, _, w)| w.as_slice())
-        .unwrap_or(&[]);
+    let parent_reads = parent_caps.read_prefixes.as_slice();
+    let parent_writes = parent_caps.write_prefixes.as_slice();
 
-    // 1. Attenuate read prefixes
+    // 1. Attenuate read prefixes strictly (`parent ∩ requested`; empty allow-list = deny-all)
     if let Some(req_reads) = attenuation.and_then(|a| a.allow_read.as_ref()) {
-        if req_reads.is_empty() {
-            child_caps = child_caps.with_read_prefix("/__slice_worker_denied_read__");
-        } else {
-            for req in req_reads {
-                let norm_req = norm_vfs_path(req);
-                if parent_reads.is_empty() || parent_reads.iter().any(|p| norm_req.starts_with(p)) {
-                    child_caps = child_caps.with_read_prefix(norm_req);
-                }
-            }
-            if child_caps.allowed_read_prefixes.is_empty() {
-                child_caps = child_caps.with_read_prefix("/__slice_worker_denied_read__");
+        for req in req_reads {
+            if !slice_sandbox::is_rejected_vfs_candidate(req)
+                && parent_reads
+                    .iter()
+                    .any(|p| slice_sandbox::vfs_prefix_matches(req, p))
+            {
+                child_caps = child_caps.with_read_prefix(norm_vfs_path(req));
             }
         }
-    } else if !parent_reads.is_empty() {
+    } else {
         for p in parent_reads {
             child_caps = child_caps.with_read_prefix(p.clone());
         }
     }
 
-    // 2. Attenuate write prefixes
+    // 2. Attenuate write prefixes strictly (`parent ∩ requested`; empty allow-list = deny-all)
     if let Some(req_writes) = attenuation.and_then(|a| a.allow_write.as_ref()) {
-        if req_writes.is_empty() {
-            child_caps = child_caps.with_write_prefix("/__slice_worker_denied_write__");
-        } else {
-            for req in req_writes {
-                let norm_req = norm_vfs_path(req);
-                if parent_writes.is_empty() || parent_writes.iter().any(|p| norm_req.starts_with(p))
-                {
-                    child_caps = child_caps.with_write_prefix(norm_req);
-                }
-            }
-            if child_caps.allowed_write_prefixes.is_empty() {
-                child_caps = child_caps.with_write_prefix("/__slice_worker_denied_write__");
+        for req in req_writes {
+            if !slice_sandbox::is_rejected_vfs_candidate(req)
+                && parent_writes
+                    .iter()
+                    .any(|p| slice_sandbox::vfs_prefix_matches(req, p))
+            {
+                child_caps = child_caps.with_write_prefix(norm_vfs_path(req));
             }
         }
-    } else if !parent_writes.is_empty() {
+    } else {
         for p in parent_writes {
             child_caps = child_caps.with_write_prefix(p.clone());
         }
@@ -500,6 +499,14 @@ pub fn worker_spawn(specifier_or_code: &str, options_json: &str) -> Result<u32, 
     let parent_egress_secrets = BOA_EGRESS_SECRETS.with(|s| s.borrow().clone());
     let parent_vfs_cache = BOA_VFS_CACHE.with(|c| c.borrow().clone());
     let parent_vfs_dirs = BOA_VFS_DIRS.with(|d| d.borrow().clone());
+    let parent_vfs_tombstones = BOA_VFS_TOMBSTONES.with(|t| {
+        let b = t.borrow();
+        if b.is_empty() {
+            FxHashSet::default()
+        } else {
+            b.clone()
+        }
+    });
     let parent_fetch_mocks = BOA_FETCH_MOCKS.with(|m| m.borrow().clone());
     let parent_ws_mocks = BOA_WS_MOCKS.with(|m| m.borrow().clone());
     let parent_sock_mocks = BOA_SOCKET_MOCKS.with(|m| m.borrow().clone());
@@ -565,6 +572,7 @@ pub fn worker_spawn(specifier_or_code: &str, options_json: &str) -> Result<u32, 
         parent_egress_secrets,
         parent_vfs_cache,
         parent_vfs_dirs,
+        parent_vfs_tombstones,
         parent_fetch_mocks,
         parent_ws_mocks,
         parent_sock_mocks,
@@ -765,6 +773,7 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
 
     BOA_VFS_CACHE.with(|c| *c.borrow_mut() = job.parent_vfs_cache);
     BOA_VFS_DIRS.with(|d| *d.borrow_mut() = job.parent_vfs_dirs);
+    BOA_VFS_TOMBSTONES.with(|t| *t.borrow_mut() = job.parent_vfs_tombstones);
     BOA_FETCH_MOCKS.with(|m| *m.borrow_mut() = job.parent_fetch_mocks);
     BOA_WS_MOCKS.with(|m| *m.borrow_mut() = job.parent_ws_mocks);
     BOA_SOCKET_MOCKS.with(|m| *m.borrow_mut() = job.parent_sock_mocks);
@@ -817,6 +826,7 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
     WORKER_SELF_ENV.with(|env| *env.borrow_mut() = WorkerSelfThreadEnv::default());
     BOA_VFS_CACHE.with(|c| c.borrow_mut().clear());
     BOA_VFS_DIRS.with(|d| d.borrow_mut().clear());
+    BOA_VFS_TOMBSTONES.with(|t| t.borrow_mut().clear());
     GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
     if let Ok(mut pool) = idle_worker_pool().lock() {
         if pool.len() < MAX_POOLED_WORKER_THREADS {

@@ -52,7 +52,12 @@ pub(crate) struct WarmBoaRealm {
     pub(crate) loaded_shards_mask: u32,
 }
 
-pub(crate) type ActiveBoaCaps = (String, Vec<String>, Vec<String>);
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BoaFsCaps {
+    pub(crate) read_prefixes: Vec<String>,
+    pub(crate) write_prefixes: Vec<String>,
+}
+
 pub(crate) type CapturedBoaHttpRes = (u16, String, String, Vec<(String, String)>);
 
 thread_local! {
@@ -66,8 +71,15 @@ thread_local! {
         std::cell::RefCell::new(FxHashMap::default());
     pub(crate) static BOA_VFS_DIRS: std::cell::RefCell<FxHashSet<String>> =
         std::cell::RefCell::new(FxHashSet::default());
-    pub(crate) static BOA_ACTIVE_CAPS: std::cell::RefCell<Option<ActiveBoaCaps>> =
-        const { std::cell::RefCell::new(None) };
+    pub(crate) static BOA_VFS_TOMBSTONES: std::cell::RefCell<FxHashSet<String>> =
+        std::cell::RefCell::new(FxHashSet::default());
+    pub(crate) static BOA_ACTIVE_CAPS: std::cell::RefCell<BoaFsCaps> =
+        const {
+            std::cell::RefCell::new(BoaFsCaps {
+                read_prefixes: Vec::new(),
+                write_prefixes: Vec::new(),
+            })
+        };
     pub(crate) static BOA_VIOLATION: std::cell::RefCell<Option<SandboxViolation>> =
         const { std::cell::RefCell::new(None) };
     pub(crate) static BOA_HTTP_REQ: std::cell::RefCell<ActiveBoaHttpReq> =
@@ -435,10 +447,13 @@ pub(crate) fn norm_vfs_path(p: &str) -> String {
 #[inline(never)]
 pub(crate) fn record_boa_fs_violation(tenant_id: &str, path: &str) -> bool {
     BOA_VIOLATION.with(|v| {
-        *v.borrow_mut() = Some(SandboxViolation::FsReadDenied {
-            tenant_id: tenant_id.to_string(),
-            path: path.to_string(),
-        });
+        let mut slot = v.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(SandboxViolation::FsReadDenied {
+                tenant_id: tenant_id.to_string(),
+                path: path.to_string(),
+            });
+        }
     });
     false
 }
@@ -447,56 +462,79 @@ pub(crate) fn record_boa_fs_violation(tenant_id: &str, path: &str) -> bool {
 #[inline(never)]
 pub(crate) fn record_boa_fs_write_violation(tenant_id: &str, path: &str) -> bool {
     BOA_VIOLATION.with(|v| {
-        *v.borrow_mut() = Some(SandboxViolation::FsWriteDenied {
-            tenant_id: tenant_id.to_string(),
-            path: path.to_string(),
-        });
+        let mut slot = v.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(SandboxViolation::FsWriteDenied {
+                tenant_id: tenant_id.to_string(),
+                path: path.to_string(),
+            });
+        }
     });
     false
 }
 
+#[cold]
+#[inline(never)]
+fn current_boa_tenant_or_default() -> String {
+    BOA_ACTIVE_TENANT.with(|t| {
+        let b = t.borrow();
+        if b.is_empty() {
+            "boa-tenant".to_string()
+        } else {
+            b.clone()
+        }
+    })
+}
+
+/// Side-effect-free predicate checking whether the active compartment currently holds OCap read
+/// authority for `path` without recording a `SandboxViolation` when denied.
 #[inline]
-pub(crate) fn check_boa_fs_read_ocap(path: &str) -> bool {
-    if memchr::memmem::find(path.as_bytes(), b"..").is_some() {
-        let tenant = BOA_ACTIVE_CAPS
-            .with(|c| c.borrow().as_ref().map(|t| t.0.clone()))
-            .unwrap_or_else(|| "boa-tenant".to_string());
-        return record_boa_fs_violation(&tenant, path);
+pub(crate) fn has_boa_fs_read_ocap(path: &str) -> bool {
+    if slice_sandbox::is_rejected_vfs_candidate(path) {
+        return false;
     }
     BOA_ACTIVE_CAPS.with(|c| {
-        if let Some((tenant_id, read_prefixes, _)) = &*c.borrow() {
-            if !read_prefixes.is_empty()
-                && !read_prefixes
-                    .iter()
-                    .any(|prefix| slice_sandbox::vfs_prefix_matches(path, prefix))
-            {
-                return record_boa_fs_violation(tenant_id, path);
-            }
+        let caps = c.borrow();
+        if caps.read_prefixes.is_empty() {
+            return false;
         }
-        true
+        let norm = slice_sandbox::normalize_vfs_path_cow(path);
+        caps.read_prefixes
+            .iter()
+            .any(|prefix| slice_sandbox::vfs_normalized_candidate_matches_prefix(&norm, prefix))
     })
 }
 
 #[inline]
+pub(crate) fn check_boa_fs_read_ocap(path: &str) -> bool {
+    if !has_boa_fs_read_ocap(path) {
+        let tenant = current_boa_tenant_or_default();
+        return record_boa_fs_violation(&tenant, path);
+    }
+    true
+}
+
+#[inline]
 pub(crate) fn check_boa_fs_write_ocap(path: &str) -> bool {
-    if memchr::memmem::find(path.as_bytes(), b"..").is_some() {
-        let tenant = BOA_ACTIVE_CAPS
-            .with(|c| c.borrow().as_ref().map(|t| t.0.clone()))
-            .unwrap_or_else(|| "boa-tenant".to_string());
+    if slice_sandbox::is_rejected_vfs_candidate(path) {
+        let tenant = current_boa_tenant_or_default();
         return record_boa_fs_write_violation(&tenant, path);
     }
-    BOA_ACTIVE_CAPS.with(|c| {
-        if let Some((tenant_id, _, write_prefixes)) = &*c.borrow() {
-            if !write_prefixes.is_empty()
-                && !write_prefixes
-                    .iter()
-                    .any(|prefix| slice_sandbox::vfs_prefix_matches(path, prefix))
-            {
-                return record_boa_fs_write_violation(tenant_id, path);
-            }
+    let allowed = BOA_ACTIVE_CAPS.with(|c| {
+        let caps = c.borrow();
+        if caps.write_prefixes.is_empty() {
+            return false;
         }
-        true
-    })
+        let norm = slice_sandbox::normalize_vfs_path_cow(path);
+        caps.write_prefixes
+            .iter()
+            .any(|prefix| slice_sandbox::vfs_normalized_candidate_matches_prefix(&norm, prefix))
+    });
+    if !allowed {
+        let tenant = current_boa_tenant_or_default();
+        return record_boa_fs_write_violation(&tenant, path);
+    }
+    true
 }
 
 #[inline]
@@ -693,7 +731,7 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_stdout: Vec<String>,
     pub(crate) saved_violation: Option<SandboxViolation>,
     pub(crate) saved_tenant: String,
-    pub(crate) saved_caps: Option<ActiveBoaCaps>,
+    pub(crate) saved_caps: BoaFsCaps,
     pub(crate) saved_net_hosts: FxHashSet<String>,
     pub(crate) saved_egress_secrets: Vec<String>,
     pub(crate) saved_env_map: FxHashMap<String, String>,
@@ -728,7 +766,7 @@ impl SavedIsolateContextGuard {
         let saved_stdout = BOA_STDOUT.with(|out| std::mem::take(&mut *out.borrow_mut()));
         let saved_violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
         let saved_tenant = BOA_ACTIVE_TENANT.with(|t| std::mem::take(&mut *t.borrow_mut()));
-        let saved_caps = BOA_ACTIVE_CAPS.with(|c| c.borrow_mut().take());
+        let saved_caps = BOA_ACTIVE_CAPS.with(|c| std::mem::take(&mut *c.borrow_mut()));
         let saved_net_hosts = BOA_NET_HOSTS.with(|h| std::mem::take(&mut *h.borrow_mut()));
         let saved_egress_secrets =
             BOA_EGRESS_SECRETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
@@ -873,7 +911,7 @@ impl Drop for SavedIsolateContextGuard {
         BOA_STDOUT.with(|out| *out.borrow_mut() = std::mem::take(&mut self.saved_stdout));
         BOA_VIOLATION.with(|v| *v.borrow_mut() = self.saved_violation.take());
         BOA_ACTIVE_TENANT.with(|t| *t.borrow_mut() = std::mem::take(&mut self.saved_tenant));
-        BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = self.saved_caps.take());
+        BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = std::mem::take(&mut self.saved_caps));
         BOA_NET_HOSTS.with(|h| *h.borrow_mut() = std::mem::take(&mut self.saved_net_hosts));
         BOA_EGRESS_SECRETS
             .with(|s| *s.borrow_mut() = std::mem::take(&mut self.saved_egress_secrets));

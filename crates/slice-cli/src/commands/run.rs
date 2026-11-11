@@ -436,7 +436,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             isolate.add_egress_audit_secret(sec.clone());
         }
         if prewarm_pool {
-            SliceIsolate::prewarm_boa_bundle(bytecode);
+            SliceIsolate::prewarm_boa_bundle_with_caps(bytecode, &exec_cfg.caps);
             let snap = isolate.checkpoint();
             let _ = isolate.execute_bytecode(bytecode, Some(&archive));
             isolate.restore(snap);
@@ -491,7 +491,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             isolate.add_egress_audit_secret(sec.clone());
         }
         if prewarm_pool {
-            SliceIsolate::prewarm_boa_bundle(&bytecode);
+            SliceIsolate::prewarm_boa_bundle_with_caps(&bytecode, &exec_cfg.caps);
             let snap = isolate.checkpoint();
             let _ = isolate.execute_bytecode(&bytecode, None);
             isolate.restore(snap);

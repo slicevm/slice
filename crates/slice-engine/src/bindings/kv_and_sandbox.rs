@@ -254,13 +254,11 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             let scope_guard = SavedIsolateContextGuard::enter();
 
             let mut parent_caps = CapabilityToken::pure_compute();
-            if let Some((_, ref r_prefs, ref w_prefs)) = scope_guard.saved_caps {
-                for r in r_prefs {
-                    parent_caps = parent_caps.with_read_prefix(r.clone());
-                }
-                for w in w_prefs {
-                    parent_caps = parent_caps.with_write_prefix(w.clone());
-                }
+            for r in &scope_guard.saved_caps.read_prefixes {
+                parent_caps = parent_caps.with_read_prefix(r.clone());
+            }
+            for w in &scope_guard.saved_caps.write_prefixes {
+                parent_caps = parent_caps.with_write_prefix(w.clone());
             }
             for nh in &scope_guard.saved_net_hosts {
                 parent_caps = parent_caps.with_net_host(nh.clone());
@@ -297,22 +295,26 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             let outcome = if cfg!(debug_assertions) {
                 let vfs_files = crate::boa_realm::BOA_VFS_CACHE.with(|c| c.borrow().clone());
                 let vfs_dirs = crate::boa_realm::BOA_VFS_DIRS.with(|d| d.borrow().clone());
-                let (out, new_files, new_dirs) = std::thread::Builder::new()
+                let vfs_tombs = crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| t.borrow().clone());
+                let (out, new_files, new_dirs, new_tombs) = std::thread::Builder::new()
                     .name("slice-eval-sandbox".to_string())
                     .stack_size(8 * 1024 * 1024)
                     .spawn(move || {
                         crate::boa_realm::BOA_VFS_CACHE.with(|c| *c.borrow_mut() = vfs_files);
                         crate::boa_realm::BOA_VFS_DIRS.with(|d| *d.borrow_mut() = vfs_dirs);
+                        crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| *t.borrow_mut() = vfs_tombs);
                         let res = proxy_parent.eval_sandbox(&code, opts);
                         let nf = crate::boa_realm::BOA_VFS_CACHE.with(|c| c.borrow().clone());
                         let nd = crate::boa_realm::BOA_VFS_DIRS.with(|d| d.borrow().clone());
-                        (res, nf, nd)
+                        let nt = crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| t.borrow().clone());
+                        (res, nf, nd, nt)
                     })
                     .expect("failed to spawn slice-eval-sandbox thread")
                     .join()
                     .expect("slice-eval-sandbox thread panicked");
                 crate::boa_realm::BOA_VFS_CACHE.with(|c| *c.borrow_mut() = new_files);
                 crate::boa_realm::BOA_VFS_DIRS.with(|d| *d.borrow_mut() = new_dirs);
+                crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| *t.borrow_mut() = new_tombs);
                 out
             } else {
                 proxy_parent.eval_sandbox(&code, opts)

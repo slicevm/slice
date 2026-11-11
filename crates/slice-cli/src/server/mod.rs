@@ -119,7 +119,7 @@ console.log(route_res);
         let secrets_clone = std::sync::Arc::clone(&audit_secrets);
 
         let server_thread = std::thread::spawn(move || -> Result<()> {
-            SliceIsolate::prewarm_boa_bundle(&bc_clone);
+            SliceIsolate::prewarm_boa_bundle_with_caps(&bc_clone, &caps_clone);
             let mut read_buf = vec![0u8; 65536];
             let mut write_buf = Vec::with_capacity(4096);
             if let Ok((stream, _)) = listener.accept() {
@@ -192,7 +192,7 @@ console.log(route_res);
         let secrets_clone = std::sync::Arc::clone(&audit_secrets);
         let counter_clone = std::sync::Arc::clone(&req_counter);
         handles.push(std::thread::spawn(move || {
-            SliceIsolate::prewarm_boa_bundle(&bc_clone);
+            SliceIsolate::prewarm_boa_bundle_with_caps(&bc_clone, &caps_clone);
             let mut read_buf = vec![0u8; 65536];
             let mut write_buf = Vec::with_capacity(4096);
             let mut local_slot = (worker_idx as u32) << 20;
@@ -224,7 +224,7 @@ console.log(route_res);
         }));
     }
 
-    SliceIsolate::prewarm_boa_bundle(&bytecode);
+    SliceIsolate::prewarm_boa_bundle_with_caps(&bytecode, &caps);
     let mut read_buf = vec![0u8; 65536];
     let mut write_buf = Vec::with_capacity(4096);
     let mut local_slot: u32 = 0;

@@ -4,8 +4,8 @@ use crate::bindings::helpers::{
     bytes_to_js_uint8_array, extract_buffer_source_bytes, try_consume_isolate_memory,
 };
 use crate::boa_realm::{
-    check_boa_fs_read_ocap, check_boa_fs_write_ocap, norm_vfs_path, BOA_DET_STATE, BOA_VFS_CACHE,
-    BOA_VFS_DIRS,
+    check_boa_fs_read_ocap, check_boa_fs_write_ocap, has_boa_fs_read_ocap, norm_vfs_path,
+    BOA_DET_STATE, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VFS_TOMBSTONES,
 };
 use crate::intrinsics::fill_random_bytes;
 
@@ -16,7 +16,31 @@ thread_local! {
         std::cell::RefCell::new(rustc_hash::FxHashMap::default());
 }
 
-fn vfs_or_host_is_dir(norm: &str, raw_path: &str) -> bool {
+#[inline]
+pub(crate) fn is_vfs_tombstoned(norm: &str) -> bool {
+    BOA_VFS_TOMBSTONES.with(|t| {
+        let set = t.borrow();
+        if set.is_empty() {
+            return false;
+        }
+        if set.contains(norm) {
+            return true;
+        }
+        let mut cur = norm;
+        while let Some(idx) = cur.rfind('/') {
+            if idx == 0 {
+                break;
+            }
+            cur = &cur[..idx];
+            if set.contains(cur) {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+fn vfs_or_host_is_dir(norm: &str) -> bool {
     if norm == "/" || norm == "." {
         return true;
     }
@@ -44,8 +68,10 @@ fn vfs_or_host_is_dir(norm: &str, raw_path: &str) -> bool {
     if let Some(res) = vfs_state {
         return res;
     }
+    if is_vfs_tombstoned(norm) {
+        return false;
+    }
     std::path::Path::new(norm).is_dir()
-        || (raw_path != norm && std::path::Path::new(raw_path).is_dir())
 }
 
 #[inline]
@@ -72,25 +98,13 @@ pub(crate) fn resolve_vfs_symlink_norm(mut current: String) -> String {
 }
 
 #[inline]
-fn read_host_bytes(norm: &str, raw_path: &str) -> std::io::Result<Vec<u8>> {
-    std::fs::read(norm).or_else(|e| {
-        if raw_path == norm {
-            Err(e)
-        } else {
-            std::fs::read(raw_path)
-        }
-    })
+fn read_host_bytes(norm: &str) -> std::io::Result<Vec<u8>> {
+    std::fs::read(norm)
 }
 
 #[inline]
-fn host_metadata(norm: &str, raw_path: &str) -> std::io::Result<std::fs::Metadata> {
-    std::fs::metadata(norm).or_else(|e| {
-        if raw_path == norm {
-            Err(e)
-        } else {
-            std::fs::metadata(raw_path)
-        }
-    })
+fn host_metadata(norm: &str) -> std::io::Result<std::fs::Metadata> {
+    std::fs::metadata(norm)
 }
 
 #[inline]
@@ -131,6 +145,27 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
     }
 
     let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_fs_check_write_sync"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let path = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !check_boa_fs_write_ocap(&path) {
+                return Ok(BoaVal::from(false));
+            }
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm != path && !check_boa_fs_write_ocap(&norm) {
+                return Ok(BoaVal::from(false));
+            }
+            Ok(BoaVal::from(true))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_fs_read_file_sync"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
@@ -166,11 +201,13 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             {
                 return Ok(BoaVal::from(-21));
             }
-            if let Ok(bytes) = read_host_bytes(&norm, &path) {
-                return Ok(utf8_vec_to_js_val(bytes));
-            }
-            if vfs_or_host_is_dir(&norm, &path) {
-                return Ok(BoaVal::from(-21));
+            if !is_vfs_tombstoned(&norm) {
+                if let Ok(bytes) = read_host_bytes(&norm) {
+                    return Ok(utf8_vec_to_js_val(bytes));
+                }
+                if vfs_or_host_is_dir(&norm) {
+                    return Ok(BoaVal::from(-21));
+                }
             }
             Ok(BoaVal::null())
         }),
@@ -212,11 +249,13 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             {
                 return Ok(BoaVal::from(-21));
             }
-            if let Ok(bytes) = read_host_bytes(&norm, &path) {
-                return bytes_to_js_uint8_array(&bytes, context);
-            }
-            if vfs_or_host_is_dir(&norm, &path) {
-                return Ok(BoaVal::from(-21));
+            if !is_vfs_tombstoned(&norm) {
+                if let Ok(bytes) = read_host_bytes(&norm) {
+                    return bytes_to_js_uint8_array(&bytes, context);
+                }
+                if vfs_or_host_is_dir(&norm) {
+                    return Ok(BoaVal::from(-21));
+                }
             }
             Ok(BoaVal::null())
         }),
@@ -302,13 +341,19 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if let Err(msg) = try_consume_isolate_memory(data_bytes.len()) {
                 return Err(JsNativeError::range().with_message(msg).into());
             }
+            if let Some(idx) = norm.rfind('/') {
+                let parent = &norm[..idx];
+                if !parent.is_empty() {
+                    BOA_VFS_DIRS.with(|d| {
+                        d.borrow_mut().insert(parent.to_string());
+                    });
+                }
+            }
             BOA_VFS_CACHE.with(|c| {
                 let mut map = c.borrow_mut();
                 let entry = map.entry(norm.clone()).or_insert_with(|| {
-                    let initial = if check_boa_fs_read_ocap(&norm) {
-                        std::fs::read(&norm)
-                            .or_else(|_| std::fs::read(&path))
-                            .unwrap_or_default()
+                    let initial = if !is_vfs_tombstoned(&norm) && has_boa_fs_read_ocap(&norm) {
+                        std::fs::read(&norm).unwrap_or_default()
                     } else {
                         Vec::new()
                     };
@@ -358,9 +403,8 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                     dirs.iter().any(|k| k.starts_with(&prefix))
                 }
             });
-            let exists = vfs_exists
-                || std::path::Path::new(&norm).exists()
-                || (path != norm && std::path::Path::new(&path).exists());
+            let exists =
+                vfs_exists || (!is_vfs_tombstoned(&norm) && std::path::Path::new(&norm).exists());
             Ok(BoaVal::from(exists))
         }),
     );
@@ -378,7 +422,10 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_write_ocap(&path) {
                 return Ok(BoaVal::undefined());
             }
-            let norm = norm_vfs_path(&path);
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm != path && !check_boa_fs_write_ocap(&norm) {
+                return Ok(BoaVal::undefined());
+            }
             BOA_VFS_DIRS.with(|d| {
                 let mut dirs = d.borrow_mut();
                 let mut cur = norm.as_str();
@@ -438,10 +485,23 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             });
             let is_vfs_tmp_dir = norm_dir.starts_with("/tmp/")
                 && BOA_VFS_DIRS.with(|d| d.borrow().contains(&norm_dir));
-            if !is_vfs_tmp_dir {
-                if let Ok(rd) = std::fs::read_dir(&norm_dir).or_else(|_| std::fs::read_dir(&path)) {
+            let has_tombstones = BOA_VFS_TOMBSTONES.with(|t| !t.borrow().is_empty());
+            let dir_tombstoned = has_tombstones && is_vfs_tombstoned(&norm_dir);
+            if !is_vfs_tmp_dir && !dir_tombstoned {
+                if let Ok(rd) = std::fs::read_dir(&norm_dir) {
                     for entry in rd.flatten() {
-                        entries_set.insert(entry.file_name().to_string_lossy().to_string());
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if has_tombstones {
+                            let child_norm = if norm_dir == "/" {
+                                format!("/{}", name)
+                            } else {
+                                format!("{}/{}", norm_dir, name)
+                            };
+                            if is_vfs_tombstoned(&child_norm) {
+                                continue;
+                            }
+                        }
+                        entries_set.insert(name);
                     }
                 }
             }
@@ -484,11 +544,13 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             }) {
                 return Ok(BoaVal::from(0.0));
             }
-            if let Ok(meta) = host_metadata(&norm, &path) {
-                return Ok(BoaVal::from(meta.len() as f64));
-            }
-            if vfs_or_host_is_dir(&norm, &path) {
-                return Ok(BoaVal::from(0.0));
+            if !is_vfs_tombstoned(&norm) {
+                if let Ok(meta) = host_metadata(&norm) {
+                    return Ok(BoaVal::from(meta.len() as f64));
+                }
+                if vfs_or_host_is_dir(&norm) {
+                    return Ok(BoaVal::from(0.0));
+                }
             }
             Ok(BoaVal::from(-1.0))
         }),
@@ -517,17 +579,21 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if BOA_DET_STATE.with(|s| s.get().is_some()) {
                 return Ok(BoaVal::from(1_700_000_000_000.0));
             }
-            let mtime_ms = host_metadata(&norm, &path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as f64)
-                .unwrap_or_else(|| {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as f64)
-                        .unwrap_or(1_700_000_000_000.0)
-                });
+            let mtime_ms = if is_vfs_tombstoned(&norm) {
+                None
+            } else {
+                host_metadata(&norm)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as f64)
+            }
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as f64)
+                    .unwrap_or(1_700_000_000_000.0)
+            });
             Ok(BoaVal::from(mtime_ms))
         }),
     );
@@ -549,7 +615,7 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             if norm != path && !check_boa_fs_read_ocap(&norm) {
                 return Ok(BoaVal::from(false));
             }
-            let is_dir = vfs_or_host_is_dir(&norm, &path);
+            let is_dir = vfs_or_host_is_dir(&norm);
             Ok(BoaVal::from(is_dir))
         }),
     );
@@ -581,11 +647,12 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             let content = BOA_VFS_CACHE
                 .with(|c| c.borrow().get(&norm_src).cloned())
                 .unwrap_or_else(|| {
-                    std::sync::Arc::new(
-                        std::fs::read(&norm_src)
-                            .or_else(|_| std::fs::read(&src))
-                            .unwrap_or_default(),
-                    )
+                    let bytes = if is_vfs_tombstoned(&norm_src) {
+                        Vec::new()
+                    } else {
+                        std::fs::read(&norm_src).unwrap_or_default()
+                    };
+                    std::sync::Arc::new(bytes)
                 });
             if let Err(msg) = try_consume_isolate_memory(content.len()) {
                 return Err(JsNativeError::range().with_message(msg).into());
@@ -627,18 +694,27 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             }
             let norm_old = resolve_vfs_symlink_norm(norm_vfs_path(&old_p));
             let norm_new = resolve_vfs_symlink_norm(norm_vfs_path(&new_p));
-            if !check_boa_fs_read_ocap(&norm_old) || !check_boa_fs_write_ocap(&norm_new) {
+            if !check_boa_fs_read_ocap(&norm_old)
+                || !check_boa_fs_write_ocap(&norm_old)
+                || !check_boa_fs_write_ocap(&norm_new)
+            {
                 return Ok(BoaVal::undefined());
             }
             let content = BOA_VFS_CACHE
                 .with(|c| c.borrow_mut().remove(&norm_old))
                 .unwrap_or_else(|| {
-                    std::sync::Arc::new(
-                        std::fs::read(&norm_old)
-                            .or_else(|_| std::fs::read(&old_p))
-                            .unwrap_or_default(),
-                    )
+                    let bytes = if is_vfs_tombstoned(&norm_old) {
+                        Vec::new()
+                    } else {
+                        std::fs::read(&norm_old).unwrap_or_default()
+                    };
+                    std::sync::Arc::new(bytes)
                 });
+            if norm_old != norm_new && std::path::Path::new(&norm_old).exists() {
+                BOA_VFS_TOMBSTONES.with(|t| {
+                    t.borrow_mut().insert(norm_old);
+                });
+            }
             if let Some(idx) = norm_new.rfind('/') {
                 let parent = &norm_new[..idx];
                 BOA_VFS_DIRS.with(|d| {
@@ -666,6 +742,9 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::undefined());
             }
             let norm = norm_vfs_path(&path);
+            if norm != path && !check_boa_fs_write_ocap(&norm) {
+                return Ok(BoaVal::undefined());
+            }
             let prefix = format!("{}/", norm);
             BOA_VFS_CACHE.with(|c| {
                 let mut map = c.borrow_mut();
@@ -682,13 +761,14 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                 mtimes.remove(&norm);
                 mtimes.retain(|k, _| !k.starts_with(&prefix));
             });
-            let p = std::path::Path::new(&path);
-            if p.exists() {
-                if p.is_dir() {
-                    let _ = std::fs::remove_dir_all(p);
-                } else {
-                    let _ = std::fs::remove_file(p);
-                }
+            // Strictly copy-on-write VFS deletion: never remove files or directories from the
+            // host OS disk. If a real host entry exists at this path, mask it with a VFS
+            // tombstone so subsequent reads/stats inside the isolate see it as unlinked and
+            // `Slice.restore()` can roll the deletion back cleanly.
+            if std::path::Path::new(&norm).exists() {
+                BOA_VFS_TOMBSTONES.with(|t| {
+                    t.borrow_mut().insert(norm);
+                });
             }
             Ok(BoaVal::undefined())
         }),
@@ -725,14 +805,14 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                     };
                 return Ok(BoaVal::from(js_string!(resolved)));
             }
-            if let Ok(canon) =
-                std::fs::canonicalize(&norm).or_else(|_| std::fs::canonicalize(&path))
-            {
-                let mut s = canon.to_string_lossy().replace('\\', "/");
-                if let Some(stripped) = s.strip_prefix("//?/") {
-                    s = stripped.to_string();
+            if !is_vfs_tombstoned(&norm) {
+                if let Ok(canon) = std::fs::canonicalize(&norm) {
+                    let mut s = canon.to_string_lossy().replace('\\', "/");
+                    if let Some(stripped) = s.strip_prefix("//?/") {
+                        s = stripped.to_string();
+                    }
+                    return Ok(BoaVal::from(js_string!(s)));
                 }
-                return Ok(BoaVal::from(js_string!(s)));
             }
             let fallback =
                 if norm.starts_with('/') || (norm.len() >= 2 && norm.as_bytes()[1] == b':') {
@@ -793,7 +873,13 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            let _ = check_boa_fs_write_ocap(&path);
+            if !check_boa_fs_write_ocap(&path) {
+                return Ok(BoaVal::undefined());
+            }
+            let norm = resolve_vfs_symlink_norm(norm_vfs_path(&path));
+            if norm != path && !check_boa_fs_write_ocap(&norm) {
+                return Ok(BoaVal::undefined());
+            }
             Ok(BoaVal::undefined())
         }),
     );
@@ -860,9 +946,13 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                         .map(|b| b.starts_with(VFS_SYMLINK_PREFIX))
                 })
                 .unwrap_or_else(|| {
-                    std::fs::symlink_metadata(&path)
-                        .map(|m| m.file_type().is_symlink())
-                        .unwrap_or(false)
+                    if is_vfs_tombstoned(&norm) {
+                        false
+                    } else {
+                        std::fs::symlink_metadata(&norm)
+                            .map(|m| m.file_type().is_symlink())
+                            .unwrap_or(false)
+                    }
                 });
             Ok(BoaVal::from(is_sym))
         }),
@@ -896,10 +986,12 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
                 }
                 return Ok(BoaVal::from(js_string!(target)));
             }
-            if let Ok(target_path) = std::fs::read_link(&path) {
-                let target_str = target_path.to_string_lossy().replace('\\', "/");
-                if check_boa_fs_read_ocap(&target_str) {
-                    return Ok(BoaVal::from(js_string!(target_str)));
+            if !is_vfs_tombstoned(&norm) {
+                if let Ok(target_path) = std::fs::read_link(&norm) {
+                    let target_str = target_path.to_string_lossy().replace('\\', "/");
+                    if check_boa_fs_read_ocap(&target_str) {
+                        return Ok(BoaVal::from(js_string!(target_str)));
+                    }
                 }
             }
             Ok(BoaVal::from(js_string!("")))
@@ -931,9 +1023,11 @@ pub(crate) fn register_fs_host_functions(ctx: &mut boa_engine::Context) {
             let mut data = BOA_VFS_CACHE
                 .with(|c| c.borrow().get(&norm).map(|arc| (**arc).clone()))
                 .unwrap_or_else(|| {
-                    std::fs::read(&norm)
-                        .or_else(|_| std::fs::read(&path))
-                        .unwrap_or_default()
+                    if is_vfs_tombstoned(&norm) {
+                        Vec::new()
+                    } else {
+                        std::fs::read(&norm).unwrap_or_default()
+                    }
                 });
             if new_len > data.len() {
                 if let Err(msg) = try_consume_isolate_memory(new_len - data.len()) {
