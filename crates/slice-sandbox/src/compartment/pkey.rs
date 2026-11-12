@@ -1,8 +1,13 @@
 //! Hardware Memory Protection Key (`pkey_alloc` / `WRPKRU` on Linux x86_64) Domain Isolation.
 
 /// Hardware Memory Protection Key (Intel MPK / ARM POE) domain descriptor.
+///
+/// Acts as a 12-byte RAII handle: when `hardware_enforced` is active on Linux `x86_64`,
+/// dropping or overwriting a `HardwareProtectionDomain` resets PKRU and frees the owned
+/// kernel protection key once, while cloning allocates an independent key (or degrades
+/// cleanly to virtualized slot tracking if all 15 kernel keys are occupied).
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct HardwareProtectionDomain {
     pub pkey: i32,
     pub pkru_mask: u32,
@@ -41,6 +46,17 @@ impl HardwareProtectionDomain {
         }
     }
 
+    /// Rebinds a reused compartment to `tenant_slot` without freeing or leaking an already-owned
+    /// hardware protection key on hot request resets.
+    #[inline]
+    pub fn rebind_slot(&mut self, tenant_slot: u32) {
+        if !self.hardware_enforced {
+            let domain_slot = ((tenant_slot % 15) + 1) as i32;
+            self.pkey = domain_slot;
+            self.pkru_mask = !(0b11u32 | (0b11u32 << (domain_slot * 2)));
+        }
+    }
+
     /// Executes a sub-20-cycle domain switch into this tenant's protection key domain.
     #[inline(always)]
     pub fn enter_domain(&self) {
@@ -48,7 +64,8 @@ impl HardwareProtectionDomain {
         {
             if self.hardware_enforced {
                 unsafe {
-                    // Unprivileged WRPKRU instruction: EAX = pkru value, ECX = 0, EDX = 0
+                    // Unprivileged WRPKRU instruction: EAX = pkru value, ECX = 0, EDX = 0.
+                    // Omit `nomem` so LLVM treats the PKRU permission switch as a memory barrier.
                     core::arch::asm!(
                         "xor ecx, ecx",
                         "xor edx, edx",
@@ -56,19 +73,42 @@ impl HardwareProtectionDomain {
                         in("eax") self.pkru_mask,
                         out("ecx") _,
                         out("edx") _,
-                        options(nomem, nostack)
+                        options(nostack)
                     );
                 }
             }
         }
     }
 
-    /// Releases the hardware protection key if allocated via kernel `pkey_alloc`.
+    /// Explicitly consumes and releases this hardware protection domain.
     #[inline]
-    pub fn release(&self) {
+    pub fn release(self) {
+        drop(self);
+    }
+}
+
+impl Clone for HardwareProtectionDomain {
+    #[inline]
+    fn clone(&self) -> Self {
+        if self.hardware_enforced {
+            Self::allocate(self.pkey.max(0) as u32)
+        } else {
+            Self {
+                pkey: self.pkey,
+                pkru_mask: self.pkru_mask,
+                hardware_enforced: false,
+            }
+        }
+    }
+}
+
+impl Drop for HardwareProtectionDomain {
+    #[inline]
+    fn drop(&mut self) {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         {
             if self.hardware_enforced && self.pkey > 0 {
+                self.hardware_enforced = false;
                 unsafe {
                     let default_pkru: u32 = 0;
                     core::arch::asm!(
@@ -78,7 +118,7 @@ impl HardwareProtectionDomain {
                         in("eax") default_pkru,
                         out("ecx") _,
                         out("edx") _,
-                        options(nomem, nostack)
+                        options(nostack)
                     );
                     // SYS_pkey_free on x86_64 Linux is 331
                     let _ = libc::syscall(331, self.pkey as usize);

@@ -130,6 +130,8 @@ impl CapabilityToken {
         self.allow_checkpoints = enabled;
         if !enabled {
             self.max_checkpoints = Some(0);
+        } else if self.max_checkpoints == Some(0) {
+            self.max_checkpoints = None;
         }
         self
     }
@@ -487,11 +489,5 @@ impl TenantCompartment {
             }
         }
         Err(self.trap_exec_denied(binary))
-    }
-}
-
-impl Drop for TenantCompartment {
-    fn drop(&mut self) {
-        self.pkey_domain.release();
     }
 }

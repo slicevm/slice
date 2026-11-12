@@ -100,3 +100,75 @@ fn test_canonical_vfs_resolver_lexical_normalization_and_boundary_guards() {
         assert!(vfs_prefix_matches("Cargo.toml", &cwd.to_string_lossy()));
     }
 }
+
+#[test]
+fn test_compartment_clone_and_rebind_lifecycle_invariants() {
+    assert_eq!(std::mem::size_of::<HardwareProtectionDomain>(), 12);
+
+    let mut primary = TenantCompartment::new(
+        "tenant-primary",
+        2,
+        CapabilityToken::pure_compute(),
+        100_000,
+        65536,
+    );
+    let primary_pkey = primary.pkey_domain.pkey;
+    assert!((1..=15).contains(&primary_pkey));
+    assert_eq!(primary.pkey_domain.pkru_mask & 0b11, 0);
+    assert_eq!(
+        primary.pkey_domain.pkru_mask & (0b11u32 << (primary_pkey * 2)),
+        0
+    );
+
+    // Cloning and dropping the clone must keep the primary compartment's domain intact
+    {
+        let cloned = primary.clone();
+        cloned.pkey_domain.enter_domain();
+        if primary.pkey_domain.hardware_enforced && cloned.pkey_domain.hardware_enforced {
+            assert_ne!(
+                cloned.pkey_domain.pkey, primary_pkey,
+                "Hardware-enforced clone must own a distinct kernel PKEY"
+            );
+        }
+    }
+
+    primary.pkey_domain.enter_domain();
+    for slot in 0..32u32 {
+        primary.pkey_domain.rebind_slot(slot);
+        let k = primary.pkey_domain.pkey;
+        assert!((1..=15).contains(&k));
+        assert_eq!(primary.pkey_domain.pkru_mask & 0b11, 0);
+        assert_eq!(primary.pkey_domain.pkru_mask & (0b11u32 << (k * 2)), 0);
+        primary.pkey_domain.enter_domain();
+    }
+}
+
+#[test]
+fn test_checkpoint_capability_toggling_and_max_limits() {
+    // Disabling then re-enabling checkpoints must clear the implicit zero cap
+    let reenabled = CapabilityToken::pure_compute()
+        .with_checkpoints(false)
+        .with_checkpoints(true);
+    let tenant_reenabled = TenantCompartment::new("cp-toggle", 1, reenabled, 10_000, 65536);
+    assert!(tenant_reenabled.verify_checkpoint(0).is_ok());
+    assert!(tenant_reenabled.verify_checkpoint(10).is_ok());
+
+    // Explicit non-zero cap must remain intact when checkpoints are enabled
+    let bounded = CapabilityToken::pure_compute()
+        .with_max_checkpoints(Some(2))
+        .with_checkpoints(true);
+    let tenant_bounded = TenantCompartment::new("cp-bounded", 2, bounded, 10_000, 65536);
+    assert!(tenant_bounded.verify_checkpoint(0).is_ok());
+    assert!(tenant_bounded.verify_checkpoint(1).is_ok());
+    assert!(matches!(
+        tenant_bounded.verify_checkpoint(2),
+        Err(SandboxViolation::CheckpointDenied { .. })
+    ));
+
+    // Zero cap followed by with_checkpoints(true) must allow checkpoints again
+    let from_zero_cap = CapabilityToken::pure_compute()
+        .with_max_checkpoints(Some(0))
+        .with_checkpoints(true);
+    let tenant_from_zero = TenantCompartment::new("cp-zero", 3, from_zero_cap, 10_000, 65536);
+    assert!(tenant_from_zero.verify_checkpoint(0).is_ok());
+}
