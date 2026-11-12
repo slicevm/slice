@@ -88,17 +88,23 @@ cipher.setAAD(Buffer.from("aad-header"));
 const encHex = cipher.update("confidential-payload", "utf8", "hex") + cipher.final("hex");
 const authTag = cipher.getAuthTag();
 
-// Asymmetric Key Generation, Signing & Key Agreement (Ed25519, ECDSA/ECDH P-256 & P-384, X25519, RSA 2048/3072/4096 & RSA-PSS / RSA-OAEP)
+// Asymmetric Key Generation, Key Agreement & Signing (Ed25519, X25519, ECDSA P-256 & P-384, and imported RSA 2048..8192 PKCS#1 v1.5 / RSA-PSS)
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
 const sig = crypto.sign(null, Buffer.from("token-body"), privateKey);
 const verified = crypto.verify(null, Buffer.from("token-body"), publicKey, sig);
 
-const rsaPair = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
-const rsaSig = crypto.sign("sha256", Buffer.from("jwt-header.payload"), rsaPair.privateKey);
-const rsaOk = crypto.verify("sha256", Buffer.from("jwt-header.payload"), rsaPair.publicKey, rsaSig);
+const aliceX = crypto.generateKeyPairSync("x25519");
+const bobX = crypto.generateKeyPairSync("x25519");
+const sharedSecret: Buffer = crypto.diffieHellman({ privateKey: aliceX.privateKey, publicKey: bobX.publicKey });
 
-// WebCrypto subtle (including RSASSA-PKCS1-v1_5, RSA-PSS, RSA-OAEP, X25519, and ECDH P-256/P-384) is also exposed as crypto.subtle:
-const x25519Pair = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
+// Import pre-provisioned RSA keys (PEM / PKCS#8 / PKCS#1 / SPKI / JWK, 2048 to 8192 bits) for RS256/384/512 & PS256/384/512:
+const rsaPriv = crypto.createPrivateKey(process.env.JWT_RSA_PRIVATE_KEY_PEM!);
+const rsaPub = crypto.createPublicKey(rsaPriv);
+const rsaSig = crypto.sign("sha256", Buffer.from("jwt-header.payload"), rsaPriv);
+const rsaOk = crypto.verify("sha256", Buffer.from("jwt-header.payload"), rsaPub, rsaSig);
+
+// WebCrypto subtle (Ed25519, X25519 deriveBits/deriveKey, ECDSA P-256/P-384, and imported RSASSA-PKCS1-v1_5 / RSA-PSS) is also exposed as crypto.subtle:
+const x25519Pair = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits", "deriveKey"]);
 ```
 
 ### 1.3 `node:path` / `path` (and `path.posix` / `path.win32`)

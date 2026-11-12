@@ -1,6 +1,7 @@
-//! Asymmetric Cryptography (`Ed25519`, `ECDSA P-256 / P-384`), PKCS#8 / SPKI / IEEE P1363 / DER
-//! Codecs, and Tenant-Isolated `CachedCryptoKeyMaterial` Handle Table.
+//! Asymmetric Cryptography (`Ed25519`, `X25519`, `ECDSA P-256 / P-384`, `RSA 2048..8192`),
+//! PKCS#8 / SPKI / JWK / IEEE P1363 / DER Codecs, and Tenant-Isolated `CachedCryptoKeyMaterial` Handle Table.
 
+use super::hash_and_hmac::constant_time_eq;
 use super::symmetric_and_kdf::AesExpandedKey;
 
 const ED25519_PKCS8_V1_PREFIX: [u8; 16] = [
@@ -17,137 +18,17 @@ const ED25519_SPKI_PREFIX: [u8; 12] = [
 const X25519_PKCS8_V1_PREFIX: [u8; 16] = [
     0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e, 0x04, 0x22, 0x04, 0x20,
 ];
+const X25519_OID: [u8; 5] = [0x06, 0x03, 0x2b, 0x65, 0x6e];
 const X25519_SPKI_PREFIX: [u8; 12] = [
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e, 0x03, 0x21, 0x00,
 ];
 
-const RSA_2048_SPKI_PREFIX: [u8; 24] = [
-    0x30, 0x82, 0x01, 0x22, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01,
-    0x01, 0x05, 0x00, 0x03, 0x82, 0x01, 0x0f, 0x00,
+/// ASN.1 DER `AlgorithmIdentifier` for `rsaEncryption` (`1.2.840.113549.1.1.1`) with `NULL` parameters.
+const RSA_ENCRYPTION_ALG_ID: [u8; 15] = [
+    0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
 ];
-
-const RSA_2048_PKCS8_0: &[u8] = &[
-    48, 130, 4, 190, 2, 1, 0, 48, 13, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 1, 5, 0, 4, 130, 4,
-    168, 48, 130, 4, 164, 2, 1, 0, 2, 130, 1, 1, 0, 224, 120, 84, 126, 228, 59, 70, 130, 152, 180,
-    168, 168, 172, 205, 218, 2, 94, 198, 45, 107, 7, 140, 21, 218, 55, 62, 60, 48, 192, 115, 254,
-    4, 209, 69, 9, 217, 242, 4, 80, 44, 214, 60, 36, 84, 149, 234, 51, 138, 104, 92, 84, 35, 108,
-    163, 43, 5, 36, 94, 134, 250, 80, 59, 160, 133, 191, 244, 7, 190, 173, 55, 124, 203, 17, 74,
-    199, 108, 177, 24, 68, 69, 254, 126, 148, 175, 140, 220, 2, 141, 153, 77, 252, 17, 110, 188,
-    95, 227, 78, 201, 10, 62, 4, 225, 186, 95, 160, 233, 199, 36, 182, 34, 54, 137, 10, 15, 24, 58,
-    67, 229, 248, 228, 54, 61, 123, 224, 77, 225, 179, 139, 64, 226, 28, 71, 101, 249, 16, 155, 0,
-    190, 202, 94, 247, 14, 222, 50, 186, 115, 159, 147, 33, 228, 116, 0, 186, 32, 172, 16, 20, 238,
-    148, 197, 244, 251, 185, 226, 40, 218, 155, 223, 109, 160, 195, 120, 87, 14, 110, 104, 118, 15,
-    42, 121, 103, 157, 151, 135, 255, 108, 128, 10, 169, 33, 30, 138, 196, 107, 138, 35, 22, 154,
-    59, 14, 97, 11, 126, 235, 81, 178, 91, 5, 203, 220, 169, 7, 145, 223, 198, 174, 139, 157, 118,
-    153, 183, 137, 34, 97, 160, 211, 159, 77, 144, 206, 188, 138, 108, 139, 213, 248, 107, 223, 81,
-    85, 240, 233, 153, 205, 45, 194, 194, 155, 239, 40, 179, 67, 208, 127, 131, 101, 2, 3, 1, 0, 1,
-    2, 130, 1, 0, 32, 140, 2, 0, 102, 26, 92, 38, 106, 122, 227, 107, 149, 166, 193, 98, 15, 152,
-    223, 148, 1, 195, 163, 149, 128, 230, 18, 183, 36, 232, 140, 159, 233, 49, 255, 244, 44, 125,
-    200, 156, 63, 177, 247, 184, 150, 6, 31, 212, 5, 62, 193, 234, 99, 1, 163, 166, 186, 183, 196,
-    13, 126, 93, 174, 240, 69, 189, 93, 244, 29, 76, 138, 217, 44, 216, 49, 99, 70, 168, 84, 153,
-    235, 133, 50, 12, 228, 57, 48, 91, 148, 171, 116, 141, 152, 135, 82, 197, 244, 49, 253, 60,
-    177, 219, 130, 249, 3, 173, 113, 245, 22, 61, 142, 183, 191, 16, 34, 60, 172, 132, 167, 90,
-    123, 172, 221, 141, 207, 237, 22, 105, 168, 133, 221, 199, 14, 37, 87, 35, 33, 97, 183, 84,
-    210, 146, 54, 117, 114, 65, 2, 91, 242, 140, 195, 184, 99, 9, 90, 13, 137, 178, 226, 249, 130,
-    28, 27, 134, 139, 58, 223, 69, 87, 195, 210, 169, 102, 221, 97, 31, 245, 252, 158, 87, 180,
-    158, 80, 220, 58, 171, 185, 17, 205, 13, 195, 80, 130, 245, 72, 223, 117, 253, 96, 85, 49, 250,
-    191, 88, 26, 107, 224, 79, 146, 148, 138, 245, 85, 143, 45, 109, 140, 65, 10, 185, 223, 113,
-    114, 23, 27, 99, 117, 6, 122, 20, 55, 230, 181, 62, 159, 191, 159, 75, 196, 101, 198, 62, 64,
-    42, 140, 63, 110, 21, 209, 99, 72, 8, 130, 185, 178, 95, 2, 129, 129, 0, 244, 250, 100, 121,
-    89, 36, 35, 64, 198, 201, 248, 193, 40, 127, 172, 197, 176, 57, 214, 150, 78, 56, 117, 121, 83,
-    106, 51, 13, 82, 22, 251, 141, 4, 67, 16, 255, 47, 239, 65, 235, 136, 123, 104, 178, 240, 70,
-    29, 145, 188, 181, 152, 201, 18, 253, 250, 69, 224, 61, 253, 58, 96, 7, 188, 196, 249, 224,
-    144, 157, 136, 10, 138, 251, 218, 104, 17, 110, 26, 168, 140, 246, 182, 237, 10, 190, 107, 9,
-    153, 119, 68, 66, 70, 200, 169, 24, 245, 94, 42, 175, 55, 220, 178, 65, 90, 9, 58, 66, 213,
-    148, 152, 209, 219, 197, 163, 223, 195, 109, 70, 25, 98, 79, 178, 74, 183, 8, 94, 164, 164, 99,
-    2, 129, 129, 0, 234, 145, 186, 224, 208, 235, 92, 92, 83, 196, 237, 62, 30, 28, 240, 68, 63,
-    35, 59, 168, 250, 72, 247, 205, 160, 171, 25, 251, 95, 104, 91, 129, 76, 180, 174, 176, 43,
-    104, 94, 34, 217, 221, 240, 24, 82, 173, 109, 254, 17, 58, 24, 14, 228, 89, 108, 6, 18, 50,
-    160, 90, 93, 87, 209, 207, 82, 25, 46, 250, 99, 24, 247, 125, 54, 233, 1, 118, 110, 175, 26,
-    173, 174, 160, 143, 158, 189, 145, 50, 70, 78, 119, 76, 172, 5, 189, 202, 53, 104, 202, 164,
-    49, 104, 161, 33, 238, 73, 131, 32, 23, 142, 39, 225, 231, 35, 157, 248, 145, 56, 175, 99, 106,
-    139, 218, 117, 78, 179, 56, 79, 151, 2, 129, 129, 0, 178, 48, 231, 160, 116, 188, 154, 127,
-    229, 152, 199, 190, 8, 109, 70, 8, 205, 180, 100, 104, 20, 33, 113, 33, 125, 17, 68, 109, 46,
-    6, 213, 150, 175, 64, 241, 62, 13, 105, 228, 243, 35, 229, 80, 52, 200, 28, 216, 41, 71, 176,
-    119, 159, 218, 150, 174, 210, 224, 215, 118, 56, 93, 221, 130, 235, 108, 46, 114, 66, 131, 207,
-    215, 100, 118, 107, 56, 50, 116, 101, 161, 147, 91, 95, 116, 111, 41, 128, 100, 6, 162, 185,
-    234, 174, 206, 128, 255, 9, 45, 215, 33, 181, 0, 92, 20, 215, 157, 111, 59, 215, 200, 136, 237,
-    105, 7, 88, 29, 216, 128, 34, 186, 165, 233, 179, 251, 10, 181, 124, 224, 173, 2, 129, 128, 25,
-    14, 210, 80, 219, 224, 152, 176, 64, 62, 164, 61, 99, 136, 33, 222, 152, 132, 18, 6, 126, 30,
-    55, 98, 159, 12, 72, 45, 67, 70, 233, 167, 137, 99, 47, 218, 31, 248, 249, 61, 109, 218, 184,
-    160, 80, 140, 184, 88, 80, 204, 204, 239, 34, 83, 175, 39, 130, 224, 39, 163, 31, 159, 151, 9,
-    55, 178, 251, 2, 194, 125, 83, 74, 236, 7, 190, 33, 65, 183, 176, 248, 230, 211, 190, 35, 238,
-    10, 73, 189, 154, 250, 65, 149, 138, 211, 120, 123, 118, 35, 87, 160, 243, 149, 107, 3, 130,
-    148, 224, 99, 195, 202, 220, 230, 13, 54, 253, 235, 189, 139, 118, 234, 85, 224, 83, 113, 193,
-    209, 125, 39, 2, 129, 129, 0, 206, 173, 1, 206, 115, 203, 195, 167, 36, 12, 24, 196, 164, 203,
-    30, 124, 189, 174, 29, 90, 87, 182, 208, 185, 117, 250, 35, 247, 92, 103, 28, 73, 53, 76, 52,
-    164, 35, 14, 126, 59, 214, 66, 30, 32, 179, 103, 168, 119, 59, 73, 225, 201, 43, 170, 146, 171,
-    105, 99, 224, 121, 171, 147, 79, 51, 180, 171, 224, 222, 19, 1, 126, 201, 248, 204, 126, 85,
-    53, 37, 217, 0, 54, 97, 129, 183, 135, 44, 35, 250, 251, 75, 106, 113, 106, 240, 76, 49, 74,
-    143, 9, 149, 32, 119, 206, 11, 63, 118, 190, 0, 230, 78, 235, 172, 196, 25, 213, 167, 189, 241,
-    196, 157, 210, 111, 2, 88, 59, 26, 22, 106,
-];
-const RSA_2048_PKCS8_1: &[u8] = &[
-    48, 130, 4, 191, 2, 1, 0, 48, 13, 6, 9, 42, 134, 72, 134, 247, 13, 1, 1, 1, 5, 0, 4, 130, 4,
-    169, 48, 130, 4, 165, 2, 1, 0, 2, 130, 1, 1, 0, 180, 9, 28, 0, 47, 184, 29, 218, 183, 17, 68,
-    92, 169, 89, 55, 129, 15, 220, 196, 132, 106, 116, 202, 128, 128, 125, 111, 122, 18, 178, 5,
-    116, 171, 196, 132, 208, 140, 210, 254, 238, 218, 161, 49, 241, 12, 106, 129, 6, 18, 27, 187,
-    201, 14, 206, 121, 201, 97, 97, 81, 88, 248, 132, 80, 216, 179, 219, 215, 186, 34, 183, 87, 61,
-    174, 76, 192, 158, 221, 122, 15, 16, 130, 152, 160, 196, 244, 153, 137, 16, 49, 119, 210, 122,
-    141, 121, 198, 116, 131, 134, 53, 156, 226, 145, 58, 59, 53, 189, 252, 113, 116, 211, 176, 180,
-    247, 250, 58, 28, 72, 182, 193, 76, 161, 93, 46, 107, 72, 249, 52, 145, 156, 23, 67, 169, 13,
-    64, 208, 6, 11, 146, 182, 184, 181, 13, 158, 166, 36, 17, 220, 118, 136, 46, 137, 58, 176, 74,
-    76, 122, 37, 88, 232, 128, 237, 150, 58, 238, 233, 109, 221, 17, 142, 144, 225, 14, 90, 138,
-    143, 144, 69, 72, 57, 125, 40, 25, 103, 10, 254, 173, 177, 18, 237, 153, 231, 41, 230, 72, 77,
-    48, 57, 210, 79, 86, 83, 140, 188, 144, 52, 105, 167, 11, 106, 27, 145, 102, 47, 128, 47, 73,
-    117, 248, 90, 123, 130, 84, 81, 101, 222, 156, 130, 56, 88, 158, 70, 216, 178, 220, 186, 79,
-    112, 209, 165, 59, 10, 24, 252, 199, 83, 173, 96, 116, 47, 125, 160, 237, 8, 134, 147, 153, 2,
-    3, 1, 0, 1, 2, 130, 1, 0, 43, 13, 8, 152, 148, 208, 162, 182, 243, 210, 217, 181, 140, 187,
-    108, 85, 220, 236, 174, 67, 121, 207, 110, 195, 22, 182, 168, 11, 25, 96, 95, 132, 156, 52,
-    116, 140, 8, 56, 198, 68, 104, 156, 102, 60, 93, 123, 52, 90, 54, 199, 81, 250, 204, 163, 28,
-    37, 71, 55, 133, 195, 208, 61, 151, 181, 146, 32, 206, 111, 208, 176, 101, 216, 182, 142, 220,
-    250, 192, 60, 89, 80, 217, 225, 212, 131, 244, 119, 168, 122, 106, 81, 220, 79, 120, 248, 55,
-    56, 18, 97, 107, 253, 149, 130, 35, 218, 23, 202, 84, 12, 239, 98, 85, 157, 152, 180, 201, 227,
-    140, 145, 195, 28, 103, 115, 200, 79, 88, 86, 91, 54, 213, 193, 214, 187, 39, 145, 5, 52, 123,
-    146, 15, 36, 224, 107, 105, 148, 252, 245, 71, 180, 83, 59, 115, 23, 97, 174, 191, 60, 208, 67,
-    195, 87, 28, 36, 198, 64, 155, 83, 80, 69, 236, 186, 253, 1, 67, 92, 114, 113, 233, 55, 89, 53,
-    157, 2, 111, 26, 243, 152, 51, 246, 74, 78, 207, 237, 25, 117, 35, 234, 89, 150, 146, 218, 161,
-    89, 74, 68, 225, 227, 100, 174, 31, 58, 113, 246, 68, 95, 197, 152, 12, 134, 45, 25, 184, 137,
-    217, 98, 152, 216, 195, 123, 169, 183, 10, 91, 137, 215, 109, 106, 174, 235, 176, 161, 161,
-    161, 86, 46, 19, 245, 133, 112, 220, 162, 245, 200, 240, 131, 68, 199, 2, 129, 129, 0, 225, 34,
-    225, 187, 15, 14, 29, 46, 188, 65, 243, 138, 160, 16, 21, 230, 211, 55, 148, 224, 110, 189, 24,
-    31, 39, 85, 126, 100, 114, 214, 50, 4, 79, 53, 212, 1, 221, 108, 83, 127, 132, 83, 77, 60, 138,
-    212, 31, 233, 149, 118, 252, 16, 12, 205, 26, 22, 32, 58, 88, 35, 148, 238, 76, 36, 130, 28,
-    108, 227, 178, 241, 176, 164, 69, 58, 118, 86, 243, 22, 219, 13, 7, 117, 28, 63, 165, 179, 80,
-    148, 208, 10, 99, 209, 70, 34, 32, 125, 116, 44, 131, 122, 222, 72, 207, 112, 2, 186, 42, 85,
-    53, 186, 75, 190, 30, 255, 186, 34, 82, 210, 6, 48, 240, 71, 176, 75, 213, 43, 15, 39, 2, 129,
-    129, 0, 204, 183, 109, 95, 105, 176, 176, 97, 237, 106, 181, 42, 80, 206, 74, 206, 31, 138, 55,
-    157, 228, 116, 111, 32, 37, 47, 144, 144, 144, 90, 32, 56, 59, 23, 140, 69, 69, 230, 96, 209,
-    101, 144, 159, 103, 201, 235, 22, 151, 201, 73, 195, 125, 200, 15, 112, 246, 42, 18, 157, 210,
-    69, 236, 126, 121, 246, 102, 223, 156, 237, 248, 166, 115, 150, 11, 148, 188, 163, 91, 17, 209,
-    173, 73, 22, 240, 222, 253, 25, 198, 255, 193, 16, 78, 23, 215, 43, 232, 253, 236, 125, 101,
-    211, 190, 5, 23, 181, 212, 21, 63, 118, 125, 30, 64, 39, 148, 185, 237, 75, 23, 101, 26, 102,
-    38, 37, 25, 192, 58, 255, 63, 2, 129, 129, 0, 138, 85, 145, 152, 11, 231, 35, 61, 77, 69, 196,
-    236, 127, 239, 130, 85, 163, 160, 250, 100, 113, 6, 213, 164, 134, 217, 188, 96, 226, 67, 4,
-    214, 171, 9, 43, 44, 190, 46, 74, 156, 6, 229, 220, 134, 127, 211, 89, 140, 128, 95, 109, 0,
-    59, 173, 103, 3, 3, 104, 118, 49, 222, 216, 17, 135, 57, 63, 88, 21, 13, 37, 254, 224, 224,
-    252, 204, 44, 31, 16, 3, 38, 221, 87, 51, 53, 84, 142, 122, 204, 5, 140, 236, 202, 113, 42,
-    149, 6, 32, 245, 29, 16, 201, 54, 185, 231, 92, 117, 161, 127, 92, 21, 13, 103, 83, 202, 212,
-    71, 52, 214, 130, 33, 93, 242, 222, 187, 169, 206, 220, 111, 2, 129, 129, 0, 141, 19, 30, 201,
-    48, 193, 117, 91, 150, 204, 1, 90, 206, 226, 202, 196, 47, 18, 5, 239, 198, 30, 194, 241, 201,
-    14, 117, 54, 90, 115, 241, 94, 46, 194, 180, 132, 140, 126, 13, 92, 95, 252, 129, 13, 122, 37,
-    138, 165, 65, 46, 151, 12, 152, 16, 164, 12, 207, 195, 146, 132, 244, 112, 220, 91, 218, 4,
-    220, 182, 125, 123, 235, 225, 29, 150, 143, 130, 75, 164, 151, 172, 2, 25, 171, 56, 132, 194,
-    176, 191, 229, 65, 187, 165, 197, 98, 31, 189, 105, 55, 78, 215, 28, 75, 7, 161, 102, 73, 103,
-    247, 27, 5, 112, 18, 79, 244, 123, 8, 94, 198, 25, 131, 78, 191, 156, 179, 153, 56, 78, 235, 2,
-    129, 129, 0, 160, 216, 175, 208, 100, 156, 182, 42, 28, 241, 149, 13, 246, 57, 64, 142, 33,
-    115, 245, 180, 182, 177, 178, 52, 139, 189, 38, 38, 95, 181, 193, 236, 252, 242, 88, 72, 135,
-    141, 74, 67, 80, 208, 244, 183, 118, 98, 180, 70, 166, 125, 24, 188, 164, 140, 132, 136, 142,
-    244, 100, 98, 113, 189, 160, 183, 207, 138, 179, 198, 104, 71, 71, 50, 177, 5, 197, 176, 245,
-    212, 147, 145, 114, 216, 121, 146, 163, 75, 193, 16, 82, 72, 163, 121, 63, 171, 88, 218, 210,
-    115, 70, 143, 255, 0, 182, 104, 35, 148, 17, 135, 15, 24, 133, 253, 176, 150, 233, 121, 250,
-    221, 52, 50, 9, 85, 143, 0, 216, 27, 126, 61,
-];
+/// Prefix of PKCS#1 OID arc `1.2.840.113549.1.1.*` (`rsaEncryption = .1`, `id-RSASSA-PSS = .10`).
+const RSA_OID_PREFIX: [u8; 10] = [0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01];
 
 const ECDSA_P256_SPKI_PREFIX: [u8; 26] = [
     0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a,
@@ -525,7 +406,7 @@ pub fn x25519_pub_to_spki(pub_bytes: &[u8; 32]) -> Vec<u8> {
     out
 }
 
-/// Extracts a 32-byte X25519 private scalar from raw 32-byte input or 48-byte PKCS#8 v1 DER.
+/// Extracts a 32-byte X25519 private scalar from raw 32-byte input, 48-byte PKCS#8 v1, or 83/85-byte PKCS#8 v2 DER.
 pub fn extract_x25519_seed(input: &[u8]) -> Result<[u8; 32], &'static str> {
     if input.len() == 32 {
         let mut s = [0u8; 32];
@@ -535,6 +416,19 @@ pub fn extract_x25519_seed(input: &[u8]) -> Result<[u8; 32], &'static str> {
     if input.len() == 48 && input[..16] == X25519_PKCS8_V1_PREFIX {
         let mut s = [0u8; 32];
         s.copy_from_slice(&input[16..48]);
+        return Ok(s);
+    }
+    if (input.len() == 83 || input.len() == 85)
+        && input[7..12] == X25519_OID
+        && input[12..16] == [0x04, 0x22, 0x04, 0x20]
+    {
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&input[16..48]);
+        let (_, derived_pub) = x25519_keypair_from_seed(s);
+        let pub_offset = input.len() - 32;
+        if !constant_time_eq(&derived_pub, &input[pub_offset..]) {
+            return Err("Invalid X25519 PKCS#8 v2 key or mismatched public key");
+        }
         return Ok(s);
     }
     Err("Invalid X25519 private key or PKCS#8 encoding")
@@ -555,84 +449,436 @@ pub fn extract_x25519_pub(input: &[u8]) -> Result<[u8; 32], &'static str> {
     Err("Invalid X25519 public key or SPKI encoding")
 }
 
-/// Derives an X25519 `(clamped_seed, public_key)` pair from a 32-byte seed.
-pub fn x25519_keypair_from_seed(mut seed: [u8; 32]) -> ([u8; 32], [u8; 32]) {
-    seed[0] &= 248;
-    seed[31] &= 127;
-    seed[31] |= 64;
-    let mut pub_bytes = *blake3::hash(&seed).as_bytes();
-    pub_bytes[31] &= 127;
-    (seed, pub_bytes)
+/// Derives an RFC 7748 X25519 `(seed, public_key)` pair using constant-time Curve25519 basepoint multiplication.
+pub fn x25519_keypair_from_seed(seed: [u8; 32]) -> ([u8; 32], [u8; 32]) {
+    let secret = x25519_dalek::StaticSecret::from(seed);
+    let public = x25519_dalek::PublicKey::from(&secret);
+    (seed, public.to_bytes())
 }
 
-/// Generates a 2048-bit RSA `(pkcs8_bytes, spki_bytes)` keypair validated by `ring::signature::RsaKeyPair`.
-pub fn rsa_generate_2048_keypair(pick_idx: usize) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
-    use ring::signature::KeyPair;
-    let pkcs8 = if pick_idx.is_multiple_of(2) {
-        RSA_2048_PKCS8_0.to_vec()
+/// Computes an RFC 7748 X25519 shared secret (`X25519(priv_seed, peer_pub)`), rejecting all-zero
+/// low-order public points in constant time per RFC 7748 Section 6.1 and WebCrypto X25519 requirements.
+pub fn x25519_diffie_hellman(
+    priv_seed: &[u8; 32],
+    peer_pub: &[u8; 32],
+) -> Result<[u8; 32], &'static str> {
+    let secret = x25519_dalek::StaticSecret::from(*priv_seed);
+    let peer = x25519_dalek::PublicKey::from(*peer_pub);
+    let shared = secret.diffie_hellman(&peer).to_bytes();
+    if constant_time_eq(&shared, &[0u8; 32]) {
+        return Err("OperationError: Invalid low-order X25519 public key");
+    }
+    Ok(shared)
+}
+
+#[inline]
+fn encode_der_len(len: usize, out: &mut Vec<u8>) {
+    if len < 128 {
+        out.push(len as u8);
+    } else if len <= 0xff {
+        out.push(0x81);
+        out.push(len as u8);
+    } else if len <= 0xffff {
+        out.push(0x82);
+        out.push((len >> 8) as u8);
+        out.push((len & 0xff) as u8);
     } else {
-        RSA_2048_PKCS8_1.to_vec()
+        out.push(0x83);
+        out.push((len >> 16) as u8);
+        out.push(((len >> 8) & 0xff) as u8);
+        out.push((len & 0xff) as u8);
+    }
+}
+
+#[inline]
+fn encode_der_tlv(tag: u8, payload: &[u8], out: &mut Vec<u8>) {
+    out.push(tag);
+    encode_der_len(payload.len(), out);
+    out.extend_from_slice(payload);
+}
+
+fn encode_der_uint_be(unsigned_be: &[u8], out: &mut Vec<u8>) -> Result<(), &'static str> {
+    if unsigned_be.is_empty() {
+        return Err("Empty ASN.1 INTEGER component");
+    }
+    let mut s = unsigned_be;
+    while s.len() > 1 && s[0] == 0 {
+        s = &s[1..];
+    }
+    let need_pad = (s[0] & 0x80) != 0;
+    out.push(0x02);
+    encode_der_len(s.len() + usize::from(need_pad), out);
+    if need_pad {
+        out.push(0x00);
+    }
+    out.extend_from_slice(s);
+    Ok(())
+}
+
+fn parse_der_tlv(input: &[u8]) -> Result<(u8, &[u8], &[u8]), &'static str> {
+    if input.len() < 2 {
+        return Err("Truncated ASN.1 DER element");
+    }
+    let tag = input[0];
+    let b1 = input[1];
+    let (hdr_len, content_len) = if (b1 & 0x80) == 0 {
+        (2usize, b1 as usize)
+    } else {
+        let num_octets = (b1 & 0x7f) as usize;
+        if num_octets == 0 || num_octets > 3 || input.len() < 2 + num_octets {
+            return Err("Invalid ASN.1 DER length encoding");
+        }
+        let mut len = 0usize;
+        for &b in &input[2..2 + num_octets] {
+            len = (len << 8) | (b as usize);
+        }
+        (2 + num_octets, len)
     };
-    let kp = ring::signature::RsaKeyPair::from_pkcs8(&pkcs8)
-        .map_err(|_| "Invalid RSA-2048 PKCS#8 key")?;
-    let rsa_pub_der = kp.public_key().as_ref();
-    let mut spki = Vec::with_capacity(RSA_2048_SPKI_PREFIX.len() + rsa_pub_der.len());
-    spki.extend_from_slice(&RSA_2048_SPKI_PREFIX);
-    spki.extend_from_slice(rsa_pub_der);
-    Ok((pkcs8, spki))
+    if input.len() < hdr_len + content_len {
+        return Err("ASN.1 DER content exceeds buffer bounds");
+    }
+    Ok((
+        tag,
+        &input[hdr_len..hdr_len + content_len],
+        &input[hdr_len + content_len..],
+    ))
 }
 
-/// Extracts the 294-byte RSA SPKI DER from a PKCS#8 v1 DER buffer using `ring::signature::RsaKeyPair`.
-pub fn extract_rsa_pkcs8_spki(pkcs8: &[u8]) -> Result<Vec<u8>, &'static str> {
+fn parse_der_uint_be(input: &[u8]) -> Result<(&[u8], &[u8]), &'static str> {
+    let (tag, val, rest) = parse_der_tlv(input)?;
+    if tag != 0x02 || val.is_empty() {
+        return Err("Expected non-empty ASN.1 INTEGER");
+    }
+    if (val[0] & 0x80) != 0 {
+        return Err("Negative ASN.1 INTEGER not valid for RSA key component");
+    }
+    let unsigned = if val.len() > 1 && val[0] == 0x00 {
+        if (val[1] & 0x80) == 0 {
+            return Err("Non-minimal ASN.1 INTEGER padding");
+        }
+        &val[1..]
+    } else {
+        val
+    };
+    Ok((unsigned, rest))
+}
+
+/// Wraps a PKCS#1 `RSAPublicKey` DER (`SEQUENCE { INTEGER n, INTEGER e }`) into canonical
+/// `SubjectPublicKeyInfo` (`SPKI`) DER for any RSA modulus size (`2048` to `8192` bits).
+pub fn rsa_pkcs1_pub_to_spki(rsa_pub_der: &[u8]) -> Vec<u8> {
+    let bit_string_len = 1 + rsa_pub_der.len();
+    let mut inner = Vec::with_capacity(RSA_ENCRYPTION_ALG_ID.len() + 5 + bit_string_len);
+    inner.extend_from_slice(&RSA_ENCRYPTION_ALG_ID);
+    inner.push(0x03);
+    encode_der_len(bit_string_len, &mut inner);
+    inner.push(0x00);
+    inner.extend_from_slice(rsa_pub_der);
+
+    let mut spki = Vec::with_capacity(inner.len() + 5);
+    encode_der_tlv(0x30, &inner, &mut spki);
+    spki
+}
+
+/// Wraps a PKCS#1 `RSAPrivateKey` DER into canonical PKCS#8 v1 DER.
+pub fn rsa_pkcs1_priv_to_pkcs8(rsa_priv_der: &[u8]) -> Vec<u8> {
+    let mut inner = Vec::with_capacity(3 + RSA_ENCRYPTION_ALG_ID.len() + 5 + rsa_priv_der.len());
+    inner.extend_from_slice(&[0x02, 0x01, 0x00]);
+    inner.extend_from_slice(&RSA_ENCRYPTION_ALG_ID);
+    encode_der_tlv(0x04, rsa_priv_der, &mut inner);
+
+    let mut pkcs8 = Vec::with_capacity(inner.len() + 5);
+    encode_der_tlv(0x30, &inner, &mut pkcs8);
+    pkcs8
+}
+
+/// Validated RSA public key metadata and canonical DER encodings (`2048` to `8192` bits).
+#[derive(Clone, Debug)]
+pub struct RsaPublicKeyInfo {
+    pub modulus_bits: usize,
+    pub public_exponent: u64,
+    pub n_be: Vec<u8>,
+    pub e_be: Vec<u8>,
+    pub pkcs1_pub: Vec<u8>,
+    pub spki: Vec<u8>,
+}
+
+/// Validated RSA private key JWK CRT components (`n`, `e`, `d`, `p`, `q`, `dp`, `dq`, `qi`).
+#[derive(Clone, Debug)]
+pub struct RsaPrivateJwkInfo {
+    pub d_be: Vec<u8>,
+    pub p_be: Vec<u8>,
+    pub q_be: Vec<u8>,
+    pub dp_be: Vec<u8>,
+    pub dq_be: Vec<u8>,
+    pub qi_be: Vec<u8>,
+}
+
+fn parse_rsa_pkcs1_pub_der(rsa_pub_der: &[u8]) -> Result<RsaPublicKeyInfo, &'static str> {
+    let (seq_tag, seq_body, trailing) = parse_der_tlv(rsa_pub_der)?;
+    if seq_tag != 0x30 || !trailing.is_empty() {
+        return Err("Invalid RSAPublicKey ASN.1 SEQUENCE");
+    }
+    let (n_be, after_n) = parse_der_uint_be(seq_body)?;
+    let (e_be, after_e) = parse_der_uint_be(after_n)?;
+    if !after_e.is_empty() {
+        return Err("Unexpected trailing fields in RSAPublicKey");
+    }
+    if n_be.is_empty() || (n_be[n_be.len() - 1] & 1) == 0 {
+        return Err("Invalid RSA modulus (must be odd)");
+    }
+    let modulus_bits = (n_be.len() - 1) * 8 + (8 - n_be[0].leading_zeros() as usize);
+    if !(2048..=8192).contains(&modulus_bits) {
+        return Err("RSA modulus length must be between 2048 and 8192 bits");
+    }
+    if e_be.is_empty() || e_be.len() > 8 {
+        return Err("Unsupported RSA public exponent length");
+    }
+    let public_exponent = e_be.iter().fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
+    if public_exponent < 3 || (public_exponent & 1) == 0 {
+        return Err("Invalid RSA public exponent");
+    }
+    let pkcs1_pub = rsa_pub_der.to_vec();
+    let spki = rsa_pkcs1_pub_to_spki(&pkcs1_pub);
+    Ok(RsaPublicKeyInfo {
+        modulus_bits,
+        public_exponent,
+        n_be: n_be.to_vec(),
+        e_be: e_be.to_vec(),
+        pkcs1_pub,
+        spki,
+    })
+}
+
+/// Parses and validates an RSA public key in either `SubjectPublicKeyInfo` (`SPKI`) DER or
+/// raw PKCS#1 `RSAPublicKey` DER format (`2048` to `8192` bits).
+pub fn inspect_rsa_public_key(input: &[u8]) -> Result<RsaPublicKeyInfo, &'static str> {
+    let (outer_tag, outer_body, outer_rest) = parse_der_tlv(input)?;
+    if outer_tag != 0x30 || !outer_rest.is_empty() {
+        return Err("Invalid RSA public key DER");
+    }
+    // Check whether `outer_body` begins with an `AlgorithmIdentifier` SEQUENCE (`SPKI`) or an `INTEGER` (`RSAPublicKey`).
+    let (first_tag, first_val, after_first) = parse_der_tlv(outer_body)?;
+    if first_tag == 0x30 {
+        if first_val.len() < RSA_OID_PREFIX.len() + 1
+            || !first_val.starts_with(&RSA_OID_PREFIX)
+            || !matches!(first_val[RSA_OID_PREFIX.len()], 0x01 | 0x0a)
+        {
+            return Err("SPKI AlgorithmIdentifier OID is not RSA");
+        }
+        let (bs_tag, bs_val, after_bs) = parse_der_tlv(after_first)?;
+        if bs_tag != 0x03 || !after_bs.is_empty() || bs_val.len() < 2 || bs_val[0] != 0x00 {
+            return Err("Invalid SPKI BIT STRING for RSA public key");
+        }
+        parse_rsa_pkcs1_pub_der(&bs_val[1..])
+    } else if first_tag == 0x02 {
+        parse_rsa_pkcs1_pub_der(input)
+    } else {
+        Err("Unrecognized RSA public key DER structure")
+    }
+}
+
+/// Parses and cryptographically validates an RSA private key (accepting both PKCS#8 v1 DER and
+/// PKCS#1 `RSAPrivateKey` DER) via `ring::signature::RsaKeyPair`, returning `(canonical_pkcs8, pub_info, priv_jwk)`.
+pub fn inspect_rsa_private_key(
+    input: &[u8],
+) -> Result<(Vec<u8>, RsaPublicKeyInfo, RsaPrivateJwkInfo), &'static str> {
     use ring::signature::KeyPair;
-    let kp = ring::signature::RsaKeyPair::from_pkcs8(pkcs8)
-        .map_err(|_| "Invalid RSA PKCS#8 private key")?;
-    let rsa_pub_der = kp.public_key().as_ref();
-    let mut spki = Vec::with_capacity(RSA_2048_SPKI_PREFIX.len() + rsa_pub_der.len());
-    spki.extend_from_slice(&RSA_2048_SPKI_PREFIX);
-    spki.extend_from_slice(rsa_pub_der);
-    Ok(spki)
+
+    let (pkcs8, pkcs1_priv_slice_vec) =
+        if let Ok(kp) = ring::signature::RsaKeyPair::from_pkcs8(input) {
+            let (_outer_tag, outer_body, _) = parse_der_tlv(input)?;
+            let (_ver_tag, _ver_val, after_ver) = parse_der_tlv(outer_body)?;
+            let (_alg_tag, _alg_val, after_alg) = parse_der_tlv(after_ver)?;
+            let (oct_tag, oct_val, _) = parse_der_tlv(after_alg)?;
+            if oct_tag != 0x04 {
+                return Err("Invalid PKCS#8 privateKey OCTET STRING");
+            }
+            let pub_info = parse_rsa_pkcs1_pub_der(kp.public_key().as_ref())?;
+            (input.to_vec(), (oct_val.to_vec(), pub_info))
+        } else if let Ok(kp) = ring::signature::RsaKeyPair::from_der(input) {
+            let wrapped = rsa_pkcs1_priv_to_pkcs8(input);
+            ring::signature::RsaKeyPair::from_pkcs8(&wrapped)
+                .map_err(|_| "Invalid RSA PKCS#1 private key")?;
+            let pub_info = parse_rsa_pkcs1_pub_der(kp.public_key().as_ref())?;
+            (wrapped, (input.to_vec(), pub_info))
+        } else {
+            return Err("Invalid RSA PKCS#8 or PKCS#1 private key");
+        };
+
+    let (pkcs1_priv, pub_info) = pkcs1_priv_vec_split(pkcs1_priv_slice_vec);
+    let (seq_tag, seq_body, _) = parse_der_tlv(&pkcs1_priv)?;
+    if seq_tag != 0x30 {
+        return Err("Invalid RSAPrivateKey SEQUENCE");
+    }
+    let (_version, r1) = parse_der_uint_be(seq_body)?;
+    let (_n, r2) = parse_der_uint_be(r1)?;
+    let (_e, r3) = parse_der_uint_be(r2)?;
+    let (d, r4) = parse_der_uint_be(r3)?;
+    let (p, r5) = parse_der_uint_be(r4)?;
+    let (q, r6) = parse_der_uint_be(r5)?;
+    let (dp, r7) = parse_der_uint_be(r6)?;
+    let (dq, r8) = parse_der_uint_be(r7)?;
+    let (qi, _r9) = parse_der_uint_be(r8)?;
+
+    Ok((
+        pkcs8,
+        pub_info,
+        RsaPrivateJwkInfo {
+            d_be: d.to_vec(),
+            p_be: p.to_vec(),
+            q_be: q.to_vec(),
+            dp_be: dp.to_vec(),
+            dq_be: dq.to_vec(),
+            qi_be: qi.to_vec(),
+        },
+    ))
 }
 
-/// Normalizes an RSA public key input (either 294-byte SPKI DER or 270-byte `RSAPublicKey` DER) to 294-byte SPKI DER.
+#[inline]
+fn pkcs1_priv_vec_split(pair: (Vec<u8>, RsaPublicKeyInfo)) -> (Vec<u8>, RsaPublicKeyInfo) {
+    pair
+}
+
+/// Builds and validates an `RsaPublicKeyInfo` from big-endian JWK `(n, e)` components.
+pub fn rsa_public_components_to_info(
+    n_be: &[u8],
+    e_be: &[u8],
+) -> Result<RsaPublicKeyInfo, &'static str> {
+    let mut seq_inner = Vec::with_capacity(n_be.len() + e_be.len() + 10);
+    encode_der_uint_be(n_be, &mut seq_inner)?;
+    encode_der_uint_be(e_be, &mut seq_inner)?;
+    let mut pkcs1_pub = Vec::with_capacity(seq_inner.len() + 5);
+    encode_der_tlv(0x30, &seq_inner, &mut pkcs1_pub);
+    parse_rsa_pkcs1_pub_der(&pkcs1_pub)
+}
+
+/// Builds and cryptographically validates an RSA PKCS#8 v1 private key from big-endian JWK CRT components
+/// (`n`, `e`, `d`, `p`, `q`, `dp`, `dq`, `qi`) via `ring::signature::RsaKeyPair::from_pkcs8`.
+#[allow(clippy::too_many_arguments)]
+pub fn rsa_private_components_to_pkcs8(
+    n_be: &[u8],
+    e_be: &[u8],
+    d_be: &[u8],
+    p_be: &[u8],
+    q_be: &[u8],
+    dp_be: &[u8],
+    dq_be: &[u8],
+    qi_be: &[u8],
+) -> Result<(Vec<u8>, RsaPublicKeyInfo), &'static str> {
+    use ring::signature::KeyPair;
+    let mut seq_inner = Vec::with_capacity(n_be.len() * 5 + 48);
+    seq_inner.extend_from_slice(&[0x02, 0x01, 0x00]); // version = 0
+    encode_der_uint_be(n_be, &mut seq_inner)?;
+    encode_der_uint_be(e_be, &mut seq_inner)?;
+    encode_der_uint_be(d_be, &mut seq_inner)?;
+    encode_der_uint_be(p_be, &mut seq_inner)?;
+    encode_der_uint_be(q_be, &mut seq_inner)?;
+    encode_der_uint_be(dp_be, &mut seq_inner)?;
+    encode_der_uint_be(dq_be, &mut seq_inner)?;
+    encode_der_uint_be(qi_be, &mut seq_inner)?;
+
+    let mut pkcs1_priv = Vec::with_capacity(seq_inner.len() + 5);
+    encode_der_tlv(0x30, &seq_inner, &mut pkcs1_priv);
+    let pkcs8 = rsa_pkcs1_priv_to_pkcs8(&pkcs1_priv);
+
+    let kp = ring::signature::RsaKeyPair::from_pkcs8(&pkcs8)
+        .map_err(|_| "DataError: Invalid or inconsistent RSA JWK private key parameters")?;
+    let pub_info = parse_rsa_pkcs1_pub_der(kp.public_key().as_ref())?;
+    Ok((pkcs8, pub_info))
+}
+
+/// Extracts canonical RSA `SubjectPublicKeyInfo` (`SPKI`) DER from a PKCS#8 or PKCS#1 private key.
+pub fn extract_rsa_pkcs8_spki(pkcs8: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let (_, pub_info, _) = inspect_rsa_private_key(pkcs8)?;
+    Ok(pub_info.spki)
+}
+
+/// Normalizes an RSA public key input (either `SPKI` DER or PKCS#1 `RSAPublicKey` DER) to canonical `SPKI` DER.
 pub fn extract_rsa_spki(input: &[u8]) -> Result<Vec<u8>, &'static str> {
-    if input.len() >= 290 && input.starts_with(&RSA_2048_SPKI_PREFIX[..20]) {
-        return Ok(input.to_vec());
-    }
-    if input.len() >= 260 && input[0] == 0x30 {
-        let mut spki = Vec::with_capacity(RSA_2048_SPKI_PREFIX.len() + input.len());
-        spki.extend_from_slice(&RSA_2048_SPKI_PREFIX);
-        spki.extend_from_slice(input);
-        return Ok(spki);
-    }
-    Err("Invalid RSA public key or SPKI DER")
+    Ok(inspect_rsa_public_key(input)?.spki)
 }
 
-/// Signs `msg` using an RSA PKCS#8 private key with PKCS#1 v1.5 SHA-256 (`ring::signature::RSA_PKCS1_SHA256`).
-pub fn rsa_sign_bytes(pkcs8: &[u8], msg: &[u8]) -> Result<Vec<u8>, &'static str> {
+/// Signs `msg` using an RSA PKCS#8 private key with either `RSASSA-PKCS1-v1_5` (`use_pss = false`)
+/// or `RSA-PSS` (`use_pss = true`) over `SHA-256`, `SHA-384`, or `SHA-512`.
+pub fn rsa_sign_bytes_with_alg(
+    pkcs8: &[u8],
+    msg: &[u8],
+    use_pss: bool,
+    hash_alg: &str,
+) -> Result<Vec<u8>, &'static str> {
     let kp = ring::signature::RsaKeyPair::from_pkcs8(pkcs8)
+        .or_else(|_| ring::signature::RsaKeyPair::from_der(pkcs8))
         .map_err(|_| "Invalid RSA PKCS#8 private key")?;
+    let is_384 = hash_alg.contains("384");
+    let is_512 = hash_alg.contains("512");
+    let encoding: &'static dyn ring::signature::RsaEncoding = match (use_pss, is_384, is_512) {
+        (false, false, false) => &ring::signature::RSA_PKCS1_SHA256,
+        (false, true, false) => &ring::signature::RSA_PKCS1_SHA384,
+        (false, _, true) => &ring::signature::RSA_PKCS1_SHA512,
+        (true, false, false) => &ring::signature::RSA_PSS_SHA256,
+        (true, true, false) => &ring::signature::RSA_PSS_SHA384,
+        (true, _, true) => &ring::signature::RSA_PSS_SHA512,
+    };
     let rng = ring::rand::SystemRandom::new();
     let mut sig = vec![0u8; kp.public().modulus_len()];
-    kp.sign(&ring::signature::RSA_PKCS1_SHA256, &rng, msg, &mut sig)
+    kp.sign(encoding, &rng, msg, &mut sig)
         .map_err(|_| "RSA signing operation failed")?;
     Ok(sig)
 }
 
-/// Verifies an RSA PKCS#1 v1.5 SHA-256 `signature` over `msg` using an RSA SPKI or `RSAPublicKey` DER.
-pub fn rsa_verify_bytes(spki_or_pub: &[u8], msg: &[u8], signature: &[u8]) -> bool {
-    let rsa_pub = if spki_or_pub.len() > RSA_2048_SPKI_PREFIX.len()
-        && spki_or_pub[..20] == RSA_2048_SPKI_PREFIX[..20]
-    {
-        &spki_or_pub[RSA_2048_SPKI_PREFIX.len()..]
-    } else {
-        spki_or_pub
+/// Signs `msg` using an RSA PKCS#8 private key with `RSASSA-PKCS1-v1_5` `SHA-256`.
+#[inline]
+pub fn rsa_sign_bytes(pkcs8: &[u8], msg: &[u8]) -> Result<Vec<u8>, &'static str> {
+    rsa_sign_bytes_with_alg(pkcs8, msg, false, "SHA-256")
+}
+
+/// Verifies an RSA `RSASSA-PKCS1-v1_5` or `RSA-PSS` signature (`SHA-256`, `SHA-384`, or `SHA-512`)
+/// over `msg` using an RSA `SPKI` or PKCS#1 `RSAPublicKey` DER (`2048` to `8192` bits).
+pub fn rsa_verify_bytes_with_alg(
+    spki_or_pub: &[u8],
+    msg: &[u8],
+    signature: &[u8],
+    use_pss: bool,
+    hash_alg: &str,
+) -> bool {
+    let Ok(pub_info) = inspect_rsa_public_key(spki_or_pub) else {
+        return false;
     };
-    let peer = ring::signature::UnparsedPublicKey::new(
-        &ring::signature::RSA_PKCS1_2048_8192_SHA256,
-        rsa_pub,
-    );
+    let is_384 = hash_alg.contains("384");
+    let is_512 = hash_alg.contains("512");
+    let peer = match (use_pss, is_384, is_512) {
+        (false, false, false) => ring::signature::UnparsedPublicKey::new(
+            &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+            &pub_info.pkcs1_pub,
+        ),
+        (false, true, false) => ring::signature::UnparsedPublicKey::new(
+            &ring::signature::RSA_PKCS1_2048_8192_SHA384,
+            &pub_info.pkcs1_pub,
+        ),
+        (false, _, true) => ring::signature::UnparsedPublicKey::new(
+            &ring::signature::RSA_PKCS1_2048_8192_SHA512,
+            &pub_info.pkcs1_pub,
+        ),
+        (true, false, false) => ring::signature::UnparsedPublicKey::new(
+            &ring::signature::RSA_PSS_2048_8192_SHA256,
+            &pub_info.pkcs1_pub,
+        ),
+        (true, true, false) => ring::signature::UnparsedPublicKey::new(
+            &ring::signature::RSA_PSS_2048_8192_SHA384,
+            &pub_info.pkcs1_pub,
+        ),
+        (true, _, true) => ring::signature::UnparsedPublicKey::new(
+            &ring::signature::RSA_PSS_2048_8192_SHA512,
+            &pub_info.pkcs1_pub,
+        ),
+    };
     peer.verify(msg, signature).is_ok()
+}
+
+/// Verifies an RSA `RSASSA-PKCS1-v1_5` `SHA-256` signature over `msg`.
+#[inline]
+pub fn rsa_verify_bytes(spki_or_pub: &[u8], msg: &[u8], signature: &[u8]) -> bool {
+    rsa_verify_bytes_with_alg(spki_or_pub, msg, signature, false, "SHA-256")
 }
 
 /// Cached pre-expanded cryptographic key entry stored in the isolate-local / tenant-scoped slot table.

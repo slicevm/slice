@@ -80,6 +80,14 @@
           var privKey = new CryptoKey("private", extractable, { name: "Ed25519" }, privUsages, __slice_base64_decode_bytes(edInfo.pkcs8), edInfo.privId, edInfo);
           return Promise.resolve({ publicKey: pubKey, privateKey: privKey });
         }
+        if (name === "X25519") {
+          var xInfo = JSON.parse(__slice_crypto_asym_keygen("X25519", ""));
+          var xPrivUsages = usages.filter(function(u) { return u === "deriveKey" || u === "deriveBits"; });
+          var xPubRaw = __slice_base64_decode_bytes(xInfo.pubRaw);
+          var xPubKey = new CryptoKey("public", true, { name: "X25519" }, [], xPubRaw, xInfo.pubId, xInfo);
+          var xPrivKey = new CryptoKey("private", extractable, { name: "X25519" }, xPrivUsages, __slice_base64_decode_bytes(xInfo.pkcs8), xInfo.privId, xInfo);
+          return Promise.resolve({ publicKey: xPubKey, privateKey: xPrivKey });
+        }
         if (name === "ECDSA") {
           var crv = __curveName(algorithm);
           var ecInfo = JSON.parse(__slice_crypto_asym_keygen("ECDSA", crv));
@@ -89,6 +97,9 @@
           var ecPubKey = new CryptoKey("public", true, { name: "ECDSA", namedCurve: crv }, ecPubUsages, ecPubRaw, ecInfo.pubId, ecInfo);
           var ecPrivKey = new CryptoKey("private", extractable, { name: "ECDSA", namedCurve: crv }, ecPrivUsages, __slice_base64_decode_bytes(ecInfo.pkcs8), ecInfo.privId, ecInfo);
           return Promise.resolve({ publicKey: ecPubKey, privateKey: ecPrivKey });
+        }
+        if (name === "RSASSA-PKCS1-V1_5" || name === "RSA-PSS" || name === "RSA-OAEP" || name === "RSA" || name === "DSA") {
+          throw new Error("NotSupportedError: Runtime RSA/DSA key generation is disabled in the edge sandbox; import an existing RSA key or generate Ed25519, X25519, or ECDSA P-256/P-384");
         }
         throw new Error("NotSupportedError: Unsupported generateKey algorithm '" + name + "'");
       } catch (e) {
@@ -151,12 +162,36 @@
           var edRaw = edImp.type === "private" ? __slice_base64_decode_bytes(edImp.pkcs8) : __slice_base64_decode_bytes(edImp.pubRaw);
           return Promise.resolve(new CryptoKey(edImp.type, extractable, { name: "Ed25519" }, usages, edRaw, edImp.id, edImp));
         }
+        if (name === "X25519") {
+          var xPayload = fmt === "jwk" ? JSON.stringify(keyData) : __slice_toU8(keyData);
+          var xImp = JSON.parse(__slice_crypto_asym_import("X25519", "", fmt, xPayload));
+          var xRaw = xImp.type === "private" ? __slice_base64_decode_bytes(xImp.pkcs8) : __slice_base64_decode_bytes(xImp.pubRaw);
+          return Promise.resolve(new CryptoKey(xImp.type, extractable, { name: "X25519" }, usages, xRaw, xImp.id, xImp));
+        }
         if (name === "ECDSA") {
           var crv = __curveName(algorithm);
           var ecPayload = fmt === "jwk" ? JSON.stringify(keyData) : __slice_toU8(keyData);
           var ecImp = JSON.parse(__slice_crypto_asym_import("ECDSA", crv, fmt, ecPayload));
           var ecRaw = ecImp.type === "private" ? __slice_base64_decode_bytes(ecImp.pkcs8) : __slice_base64_decode_bytes(ecImp.pubRaw);
           return Promise.resolve(new CryptoKey(ecImp.type, extractable, { name: "ECDSA", namedCurve: crv }, usages, ecRaw, ecImp.id, ecImp));
+        }
+        if (name === "RSASSA-PKCS1-V1_5" || name === "RSA-PSS") {
+          var rsaCanon = name === "RSA-PSS" ? "RSA-PSS" : "RSASSA-PKCS1-v1_5";
+          var rsaHash = __hmacHashName(algorithm);
+          if (rsaHash !== "SHA-256" && rsaHash !== "SHA-384" && rsaHash !== "SHA-512") {
+            throw new Error("NotSupportedError: Unsupported RSA hash '" + rsaHash + "'");
+          }
+          var rsaPayload = fmt === "jwk" ? JSON.stringify(keyData) : __slice_toU8(keyData);
+          var rsaImp = JSON.parse(__slice_crypto_asym_import(rsaCanon, rsaHash, fmt, rsaPayload));
+          var rsaRaw = rsaImp.type === "private" ? __slice_base64_decode_bytes(rsaImp.pkcs8) : __slice_base64_decode_bytes(rsaImp.spki);
+          var rsaPubExpU8 = __slice_base64_decode_bytes(rsaImp.e);
+          var rsaKeyAlg = {
+            name: rsaCanon,
+            modulusLength: rsaImp.modulusLength,
+            publicExponent: rsaPubExpU8,
+            hash: { name: rsaHash }
+          };
+          return Promise.resolve(new CryptoKey(rsaImp.type, extractable, rsaKeyAlg, usages, rsaRaw, rsaImp.id, rsaImp));
         }
         throw new Error("NotSupportedError: Unsupported importKey algorithm '" + name + "'");
       } catch (e) {
@@ -171,8 +206,8 @@
         var kAlg = (key.algorithm && key.algorithm.name) || "";
         var kUpper = kAlg.toUpperCase();
         if (fmt === "raw") {
-          if (key.type === "private") {
-            throw new Error("InvalidAccessError: Cannot export private key in 'raw' format");
+          if (key.type === "private" || kUpper === "RSASSA-PKCS1-V1_5" || kUpper === "RSA-PSS") {
+            throw new Error("InvalidAccessError: Cannot export key in 'raw' format");
           }
           var copy = new Uint8Array(key._raw);
           return Promise.resolve(copy.buffer);
@@ -227,6 +262,17 @@
             if (key.type === "private" && key._meta.d) edJwk.d = key._meta.d;
             return Promise.resolve(edJwk);
           }
+          if (kUpper === "X25519" && key._meta) {
+            var xJwk = {
+              kty: "OKP",
+              crv: "X25519",
+              x: key._meta.x,
+              ext: Boolean(key.extractable),
+              key_ops: key.usages.slice()
+            };
+            if (key.type === "private" && key._meta.d) xJwk.d = key._meta.d;
+            return Promise.resolve(xJwk);
+          }
           if (kUpper === "ECDSA" && key._meta) {
             var ecJwk = {
               kty: "EC",
@@ -238,6 +284,28 @@
             };
             if (key.type === "private" && key._meta.d) ecJwk.d = key._meta.d;
             return Promise.resolve(ecJwk);
+          }
+          if ((kUpper === "RSASSA-PKCS1-V1_5" || kUpper === "RSA-PSS") && key._meta) {
+            var rh = (key.algorithm && key.algorithm.hash && key.algorithm.hash.name) || "SHA-256";
+            var rPrefix = kUpper === "RSA-PSS" ? "PS" : "RS";
+            var rSuffix = rh === "SHA-512" ? "512" : (rh === "SHA-384" ? "384" : "256");
+            var rJwk = {
+              kty: "RSA",
+              alg: rPrefix + rSuffix,
+              n: key._meta.n,
+              e: key._meta.e,
+              ext: Boolean(key.extractable),
+              key_ops: key.usages.slice()
+            };
+            if (key.type === "private" && key._meta.d) {
+              rJwk.d = key._meta.d;
+              rJwk.p = key._meta.p;
+              rJwk.q = key._meta.q;
+              rJwk.dp = key._meta.dp;
+              rJwk.dq = key._meta.dq;
+              rJwk.qi = key._meta.qi;
+            }
+            return Promise.resolve(rJwk);
           }
         }
         throw new Error("NotSupportedError: Unsupported exportKey format '" + fmt + "'");
@@ -293,6 +361,11 @@
           var crv = (key.algorithm && key.algorithm.namedCurve) || "P-256";
           return Promise.resolve(__slice_crypto_asym_sign("ECDSA", crv, key._id, key._raw, data, false));
         }
+        if (name === "RSASSA-PKCS1-V1_5" || name === "RSA-PSS") {
+          var rSignAlg = name === "RSA-PSS" ? "RSA-PSS" : "RSA";
+          var rSignHash = (key.algorithm && key.algorithm.hash && key.algorithm.hash.name) || "SHA-256";
+          return Promise.resolve(__slice_crypto_asym_sign(rSignAlg, rSignHash, key._id, key._raw, data, false));
+        }
         var hashName = (key.algorithm && key.algorithm.hash && key.algorithm.hash.name) || __hmacHashName(algorithm);
         var ab = __slice_crypto_hmac_sign(hashName, key._raw, data, key._id);
         return Promise.resolve(ab);
@@ -314,6 +387,11 @@
           var crv = (key.algorithm && key.algorithm.namedCurve) || "P-256";
           return Promise.resolve(Boolean(__slice_crypto_asym_verify("ECDSA", crv, key._id, key._raw, signature, data)));
         }
+        if (name === "RSASSA-PKCS1-V1_5" || name === "RSA-PSS") {
+          var rVerAlg = name === "RSA-PSS" ? "RSA-PSS" : "RSA";
+          var rVerHash = (key.algorithm && key.algorithm.hash && key.algorithm.hash.name) || "SHA-256";
+          return Promise.resolve(Boolean(__slice_crypto_asym_verify(rVerAlg, rVerHash, key._id, key._raw, signature, data)));
+        }
         var hashName = (key.algorithm && key.algorithm.hash && key.algorithm.hash.name) || __hmacHashName(algorithm);
         var ok = __slice_crypto_hmac_verify(hashName, key._raw, signature, data, key._id);
         return Promise.resolve(Boolean(ok));
@@ -328,9 +406,26 @@
           throw new Error("InvalidAccessError: baseKey does not support deriveBits/deriveKey usage");
         }
         var name = __algName(algorithm);
-        var bitLen = Number(length) || 0;
+        var bitLen = (length === null || length === undefined) && name === "X25519" ? 256 : (Number(length) || 0);
         if (bitLen <= 0 || bitLen % 8 !== 0) {
           throw new Error("OperationError: deriveBits length must be a positive multiple of 8");
+        }
+        if (name === "X25519") {
+          var peerPub = algorithm && algorithm.public;
+          if (!peerPub || !(peerPub instanceof CryptoKey) || peerPub.type !== "public" || __algName(peerPub.algorithm) !== "X25519") {
+            throw new TypeError("InvalidAccessError: X25519 deriveBits requires a public X25519 CryptoKey");
+          }
+          if (baseKey.type !== "private" || __algName(baseKey.algorithm) !== "X25519") {
+            throw new Error("InvalidAccessError: X25519 deriveBits requires a private X25519 baseKey");
+          }
+          if (bitLen > 256) {
+            throw new Error("OperationError: X25519 derived length cannot exceed 256 bits");
+          }
+          var xSharedAb = __slice_crypto_ecdh("X25519", baseKey._id, baseKey._raw, peerPub._id, peerPub._raw);
+          if (bitLen < 256) {
+            return Promise.resolve(xSharedAb.slice(0, bitLen / 8));
+          }
+          return Promise.resolve(xSharedAb);
         }
         var hashName = __hmacHashName(algorithm);
         var salt = (algorithm && algorithm.salt) ? algorithm.salt : new Uint8Array(0);

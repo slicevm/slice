@@ -28,6 +28,7 @@ smallvec.workspace = true
 itoa.workspace = true
 rustls.workspace = true
 ring.workspace = true
+x25519-dalek.workspace = true
 webpki-roots.workspace = true
 rustls-pki-types.workspace = true
 wasmi.workspace = true
