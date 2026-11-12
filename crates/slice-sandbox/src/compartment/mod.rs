@@ -447,18 +447,52 @@ impl TenantCompartment {
     ///   and formatting `host:port` candidates onto a stack buffer.
     #[inline]
     pub fn verify_net_connect(&self, host: &str) -> Result<(), SandboxViolation> {
-        if is_cloud_metadata_ssrf_target(host) {
+        let trimmed = host.trim();
+        if trimmed.is_empty() || trimmed.bytes().any(|b| b <= 0x20 || b == 0x7F) {
             return Err(self.trap_net_access(host));
         }
-        if self.capabilities.allowed_net_hosts.contains(host) {
-            return Ok(());
+
+        if trimmed.contains("://") {
+            let Some(parsed) = crate::net::parse_http_authority_and_path(trimmed) else {
+                return Err(self.trap_net_access(host));
+            };
+            let clean_host = parsed.clean_host.as_ref();
+            if is_cloud_metadata_ssrf_target(clean_host) {
+                return Err(self.trap_net_access(host));
+            }
+            if self.capabilities.allowed_net_hosts.contains(clean_host)
+                || contains_host_and_port(
+                    &self.capabilities.allowed_net_hosts,
+                    clean_host,
+                    parsed.port,
+                )
+            {
+                return Ok(());
+            }
+            if self.capabilities.allowed_net_hosts.contains("*")
+                && !is_private_or_loopback_ssrf_target(clean_host)
+            {
+                return Ok(());
+            }
+            return Err(self.trap_net_access(host));
+        }
+
+        if trimmed.contains(['@', '/', '?', '#', '\\']) {
+            return Err(self.trap_net_access(host));
+        }
+        if is_cloud_metadata_ssrf_target(trimmed) {
+            return Err(self.trap_net_access(host));
         }
         let (clean_host, explicit_port, scheme_default_port) =
-            extract_clean_hostname_and_port(host);
-        if self
-            .capabilities
-            .allowed_net_hosts
-            .contains(clean_host.as_ref())
+            extract_clean_hostname_and_port(trimmed);
+        if clean_host.is_empty() {
+            return Err(self.trap_net_access(host));
+        }
+        if self.capabilities.allowed_net_hosts.contains(trimmed)
+            || self
+                .capabilities
+                .allowed_net_hosts
+                .contains(clean_host.as_ref())
         {
             return Ok(());
         }
@@ -476,7 +510,7 @@ impl TenantCompartment {
             return Ok(());
         }
         if self.capabilities.allowed_net_hosts.contains("*")
-            && !is_private_or_loopback_ssrf_target(host)
+            && !is_private_or_loopback_ssrf_target(&clean_host)
         {
             return Ok(());
         }

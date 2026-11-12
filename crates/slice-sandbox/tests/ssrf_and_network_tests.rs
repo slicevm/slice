@@ -190,3 +190,70 @@ fn test_nsec8_noncanonical_ip_and_special_cidr_ssrf_blocking() {
         );
     }
 }
+
+#[test]
+fn test_http_authority_alignment_percent_decoding_and_extended_ssrf_ranges() {
+    use std::net::IpAddr;
+
+    // 1. Query `?@` and backslash `\@` authority delimiters match WHATWG URL rules
+    let q_auth =
+        parse_http_authority_and_path("https://api.trusted.com?@evil.example/exfil").unwrap();
+    assert_eq!(q_auth.clean_host.as_ref(), "api.trusted.com");
+    assert_eq!(q_auth.port, 443);
+    assert_eq!(q_auth.path_and_query.as_ref(), "/?@evil.example/exfil");
+
+    let bs_auth =
+        parse_http_authority_and_path("https://169.254.169.254\\@api.trusted.com/").unwrap();
+    assert_eq!(bs_auth.clean_host.as_ref(), "169.254.169.254");
+    assert!(is_cloud_metadata_ssrf_target(&bs_auth.clean_host));
+
+    // 2. Reject userinfo `@` inside authority and empty hostnames
+    assert!(parse_http_authority_and_path("https://user:pass@api.trusted.com/").is_none());
+    assert!(parse_http_authority_and_path("http://:8080/").is_none());
+
+    // 3. Percent-decoded hostnames are caught by metadata and private SSRF shields
+    let pct_meta = "http://%31%36%39.%32%35%34.%31%36%39.%32%35%34/";
+    assert!(is_cloud_metadata_ssrf_target(pct_meta));
+    let wildcard_tenant = TenantCompartment::new(
+        "net-pct",
+        1,
+        CapabilityToken::pure_compute().with_net_host("*"),
+        10_000,
+        65536,
+    );
+    assert!(wildcard_tenant.verify_net_connect(pct_meta).is_err());
+    assert!(wildcard_tenant
+        .verify_net_connect("http://%31%32%37.%30.%30.%31:8080/")
+        .is_err());
+    assert!(wildcard_tenant
+        .verify_net_connect("http://0.0.0.1/")
+        .is_err());
+
+    // 4. Extended non-global IPv4 (`0.0.0.0/8`) and IPv6 (`64:ff9b:1::/48`, SIIT, Teredo) SSRF ranges
+    for non_global in [
+        "0.0.0.1",
+        "0.255.255.254",
+        "64:ff9b:1:1::1",
+        "64:ff9b:1:abcd::a9fe:a9fe",
+        "::ffff:0:127.0.0.1",
+        "::ffff:0:10.0.0.1",
+        "2001:0000:4136:e378:8000:63bf:3fff:fdd2",
+    ] {
+        let ip: IpAddr = non_global.parse().unwrap();
+        assert!(
+            is_private_or_loopback_ip(ip),
+            "expected {} to be classified as non-global SSRF target",
+            non_global
+        );
+    }
+
+    // SIIT and RFC 8215 NAT64 embedding 169.254.169.254 are also classified as cloud metadata IPs
+    for meta_v6 in ["::ffff:0:169.254.169.254", "64:ff9b:1:42::169.254.169.254"] {
+        let ip: IpAddr = meta_v6.parse().unwrap();
+        assert!(
+            is_cloud_metadata_ip(ip),
+            "expected metadata IP for {}",
+            meta_v6
+        );
+    }
+}

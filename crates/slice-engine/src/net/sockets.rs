@@ -412,6 +412,7 @@ pub fn tcp_socket_connect(host: &str, port: u16, tls_mode: &str) -> Result<Strin
     let (local_addr, local_port, remote_addr, remote_port, family) = match &stream {
         OutboundStream::Plain(tcp) => extract_tcp_addrs(tcp),
         OutboundStream::Tls(tls) => extract_tcp_addrs(tls.get_ref()),
+        OutboundStream::TunneledTls(tls) => extract_tcp_addrs(tls.get_ref().get_ref()),
     };
 
     let id = next_socket_handle_id()?;
@@ -529,14 +530,7 @@ pub fn tcp_socket_read(id: u32, max_bytes: usize, timeout_ms: u64) -> Result<Str
             }
             TcpConnectionBackend::Live(stream) => {
                 let read_to = Duration::from_millis(timeout_ms.clamp(1, 5_000));
-                match stream {
-                    OutboundStream::Plain(tcp) => {
-                        let _ = tcp.set_read_timeout(Some(read_to));
-                    }
-                    OutboundStream::Tls(tls) => {
-                        let _ = tls.get_ref().set_read_timeout(Some(read_to));
-                    }
-                }
+                stream.set_read_timeout(Some(read_to));
 
                 let mut buf = vec![0u8; cap.min(65_536)];
                 match stream.read(&mut buf) {
@@ -575,22 +569,39 @@ pub fn tcp_socket_read(id: u32, max_bytes: usize, timeout_ms: u64) -> Result<Str
 
 /// Upgrades a plain TCP socket (`tls_mode: "starttls"`) to TLS 1.3 in-place.
 pub fn tcp_socket_starttls(id: u32, server_name_override: Option<&str>) -> Result<String, String> {
+    let (sock_host, sock_port, is_tls) = TCP_SOCKET_TABLE.with(|t| {
+        let table = t.borrow();
+        let sock = table
+            .get(&id)
+            .ok_or_else(|| format!("SocketError: Invalid or closed TCP socket id {}", id))?;
+        Ok::<(String, u16, bool), String>((sock.host.clone(), sock.port, sock.is_tls))
+    })?;
+    if is_tls {
+        return Err("SocketError: Socket is already using TLS".to_string());
+    }
+    let sni_host = server_name_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&sock_host)
+        .to_string();
+
+    // Enforce OCap `allow_net`, SSRF, and Outbound Egress Secret DLP on the SNI / expectedServerHostname
+    verify_raw_socket_ocap(&sni_host, sock_port)?;
+    verify_socket_egress_dlp(
+        sni_host.as_bytes(),
+        &format!("tls://{}:{}", sni_host, sock_port),
+    )?;
+
     TCP_SOCKET_TABLE.with(|t| {
         let mut table = t.borrow_mut();
         let sock = table
             .get_mut(&id)
             .ok_or_else(|| format!("SocketError: Invalid or closed TCP socket id {}", id))?;
-        if sock.is_tls {
-            return Err("SocketError: Socket is already using TLS".to_string());
-        }
-        let sni_host = server_name_override
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&sock.host)
-            .to_string();
 
         match &mut sock.backend {
             TcpConnectionBackend::Mock { .. } => {
                 sock.is_tls = true;
+                sock.host = sni_host;
                 Ok(serde_json::json!({ "id": id, "tls": true }).to_string())
             }
             TcpConnectionBackend::Live(_) => {
@@ -599,7 +610,11 @@ pub fn tcp_socket_starttls(id: u32, server_name_override: Option<&str>) -> Resul
                 let TcpConnectionBackend::Live(OutboundStream::Plain(tcp)) = removed.backend else {
                     return Err("SocketError: Cannot upgrade non-plain TCP stream".to_string());
                 };
-                let server_name = ServerName::try_from(sni_host.clone())
+                let sni_trimmed = sni_host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string();
+                let server_name = ServerName::try_from(sni_trimmed)
                     .map_err(|e| format!("TLS Invalid DNS ServerName '{}': {}", sni_host, e))?;
                 let tls_conn = rustls::ClientConnection::new(
                     crate::outbound_http::get_tls_client_config(),
@@ -610,6 +625,7 @@ pub fn tcp_socket_starttls(id: u32, server_name_override: Option<&str>) -> Resul
                 table.insert(
                     id,
                     ActiveTcpSocket {
+                        host: sni_host,
                         is_tls: true,
                         backend: TcpConnectionBackend::Live(OutboundStream::Tls(Box::new(
                             tls_stream,
@@ -645,6 +661,10 @@ pub fn tcp_socket_close(id: u32, half_close_write: bool) -> Result<String, Strin
                         let _ = tls.flush();
                         let _ = tls.get_ref().shutdown(Shutdown::Both);
                     }
+                    OutboundStream::TunneledTls(mut tls) => {
+                        let _ = tls.flush();
+                        let _ = tls.get_ref().get_ref().shutdown(Shutdown::Both);
+                    }
                 }
             }
         }
@@ -664,10 +684,44 @@ pub fn udp_socket_bind(family: &str, address: &str, port: u16) -> Result<String,
     } else {
         address.trim()
     };
+    let clean_bind_host = slice_sandbox::extract_clean_hostname(bind_host);
 
-    // Check OCap allow_net (allow binding if any allow_net entry exists)
-    let has_any_net_cap = BOA_NET_HOSTS.with(|h| !h.borrow().is_empty());
-    if !has_any_net_cap {
+    // Ephemeral client binds (`port == 0`) are permitted when any `allow_net` grant is active
+    // (each outbound `udp.send()` independently enforces target `host:port` OCap + SSRF + DLP).
+    // Non-ephemeral local port binds (`port != 0`) require `"*"` or an explicit `bind_host[:port]` grant.
+    let bind_permitted = !clean_bind_host.is_empty()
+        && BOA_NET_HOSTS.with(|h| {
+            let set = h.borrow();
+            if set.is_empty() {
+                return false;
+            }
+            if port == 0 || set.contains("*") {
+                return true;
+            }
+            let host_port = if clean_bind_host.contains(':') {
+                format!("[{}]:{}", clean_bind_host, port)
+            } else {
+                format!("{}:{}", clean_bind_host, port)
+            };
+            if set.contains(&host_port)
+                || set.contains(&clean_bind_host)
+                || (clean_bind_host.contains(':')
+                    && (set.contains(&format!("[{}]", clean_bind_host))
+                        || set.contains(&format!("{}:{}", clean_bind_host, port))))
+            {
+                return true;
+            }
+            if clean_bind_host == "127.0.0.1" || clean_bind_host == "localhost" {
+                let alt = if clean_bind_host == "127.0.0.1" {
+                    "localhost"
+                } else {
+                    "127.0.0.1"
+                };
+                return set.contains(alt) || set.contains(&format!("{}:{}", alt, port));
+            }
+            false
+        });
+    if !bind_permitted {
         let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
         BOA_VIOLATION.with(|v| {
             *v.borrow_mut() = Some(SandboxViolation::NetAccessDenied {
