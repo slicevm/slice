@@ -660,4 +660,182 @@ mod tests {
 
         set_thread_exper_boacas_override(None);
     }
+
+    #[test]
+    fn test_slicebc_adversarial_deserialization_bounds() {
+        let mut ctx = boa_engine::Context::default();
+        let valid_script =
+            boa_engine::Script::parse(boa_engine::Source::from_bytes(b"1 + 2"), None, &mut ctx)
+                .expect("valid parse");
+        let valid_bytes = valid_script
+            .compile_to_slicebc(&mut ctx)
+            .expect("valid slicebc");
+        assert_eq!(&valid_bytes[..5], b"SLCB\x01");
+        assert!(boa_engine::Script::from_slicebc_bytes(&valid_bytes, &mut ctx).is_some());
+
+        // 1. Bad magic header must fail closed immediately
+        let mut bad_magic = valid_bytes.clone();
+        bad_magic[0] = b'X';
+        assert!(boa_engine::Script::from_slicebc_bytes(&bad_magic, &mut ctx).is_none());
+
+        // 2. Trailing garbage bytes must be rejected
+        let mut with_trailing = valid_bytes.clone();
+        with_trailing.push(0xAA);
+        assert!(boa_engine::Script::from_slicebc_bytes(&with_trailing, &mut ctx).is_none());
+
+        // 3. Adversarial global_bindings = u32::MAX (zero-byte loop hazard)
+        let t0 = std::time::Instant::now();
+        let mut huge_globals = valid_bytes.clone();
+        huge_globals[5..9].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(boa_engine::Script::from_slicebc_bytes(&huge_globals, &mut ctx).is_none());
+
+        // 4. Adversarial register_count = u32::MAX & mapped_len = u32::MAX (OOM hazard)
+        let mut huge_regs = Vec::new();
+        huge_regs.extend_from_slice(b"SLCB\x01");
+        huge_regs.extend_from_slice(&0u32.to_le_bytes()); // global_bindings
+        huge_regs.extend_from_slice(&0u16.to_le_bytes()); // flags
+        huge_regs.extend_from_slice(&0u32.to_le_bytes()); // length
+        huge_regs.extend_from_slice(&0u32.to_le_bytes()); // parameter_length
+        huge_regs.extend_from_slice(&u32::MAX.to_le_bytes()); // register_count
+        huge_regs.push(1u8); // strict
+        assert!(boa_engine::Script::from_slicebc_bytes(&huge_regs, &mut ctx).is_none());
+
+        let mut huge_mapped = Vec::new();
+        huge_mapped.extend_from_slice(b"SLCB\x01");
+        huge_mapped.extend_from_slice(&0u32.to_le_bytes()); // global_bindings
+        huge_mapped.extend_from_slice(&0u16.to_le_bytes()); // flags
+        huge_mapped.extend_from_slice(&0u32.to_le_bytes()); // length
+        huge_mapped.extend_from_slice(&0u32.to_le_bytes()); // parameter_length
+        huge_mapped.extend_from_slice(&4u32.to_le_bytes()); // register_count
+        huge_mapped.push(1u8); // strict
+        huge_mapped.extend_from_slice(&u32::MAX.to_le_bytes()); // mapped_len = u32::MAX
+        assert!(boa_engine::Script::from_slicebc_bytes(&huge_mapped, &mut ctx).is_none());
+
+        // 5. Adversarial Constant::Scope binding count = u32::MAX - 1 (34 GB scope_cache resize hazard)
+        let mut huge_scope = Vec::new();
+        huge_scope.extend_from_slice(b"SLCB\x01");
+        huge_scope.extend_from_slice(&0u32.to_le_bytes()); // global_bindings
+        huge_scope.extend_from_slice(&0u16.to_le_bytes()); // flags
+        huge_scope.extend_from_slice(&0u32.to_le_bytes()); // length
+        huge_scope.extend_from_slice(&0u32.to_le_bytes()); // parameter_length
+        huge_scope.extend_from_slice(&1u32.to_le_bytes()); // register_count
+        huge_scope.push(1u8); // strict
+        huge_scope.extend_from_slice(&0u32.to_le_bytes()); // mapped_len
+        huge_scope.extend_from_slice(&0u32.to_le_bytes()); // bc_len
+        huge_scope.extend_from_slice(&1u32.to_le_bytes()); // const_len = 1
+        huge_scope.push(3u8); // Constant::Scope
+        huge_scope.extend_from_slice(&(u32::MAX - 1).to_le_bytes()); // n = u32::MAX - 1
+        assert!(boa_engine::Script::from_slicebc_bytes(&huge_scope, &mut ctx).is_none());
+
+        // 6. 500-deep nested Constant::Function recursion bomb
+        let mut deep_fn = Vec::new();
+        deep_fn.extend_from_slice(b"SLCB\x01");
+        deep_fn.extend_from_slice(&0u32.to_le_bytes()); // global_bindings
+        for _ in 0..500 {
+            deep_fn.extend_from_slice(&0u16.to_le_bytes()); // flags
+            deep_fn.extend_from_slice(&0u32.to_le_bytes()); // length
+            deep_fn.extend_from_slice(&0u32.to_le_bytes()); // parameter_length
+            deep_fn.extend_from_slice(&1u32.to_le_bytes()); // register_count
+            deep_fn.push(1u8); // strict
+            deep_fn.extend_from_slice(&0u32.to_le_bytes()); // mapped_len
+            deep_fn.extend_from_slice(&0u32.to_le_bytes()); // bc_len
+            deep_fn.extend_from_slice(&1u32.to_le_bytes()); // const_len = 1
+            deep_fn.push(1u8); // tag = 1 (Constant::Function)
+        }
+        assert!(boa_engine::Script::from_slicebc_bytes(&deep_fn, &mut ctx).is_none());
+        assert!(
+            t0.elapsed().as_millis() < 50,
+            "adversarial SLICEBC checks must reject in sub-millisecond time"
+        );
+    }
+
+    #[test]
+    fn test_inline_cache_shape_id_gc_churn_and_unique_shape_transitions() {
+        let mut ctx = boa_engine::Context::default();
+
+        // Define an IC-hot reader/writer over both SharedShape and UniqueShape objects
+        // (Object.create(null) + property deletion transitions into dictionary/UniqueShape mode)
+        ctx.eval(boa_engine::Source::from_bytes(
+            br#"
+            function readTarget(o) { return o.target; }
+            function writeTarget(o, v) { o.target = v; }
+            function makeUniqueWithSixSlots(val) {
+                var u = Object.create(null);
+                u.a = 1; u.b = 2; u.c = 3; u.d = 4; u.e = 5; u.target = val;
+                delete u.a;
+                return u;
+            }
+            function makeUniqueWithOneSlot(val) {
+                var u = Object.create(null);
+                u.x = 1; u.only = val;
+                delete u.x;
+                return u;
+            }
+            "#,
+        ))
+        .expect("setup IC helpers");
+
+        // Churn GC between UniqueShape allocations to verify monotonic Shape::id() never hits stale slots
+        for round in 0..32 {
+            let v = ctx
+                .eval(boa_engine::Source::from_bytes(
+                    format!("readTarget(makeUniqueWithSixSlots({}))", 1000 + round).as_bytes(),
+                ))
+                .expect("eval six-slot unique shape");
+            assert_eq!(v.as_number(), Some((1000 + round) as f64));
+            boa_engine::gc::force_collect();
+
+            let v_small = ctx
+                .eval(boa_engine::Source::from_bytes(
+                    b"readTarget(makeUniqueWithOneSlot(7))",
+                ))
+                .expect("eval one-slot unique shape after GC");
+            assert!(v_small.is_undefined());
+        }
+
+        // Verify UniqueShape in-place defineProperty(writable: false) invalidates cached writable IC slot
+        let frozen_prop_res = ctx
+            .eval(boa_engine::Source::from_bytes(
+                br#"
+                function strictWriteTarget(o, v) { "use strict"; o.target = v; }
+                var u = Object.create(null);
+                u.a = 1; u.target = 10;
+                delete u.a;
+                strictWriteTarget(u, 20);
+                Object.defineProperty(u, "target", { writable: false });
+                var threw = false;
+                try { strictWriteTarget(u, 99); } catch (_e) { threw = true; }
+                threw + ":" + u.target
+                "#,
+            ))
+            .expect("strict non-writable UniqueShape check");
+        assert_eq!(
+            frozen_prop_res
+                .as_string()
+                .map(|s| s.to_std_string_escaped()),
+            Some("true:20".to_string())
+        );
+
+        // Microbenchmark monomorphic IC loop throughput
+        let t0 = std::time::Instant::now();
+        let sum_val = ctx
+            .eval(boa_engine::Source::from_bytes(
+                br#"
+                (function() {
+                    var pt = { x: 3, y: 4, z: 5 };
+                    var acc = 0;
+                    for (var i = 0; i < 100000; i++) {
+                        acc += pt.x + pt.y + pt.z;
+                    }
+                    return acc;
+                })()
+                "#,
+            ))
+            .expect("monomorphic IC loop");
+        assert_eq!(sum_val.as_number(), Some(1_200_000.0));
+        println!(
+            "[IC-PERF] 300k monomorphic Shape::id() IC reads completed in {:.2} ms",
+            t0.elapsed().as_secs_f64() * 1_000.0
+        );
+    }
 }

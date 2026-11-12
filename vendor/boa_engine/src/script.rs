@@ -262,11 +262,13 @@ impl Script {
 
     /// Compiles this script into a `CodeBlock` and serializes the entire `CodeBlock` tree
     /// (including nested function `CodeBlock`s, constants, `BindingLocator`s, exception `Handler`s,
-    /// and `InlineCache` descriptors) plus the global scope binding count into a binary buffer.
+    /// Serializes the compiled `CodeBlock` tree (`Bytecode`, `Constants`, `BindingLocator`s, `Handler`s,
+    /// and `InlineCache` descriptors) plus the global scope binding count into a `SLCB\x01` binary buffer.
     pub fn compile_to_slicebc(&self, context: &mut Context) -> JsResult<Vec<u8>> {
         let cb = self.codeblock(context)?;
         let global_bindings = self.inner.realm.scope().num_bindings();
         let mut out = Vec::with_capacity(16_384);
+        out.extend_from_slice(SLICEBC_MAGIC);
         out.extend_from_slice(&global_bindings.to_le_bytes());
         encode_codeblock(&cb, &mut out);
         Ok(out)
@@ -278,10 +280,19 @@ impl Script {
     #[must_use]
     pub fn from_slicebc_bytes(bytes: &[u8], context: &mut Context) -> Option<Self> {
         let mut pos = 0usize;
+        if read_bytes(bytes, &mut pos, SLICEBC_MAGIC.len())? != SLICEBC_MAGIC {
+            return None;
+        }
         let global_bindings = read_u32(bytes, &mut pos)?;
+        if global_bindings > MAX_SLICEBC_BINDINGS {
+            return None;
+        }
         let empty_global_scope = boa_ast::scope::Scope::new_global();
-        let mut scope_cache: Vec<Option<boa_ast::scope::Scope>> = Vec::new();
-        let cb = decode_codeblock(bytes, &mut pos, &empty_global_scope, &mut scope_cache)?;
+        let mut scope_cache: FxHashMap<u32, boa_ast::scope::Scope> = FxHashMap::default();
+        let cb = decode_codeblock(bytes, &mut pos, &empty_global_scope, &mut scope_cache, 0)?;
+        if pos != bytes.len() {
+            return None;
+        }
 
         let realm = context.realm().clone();
         let realm_scope = realm.scope();
@@ -307,6 +318,12 @@ impl Script {
         })
     }
 }
+
+const SLICEBC_MAGIC: &[u8; 5] = b"SLCB\x01";
+const MAX_SLICEBC_BINDINGS: u32 = 65_536;
+const MAX_SLICEBC_COLLECTION_LEN: usize = 1_048_576;
+const MAX_SLICEBC_STRING_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SLICEBC_NESTING_DEPTH: usize = 128;
 
 #[inline]
 fn write_u32(dst: &mut Vec<u8>, val: u32) {
@@ -471,66 +488,93 @@ fn read_bytes<'a>(src: &'a [u8], pos: &mut usize, len: usize) -> Option<&'a [u8]
 }
 
 #[inline]
+fn read_bounded_len(src: &[u8], pos: &mut usize, min_elem_bytes: usize) -> Option<usize> {
+    let len = read_u32(src, pos)? as usize;
+    let rem = src.len().checked_sub(*pos)?;
+    let min_bytes = len.checked_mul(min_elem_bytes.max(1))?;
+    if len > MAX_SLICEBC_COLLECTION_LEN || min_bytes > rem {
+        return None;
+    }
+    Some(len)
+}
+
+#[inline]
 fn read_js_string(src: &[u8], pos: &mut usize) -> Option<JsString> {
     let kind = read_u8(src, pos)?;
     let len = read_u32(src, pos)? as usize;
-    if kind == 0 {
-        let bytes = read_bytes(src, pos, len)?;
-        Some(JsString::from(boa_string::JsStr::latin1(bytes)))
-    } else {
-        let byte_len = len.checked_mul(2)?;
-        let raw = read_bytes(src, pos, byte_len)?;
-        let mut units = Vec::with_capacity(len);
-        for chunk in raw.chunks_exact(2) {
-            units.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+    match kind {
+        0 => {
+            if len > MAX_SLICEBC_STRING_BYTES {
+                return None;
+            }
+            let bytes = read_bytes(src, pos, len)?;
+            Some(JsString::from(boa_string::JsStr::latin1(bytes)))
         }
-        Some(JsString::from(units.as_slice()))
+        1 => {
+            let byte_len = len.checked_mul(2)?;
+            if byte_len > MAX_SLICEBC_STRING_BYTES {
+                return None;
+            }
+            let raw = read_bytes(src, pos, byte_len)?;
+            let mut units = Vec::with_capacity(len);
+            for chunk in raw.chunks_exact(2) {
+                units.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+            }
+            Some(JsString::from(units.as_slice()))
+        }
+        _ => None,
     }
 }
 
 fn get_or_build_scope_with_len(
     n: u32,
     empty_global_scope: &boa_ast::scope::Scope,
-    cache: &mut Vec<Option<boa_ast::scope::Scope>>,
-) -> boa_ast::scope::Scope {
+    cache: &mut FxHashMap<u32, boa_ast::scope::Scope>,
+) -> Option<boa_ast::scope::Scope> {
     if n == 0 {
-        return empty_global_scope.clone();
+        return Some(empty_global_scope.clone());
     }
-    let idx = n as usize;
-    if idx < cache.len() {
-        if let Some(s) = &cache[idx] {
-            return s.clone();
-        }
-    } else {
-        cache.resize(idx + 1, None);
+    if n > MAX_SLICEBC_BINDINGS {
+        return None;
+    }
+    if let Some(s) = cache.get(&n) {
+        return Some(s.clone());
     }
     let s = boa_ast::scope::Scope::new_global();
     for i in 0..n {
         let name = JsString::from(format!("b{i}"));
         drop(s.create_mutable_binding(name, true));
     }
-    cache[idx] = Some(s.clone());
-    s
+    cache.insert(n, s.clone());
+    Some(s)
 }
 
 fn decode_codeblock(
     src: &[u8],
     pos: &mut usize,
     empty_global_scope: &boa_ast::scope::Scope,
-    scope_cache: &mut Vec<Option<boa_ast::scope::Scope>>,
+    scope_cache: &mut FxHashMap<u32, boa_ast::scope::Scope>,
+    depth: usize,
 ) -> Option<Gc<CodeBlock>> {
+    if depth > MAX_SLICEBC_NESTING_DEPTH {
+        return None;
+    }
     let flags_bits = read_u16(src, pos)?;
     let flags = crate::vm::CodeBlockFlags::from_bits_retain(flags_bits);
     let length = read_u32(src, pos)?;
     let parameter_length = read_u32(src, pos)?;
     let register_count = read_u32(src, pos)?;
+    if register_count > MAX_SLICEBC_COLLECTION_LEN as u32 {
+        return None;
+    }
     let this_mode = match read_u8(src, pos)? {
         0 => crate::builtins::function::ThisMode::Lexical,
         1 => crate::builtins::function::ThisMode::Strict,
-        _ => crate::builtins::function::ThisMode::Global,
+        2 => crate::builtins::function::ThisMode::Global,
+        _ => return None,
     };
 
-    let mapped_len = read_u32(src, pos)? as usize;
+    let mapped_len = read_bounded_len(src, pos, 4)?;
     let mut mapped_arguments_binding_indices = thin_vec::ThinVec::with_capacity(mapped_len);
     for _ in 0..mapped_len {
         let v = read_u32(src, pos)?;
@@ -543,7 +587,7 @@ fn decode_codeblock(
         bytes: bc_bytes.to_vec().into_boxed_slice(),
     };
 
-    let const_len = read_u32(src, pos)? as usize;
+    let const_len = read_bounded_len(src, pos, 5)?;
     let mut constants = thin_vec::ThinVec::with_capacity(const_len);
     for _ in 0..const_len {
         let tag = read_u8(src, pos)?;
@@ -554,27 +598,29 @@ fn decode_codeblock(
                 pos,
                 empty_global_scope,
                 scope_cache,
+                depth + 1,
             )?),
             2 => {
-                let slen = read_u32(src, pos)? as usize;
+                let slen = read_bounded_len(src, pos, 1)?;
                 let sbytes = read_bytes(src, pos, slen)?;
                 let s = std::str::from_utf8(sbytes).ok()?;
                 let bi = crate::JsBigInt::from_string(s)?;
                 crate::vm::Constant::BigInt(bi)
             }
-            _ => {
+            3 => {
                 let n = read_u32(src, pos)?;
                 crate::vm::Constant::Scope(get_or_build_scope_with_len(
                     n,
                     empty_global_scope,
                     scope_cache,
-                ))
+                )?)
             }
+            _ => return None,
         };
         constants.push(c);
     }
 
-    let bind_len = read_u32(src, pos)? as usize;
+    let bind_len = read_bounded_len(src, pos, 14)?;
     let mut bindings_vec = Vec::with_capacity(bind_len);
     for _ in 0..bind_len {
         let name = read_js_string(src, pos)?;
@@ -585,14 +631,15 @@ fn decode_codeblock(
         let bscope = match scope_kind {
             0 => boa_ast::scope::BindingLocatorScope::GlobalObject,
             1 => boa_ast::scope::BindingLocatorScope::GlobalDeclarative,
-            _ => boa_ast::scope::BindingLocatorScope::Stack(stack_idx),
+            2 => boa_ast::scope::BindingLocatorScope::Stack(stack_idx),
+            _ => return None,
         };
         loc.set_scope(bscope);
         loc.set_binding_index(binding_index);
         bindings_vec.push(loc);
     }
 
-    let handler_len = read_u32(src, pos)? as usize;
+    let handler_len = read_bounded_len(src, pos, 12)?;
     let mut handlers = thin_vec::ThinVec::with_capacity(handler_len);
     for _ in 0..handler_len {
         let start = crate::vm::opcode::Address::new(read_u32(src, pos)?);
@@ -605,7 +652,7 @@ fn decode_codeblock(
         });
     }
 
-    let ic_len = read_u32(src, pos)? as usize;
+    let ic_len = read_bounded_len(src, pos, 5)?;
     let mut ic_vec = Vec::with_capacity(ic_len);
     for _ in 0..ic_len {
         let name = read_js_string(src, pos)?;
@@ -613,7 +660,7 @@ fn decode_codeblock(
     }
 
     let fn_name = read_js_string(src, pos)?;
-    let sm_len = read_u32(src, pos)? as usize;
+    let sm_len = read_bounded_len(src, pos, 12)?;
     let mut sm_entries = Vec::with_capacity(sm_len);
     for _ in 0..sm_len {
         let pc = read_u32(src, pos)?;
@@ -635,13 +682,13 @@ fn decode_codeblock(
         SpannedSourceText::new_empty(),
     );
 
-    let glex_len = read_u32(src, pos)? as usize;
+    let glex_len = read_bounded_len(src, pos, 4)?;
     let mut glex_vec = Vec::with_capacity(glex_len);
     for _ in 0..glex_len {
         glex_vec.push(read_u32(src, pos)?);
     }
 
-    let gfn_len = read_u32(src, pos)? as usize;
+    let gfn_len = read_bounded_len(src, pos, 8)?;
     let mut gfn_vec = Vec::with_capacity(gfn_len);
     for _ in 0..gfn_len {
         let name_index = read_u32(src, pos)?;
@@ -652,7 +699,7 @@ fn decode_codeblock(
         });
     }
 
-    let gvar_len = read_u32(src, pos)? as usize;
+    let gvar_len = read_bounded_len(src, pos, 4)?;
     let mut gvar_vec = Vec::with_capacity(gvar_len);
     for _ in 0..gvar_len {
         gvar_vec.push(read_u32(src, pos)?);

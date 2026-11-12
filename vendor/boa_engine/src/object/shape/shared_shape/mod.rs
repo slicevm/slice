@@ -81,6 +81,9 @@ unsafe impl Trace for ShapeFlags {
 /// The internal representation of a [`SharedShape`].
 #[derive(Debug, Trace, Finalize)]
 struct Inner {
+    /// Monotonic process-unique shape identifier (immune to heap pointer-reuse ABA).
+    id: u64,
+
     /// See [`ForwardTransition`].
     forward_transitions: ForwardTransition,
 
@@ -174,6 +177,7 @@ impl SharedShape {
     #[must_use]
     pub(crate) fn root() -> Self {
         Self::new(Inner {
+            id: super::next_shape_id(),
             forward_transitions: ForwardTransition::default(),
             prototype: None,
             property_count: 0,
@@ -195,6 +199,7 @@ impl SharedShape {
             self.forward_transitions().prune_prototype_transitions();
         }
         let new_inner_shape = Inner {
+            id: super::next_shape_id(),
             forward_transitions: ForwardTransition::default(),
             prototype: prototype.clone(),
             property_table: self.property_table().clone(),
@@ -239,6 +244,7 @@ impl SharedShape {
             self.property_count(),
         );
         let new_inner_shape = Inner {
+            id: super::next_shape_id(),
             prototype: self.prototype(),
             forward_transitions: ForwardTransition::default(),
             property_table,
@@ -303,6 +309,7 @@ impl SharedShape {
             let property_table = self.property_table().deep_clone_all();
             property_table.set_attributes_at_index(&key.property_key, key.attributes);
             let inner_shape = Inner {
+                id: super::next_shape_id(),
                 forward_transitions: ForwardTransition::default(),
                 prototype: self.prototype(),
                 property_table,
@@ -497,6 +504,12 @@ impl SharedShape {
                 .borrow()
                 .clone_count(self.property_count()),
         )
+    }
+
+    /// Return the unique monotonic 64-bit identifier of the [`SharedShape`].
+    #[inline]
+    pub(crate) fn id(&self) -> u64 {
+        self.inner.id
     }
 
     /// Return location in memory of the [`SharedShape`].

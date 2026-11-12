@@ -59,7 +59,7 @@ pub(crate) struct WarmBoaRealm {
     pub(crate) init_worker_self_fn: Option<boa_engine::JsObject>,
     pub(crate) drain_wu_fn: Option<boa_engine::JsObject>,
     pub(crate) ctl_fn: Option<boa_engine::JsObject>,
-    pub(crate) ses_proto_sigs: [(usize, usize); 6],
+    pub(crate) ses_proto_sigs: [(u64, usize, usize); 6],
     pub(crate) loaded_shards_mask: u32,
     pub(crate) registered_host_groups: u8,
     pub(crate) has_pending_wu: bool,
@@ -605,16 +605,17 @@ pub(crate) fn ensure_vfs_tenant_affinity(vfs_ns: &str) {
 }
 
 #[inline]
-fn proto_sig(obj: &boa_engine::JsObject) -> (usize, usize) {
+fn proto_sig(obj: &boa_engine::JsObject) -> (u64, usize, usize) {
     let b = obj.borrow();
     (
-        b.shape().to_addr_usize(),
+        b.shape().id(),
+        b.properties().storage_len(),
         b.properties().index_property_values().len(),
     )
 }
 
 #[inline]
-pub(crate) fn capture_ses_proto_sigs(ctx: &boa_engine::Context) -> [(usize, usize); 6] {
+pub(crate) fn capture_ses_proto_sigs(ctx: &boa_engine::Context) -> [(u64, usize, usize); 6] {
     let c = ctx.intrinsics().constructors();
     [
         proto_sig(&c.object().prototype()),
