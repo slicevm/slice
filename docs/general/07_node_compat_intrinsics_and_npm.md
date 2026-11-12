@@ -10,8 +10,8 @@ This chapter provides the complete API reference for every built-in `node:*` mod
 
 All built-in modules can be imported with or without the `node:` prefix (`import * as fs from "node:fs"` or `import * as fs from "fs"`, as well as CommonJS `require("node:fs")` or `require("fs")`). They are loaded lazily on first use (`0.00 ns` cost if unused).
 
-### 1.1 `node:fs` / `fs` & `node:fs/promises` (OCap-Guarded In-Memory VFS Slab + OS Disk Fallback)
-Every `node:fs` and `node:fs/promises` operation checks your `allow_read` / `allow_write` prefixes, blocks `..` traversal, serves hot files from Slice's in-memory VFS slab (`BOA_VFS_CACHE`), and automatically snapshots/restores during `Slice.checkpoint()` / `Slice.restore()` and `slice test`!
+### 1.1 `node:fs` / `fs` & `node:fs/promises` (OCap-Guarded Copy-on-Write VFS Slab + Read-Only Host Fallback)
+Every `node:fs` and `node:fs/promises` operation checks your `allow_read` / `allow_write` prefixes, blocks `..` traversal, NUL bytes, and device/UNC paths, serves hot files from Slice's in-memory copy-on-write VFS slab (`BOA_VFS_CACHE`), masks unlinked paths with VFS tombstones without deleting host OS files, and snapshots/restores state in `< 5 us` during `Slice.checkpoint()` / `Slice.restore()` and `slice test`.
 
 ```typescript
 import * as fs from "node:fs";
@@ -88,17 +88,23 @@ cipher.setAAD(Buffer.from("aad-header"));
 const encHex = cipher.update("confidential-payload", "utf8", "hex") + cipher.final("hex");
 const authTag = cipher.getAuthTag();
 
-// Asymmetric Key Generation, Signing & Key Agreement (Ed25519, ECDSA/ECDH P-256 & P-384, X25519, RSA 2048/3072/4096 & RSA-PSS / RSA-OAEP)
+// Asymmetric Key Generation, Key Agreement & Signing (Ed25519, X25519, ECDSA P-256 & P-384, and imported RSA 2048..8192 PKCS#1 v1.5 / RSA-PSS)
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
 const sig = crypto.sign(null, Buffer.from("token-body"), privateKey);
 const verified = crypto.verify(null, Buffer.from("token-body"), publicKey, sig);
 
-const rsaPair = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
-const rsaSig = crypto.sign("sha256", Buffer.from("jwt-header.payload"), rsaPair.privateKey);
-const rsaOk = crypto.verify("sha256", Buffer.from("jwt-header.payload"), rsaPair.publicKey, rsaSig);
+const aliceX = crypto.generateKeyPairSync("x25519");
+const bobX = crypto.generateKeyPairSync("x25519");
+const sharedSecret: Buffer = crypto.diffieHellman({ privateKey: aliceX.privateKey, publicKey: bobX.publicKey });
 
-// WebCrypto subtle (including RSASSA-PKCS1-v1_5, RSA-PSS, RSA-OAEP, X25519, and ECDH P-256/P-384) is also exposed as crypto.subtle:
-const x25519Pair = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
+// Import pre-provisioned RSA keys (PEM / PKCS#8 / PKCS#1 / SPKI / JWK, 2048 to 8192 bits) for RS256/384/512 & PS256/384/512:
+const rsaPriv = crypto.createPrivateKey(process.env.JWT_RSA_PRIVATE_KEY_PEM!);
+const rsaPub = crypto.createPublicKey(rsaPriv);
+const rsaSig = crypto.sign("sha256", Buffer.from("jwt-header.payload"), rsaPriv);
+const rsaOk = crypto.verify("sha256", Buffer.from("jwt-header.payload"), rsaPub, rsaSig);
+
+// WebCrypto subtle (Ed25519, X25519 deriveBits/deriveKey, ECDSA P-256/P-384, and imported RSASSA-PKCS1-v1_5 / RSA-PSS) is also exposed as crypto.subtle:
+const x25519Pair = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits", "deriveKey"]);
 ```
 
 ### 1.3 `node:path` / `path` (and `path.posix` / `path.win32`)

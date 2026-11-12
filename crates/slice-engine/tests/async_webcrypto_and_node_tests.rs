@@ -644,23 +644,21 @@ main();
 "#;
 
     let bc = compile_source_to_bytecode(script);
+    let n4_caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/tmp")
+        .with_write_prefix("/tmp");
     let mut iso1 = SliceIsolate::spawn(
         "phase-n4-tenant-1",
         1,
-        CapabilityToken::pure_compute(),
+        n4_caps.clone(),
         25_000_000,
         8 * 1024 * 1024,
     );
     iso1.set_deterministic_seed(Some(20261104));
     let m1 = iso1.execute_bytecode(&bc, None).unwrap();
 
-    let mut iso2 = SliceIsolate::spawn(
-        "phase-n4-tenant-2",
-        2,
-        CapabilityToken::pure_compute(),
-        25_000_000,
-        8 * 1024 * 1024,
-    );
+    let mut iso2 =
+        SliceIsolate::spawn("phase-n4-tenant-2", 2, n4_caps, 25_000_000, 8 * 1024 * 1024);
     iso2.set_deterministic_seed(Some(20261104));
     let m2 = iso2.execute_bytecode(&bc, None).unwrap();
 
@@ -3372,28 +3370,76 @@ import { EventEmitter } from "node:events";
 
 const out: Record<string, any> = {};
 
-// 1. Issue #58: RSA-2048, X25519, DSA keygen, DER sizes, RSA-SHA256 sign/verify, invalid key type
-const rsaKeys = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
-out.rsaKeyTypes = [rsaKeys.publicKey.asymmetricKeyType, rsaKeys.privateKey.asymmetricKeyType];
+// 1. RSA-2048 import + sign/verify, X25519 random keygen, and fail-closed RSA/DSA runtime keygen
+const TEST_RSA_2048_PRIV_PEM = `-----BEGIN PRIVATE KEY-----
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCfstKkx/2YDczM
+aprvTAz5wzUDQ/I1sRCNb42iz8KU1vUzgLBTSScXZSR/J4KdI0zG2KhsVyl5dD6M
+ERJ34ZClB+tDzGg4h5Y373ItlwsUfQZMAAIzJJUAvbfqSkKU79GPmm6jMatzqftS
+vcPcMdKm9Ww+Oj5Qg1QOvBrA3qD33JTyEkcUNEnHA+ULpMFzQsFSiHcueNLPV9LB
+ZwtvF5Rj0GLlJe/B9ibSjr1LP/Jx4gYAmx/D79Zs5h6zu1F6nUiNIAiyljEayH1N
+UhjtW7SKHVwFrod9pk2KTGjiqd5t64E8lJQ1O1ku0EsQgLYjePVFZFmbbx4IEpJ5
+VglGHhrvAgMBAAECggEAPtkRs96uyunXaLUljzonOx3bHZNeXUn3ISo/G81Wntuv
+uNqSydwWocrgn5fte6jaPMEkGyr8O/uG5/mKAprHIWNp748gjuqxMAcwMIfqSOBh
+G4S/WOAzMYz4NaCO7m0o1DJrCxdviX/iU/AxhdUnuSQJur2SK35blMbrYm7a+1/5
+JF+5zZtxWgLerZAh7C/JPw80LTQN4AV52T27Nf3JsAxFJH0NxSS0z7jftWmMctKX
+a7h45x2bs3P6Yqb5dGwoLbGDxDb1J0W9HtnNdh+pUe/pDgizUh6LUR+MPBFsKwAd
+vXXdZZt5BTHKxK36/rLtmYYSkx3fGwieJlzklSpsRQKBgQDNu06k9aM/TqparK3K
+UyGbSC1jppF0mxpAfIqtPWRw0EzVZ8ESb6elwo/BXKaE0YdkvVfIewGqxSYP5xO9
+rlz2uwBilWWmXrR4gKHcpVawdJbXAXZlkqxpnsanWbyW2Y3ql4gtttNf1yo242Lx
+bBM6aw1rxRYbsJP01IoxZurKzQKBgQDGuBpeITHHZvuDEjxOiJDwIp6ojA4v00Mv
+h8oTRHRYzgB02f6NYzIP9tejnWTq3GEtsvfwUv61agZxYrp3CLfCl/yRFD6J3m1l
+b4+SWmu0D8vIFJMJ9r/ZoVvOZHzl3cOA8Pl0Gi1dutGbysO3Hw2BwWeE2xAeADXV
+WioDrHM0qwKBgGbVNywxM9YTBgeoxH2bK/MoErf6rD3ywR52ogKR60CQfbc100XZ
+1Zx/Mcfe/cTpzplGIzisc1rejHXqdO2c2A7jzf942YRdVivdcAqQAlLVFAiITJvc
+wp1Qpc9EhYWJXOxjrcfb2K/RJuKkqfIuqTXMCLtTmgdhLbN1AVZMMRQJAoGASbAP
+JwSMHvMTJOFoN37wr/tGdh2pTRa7/S4PQuHJevy4spv7hpZYBA92mxdMSsL5ziZl
+RlqgVMlCJl2D44v6CFCvuWSWZC10x3588LpS4exRlpn6hGFZduwczQX6Qorfajrx
+ZZonZHBYNbsUpB0BtzHunxdUfKt7SugqWD5kYg0CgYBSoCnx8Sof7BgYteS5p2O5
+nizvTevviLhUfoUzo+uGWHolYmssaRNkzDjwUGV6Q7ncgMcUXFPj5uZLU3ASZ+cG
+yXmGqKEBlTsd+tukkfKq6YV1EZBh/XQ7uwtNMjiwWPqFaNFQcNQrmuP6UVdWlqRJ
+oYEg8QGzr8H2y1ukdoelWQ==
+-----END PRIVATE KEY-----`;
 
-const rsaDer = crypto.generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    publicKeyEncoding: { type: "spki", format: "der" },
-    privateKeyEncoding: { type: "pkcs8", format: "der" }
-});
-out.rsaSpkiLen = rsaDer.publicKey.length;
+const TEST_RSA_2048_PUB_PEM = `-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAn7LSpMf9mA3MzGqa70wM
++cM1A0PyNbEQjW+Nos/ClNb1M4CwU0knF2UkfyeCnSNMxtiobFcpeXQ+jBESd+GQ
+pQfrQ8xoOIeWN+9yLZcLFH0GTAACMySVAL236kpClO/Rj5puozGrc6n7Ur3D3DHS
+pvVsPjo+UINUDrwawN6g99yU8hJHFDRJxwPlC6TBc0LBUoh3LnjSz1fSwWcLbxeU
+Y9Bi5SXvwfYm0o69Sz/yceIGAJsfw+/WbOYes7tRep1IjSAIspYxGsh9TVIY7Vu0
+ih1cBa6HfaZNikxo4qnebeuBPJSUNTtZLtBLEIC2I3j1RWRZm28eCBKSeVYJRh4a
+7wIDAQAB
+-----END PUBLIC KEY-----`;
+
+const rsaPrivKey = crypto.createPrivateKey(TEST_RSA_2048_PRIV_PEM);
+const rsaPubKey = crypto.createPublicKey(TEST_RSA_2048_PUB_PEM);
+out.rsaKeyTypes = [rsaPubKey.asymmetricKeyType, rsaPrivKey.asymmetricKeyType];
+out.rsaSpkiLen = rsaPubKey.export({ type: "spki", format: "der" }).length;
 const signer = crypto.createSign("RSA-SHA256");
 signer.update("hello rsa");
-const rsaSig = signer.sign(rsaDer.privateKey);
+const rsaSig = signer.sign(rsaPrivKey);
 out.rsaSigLen = rsaSig.length;
-out.rsaVerifyOk = crypto.createVerify("RSA-SHA256").update("hello rsa").verify(rsaDer.publicKey, rsaSig);
-out.rsaVerifyBad = crypto.createVerify("RSA-SHA256").update("tampered").verify(rsaDer.publicKey, rsaSig);
+out.rsaVerifyOk = crypto.createVerify("RSA-SHA256").update("hello rsa").verify(rsaPubKey, rsaSig);
+out.rsaVerifyBad = crypto.createVerify("RSA-SHA256").update("tampered").verify(rsaPubKey, rsaSig);
+
+try {
+    crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+} catch (e: any) {
+    out.rsaKeygenCode = e.code;
+}
 
 const x25519Keys = crypto.generateKeyPairSync("x25519");
+const x25519Keys2 = crypto.generateKeyPairSync("x25519");
 out.x25519Type = x25519Keys.publicKey.asymmetricKeyType;
+out.x25519Distinct = !x25519Keys.publicKey.export({ type: "spki", format: "der" }).equals(
+    x25519Keys2.publicKey.export({ type: "spki", format: "der" })
+);
 
-const dsaKeys = crypto.generateKeyPairSync("dsa", { modulusLength: 2048, divisorLength: 256 });
-out.dsaType = dsaKeys.publicKey.asymmetricKeyType;
+try {
+    crypto.generateKeyPairSync("dsa" as any, { modulusLength: 2048, divisorLength: 256 });
+} catch (e: any) {
+    out.dsaCode = e.code;
+    out.dsaIsTypeErr = e instanceof TypeError;
+}
 
 try {
     crypto.generateKeyPairSync("no-such-type" as any);
@@ -3471,8 +3517,11 @@ console.log(JSON.stringify(out));
     assert_eq!(out["rsaSigLen"], 256);
     assert_eq!(out["rsaVerifyOk"], true);
     assert_eq!(out["rsaVerifyBad"], false);
+    assert_eq!(out["rsaKeygenCode"], "ERR_CRYPTO_UNSUPPORTED_OPERATION");
     assert_eq!(out["x25519Type"], "x25519");
-    assert_eq!(out["dsaType"], "dsa");
+    assert_eq!(out["x25519Distinct"], true);
+    assert_eq!(out["dsaCode"], "ERR_INVALID_ARG_VALUE");
+    assert_eq!(out["dsaIsTypeErr"], true);
     assert_eq!(out["invalidKeyCode"], "ERR_INVALID_ARG_VALUE");
     assert_eq!(out["invalidKeyIsTypeErr"], true);
     assert_eq!(out["inspectDepth0"], "{ a: [Object] }");
@@ -3496,4 +3545,277 @@ console.log(JSON.stringify(out));
     assert_eq!(out["abDetachedAfter"], true);
     assert_eq!(out["ab2LenAndData"], serde_json::json!([16, 1, 4]));
     assert_eq!(out["ab3Len"], 4);
+}
+
+#[test]
+fn test_x25519_rfc7748_key_agreement_and_rsa_dynamic_import_pss() {
+    let script = r#"
+import crypto from "node:crypto";
+
+const TEST_RSA_3072_PRIV_PEM = `-----BEGIN PRIVATE KEY-----
+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
+/V1BUd03zZYQpr1ktMX9bw==
+-----END PRIVATE KEY-----`;
+
+(async () => {
+    const out: Record<string, any> = {};
+
+    // 1. RFC 7748 Section 6.1 X25519 Known-Answer Vectors (Alice & Bob)
+    const pkcs8Prefix = "302e020100300506032b656e04220420";
+    const spkiPrefix = "302a300506032b656e032100";
+    const aliceSeedHex = "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a";
+    const alicePubExpected = "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a";
+    const bobSeedHex = "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb";
+    const bobPubExpected = "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f";
+    const sharedExpected = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
+
+    const alicePriv = crypto.createPrivateKey({
+        key: Buffer.from(pkcs8Prefix + aliceSeedHex, "hex"),
+        format: "der",
+        type: "pkcs8"
+    });
+    const bobPriv = crypto.createPrivateKey({
+        key: Buffer.from(pkcs8Prefix + bobSeedHex, "hex"),
+        format: "der",
+        type: "pkcs8"
+    });
+    const aliceDerivedPub = crypto.createPublicKey(alicePriv);
+    const bobDerivedPub = crypto.createPublicKey(bobPriv);
+
+    out.alicePubHex = aliceDerivedPub.export({ format: "der", type: "spki" }).subarray(12).toString("hex");
+    out.bobPubHex = bobDerivedPub.export({ format: "der", type: "spki" }).subarray(12).toString("hex");
+    out.alicePubMatchesRfc = out.alicePubHex === alicePubExpected;
+    out.bobPubMatchesRfc = out.bobPubHex === bobPubExpected;
+
+    const dhAlice = crypto.diffieHellman({ privateKey: alicePriv, publicKey: bobDerivedPub });
+    const dhBob = crypto.diffieHellman({ privateKey: bobPriv, publicKey: aliceDerivedPub });
+    out.dhMatchesRfc = dhAlice.toString("hex") === sharedExpected && dhBob.toString("hex") === sharedExpected;
+
+    // Low-order all-zero public point rejection in node:crypto
+    const zeroPub = crypto.createPublicKey({
+        key: Buffer.from(spkiPrefix + "00".repeat(32), "hex"),
+        format: "der",
+        type: "spki"
+    });
+    let lowOrderNodeRejected = false;
+    try {
+        crypto.diffieHellman({ privateKey: alicePriv, publicKey: zeroPub });
+    } catch (_e) {
+        lowOrderNodeRejected = true;
+    }
+    out.lowOrderNodeRejected = lowOrderNodeRejected;
+
+    // 2. WebCrypto X25519 generateKey, JWK/raw/PKCS8/SPKI roundtrip, deriveBits, and deriveKey -> AES-GCM
+    const peerA = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveKey", "deriveBits"]);
+    const peerB = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveKey", "deriveBits"]);
+
+    const peerAPubJwk = await crypto.subtle.exportKey("jwk", peerA.publicKey);
+    const peerAPrivJwk = await crypto.subtle.exportKey("jwk", peerA.privateKey);
+    const peerBPubRaw = await crypto.subtle.exportKey("raw", peerB.publicKey);
+
+    const peerAPrivReimp = await crypto.subtle.importKey("jwk", peerAPrivJwk, { name: "X25519" }, false, ["deriveBits", "deriveKey"]);
+    const peerBPubReimp = await crypto.subtle.importKey("raw", peerBPubRaw, { name: "X25519" }, true, []);
+    const peerAPubReimp = await crypto.subtle.importKey("jwk", peerAPubJwk, { name: "X25519" }, true, []);
+
+    const bitsAB = new Uint8Array(await crypto.subtle.deriveBits({ name: "X25519", public: peerBPubReimp }, peerAPrivReimp, 256));
+    const bitsBA = new Uint8Array(await crypto.subtle.deriveBits({ name: "X25519", public: peerAPubReimp }, peerB.privateKey, 256));
+    out.webcryptoX25519Symmetry = Buffer.from(bitsAB).equals(Buffer.from(bitsBA)) && bitsAB.length === 32;
+
+    // Reject mismatched X25519 JWK public/private components
+    let mismatchedJwkRejected = false;
+    try {
+        await crypto.subtle.importKey(
+            "jwk",
+            { ...peerAPrivJwk, x: Buffer.from(peerBPubRaw).toString("base64url") },
+            { name: "X25519" },
+            false,
+            ["deriveBits"]
+        );
+    } catch (_e) {
+        mismatchedJwkRejected = true;
+    }
+    out.mismatchedJwkRejected = mismatchedJwkRejected;
+
+    // Reject low-order all-zero public key in WebCrypto
+    const zeroWebPub = await crypto.subtle.importKey("raw", new Uint8Array(32), { name: "X25519" }, false, []);
+    let lowOrderWebRejected = false;
+    try {
+        await crypto.subtle.deriveBits({ name: "X25519", public: zeroWebPub }, peerAPrivReimp, 256);
+    } catch (_e) {
+        lowOrderWebRejected = true;
+    }
+    out.lowOrderWebRejected = lowOrderWebRejected;
+
+    // X25519 deriveKey -> AES-GCM-256 encrypt/decrypt roundtrip
+    const aesA = await crypto.subtle.deriveKey(
+        { name: "X25519", public: peerBPubReimp },
+        peerAPrivReimp,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt"]
+    );
+    const aesB = await crypto.subtle.deriveKey(
+        { name: "X25519", public: peerAPubReimp },
+        peerB.privateKey,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["decrypt"]
+    );
+    const iv = new Uint8Array(12).fill(7);
+    const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, aesA, new TextEncoder().encode("x25519-sealed"));
+    const pt = new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, aesB, ct));
+    out.x25519DerivedAesPt = pt;
+
+    // 3. Dynamic RSA-3072 import, JWK roundtrip, SHA-384/SHA-512, and RSA-PSS across node:crypto and WebCrypto
+    const rsa3072Priv = crypto.createPrivateKey(TEST_RSA_3072_PRIV_PEM);
+    const rsa3072Pub = crypto.createPublicKey(TEST_RSA_3072_PRIV_PEM);
+    out.rsa3072ModulusBits = rsa3072Priv.asymmetricKeyDetails.modulusLength;
+    out.rsa3072PubModulusBits = rsa3072Pub.asymmetricKeyDetails.modulusLength;
+    out.rsa3072PubType = rsa3072Pub.type;
+
+    const sig384 = crypto.createSign("RSA-SHA384").update("payload-384").sign(rsa3072Priv);
+    out.rsa3072SigLen = sig384.length;
+    out.rsa384Ok = crypto.createVerify("RSA-SHA384").update("payload-384").verify(rsa3072Pub, sig384);
+    out.rsa384CrossAlgRejected = !crypto.createVerify("RSA-SHA256").update("payload-384").verify(rsa3072Pub, sig384);
+
+    const pssNodeSig = crypto.sign("sha512", Buffer.from("pss-node-msg"), {
+        key: rsa3072Priv,
+        padding: crypto.constants.RSA_PKCS1_PSS_PADDING
+    });
+    out.pssNodeOk = crypto.verify(
+        "sha512",
+        Buffer.from("pss-node-msg"),
+        { key: rsa3072Pub, padding: crypto.constants.RSA_PKCS1_PSS_PADDING },
+        pssNodeSig
+    );
+    out.pssCrossPadRejected = !crypto.verify("sha512", Buffer.from("pss-node-msg"), rsa3072Pub, pssNodeSig);
+
+    const rsa3072PrivJwk = rsa3072Priv.export({ format: "jwk" });
+    const rsa3072PubJwk = rsa3072Pub.export({ format: "jwk" });
+    const rsaFromJwkNode = crypto.createPrivateKey({ key: rsa3072PrivJwk, format: "jwk" });
+    out.rsaJwkNodeModulus = rsaFromJwkNode.asymmetricKeyDetails.modulusLength;
+
+    // WebCrypto RSASSA-PKCS1-v1_5 and RSA-PSS JWK/SPKI/PKCS8 + cross-API verification
+    const wcPssPriv = await crypto.subtle.importKey(
+        "jwk",
+        rsa3072PrivJwk,
+        { name: "RSA-PSS", hash: "SHA-512" },
+        true,
+        ["sign"]
+    );
+    const wcPssPub = await crypto.subtle.importKey(
+        "jwk",
+        rsa3072PubJwk,
+        { name: "RSA-PSS", hash: "SHA-512" },
+        true,
+        ["verify"]
+    );
+    out.wcRsaModulus = (wcPssPub.algorithm as any).modulusLength;
+    out.wcCrossVerifyNodePss = await crypto.subtle.verify(
+        { name: "RSA-PSS", saltLength: 64 },
+        wcPssPub,
+        pssNodeSig,
+        new TextEncoder().encode("pss-node-msg")
+    );
+    const wcPssSig = await crypto.subtle.sign(
+        { name: "RSA-PSS", saltLength: 64 },
+        wcPssPriv,
+        new TextEncoder().encode("wc-pss-msg")
+    );
+    out.nodeCrossVerifyWcPss = crypto.verify(
+        "sha512",
+        Buffer.from("wc-pss-msg"),
+        { key: rsa3072Pub, padding: crypto.constants.RSA_PKCS1_PSS_PADDING },
+        Buffer.from(wcPssSig)
+    );
+    const exportedWcJwk = await crypto.subtle.exportKey("jwk", wcPssPub);
+    out.wcExportedJwkAlg = exportedWcJwk.alg;
+
+    // WebCrypto runtime RSA keygen fails closed
+    let wcRsaKeygenRejected = false;
+    try {
+        await crypto.subtle.generateKey(
+            { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+            true,
+            ["sign", "verify"]
+        );
+    } catch (_e) {
+        wcRsaKeygenRejected = true;
+    }
+    out.wcRsaKeygenRejected = wcRsaKeygenRejected;
+
+    console.log(JSON.stringify(out));
+})();
+"#;
+
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "x25519-rfc7748-and-rsa-pss",
+        1,
+        CapabilityToken::pure_compute(),
+        25_000_000,
+        32 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+
+    assert_eq!(out["alicePubMatchesRfc"], true, "out = {out}");
+    assert_eq!(out["bobPubMatchesRfc"], true);
+    assert_eq!(out["dhMatchesRfc"], true);
+    assert_eq!(out["lowOrderNodeRejected"], true);
+    assert_eq!(out["webcryptoX25519Symmetry"], true);
+    assert_eq!(out["mismatchedJwkRejected"], true);
+    assert_eq!(out["lowOrderWebRejected"], true);
+    assert_eq!(out["x25519DerivedAesPt"], "x25519-sealed");
+    assert_eq!(out["rsa3072ModulusBits"], 3072);
+    assert_eq!(out["rsa3072PubModulusBits"], 3072);
+    assert_eq!(out["rsa3072PubType"], "public");
+    assert_eq!(out["rsa3072SigLen"], 384);
+    assert_eq!(out["rsa384Ok"], true);
+    assert_eq!(out["rsa384CrossAlgRejected"], true);
+    assert_eq!(out["pssNodeOk"], true);
+    assert_eq!(out["pssCrossPadRejected"], true);
+    assert_eq!(out["rsaJwkNodeModulus"], 3072);
+    assert_eq!(out["wcRsaModulus"], 3072);
+    assert_eq!(out["wcCrossVerifyNodePss"], true);
+    assert_eq!(out["nodeCrossVerifyWcPss"], true);
+    assert_eq!(out["wcExportedJwkAlg"], "PS512");
+    assert_eq!(out["wcRsaKeygenRejected"], true);
 }

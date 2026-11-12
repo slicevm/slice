@@ -320,6 +320,9 @@ pub(crate) fn eval_boacas_on_realm(
         if let Some(script) =
             boa_engine::Script::from_slicebc_bytes(precompiled_slice, &mut realm.ctx)
         {
+            let fused_spec =
+                crate::boa_realm::encode_fused_source_spec(header.shards_mask, init_lazy);
+            crate::boa_realm::set_active_source_fused_spec(fused_spec);
             let res = script.evaluate(&mut realm.ctx);
             realm.loaded_shards_mask = effective_shards | if init_lazy { 1 } else { 0 };
             crate::boa_realm::populate_realm_cached_handles(realm);
@@ -357,6 +360,9 @@ pub(crate) fn eval_boacas_on_realm(
                             {
                                 if let Some(obj) = val.as_object() {
                                     realm.loaded_bundles.insert(header.rc_key, obj.clone());
+                                    realm
+                                        .loaded_bundle_fused_specs
+                                        .insert(header.rc_key, fused_spec);
                                 }
                             }
                         }
@@ -366,12 +372,19 @@ pub(crate) fn eval_boacas_on_realm(
             return (res, true);
         }
         // Fallback if CodeBlock deserialization fails
+        crate::boa_realm::set_active_source_fused_spec(0);
         let _ = crate::js_preludes::eval_ultra_core_prelude(&mut realm.ctx);
         crate::boa_realm::populate_realm_cached_handles(realm);
     }
 
     if (header.feature_flags & BOACAS_FLAG_IS_RC_BUNDLE) != 0 {
         if let Some(fn_obj) = realm.loaded_bundles.get(&header.rc_key).cloned() {
+            let fused_spec = realm
+                .loaded_bundle_fused_specs
+                .get(&header.rc_key)
+                .copied()
+                .unwrap_or(0);
+            crate::boa_realm::set_active_source_fused_spec(fused_spec);
             if is_http_req && (realm.loaded_shards_mask & (1 << 11)) == 0 {
                 ensure_realm_shards(realm, 1 << 11, false);
             }

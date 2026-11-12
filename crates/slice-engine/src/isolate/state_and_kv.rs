@@ -1,7 +1,9 @@
 //! Sharded Edge KV Slab (`Slice.kv`), Sub-5us State Checkpoints (`Slice.checkpoint`/`Slice.restore`),
 //! Deterministic SplitMix64 PRNG Re-export, and Outbound Egress Secret DLP Guard.
 
-use crate::boa_realm::{BOA_VFS_CACHE, BOA_VFS_DIRS, CHECKPOINT_SLAB, NEXT_CHECKPOINT_ID};
+use crate::boa_realm::{
+    BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VFS_TOMBSTONES, CHECKPOINT_SLAB, NEXT_CHECKPOINT_ID,
+};
 pub(crate) use crate::intrinsics::splitmix64_next_f64;
 use compact_str::CompactString;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -16,6 +18,7 @@ pub(crate) struct StateCheckpoint {
     pub(crate) owner_tenant: CompactString,
     pub(crate) vfs_files: FxHashMap<String, Arc<Vec<u8>>>,
     pub(crate) vfs_dirs: FxHashSet<String>,
+    pub(crate) vfs_tombstones: FxHashSet<String>,
     pub(crate) tenant_kv: [Option<KvTenantMap>; 16],
 }
 
@@ -28,6 +31,14 @@ pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
     };
     let vfs_files = BOA_VFS_CACHE.with(|c| c.borrow().clone());
     let vfs_dirs = BOA_VFS_DIRS.with(|d| d.borrow().clone());
+    let vfs_tombstones = BOA_VFS_TOMBSTONES.with(|t| {
+        let b = t.borrow();
+        if b.is_empty() {
+            FxHashSet::default()
+        } else {
+            b.clone()
+        }
+    });
     let mut tenant_kv: [Option<KvTenantMap>; 16] = std::array::from_fn(|_| None);
     let mut kv_keys_count = 0usize;
     if let Some(shards) = EDGE_KV_SLAB.get() {
@@ -68,6 +79,7 @@ pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
                 owner_tenant: CompactString::new(tenant_id),
                 vfs_files,
                 vfs_dirs,
+                vfs_tombstones,
                 tenant_kv,
             },
         );
@@ -108,6 +120,7 @@ pub(crate) fn restore_tenant_state(tenant_id: &str, checkpoint_id: u64) -> bool 
     let vfs_files_count = snap.vfs_files.len();
     BOA_VFS_CACHE.with(|c| *c.borrow_mut() = snap.vfs_files);
     BOA_VFS_DIRS.with(|d| *d.borrow_mut() = snap.vfs_dirs);
+    BOA_VFS_TOMBSTONES.with(|t| *t.borrow_mut() = snap.vfs_tombstones);
     let shards = EDGE_KV_SLAB
         .get_or_init(|| std::array::from_fn(|_| parking_lot::RwLock::new(FxHashMap::default())));
     for (idx, shard_snap) in snap.tenant_kv.into_iter().enumerate() {

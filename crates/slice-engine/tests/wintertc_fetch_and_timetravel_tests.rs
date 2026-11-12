@@ -443,7 +443,9 @@ console.log(JSON.stringify(Slice.testSummary()));
     let mut iso = SliceIsolate::spawn(
         "f4-test-runner",
         1,
-        CapabilityToken::pure_compute(),
+        CapabilityToken::pure_compute()
+            .with_read_prefix("/tmp")
+            .with_write_prefix("/tmp"),
         10_000_000,
         8 * 1024 * 1024,
     );

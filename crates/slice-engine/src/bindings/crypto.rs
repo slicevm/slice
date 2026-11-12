@@ -1,5 +1,5 @@
 //! WHATWG WebCrypto (`crypto.subtle`) and `node:crypto` Host Bindings (Digests, HMAC, AES-GCM/CBC,
-//! Ed25519, ECDSA P-256/P-384, PBKDF2, HKDF, scrypt, CSPRNG).
+//! Ed25519, X25519, ECDSA P-256/P-384, RSA PKCS#1 v1.5 / RSA-PSS, PBKDF2, HKDF, scrypt, CSPRNG).
 
 use crate::bindings::helpers::{
     bytes_to_js_array_buffer, bytes_to_js_uint8_array, compute_webcrypto_hmac,
@@ -15,12 +15,13 @@ use crate::intrinsics::{
     ecdsa_pub_to_spki, ecdsa_sign_bytes, ecdsa_verify_bytes, ed25519_keypair_from_seed,
     ed25519_pub_to_spki, ed25519_seed_to_pkcs8_v1, ed25519_sign_bytes, ed25519_verify_bytes,
     extract_ecdsa_pkcs8_components, extract_ecdsa_pub, extract_ed25519_pub, extract_ed25519_seed,
-    extract_rsa_pkcs8_spki, extract_rsa_spki, extract_x25519_pub, extract_x25519_seed,
-    fill_random_bytes, generate_uuid_v4, hkdf_derive_bytes, insert_cached_crypto_key,
-    make_ring_aead_key, md5_bytes, pbkdf2_derive_bytes, rsa_generate_2048_keypair, rsa_sign_bytes,
-    rsa_verify_bytes, scrypt_derive_bytes, sha1_bytes, sha256_bytes, sha384_bytes, sha512_bytes,
-    with_cached_crypto_key, x25519_keypair_from_seed, x25519_pub_to_spki, x25519_seed_to_pkcs8_v1,
-    AesExpandedKey, CachedCryptoKeyMaterial,
+    extract_x25519_pub, extract_x25519_seed, fill_random_bytes, generate_uuid_v4,
+    hkdf_derive_bytes, insert_cached_crypto_key, inspect_rsa_private_key, inspect_rsa_public_key,
+    make_ring_aead_key, md5_bytes, pbkdf2_derive_bytes, rsa_private_components_to_pkcs8,
+    rsa_public_components_to_info, rsa_sign_bytes_with_alg, rsa_verify_bytes_with_alg,
+    scrypt_derive_bytes, sha1_bytes, sha256_bytes, sha384_bytes, sha512_bytes,
+    with_cached_crypto_key, x25519_diffie_hellman, x25519_keypair_from_seed, x25519_pub_to_spki,
+    x25519_seed_to_pkcs8_v1, AesExpandedKey, CachedCryptoKeyMaterial,
 };
 
 pub(crate) fn register_node_crypto_bootstrap_host_function(ctx: &mut boa_engine::Context) {
@@ -786,37 +787,16 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(js_string!(res.to_string())));
             }
 
-            if alg.eq_ignore_ascii_case("RSA") || alg.eq_ignore_ascii_case("RSA-PSS") {
-                let mut pick_byte = [0u8; 1];
-                BOA_DET_STATE.with(|s| {
-                    if let Some((mut prng, clk)) = s.get() {
-                        fill_random_bytes(&mut pick_byte, Some(&mut prng));
-                        s.set(Some((prng, clk)));
-                    } else {
-                        fill_random_bytes(&mut pick_byte, None);
-                    }
-                });
-                let (pkcs8, spki) = rsa_generate_2048_keypair(pick_byte[0] as usize)
-                    .map_err(|msg| JsNativeError::error().with_message(msg))?;
-                let priv_id = insert_cached_crypto_key(
-                    tenant.clone(),
-                    CachedCryptoKeyMaterial::RsaPrivate {
-                        pkcs8: pkcs8.clone(),
-                        spki: spki.clone(),
-                    },
-                );
-                let pub_id = insert_cached_crypto_key(
-                    tenant,
-                    CachedCryptoKeyMaterial::RsaPublic { spki: spki.clone() },
-                );
-                let res = serde_json::json!({
-                    "privId": priv_id,
-                    "pubId": pub_id,
-                    "pubRaw": base64_encode(&spki, false),
-                    "pkcs8": base64_encode(&pkcs8, false),
-                    "spki": base64_encode(&spki, false),
-                });
-                return Ok(BoaVal::from(js_string!(res.to_string())));
+            if alg.eq_ignore_ascii_case("RSA")
+                || alg.eq_ignore_ascii_case("RSASSA-PKCS1-v1_5")
+                || alg.eq_ignore_ascii_case("RSA-PSS")
+                || alg.eq_ignore_ascii_case("RSA-OAEP")
+            {
+                return Err(JsNativeError::error()
+                    .with_message(
+                        "NotSupportedError: Runtime RSA key generation is disabled in the edge sandbox; import an existing RSA key or generate Ed25519, X25519, or ECDSA P-256/P-384",
+                    )
+                    .into());
             }
 
             if alg.eq_ignore_ascii_case("ECDSA") || alg.eq_ignore_ascii_case("ec") {
@@ -1130,12 +1110,90 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
             }
 
             if alg.eq_ignore_ascii_case("X25519") {
+                if format.eq_ignore_ascii_case("jwk") {
+                    let jwk_str = data_arg.to_string(context)?.to_std_string_escaped();
+                    let jwk: serde_json::Value = serde_json::from_str(&jwk_str).map_err(|_| {
+                        JsNativeError::error().with_message("DataError: Invalid JWK JSON")
+                    })?;
+                    if jwk.get("kty").and_then(|v| v.as_str()) != Some("OKP")
+                        || jwk.get("crv").and_then(|v| v.as_str()) != Some("X25519")
+                    {
+                        return Err(JsNativeError::error()
+                            .with_message("DataError: JWK kty/crv must be OKP/X25519")
+                            .into());
+                    }
+                    let x_str = jwk.get("x").and_then(|v| v.as_str()).unwrap_or("");
+                    if let Some(d_str) = jwk.get("d").and_then(|v| v.as_str()) {
+                        let d_raw = base64_decode(d_str);
+                        if d_raw.len() != 32 {
+                            return Err(JsNativeError::error()
+                                .with_message("DataError: Invalid X25519 JWK private scalar length")
+                                .into());
+                        }
+                        let mut seed = [0u8; 32];
+                        seed.copy_from_slice(&d_raw);
+                        let (seed_bytes, pub_bytes) = x25519_keypair_from_seed(seed);
+                        if !x_str.is_empty() {
+                            let x_raw = base64_decode(x_str);
+                            if x_raw.len() != 32 || !constant_time_eq(&pub_bytes, &x_raw) {
+                                return Err(JsNativeError::error()
+                                    .with_message(
+                                        "DataError: Mismatched X25519 JWK public/private components",
+                                    )
+                                    .into());
+                            }
+                        }
+                        let pkcs8 = x25519_seed_to_pkcs8_v1(&seed_bytes);
+                        let spki = x25519_pub_to_spki(&pub_bytes);
+                        let id = insert_cached_crypto_key(
+                            tenant,
+                            CachedCryptoKeyMaterial::X25519Private {
+                                seed: seed_bytes,
+                                pub_bytes,
+                            },
+                        );
+                        let out = serde_json::json!({
+                            "id": id,
+                            "type": "private",
+                            "crv": "X25519",
+                            "d": base64_encode(&seed_bytes, true),
+                            "x": base64_encode(&pub_bytes, true),
+                            "pkcs8": base64_encode(&pkcs8, false),
+                            "spki": base64_encode(&spki, false),
+                        });
+                        return Ok(BoaVal::from(js_string!(out.to_string())));
+                    } else {
+                        let x_raw = base64_decode(x_str);
+                        if x_raw.len() != 32 {
+                            return Err(JsNativeError::error()
+                                .with_message("DataError: Invalid X25519 JWK public key length")
+                                .into());
+                        }
+                        let mut pub_bytes = [0u8; 32];
+                        pub_bytes.copy_from_slice(&x_raw);
+                        let spki = x25519_pub_to_spki(&pub_bytes);
+                        let id = insert_cached_crypto_key(
+                            tenant,
+                            CachedCryptoKeyMaterial::X25519Public { pub_bytes },
+                        );
+                        let out = serde_json::json!({
+                            "id": id,
+                            "type": "public",
+                            "crv": "X25519",
+                            "x": base64_encode(&pub_bytes, true),
+                            "pubRaw": base64_encode(&pub_bytes, false),
+                            "spki": base64_encode(&spki, false),
+                        });
+                        return Ok(BoaVal::from(js_string!(out.to_string())));
+                    }
+                }
                 let raw = extract_buffer_source_bytes(data_arg, context)?;
                 if format.eq_ignore_ascii_case("pkcs8") {
                     let seed = extract_x25519_seed(&raw)
                         .map_err(|msg| JsNativeError::error().with_message(msg))?;
                     let (seed_bytes, pub_bytes) = x25519_keypair_from_seed(seed);
                     let pkcs8 = x25519_seed_to_pkcs8_v1(&seed_bytes);
+                    let spki = x25519_pub_to_spki(&pub_bytes);
                     let id = insert_cached_crypto_key(
                         tenant,
                         CachedCryptoKeyMaterial::X25519Private {
@@ -1150,9 +1208,15 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                         "d": base64_encode(&seed_bytes, true),
                         "x": base64_encode(&pub_bytes, true),
                         "pkcs8": base64_encode(&pkcs8, false),
+                        "spki": base64_encode(&spki, false),
                     });
                     return Ok(BoaVal::from(js_string!(out.to_string())));
                 } else {
+                    if format.eq_ignore_ascii_case("raw") && raw.len() != 32 {
+                        return Err(JsNativeError::error()
+                            .with_message("DataError: X25519 raw public key must be 32 bytes")
+                            .into());
+                    }
                     let pub_bytes = extract_x25519_pub(&raw)
                         .map_err(|msg| JsNativeError::error().with_message(msg))?;
                     let spki = x25519_pub_to_spki(&pub_bytes);
@@ -1172,35 +1236,144 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 }
             }
 
-            if alg.eq_ignore_ascii_case("RSA") || alg.eq_ignore_ascii_case("RSA-PSS") {
+            if alg.eq_ignore_ascii_case("RSA")
+                || alg.eq_ignore_ascii_case("RSASSA-PKCS1-v1_5")
+                || alg.eq_ignore_ascii_case("RSA-PSS")
+            {
+                if format.eq_ignore_ascii_case("jwk") {
+                    let jwk_str = data_arg.to_string(context)?.to_std_string_escaped();
+                    let jwk: serde_json::Value = serde_json::from_str(&jwk_str).map_err(|_| {
+                        JsNativeError::error().with_message("DataError: Invalid JWK JSON")
+                    })?;
+                    if jwk.get("kty").and_then(|v| v.as_str()) != Some("RSA") {
+                        return Err(JsNativeError::error()
+                            .with_message("DataError: JWK kty must be RSA")
+                            .into());
+                    }
+                    let n_bytes =
+                        base64_decode(jwk.get("n").and_then(|v| v.as_str()).unwrap_or(""));
+                    let e_bytes =
+                        base64_decode(jwk.get("e").and_then(|v| v.as_str()).unwrap_or(""));
+                    if let Some(d_str) = jwk.get("d").and_then(|v| v.as_str()) {
+                        let d_bytes = base64_decode(d_str);
+                        let p_bytes =
+                            base64_decode(jwk.get("p").and_then(|v| v.as_str()).unwrap_or(""));
+                        let q_bytes =
+                            base64_decode(jwk.get("q").and_then(|v| v.as_str()).unwrap_or(""));
+                        let dp_bytes =
+                            base64_decode(jwk.get("dp").and_then(|v| v.as_str()).unwrap_or(""));
+                        let dq_bytes =
+                            base64_decode(jwk.get("dq").and_then(|v| v.as_str()).unwrap_or(""));
+                        let qi_bytes =
+                            base64_decode(jwk.get("qi").and_then(|v| v.as_str()).unwrap_or(""));
+                        let (pkcs8, pub_info) = rsa_private_components_to_pkcs8(
+                            &n_bytes, &e_bytes, &d_bytes, &p_bytes, &q_bytes, &dp_bytes, &dq_bytes,
+                            &qi_bytes,
+                        )
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                        let (_, _, priv_jwk) = inspect_rsa_private_key(&pkcs8)
+                            .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                        let pkcs8_b64 = base64_encode(&pkcs8, false);
+                        let spki_b64 = base64_encode(&pub_info.spki, false);
+                        let id = insert_cached_crypto_key(
+                            tenant,
+                            CachedCryptoKeyMaterial::RsaPrivate {
+                                pkcs8,
+                                spki: pub_info.spki,
+                            },
+                        );
+                        let out = serde_json::json!({
+                            "id": id,
+                            "type": "private",
+                            "modulusLength": pub_info.modulus_bits,
+                            "publicExponent": pub_info.public_exponent,
+                            "n": base64_encode(&pub_info.n_be, true),
+                            "e": base64_encode(&pub_info.e_be, true),
+                            "d": base64_encode(&priv_jwk.d_be, true),
+                            "p": base64_encode(&priv_jwk.p_be, true),
+                            "q": base64_encode(&priv_jwk.q_be, true),
+                            "dp": base64_encode(&priv_jwk.dp_be, true),
+                            "dq": base64_encode(&priv_jwk.dq_be, true),
+                            "qi": base64_encode(&priv_jwk.qi_be, true),
+                            "pkcs8": pkcs8_b64,
+                            "spki": spki_b64,
+                        });
+                        return Ok(BoaVal::from(js_string!(out.to_string())));
+                    } else {
+                        let pub_info = rsa_public_components_to_info(&n_bytes, &e_bytes)
+                            .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                        let spki_b64 = base64_encode(&pub_info.spki, false);
+                        let id = insert_cached_crypto_key(
+                            tenant,
+                            CachedCryptoKeyMaterial::RsaPublic {
+                                spki: pub_info.spki,
+                            },
+                        );
+                        let out = serde_json::json!({
+                            "id": id,
+                            "type": "public",
+                            "modulusLength": pub_info.modulus_bits,
+                            "publicExponent": pub_info.public_exponent,
+                            "n": base64_encode(&pub_info.n_be, true),
+                            "e": base64_encode(&pub_info.e_be, true),
+                            "pubRaw": spki_b64,
+                            "spki": spki_b64,
+                        });
+                        return Ok(BoaVal::from(js_string!(out.to_string())));
+                    }
+                }
+                if format.eq_ignore_ascii_case("raw") {
+                    return Err(JsNativeError::error()
+                        .with_message("NotSupportedError: RSA keys do not support 'raw' format")
+                        .into());
+                }
                 let raw = extract_buffer_source_bytes(data_arg, context)?;
                 if format.eq_ignore_ascii_case("pkcs8") {
-                    let spki = extract_rsa_pkcs8_spki(&raw)
+                    let (pkcs8, pub_info, priv_jwk) = inspect_rsa_private_key(&raw)
                         .map_err(|msg| JsNativeError::error().with_message(msg))?;
-                    let pkcs8_b64 = base64_encode(&raw, false);
-                    let spki_b64 = base64_encode(&spki, false);
+                    let pkcs8_b64 = base64_encode(&pkcs8, false);
+                    let spki_b64 = base64_encode(&pub_info.spki, false);
                     let id = insert_cached_crypto_key(
                         tenant,
-                        CachedCryptoKeyMaterial::RsaPrivate { pkcs8: raw, spki },
+                        CachedCryptoKeyMaterial::RsaPrivate {
+                            pkcs8,
+                            spki: pub_info.spki,
+                        },
                     );
                     let out = serde_json::json!({
                         "id": id,
                         "type": "private",
+                        "modulusLength": pub_info.modulus_bits,
+                        "publicExponent": pub_info.public_exponent,
+                        "n": base64_encode(&pub_info.n_be, true),
+                        "e": base64_encode(&pub_info.e_be, true),
+                        "d": base64_encode(&priv_jwk.d_be, true),
+                        "p": base64_encode(&priv_jwk.p_be, true),
+                        "q": base64_encode(&priv_jwk.q_be, true),
+                        "dp": base64_encode(&priv_jwk.dp_be, true),
+                        "dq": base64_encode(&priv_jwk.dq_be, true),
+                        "qi": base64_encode(&priv_jwk.qi_be, true),
                         "pkcs8": pkcs8_b64,
                         "spki": spki_b64,
                     });
                     return Ok(BoaVal::from(js_string!(out.to_string())));
                 } else {
-                    let spki = extract_rsa_spki(&raw)
+                    let pub_info = inspect_rsa_public_key(&raw)
                         .map_err(|msg| JsNativeError::error().with_message(msg))?;
-                    let spki_b64 = base64_encode(&spki, false);
+                    let spki_b64 = base64_encode(&pub_info.spki, false);
                     let id = insert_cached_crypto_key(
                         tenant,
-                        CachedCryptoKeyMaterial::RsaPublic { spki },
+                        CachedCryptoKeyMaterial::RsaPublic {
+                            spki: pub_info.spki,
+                        },
                     );
                     let out = serde_json::json!({
                         "id": id,
                         "type": "public",
+                        "modulusLength": pub_info.modulus_bits,
+                        "publicExponent": pub_info.public_exponent,
+                        "n": base64_encode(&pub_info.n_be, true),
+                        "e": base64_encode(&pub_info.e_be, true),
                         "pubRaw": spki_b64,
                         "spki": spki_b64,
                     });
@@ -1297,11 +1470,15 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 return bytes_to_js_array_buffer(&sig, context);
             }
 
-            if alg.eq_ignore_ascii_case("RSA") || alg.eq_ignore_ascii_case("RSA-PSS") {
+            if alg.eq_ignore_ascii_case("RSA")
+                || alg.eq_ignore_ascii_case("RSASSA-PKCS1-v1_5")
+                || alg.eq_ignore_ascii_case("RSA-PSS")
+            {
+                let use_pss = alg.eq_ignore_ascii_case("RSA-PSS");
                 let sig_res = if handle_id != 0 {
                     with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
                         CachedCryptoKeyMaterial::RsaPrivate { pkcs8, .. } => {
-                            Some(rsa_sign_bytes(pkcs8, &msg_bytes))
+                            Some(rsa_sign_bytes_with_alg(pkcs8, &msg_bytes, use_pss, &curve))
                         }
                         _ => None,
                     })
@@ -1311,7 +1488,7 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 };
                 let sig = match sig_res {
                     Some(r) => r,
-                    None => rsa_sign_bytes(&key_fallback, &msg_bytes),
+                    None => rsa_sign_bytes_with_alg(&key_fallback, &msg_bytes, use_pss, &curve),
                 }
                 .map_err(|msg| JsNativeError::error().with_message(msg))?;
                 return bytes_to_js_array_buffer(&sig, context);
@@ -1421,12 +1598,18 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(ok));
             }
 
-            if alg.eq_ignore_ascii_case("RSA") || alg.eq_ignore_ascii_case("RSA-PSS") {
+            if alg.eq_ignore_ascii_case("RSA")
+                || alg.eq_ignore_ascii_case("RSASSA-PKCS1-v1_5")
+                || alg.eq_ignore_ascii_case("RSA-PSS")
+            {
+                let use_pss = alg.eq_ignore_ascii_case("RSA-PSS");
                 let verified = if handle_id != 0 {
                     with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
                         CachedCryptoKeyMaterial::RsaPublic { spki }
                         | CachedCryptoKeyMaterial::RsaPrivate { spki, .. } => {
-                            Some(rsa_verify_bytes(spki, &msg_bytes, &sig_bytes))
+                            Some(rsa_verify_bytes_with_alg(
+                                spki, &msg_bytes, &sig_bytes, use_pss, &curve,
+                            ))
                         }
                         _ => None,
                     })
@@ -1436,12 +1619,98 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 };
                 let ok = match verified {
                     Some(v) => v,
-                    None => rsa_verify_bytes(&pub_fallback, &msg_bytes, &sig_bytes),
+                    None => rsa_verify_bytes_with_alg(
+                        &pub_fallback,
+                        &msg_bytes,
+                        &sig_bytes,
+                        use_pss,
+                        &curve,
+                    ),
                 };
                 return Ok(BoaVal::from(ok));
             }
 
             Ok(BoaVal::from(false))
+        }),
+    );
+
+    // Phase 2: Constant-time RFC 7748 X25519 Diffie-Hellman key agreement (`crypto.diffieHellman` / `subtle.deriveBits`)
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_ecdh"),
+        5,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let alg = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            if !alg.eq_ignore_ascii_case("X25519") {
+                return Err(JsNativeError::error()
+                    .with_message(format!(
+                        "NotSupportedError: Unsupported key agreement algorithm '{}'",
+                        alg
+                    ))
+                    .into());
+            }
+            let priv_id = args
+                .get(1)
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
+            let priv_fallback = match args.get(2) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let pub_id = args
+                .get(3)
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
+            let pub_fallback = match args.get(4) {
+                Some(v) if !v.is_undefined() && !v.is_null() => {
+                    extract_buffer_source_bytes(v, context)?
+                }
+                _ => Vec::new(),
+            };
+            let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+
+            let cached_seed = if priv_id != 0 {
+                with_cached_crypto_key(priv_id, &tenant, |mat| match mat {
+                    CachedCryptoKeyMaterial::X25519Private { seed, .. } => Some(*seed),
+                    _ => None,
+                })
+                .flatten()
+            } else {
+                None
+            };
+            let priv_seed = match cached_seed {
+                Some(s) => s,
+                None => extract_x25519_seed(&priv_fallback)
+                    .map_err(|msg| JsNativeError::error().with_message(msg))?,
+            };
+
+            let cached_pub = if pub_id != 0 {
+                with_cached_crypto_key(pub_id, &tenant, |mat| match mat {
+                    CachedCryptoKeyMaterial::X25519Public { pub_bytes }
+                    | CachedCryptoKeyMaterial::X25519Private { pub_bytes, .. } => Some(*pub_bytes),
+                    _ => None,
+                })
+                .flatten()
+            } else {
+                None
+            };
+            let peer_pub = match cached_pub {
+                Some(p) => p,
+                None => extract_x25519_pub(&pub_fallback)
+                    .map_err(|msg| JsNativeError::error().with_message(msg))?,
+            };
+
+            let shared = x25519_diffie_hellman(&priv_seed, &peer_pub)
+                .map_err(|msg| JsNativeError::error().with_message(msg))?;
+            bytes_to_js_array_buffer(&shared, context)
         }),
     );
 

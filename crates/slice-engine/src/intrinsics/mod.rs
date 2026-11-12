@@ -7,7 +7,7 @@
 //! - [`url_and_usp`]: Native WHATWG `URL`, `URL.canParse`, `URLSearchParams`, and pathname normalizer.
 //! - [`hash_and_hmac`]: Streaming `SHA-256` (`SHA-NI`), `SHA-1`, `SHA-384`, `SHA-512`, `MD5`, `HMAC`, and `constant_time_eq`.
 //! - [`symmetric_and_kdf`]: Branchless `AES-128/256-CBC`, `ring` `AES-128/256-GCM`, `PBKDF2`, `HKDF`, and `scrypt`.
-//! - [`asymmetric_and_keys`]: `Ed25519` and `ECDSA P-256/P-384` PKCS#8/SPKI/DER codecs and tenant-scoped key handle table.
+//! - [`asymmetric_and_keys`]: `Ed25519`, `X25519`, `ECDSA P-256/P-384`, and `RSA 2048..8192` PKCS#8/PKCS#1/SPKI/JWK codecs and tenant-scoped key handle table.
 //! - [`prng_and_uuid`]: Deterministic `SplitMix64` PRNG, OS-backed `SystemRandom` CSPRNG pool, and RFC 4122 `UUIDv4`.
 //! - [`compression`]: Self-contained RFC 1951 `DEFLATE`, RFC 1950 `Zlib`, and RFC 1952 `Gzip` with 9-bit Huffman LUT and table CRC-32.
 

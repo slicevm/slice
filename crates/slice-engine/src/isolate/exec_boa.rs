@@ -9,11 +9,13 @@ use crate::boa_realm::{
     BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS,
     BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES,
     BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_LAST_EXIT_CODE, BOA_NET_HOSTS,
-    BOA_PROCESS_EXIT, BOA_STDOUT, BOA_UNCAUGHT_ERROR, BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION,
-    BOA_WAIT_UNTIL_COUNT, CHECKPOINT_SLAB, DIRTY_FETCH_MOCK, DIRTY_SOCKETS, DIRTY_WASM,
-    DIRTY_WEBSOCKET, DIRTY_WORKERS, EXEC_DIRTY_ARGV, EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT,
-    EXEC_DIRTY_REJECTIONS, EXEC_DIRTY_UNCAUGHT, REALM_CTL_DISPATCH_HTTP_BRIDGE, REALM_CTL_RESET_MT,
-    REALM_CTL_RESET_WU, REALM_CTL_SET_DET_MODE, REALM_CTL_SET_NEXT_TICK, REALM_CTL_SYNC_ENV,
+    BOA_PROCESS_EXIT, BOA_STDOUT, BOA_UNCAUGHT_ERROR, BOA_UNHANDLED_REJECTIONS, BOA_VFS_CACHE,
+    BOA_VFS_DIRS, BOA_VFS_TOMBSTONES, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT, CHECKPOINT_SLAB,
+    DIRTY_FETCH_MOCK, DIRTY_SOCKETS, DIRTY_WASM, DIRTY_WEBSOCKET, DIRTY_WORKERS, EXEC_DIRTY_ARGV,
+    EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS, EXEC_DIRTY_UNCAUGHT,
+    HOST_GROUP_DET, HOST_GROUP_HTTP_BRIDGE, HOST_GROUP_KV_SANDBOX, HOST_GROUP_SEMVER_FAST,
+    REALM_CTL_DISPATCH_HTTP_BRIDGE, REALM_CTL_RESET_MT, REALM_CTL_RESET_WU, REALM_CTL_SET_DET_MODE,
+    REALM_CTL_SET_NEXT_TICK, REALM_CTL_SYNC_ENV,
 };
 use crate::boacas::{
     BOACAS_FLAG_HAS_HTTP_BRIDGE, BOACAS_FLAG_HAS_KV_SANDBOX, BOACAS_FLAG_HAS_NEXT_TICK,
@@ -26,16 +28,120 @@ use crate::isolate::SliceIsolate;
 use crate::js_preludes::{detect_needed_shards, needs_lazy_global_getters};
 use crate::parser_and_compiler::extract_slice_rc_key;
 use crate::value_and_ast::JsValue;
-use slice_sandbox::SandboxViolation;
+use slice_sandbox::{CapabilityToken, SandboxViolation};
+
+#[inline]
+pub(crate) fn ensure_realm_http_bridge(realm: &mut WarmBoaRealm) {
+    if (realm.registered_host_groups & HOST_GROUP_HTTP_BRIDGE) == 0 {
+        crate::host_bindings::register_http_bridge_host_functions(&mut realm.ctx);
+        realm.registered_host_groups |= HOST_GROUP_HTTP_BRIDGE;
+    }
+}
+
+#[inline]
+pub(crate) fn ensure_realm_semver_fast(realm: &mut WarmBoaRealm) {
+    if (realm.registered_host_groups & HOST_GROUP_SEMVER_FAST) == 0 {
+        crate::host_bindings::register_semver_and_fast_intrinsics_host_functions(&mut realm.ctx);
+        realm.registered_host_groups |= HOST_GROUP_SEMVER_FAST;
+    }
+}
+
+#[inline]
+pub(crate) fn ensure_realm_kv_sandbox(realm: &mut WarmBoaRealm) {
+    if (realm.registered_host_groups & HOST_GROUP_KV_SANDBOX) == 0 {
+        crate::host_bindings::register_kv_and_sandbox_host_functions(&mut realm.ctx);
+        realm.registered_host_groups |= HOST_GROUP_KV_SANDBOX;
+    }
+}
+
+#[inline]
+pub(crate) fn ensure_realm_det_funcs(realm: &mut WarmBoaRealm) {
+    if (realm.registered_host_groups & HOST_GROUP_DET) == 0 {
+        crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
+        realm.registered_host_groups |= HOST_GROUP_DET;
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct BoaSessionFlags {
-    pub(crate) has_fs_restrictions: bool,
+    pub(crate) has_fs_grants: bool,
     pub(crate) has_net_hosts: bool,
     pub(crate) has_egress_secrets: bool,
     pub(crate) has_env_keys: bool,
     pub(crate) has_exec_bins: bool,
     pub(crate) is_worker: bool,
+}
+
+fn setup_prewarm_caps(caps: &CapabilityToken) -> (bool, bool, bool, bool) {
+    let has_fs = !caps.allowed_read_prefixes.is_empty() || !caps.allowed_write_prefixes.is_empty();
+    if has_fs {
+        BOA_ACTIVE_CAPS.with(|c| {
+            let mut dst = c.borrow_mut();
+            dst.read_prefixes.clear();
+            dst.read_prefixes
+                .extend_from_slice(&caps.allowed_read_prefixes);
+            dst.write_prefixes.clear();
+            dst.write_prefixes
+                .extend_from_slice(&caps.allowed_write_prefixes);
+        });
+    }
+    let has_net = !caps.allowed_net_hosts.is_empty();
+    if has_net {
+        BOA_NET_HOSTS.with(|h| *h.borrow_mut() = caps.allowed_net_hosts.clone());
+    }
+    let has_env = !caps.allowed_env_keys.is_empty();
+    if has_env {
+        BOA_ENV_MAP.with(|m| *m.borrow_mut() = caps.allowed_env_keys.clone());
+    }
+    let has_exec = !caps.allowed_exec_binaries.is_empty();
+    if has_exec {
+        BOA_EXEC_BINS.with(|b| *b.borrow_mut() = caps.allowed_exec_binaries.clone());
+    }
+    (has_fs, has_net, has_env, has_exec)
+}
+
+fn scrub_after_prewarm(realm: &mut WarmBoaRealm, prewarm_flags: (bool, bool, bool, bool)) {
+    let (has_fs, has_net, has_env, has_exec) = prewarm_flags;
+    if has_fs {
+        BOA_ACTIVE_CAPS.with(|c| {
+            let mut dst = c.borrow_mut();
+            dst.read_prefixes.clear();
+            dst.write_prefixes.clear();
+        });
+    }
+    if has_net {
+        BOA_NET_HOSTS.with(|h| h.borrow_mut().clear());
+    }
+    if has_env {
+        call_realm_ctl(realm, REALM_CTL_SYNC_ENV, false);
+        BOA_ENV_MAP.with(|m| m.borrow_mut().clear());
+    }
+    if has_exec {
+        BOA_EXEC_BINS.with(|b| b.borrow_mut().clear());
+    }
+    clear_event_loop_state();
+    crate::websocket::clear_thread_websocket_state();
+    crate::sockets::clear_thread_socket_state();
+    crate::workers::clear_thread_worker_state();
+    CHECKPOINT_SLAB.with(|s| s.borrow_mut().clear());
+    BOA_CHECKPOINT_STATS.with(|s| s.set((0, 0, 0)));
+    BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(0));
+    BOA_EXEC_DIRTY.with(|c| c.set(0));
+    BOA_PROCESS_EXIT.with(|e| e.set(None));
+    BOA_LAST_EXIT_CODE.with(|e| e.set(None));
+    BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
+    BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = None);
+    BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
+    BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
+    BOA_VFS_CACHE.with(|c| c.borrow_mut().clear());
+    BOA_VFS_DIRS.with(|d| d.borrow_mut().clear());
+    BOA_VFS_TOMBSTONES.with(|t| t.borrow_mut().clear());
+    if BOA_WAIT_UNTIL_COUNT.with(|c| c.get()) > 0 {
+        call_realm_ctl(realm, REALM_CTL_RESET_WU, false);
+    }
+    BOA_STDOUT.with(|out| out.borrow_mut().clear());
+    BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
+    BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
 }
 
 impl SliceIsolate {
@@ -51,10 +157,16 @@ impl SliceIsolate {
         });
     }
 
-    /// Pre-warms a `boa_engine::Context` realm in `BOA_CONTEXT_POOL` and pre-populates its
-    /// Persistent Realm Module Cache (`globalThis.__slice_rc`) for `bytecode`, so subsequent
-    /// warm isolate executions skip `100%` of JS lexing/parsing and `node_modules` CJS evaluation.
+    /// Pre-warms a `boa_engine::Context` realm in `BOA_CONTEXT_POOL` under strict zero-authority
+    /// (`CapabilityToken::pure_compute()`) containment and pre-populates its Persistent Realm Module
+    /// Cache (`globalThis.__slice_rc`) for `bytecode`.
     pub fn prewarm_boa_bundle(bytecode: &[u8]) {
+        Self::prewarm_boa_bundle_with_caps(bytecode, &CapabilityToken::pure_compute());
+    }
+
+    /// Pre-warms a `boa_engine::Context` realm in `BOA_CONTEXT_POOL` bounded by `caps` so top-level
+    /// module initialization obeys the exact same OCap permissions as subsequent executions.
+    pub fn prewarm_boa_bundle_with_caps(bytecode: &[u8], caps: &CapabilityToken) {
         if let Some((hdr, precompiled_slice, fallback_js)) =
             crate::boacas::BoaCasHeader::decode(bytecode)
         {
@@ -69,14 +181,14 @@ impl SliceIsolate {
                     };
                     if !realm.loaded_bundles.contains_key(&hdr.rc_key) {
                         if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_HAS_SEMVER_FAST) != 0 {
-                            crate::host_bindings::register_semver_and_fast_intrinsics_host_functions(
-                                &mut realm.ctx,
-                            );
+                            ensure_realm_semver_fast(&mut realm);
                         }
                         if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX) != 0 {
-                            crate::host_bindings::register_kv_and_sandbox_host_functions(
-                                &mut realm.ctx,
-                            );
+                            ensure_realm_kv_sandbox(&mut realm);
+                        }
+                        let pw_flags = setup_prewarm_caps(caps);
+                        if pw_flags.2 {
+                            call_realm_ctl(&mut realm, REALM_CTL_SYNC_ENV, true);
                         }
                         let total_end = crate::boacas::BOACAS_HEADER_LEN
                             + (hdr.precompiled_len as usize)
@@ -93,19 +205,7 @@ impl SliceIsolate {
                             is_cold_bare_realm,
                         );
                         let _ = realm.ctx.run_jobs();
-                        clear_event_loop_state();
-                        crate::websocket::clear_thread_websocket_state();
-                        crate::sockets::clear_thread_socket_state();
-                        crate::workers::clear_thread_worker_state();
-                        CHECKPOINT_SLAB.with(|s| s.borrow_mut().clear());
-                        BOA_CHECKPOINT_STATS.with(|s| s.set((0, 0, 0)));
-                        BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(0));
-                        if BOA_WAIT_UNTIL_COUNT.with(|c| c.get()) > 0 {
-                            call_realm_ctl(&mut realm, REALM_CTL_RESET_WU, false);
-                        }
-                        BOA_STDOUT.with(|out| out.borrow_mut().clear());
-                        BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
-                        BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
+                        scrub_after_prewarm(&mut realm, pw_flags);
                     }
                     release_warm_boa_realm(realm);
                     return;
@@ -128,26 +228,22 @@ impl SliceIsolate {
             if let Some((rc_key_u64, hex_bytes)) = extract_slice_rc_key(js_code) {
                 let mut realm = acquire_warm_boa_realm();
                 if !realm.loaded_bundles.contains_key(&rc_key_u64) {
-                    if js_code.contains("__slice_semver_") || js_code.contains("__slice_fast_") {
-                        crate::host_bindings::register_semver_and_fast_intrinsics_host_functions(
-                            &mut realm.ctx,
-                        );
+                    let (bflags, _, _) = crate::boacas::compute_boacas_metadata(js_code);
+                    if (bflags & BOACAS_FLAG_HAS_SEMVER_FAST) != 0 {
+                        ensure_realm_semver_fast(&mut realm);
                     }
-                    if js_code.contains("Slice.kv")
-                        || js_code.contains("Slice.checkpoint")
-                        || js_code.contains("Slice.restore")
-                        || js_code.contains("Slice.releaseCheckpoint")
-                        || js_code.contains("Slice.evalSandbox")
-                    {
-                        crate::host_bindings::register_kv_and_sandbox_host_functions(
-                            &mut realm.ctx,
-                        );
+                    if (bflags & BOACAS_FLAG_HAS_KV_SANDBOX) != 0 {
+                        ensure_realm_kv_sandbox(&mut realm);
                     }
                     ensure_realm_shards(
                         &mut realm,
                         detect_needed_shards(js_code, false),
                         needs_lazy_global_getters(js_code),
                     );
+                    let pw_flags = setup_prewarm_caps(caps);
+                    if pw_flags.2 {
+                        call_realm_ctl(&mut realm, REALM_CTL_SYNC_ENV, true);
+                    }
                     let _ = realm
                         .ctx
                         .eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
@@ -162,25 +258,14 @@ impl SliceIsolate {
                                 {
                                     if let Some(obj) = val.as_object() {
                                         realm.loaded_bundles.insert(rc_key_u64, obj.clone());
+                                        realm.loaded_bundle_flags.insert(rc_key_u64, bflags);
                                     }
                                 }
                             }
                         }
                     }
                     let _ = realm.ctx.run_jobs();
-                    clear_event_loop_state();
-                    crate::websocket::clear_thread_websocket_state();
-                    crate::sockets::clear_thread_socket_state();
-                    crate::workers::clear_thread_worker_state();
-                    CHECKPOINT_SLAB.with(|s| s.borrow_mut().clear());
-                    BOA_CHECKPOINT_STATS.with(|s| s.set((0, 0, 0)));
-                    BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(0));
-                    if BOA_WAIT_UNTIL_COUNT.with(|c| c.get()) > 0 {
-                        call_realm_ctl(&mut realm, REALM_CTL_RESET_WU, false);
-                    }
-                    BOA_STDOUT.with(|out| out.borrow_mut().clear());
-                    BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
-                    BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
+                    scrub_after_prewarm(&mut realm, pw_flags);
                 }
                 release_warm_boa_realm(realm);
             }
@@ -249,7 +334,7 @@ impl SliceIsolate {
             BOA_DET_STATE.with(|s| s.set(Some((seed ^ 0x9E37_79B9_7F4A_7C15, 1_700_000_000_000))));
         }
 
-        let has_fs_restrictions = !self
+        let has_fs_grants = !self
             .compartment
             .capabilities
             .allowed_read_prefixes
@@ -259,30 +344,15 @@ impl SliceIsolate {
                 .capabilities
                 .allowed_write_prefixes
                 .is_empty();
-        if has_fs_restrictions {
-            let read_prefs = if self
-                .compartment
-                .capabilities
-                .allowed_read_prefixes
-                .is_empty()
-            {
-                vec!["/__slice_denied__".to_string()]
-            } else {
-                self.compartment.capabilities.allowed_read_prefixes.clone()
-            };
-            let write_prefs = if self
-                .compartment
-                .capabilities
-                .allowed_write_prefixes
-                .is_empty()
-            {
-                vec!["/__slice_denied__".to_string()]
-            } else {
-                self.compartment.capabilities.allowed_write_prefixes.clone()
-            };
+        if has_fs_grants {
             BOA_ACTIVE_CAPS.with(|c| {
-                *c.borrow_mut() =
-                    Some((self.compartment.tenant_id.clone(), read_prefs, write_prefs));
+                let mut caps = c.borrow_mut();
+                caps.read_prefixes.clear();
+                caps.read_prefixes
+                    .extend_from_slice(&self.compartment.capabilities.allowed_read_prefixes);
+                caps.write_prefixes.clear();
+                caps.write_prefixes
+                    .extend_from_slice(&self.compartment.capabilities.allowed_write_prefixes);
             });
         }
         let has_net_hosts = !self.compartment.capabilities.allowed_net_hosts.is_empty();
@@ -315,7 +385,7 @@ impl SliceIsolate {
         }
 
         BoaSessionFlags {
-            has_fs_restrictions,
+            has_fs_grants,
             has_net_hosts,
             has_egress_secrets,
             has_env_keys,
@@ -349,8 +419,12 @@ impl SliceIsolate {
             call_realm_ctl(realm, REALM_CTL_SET_DET_MODE, false);
             BOA_DET_STATE.with(|s| s.set(None));
         }
-        if flags.has_fs_restrictions {
-            BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = None);
+        if flags.has_fs_grants {
+            BOA_ACTIVE_CAPS.with(|c| {
+                let mut caps = c.borrow_mut();
+                caps.read_prefixes.clear();
+                caps.write_prefixes.clear();
+            });
         }
         if flags.has_net_hosts {
             BOA_NET_HOSTS.with(|h| h.borrow_mut().clear());
@@ -674,21 +748,53 @@ impl SliceIsolate {
     ) -> Result<JsValue, SandboxViolation> {
         let _active_src_guard = crate::boa_realm::ActiveSourceSliceGuard::new(js_code);
         let flags = self.setup_boa_compartment_thread_locals();
+        let rc_key_opt = extract_slice_rc_key(js_code);
+        let mut realm = acquire_warm_boa_realm();
 
-        if !flags.is_worker && (js_code.contains("Worker") || js_code.contains("worker_threads")) {
+        let cached_rc_flags =
+            rc_key_opt.and_then(|(k, _)| realm.loaded_bundle_flags.get(&k).copied());
+
+        let (has_worker_kw, has_next_tick, has_http_kw, has_semver_kw, has_kv_kw, cached_ses_kw) =
+            if let Some(bf) = cached_rc_flags {
+                (
+                    (bf & BOACAS_FLAG_HAS_WORKER) != 0,
+                    (bf & BOACAS_FLAG_HAS_NEXT_TICK) != 0,
+                    (bf & BOACAS_FLAG_HAS_HTTP_BRIDGE) != 0,
+                    (bf & BOACAS_FLAG_HAS_SEMVER_FAST) != 0,
+                    (bf & BOACAS_FLAG_HAS_KV_SANDBOX) != 0,
+                    Some((bf & BOACAS_FLAG_NEEDS_SES_CHECK) != 0),
+                )
+            } else {
+                let has_slice_dot = memchr::memmem::find(js_code.as_bytes(), b"Slice.").is_some();
+                (
+                    js_code.contains("Worker") || js_code.contains("worker_threads"),
+                    js_code.contains("nextTick"),
+                    (has_slice_dot
+                        && (js_code.contains("Slice.request")
+                            || js_code.contains("Slice.respond")))
+                        || js_code.contains("__slice_http_"),
+                    js_code.contains("__slice_semver_") || js_code.contains("__slice_fast_"),
+                    has_slice_dot
+                        && (js_code.contains("Slice.kv")
+                            || js_code.contains("Slice.checkpoint")
+                            || js_code.contains("Slice.restore")
+                            || js_code.contains("Slice.releaseCheckpoint")
+                            || js_code.contains("Slice.evalSandbox")),
+                    None,
+                )
+            };
+
+        if !flags.is_worker && has_worker_kw {
             crate::workers::speculative_prewarm_worker_pool(1);
         }
-
-        let mut realm = acquire_warm_boa_realm();
 
         if flags.has_env_keys {
             call_realm_ctl(&mut realm, REALM_CTL_SYNC_ENV, true);
         }
         if self.deterministic_seed.is_some() {
-            crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
+            ensure_realm_det_funcs(&mut realm);
             call_realm_ctl(&mut realm, REALM_CTL_SET_DET_MODE, true);
         }
-        let has_next_tick = js_code.contains("nextTick");
         if has_next_tick {
             call_realm_ctl(&mut realm, REALM_CTL_SET_NEXT_TICK, true);
         }
@@ -707,29 +813,15 @@ impl SliceIsolate {
             }
         }
         let is_http_req = BOA_HTTP_REQ.with(|r| r.borrow().active);
-        let has_slice_dot = memchr::memmem::find(js_code.as_bytes(), b"Slice.").is_some();
-        if is_http_req
-            || (has_slice_dot
-                && (js_code.contains("Slice.request") || js_code.contains("Slice.respond")))
-            || js_code.contains("__slice_http_")
-        {
-            crate::host_bindings::register_http_bridge_host_functions(&mut realm.ctx);
+        if is_http_req || has_http_kw {
+            ensure_realm_http_bridge(&mut realm);
         }
-        if js_code.contains("__slice_semver_") || js_code.contains("__slice_fast_") {
-            crate::host_bindings::register_semver_and_fast_intrinsics_host_functions(
-                &mut realm.ctx,
-            );
+        if has_semver_kw {
+            ensure_realm_semver_fast(&mut realm);
         }
-        if has_slice_dot
-            && (js_code.contains("Slice.kv")
-                || js_code.contains("Slice.checkpoint")
-                || js_code.contains("Slice.restore")
-                || js_code.contains("Slice.releaseCheckpoint")
-                || js_code.contains("Slice.evalSandbox"))
-        {
-            crate::host_bindings::register_kv_and_sandbox_host_functions(&mut realm.ctx);
+        if has_kv_kw {
+            ensure_realm_kv_sandbox(&mut realm);
         }
-        let rc_key_opt = extract_slice_rc_key(js_code);
         let mut should_check_ses = rc_key_opt.is_none();
         // Phase 9B Priority 2 + Phase N1 Direct JsObject Invocation (`__slice_rc`):
         // When a warm `boa_engine::Context` has already evaluated this bundle's `node_modules` CJS factories
@@ -744,6 +836,7 @@ impl SliceIsolate {
                 fn_obj.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
             } else {
                 should_check_ses = true;
+                let (bflags, _, _) = crate::boacas::compute_boacas_metadata(js_code);
                 ensure_realm_shards(
                     &mut realm,
                     detect_needed_shards(js_code, is_http_req),
@@ -765,6 +858,7 @@ impl SliceIsolate {
                                 {
                                     if let Some(obj) = val.as_object() {
                                         realm.loaded_bundles.insert(rc_key_u64, obj.clone());
+                                        realm.loaded_bundle_flags.insert(rc_key_u64, bflags);
                                     }
                                 }
                             }
@@ -788,7 +882,7 @@ impl SliceIsolate {
                 needs_lazy_global_getters(js_code),
             );
             self.apply_boa_realm_runtime_limits(&mut realm);
-            let scoped_code = if js_code.starts_with("//") {
+            let scoped_code = if js_code.starts_with("#!") {
                 format!("{{\n{}\n}}", js_code)
             } else {
                 format!("{{{}\n}}", js_code)
@@ -798,10 +892,12 @@ impl SliceIsolate {
 
         let need_ses_scan = should_check_ses || BOA_WAIT_UNTIL_COUNT.with(|c| c.get()) > 0;
         let has_ses_keywords = need_ses_scan
-            && (js_code.contains("prototype")
-                || js_code.contains("__proto__")
-                || js_code.contains("Reflect")
-                || js_code.contains("Object["));
+            && cached_ses_kw.unwrap_or_else(|| {
+                js_code.contains("prototype")
+                    || js_code.contains("__proto__")
+                    || js_code.contains("Reflect")
+                    || js_code.contains("Object[")
+            });
         self.last_exec_check_ses = has_ses_keywords;
         let check_ses = should_check_ses && has_ses_keywords;
 
@@ -840,7 +936,7 @@ impl SliceIsolate {
         let has_next_tick = (header.feature_flags & BOACAS_FLAG_HAS_NEXT_TICK) != 0;
         if is_cold_bare_realm && header.approach_kind >= 1 && !precompiled_slice.is_empty() {
             if self.deterministic_seed.is_some() {
-                crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
+                ensure_realm_det_funcs(&mut realm);
             }
             let mut boot_flags: i32 = 0;
             if flags.has_env_keys {
@@ -873,7 +969,7 @@ impl SliceIsolate {
                 call_realm_ctl(&mut realm, REALM_CTL_SYNC_ENV, true);
             }
             if self.deterministic_seed.is_some() {
-                crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
+                ensure_realm_det_funcs(&mut realm);
                 call_realm_ctl(&mut realm, REALM_CTL_SET_DET_MODE, true);
             }
             if has_next_tick {
@@ -896,15 +992,13 @@ impl SliceIsolate {
         }
         let is_http_req = BOA_HTTP_REQ.with(|r| r.borrow().active);
         if is_http_req || (header.feature_flags & BOACAS_FLAG_HAS_HTTP_BRIDGE) != 0 {
-            crate::host_bindings::register_http_bridge_host_functions(&mut realm.ctx);
+            ensure_realm_http_bridge(&mut realm);
         }
         if (header.feature_flags & BOACAS_FLAG_HAS_SEMVER_FAST) != 0 {
-            crate::host_bindings::register_semver_and_fast_intrinsics_host_functions(
-                &mut realm.ctx,
-            );
+            ensure_realm_semver_fast(&mut realm);
         }
         if (header.feature_flags & BOACAS_FLAG_HAS_KV_SANDBOX) != 0 {
-            crate::host_bindings::register_kv_and_sandbox_host_functions(&mut realm.ctx);
+            ensure_realm_kv_sandbox(&mut realm);
         }
 
         self.apply_boa_realm_runtime_limits(&mut realm);

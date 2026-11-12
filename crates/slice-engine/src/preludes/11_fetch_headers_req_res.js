@@ -278,6 +278,7 @@
         rSimple.statusText = "OK";
         rSimple.ok = true;
         rSimple._h = null;
+        rSimple._rawH = null;
         rSimple._data = undefined;
         rSimple._stream = null;
         rSimple._body = typeof body === "string" ? body : "";
@@ -312,10 +313,31 @@
     }
     var o = init;
     var st = o.status !== undefined ? Number(o.status) : 200;
-    this.status = st;
-    this.statusText = o.statusText !== undefined ? String(o.statusText) : (st === 200 ? "OK" : "");
-    this.ok = st >= 200 && st < 300;
+    var stText = o.statusText !== undefined ? String(o.statusText) : (st === 200 ? "OK" : "");
     var oh = o.headers;
+    if (
+      (body === undefined || body === null || typeof body === "string") &&
+      (!oh || (typeof oh === "object" && !oh._isHeaders && !Array.isArray(oh)))
+    ) {
+      var rInit = Object.create(LazyResProto);
+      rInit.status = st;
+      rInit.statusText = stText;
+      rInit.ok = st >= 200 && st < 300;
+      rInit._h = null;
+      rInit._rawH = oh || null;
+      rInit._data = undefined;
+      rInit._stream = null;
+      rInit._body = typeof body === "string" ? body : "";
+      rInit._u8 = null;
+      rInit._fd = null;
+      rInit._ct = typeof body === "string" ? "text/plain;charset=UTF-8" : "";
+      rInit._isSliceRes = true;
+      rInit.bodyUsed = false;
+      return rInit;
+    }
+    this.status = st;
+    this.statusText = stText;
+    this.ok = st >= 200 && st < 300;
     this.headers = (oh && oh._isHeaders) ? oh : new Headers(oh);
     this._data = undefined;
     this._stream = null;
@@ -380,14 +402,16 @@
   Object.defineProperty(LazyResProto, "headers", {
     get: function() {
       if (!this._h) {
-        var h = new Headers();
-        if (this._ct) h._m["content-type"] = this._ct;
+        var h = this._rawH ? new Headers(this._rawH) : new Headers();
+        if (this._ct && !h._m["content-type"]) h._m["content-type"] = this._ct;
         this._h = h;
+        this._rawH = null;
       }
       return this._h;
     },
     set: function(v) {
       this._h = v;
+      this._rawH = null;
     },
     configurable: true,
     enumerable: true
@@ -490,6 +514,7 @@
       rFast.statusText = "OK";
       rFast.ok = true;
       rFast._h = null;
+      rFast._rawH = null;
       rFast._data = data;
       rFast._stream = null;
       rFast._body = "";
@@ -501,7 +526,11 @@
       return rFast;
     }
     var r = new Response(null, typeof init === "number" ? { status: init } : init);
-    if (!r.headers._m["content-type"]) r.headers._m["content-type"] = "application/json";
+    if (r._h === null) {
+      r._ct = "application/json";
+    } else if (!r.headers._m["content-type"]) {
+      r.headers._m["content-type"] = "application/json";
+    }
     r._data = data;
     return r;
   };
@@ -532,6 +561,30 @@
   }
 
   function __finishSliceRes(r) {
+    if (r._h === null && !r._stream) {
+      var ctFast = r._ct || "text/plain;charset=UTF-8";
+      var hdrJsonFast = "";
+      var rawH = r._rawH;
+      if (rawH) {
+        var extra = null;
+        for (var rk in rawH) {
+          if (!Object.prototype.hasOwnProperty.call(rawH, rk)) continue;
+          var rv = rawH[rk];
+          if (rv === undefined) continue;
+          var lk = (rk === "content-type" || rk === "content-length") ? rk : rk.toLowerCase();
+          if (lk === "content-type") {
+            ctFast = typeof rv === "string" ? rv : String(rv);
+          } else if (lk !== "content-length") {
+            if (!extra) extra = [];
+            extra.push([lk, typeof rv === "string" ? rv : String(rv)]);
+          }
+        }
+        if (extra) hdrJsonFast = JSON.stringify(extra);
+      }
+      var rbFast = r._body || (r._data !== undefined ? JSON.stringify(r._data) : "");
+      __slice_http_respond(r.status, rbFast, ctFast, hdrJsonFast);
+      return;
+    }
     var h = r._h !== undefined ? r._h : r.headers;
     var ct = (h && h._m && h._m["content-type"]) || r._ct || "text/plain;charset=UTF-8";
     var hdrJson = h ? __resHdrJson(h) : "";
@@ -564,7 +617,9 @@
     if (!__slice_http_is_active()) return;
     var fn = typeof h.fetch === "function" ? h.fetch : (typeof h === "function" ? h : null);
     if (!fn) return;
-    var res = fn.call(h, __makeLiveReq(), globalThis.process.env, __slice_web_ctx);
+    var res = fn.length <= 1
+      ? fn.call(h, __makeLiveReq())
+      : fn.call(h, __makeLiveReq(), globalThis.process.env, __slice_web_ctx);
     if (res) {
       if (res._isSliceRes) {
         __finishSliceRes(res);
