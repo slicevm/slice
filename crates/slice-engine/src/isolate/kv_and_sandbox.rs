@@ -3,8 +3,9 @@
 
 use crate::isolate::SliceIsolate;
 use crate::state_and_kv::{
-    checkpoint_tenant_state, clear_tenant_checkpoints, edge_kv_del, edge_kv_get, edge_kv_incr,
-    edge_kv_set, release_tenant_checkpoint, restore_tenant_state,
+    checkpoint_tenant_state, clear_tenant_checkpoints, edge_kv_contains_live_key,
+    edge_kv_del_bytes, edge_kv_get, edge_kv_incr, edge_kv_set, edge_kv_tenant_bytes,
+    release_tenant_checkpoint, restore_tenant_state,
 };
 use serde::{Deserialize, Serialize};
 use slice_sandbox::{CapabilityToken, SandboxViolation};
@@ -105,15 +106,39 @@ impl SliceIsolate {
 
     /// Deletes a key from this tenant's isolated `Slice.kv` partition.
     #[inline]
-    pub fn kv_del(&self, key: &str) -> bool {
-        edge_kv_del(&self.compartment.tenant_id, key)
+    pub fn kv_del(&mut self, key: &str) -> bool {
+        if let Some(freed) = edge_kv_del_bytes(&self.compartment.tenant_id, key) {
+            self.compartment.memory_used_bytes = self
+                .compartment
+                .memory_used_bytes
+                .saturating_sub(freed)
+                .max(4096);
+            true
+        } else {
+            false
+        }
     }
 
     /// Atomically increments a 64-bit integer counter in this tenant's isolated `Slice.kv` partition.
     #[inline]
     pub fn kv_incr(&mut self, key: &str, delta: i64) -> Result<i64, SandboxViolation> {
-        self.compartment.alloc_memory(key.len().saturating_add(8))?;
+        if !edge_kv_contains_live_key(&self.compartment.tenant_id, key) {
+            self.compartment
+                .alloc_memory(key.len().saturating_add(24))?;
+        }
         Ok(edge_kv_incr(&self.compartment.tenant_id, key, delta))
+    }
+
+    /// Returns the live byte footprint currently retained by this tenant in the `Slice.kv` slab.
+    #[inline]
+    pub fn live_kv_bytes(&self) -> usize {
+        edge_kv_tenant_bytes(&self.compartment.tenant_id)
+    }
+
+    /// Synchronizes `compartment.memory_used_bytes` to the 4 KB compartment baseline plus live `Slice.kv` state.
+    #[inline]
+    pub fn sync_live_kv_memory(&mut self) {
+        self.compartment.memory_used_bytes = 4096usize.saturating_add(self.live_kv_bytes());
     }
 
     /// Compiles (via Oxc) and executes untrusted TypeScript/JavaScript inside a nested child

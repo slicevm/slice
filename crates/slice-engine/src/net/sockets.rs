@@ -14,8 +14,8 @@
 //! 5. **Deterministic Mock Socket Support (`Slice.mockSocket`)**: Supports zero-network deterministic testing and replay.
 
 use crate::boa_realm::{
-    mark_subsystem_dirty, BOA_ACTIVE_TENANT, BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
-    BOA_VIOLATION, DIRTY_SOCKETS,
+    mark_subsystem_dirty, BOA_ACTIVE_TENANT, BOA_EGRESS_SECRETS, BOA_FUEL_BUDGET,
+    BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VIOLATION, DIRTY_SOCKETS,
 };
 use crate::intrinsics::{base64_decode, base64_encode};
 use crate::outbound_http::{
@@ -49,6 +49,20 @@ struct ActiveTcpSocket {
     port: u16,
     is_tls: bool,
     backend: TcpConnectionBackend,
+    mock_buffered_bytes: usize,
+}
+
+impl Drop for ActiveTcpSocket {
+    fn drop(&mut self) {
+        if self.mock_buffered_bytes > 0 {
+            let release = self.mock_buffered_bytes;
+            self.mock_buffered_bytes = 0;
+            BOA_KV_MEM_BUDGET.with(|b| {
+                let (used, limit) = b.get();
+                b.set((used.saturating_sub(release), limit));
+            });
+        }
+    }
 }
 
 enum UdpSocketBackend {
@@ -98,7 +112,10 @@ fn next_socket_handle_id() -> Result<u32, String> {
     Ok(id)
 }
 
-fn charge_socket_memory_budget(bytes: usize) -> Result<(), String> {
+/// Verifies that a single transient socket read/write payload fits within `MAX_SOCKET_IO_BYTES`
+/// and the isolate's remaining memory ceiling (without permanently pinning transient wire bytes
+/// into `BOA_KV_MEM_BUDGET`), and charges CPU fuel proportional to throughput.
+fn verify_transient_socket_io_budget_and_fuel(bytes: usize) -> Result<(), String> {
     if bytes > MAX_SOCKET_IO_BYTES {
         let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
         let (_, limit) = BOA_KV_MEM_BUDGET.with(|b| b.get());
@@ -106,7 +123,7 @@ fn charge_socket_memory_budget(bytes: usize) -> Result<(), String> {
             *v.borrow_mut() = Some(SandboxViolation::MemoryCeilingExceeded {
                 tenant_id,
                 requested: bytes,
-                limit: limit.max(MAX_SOCKET_IO_BYTES),
+                limit: limit.min(MAX_SOCKET_IO_BYTES),
             });
         });
         return Err(format!(
@@ -116,10 +133,9 @@ fn charge_socket_memory_budget(bytes: usize) -> Result<(), String> {
     }
     let exceeded = BOA_KV_MEM_BUDGET.with(|b| {
         let (used, limit) = b.get();
-        if limit > 0 && used.saturating_add(bytes) > limit {
+        if limit > 0 && limit < usize::MAX && used.saturating_add(bytes) > limit {
             Some((used.saturating_add(bytes), limit))
         } else {
-            b.set((used.saturating_add(bytes), limit));
             None
         }
     });
@@ -136,6 +152,85 @@ fn charge_socket_memory_budget(bytes: usize) -> Result<(), String> {
             "SandboxViolation: Socket allocation ({} bytes) exceeded tenant memory ceiling ({} bytes)",
             requested, limit
         ));
+    }
+    let fuel_ticks = ((bytes as u64) / 4096).max(1);
+    let fuel_exceeded = BOA_FUEL_BUDGET.with(|f| {
+        let (consumed, limit) = f.get();
+        if limit == u64::MAX {
+            return None;
+        }
+        let next = consumed.saturating_add(fuel_ticks);
+        f.set((next, limit));
+        if next > limit {
+            Some(limit)
+        } else {
+            None
+        }
+    });
+    if let Some(limit) = fuel_exceeded {
+        let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+        BOA_VIOLATION.with(|v| {
+            if v.borrow().is_none() {
+                *v.borrow_mut() = Some(SandboxViolation::CpuFuelExhausted { tenant_id, limit });
+            }
+        });
+        return Err(format!(
+            "SandboxViolation: Socket I/O exhausted tenant CPU fuel budget ({})",
+            limit
+        ));
+    }
+    Ok(())
+}
+
+fn sync_mock_socket_rx_budget(sock: &mut ActiveTcpSocket, new_rx_len: usize) -> Result<(), String> {
+    let prev = sock.mock_buffered_bytes;
+    if new_rx_len > prev {
+        let delta = new_rx_len - prev;
+        if new_rx_len > MAX_SOCKET_IO_BYTES {
+            let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+            BOA_VIOLATION.with(|v| {
+                *v.borrow_mut() = Some(SandboxViolation::MemoryCeilingExceeded {
+                    tenant_id,
+                    requested: new_rx_len,
+                    limit: MAX_SOCKET_IO_BYTES,
+                });
+            });
+            return Err(format!(
+                "SocketError: Buffered mock socket payload ({} bytes) exceeds maximum limit ({} bytes)",
+                new_rx_len, MAX_SOCKET_IO_BYTES
+            ));
+        }
+        let exceeded = BOA_KV_MEM_BUDGET.with(|b| {
+            let (used, limit) = b.get();
+            if limit > 0 && limit < usize::MAX && used.saturating_add(delta) > limit {
+                Some((used.saturating_add(delta), limit))
+            } else {
+                b.set((used.saturating_add(delta), limit));
+                None
+            }
+        });
+        if let Some((requested, limit)) = exceeded {
+            let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+            BOA_VIOLATION.with(|v| {
+                *v.borrow_mut() = Some(SandboxViolation::MemoryCeilingExceeded {
+                    tenant_id,
+                    requested,
+                    limit,
+                });
+            });
+            return Err(format!(
+                "SandboxViolation: Socket allocation ({} bytes) exceeded tenant memory ceiling ({} bytes)",
+                requested, limit
+            ));
+        }
+        sock.mock_buffered_bytes = new_rx_len;
+    } else if new_rx_len < prev {
+        let release = prev - new_rx_len;
+        BOA_KV_MEM_BUDGET.with(|b| {
+            let (used, limit) = b.get();
+            b.set((used.saturating_sub(release), limit));
+        });
+        sock.mock_buffered_bytes = new_rx_len;
     }
     Ok(())
 }
@@ -380,19 +475,22 @@ pub fn tcp_socket_connect(host: &str, port: u16, tls_mode: &str) -> Result<Strin
         } else {
             Vec::new()
         };
+        let initial_len = initial_rx.len();
+        let mut mock_sock = ActiveTcpSocket {
+            host: host_trimmed.to_string(),
+            port,
+            is_tls,
+            backend: TcpConnectionBackend::Mock {
+                rx_queue: initial_rx,
+                spec: mock_spec,
+            },
+            mock_buffered_bytes: 0,
+        };
+        if initial_len > 0 {
+            sync_mock_socket_rx_budget(&mut mock_sock, initial_len)?;
+        }
         TCP_SOCKET_TABLE.with(|t| {
-            t.borrow_mut().insert(
-                id,
-                ActiveTcpSocket {
-                    host: host_trimmed.to_string(),
-                    port,
-                    is_tls,
-                    backend: TcpConnectionBackend::Mock {
-                        rx_queue: initial_rx,
-                        spec: mock_spec,
-                    },
-                },
-            );
+            t.borrow_mut().insert(id, mock_sock);
         });
         return Ok(serde_json::json!({
             "id": id,
@@ -424,6 +522,7 @@ pub fn tcp_socket_connect(host: &str, port: u16, tls_mode: &str) -> Result<Strin
                 port,
                 is_tls,
                 backend: TcpConnectionBackend::Live(stream),
+                mock_buffered_bytes: 0,
             },
         );
     });
@@ -457,7 +556,7 @@ fn extract_tcp_addrs(tcp: &TcpStream) -> (String, u16, String, u16, &'static str
 
 /// Writes raw bytes to an active TCP/TLS socket after Egress DLP verification.
 pub fn tcp_socket_write_bytes(id: u32, payload: &[u8]) -> Result<String, String> {
-    charge_socket_memory_budget(payload.len())?;
+    verify_transient_socket_io_budget_and_fuel(payload.len())?;
 
     TCP_SOCKET_TABLE.with(|t| {
         let mut table = t.borrow_mut();
@@ -467,10 +566,11 @@ pub fn tcp_socket_write_bytes(id: u32, payload: &[u8]) -> Result<String, String>
         let target_label = format!("{}:{}", sock.host, sock.port);
         verify_socket_egress_dlp(payload, &target_label)?;
 
-        match &mut sock.backend {
+        let new_mock_len = match &mut sock.backend {
             TcpConnectionBackend::Mock { rx_queue, spec } => {
                 let reply = generate_mock_tcp_reply(spec, payload);
-                rx_queue.extend_from_slice(&reply);
+                let next_len = rx_queue.len().saturating_add(reply.len());
+                Some((reply, next_len))
             }
             TcpConnectionBackend::Live(stream) => {
                 stream
@@ -479,6 +579,13 @@ pub fn tcp_socket_write_bytes(id: u32, payload: &[u8]) -> Result<String, String>
                 stream
                     .flush()
                     .map_err(|e| format!("SocketFlushError: {}", e))?;
+                None
+            }
+        };
+        if let Some((reply, next_len)) = new_mock_len {
+            sync_mock_socket_rx_budget(sock, next_len)?;
+            if let TcpConnectionBackend::Mock { rx_queue, .. } = &mut sock.backend {
+                rx_queue.extend_from_slice(&reply);
             }
         }
 
@@ -519,11 +626,13 @@ pub fn tcp_socket_read(id: u32, max_bytes: usize, timeout_ms: u64) -> Result<Str
                     .to_string());
                 }
                 let take_len = rx_queue.len().min(cap);
+                verify_transient_socket_io_budget_and_fuel(take_len)?;
                 let chunk: Vec<u8> = rx_queue.drain(..take_len).collect();
-                charge_socket_memory_budget(chunk.len())?;
+                let rem_len = rx_queue.len();
+                let _ = sync_mock_socket_rx_budget(sock, rem_len);
                 Ok(serde_json::json!({
                     "bytesRead": chunk.len(),
-                    "eof": rx_queue.is_empty(),
+                    "eof": rem_len == 0,
                     "dataBase64": base64_encode(&chunk, false)
                 })
                 .to_string())
@@ -541,7 +650,7 @@ pub fn tcp_socket_read(id: u32, max_bytes: usize, timeout_ms: u64) -> Result<Str
                     })
                     .to_string()),
                     Ok(n) => {
-                        charge_socket_memory_budget(n)?;
+                        verify_transient_socket_io_budget_and_fuel(n)?;
                         Ok(serde_json::json!({
                             "bytesRead": n,
                             "eof": false,
@@ -606,8 +715,14 @@ pub fn tcp_socket_starttls(id: u32, server_name_override: Option<&str>) -> Resul
             }
             TcpConnectionBackend::Live(_) => {
                 // Take ownership of the Plain TcpStream to wrap in rustls::StreamOwned
-                let removed = table.remove(&id).unwrap();
-                let TcpConnectionBackend::Live(OutboundStream::Plain(tcp)) = removed.backend else {
+                let mut removed = table.remove(&id).unwrap();
+                let TcpConnectionBackend::Live(OutboundStream::Plain(tcp)) = std::mem::replace(
+                    &mut removed.backend,
+                    TcpConnectionBackend::Mock {
+                        rx_queue: Vec::new(),
+                        spec: String::new(),
+                    },
+                ) else {
                     return Err("SocketError: Cannot upgrade non-plain TCP stream".to_string());
                 };
                 let sni_trimmed = sni_host
@@ -622,17 +737,11 @@ pub fn tcp_socket_starttls(id: u32, server_name_override: Option<&str>) -> Resul
                 )
                 .map_err(|e| format!("TLS Handshake Init Error: {}", e))?;
                 let tls_stream = rustls::StreamOwned::new(tls_conn, tcp);
-                table.insert(
-                    id,
-                    ActiveTcpSocket {
-                        host: sni_host,
-                        is_tls: true,
-                        backend: TcpConnectionBackend::Live(OutboundStream::Tls(Box::new(
-                            tls_stream,
-                        ))),
-                        ..removed
-                    },
-                );
+                removed.host = sni_host;
+                removed.is_tls = true;
+                removed.backend =
+                    TcpConnectionBackend::Live(OutboundStream::Tls(Box::new(tls_stream)));
+                table.insert(id, removed);
                 Ok(serde_json::json!({ "id": id, "tls": true }).to_string())
             }
         }
@@ -651,8 +760,14 @@ pub fn tcp_socket_close(id: u32, half_close_write: bool) -> Result<String, Strin
             }
             return Ok(serde_json::json!({ "closed": false, "halfClosed": true }).to_string());
         }
-        if let Some(sock) = table.remove(&id) {
-            if let TcpConnectionBackend::Live(stream) = sock.backend {
+        if let Some(mut sock) = table.remove(&id) {
+            if let TcpConnectionBackend::Live(stream) = std::mem::replace(
+                &mut sock.backend,
+                TcpConnectionBackend::Mock {
+                    rx_queue: Vec::new(),
+                    spec: String::new(),
+                },
+            ) {
                 match stream {
                     OutboundStream::Plain(tcp) => {
                         let _ = tcp.shutdown(Shutdown::Both);
@@ -785,7 +900,7 @@ pub fn udp_socket_send_bytes(
             payload.len()
         ));
     }
-    charge_socket_memory_budget(payload.len())?;
+    verify_transient_socket_io_budget_and_fuel(payload.len())?;
     let target_label = format!("udp://{}:{}", host.trim(), port);
     verify_socket_egress_dlp(payload, &target_label)?;
 
@@ -837,7 +952,7 @@ pub fn udp_socket_send_bytes(
                 let mut recv_buf = [0u8; 65_536];
                 let mut replies = Vec::new();
                 if let Ok((n, src_addr)) = udp.recv_from(&mut recv_buf) {
-                    charge_socket_memory_budget(n)?;
+                    verify_transient_socket_io_budget_and_fuel(n)?;
                     replies.push(serde_json::json!({
                         "dataBase64": base64_encode(&recv_buf[..n], false),
                         "size": n,

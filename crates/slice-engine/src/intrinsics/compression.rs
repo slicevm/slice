@@ -76,12 +76,47 @@ pub fn crc32_checksum(data: &[u8]) -> u32 {
 fn effective_compression_mem_budget() -> usize {
     crate::boa_realm::BOA_KV_MEM_BUDGET.with(|m| {
         let (used, limit) = m.get();
-        if limit > 0 {
+        if limit > 0 && limit < usize::MAX {
             limit.saturating_sub(used).min(MAX_DECOMPRESSED_BYTES)
         } else {
             MAX_DECOMPRESSED_BYTES
         }
     })
+}
+
+#[inline]
+fn charge_inflate_fuel(ticks: u64) -> Result<(), &'static str> {
+    let exceeded = crate::boa_realm::BOA_FUEL_BUDGET.with(|f| {
+        let (consumed, limit) = f.get();
+        if limit == u64::MAX {
+            return None;
+        }
+        let next = consumed.saturating_add(ticks);
+        f.set((next, limit));
+        if next > limit {
+            Some(limit)
+        } else {
+            None
+        }
+    });
+    if let Some(limit) = exceeded {
+        let tenant_id = crate::boa_realm::BOA_ACTIVE_TENANT.with(|t| {
+            let b = t.borrow();
+            if b.is_empty() {
+                "boa-tenant".to_string()
+            } else {
+                b.clone()
+            }
+        });
+        crate::boa_realm::BOA_VIOLATION.with(|v| {
+            if v.borrow().is_none() {
+                *v.borrow_mut() =
+                    Some(slice_sandbox::SandboxViolation::CpuFuelExhausted { tenant_id, limit });
+            }
+        });
+        return Err("CPU fuel budget exhausted during DEFLATE decompression");
+    }
+    Ok(())
 }
 
 struct DeflateBitWriter {
@@ -443,14 +478,19 @@ impl<'a> InflateBitReader<'a> {
 /// Decompresses a raw RFC 1951 DEFLATE stream (`BTYPE = 00`, `01`, or `10`).
 pub(crate) fn inflate_raw_decompress(input: &[u8]) -> Result<Vec<u8>, &'static str> {
     let effective_max = effective_compression_mem_budget();
+    let mut consecutive_empty_blocks = 0usize;
+    let mut total_empty_blocks = 0usize;
+    let mut symbol_steps = 0u32;
     let mut br = InflateBitReader::new(input);
     let mut out = Vec::with_capacity(input.len().saturating_mul(2).min(65536).min(effective_max));
 
     loop {
+        let out_before_block = out.len();
         let bfinal = br.read_bits(1)?;
         let btype = br.read_bits(2)?;
         match btype {
             0 => {
+                charge_inflate_fuel(4)?;
                 br.align_byte();
                 let len = br.read_u16_aligned()?;
                 let nlen = br.read_u16_aligned()?;
@@ -460,6 +500,9 @@ pub(crate) fn inflate_raw_decompress(input: &[u8]) -> Result<Vec<u8>, &'static s
                 if out.len().saturating_add(len as usize) > effective_max {
                     return Err("Decompressed payload exceeds sandbox memory limit");
                 }
+                if len > 0 {
+                    charge_inflate_fuel(((len as u64) / 512).max(1))?;
+                }
                 for _ in 0..len {
                     out.push(br.read_bits(8)? as u8);
                 }
@@ -467,9 +510,11 @@ pub(crate) fn inflate_raw_decompress(input: &[u8]) -> Result<Vec<u8>, &'static s
             1 | 2 => {
                 let dynamic_trees: Option<(HuffmanTree, HuffmanTree)>;
                 let (lit_tree, dist_tree) = if btype == 1 {
+                    charge_inflate_fuel(4)?;
                     let (lt, dt) = fixed_huffman_trees();
                     (lt, dt)
                 } else {
+                    charge_inflate_fuel(24)?;
                     let hlit = br.read_bits(5)? as usize + 257;
                     let hdist = br.read_bits(5)? as usize + 1;
                     let hclen = br.read_bits(4)? as usize + 4;
@@ -523,6 +568,10 @@ pub(crate) fn inflate_raw_decompress(input: &[u8]) -> Result<Vec<u8>, &'static s
                 };
 
                 loop {
+                    symbol_steps = symbol_steps.wrapping_add(1);
+                    if (symbol_steps & 0xFF) == 0 {
+                        charge_inflate_fuel(2)?;
+                    }
                     let sym = br.decode_huffman(lit_tree)?;
                     if sym < 256 {
                         if out.len() >= effective_max {
@@ -566,6 +615,16 @@ pub(crate) fn inflate_raw_decompress(input: &[u8]) -> Result<Vec<u8>, &'static s
                 }
             }
             _ => return Err("Invalid DEFLATE block type (BTYPE=11)"),
+        }
+
+        if out.len() == out_before_block {
+            consecutive_empty_blocks += 1;
+            total_empty_blocks += 1;
+            if consecutive_empty_blocks > 64 || total_empty_blocks > 1024 {
+                return Err("DEFLATE stream exceeds empty block limit");
+            }
+        } else {
+            consecutive_empty_blocks = 0;
         }
 
         if bfinal != 0 {

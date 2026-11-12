@@ -568,12 +568,17 @@ impl SliceIsolate {
             }
             ("JSON", "stringify") => {
                 let first = eval_args.first().cloned().unwrap_or(JsValue::Undefined);
-                return Ok(Some(JsValue::str(js_value_to_json_string(&first))));
+                let s = js_value_to_json_string(&first);
+                self.compartment.alloc_memory(s.len())?;
+                return Ok(Some(JsValue::str(s)));
             }
             ("JSON", "parse") => {
                 if let Some(JsValue::Str(s)) = eval_args.first() {
                     match serde_json::from_str::<serde_json::Value>(s) {
-                        Ok(val) => return Ok(Some(serde_json_to_js_value(&val))),
+                        Ok(val) => {
+                            self.compartment.alloc_memory(s.len())?;
+                            return Ok(Some(serde_json_to_js_value(&val)));
+                        }
                         Err(e) => {
                             return Ok(Some(JsValue::str(format!(
                                 "Uncaught SyntaxError: {}\n    at <main> (unknown at :1:12)",
@@ -589,6 +594,8 @@ impl SliceIsolate {
             ("Object", "keys") => {
                 if let Some(JsValue::Object(map)) = eval_args.first() {
                     let mut keys: Vec<String> = map.keys().cloned().collect();
+                    let bytes: usize = keys.iter().map(|k| k.len().saturating_add(16)).sum();
+                    self.compartment.alloc_memory(bytes)?;
                     keys.sort();
                     return Ok(Some(JsValue::array(
                         keys.into_iter().map(JsValue::str).collect(),
@@ -663,13 +670,17 @@ impl SliceIsolate {
                     None | Some(JsValue::Undefined) => ",".to_string(),
                     Some(v) => v.to_string(),
                 };
-                let parts: Vec<String> = items
-                    .iter()
-                    .map(|v| match v {
+                let mut parts = Vec::with_capacity(items.len());
+                let mut total_bytes = items.len().saturating_sub(1).saturating_mul(sep.len());
+                for v in items.iter() {
+                    let s = match v {
                         JsValue::Null | JsValue::Undefined => String::new(),
                         other => other.to_string(),
-                    })
-                    .collect();
+                    };
+                    total_bytes = total_bytes.saturating_add(s.len());
+                    parts.push(s);
+                }
+                self.compartment.alloc_memory(total_bytes)?;
                 Ok(Some(JsValue::str(parts.join(&sep))))
             }
             (JsValue::Array(items), "includes") => {
@@ -733,8 +744,14 @@ impl SliceIsolate {
             }
             (JsValue::Str(s), "split") => {
                 let sep = eval_args.first().map(|v| v.to_string()).unwrap_or_default();
-                let parts: Vec<JsValue> =
-                    s.split(&sep).map(|p| JsValue::str(p.to_string())).collect();
+                let mut parts = Vec::new();
+                let mut total_bytes = 0usize;
+                for p in s.split(&sep) {
+                    total_bytes = total_bytes.saturating_add(p.len().saturating_add(16));
+                    self.compartment.alloc_memory(p.len().saturating_add(16))?;
+                    parts.push(JsValue::str(p.to_string()));
+                }
+                let _ = total_bytes;
                 Ok(Some(JsValue::array(parts)))
             }
             _ => Ok(None),

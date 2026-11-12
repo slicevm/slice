@@ -9,11 +9,37 @@ fn check_sandbox_kdf_memory_budget(requested_bytes: usize) -> Result<(), &'stati
     if requested_bytes > MAX_KDF_OUTPUT_BYTES {
         return Err("Key derivation output length exceeds sandbox memory limit");
     }
-    let allowed = crate::boa_realm::BOA_KV_MEM_BUDGET.with(|m| {
+    let exceeded = crate::boa_realm::BOA_KV_MEM_BUDGET.with(|m| {
         let (used, limit) = m.get();
-        limit == 0 || used.saturating_add(requested_bytes) <= limit
+        if limit == 0 || limit == usize::MAX {
+            None
+        } else {
+            let next = used.saturating_add(requested_bytes);
+            if next > limit {
+                Some((next, limit))
+            } else {
+                None
+            }
+        }
     });
-    if !allowed {
+    if let Some((requested, limit)) = exceeded {
+        let tenant_id = crate::boa_realm::BOA_ACTIVE_TENANT.with(|t| {
+            let b = t.borrow();
+            if b.is_empty() {
+                "boa-tenant".to_string()
+            } else {
+                b.clone()
+            }
+        });
+        crate::boa_realm::BOA_VIOLATION.with(|v| {
+            if v.borrow().is_none() {
+                *v.borrow_mut() = Some(slice_sandbox::SandboxViolation::MemoryCeilingExceeded {
+                    tenant_id,
+                    requested,
+                    limit,
+                });
+            }
+        });
         return Err("Key derivation exceeds sandbox memory limit");
     }
     Ok(())

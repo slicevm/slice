@@ -288,6 +288,11 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
                         let _ = try_consume_isolate_memory(usize::MAX / 2);
                         return Err(JsNativeError::range().with_message(msg).into());
                     }
+                    if msg.contains("CPU fuel budget exhausted")
+                        || msg.contains("empty block limit")
+                    {
+                        return Err(JsNativeError::range().with_message(msg).into());
+                    }
                     Err(JsNativeError::typ().with_message(msg).into())
                 }
             }

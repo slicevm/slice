@@ -336,13 +336,55 @@ pub(crate) fn edge_kv_set(tenant_id: &str, key: &str, val: &str, ttl_ms: u64) {
     guard.insert(CompactString::new(tenant_id), t_map);
 }
 
-pub(crate) fn edge_kv_del(tenant_id: &str, key: &str) -> bool {
+#[inline]
+pub(crate) fn edge_kv_entry_bytes(key: &str, entry: &KvEntry) -> usize {
+    let val_bytes = match &entry.val {
+        KvValue::Str(s) => s.len(),
+        KvValue::Int(_) => 24,
+    };
+    key.len().saturating_add(val_bytes)
+}
+
+#[inline]
+pub(crate) fn edge_kv_contains_live_key(tenant_id: &str, key: &str) -> bool {
+    let shard = edge_kv_shard(tenant_id, key);
+    let guard = shard.read();
+    guard
+        .get(tenant_id)
+        .and_then(|m| m.get(key))
+        .is_some_and(|entry| {
+            entry
+                .expires_at_ms
+                .is_none_or(|exp| current_epoch_ms() < exp)
+        })
+}
+
+pub(crate) fn edge_kv_tenant_bytes(tenant_id: &str) -> usize {
+    let Some(shards) = EDGE_KV_SLAB.get() else {
+        return 0;
+    };
+    let now = current_epoch_ms();
+    let mut total = 0usize;
+    for shard in shards {
+        let guard = shard.read();
+        if let Some(t_map) = guard.get(tenant_id) {
+            for (k, entry) in t_map {
+                if entry.expires_at_ms.is_none_or(|exp| now < exp) {
+                    total = total.saturating_add(edge_kv_entry_bytes(k.as_str(), entry));
+                }
+            }
+        }
+    }
+    total
+}
+
+pub(crate) fn edge_kv_del_bytes(tenant_id: &str, key: &str) -> Option<usize> {
     let shard = edge_kv_shard(tenant_id, key);
     let mut guard = shard.write();
     guard
         .get_mut(tenant_id)
         .and_then(|t_map| t_map.remove(key))
-        .is_some()
+        .map(|entry| edge_kv_entry_bytes(key, &entry))
 }
 
 pub(crate) fn edge_kv_incr(tenant_id: &str, key: &str, delta: i64) -> i64 {

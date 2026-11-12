@@ -11,8 +11,9 @@
 use crate::boa_realm::{
     check_boa_fs_read_ocap, mark_subsystem_dirty, norm_vfs_path, vfs_owner_namespace, BoaFsCaps,
     BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_ENV_MAP,
-    BOA_EXEC_BINS, BOA_FETCH_MOCKS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VFS_CACHE, BOA_VFS_DIRS,
-    BOA_VFS_MTIMES, BOA_VFS_OWNER_TENANT, BOA_VFS_TOMBSTONES, BOA_VIOLATION, DIRTY_WORKERS,
+    BOA_EXEC_BINS, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
+    BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VFS_MTIMES, BOA_VFS_OWNER_TENANT, BOA_VFS_TOMBSTONES,
+    BOA_VIOLATION, DIRTY_WORKERS,
 };
 use crate::intrinsics::base64_decode;
 use crate::isolate::SliceIsolate;
@@ -131,7 +132,7 @@ pub(crate) enum WorkerOutboundEventKind {
     Online,
     Message(String),
     Error { message: String, is_violation: bool },
-    Exit { exit_code: i32 },
+    Exit { exit_code: i32, fuel_consumed: u64 },
 }
 
 #[derive(Debug)]
@@ -145,6 +146,32 @@ struct ParentWorkerHandle {
     terminated: Arc<AtomicBool>,
     finished: bool,
     refed: bool,
+    reserved_fuel: u64,
+    reserved_mem: usize,
+    reconciled: bool,
+}
+
+impl ParentWorkerHandle {
+    #[inline]
+    fn reconcile_resources(&mut self, actual_fuel_consumed: u64) {
+        if self.reconciled {
+            return;
+        }
+        self.reconciled = true;
+        let refund_fuel = self.reserved_fuel.saturating_sub(actual_fuel_consumed);
+        if refund_fuel > 0 {
+            BOA_FUEL_BUDGET.with(|f| {
+                let (used, limit) = f.get();
+                f.set((used.saturating_sub(refund_fuel), limit));
+            });
+        }
+        if self.reserved_mem > 0 {
+            BOA_KV_MEM_BUDGET.with(|b| {
+                let (used, limit) = b.get();
+                b.set((used.saturating_sub(self.reserved_mem), limit));
+            });
+        }
+    }
 }
 
 struct ParentWorkerRegistry {
@@ -166,9 +193,10 @@ impl ParentWorkerRegistry {
     }
 
     fn reset(&mut self) {
-        for (_, h) in self.workers.drain() {
+        for (_, mut h) in self.workers.drain() {
             h.terminated.store(true, Ordering::Release);
             let _ = h.inbound_tx.send(WorkerInboundCmd::Terminate);
+            h.reconcile_resources(h.reserved_fuel.min(1_000));
         }
         while self.event_rx.try_recv().is_ok() {}
     }
@@ -447,6 +475,16 @@ fn build_attenuated_worker_caps(
 
 /// Spawns a capability-attenuated MicroVM Worker thread and returns its `worker_id`.
 pub fn worker_spawn(specifier_or_code: &str, options_json: &str) -> Result<u32, String> {
+    worker_spawn_with_context(specifier_or_code, options_json, None)
+}
+
+/// Spawns a capability-attenuated MicroVM Worker thread while reserving CPU fuel and memory
+/// directly against the active parent `Context` and isolate budgets.
+pub(crate) fn worker_spawn_with_context(
+    specifier_or_code: &str,
+    options_json: &str,
+    ctx_opt: Option<&mut Context>,
+) -> Result<u32, String> {
     mark_subsystem_dirty(DIRTY_WORKERS);
     let opts: WorkerSpawnOptions = serde_json::from_str(options_json).unwrap_or_default();
     let active_in_isolate = PARENT_WORKERS.with(|reg| {
@@ -496,6 +534,57 @@ pub fn worker_spawn(specifier_or_code: &str, options_json: &str) -> Result<u32, 
             b.clone()
         }
     });
+
+    // Enforce parent CPU fuel ceiling and reserve child's fuel slice upfront
+    let loop_iters = ctx_opt
+        .as_ref()
+        .map(|c| c.runtime_limits().loop_iterations_executed())
+        .unwrap_or(0);
+    let (consumed_fuel, limit_fuel) = BOA_FUEL_BUDGET.with(|f| f.get());
+    let total_parent_fuel = consumed_fuel.saturating_add(loop_iters);
+    let avail_fuel_for_child = limit_fuel
+        .saturating_sub(total_parent_fuel)
+        .saturating_sub(64);
+    if avail_fuel_for_child < 100 {
+        GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
+        BOA_VIOLATION.with(|v| {
+            if v.borrow().is_none() {
+                *v.borrow_mut() = Some(SandboxViolation::CpuFuelExhausted {
+                    tenant_id: parent_tenant.clone(),
+                    limit: limit_fuel,
+                });
+            }
+        });
+        if let Some(ctx) = ctx_opt {
+            ctx.runtime_limits_mut().set_loop_iteration_limit(1);
+        }
+        return Err(format!(
+            "RangeError: Parent isolate CPU fuel budget ({}) exhausted before Worker spawn",
+            limit_fuel
+        ));
+    }
+
+    // Enforce parent memory ceiling and reserve child's memory slice upfront
+    let (used_mem, limit_mem) = BOA_KV_MEM_BUDGET.with(|b| b.get());
+    let avail_mem_for_child = limit_mem.saturating_sub(used_mem).saturating_sub(65_536);
+    if avail_mem_for_child < 65_536 {
+        GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
+        let requested = used_mem.saturating_add(131_072);
+        BOA_VIOLATION.with(|v| {
+            if v.borrow().is_none() {
+                *v.borrow_mut() = Some(SandboxViolation::MemoryCeilingExceeded {
+                    tenant_id: parent_tenant.clone(),
+                    requested,
+                    limit: limit_mem,
+                });
+            }
+        });
+        return Err(format!(
+            "RangeError: Parent isolate memory cage ({} bytes) exhausted before Worker spawn",
+            limit_mem
+        ));
+    }
+
     let parent_caps = BOA_ACTIVE_CAPS.with(|c| c.borrow().clone());
     let parent_net_hosts = BOA_NET_HOSTS.with(|h| h.borrow().clone());
     let parent_env_map = BOA_ENV_MAP.with(|m| m.borrow().clone());
@@ -522,8 +611,6 @@ pub fn worker_spawn(specifier_or_code: &str, options_json: &str) -> Result<u32, 
     let parent_ws_mocks = BOA_WS_MOCKS.with(|m| m.borrow().clone());
     let parent_sock_mocks = BOA_SOCKET_MOCKS.with(|m| m.borrow().clone());
     let parent_det = BOA_DET_STATE.with(|s| s.get());
-    let (used_mem, limit_mem) = BOA_KV_MEM_BUDGET.with(|b| b.get());
-    let parent_rem_mem = limit_mem.saturating_sub(used_mem).max(65_536);
 
     let child_caps = build_attenuated_worker_caps(
         opts.slice.as_ref(),
@@ -531,19 +618,29 @@ pub fn worker_spawn(specifier_or_code: &str, options_json: &str) -> Result<u32, 
         &parent_net_hosts,
         &parent_env_map,
     );
-    let child_fuel = opts
-        .slice
-        .as_ref()
-        .and_then(|s| s.fuel)
-        .unwrap_or(5_000_000)
-        .clamp(100, 50_000_000);
-    let child_mem = opts
-        .slice
-        .as_ref()
-        .and_then(|s| s.memory_bytes)
-        .unwrap_or(parent_rem_mem)
-        .min(parent_rem_mem)
-        .max(65_536);
+    let child_fuel = match opts.slice.as_ref().and_then(|s| s.fuel) {
+        Some(req_fuel) => req_fuel.clamp(100, 50_000_000).min(avail_fuel_for_child),
+        None => (avail_fuel_for_child / 2)
+            .clamp(100, 5_000_000)
+            .min(avail_fuel_for_child),
+    };
+    let child_mem = match opts.slice.as_ref().and_then(|s| s.memory_bytes) {
+        Some(req_mem) => req_mem.clamp(65_536, avail_mem_for_child),
+        None => (avail_mem_for_child / 4)
+            .clamp(65_536, 4 * 1024 * 1024)
+            .min(avail_mem_for_child),
+    };
+
+    let new_consumed_fuel = consumed_fuel.saturating_add(child_fuel);
+    BOA_FUEL_BUDGET.with(|f| f.set((new_consumed_fuel, limit_fuel)));
+    BOA_KV_MEM_BUDGET.with(|b| b.set((used_mem.saturating_add(child_mem), limit_mem)));
+    if let Some(ctx) = ctx_opt {
+        let parent_loop_cap = limit_fuel
+            .saturating_sub(new_consumed_fuel)
+            .max(loop_iters.saturating_add(1));
+        ctx.runtime_limits_mut()
+            .set_loop_iteration_limit(parent_loop_cap);
+    }
 
     let (inbound_tx, inbound_rx) = mpsc::channel();
     let terminated = Arc::new(AtomicBool::new(false));
@@ -561,6 +658,9 @@ pub fn worker_spawn(specifier_or_code: &str, options_json: &str) -> Result<u32, 
                 terminated,
                 finished: false,
                 refed: true,
+                reserved_fuel: child_fuel,
+                reserved_mem: child_mem,
+                reconciled: false,
             },
         );
         (id, tx)
@@ -597,7 +697,11 @@ pub fn worker_spawn(specifier_or_code: &str, options_json: &str) -> Result<u32, 
     if let Err(e) = dispatch_worker_job(job) {
         GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
         PARENT_WORKERS.with(|reg| {
-            reg.borrow_mut().workers.remove(&worker_id);
+            let mut r = reg.borrow_mut();
+            if let Some(mut removed) = r.workers.remove(&worker_id) {
+                removed.reconcile_resources(0);
+            }
+            WORKER_ACTIVE_COUNT.with(|c| c.set(r.workers.len()));
         });
         return Err(format!("WorkerSpawnError: {}", e));
     }
@@ -778,7 +882,10 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
         }
         let _ = event_tx.send(WorkerOutboundEvent {
             worker_id,
-            kind: WorkerOutboundEventKind::Exit { exit_code: 1 },
+            kind: WorkerOutboundEventKind::Exit {
+                exit_code: 1,
+                fuel_consumed: 0,
+            },
         });
         return;
     }
@@ -832,11 +939,21 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
         child_isolate.add_egress_audit_secret(sec);
     }
 
+    let child_fuel_cap = job.child_fuel;
     let exec_res = child_isolate.execute_bytecode(&job.bytecode, None);
     let was_terminated = terminated_clone.load(Ordering::Acquire);
     let explicit_code = WORKER_SELF_ENV
         .with(|env| env.borrow().explicit_exit_code)
         .or_else(|| child_isolate.last_exit_code());
+    let actual_fuel_consumed = match &exec_res {
+        Ok(m) => m.fuel_consumed.min(child_fuel_cap).max(1),
+        Err(SandboxViolation::CpuFuelExhausted { .. }) => child_fuel_cap,
+        Err(_) => child_isolate
+            .compartment
+            .fuel_consumed
+            .min(child_fuel_cap)
+            .max(1),
+    };
 
     // Scrub thread-local worker state and return this thread to `IDLE_WORKER_POOL`
     // BEFORE sending `Exit` to the parent isolate so sequential `await worker` loops
@@ -859,6 +976,7 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
             worker_id,
             kind: WorkerOutboundEventKind::Exit {
                 exit_code: explicit_code.unwrap_or(1),
+                fuel_consumed: actual_fuel_consumed,
             },
         });
     } else {
@@ -876,6 +994,7 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
                         worker_id,
                         kind: WorkerOutboundEventKind::Exit {
                             exit_code: explicit_code.unwrap_or(1),
+                            fuel_consumed: actual_fuel_consumed,
                         },
                     });
                 } else {
@@ -883,6 +1002,7 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
                         worker_id,
                         kind: WorkerOutboundEventKind::Exit {
                             exit_code: explicit_code.unwrap_or(0),
+                            fuel_consumed: actual_fuel_consumed,
                         },
                     });
                 }
@@ -899,6 +1019,7 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
                     worker_id,
                     kind: WorkerOutboundEventKind::Exit {
                         exit_code: explicit_code.unwrap_or(1),
+                        fuel_consumed: actual_fuel_consumed,
                     },
                 });
             }
@@ -1128,12 +1249,15 @@ pub(crate) fn poll_parent_worker_events_and_dispatch(
     }
 
     let mut events: Vec<WorkerOutboundEvent> = Vec::new();
+    let mut reconciled_any = false;
     PARENT_WORKERS.with(|reg| {
         let mut r = reg.borrow_mut();
         while let Ok(ev) = r.event_rx.try_recv() {
-            if matches!(ev.kind, WorkerOutboundEventKind::Exit { .. }) {
+            if let WorkerOutboundEventKind::Exit { fuel_consumed, .. } = ev.kind {
                 if let Some(h) = r.workers.get_mut(&ev.worker_id) {
                     h.finished = true;
+                    h.reconcile_resources(fuel_consumed);
+                    reconciled_any = true;
                 }
             }
             events.push(ev);
@@ -1141,16 +1265,20 @@ pub(crate) fn poll_parent_worker_events_and_dispatch(
         if events.is_empty() && r.has_active_refed_workers() {
             if let Some(dur) = wait_timeout {
                 if let Ok(ev) = r.event_rx.recv_timeout(dur) {
-                    if matches!(ev.kind, WorkerOutboundEventKind::Exit { .. }) {
+                    if let WorkerOutboundEventKind::Exit { fuel_consumed, .. } = ev.kind {
                         if let Some(h) = r.workers.get_mut(&ev.worker_id) {
                             h.finished = true;
+                            h.reconcile_resources(fuel_consumed);
+                            reconciled_any = true;
                         }
                     }
                     events.push(ev);
                     while let Ok(ev2) = r.event_rx.try_recv() {
-                        if matches!(ev2.kind, WorkerOutboundEventKind::Exit { .. }) {
+                        if let WorkerOutboundEventKind::Exit { fuel_consumed, .. } = ev2.kind {
                             if let Some(h) = r.workers.get_mut(&ev2.worker_id) {
                                 h.finished = true;
+                                h.reconcile_resources(fuel_consumed);
+                                reconciled_any = true;
                             }
                         }
                         events.push(ev2);
@@ -1161,6 +1289,15 @@ pub(crate) fn poll_parent_worker_events_and_dispatch(
         r.workers.retain(|_, w| !w.finished);
         WORKER_ACTIVE_COUNT.with(|c| c.set(r.workers.len()));
     });
+
+    if reconciled_any && BOA_VIOLATION.with(|v| v.borrow().is_none()) {
+        let (consumed, limit) = BOA_FUEL_BUDGET.with(|f| f.get());
+        let cur_iters = ctx.runtime_limits().loop_iterations_executed();
+        let next_cap = limit
+            .saturating_sub(consumed)
+            .max(cur_iters.saturating_add(1));
+        ctx.runtime_limits_mut().set_loop_iteration_limit(next_cap);
+    }
 
     if events.is_empty() {
         return false;
@@ -1187,7 +1324,7 @@ pub(crate) fn poll_parent_worker_events_and_dispatch(
                         },
                         1.0,
                     ),
-                    WorkerOutboundEventKind::Exit { exit_code } => {
+                    WorkerOutboundEventKind::Exit { exit_code, .. } => {
                         ("exit", String::new(), exit_code as f64)
                     }
                 };

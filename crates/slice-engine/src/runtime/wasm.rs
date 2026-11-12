@@ -248,7 +248,7 @@ fn record_wasm_fuel_violation() {
 }
 
 #[inline]
-fn check_wasm_memory_pages_budget(total_pages: u32) -> Result<usize, String> {
+fn check_wasm_memory_pages_budget(total_pages: u32, added_pages: u32) -> Result<usize, String> {
     if total_pages > MAX_WASM_MEMORY_PAGES {
         let req_bytes = (total_pages as usize).saturating_mul(WASM_PAGE_BYTES);
         let max_bytes = (MAX_WASM_MEMORY_PAGES as usize) * WASM_PAGE_BYTES;
@@ -259,9 +259,10 @@ fn check_wasm_memory_pages_budget(total_pages: u32) -> Result<usize, String> {
         ));
     }
     let req_bytes = (total_pages as usize).saturating_mul(WASM_PAGE_BYTES);
+    let added_bytes = (added_pages as usize).saturating_mul(WASM_PAGE_BYTES);
     let (used, limit) = BOA_KV_MEM_BUDGET.with(|m| m.get());
-    if req_bytes > limit || used.saturating_add(total_pages as usize * 1024) > limit {
-        record_wasm_memory_violation(req_bytes, limit);
+    if req_bytes > limit || used.saturating_add(added_bytes) > limit {
+        record_wasm_memory_violation(req_bytes.max(used.saturating_add(added_bytes)), limit);
         return Err(format!(
             "RangeError: WebAssembly linear memory ({} bytes) exceeds isolate memory cage ({} bytes)",
             req_bytes, limit
@@ -467,9 +468,10 @@ pub fn wasm_create_memory(initial_pages: u32, max_pages: Option<u32>) -> Result<
             ));
         }
     }
-    check_wasm_memory_pages_budget(initial_pages)?;
+    check_wasm_memory_pages_budget(initial_pages, initial_pages)?;
     let (used, limit) = BOA_KV_MEM_BUDGET.with(|m| m.get());
-    BOA_KV_MEM_BUDGET.with(|m| m.set((used.saturating_add(initial_pages as usize * 1024), limit)));
+    let added_bytes = (initial_pages as usize).saturating_mul(WASM_PAGE_BYTES);
+    BOA_KV_MEM_BUDGET.with(|m| m.set((used.saturating_add(added_bytes), limit)));
 
     let mem_id = WASM_STATE.with(|st| {
         let mut s = st.borrow_mut();
@@ -508,14 +510,14 @@ pub fn wasm_grow_memory(mem_id: u32, inst_id: u32, delta_pages: u32) -> Result<i
                     ));
                 }
             }
-            check_wasm_memory_pages_budget(new_pages)?;
+            check_wasm_memory_pages_budget(new_pages, delta_pages)?;
             match mem.grow(&mut inst.store, delta_pages.into()) {
                 Ok(prev) => {
                     let new_byte_len = (new_pages as usize) * WASM_PAGE_BYTES;
                     inst.shadow_mem.resize(new_byte_len, 0);
                     let (used, limit) = BOA_KV_MEM_BUDGET.with(|m| m.get());
-                    BOA_KV_MEM_BUDGET
-                        .with(|m| m.set((used.saturating_add(delta_pages as usize * 1024), limit)));
+                    let added_bytes = (delta_pages as usize).saturating_mul(WASM_PAGE_BYTES);
+                    BOA_KV_MEM_BUDGET.with(|m| m.set((used.saturating_add(added_bytes), limit)));
                     Ok(prev as i32)
                 }
                 Err(e) => Err(format!("RangeError: WebAssembly.Memory.grow() failed: {}", e)),
@@ -538,11 +540,11 @@ pub fn wasm_grow_memory(mem_id: u32, inst_id: u32, delta_pages: u32) -> Result<i
                 ));
             }
         }
-        check_wasm_memory_pages_budget(new_pages)?;
+        check_wasm_memory_pages_budget(new_pages, delta_pages)?;
         entry.pages = new_pages;
         let (used, limit) = BOA_KV_MEM_BUDGET.with(|m| m.get());
-        BOA_KV_MEM_BUDGET
-            .with(|m| m.set((used.saturating_add(delta_pages as usize * 1024), limit)));
+        let added_bytes = (delta_pages as usize).saturating_mul(WASM_PAGE_BYTES);
+        BOA_KV_MEM_BUDGET.with(|m| m.set((used.saturating_add(added_bytes), limit)));
         Ok(prev as i32)
     })
 }
@@ -843,7 +845,7 @@ pub fn wasm_instantiate_module(
                         }
                     }
                 }
-                if let Err(msg) = check_wasm_memory_pages_budget(actual_pages) {
+                if let Err(msg) = check_wasm_memory_pages_budget(actual_pages, actual_pages) {
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
                 let eff_max = max_pages
@@ -893,7 +895,7 @@ pub fn wasm_instantiate_module(
     for exp in module.exports() {
         if let ExternType::Memory(mem_ty) = exp.ty() {
             let min_pages = mem_ty.minimum() as u32;
-            if let Err(msg) = check_wasm_memory_pages_budget(min_pages) {
+            if let Err(msg) = check_wasm_memory_pages_budget(min_pages, min_pages) {
                 return Err(JsNativeError::range().with_message(msg).into());
             }
         }
@@ -991,7 +993,8 @@ pub fn wasm_instantiate_module(
         let data = m.data(&store);
         shadow_mem.extend_from_slice(data);
         let (used, limit) = BOA_KV_MEM_BUDGET.with(|b| b.get());
-        BOA_KV_MEM_BUDGET.with(|b| b.set((used.saturating_add(mem_pages as usize * 1024), limit)));
+        let added_bytes = (mem_pages as usize).saturating_mul(WASM_PAGE_BYTES);
+        BOA_KV_MEM_BUDGET.with(|b| b.set((used.saturating_add(added_bytes), limit)));
         // If memory was imported with an existing ArrayBuffer, sync any data segment initialization back
         if let Some((_, _, Some(ref b_obj))) = imported_memory {
             if let Ok(ab) = JsArrayBuffer::from_object(b_obj.clone()) {

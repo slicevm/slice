@@ -1474,6 +1474,9 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 || alg.eq_ignore_ascii_case("RSASSA-PKCS1-v1_5")
                 || alg.eq_ignore_ascii_case("RSA-PSS")
             {
+                if let Err(msg) = consume_crypto_kdf_fuel(40) {
+                    return Err(JsNativeError::range().with_message(msg).into());
+                }
                 let use_pss = alg.eq_ignore_ascii_case("RSA-PSS");
                 let sig_res = if handle_id != 0 {
                     with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
@@ -1602,6 +1605,9 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 || alg.eq_ignore_ascii_case("RSASSA-PKCS1-v1_5")
                 || alg.eq_ignore_ascii_case("RSA-PSS")
             {
+                if let Err(msg) = consume_crypto_kdf_fuel(15) {
+                    return Err(JsNativeError::range().with_message(msg).into());
+                }
                 let use_pss = alg.eq_ignore_ascii_case("RSA-PSS");
                 let verified = if handle_id != 0 {
                     with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
@@ -1771,13 +1777,23 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                         .with_message("OperationError: PBKDF2 iterations must be greater than 0")
                         .into());
                 }
-                let fuel_cost = ((iterations_or_n as u64) / 100).max(10);
+                let blocks = byte_len.div_ceil(32).max(1) as u64;
+                let fuel_cost = ((iterations_or_n as u64).saturating_mul(blocks) / 100).max(10);
                 if let Err(msg) = consume_crypto_kdf_fuel(fuel_cost) {
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
                 let derived =
                     pbkdf2_derive_bytes(&hash, &secret, &salt, iterations_or_n as u32, byte_len)
-                        .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                        .map_err(|msg| {
+                            if msg.contains("sandbox memory limit") {
+                                JsNativeError::range().with_message(msg)
+                            } else {
+                                JsNativeError::error().with_message(msg)
+                            }
+                        })?;
+                if let Err(msg) = try_consume_isolate_memory(derived.len()) {
+                    return Err(JsNativeError::range().with_message(msg).into());
+                }
                 return bytes_to_js_array_buffer(&derived, context);
             }
 
@@ -1785,8 +1801,17 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 if let Err(msg) = consume_crypto_kdf_fuel(15) {
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
-                let derived = hkdf_derive_bytes(&hash, &secret, &salt, &info, byte_len)
-                    .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                let derived =
+                    hkdf_derive_bytes(&hash, &secret, &salt, &info, byte_len).map_err(|msg| {
+                        if msg.contains("sandbox memory limit") {
+                            JsNativeError::range().with_message(msg)
+                        } else {
+                            JsNativeError::error().with_message(msg)
+                        }
+                    })?;
+                if let Err(msg) = try_consume_isolate_memory(derived.len()) {
+                    return Err(JsNativeError::range().with_message(msg).into());
+                }
                 return bytes_to_js_array_buffer(&derived, context);
             }
 
@@ -1822,7 +1847,16 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                     byte_len,
                     maxmem,
                 )
-                .map_err(|msg| JsNativeError::error().with_message(msg))?;
+                .map_err(|msg| {
+                    if msg.contains("sandbox memory limit") {
+                        JsNativeError::range().with_message(msg)
+                    } else {
+                        JsNativeError::error().with_message(msg)
+                    }
+                })?;
+                if let Err(msg) = try_consume_isolate_memory(derived.len()) {
+                    return Err(JsNativeError::range().with_message(msg).into());
+                }
                 return bytes_to_js_array_buffer(&derived, context);
             }
 

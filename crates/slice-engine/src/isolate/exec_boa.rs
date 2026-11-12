@@ -149,6 +149,8 @@ fn scrub_after_prewarm(realm: &mut WarmBoaRealm, prewarm_flags: (bool, bool, boo
     BOA_STDOUT.with(|out| out.borrow_mut().clear());
     BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
     BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
+    BOA_FUEL_BUDGET.with(|f| f.set((0, u64::MAX)));
+    BOA_KV_MEM_BUDGET.with(|m| m.set((0, usize::MAX)));
 }
 
 impl SliceIsolate {
@@ -659,6 +661,8 @@ impl SliceIsolate {
 
         let wu_queued = BOA_WAIT_UNTIL_COUNT.with(|c| c.get());
         let clear_wu_and_release = |mut r: WarmBoaRealm| {
+            BOA_FUEL_BUDGET.with(|f| f.set((0, u64::MAX)));
+            BOA_KV_MEM_BUDGET.with(|m| m.set((0, usize::MAX)));
             if wu_queued > 0 || r.has_pending_wu {
                 call_realm_ctl(&mut r, REALM_CTL_RESET_WU, false);
                 r.has_pending_wu = false;
@@ -669,6 +673,8 @@ impl SliceIsolate {
 
         if !ses_mutated_target.is_empty() {
             // Quarantine: never return a realm whose SES intrinsics were mutated back to BOA_CONTEXT_POOL.
+            BOA_FUEL_BUDGET.with(|f| f.set((0, u64::MAX)));
+            BOA_KV_MEM_BUDGET.with(|m| m.set((0, usize::MAX)));
             BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
             drop(realm);
             return Err(SandboxViolation::IntrinsicMutationBlocked {
@@ -686,7 +692,7 @@ impl SliceIsolate {
             clear_wu_and_release(realm);
             return Err(violation);
         }
-        let wasm_fuel = BOA_FUEL_BUDGET.with(|f| f.get().0);
+        let wasm_fuel = BOA_FUEL_BUDGET.with(|f| f.replace((0, u64::MAX)).0);
         if wasm_fuel > 0 {
             if let Err(v) = self.compartment.consume_fuel(wasm_fuel) {
                 clear_wu_and_release(realm);
@@ -700,7 +706,7 @@ impl SliceIsolate {
                 return Err(v);
             }
         }
-        let kv_used = BOA_KV_MEM_BUDGET.with(|m| m.get().0);
+        let kv_used = BOA_KV_MEM_BUDGET.with(|m| m.replace((0, usize::MAX)).0);
         if kv_used > 0 {
             if let Err(v) = self.compartment.alloc_memory(kv_used) {
                 self.compartment.memory_used_bytes =

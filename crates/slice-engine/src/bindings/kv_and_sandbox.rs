@@ -6,8 +6,8 @@ use crate::boa_realm::{
 use crate::event_loop::{clear_event_loop_state, drive_event_loop_to_completion};
 use crate::isolate::{SandboxEvalOptions, SliceIsolate};
 use crate::state_and_kv::{
-    checkpoint_tenant_state, edge_kv_del, edge_kv_get, edge_kv_incr, edge_kv_set,
-    release_tenant_checkpoint, restore_tenant_state,
+    checkpoint_tenant_state, edge_kv_contains_live_key, edge_kv_del_bytes, edge_kv_get,
+    edge_kv_incr, edge_kv_set, release_tenant_checkpoint, restore_tenant_state,
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
@@ -116,8 +116,14 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            let removed = BOA_ACTIVE_TENANT.with(|t| edge_kv_del(&t.borrow(), &key));
-            Ok(BoaVal::from(removed))
+            let freed = BOA_ACTIVE_TENANT.with(|t| edge_kv_del_bytes(&t.borrow(), &key));
+            if let Some(bytes) = freed {
+                BOA_KV_MEM_BUDGET.with(|m| {
+                    let (used, limit) = m.get();
+                    m.set((used.saturating_sub(bytes), limit));
+                });
+            }
+            Ok(BoaVal::from(freed.is_some()))
         }),
     );
 
@@ -136,6 +142,36 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 .and_then(|v| v.as_number())
                 .map(|n| n as i64)
                 .unwrap_or(1);
+            let exists = BOA_ACTIVE_TENANT.with(|t| edge_kv_contains_live_key(&t.borrow(), &key));
+            if !exists {
+                let added = key.len().saturating_add(24);
+                let exceeded = BOA_KV_MEM_BUDGET.with(|m| {
+                    let (used, limit) = m.get();
+                    let next = used.saturating_add(added);
+                    if next > limit {
+                        Some((next, limit))
+                    } else {
+                        m.set((next, limit));
+                        None
+                    }
+                });
+                if let Some((requested, limit)) = exceeded {
+                    let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+                    let violation = SandboxViolation::MemoryCeilingExceeded {
+                        tenant_id: tenant,
+                        requested,
+                        limit,
+                    };
+                    let msg = violation.to_string();
+                    BOA_VIOLATION.with(|v| {
+                        if v.borrow().is_none() {
+                            *v.borrow_mut() = Some(violation);
+                        }
+                    });
+                    context.runtime_limits_mut().set_loop_iteration_limit(1);
+                    return Err(boa_engine::JsNativeError::range().with_message(msg).into());
+                }
+            }
             let next = BOA_ACTIVE_TENANT.with(|t| edge_kv_incr(&t.borrow(), &key, delta));
             Ok(BoaVal::from(next as f64))
         }),

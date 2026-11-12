@@ -205,7 +205,7 @@ slice run ./untrusted_plugin.ts --no-checkpoints
 
 ### 5.2 What Happens When a Limit Is Exceeded
 - **Infinite Loop / CPU DoS (`while (true) {}`):** Preempted deterministically on the exact instruction that exceeds `fuel`, returning `SandboxViolation::CpuFuelExhausted` (or `HTTP 403 Forbidden` in `slice serve`) while all other worker threads and tenants continue unaffected.
-- **Memory Exhaustion (`Slice.kv` / allocations / buffers):** Any `Slice.kv.set(key, val)`, array/string expansion, or compartment allocation that pushes `memory_used_bytes` past `memory_limit_bytes` traps immediately with `SandboxViolation::MemoryCeilingExceeded`.
+- **Memory Exhaustion (`Slice.kv` / allocations / buffers):** Any `Slice.kv.set(key, val)` / `Slice.kv.incr(key)`, WebAssembly linear memory page growth, array/string expansion, or compartment allocation that pushes `memory_used_bytes` past `memory_limit_bytes` traps immediately with `SandboxViolation::MemoryCeilingExceeded`.
 - **Checkpoint Quota Enforcement:** If guest code calls `Slice.checkpoint()` when `--no-checkpoints` is set or after reaching `--max-checkpoints=<N>`, Slice blocks the unauthorized snapshot call immediately.
 
 ---

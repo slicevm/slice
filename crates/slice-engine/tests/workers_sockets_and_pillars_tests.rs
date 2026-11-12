@@ -1395,3 +1395,257 @@ runTests();
     assert_eq!(out["wResult"]["msgReply"]["replyNegInfOk"], true);
     assert_eq!(out["immediateExitCode"], 17);
 }
+
+#[test]
+fn test_wasm_linear_memory_page_growth_enforces_64kb_per_page() {
+    let js = r#"
+const mem = new WebAssembly.Memory({ initial: 2, maximum: 128 });
+mem.grow(8); // 10 pages total = 640 KB (fits inside 2 MB cage)
+mem.grow(30); // 40 pages total = 2.56 MB (must exceed 2 MB cage)
+"#;
+    let bundled = slice_cas::strip_typescript_and_normalize(js, true);
+    let bc = crate::compile_source_to_bytecode(&bundled);
+    let mut isolate = SliceIsolate::spawn(
+        "wasm-64kb-page-cage",
+        1,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        2 * 1024 * 1024,
+    );
+    let err = isolate
+        .execute_bytecode(&bc, None)
+        .expect_err("40 Wasm pages (2.56 MB) must exceed 2 MB isolate memory ceiling");
+    assert!(
+        matches!(err, SandboxViolation::MemoryCeilingExceeded { .. }),
+        "expected MemoryCeilingExceeded, got: {:?}",
+        err
+    );
+}
+
+#[test]
+fn test_worker_pool_cannot_exceed_parent_fuel_or_memory_budget() {
+    let js = r#"
+const { Worker } = require("node:worker_threads");
+const workers = [];
+for (let i = 0; i < 16; i++) {
+    workers.push(
+        new Worker("let acc = 0; for (let k = 0; k < 500000; k++) { acc += k; }", { eval: true })
+    );
+}
+"#;
+    let bundled = slice_cas::strip_typescript_and_normalize(js, true);
+    let bc = crate::compile_source_to_bytecode(&bundled);
+    let mut isolate = SliceIsolate::spawn(
+        "worker-fuel-cage",
+        1,
+        CapabilityToken::pure_compute(),
+        200_000,
+        8 * 1024 * 1024,
+    );
+    let res = isolate.execute_bytecode(&bc, None);
+    assert!(
+        matches!(res, Err(SandboxViolation::CpuFuelExhausted { .. }))
+            || isolate.compartment.fuel_consumed <= 200_000,
+        "spawning 16 workers inside a 200k-fuel isolate must never exceed parent fuel: {:?}",
+        res
+    );
+}
+
+#[test]
+fn test_deflate_empty_blocks_kdf_memory_kv_incr_and_tier0_alloc_limits() {
+    // 1. Empty stored DEFLATE blocks (each 5 bytes: BFINAL=0, LEN=0, NLEN=0xFFFF) exceeding empty-block limit
+    let mut bomb = Vec::with_capacity(6005);
+    for _ in 0..1200 {
+        bomb.extend_from_slice(&[0x00, 0x00, 0x00, 0xFF, 0xFF]);
+    }
+    bomb.extend_from_slice(&[0x01, 0x00, 0x00, 0xFF, 0xFF]);
+    let deflate_err = crate::intrinsics::zlib_decompress_bytes(&bomb, "deflate-raw")
+        .expect_err("thousands of zero-output DEFLATE blocks must be rejected");
+    assert!(
+        deflate_err.contains("empty block limit"),
+        "unexpected error: {}",
+        deflate_err
+    );
+
+    // 2. Multi-block stream inside a low-fuel isolate aborts mid-stream on CPU fuel
+    let mut dyn_stream = Vec::with_capacity(3005);
+    for _ in 0..500 {
+        // 1-byte stored block (`BFINAL=0, BTYPE=00, LEN=1, NLEN=0xFFFE, 'A'`): 4 fuel ticks/block -> 2000 fuel > 1500
+        dyn_stream.extend_from_slice(&[0x00, 0x01, 0x00, 0xFE, 0xFF, b'A']);
+    }
+    dyn_stream.extend_from_slice(&[0x01, 0x00, 0x00, 0xFF, 0xFF]);
+    let b64_stream = crate::intrinsics::base64_encode(&dyn_stream, false);
+    let js_inflate = format!(
+        "const zlib = require('node:zlib'); zlib.inflateRawSync(Buffer.from('{}', 'base64'));",
+        b64_stream
+    );
+    let bundled_inflate = slice_cas::strip_typescript_and_normalize(&js_inflate, true);
+    let bc_inflate = crate::compile_source_to_bytecode(&bundled_inflate);
+    let mut low_fuel_iso = SliceIsolate::spawn(
+        "deflate-fuel-cage",
+        1,
+        CapabilityToken::pure_compute(),
+        1_500,
+        8 * 1024 * 1024,
+    );
+    let inflate_res = low_fuel_iso.execute_bytecode(&bc_inflate, None);
+    assert!(
+        matches!(inflate_res, Err(SandboxViolation::CpuFuelExhausted { .. })),
+        "expected CpuFuelExhausted mid-stream during DEFLATE decode, got: {:?}",
+        inflate_res
+    );
+
+    // 3. Slice.kv.incr new-key flood charges memory budget and traps MemoryCeilingExceeded
+    let kv_js = r#"
+for (let i = 0; i < 20000; i++) {
+    Slice.kv.incr("counter_key_prefix_" + i, 1);
+}
+"#;
+    let bundled_kv = slice_cas::strip_typescript_and_normalize(kv_js, true);
+    let bc_kv = crate::compile_source_to_bytecode(&bundled_kv);
+    let mut kv_iso = SliceIsolate::spawn(
+        "kv-incr-mem-cage",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        64 * 1024,
+    );
+    let kv_err = kv_iso
+        .execute_bytecode(&bc_kv, None)
+        .expect_err("unbounded new keys via Slice.kv.incr must hit MemoryCeilingExceeded");
+    assert!(
+        matches!(kv_err, SandboxViolation::MemoryCeilingExceeded { .. }),
+        "expected MemoryCeilingExceeded, got: {:?}",
+        kv_err
+    );
+
+    // 4. scrypt working-set memory check against isolate memory ceiling
+    let scrypt_js = r#"
+const crypto = require("node:crypto");
+crypto.scryptSync("password", "salt", 32, { N: 16384, r: 8, p: 1, maxmem: 33554432 });
+"#;
+    let bundled_scrypt = slice_cas::strip_typescript_and_normalize(scrypt_js, true);
+    let bc_scrypt = crate::compile_source_to_bytecode(&bundled_scrypt);
+    let mut scrypt_iso = SliceIsolate::spawn(
+        "scrypt-mem-cage",
+        1,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        4 * 1024 * 1024,
+    );
+    let scrypt_res = scrypt_iso.execute_bytecode(&bc_scrypt, None);
+    assert!(
+        matches!(
+            scrypt_res,
+            Err(SandboxViolation::MemoryCeilingExceeded { .. })
+        ),
+        "16 MB scrypt working set must exceed 4 MB isolate cage: {:?}",
+        scrypt_res
+    );
+
+    // 5. Tier-0 AST evaluator charges Array.join string expansion against compartment memory
+    let tier0_stmts = vec![
+        crate::value_and_ast::Stmt::VarDecl {
+            name: "s".to_string(),
+            init: Some(crate::value_and_ast::Expr::Literal(
+                crate::value_and_ast::JsValue::str("x".repeat(2048)),
+            )),
+            is_export: false,
+        },
+        crate::value_and_ast::Stmt::VarDecl {
+            name: "arr".to_string(),
+            init: Some(crate::value_and_ast::Expr::ArrayLit(vec![
+                crate::value_and_ast::Expr::Ident("s".to_string());
+                16
+            ])),
+            is_export: false,
+        },
+        crate::value_and_ast::Stmt::ExprStmt(crate::value_and_ast::Expr::Call {
+            callee: Box::new(crate::value_and_ast::Expr::Member {
+                object: Box::new(crate::value_and_ast::Expr::Ident("arr".to_string())),
+                property: "join".to_string(),
+            }),
+            args: vec![crate::value_and_ast::Expr::Literal(
+                crate::value_and_ast::JsValue::str(","),
+            )],
+        }),
+    ];
+    let mut tier0_iso = SliceIsolate::spawn(
+        "tier0-join-cage",
+        1,
+        CapabilityToken::pure_compute(),
+        100_000,
+        16 * 1024,
+    );
+    let tier0_res = tier0_iso.eval_block(&tier0_stmts);
+    assert!(
+        matches!(
+            tier0_res,
+            Err(SandboxViolation::MemoryCeilingExceeded { .. })
+        ),
+        "32 KB Tier-0 Array.join must exceed 16 KB isolate cage: {:?}",
+        tier0_res
+    );
+}
+
+#[test]
+fn test_tcp_socket_sustained_streaming_exceeding_isolate_memory_limit() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback echo server");
+    let port = listener.local_addr().unwrap().port();
+    let server_handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 32 * 1024];
+            while let Ok(n) = stream.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                if stream.write_all(&buf[..n]).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Stream 2,100 * 16 KB = 33.6 MB round-trip (67.2 MB wire I/O) inside a 16 MB isolate!
+    let js = format!(
+        r#"
+async function runStream() {{
+    const sock = Slice.connect({{ hostname: "127.0.0.1", port: {port} }});
+    const writer = sock.writable.getWriter();
+    const reader = sock.readable.getReader();
+    const chunk = new Uint8Array(16384);
+    chunk.fill(65);
+    let totalRead = 0;
+    let carry = 0;
+    for (let i = 0; i < 2100; i++) {{
+        await writer.write(chunk);
+        let got = carry;
+        carry = 0;
+        while (got < 16384) {{
+            const {{ value, done }} = await reader.read();
+            if (done || !value || value.byteLength === 0) throw new Error("unexpected EOF");
+            got += value.byteLength;
+        }}
+        if (got > 16384) carry = got - 16384;
+        totalRead += 16384;
+    }}
+    totalRead += carry;
+    await sock.close();
+    console.log(String(totalRead));
+}}
+runStream();
+"#
+    );
+    let bundled = slice_cas::strip_typescript_and_normalize(&js, true);
+    let bc = crate::compile_source_to_bytecode(&bundled);
+    let caps = CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", port));
+    let mut isolate = SliceIsolate::spawn("tcp-stream-33mb", 1, caps, 50_000_000, 16 * 1024 * 1024);
+    let m = isolate
+        .execute_bytecode(&bc, None)
+        .expect("sustained 16 KB TCP streaming past 32 MB must succeed inside 16 MB isolate");
+    let _ = server_handle.join();
+    assert_eq!(m.stdout, vec![(2100 * 16384).to_string()]);
+}
