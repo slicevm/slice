@@ -342,15 +342,17 @@ fn resolve_worker_script_source(specifier_or_code: &str, is_eval: bool) -> Resul
         return Ok(String::from_utf8_lossy(&vfs_src).into_owned());
     }
 
-    if crate::bindings::fs::is_vfs_tombstoned(&norm) {
+    if crate::bindings::fs::is_vfs_tombstoned(&norm)
+        || crate::bindings::fs::is_host_unc_blocked(raw_path)
+    {
         return Err(format!(
-            "WorkerError: Cannot read worker module '{}': file removed in VFS",
+            "WorkerError: Cannot read worker module '{}': file removed or blocked in VFS",
             raw_path
         ));
     }
 
     // 2. Fallback to host filesystem if OCap permits
-    std::fs::read_to_string(raw_path).map_err(|e| {
+    std::fs::read_to_string(&norm).map_err(|e| {
         format!(
             "WorkerError: Cannot read worker module '{}': {}",
             raw_path, e

@@ -2,52 +2,83 @@
 
 use std::borrow::Cow;
 
+#[inline]
+fn has_dotdot_segment(path: &str) -> bool {
+    if memchr::memmem::find(path.as_bytes(), b"..").is_none() {
+        return false;
+    }
+    let trimmed = path.trim();
+    let rest = if trimmed.len() >= 2
+        && trimmed.as_bytes()[0].is_ascii_alphabetic()
+        && trimmed.as_bytes()[1] == b':'
+    {
+        &trimmed[2..]
+    } else {
+        trimmed
+    };
+    rest.split(['/', '\\']).any(|seg| seg == "..")
+}
+
 /// Checks whether a raw VFS candidate path contains forbidden sequences (`SBX-SEC-01`):
-/// - `..` parent traversal segments
+/// - `..` parent traversal segments (allowing non-traversal filenames like `[...slug].tsx`)
 /// - Null bytes (`\0`)
-/// - Win32 device namespace prefixes (`\\.\` or `//./`)
-/// - Win32/SMB UNC network share paths (`\\?\UNC\`, `//?/UNC/`, or `\\server\share`)
+/// - NT native namespace prefixes (`\??\` or `/??/`)
+/// - Win32 device namespace prefixes (`\\.\`, `//./`, or non-drive `\\?\` / `//?/` such as `GLOBALROOT` or `UNC`)
+/// - Raw Windows SMB UNC network share paths (`\\server\share`)
+/// - Windows drive-relative paths (`C:file.txt` without a root slash after `:`)
 #[inline]
 pub fn is_rejected_vfs_candidate(candidate_path: &str) -> bool {
     let bytes = candidate_path.as_bytes();
-    if memchr::memmem::find(bytes, b"..").is_some() || memchr::memchr(0, bytes).is_some() {
+    if memchr::memchr(0, bytes).is_some() || has_dotdot_segment(candidate_path) {
         return true;
     }
     let trimmed = candidate_path.trim_start();
     let tb = trimmed.as_bytes();
-    if tb.len() >= 4 {
+
+    // Reject Windows drive-relative paths (`C:secret.txt` or bare `C:`) across all platforms
+    if tb.len() >= 2
+        && tb[0].is_ascii_alphabetic()
+        && tb[1] == b':'
+        && !matches!(tb.get(2), Some(b'/' | b'\\'))
+    {
+        return true;
+    }
+
+    // Reject NT native `\??\` / `/??/` namespace
+    if tb.len() >= 3
+        && (tb[0] == b'\\' || tb[0] == b'/')
+        && tb[1] == b'?'
+        && tb[2] == b'?'
+        && (tb.len() == 3 || tb[3] == b'\\' || tb[3] == b'/')
+    {
+        return true;
+    }
+
+    if tb.len() >= 3 && (tb[0] == b'\\' || tb[0] == b'/') && (tb[1] == b'\\' || tb[1] == b'/') {
         // Reject `\\.\` or `//./` Win32 device namespace
-        if (tb[0] == b'\\' || tb[0] == b'/')
-            && (tb[1] == b'\\' || tb[1] == b'/')
-            && tb[2] == b'.'
-            && (tb[3] == b'\\' || tb[3] == b'/')
-        {
+        if tb[2] == b'.' && (tb.len() == 3 || tb[3] == b'\\' || tb[3] == b'/') {
             return true;
         }
-        // Reject `\\?\UNC\` or `//?/UNC/` network share prefix
-        if (tb[0] == b'\\' || tb[0] == b'/')
-            && (tb[1] == b'\\' || tb[1] == b'/')
-            && tb[2] == b'?'
-            && (tb[3] == b'\\' || tb[3] == b'/')
-        {
-            let rest = &tb[4..];
-            if rest.len() >= 4
-                && rest[0].eq_ignore_ascii_case(&b'u')
-                && rest[1].eq_ignore_ascii_case(&b'n')
-                && rest[2].eq_ignore_ascii_case(&b'c')
-                && (rest[3] == b'\\' || rest[3] == b'/')
-            {
+        // Reject `\\?\` or `//?/` extended prefix UNLESS followed by an absolute drive root (`X:\` or `X:/`)
+        if tb[2] == b'?' && (tb.len() == 3 || tb[3] == b'\\' || tb[3] == b'/') {
+            let is_valid_extended_drive = tb.len() >= 7
+                && tb[4].is_ascii_alphabetic()
+                && tb[5] == b':'
+                && (tb[6] == b'\\' || tb[6] == b'/');
+            if !is_valid_extended_drive {
                 return true;
             }
         }
     }
-    // Reject raw Windows UNC network shares `\\server\share` (two leading backslashes not followed by `?\X:`)
+
+    // Reject raw Windows UNC network shares `\\server\share` (two leading backslashes not followed by `?\X:\`)
     if tb.len() >= 2 && tb[0] == b'\\' && tb[1] == b'\\' {
-        let is_extended_drive = tb.len() >= 6
+        let is_extended_drive = tb.len() >= 7
             && tb[2] == b'?'
             && (tb[3] == b'\\' || tb[3] == b'/')
             && tb[4].is_ascii_alphabetic()
-            && tb[5] == b':';
+            && tb[5] == b':'
+            && (tb[6] == b'\\' || tb[6] == b'/');
         if !is_extended_drive {
             return true;
         }
@@ -216,12 +247,23 @@ pub fn normalize_vfs_path_lexical(raw: &str) -> String {
 }
 
 #[inline]
+fn is_abs_normalized_vfs_path(norm: &str) -> bool {
+    norm.starts_with('/') || (norm.len() >= 3 && norm.as_bytes()[1] == b':')
+}
+
+#[inline]
 fn path_starts_with_dir_boundary(norm_candidate: &str, norm_prefix: &str) -> bool {
     if norm_prefix == "*" || norm_prefix == "/" {
         return true;
     }
     if norm_candidate == norm_prefix {
         return true;
+    }
+    if norm_prefix == "." {
+        return !norm_candidate.is_empty()
+            && !is_abs_normalized_vfs_path(norm_candidate)
+            && norm_candidate != ".."
+            && !norm_candidate.starts_with("../");
     }
     if let Some(rem) = norm_candidate.strip_prefix(norm_prefix) {
         return norm_prefix.ends_with('/') || rem.starts_with('/');
@@ -232,10 +274,14 @@ fn path_starts_with_dir_boundary(norm_candidate: &str, norm_prefix: &str) -> boo
 /// Checks a pre-normalized candidate path (`norm_cand`) against `allowed_prefix`.
 #[inline]
 pub fn vfs_normalized_candidate_matches_prefix(norm_cand: &str, allowed_prefix: &str) -> bool {
-    if allowed_prefix == "*" || allowed_prefix == "/" {
+    let trimmed_pref = allowed_prefix.trim();
+    if trimmed_pref.is_empty() {
+        return false;
+    }
+    if trimmed_pref == "*" || trimmed_pref == "/" {
         return true;
     }
-    let norm_pref = normalize_vfs_path_cow(allowed_prefix);
+    let norm_pref = normalize_vfs_path_cow(trimmed_pref);
     if path_starts_with_dir_boundary(norm_cand, &norm_pref) {
         return true;
     }
@@ -256,10 +302,8 @@ pub fn vfs_normalized_candidate_matches_prefix(norm_cand: &str, allowed_prefix: 
     }
 
     // Relative-vs-absolute workspace resolution against `current_dir()`
-    let cand_is_abs =
-        norm_cand.starts_with('/') || (norm_cand.len() >= 3 && norm_cand.as_bytes()[1] == b':');
-    let pref_is_abs =
-        norm_pref.starts_with('/') || (norm_pref.len() >= 3 && norm_pref.as_bytes()[1] == b':');
+    let cand_is_abs = is_abs_normalized_vfs_path(norm_cand);
+    let pref_is_abs = is_abs_normalized_vfs_path(&norm_pref);
     if cand_is_abs != pref_is_abs {
         if let Ok(cwd) = std::env::current_dir() {
             let norm_cwd = normalize_vfs_path_lexical(&cwd.to_string_lossy());
@@ -303,11 +347,15 @@ pub fn vfs_prefix_matches(candidate_path: &str, allowed_prefix: &str) -> bool {
     if is_rejected_vfs_candidate(candidate_path) {
         return false;
     }
-    if allowed_prefix == "*" || allowed_prefix == "/" {
+    let trimmed_pref = allowed_prefix.trim();
+    if trimmed_pref.is_empty() {
+        return false;
+    }
+    if trimmed_pref == "*" || trimmed_pref == "/" {
         return true;
     }
     let norm_cand = normalize_vfs_path_cow(candidate_path);
-    vfs_normalized_candidate_matches_prefix(&norm_cand, allowed_prefix)
+    vfs_normalized_candidate_matches_prefix(&norm_cand, trimmed_pref)
 }
 
 /// Checks whether a requested subprocess binary (`requested`) matches an allowlisted
@@ -327,9 +375,32 @@ pub fn exec_binary_matches(requested: &str, allowed: &str) -> bool {
     let allow = allowed.trim();
     if req.is_empty()
         || allow.is_empty()
-        || memchr::memmem::find(req.as_bytes(), b"..").is_some()
+        || has_dotdot_segment(req)
         || req.bytes().any(|b| {
-            b < 0x20 || matches!(b, b';' | b'|' | b'&' | b'`' | b'$' | b'>' | b'<' | b'\x7f')
+            b < 0x20
+                || matches!(
+                    b,
+                    b';' | b'|'
+                        | b'&'
+                        | b'`'
+                        | b'$'
+                        | b'>'
+                        | b'<'
+                        | b'('
+                        | b')'
+                        | b'*'
+                        | b'?'
+                        | b'['
+                        | b']'
+                        | b'{'
+                        | b'}'
+                        | b'~'
+                        | b'!'
+                        | b'#'
+                        | b'\''
+                        | b'"'
+                        | b'\x7f'
+                )
         })
     {
         return false;

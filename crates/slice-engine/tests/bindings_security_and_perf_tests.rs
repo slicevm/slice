@@ -665,3 +665,169 @@ fn test_worker_fs_capability_attenuation_and_symlink_write_containment() {
         SandboxViolation::FsWriteDenied { .. }
     ));
 }
+
+#[test]
+fn test_child_process_custom_shell_metacharacters_and_interpreter_env_filtering() {
+    let echo_only = CapabilityToken::pure_compute().with_exec_binary("echo");
+
+    // 1. Custom `options.shell` executable path must not piggyback on `echo` allowance
+    let custom_shell_err = eval_ts_with_caps(
+        "cp-custom-shell",
+        r#"
+        import cp from "node:child_process";
+        cp.spawnSync("echo", ["ok"], { shell: "/usr/bin/python3" });
+        "#,
+        echo_only.clone(),
+    )
+    .expect_err("custom shell binary without explicit ExecCap must fail");
+    assert!(
+        matches!(&custom_shell_err, SandboxViolation::ExecDenied { binary, .. } if binary == "/usr/bin/python3"),
+        "expected ExecDenied(/usr/bin/python3), got: {:?}",
+        custom_shell_err
+    );
+
+    // 2. Shell command injection via embedded newline, globbing, or backslash must require shell ExecCap
+    for bad_cmd in [
+        "echo ok\\n/usr/bin/id",
+        "echo *.json",
+        "echo \\\\$HOME",
+        "echo ~root",
+    ] {
+        let script = format!(
+            "import cp from 'node:child_process';\ncp.execSync(\"{}\");\n",
+            bad_cmd
+        );
+        let err = eval_ts_with_caps("cp-meta-shell", &script, echo_only.clone()).expect_err(
+            "shell metacharacter or newline command must require explicit shell ExecCap",
+        );
+        assert!(
+            matches!(err, SandboxViolation::ExecDenied { .. }),
+            "expected ExecDenied for {}, got: {:?}",
+            bad_cmd,
+            err
+        );
+    }
+
+    // 3. Interpreter injection env vars (`NODE_OPTIONS`, `PYTHONPATH`, `PATH`, `IFS`, `BASH_FUNC_*`)
+    // are stripped from child `opts.env` unless explicitly granted in `EnvCap`.
+    #[cfg(unix)]
+    {
+        let printenv_caps = CapabilityToken::pure_compute().with_exec_binary("/usr/bin/env");
+        let out = eval_ts_with_caps(
+            "cp-env-filter",
+            r#"
+            import cp from "node:child_process";
+            const res = cp.spawnSync("/usr/bin/env", [], {
+                encoding: "utf8",
+                env: {
+                    SAFE_CUSTOM_VAR: "allowed_val",
+                    NODE_OPTIONS: "--require /tmp/pwn.js",
+                    PYTHONPATH: "/tmp/evil",
+                    IFS: "/",
+                    "BASH_FUNC_myfn%%": "() { id; }"
+                }
+            });
+            console.log(String(res.stdout));
+            "#,
+            printenv_caps,
+        )
+        .unwrap();
+        assert!(out.contains("SAFE_CUSTOM_VAR=allowed_val"));
+        assert!(!out.contains("NODE_OPTIONS="));
+        assert!(!out.contains("PYTHONPATH="));
+        assert!(!out.contains("BASH_FUNC_"));
+    }
+}
+
+#[test]
+fn test_vfs_root_readdir_symlink_eloop_relative_symlinks_and_directory_rename() {
+    // 1. Relative symlink target anchored outside capability zone is rejected at creation time
+    let scoped_caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/workspace")
+        .with_write_prefix("/workspace");
+    let escape_err = eval_ts_with_caps(
+        "vfs-rel-symlink-escape",
+        r#"
+        import * as fs from "node:fs";
+        fs.mkdirSync("/workspace/sub", { recursive: true });
+        fs.symlinkSync("../../etc/passwd", "/workspace/sub/escape_link");
+        "#,
+        scoped_caps.clone(),
+    )
+    .expect_err("relative symlink escaping /workspace must trap FsReadDenied");
+    assert!(matches!(escape_err, SandboxViolation::FsReadDenied { .. }));
+
+    // 2. Root readdirSync("/"), relative symlinks inside scope, 9-hop ELOOP, symlink rename, and directory subtree rename
+    let root_caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/")
+        .with_write_prefix("/workspace");
+    let out = eval_ts_with_caps(
+        "vfs-rich-ops",
+        r#"
+        import * as fs from "node:fs";
+
+        fs.mkdirSync("/workspace/tree/nested", { recursive: true });
+        fs.writeFileSync("/workspace/tree/root.txt", "root-val");
+        fs.writeFileSync("/workspace/tree/nested/leaf.txt", "leaf-val");
+
+        // Root readdirSync("/") must see "workspace"
+        const rootEntries = fs.readdirSync("/");
+        const sawWorkspaceAtRoot = rootEntries.includes("workspace");
+
+        // Relative symlink inside /workspace/tree
+        fs.symlinkSync("root.txt", "/workspace/tree/rel_link.txt");
+        const relRead = fs.readFileSync("/workspace/tree/rel_link.txt", "utf8");
+        const relTarget = fs.readlinkSync("/workspace/tree/rel_link.txt");
+
+        // Rename symlink itself without modifying or deleting target
+        fs.renameSync("/workspace/tree/rel_link.txt", "/workspace/tree/moved_link.txt");
+        const linkMovedOk = !fs.existsSync("/workspace/tree/rel_link.txt")
+            && fs.lstatSync("/workspace/tree/moved_link.txt").isSymbolicLink()
+            && fs.readFileSync("/workspace/tree/moved_link.txt", "utf8") === "root-val"
+            && fs.readFileSync("/workspace/tree/root.txt", "utf8") === "root-val";
+
+        // Directory subtree rename
+        fs.renameSync("/workspace/tree", "/workspace/renamed_tree");
+        const dirRenamedOk = !fs.existsSync("/workspace/tree")
+            && !fs.existsSync("/workspace/tree/nested/leaf.txt")
+            && fs.readFileSync("/workspace/renamed_tree/nested/leaf.txt", "utf8") === "leaf-val"
+            && fs.readFileSync("/workspace/renamed_tree/moved_link.txt", "utf8") === "root-val";
+
+        // 9-hop symlink loop throws ELOOP (without leaking internal sentinel) and existsSync returns false
+        fs.symlinkSync("/workspace/loop_b", "/workspace/loop_a");
+        fs.symlinkSync("/workspace/loop_a", "/workspace/loop_b");
+        let eloopCode = "";
+        let eloopMsg = "";
+        try {
+            fs.readFileSync("/workspace/loop_a", "utf8");
+        } catch (err: any) {
+            eloopCode = String(err.code || "");
+            eloopMsg = String(err.message || "");
+        }
+        const loopExists = fs.existsSync("/workspace/loop_a");
+
+        console.log(JSON.stringify({
+            sawWorkspaceAtRoot,
+            relRead,
+            relTarget,
+            linkMovedOk,
+            dirRenamedOk,
+            eloopCode,
+            leakedSentinel: eloopMsg.includes("SLICE_SYMLINK"),
+            loopExists
+        }));
+        "#,
+        root_caps,
+    )
+    .unwrap();
+
+    let parsed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(parsed["sawWorkspaceAtRoot"], true);
+    assert_eq!(parsed["relRead"], "root-val");
+    assert_eq!(parsed["relTarget"], "root.txt");
+    assert_eq!(parsed["linkMovedOk"], true);
+    assert_eq!(parsed["dirRenamedOk"], true);
+    assert_eq!(parsed["eloopCode"], "ELOOP");
+    assert_eq!(parsed["leakedSentinel"], false);
+    assert_eq!(parsed["loopExists"], false);
+}

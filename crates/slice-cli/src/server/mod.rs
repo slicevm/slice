@@ -20,13 +20,18 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 
 pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
-    let mut exec_cfg = ResolvedExecutionConfig::from_cli_args(args)?;
     let mut smoke_test = false;
     let mut max_requests_opt: Option<usize> = None;
     let mut tenant_dir_opt: Option<PathBuf> = None;
     let mut target_opt: Option<String> = None;
 
-    for arg in args {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--config" {
+            i += 2;
+            continue;
+        }
         if let Some(m) = arg.strip_prefix("--max-requests=") {
             max_requests_opt = m.parse().ok();
         } else if let Some(td) = arg.strip_prefix("--tenant-dir=") {
@@ -36,7 +41,18 @@ pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
         } else if !arg.starts_with('-') && target_opt.is_none() {
             target_opt = Some(arg.clone());
         }
+        i += 1;
     }
+
+    let embedded_archive = if target_opt.is_none() {
+        MappedCasArchive::open_embedded_self().ok().flatten()
+    } else {
+        None
+    };
+    let load_ambient_cwd =
+        !target_opt.as_deref().is_some_and(|t| t.ends_with(".cas")) && embedded_archive.is_none();
+    let mut exec_cfg =
+        ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(args, load_ambient_cwd)?;
 
     // Pre-compile or map handler bytecode and extract any embedded CAS static assets
     let default_handler_src = r#"
@@ -49,7 +65,7 @@ console.log(route_res);
         if target.ends_with(".cas") {
             let archive = MappedCasArchive::open(p)?;
             if let Some(toml_str) = archive.get_manifest_toml() {
-                exec_cfg.apply_manifest_toml(toml_str, p.parent());
+                exec_cfg.apply_manifest_toml(toml_str, None);
             }
             static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
             let entry = archive
@@ -65,7 +81,7 @@ console.log(route_res);
             let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
             compile_source_to_bytecode(&bundled)
         }
-    } else if let Ok(Some(archive)) = MappedCasArchive::open_embedded_self() {
+    } else if let Some(archive) = embedded_archive {
         if let Some(toml_str) = archive.get_manifest_toml() {
             exec_cfg.apply_manifest_toml(toml_str, None);
         }

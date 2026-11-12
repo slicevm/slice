@@ -102,12 +102,30 @@ impl CapabilityToken {
     }
 
     pub fn with_read_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.allowed_read_prefixes.push(prefix.into());
+        let raw = prefix.into();
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let canon = if trimmed == "*" || trimmed == "/" {
+                trimmed.to_string()
+            } else {
+                crate::vfs::normalize_vfs_path_lexical(trimmed)
+            };
+            self.allowed_read_prefixes.push(canon);
+        }
         self
     }
 
     pub fn with_write_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.allowed_write_prefixes.push(prefix.into());
+        let raw = prefix.into();
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let canon = if trimmed == "*" || trimmed == "/" {
+                trimmed.to_string()
+            } else {
+                crate::vfs::normalize_vfs_path_lexical(trimmed)
+            };
+            self.allowed_write_prefixes.push(canon);
+        }
         self
     }
 

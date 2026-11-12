@@ -172,3 +172,75 @@ fn test_checkpoint_capability_toggling_and_max_limits() {
     let tenant_from_zero = TenantCompartment::new("cp-zero", 3, from_zero_cap, 10_000, 65536);
     assert!(tenant_from_zero.verify_checkpoint(0).is_ok());
 }
+
+#[test]
+fn test_vfs_drive_relative_device_namespaces_catchall_routes_and_dot_prefix() {
+    let broad = CapabilityToken::pure_compute()
+        .with_read_prefix("/")
+        .with_read_prefix("C:/");
+    let tenant_broad = TenantCompartment::new("vfs-edge", 1, broad, 10_000, 65536);
+
+    // Reject Windows drive-relative paths, NT native prefixes, and non-drive device namespaces
+    for rejected in [
+        "C:secret.txt",
+        "c:../secret.txt",
+        "D:",
+        r"\??\C:\Windows\win.ini",
+        "/??/C:/Windows/win.ini",
+        "//?/GLOBALROOT/Device/HarddiskVolume1/secret",
+        r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\secret",
+        "//?/UNC/fileserver/share/secret.txt",
+        r"\\?\C:relative_escape.txt",
+    ] {
+        assert!(
+            matches!(
+                tenant_broad.verify_fs_read(rejected),
+                Err(SandboxViolation::FsReadDenied { .. })
+            ),
+            "expected {} to be rejected by VFS canonicalizer",
+            rejected
+        );
+    }
+
+    // Extended-length absolute drive root (`\\?\C:\...`) remains valid when `C:/` is granted
+    assert!(tenant_broad
+        .verify_fs_read(r"\\?\C:\allowed\data.json")
+        .is_ok());
+
+    // Catch-all framework route segments (`[...slug]`) and `foo..bar` filenames are allowed,
+    // while actual `..` parent traversal segments remain blocked.
+    let app_caps = CapabilityToken::pure_compute().with_read_prefix("/app");
+    let tenant_app = TenantCompartment::new("vfs-routes", 2, app_caps, 10_000, 65536);
+    assert!(tenant_app
+        .verify_fs_read("/app/blog/[...slug]/page.tsx")
+        .is_ok());
+    assert!(tenant_app
+        .verify_fs_read("/app/docs/[[...catchall]]/route.ts")
+        .is_ok());
+    assert!(tenant_app.verify_fs_read("/app/archive..v2.tar.gz").is_ok());
+    assert!(tenant_app.verify_fs_read("/app/../etc/passwd").is_err());
+    assert!(tenant_app.verify_fs_read("/app/blog/..").is_err());
+
+    // POSIX double-slash root path (`//file.txt`) normalizes to `/file.txt`
+    let root_caps = CapabilityToken::pure_compute().with_read_prefix("/");
+    let tenant_root = TenantCompartment::new("vfs-posix-root", 3, root_caps, 10_000, 65536);
+    assert!(tenant_root.verify_fs_read("//file.txt").is_ok());
+
+    // Relative `.` capability prefix authorizes relative project paths without granting `/` or `..`
+    let dot_caps = CapabilityToken::pure_compute()
+        .with_read_prefix(".")
+        .with_read_prefix("");
+    let tenant_dot = TenantCompartment::new("vfs-dot", 4, dot_caps, 10_000, 65536);
+    assert!(tenant_dot.verify_fs_read(".").is_ok());
+    assert!(tenant_dot.verify_fs_read("./src/index.ts").is_ok());
+    assert!(tenant_dot.verify_fs_read("Cargo.toml").is_ok());
+    assert!(tenant_dot.verify_fs_read("app/[...slug]/page.tsx").is_ok());
+    assert!(tenant_dot.verify_fs_read("/etc/passwd").is_err());
+    assert!(tenant_dot.verify_fs_read("../outside.txt").is_err());
+
+    // Empty capability prefix alone must never match relative paths
+    let empty_caps = CapabilityToken::pure_compute().with_read_prefix("");
+    let tenant_empty = TenantCompartment::new("vfs-empty", 5, empty_caps, 10_000, 65536);
+    assert!(tenant_empty.verify_fs_read("Cargo.toml").is_err());
+    assert!(tenant_empty.verify_fs_read(".").is_err());
+}

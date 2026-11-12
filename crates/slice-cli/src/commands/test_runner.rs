@@ -70,7 +70,13 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
     let mut watch_once = false;
     let mut target_opt: Option<String> = None;
 
-    for arg in args {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--config" {
+            i += 2;
+            continue;
+        }
         if let Some(f) = arg.strip_prefix("--filter=") {
             filter_opt = Some(f.to_string());
         } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
@@ -87,6 +93,7 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
         } else if !arg.starts_with('-') && target_opt.is_none() {
             target_opt = Some(arg.clone());
         }
+        i += 1;
     }
 
     let target_str = target_opt.unwrap_or_else(|| ".".to_string());
