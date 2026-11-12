@@ -3,7 +3,8 @@
 
 use crate::boa_realm::{
     acquire_warm_boa_realm_for_tenant, call_realm_ctl, ensure_realm_shards, BOA_HTTP_REQ,
-    BOA_HTTP_RES, BOA_WAIT_UNTIL_COUNT, REALM_CTL_SET_DET_MODE, REALM_CTL_SYNC_ENV,
+    BOA_HTTP_RES, BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, REALM_CTL_SET_DET_MODE,
+    REALM_CTL_SYNC_ENV,
 };
 use crate::isolate::{ExecutionMetrics, SliceIsolate};
 use slice_cas::MappedCasArchive;
@@ -28,8 +29,20 @@ pub struct HttpExecutionOutcome {
     pub status_code: u16,
     pub content_type: Cow<'static, str>,
     pub response_body: String,
+    pub response_body_bytes: Option<Vec<u8>>,
     pub response_headers: Vec<(String, String)>,
     pub wait_until_count: usize,
+    pub ws_upgraded: bool,
+}
+
+impl HttpExecutionOutcome {
+    /// Returns the raw wire response bytes (exact binary bytes when present, otherwise UTF-8 `response_body`).
+    #[inline]
+    pub fn body_bytes(&self) -> &[u8] {
+        self.response_body_bytes
+            .as_deref()
+            .unwrap_or(self.response_body.as_bytes())
+    }
 }
 
 /// Zero-clone HTTP outcome used on the hot `slice serve` worker path (`execute_http_request_fast`).
@@ -40,8 +53,20 @@ pub struct HttpFastOutcome {
     pub status_code: u16,
     pub content_type: Cow<'static, str>,
     pub response_body: String,
+    pub response_body_bytes: Option<Vec<u8>>,
     pub response_headers: Vec<(String, String)>,
     pub wait_until_count: usize,
+    pub ws_upgraded: bool,
+}
+
+impl HttpFastOutcome {
+    /// Returns the raw wire response bytes without allocating or coercing binary payloads through UTF-8.
+    #[inline]
+    pub fn body_bytes(&self) -> &[u8] {
+        self.response_body_bytes
+            .as_deref()
+            .unwrap_or(self.response_body.as_bytes())
+    }
 }
 
 #[inline]
@@ -72,6 +97,7 @@ fn populate_boa_http_req(req: &HttpRequestContext<'_>) {
         }
     });
     BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
+    BOA_WS_UPGRADED.with(|w| w.set(false));
     BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
 }
 
@@ -94,18 +120,30 @@ impl SliceIsolate {
             let mut metrics = metrics_res?;
 
             let custom_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
+            let ws_upgraded = BOA_WS_UPGRADED.with(|w| w.replace(false));
             let wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.get());
 
-            let (status_code, content_type, response_body, response_headers) =
-                if let Some((st, body, ct, hdrs)) = custom_res {
-                    (st, Cow::Owned(ct), body, hdrs)
+            let (status_code, content_type, response_body, response_body_bytes, response_headers) =
+                if let Some((st, mut body, body_bytes, ct, hdrs)) = custom_res {
+                    if body.is_empty() {
+                        if let Some(ref raw) = body_bytes {
+                            body = String::from_utf8_lossy(raw).into_owned();
+                        }
+                    }
+                    (st, Cow::Owned(ct), body, body_bytes, hdrs)
                 } else {
                     let body = if !metrics.stdout.is_empty() {
                         metrics.stdout.join("\n")
                     } else {
                         std::mem::take(&mut metrics.return_value)
                     };
-                    (200, Cow::Borrowed("application/json"), body, Vec::new())
+                    (
+                        200,
+                        Cow::Borrowed("application/json"),
+                        body,
+                        None,
+                        Vec::new(),
+                    )
                 };
 
             return Ok(HttpExecutionOutcome {
@@ -113,8 +151,10 @@ impl SliceIsolate {
                 status_code,
                 content_type,
                 response_body,
+                response_body_bytes,
                 response_headers,
                 wait_until_count,
+                ws_upgraded,
             });
         }
 
@@ -129,8 +169,10 @@ impl SliceIsolate {
             status_code: 200,
             content_type: Cow::Borrowed("application/json"),
             response_body: body,
+            response_body_bytes: None,
             response_headers: Vec::new(),
             wait_until_count: 0,
+            ws_upgraded: false,
         })
     }
 
@@ -151,18 +193,25 @@ impl SliceIsolate {
             let (_instantiate_ns, total_time_ns, ret_str) = core_res?;
 
             let custom_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
+            let ws_upgraded = BOA_WS_UPGRADED.with(|w| w.replace(false));
             let wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.get());
 
-            let (status_code, content_type, response_body, response_headers) =
-                if let Some((st, body, ct, hdrs)) = custom_res {
-                    (st, Cow::Owned(ct), body, hdrs)
+            let (status_code, content_type, response_body, response_body_bytes, response_headers) =
+                if let Some((st, body, body_bytes, ct, hdrs)) = custom_res {
+                    (st, Cow::Owned(ct), body, body_bytes, hdrs)
                 } else {
                     let body = if !self.stdout.is_empty() {
                         self.stdout.join("\n")
                     } else {
                         ret_str
                     };
-                    (200, Cow::Borrowed("application/json"), body, Vec::new())
+                    (
+                        200,
+                        Cow::Borrowed("application/json"),
+                        body,
+                        None,
+                        Vec::new(),
+                    )
                 };
 
             return Ok(HttpFastOutcome {
@@ -171,8 +220,10 @@ impl SliceIsolate {
                 status_code,
                 content_type,
                 response_body,
+                response_body_bytes,
                 response_headers,
                 wait_until_count,
+                ws_upgraded,
             });
         }
 
@@ -189,8 +240,10 @@ impl SliceIsolate {
             status_code: 200,
             content_type: Cow::Borrowed("application/json"),
             response_body: body,
+            response_body_bytes: None,
             response_headers: Vec::new(),
             wait_until_count: 0,
+            ws_upgraded: false,
         })
     }
 

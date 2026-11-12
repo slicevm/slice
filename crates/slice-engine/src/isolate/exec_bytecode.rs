@@ -78,8 +78,14 @@ impl SliceIsolate {
                     self.verify_egress_not_leaked(rj)?;
                 }
                 BOA_HTTP_RES.with(|res| -> Result<(), SandboxViolation> {
-                    if let Some((_, ref res_body, _, ref res_hdrs)) = *res.borrow() {
+                    if let Some((_, ref res_body, ref res_bytes, ref res_ct, ref res_hdrs)) =
+                        *res.borrow()
+                    {
                         self.verify_egress_not_leaked(res_body)?;
+                        if let Some(ref raw) = res_bytes {
+                            self.verify_egress_not_leaked(&String::from_utf8_lossy(raw))?;
+                        }
+                        self.verify_egress_not_leaked(res_ct)?;
                         for (_, hv) in res_hdrs {
                             self.verify_egress_not_leaked(hv)?;
                         }

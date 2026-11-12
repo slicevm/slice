@@ -115,7 +115,7 @@ X-Slice-Fuel-Used: 120
 | **`URLSearchParams`** | `new URLSearchParams(init?)` - `.get(k)`, `.getAll(k)`, `.has(k)`, `.set(k, v)`, `.append(k, v)`, `.delete(k)`, `.sort()`, `.forEach(cb)`, `.entries()`, `.keys()`, `.values()`, `.toString()`, `.size`, `for (const [k, v] of params)`. Live two-way synced with `URL`. |
 | **`Headers`** | `new Headers(init?)` - Case-insensitive map supporting `.get(k)`, `.set(k, v)`, `.append(k, v)`, `.has(k)`, `.delete(k)`, **`getSetCookie()`**, `.entries()`, `.keys()`, `.values()`, `.forEach(cb)`, `for (const [k, v] of headers)`. Incoming `req.headers` uses a **zero-copy lazy view** (`__SLICE_LIVE_REQ__`) over the Rust socket buffer! |
 | **`Request`** | `new Request(input, init?)` - `.method`, `.url`, `.headers`, `.signal`, `.body`, `.bodyUsed`, `await req.text()`, `await req.json()`, **`await req.arrayBuffer()`**, **`await req.bytes()`**, **`await req.blob()`**, **`await req.formData()`**, `req.textSync()`, `req.jsonSync()`, `req.clone()`. |
-| **`Response`** | `new Response(body?, init?)` - `.status`, `.statusText`, `.ok`, `.redirected`, `.url`, `.headers`, `.body`, `.bodyUsed`, `await res.text()`, `await res.json()`, **`await res.arrayBuffer()`**, **`await res.bytes()`**, **`await res.blob()`**, **`await res.formData()`**, `res.textSync()`, `res.jsonSync()`, `res.clone()`, **`Response.json(data, init?)`**, **`Response.redirect(url, status?)`**, **`Response.sse(source, init?)`**. |
+| **`Response`** | `new Response(body?, init?)` (strings, raw binary `Uint8Array` / `ArrayBuffer`, `Blob`, `FormData`, `ReadableStream`) - `.status`, `.statusText`, `.ok`, `.redirected`, `.url`, `.headers`, `.body`, `.bodyUsed`, `await res.text()`, `await res.json()`, **`await res.arrayBuffer()`**, **`await res.bytes()`**, **`await res.blob()`**, **`await res.formData()`**, `res.textSync()`, `res.jsonSync()`, `res.clone()`, **`Response.json(data, init?)`**, **`Response.redirect(url, status?)`**, **`Response.sse(source, init?)`**. |
 | **`crypto` & `crypto.subtle`** | `crypto.randomUUID()`, `crypto.getRandomValues(typedArray)`, and native Rust `SubtleCrypto`: `digest("SHA-256"\|"SHA-384"\|"SHA-512"\|"SHA-1")`, `sign`/`verify` (`HMAC`, `Ed25519`, `ECDSA` `P-256`/`P-384`, imported `RSASSA-PKCS1-v1_5` & `RSA-PSS`), `encrypt`/`decrypt` (`AES-GCM` & `AES-CBC` 128/256-bit), `deriveBits`/`deriveKey` (`PBKDF2`, `HKDF`, RFC 7748 `X25519`), `generateKey` (`AES-GCM`, `AES-CBC`, `HMAC`, `Ed25519`, `X25519`, `ECDSA`), `importKey`, `exportKey` (`"raw"`, `"jwk"`, `"pkcs8"`, `"spki"`). |
 | **`ReadableStream` / `WritableStream` / `TransformStream`** | Full WHATWG Streams pipeline with `.getReader()`, `.getWriter()`, `.pipeThrough(transform)`, `.pipeTo(dest)`, `.tee()`, `for await (const chunk of stream)`, `TextEncoderStream`, and `TextDecoderStream`. |
 | **`CompressionStream` & `DecompressionStream`** | Pure-Rust zero-dependency RFC 1950/1951/1952 streaming compression and decompression supporting `"gzip"`, `"deflate"`, and `"deflate-raw"` via `.pipeThrough()`. |
@@ -149,6 +149,8 @@ Slice.waitUntil(() => {
 });
 
 Slice.respond(200, { status: "healthy", tenant: req.tenant }, "application/json");
+// Or pass a raw Uint8Array / ArrayBuffer directly for byte-exact binary responses:
+// Slice.respond(200, new Uint8Array([0x00, 0x7f, 0x80, 0xff]), "application/octet-stream");
 ```
 
 ---
@@ -331,9 +333,10 @@ Start `slice serve` with `--tenant-dir=./tenants`:
 slice serve --port=3000 --workers=8 --tenant-dir=./tenants
 ```
 
-1. **Automatic Tenant Resolution:**
+1. **Automatic Tenant Resolution & Namespace Sanitization:**
    - A request with header `X-Slice-Tenant: tenant-alpha` **or** URL path `/t/tenant-alpha/checkout` automatically executes `./tenants/tenant-alpha.cas` inside `tenant-alpha`'s isolated `SliceIsolate` and `Slice.kv` partition.
-   - Unknown tenants automatically fall back to `./tenants/default.cas` (if present).
+   - Tenant identifiers are normalized to `[A-Za-z0-9_-]` and interior `.` (stripping `:`, path separators, and `..` sequences so `Slice.kv` `<tenant>:<key>` namespaces cannot collide and `--tenant-dir` lookups remain confined).
+   - Unknown tenants automatically fall back to `./tenants/default.cas` (if present), sharing a single deduplicated bundle inside a bounded `1,024`-entry per-worker cache.
 2. **Zero-Downtime Atomic Hot-Swapping:**
    - When `tenant-alpha` deploys new code, simply run `slice pack ./alpha-src ./tenants/tenant-alpha.cas`.
    - On the very next HTTP request for `tenant-alpha`, `slice serve` detects the new file modification timestamp (`mtime_ns`), memory-maps the updated `.cas` archive, pre-warms its realm closure, and serves the new version with **0 dropped connections and 0 server restarts**.

@@ -113,6 +113,17 @@ pub(crate) enum ServerConnStream {
     Tls(Box<rustls::StreamOwned<rustls::ServerConnection, TcpStream>>),
 }
 
+impl ServerConnStream {
+    #[inline]
+    pub(crate) fn set_read_timeout(&self, dur: Option<std::time::Duration>) {
+        let tcp = match self {
+            Self::Plain(s) => s,
+            Self::Tls(s) => s.get_ref(),
+        };
+        let _ = tcp.set_read_timeout(dur);
+    }
+}
+
 impl Read for ServerConnStream {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {

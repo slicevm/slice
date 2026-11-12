@@ -560,9 +560,19 @@
     return out.length > 0 ? JSON.stringify(out) : "";
   }
 
+  function __streamHasBinary(st) {
+    if (typeof st._drainSync === "function") st._drainSync();
+    var ch = st._chunks;
+    if (!ch) return false;
+    for (var i = 0; i < ch.length; i++) {
+      if (typeof ch[i] !== "string") return true;
+    }
+    return false;
+  }
+
   function __finishSliceRes(r) {
     if (r._h === null && !r._stream) {
-      var ctFast = r._ct || "text/plain;charset=UTF-8";
+      var ctFast = r._ct || (r._u8 instanceof Uint8Array ? "application/octet-stream" : "text/plain;charset=UTF-8");
       var hdrJsonFast = "";
       var rawH = r._rawH;
       if (rawH) {
@@ -581,23 +591,46 @@
         }
         if (extra) hdrJsonFast = JSON.stringify(extra);
       }
+      if (r._u8 instanceof Uint8Array) {
+        __slice_http_respond(r.status, r._u8, ctFast, hdrJsonFast);
+        return;
+      }
       var rbFast = r._body || (r._data !== undefined ? JSON.stringify(r._data) : "");
       __slice_http_respond(r.status, rbFast, ctFast, hdrJsonFast);
       return;
     }
     var h = r._h !== undefined ? r._h : r.headers;
-    var ct = (h && h._m && h._m["content-type"]) || r._ct || "text/plain;charset=UTF-8";
+    var hasBin = r._u8 instanceof Uint8Array;
+    var ct = (h && h._m && h._m["content-type"]) || r._ct || (hasBin ? "application/octet-stream" : "text/plain;charset=UTF-8");
     var hdrJson = h ? __resHdrJson(h) : "";
     if (r._stream) {
       var st = r._stream;
       if (st._startPromise) {
         st._startPromise.then(function() {
           var hs = r._h !== undefined ? r._h : r.headers;
-          __slice_http_respond(r.status, st._toText(), ct, hs ? __resHdrJson(hs) : "");
+          var isBinS = __streamHasBinary(st);
+          var ctS = (hs && hs._m && hs._m["content-type"]) || r._ct || (isBinS ? "application/octet-stream" : "text/plain;charset=UTF-8");
+          __slice_http_respond(
+            r.status,
+            isBinS && typeof st._toBytes === "function" ? st._toBytes() : st._toText(),
+            ctS,
+            hs ? __resHdrJson(hs) : ""
+          );
         });
         return;
       }
-      __slice_http_respond(r.status, st._toText(), ct, hdrJson);
+      var isBin = __streamHasBinary(st);
+      var ctStream = (h && h._m && h._m["content-type"]) || r._ct || (isBin ? "application/octet-stream" : "text/plain;charset=UTF-8");
+      __slice_http_respond(
+        r.status,
+        isBin && typeof st._toBytes === "function" ? st._toBytes() : st._toText(),
+        ctStream,
+        hdrJson
+      );
+      return;
+    }
+    if (hasBin) {
+      __slice_http_respond(r.status, r._u8, ct, hdrJson);
       return;
     }
     var rb = r._body || (r._data !== undefined ? JSON.stringify(r._data) : "");

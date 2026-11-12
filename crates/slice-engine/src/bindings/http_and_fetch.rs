@@ -3,7 +3,7 @@
 use crate::bindings::helpers::active_tenant_id_or_default;
 use crate::boa_realm::{
     mark_subsystem_dirty, BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_FETCH_MOCKS,
-    BOA_HTTP_REQ, BOA_HTTP_RES, BOA_VIOLATION, DIRTY_FETCH_MOCK,
+    BOA_HTTP_REQ, BOA_HTTP_RES, BOA_VIOLATION, BOA_WS_UPGRADED, DIRTY_FETCH_MOCK,
 };
 use crate::event_loop::enqueue_async_fetch;
 use crate::outbound_http::{
@@ -138,6 +138,15 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
     );
 
     let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_mark_ws_upgrade"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            BOA_WS_UPGRADED.with(|w| w.set(true));
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_http_respond"),
         4,
         NativeFunction::from_fn_ptr(|_this, args, context| {
@@ -146,12 +155,18 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
                 .and_then(|v| v.as_number())
                 .map(|n| n as u16)
                 .unwrap_or(200);
-            let body = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
+            let (body, body_bytes) = match args.get(1) {
+                Some(val) if val.as_object().is_some() => {
+                    let bytes =
+                        crate::bindings::helpers::extract_buffer_source_bytes(val, context)?;
+                    (String::new(), Some(bytes))
+                }
+                Some(val) => {
+                    let s = val.to_string(context)?.to_std_string_escaped();
+                    (s, None)
+                }
+                None => (String::new(), None),
+            };
             let content_type = args
                 .get(2)
                 .map(|v| v.to_string(context))
@@ -171,7 +186,13 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
                 let tenant_id = active_tenant_id_or_default();
                 let dlp_res = BOA_EGRESS_SECRETS.with(|s| {
                     let egress_secrets = s.borrow();
-                    verify_egress_secrets_slice(&tenant_id, &egress_secrets, &body)
+                    let body_check = if let Some(ref raw) = body_bytes {
+                        let lossy = String::from_utf8_lossy(raw);
+                        verify_egress_secrets_slice(&tenant_id, &egress_secrets, &lossy)
+                    } else {
+                        verify_egress_secrets_slice(&tenant_id, &egress_secrets, &body)
+                    };
+                    body_check
                         .and_then(|()| {
                             verify_egress_secrets_slice(&tenant_id, &egress_secrets, &content_type)
                         })
@@ -196,7 +217,7 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
                 serde_json::from_str(&headers_json).unwrap_or_default()
             };
             BOA_HTTP_RES.with(|res| {
-                *res.borrow_mut() = Some((status, body, content_type, extra_headers));
+                *res.borrow_mut() = Some((status, body, body_bytes, content_type, extra_headers));
             });
             Ok(BoaVal::undefined())
         }),

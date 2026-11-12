@@ -10,16 +10,58 @@ use std::time::Instant;
 
 /// Maximum allowed inbound HTTP request body size (`4 MB`).
 pub(crate) const MAX_INBOUND_BODY_BYTES: usize = 4 * 1024 * 1024;
+/// Static assets larger than `4 MB` stream directly in `64 KB` chunks rather than buffering in `write_buf`.
+const STATIC_STREAM_THRESHOLD_BYTES: usize = 4 * 1024 * 1024;
 
 #[inline]
 pub(crate) fn find_http_header_end(buf: &[u8]) -> Option<(usize, usize)> {
     if let Some(i) = memchr::memmem::find(buf, b"\r\n\r\n") {
         return Some((i, i + 4));
     }
+    // Do not fall back to bare `\n\n` if the request line uses CRLF (`\r\n`) framing.
+    let first_lf = memchr::memchr(b'\n', buf)?;
+    if first_lf > 0 && buf[first_lf - 1] == b'\r' {
+        return None;
+    }
     if let Some(i) = memchr::memmem::find(buf, b"\n\n") {
         return Some((i, i + 2));
     }
     None
+}
+
+#[inline]
+fn is_chunked_transfer_encoding_only(val: &str) -> bool {
+    let mut saw_chunked = false;
+    for raw_tok in val.split(',') {
+        let tok = raw_tok.trim();
+        if tok.is_empty() || saw_chunked || !tok.eq_ignore_ascii_case("chunked") {
+            return false;
+        }
+        saw_chunked = true;
+    }
+    saw_chunked
+}
+
+#[inline]
+fn is_forbidden_custom_response_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("transfer-encoding")
+        || name.eq_ignore_ascii_case("content-length")
+        || name.eq_ignore_ascii_case("content-type")
+        || name.eq_ignore_ascii_case("connection")
+        || name.eq_ignore_ascii_case("keep-alive")
+        || name.eq_ignore_ascii_case("upgrade")
+        || name.eq_ignore_ascii_case("trailer")
+        || name.eq_ignore_ascii_case("te")
+}
+
+#[inline]
+fn flush_pending_write_buf<S: Write>(stream: &mut S, write_buf: &mut Vec<u8>) -> Result<()> {
+    if !write_buf.is_empty() {
+        stream.write_all(write_buf)?;
+        stream.flush()?;
+        write_buf.clear();
+    }
+    Ok(())
 }
 
 #[inline]
@@ -266,38 +308,75 @@ pub(crate) fn serve_connection_with_isolate(
     };
 
     let mut filled: usize = 0;
+    let mut carry_buf: Vec<u8> = Vec::new();
     write_buf.clear();
 
     loop {
+        if !carry_buf.is_empty() && filled < read_buf.len() {
+            let pull = carry_buf.len().min(read_buf.len() - filled);
+            read_buf[filled..filled + pull].copy_from_slice(&carry_buf[..pull]);
+            carry_buf.drain(..pull);
+            filled += pull;
+            if carry_buf.is_empty() && carry_buf.capacity() > 65536 {
+                carry_buf.shrink_to(0);
+            }
+        }
+
         let mut header_deadline: Option<Instant> = if filled > 0 {
-            Some(Instant::now() + std::time::Duration::from_secs(5))
+            Some(Instant::now() + std::time::Duration::from_secs(10))
         } else {
             None
         };
+        let mut narrowed_timeout = false;
 
         // 1. Read until complete HTTP headers (`\r\n\r\n`) are present in `read_buf[..filled]`
         let (hdr_end, body_offset) = loop {
             if let Some(pos) = find_http_header_end(&read_buf[..filled]) {
                 break pos;
             }
+            if !carry_buf.is_empty() && filled < read_buf.len() {
+                let pull = carry_buf.len().min(read_buf.len() - filled);
+                read_buf[filled..filled + pull].copy_from_slice(&carry_buf[..pull]);
+                carry_buf.drain(..pull);
+                filled += pull;
+                continue;
+            }
             if let Some(deadline) = header_deadline {
-                if Instant::now() > deadline {
+                let now = Instant::now();
+                if now >= deadline {
+                    let _ = flush_pending_write_buf(&mut stream, write_buf);
                     return write_http_error_and_close(
                         &mut stream,
                         408,
                         r#"{"error":"HEADER_READ_TIMEOUT"}"#,
                     );
                 }
+                let rem = deadline
+                    .saturating_duration_since(now)
+                    .max(std::time::Duration::from_millis(1));
+                stream.set_read_timeout(Some(rem));
+                narrowed_timeout = true;
             }
             if filled >= read_buf.len() {
+                let _ = flush_pending_write_buf(&mut stream, write_buf);
                 return write_http_error_and_close(
                     &mut stream,
                     431,
                     r#"{"error":"REQUEST_HEADER_FIELDS_TOO_LARGE"}"#,
                 );
             }
+            flush_pending_write_buf(&mut stream, write_buf)?;
             match stream.read(&mut read_buf[filled..]) {
-                Ok(0) => return Ok(()),
+                Ok(0) => {
+                    if filled > 0 {
+                        return write_http_error_and_close(
+                            &mut stream,
+                            400,
+                            r#"{"error":"INCOMPLETE_REQUEST_HEADERS"}"#,
+                        );
+                    }
+                    return Ok(());
+                }
                 Err(ref e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
@@ -314,16 +393,20 @@ pub(crate) fn serve_connection_with_isolate(
                 Err(_) => return Ok(()),
                 Ok(n) => {
                     if header_deadline.is_none() {
-                        header_deadline = Some(Instant::now() + std::time::Duration::from_secs(5));
+                        header_deadline = Some(Instant::now() + std::time::Duration::from_secs(10));
                     }
                     filled += n;
                 }
             }
         };
+        if narrowed_timeout {
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        }
 
         let req_start = Instant::now();
         let (hdr_slice, after_hdr_buf) = read_buf.split_at_mut(body_offset);
         let Ok(hdr_str) = std::str::from_utf8(&hdr_slice[..hdr_end]) else {
+            let _ = flush_pending_write_buf(&mut stream, write_buf);
             return write_http_error_and_close(
                 &mut stream,
                 400,
@@ -337,12 +420,15 @@ pub(crate) fn serve_connection_with_isolate(
         let mut parts = req_line.split_whitespace();
         let method = parts.next().unwrap_or("");
         let raw_target = parts.next().unwrap_or("");
-        let version = parts.next().unwrap_or("HTTP/1.1");
+        let version = parts.next().unwrap_or("");
         if method.is_empty()
             || raw_target.is_empty()
+            || parts.next().is_some()
+            || (version != "HTTP/1.1" && version != "HTTP/1.0")
             || !slice_engine::is_valid_http_header_name(method)
             || !slice_engine::is_valid_request_target(raw_target)
         {
+            let _ = flush_pending_write_buf(&mut stream, write_buf);
             return write_http_error_and_close(
                 &mut stream,
                 400,
@@ -351,7 +437,7 @@ pub(crate) fn serve_connection_with_isolate(
         }
         let (raw_path, query) = raw_target.split_once('?').unwrap_or((raw_target, ""));
 
-        let mut keep_alive = !version.ends_with("1.0");
+        let mut keep_alive = version == "HTTP/1.1";
         let mut seen_content_length: Option<usize> = None;
         let mut has_transfer_encoding = false;
         let mut is_chunked_te = false;
@@ -359,11 +445,11 @@ pub(crate) fn serve_connection_with_isolate(
         let mut sec_websocket_key: &str = "";
         let mut if_none_match: &str = "";
         let mut path = raw_path;
-        let mut tenant_id: &str = "tenant-default";
+        let mut raw_tenant_id: &str = "tenant-default";
         if let Some(rest) = raw_path.strip_prefix("/t/") {
             if let Some((t_seg, sub)) = rest.split_once('/') {
                 if !t_seg.is_empty() {
-                    tenant_id = t_seg;
+                    raw_tenant_id = t_seg;
                     path = if sub.is_empty() {
                         "/"
                     } else {
@@ -371,7 +457,7 @@ pub(crate) fn serve_connection_with_isolate(
                     };
                 }
             } else if !rest.is_empty() {
-                tenant_id = rest;
+                raw_tenant_id = rest;
                 path = "/";
             }
         }
@@ -383,18 +469,21 @@ pub(crate) fn serve_connection_with_isolate(
             if line.is_empty() {
                 continue;
             }
-            let Some((k, v)) = line.split_once(':') else {
+            let Some((raw_k, raw_v)) = line.split_once(':') else {
+                let _ = flush_pending_write_buf(&mut stream, write_buf);
                 return write_http_error_and_close(
                     &mut stream,
                     400,
                     r#"{"error":"MALFORMED_HEADER_LINE"}"#,
                 );
             };
-            let k = k.trim();
-            let v = v.trim();
+            // RFC 9112 Section 5.1: Reject leading (`obs-fold`) or trailing whitespace before `:` in header names.
+            let k = raw_k;
+            let v = raw_v.trim();
             if !slice_engine::is_valid_http_header_name(k)
                 || !slice_engine::is_valid_http_header_value(v)
             {
+                let _ = flush_pending_write_buf(&mut stream, write_buf);
                 return write_http_error_and_close(
                     &mut stream,
                     400,
@@ -402,6 +491,7 @@ pub(crate) fn serve_connection_with_isolate(
                 );
             }
             if headers_len >= headers_stack.len() {
+                let _ = flush_pending_write_buf(&mut stream, write_buf);
                 return write_http_error_and_close(
                     &mut stream,
                     431,
@@ -409,7 +499,7 @@ pub(crate) fn serve_connection_with_isolate(
                 );
             }
             if k.eq_ignore_ascii_case("x-slice-tenant") && !v.is_empty() {
-                tenant_id = v;
+                raw_tenant_id = v;
             } else if k.eq_ignore_ascii_case("connection") {
                 if contains_ascii_ignore_case(v, b"close") {
                     keep_alive = false;
@@ -421,8 +511,9 @@ pub(crate) fn serve_connection_with_isolate(
             } else if k.eq_ignore_ascii_case("sec-websocket-key") {
                 sec_websocket_key = v;
             } else if k.eq_ignore_ascii_case("transfer-encoding") {
-                // N-Sec-3: Reject requests with both Transfer-Encoding and Content-Length (CL.TE / TE.CL smuggling)
-                if seen_content_length.is_some() {
+                // N-Sec-3: Reject requests with both Transfer-Encoding and Content-Length or duplicate Transfer-Encoding
+                if seen_content_length.is_some() || has_transfer_encoding {
+                    let _ = flush_pending_write_buf(&mut stream, write_buf);
                     return write_http_error_and_close(
                         &mut stream,
                         400,
@@ -430,9 +521,10 @@ pub(crate) fn serve_connection_with_isolate(
                     );
                 }
                 has_transfer_encoding = true;
-                if contains_ascii_ignore_case(v, b"chunked") {
+                if is_chunked_transfer_encoding_only(v) {
                     is_chunked_te = true;
                 } else {
+                    let _ = flush_pending_write_buf(&mut stream, write_buf);
                     return write_http_error_and_close(
                         &mut stream,
                         400,
@@ -442,6 +534,7 @@ pub(crate) fn serve_connection_with_isolate(
             } else if k.eq_ignore_ascii_case("content-length") {
                 // N-Sec-3: Reject requests with both Transfer-Encoding and Content-Length or conflicting duplicate Content-Length
                 if has_transfer_encoding {
+                    let _ = flush_pending_write_buf(&mut stream, write_buf);
                     return write_http_error_and_close(
                         &mut stream,
                         400,
@@ -449,6 +542,7 @@ pub(crate) fn serve_connection_with_isolate(
                     );
                 }
                 let Ok(parsed_len) = v.parse::<usize>() else {
+                    let _ = flush_pending_write_buf(&mut stream, write_buf);
                     return write_http_error_and_close(
                         &mut stream,
                         400,
@@ -457,6 +551,7 @@ pub(crate) fn serve_connection_with_isolate(
                 };
                 if let Some(prev_len) = seen_content_length {
                     if prev_len != parsed_len {
+                        let _ = flush_pending_write_buf(&mut stream, write_buf);
                         return write_http_error_and_close(
                             &mut stream,
                             400,
@@ -465,6 +560,7 @@ pub(crate) fn serve_connection_with_isolate(
                     }
                 }
                 if parsed_len > MAX_INBOUND_BODY_BYTES {
+                    let _ = flush_pending_write_buf(&mut stream, write_buf);
                     return write_http_error_and_close(
                         &mut stream,
                         413,
@@ -479,28 +575,71 @@ pub(crate) fn serve_connection_with_isolate(
             headers_len += 1;
         }
 
+        let sanitized_tenant = super::sanitize_tenant_id(raw_tenant_id);
+        let tenant_id: &str = if sanitized_tenant.is_empty() {
+            "tenant-default"
+        } else {
+            sanitized_tenant.as_ref()
+        };
+
         let content_length = seen_content_length.unwrap_or(0);
         let mut body_filled = filled.saturating_sub(body_offset);
         let mut owned_body_opt: Option<String> = None;
         let body_end: usize;
 
         if is_chunked_te {
-            let mut chunk_raw = Vec::with_capacity(body_filled.max(1024));
+            let mut chunk_raw =
+                Vec::with_capacity(body_filled.saturating_add(carry_buf.len()).max(1024));
             chunk_raw.extend_from_slice(&after_hdr_buf[..body_filled]);
-            let mut scratch = [0u8; 4096];
+            if !carry_buf.is_empty() {
+                chunk_raw.extend_from_slice(&carry_buf);
+                carry_buf.clear();
+            }
+            let mut scratch = [0u8; 8192];
+            let mut body_deadline_opt: Option<Instant> = None;
             let (decoded, consumed_raw) = loop {
                 match slice_engine::parse_chunked_body(&chunk_raw, MAX_INBOUND_BODY_BYTES) {
                     Ok(Some(res)) => break res,
                     Ok(None) => {
                         if chunk_raw.len() > MAX_INBOUND_BODY_BYTES.saturating_add(65536) {
+                            let _ = flush_pending_write_buf(&mut stream, write_buf);
                             return write_http_error_and_close(
                                 &mut stream,
                                 413,
                                 r#"{"error":"CHUNKED_PAYLOAD_TOO_LARGE"}"#,
                             );
                         }
+                        let deadline = *body_deadline_opt.get_or_insert_with(|| {
+                            Instant::now() + std::time::Duration::from_secs(30)
+                        });
+                        if Instant::now() >= deadline {
+                            let _ = flush_pending_write_buf(&mut stream, write_buf);
+                            return write_http_error_and_close(
+                                &mut stream,
+                                408,
+                                r#"{"error":"BODY_READ_TIMEOUT"}"#,
+                            );
+                        }
+                        flush_pending_write_buf(&mut stream, write_buf)?;
                         match stream.read(&mut scratch) {
-                            Ok(0) | Err(_) => {
+                            Ok(0) => {
+                                return write_http_error_and_close(
+                                    &mut stream,
+                                    400,
+                                    r#"{"error":"TRUNCATED_CHUNKED_BODY"}"#,
+                                );
+                            }
+                            Err(ref e)
+                                if e.kind() == std::io::ErrorKind::WouldBlock
+                                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                            {
+                                return write_http_error_and_close(
+                                    &mut stream,
+                                    408,
+                                    r#"{"error":"BODY_READ_TIMEOUT"}"#,
+                                );
+                            }
+                            Err(_) => {
                                 return write_http_error_and_close(
                                     &mut stream,
                                     400,
@@ -516,6 +655,7 @@ pub(crate) fn serve_connection_with_isolate(
                         } else {
                             400
                         };
+                        let _ = flush_pending_write_buf(&mut stream, write_buf);
                         return write_http_error_and_close(
                             &mut stream,
                             status,
@@ -524,19 +664,51 @@ pub(crate) fn serve_connection_with_isolate(
                     }
                 }
             };
-            // Preserve any pipelined bytes that arrived after the chunked terminator
+            // Preserve any pipelined bytes that arrived after the chunked terminator without overflowing `after_hdr_buf`.
             let leftover = chunk_raw.len().saturating_sub(consumed_raw);
-            if leftover > 0 && leftover <= after_hdr_buf.len() {
-                after_hdr_buf[..leftover].copy_from_slice(&chunk_raw[consumed_raw..]);
+            let fit = leftover.min(after_hdr_buf.len());
+            if fit > 0 {
+                after_hdr_buf[..fit].copy_from_slice(&chunk_raw[consumed_raw..consumed_raw + fit]);
             }
-            filled = body_offset + leftover;
+            if leftover > fit {
+                carry_buf.extend_from_slice(&chunk_raw[consumed_raw + fit..]);
+            }
+            filled = body_offset + fit;
             body_end = body_offset;
             owned_body_opt = Some(String::from_utf8_lossy(&decoded).into_owned());
         } else if content_length <= after_hdr_buf.len() {
-            while body_filled < content_length {
-                match stream.read(&mut after_hdr_buf[body_filled..]) {
-                    Ok(0) | Err(_) => return Ok(()),
-                    Ok(n) => body_filled += n,
+            if !carry_buf.is_empty() && body_filled < after_hdr_buf.len() {
+                let pull = carry_buf.len().min(after_hdr_buf.len() - body_filled);
+                after_hdr_buf[body_filled..body_filled + pull].copy_from_slice(&carry_buf[..pull]);
+                carry_buf.drain(..pull);
+                body_filled += pull;
+            }
+            if body_filled < content_length {
+                let body_deadline = Instant::now() + std::time::Duration::from_secs(30);
+                flush_pending_write_buf(&mut stream, write_buf)?;
+                while body_filled < content_length {
+                    if Instant::now() >= body_deadline {
+                        return write_http_error_and_close(
+                            &mut stream,
+                            408,
+                            r#"{"error":"BODY_READ_TIMEOUT"}"#,
+                        );
+                    }
+                    match stream.read(&mut after_hdr_buf[body_filled..]) {
+                        Ok(0) => return Ok(()),
+                        Err(ref e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            return write_http_error_and_close(
+                                &mut stream,
+                                408,
+                                r#"{"error":"BODY_READ_TIMEOUT"}"#,
+                            );
+                        }
+                        Err(_) => return Ok(()),
+                        Ok(n) => body_filled += n,
+                    }
                 }
             }
             filled = body_offset + body_filled;
@@ -546,15 +718,47 @@ pub(crate) fn serve_connection_with_isolate(
             let mut large_body = Vec::with_capacity(content_length);
             let initial_copy = body_filled.min(content_length);
             large_body.extend_from_slice(&after_hdr_buf[..initial_copy]);
-            let mut scratch = [0u8; 8192];
-            while large_body.len() < content_length {
-                let rem = (content_length - large_body.len()).min(scratch.len());
-                match stream.read(&mut scratch[..rem]) {
-                    Ok(0) | Err(_) => return Ok(()),
-                    Ok(n) => large_body.extend_from_slice(&scratch[..n]),
+            if !carry_buf.is_empty() && large_body.len() < content_length {
+                let pull = carry_buf.len().min(content_length - large_body.len());
+                large_body.extend_from_slice(&carry_buf[..pull]);
+                carry_buf.drain(..pull);
+            }
+            if large_body.len() < content_length {
+                let body_deadline = Instant::now() + std::time::Duration::from_secs(30);
+                flush_pending_write_buf(&mut stream, write_buf)?;
+                let mut scratch = [0u8; 8192];
+                while large_body.len() < content_length {
+                    if Instant::now() >= body_deadline {
+                        return write_http_error_and_close(
+                            &mut stream,
+                            408,
+                            r#"{"error":"BODY_READ_TIMEOUT"}"#,
+                        );
+                    }
+                    let rem = (content_length - large_body.len()).min(scratch.len());
+                    match stream.read(&mut scratch[..rem]) {
+                        Ok(0) => return Ok(()),
+                        Err(ref e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            return write_http_error_and_close(
+                                &mut stream,
+                                408,
+                                r#"{"error":"BODY_READ_TIMEOUT"}"#,
+                            );
+                        }
+                        Err(_) => return Ok(()),
+                        Ok(n) => large_body.extend_from_slice(&scratch[..n]),
+                    }
                 }
             }
-            filled = body_offset;
+            if body_filled > initial_copy {
+                after_hdr_buf.copy_within(initial_copy..body_filled, 0);
+                filled = body_offset + (body_filled - initial_copy);
+            } else {
+                filled = body_offset;
+            }
             body_end = body_offset;
             owned_body_opt = Some(String::from_utf8_lossy(&large_body).into_owned());
         }
@@ -562,12 +766,13 @@ pub(crate) fn serve_connection_with_isolate(
         let body_len = content_length.min(body_filled);
         let conn_hdr = if keep_alive { "keep-alive" } else { "close" };
         let has_more_pipelined = keep_alive
-            && body_end < filled
-            && find_http_header_end(
-                &after_hdr_buf
-                    [body_end.saturating_sub(body_offset)..filled.saturating_sub(body_offset)],
-            )
-            .is_some();
+            && ((body_end < filled
+                && find_http_header_end(
+                    &after_hdr_buf
+                        [body_end.saturating_sub(body_offset)..filled.saturating_sub(body_offset)],
+                )
+                .is_some())
+                || find_http_header_end(&carry_buf).is_some());
 
         // Phase F2: Zero-Stat CAS / In-Memory Static Asset Fast-Path (`< 2 us`, 0 JS VM spinup, 0 disk syscalls)
         if !is_ws_upgrade {
@@ -617,20 +822,37 @@ pub(crate) fn serve_connection_with_isolate(
                             push_u64_ascii(write_buf, total_us);
                             write_buf.extend_from_slice(b"\r\nX-Slice-Fuel-Used: 0\r\n\r\n");
                             if method != "HEAD" {
-                                write_buf.extend_from_slice(&asset.payload);
+                                if asset.payload.len() > STATIC_STREAM_THRESHOLD_BYTES {
+                                    stream.write_all(write_buf)?;
+                                    write_buf.clear();
+                                    for chunk in asset.payload.chunks(65536) {
+                                        stream.write_all(chunk)?;
+                                    }
+                                } else {
+                                    write_buf.extend_from_slice(&asset.payload);
+                                }
                             }
                         }
-                        if !has_more_pipelined || write_buf.len() >= 32768 {
-                            stream.write_all(write_buf)?;
-                            write_buf.clear();
-                        }
-                        if let Some((counter, max_reqs)) = max_requests_tracker {
-                            let prev = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if max_reqs > 0 && prev + 1 >= max_reqs {
-                                std::process::exit(0);
+                        let reached_max = if let Some((counter, max_reqs)) = max_requests_tracker {
+                            let prev = counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                            max_reqs > 0 && prev + 1 >= max_reqs
+                        } else {
+                            false
+                        };
+                        if !has_more_pipelined
+                            || write_buf.len() >= 32768
+                            || !keep_alive
+                            || reached_max
+                        {
+                            if !write_buf.is_empty() {
+                                stream.write_all(write_buf)?;
+                                write_buf.clear();
+                            }
+                            if !keep_alive || reached_max {
+                                stream.flush()?;
                             }
                         }
-                        if !keep_alive {
+                        if !keep_alive || reached_max {
                             break;
                         }
                         if filled > body_end {
@@ -671,14 +893,14 @@ pub(crate) fn serve_connection_with_isolate(
 
         match isolate.execute_http_request_fast(active_bytecode, None, &req_ctx) {
             Ok(outcome) => {
-                // Check for RFC 6455 Server-Side WebSocket Upgrade (`Upgrade: websocket` + `Sec-WebSocket-Key`)
+                // Only enter RFC 6455 Server-Side WebSocket Upgrade when the handler explicitly upgraded (`101`).
                 if is_ws_upgrade
                     && !sec_websocket_key.is_empty()
-                    && outcome.status_code != 403
-                    && outcome.status_code != 400
+                    && outcome.ws_upgraded
+                    && outcome.status_code == 101
                 {
+                    flush_pending_write_buf(&mut stream, write_buf)?;
                     let accept_key = slice_engine::compute_websocket_accept_key(sec_websocket_key);
-                    write_buf.clear();
                     write_buf.extend_from_slice(
                         b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ",
                     );
@@ -695,6 +917,9 @@ pub(crate) fn serve_connection_with_isolate(
                         isolate.execute_websocket_event("open", false, &[], 0, "")
                     {
                         if flush_server_ws_frames(&mut stream, open_frames)? {
+                            if let Some((counter, _)) = max_requests_tracker {
+                                counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                            }
                             return Ok(());
                         }
                     }
@@ -702,6 +927,10 @@ pub(crate) fn serve_connection_with_isolate(
                     let mut ws_pending = Vec::new();
                     if filled > body_end {
                         ws_pending.extend_from_slice(&read_buf[body_end..filled]);
+                    }
+                    if !carry_buf.is_empty() {
+                        ws_pending.extend_from_slice(&carry_buf);
+                        carry_buf.clear();
                     }
                     let effective_ws_limit = mem_limit.min(slice_engine::MAX_WS_FRAME_BYTES);
                     loop {
@@ -763,6 +992,9 @@ pub(crate) fn serve_connection_with_isolate(
                             Ok(None) | Err(_) => break,
                         }
                     }
+                    if let Some((counter, _)) = max_requests_tracker {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    }
                     return Ok(());
                 }
 
@@ -773,22 +1005,30 @@ pub(crate) fn serve_connection_with_isolate(
                 } else {
                     "application/octet-stream"
                 };
+                let body_bytes = outcome.body_bytes();
+                let is_bodyless_status = matches!(outcome.status_code, 100..=199 | 204 | 304);
+                let suppress_wire_body = method == "HEAD" || is_bodyless_status;
 
                 // CLI-PERF-02: Zero-format-macro byte slice + `itoa` response header serialization
                 write_buf.extend_from_slice(b"HTTP/1.1 ");
                 push_u64_ascii(write_buf, outcome.status_code as u64);
                 write_buf.push(b' ');
                 write_buf.extend_from_slice(http_status_reason(outcome.status_code).as_bytes());
-                write_buf.extend_from_slice(b"\r\nContent-Type: ");
-                write_buf.extend_from_slice(safe_ct.as_bytes());
                 write_buf.extend_from_slice(b"\r\n");
-                if safe_ct.starts_with("text/event-stream") {
-                    write_buf
-                        .extend_from_slice(b"Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\n");
+                if !is_bodyless_status {
+                    write_buf.extend_from_slice(b"Content-Type: ");
+                    write_buf.extend_from_slice(safe_ct.as_bytes());
+                    write_buf.extend_from_slice(b"\r\n");
+                    if safe_ct.starts_with("text/event-stream") {
+                        write_buf.extend_from_slice(
+                            b"Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\n",
+                        );
+                    }
+                    write_buf.extend_from_slice(b"Content-Length: ");
+                    push_u64_ascii(write_buf, body_bytes.len() as u64);
+                    write_buf.extend_from_slice(b"\r\n");
                 }
-                write_buf.extend_from_slice(b"Content-Length: ");
-                push_u64_ascii(write_buf, outcome.response_body.len() as u64);
-                write_buf.extend_from_slice(b"\r\nConnection: ");
+                write_buf.extend_from_slice(b"Connection: ");
                 write_buf.extend_from_slice(conn_hdr.as_bytes());
                 write_buf.extend_from_slice(b"\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: ");
                 write_buf.extend_from_slice(tenant_id.as_bytes());
@@ -800,9 +1040,10 @@ pub(crate) fn serve_connection_with_isolate(
                 push_u64_ascii(write_buf, outcome.fuel_consumed);
                 write_buf.extend_from_slice(b"\r\n");
 
-                // N-Sec-2: Validate all custom response headers against CRLF / control character injection
+                // N-Sec-2: Validate custom response headers against CRLF/control chars and hop-by-hop framing injection
                 for (hk, hv) in &outcome.response_headers {
-                    if slice_engine::is_valid_http_header_name(hk)
+                    if !is_forbidden_custom_response_header(hk)
+                        && slice_engine::is_valid_http_header_name(hk)
                         && slice_engine::is_valid_http_header_value(hv)
                     {
                         write_buf.extend_from_slice(hk.as_bytes());
@@ -812,7 +1053,9 @@ pub(crate) fn serve_connection_with_isolate(
                     }
                 }
                 write_buf.extend_from_slice(b"\r\n");
-                write_buf.extend_from_slice(outcome.response_body.as_bytes());
+                if !suppress_wire_body {
+                    write_buf.extend_from_slice(body_bytes);
+                }
                 if !has_more_pipelined || write_buf.len() >= 32768 {
                     stream.write_all(write_buf)?;
                     write_buf.clear();
@@ -838,20 +1081,23 @@ pub(crate) fn serve_connection_with_isolate(
                 write_buf.extend_from_slice(b"\r\nConnection: ");
                 write_buf.extend_from_slice(conn_hdr.as_bytes());
                 write_buf.extend_from_slice(b"\r\nServer: Slice-NexusJS/0.2\r\n\r\n");
-                write_buf.extend_from_slice(err_body.as_bytes());
+                if method != "HEAD" {
+                    write_buf.extend_from_slice(err_body.as_bytes());
+                }
                 stream.write_all(write_buf)?;
                 write_buf.clear();
             }
         }
 
-        if let Some((counter, max_reqs)) = max_requests_tracker {
-            let prev = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if max_reqs > 0 && prev + 1 >= max_reqs {
-                std::process::exit(0);
-            }
-        }
+        let reached_max = if let Some((counter, max_reqs)) = max_requests_tracker {
+            let prev = counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            max_reqs > 0 && prev + 1 >= max_reqs
+        } else {
+            false
+        };
 
-        if !keep_alive {
+        if !keep_alive || reached_max {
+            flush_pending_write_buf(&mut stream, write_buf)?;
             break;
         }
         if filled > body_end {
@@ -861,5 +1107,6 @@ pub(crate) fn serve_connection_with_isolate(
             filled = 0;
         }
     }
+    flush_pending_write_buf(&mut stream, write_buf)?;
     Ok(())
 }

@@ -71,7 +71,7 @@ pub(crate) struct BoaFsCaps {
     pub(crate) write_prefixes: Vec<String>,
 }
 
-pub(crate) type CapturedBoaHttpRes = (u16, String, String, Vec<(String, String)>);
+pub(crate) type CapturedBoaHttpRes = (u16, String, Option<Vec<u8>>, String, Vec<(String, String)>);
 
 thread_local! {
     pub(crate) static SNP_MODULE_CACHE: std::cell::RefCell<FxHashMap<u64, std::sync::Arc<BytecodeModule>>> =
@@ -103,6 +103,8 @@ thread_local! {
         std::cell::RefCell::new(ActiveBoaHttpReq::default());
     pub(crate) static BOA_HTTP_RES: std::cell::RefCell<Option<CapturedBoaHttpRes>> =
         const { std::cell::RefCell::new(None) };
+    pub(crate) static BOA_WS_UPGRADED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
     pub(crate) static BOA_WAIT_UNTIL_COUNT: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
     pub(crate) static BOA_ACTIVE_TENANT: std::cell::RefCell<String> =
@@ -897,6 +899,7 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_als_snap: boa_engine::JsValue,
     pub(crate) saved_http_req: Option<ActiveBoaHttpReq>,
     pub(crate) saved_http_res: Option<CapturedBoaHttpRes>,
+    pub(crate) saved_ws_upgraded: bool,
     pub(crate) saved_wait_until_count: usize,
     pub(crate) saved_dirty_subsystems: u16,
     pub(crate) saved_exec_dirty: u8,
@@ -970,6 +973,7 @@ impl SavedIsolateContextGuard {
             }
         });
         let saved_http_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
+        let saved_ws_upgraded = BOA_WS_UPGRADED.with(|w| w.replace(false));
         let saved_wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.replace(0));
         let saved_dirty_subsystems = BOA_DIRTY_SUBSYSTEMS.with(|d| d.replace(0));
         let saved_custom_argv = if (saved_exec_dirty & EXEC_DIRTY_ARGV) != 0 {
@@ -1021,6 +1025,7 @@ impl SavedIsolateContextGuard {
             saved_als_snap,
             saved_http_req,
             saved_http_res,
+            saved_ws_upgraded,
             saved_wait_until_count,
             saved_dirty_subsystems,
             saved_exec_dirty,
@@ -1107,6 +1112,7 @@ impl Drop for SavedIsolateContextGuard {
             BOA_HTTP_REQ.with(|r| r.borrow_mut().active = false);
         }
         BOA_HTTP_RES.with(|res| *res.borrow_mut() = self.saved_http_res.take());
+        BOA_WS_UPGRADED.with(|w| w.set(self.saved_ws_upgraded));
         BOA_WAIT_UNTIL_COUNT.with(|c| c.set(self.saved_wait_until_count));
     }
 }

@@ -465,6 +465,13 @@
       };
     },
     respond: function(s, b, ct) {
+      if (
+        b !== null &&
+        typeof b === "object" &&
+        (b instanceof Uint8Array || b instanceof ArrayBuffer || (b.buffer instanceof ArrayBuffer))
+      ) {
+        return __slice_http_respond(s, __slice_toU8(b), ct || "application/octet-stream", "");
+      }
       return __slice_http_respond(
         s,
         typeof b === "string" ? b : JSON.stringify(b),
