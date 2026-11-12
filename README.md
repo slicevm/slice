@@ -169,14 +169,14 @@ Across **33 real-world TypeScript apps, frameworks (`Hono`, `UnJS`, `Express`, `
 
 | Metric (`Linux x86_64`) | Slice (`v0.10.12`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha.0.0.0`) |
 | :--- | :---: | :---: | :---: | :---: |
-| **Isolate Cold Start (`P50` / `P99`)** | **`1.02 us` / `4.27 us`** | Process / VM | Process / VM | Process / VM |
-| **1,000-Tenant Swarm (Boot + Exec)** | **`1.74 ms` (`9.82 MB` RSS)** | `> 5,000 ms` | `> 15,000 ms` | `> 30,000 ms` |
-| **HTTP/1.1 Keep-Alive (`16k` Reqs)** | **`154,794 req/s`** (Tier-0) / **`147,564 req/s`** (Tier-1) | `100,562 req/s` | `99,082 req/s` | `56,447 req/s` |
-| **33-Workload Cold `.cas` Total** | **`496.3 ms`** (`1.40x` Bun / `5.44x` Node) | `695.3 ms` | `1,745.0 ms` | `2,700.0 ms` |
-| **33-Workload `--warm` Pooled Total** | **`167.1 ms`** (`4.16x` Bun / `16.16x` Node) | `695.3 ms` | `1,745.0 ms` | `2,700.0 ms` |
-| **Peak Memory (`Max RSS` Range)** | **`13.45 - 21.63 MB`** | `26.13 - 40.25 MB` | `45.69 - 62.38 MB` | `70.15 - 93.00 MB` |
+| **Isolate Cold Start (`P50` / `P99`)** | **`1.24 us` / `2.10 us`** | Process / VM | Process / VM | Process / VM |
+| **1,000-Tenant Swarm (Boot + Exec)** | **`1.50 ms` (`19.69 MB` RSS)** | `> 5,000 ms` | `> 15,000 ms` | `> 30,000 ms` |
+| **HTTP/1.1 Keep-Alive (`16k` Reqs)** | **`148,865 req/s`** (Tier-0) / **`154,737 req/s`** (Tier-1) | `96,712 req/s` | `100,758 req/s` | `57,158 req/s` |
+| **33-Workload Cold `.cas` Total** | **`500.8 ms`** (`1.39x` Bun / `5.43x` Node) | `696.7 ms` | `1,748.9 ms` | `2,717.7 ms` |
+| **33-Workload `--warm` Pooled Total** | **`170.4 ms`** (`4.09x` Bun / `15.95x` Node) | `696.7 ms` | `1,748.9 ms` | `2,717.7 ms` |
+| **Peak Memory (`Max RSS` Range)** | **`13.75 - 22.13 MB`** | `25.85 - 40.88 MB` | `45.71 - 62.29 MB` | `69.90 - 93.50 MB` |
 
-Full 33-workload breakdown, per-app latency and RSS tables, and run provenance (`dc31f74`, `2026-11-11T17:58:36Z`): **[`tests/reports/latest.md`](./tests/reports/latest.md)** (archive: [`bench_v0.10.12_20261111_175836Z_dc31f74.md`](./tests/reports/bench_v0.10.12_20261111_175836Z_dc31f74.md)).
+Full 33-workload breakdown, per-app latency and RSS tables, and run provenance (`4c5089a`, `2026-11-12T02:06:39Z`): **[`tests/reports/latest.md`](./tests/reports/latest.md)** (archive: [`bench_v0.10.12_20261112_020639Z_4c5089a.md`](./tests/reports/bench_v0.10.12_20261112_020639Z_4c5089a.md)).
 <!-- BENCHMARK_SUMMARY_END -->
 
 To reproduce the full Linux `x86_64` Docker benchmark suite locally and regenerate [`tests/reports/latest.md`](./tests/reports/latest.md):
