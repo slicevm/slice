@@ -113,7 +113,7 @@ struct StandaloneMemoryEntry {
 }
 
 #[derive(Default)]
-struct WasmThreadState {
+pub(crate) struct WasmThreadState {
     next_id: u32,
     modules: FxHashMap<u32, CompiledModuleEntry>,
     instances: FxHashMap<u32, ActiveWasmInstance>,
@@ -126,6 +126,14 @@ impl WasmThreadState {
         mark_subsystem_dirty(DIRTY_WASM);
         self.next_id = self.next_id.wrapping_add(1).max(1);
         self.next_id
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.instances.is_empty()
+            && self.modules.is_empty()
+            && self.memories.is_empty()
+            && self.import_funcs.is_empty()
     }
 }
 
@@ -158,24 +166,37 @@ impl Drop for ActiveBoaCtxGuard {
     }
 }
 
-/// Clears transient per-request host function callbacks while preserving cached WASM modules/instances
-/// if within the thread pool cap (`MAX_WASM_INSTANCES_PER_THREAD`).
+/// Clears all per-turn WASM instances, linear memories, module handles, and imported JS closures
+/// from thread-local state while preserving compiled `wasmi::Module` artifacts in `GLOBAL_WASM_MODULE_CACHE`.
 pub fn clear_thread_wasm_state() {
     WASM_STATE.with(|st| {
         let mut s = st.borrow_mut();
-        if s.instances.len() > MAX_WASM_INSTANCES_PER_THREAD {
-            s.instances.clear();
-            s.import_funcs.clear();
-        }
-        if s.modules.len() > MAX_WASM_INSTANCES_PER_THREAD {
-            s.modules.clear();
-        }
-        if s.memories.len() > MAX_WASM_INSTANCES_PER_THREAD {
-            s.memories.clear();
-        }
+        s.instances.clear();
+        s.import_funcs.clear();
+        s.modules.clear();
+        s.memories.clear();
     });
     ACTIVE_BOA_CTX_PTR.with(|p| p.set(std::ptr::null_mut()));
     ACTIVE_MEM_AB_PTR.with(|p| p.set(std::ptr::null()));
+}
+
+#[inline]
+pub(crate) fn take_thread_wasm_state_if_nonempty() -> Option<WasmThreadState> {
+    WASM_STATE.with(|st| {
+        let mut s = st.borrow_mut();
+        if s.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut *s))
+        }
+    })
+}
+
+#[inline]
+pub(crate) fn restore_thread_wasm_state(saved: WasmThreadState) {
+    WASM_STATE.with(|st| {
+        *st.borrow_mut() = saved;
+    });
 }
 
 #[inline]

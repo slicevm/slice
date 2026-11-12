@@ -228,12 +228,13 @@ impl SliceIsolate {
             .with_checkpoints(child_allow_cp)
             .with_max_checkpoints(child_max_cp);
 
-        let child_tenant = match opts
+        let explicit_sub_tenant = opts
             .tenant_id
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
+            .filter(|s| !s.is_empty());
+        let has_isolated_sub_tenant = explicit_sub_tenant.is_some();
+        let child_tenant = match explicit_sub_tenant {
             Some(sub_id) => format!("{}:sub:{}", self.compartment.tenant_id, sub_id),
             None => format!("{}:sub", self.compartment.tenant_id),
         };
@@ -256,9 +257,47 @@ impl SliceIsolate {
         let bc = crate::parser_and_compiler::compile_source_for_sandbox_eval(code);
         let compile_time_ns = (compile_start.elapsed().as_nanos() as u64).max(1);
 
+        let parent_vfs_ns = crate::boa_realm::vfs_owner_namespace(&self.compartment.tenant_id);
+        crate::boa_realm::ensure_vfs_tenant_affinity(parent_vfs_ns);
+        let saved_vfs = if has_isolated_sub_tenant {
+            Some((
+                crate::boa_realm::BOA_VFS_OWNER_TENANT
+                    .with(|o| std::mem::take(&mut *o.borrow_mut())),
+                crate::boa_realm::BOA_VFS_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut())),
+                crate::boa_realm::BOA_VFS_DIRS.with(|d| std::mem::take(&mut *d.borrow_mut())),
+                crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| std::mem::take(&mut *t.borrow_mut())),
+                crate::boa_realm::BOA_VFS_MTIMES.with(|m| std::mem::take(&mut *m.borrow_mut())),
+            ))
+        } else if !child_iso
+            .compartment
+            .capabilities
+            .allowed_write_prefixes
+            .is_empty()
+        {
+            Some((
+                crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| o.borrow().clone()),
+                crate::boa_realm::BOA_VFS_CACHE.with(|c| c.borrow().clone()),
+                crate::boa_realm::BOA_VFS_DIRS.with(|d| d.borrow().clone()),
+                crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| t.borrow().clone()),
+                crate::boa_realm::BOA_VFS_MTIMES.with(|m| m.borrow().clone()),
+            ))
+        } else {
+            None
+        };
+
         let exec_start = Instant::now();
         let exec_res = child_iso.execute_bytecode(&bc, None);
         let exec_time_ns = (exec_start.elapsed().as_nanos() as u64).max(1);
+
+        if has_isolated_sub_tenant || exec_res.is_err() {
+            if let Some((owner, files, dirs, tombs, mtimes)) = saved_vfs {
+                crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| *o.borrow_mut() = owner);
+                crate::boa_realm::BOA_VFS_CACHE.with(|c| *c.borrow_mut() = files);
+                crate::boa_realm::BOA_VFS_DIRS.with(|d| *d.borrow_mut() = dirs);
+                crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| *t.borrow_mut() = tombs);
+                crate::boa_realm::BOA_VFS_MTIMES.with(|m| *m.borrow_mut() = mtimes);
+            }
+        }
         if child_iso.checkpoints_taken > 0 {
             clear_tenant_checkpoints(&child_iso.compartment.tenant_id);
         }

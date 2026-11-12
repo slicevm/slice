@@ -9,10 +9,10 @@
 //! - Lock-free `mpsc` bidirectional message channels integrated directly into `event_loop.rs`
 
 use crate::boa_realm::{
-    check_boa_fs_read_ocap, mark_subsystem_dirty, norm_vfs_path, BoaFsCaps, BOA_ACTIVE_CAPS,
-    BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS,
-    BOA_FETCH_MOCKS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VFS_CACHE, BOA_VFS_DIRS,
-    BOA_VFS_TOMBSTONES, BOA_VIOLATION, DIRTY_WORKERS,
+    check_boa_fs_read_ocap, mark_subsystem_dirty, norm_vfs_path, vfs_owner_namespace, BoaFsCaps,
+    BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_ENV_MAP,
+    BOA_EXEC_BINS, BOA_FETCH_MOCKS, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VFS_CACHE, BOA_VFS_DIRS,
+    BOA_VFS_MTIMES, BOA_VFS_OWNER_TENANT, BOA_VFS_TOMBSTONES, BOA_VIOLATION, DIRTY_WORKERS,
 };
 use crate::intrinsics::base64_decode;
 use crate::isolate::SliceIsolate;
@@ -64,6 +64,7 @@ struct WorkerJob {
     parent_vfs_cache: FxHashMap<String, Arc<Vec<u8>>>,
     parent_vfs_dirs: FxHashSet<String>,
     parent_vfs_tombstones: FxHashSet<String>,
+    parent_vfs_mtimes: FxHashMap<String, f64>,
     parent_fetch_mocks: FxHashMap<String, String>,
     parent_ws_mocks: FxHashMap<String, String>,
     parent_sock_mocks: FxHashMap<String, String>,
@@ -507,6 +508,14 @@ pub fn worker_spawn(specifier_or_code: &str, options_json: &str) -> Result<u32, 
             b.clone()
         }
     });
+    let parent_vfs_mtimes = BOA_VFS_MTIMES.with(|m| {
+        let b = m.borrow();
+        if b.is_empty() {
+            FxHashMap::default()
+        } else {
+            b.clone()
+        }
+    });
     let parent_fetch_mocks = BOA_FETCH_MOCKS.with(|m| m.borrow().clone());
     let parent_ws_mocks = BOA_WS_MOCKS.with(|m| m.borrow().clone());
     let parent_sock_mocks = BOA_SOCKET_MOCKS.with(|m| m.borrow().clone());
@@ -573,6 +582,7 @@ pub fn worker_spawn(specifier_or_code: &str, options_json: &str) -> Result<u32, 
         parent_vfs_cache,
         parent_vfs_dirs,
         parent_vfs_tombstones,
+        parent_vfs_mtimes,
         parent_fetch_mocks,
         parent_ws_mocks,
         parent_sock_mocks,
@@ -771,9 +781,15 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
         return;
     }
 
+    BOA_VFS_OWNER_TENANT.with(|o| {
+        let mut cur = o.borrow_mut();
+        cur.clear();
+        cur.push_str(vfs_owner_namespace(&job.child_tenant));
+    });
     BOA_VFS_CACHE.with(|c| *c.borrow_mut() = job.parent_vfs_cache);
     BOA_VFS_DIRS.with(|d| *d.borrow_mut() = job.parent_vfs_dirs);
     BOA_VFS_TOMBSTONES.with(|t| *t.borrow_mut() = job.parent_vfs_tombstones);
+    BOA_VFS_MTIMES.with(|m| *m.borrow_mut() = job.parent_vfs_mtimes);
     BOA_FETCH_MOCKS.with(|m| *m.borrow_mut() = job.parent_fetch_mocks);
     BOA_WS_MOCKS.with(|m| *m.borrow_mut() = job.parent_ws_mocks);
     BOA_SOCKET_MOCKS.with(|m| *m.borrow_mut() = job.parent_sock_mocks);
@@ -824,9 +840,11 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
     // BEFORE sending `Exit` to the parent isolate so sequential `await worker` loops
     // immediately reuse this warm thread without a race condition!
     WORKER_SELF_ENV.with(|env| *env.borrow_mut() = WorkerSelfThreadEnv::default());
+    BOA_VFS_OWNER_TENANT.with(|o| o.borrow_mut().clear());
     BOA_VFS_CACHE.with(|c| c.borrow_mut().clear());
     BOA_VFS_DIRS.with(|d| d.borrow_mut().clear());
     BOA_VFS_TOMBSTONES.with(|t| t.borrow_mut().clear());
+    BOA_VFS_MTIMES.with(|m| m.borrow_mut().clear());
     GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
     if let Ok(mut pool) = idle_worker_pool().lock() {
         if pool.len() < MAX_POOLED_WORKER_THREADS {

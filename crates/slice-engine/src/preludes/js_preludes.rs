@@ -756,6 +756,14 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
         "Object[",
         ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_NEEDS_SES_CHECK),
     ),
+    (
+        "defineProperty",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_NEEDS_SES_CHECK),
+    ),
+    (
+        "][",
+        ShardTriggerAction::Flags(crate::boacas::BOACAS_FLAG_NEEDS_SES_CHECK),
+    ),
     ("globalThis", ShardTriggerAction::GlobalThisRef),
     (
         "getOwnPropertyDescriptor",

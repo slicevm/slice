@@ -3,17 +3,19 @@
 use crate::host_bindings::register_slice_native_host_functions;
 use crate::state_and_kv::StateCheckpoint;
 use crate::value_and_ast::BytecodeModule;
+use compact_str::CompactString;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slice_sandbox::SandboxViolation;
 
-pub(crate) const DIRTY_EVENT_LOOP: u8 = 1 << 0;
-pub(crate) const DIRTY_ALS: u8 = 1 << 1;
-pub(crate) const DIRTY_FETCH_MOCK: u8 = 1 << 2;
-pub(crate) const DIRTY_WEBSOCKET: u8 = 1 << 3;
-pub(crate) const DIRTY_SOCKETS: u8 = 1 << 4;
-pub(crate) const DIRTY_WORKERS: u8 = 1 << 5;
-pub(crate) const DIRTY_WASM: u8 = 1 << 6;
-pub(crate) const DIRTY_PROCESS: u8 = 1 << 7;
+pub(crate) const DIRTY_EVENT_LOOP: u16 = 1 << 0;
+pub(crate) const DIRTY_ALS: u16 = 1 << 1;
+pub(crate) const DIRTY_FETCH_MOCK: u16 = 1 << 2;
+pub(crate) const DIRTY_WEBSOCKET: u16 = 1 << 3;
+pub(crate) const DIRTY_SOCKETS: u16 = 1 << 4;
+pub(crate) const DIRTY_WORKERS: u16 = 1 << 5;
+pub(crate) const DIRTY_WASM: u16 = 1 << 6;
+pub(crate) const DIRTY_PROCESS: u16 = 1 << 7;
+pub(crate) const DIRTY_VFS: u16 = 1 << 8;
 
 pub(crate) const EXEC_DIRTY_EXIT: u8 = 1 << 0;
 pub(crate) const EXEC_DIRTY_REJECTIONS: u8 = 1 << 1;
@@ -46,6 +48,7 @@ pub(crate) struct ActiveBoaHttpReq {
 }
 
 pub(crate) struct WarmBoaRealm {
+    pub(crate) owner_tenant: CompactString,
     pub(crate) ctx: boa_engine::Context,
     pub(crate) loaded_bundles: FxHashMap<u64, boa_engine::JsObject>,
     pub(crate) loaded_bundle_flags: FxHashMap<u64, u16>,
@@ -56,8 +59,10 @@ pub(crate) struct WarmBoaRealm {
     pub(crate) init_worker_self_fn: Option<boa_engine::JsObject>,
     pub(crate) drain_wu_fn: Option<boa_engine::JsObject>,
     pub(crate) ctl_fn: Option<boa_engine::JsObject>,
+    pub(crate) ses_proto_sigs: [(usize, usize); 6],
     pub(crate) loaded_shards_mask: u32,
     pub(crate) registered_host_groups: u8,
+    pub(crate) has_pending_wu: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -81,6 +86,10 @@ thread_local! {
         std::cell::RefCell::new(FxHashSet::default());
     pub(crate) static BOA_VFS_TOMBSTONES: std::cell::RefCell<FxHashSet<String>> =
         std::cell::RefCell::new(FxHashSet::default());
+    pub(crate) static BOA_VFS_MTIMES: std::cell::RefCell<FxHashMap<String, f64>> =
+        std::cell::RefCell::new(FxHashMap::default());
+    pub(crate) static BOA_VFS_OWNER_TENANT: std::cell::RefCell<CompactString> =
+        const { std::cell::RefCell::new(CompactString::const_new("")) };
     pub(crate) static BOA_ACTIVE_CAPS: std::cell::RefCell<BoaFsCaps> =
         const {
             std::cell::RefCell::new(BoaFsCaps {
@@ -136,7 +145,7 @@ thread_local! {
         const { std::cell::Cell::new(false) };
     pub(crate) static BOA_TRACE_EVENTS: std::cell::RefCell<Vec<ChromeTraceEvent>> =
         const { std::cell::RefCell::new(Vec::new()) };
-    pub(crate) static BOA_DIRTY_SUBSYSTEMS: std::cell::Cell<u8> =
+    pub(crate) static BOA_DIRTY_SUBSYSTEMS: std::cell::Cell<u16> =
         const { std::cell::Cell::new(0) };
     pub(crate) static BOA_EXEC_DIRTY: std::cell::Cell<u8> =
         const { std::cell::Cell::new(0) };
@@ -285,7 +294,7 @@ impl boa_engine::context::HostHooks for SliceHostHooks {
 }
 
 #[inline]
-pub(crate) fn mark_subsystem_dirty(bit: u8) {
+pub(crate) fn mark_subsystem_dirty(bit: u16) {
     BOA_DIRTY_SUBSYSTEMS.with(|c| c.set(c.get() | bit));
 }
 
@@ -571,38 +580,121 @@ pub(crate) fn check_boa_fs_write_ocap(path: &str) -> bool {
         let tenant = current_boa_tenant_or_default();
         return record_boa_fs_write_violation(&tenant, path);
     }
+    mark_subsystem_dirty(DIRTY_VFS);
     true
 }
 
 #[inline]
+pub(crate) fn vfs_owner_namespace(tenant_id: &str) -> &str {
+    tenant_id.strip_suffix(":sub").unwrap_or(tenant_id)
+}
+
+#[inline]
+pub(crate) fn ensure_vfs_tenant_affinity(vfs_ns: &str) {
+    BOA_VFS_OWNER_TENANT.with(|owner| {
+        let mut cur = owner.borrow_mut();
+        if cur.as_str() != vfs_ns {
+            BOA_VFS_CACHE.with(|c| c.borrow_mut().clear());
+            BOA_VFS_DIRS.with(|d| d.borrow_mut().clear());
+            BOA_VFS_TOMBSTONES.with(|t| t.borrow_mut().clear());
+            BOA_VFS_MTIMES.with(|m| m.borrow_mut().clear());
+            cur.clear();
+            cur.push_str(vfs_ns);
+        }
+    });
+}
+
+#[inline]
+fn proto_sig(obj: &boa_engine::JsObject) -> (usize, usize) {
+    let b = obj.borrow();
+    (
+        b.shape().to_addr_usize(),
+        b.properties().index_property_values().len(),
+    )
+}
+
+#[inline]
+pub(crate) fn capture_ses_proto_sigs(ctx: &boa_engine::Context) -> [(usize, usize); 6] {
+    let c = ctx.intrinsics().constructors();
+    [
+        proto_sig(&c.object().prototype()),
+        proto_sig(&c.array().prototype()),
+        proto_sig(&c.function().prototype()),
+        proto_sig(&c.string().prototype()),
+        proto_sig(&c.promise().prototype()),
+        proto_sig(&c.typed_uint8_array().prototype()),
+    ]
+}
+
+#[inline]
+pub(crate) fn has_ses_proto_sig_mismatch(realm: &WarmBoaRealm) -> bool {
+    capture_ses_proto_sigs(&realm.ctx) != realm.ses_proto_sigs
+}
+
+#[inline]
+pub(crate) fn try_acquire_pooled_boa_realm_for_tenant(tenant_id: &str) -> Option<WarmBoaRealm> {
+    BOA_CONTEXT_POOL.with(|pool| {
+        let mut p = pool.borrow_mut();
+        if p.is_empty() {
+            return None;
+        }
+        if tenant_id.is_empty() {
+            let idx = p.iter().rposition(|r| r.owner_tenant.is_empty())?;
+            return Some(p.remove(idx));
+        }
+        if p.last().is_some_and(|r| r.owner_tenant == tenant_id) {
+            return p.pop();
+        }
+        if let Some(idx) = p.iter().rposition(|r| r.owner_tenant == tenant_id) {
+            return Some(p.remove(idx));
+        }
+        if let Some(idx) = p.iter().rposition(|r| r.owner_tenant.is_empty()) {
+            let mut realm = p.remove(idx);
+            realm.owner_tenant = CompactString::new(tenant_id);
+            return Some(realm);
+        }
+        None
+    })
+}
+
+#[inline]
 pub(crate) fn try_acquire_pooled_boa_realm() -> Option<WarmBoaRealm> {
-    BOA_CONTEXT_POOL.with(|pool| pool.borrow_mut().pop())
+    try_acquire_pooled_boa_realm_for_tenant("")
+}
+
+#[inline]
+pub(crate) fn acquire_warm_boa_realm_for_tenant(tenant_id: &str) -> WarmBoaRealm {
+    try_acquire_pooled_boa_realm_for_tenant(tenant_id)
+        .unwrap_or_else(|| create_warm_boa_realm_for_tenant(tenant_id))
 }
 
 pub(crate) fn acquire_warm_boa_realm() -> WarmBoaRealm {
-    try_acquire_pooled_boa_realm().unwrap_or_else(create_warm_boa_realm)
+    acquire_warm_boa_realm_for_tenant("")
 }
 
 pub(crate) fn release_warm_boa_realm(realm: WarmBoaRealm) {
     BOA_CONTEXT_POOL.with(|pool| {
         let mut p = pool.borrow_mut();
-        if p.len() < 8 {
-            p.push(realm);
+        if p.len() >= 8 {
+            p.remove(0);
         }
+        p.push(realm);
     });
 }
 
 /// Creates a bare `boa_engine::Context` with `SliceJobExecutor` and core native Rust host functions
 /// registered, without evaluating `ULTRA_CORE_PRELUDE` yet (used when executing pre-fused or
 /// pre-compiled `SLICEBC\x01` payloads on cold start).
-pub(crate) fn create_bare_boa_realm() -> WarmBoaRealm {
+pub(crate) fn create_bare_boa_realm_for_tenant(tenant_id: &str) -> WarmBoaRealm {
     let mut ctx = boa_engine::context::ContextBuilder::new()
         .job_executor(std::rc::Rc::new(SliceJobExecutor::new()))
         .host_hooks(std::rc::Rc::new(SliceHostHooks))
         .build()
         .unwrap_or_else(|_| boa_engine::Context::default());
     register_slice_native_host_functions(&mut ctx);
+    let ses_proto_sigs = capture_ses_proto_sigs(&ctx);
     WarmBoaRealm {
+        owner_tenant: CompactString::new(tenant_id),
         ctx,
         loaded_bundles: FxHashMap::default(),
         loaded_bundle_flags: FxHashMap::default(),
@@ -613,9 +705,16 @@ pub(crate) fn create_bare_boa_realm() -> WarmBoaRealm {
         init_worker_self_fn: None,
         drain_wu_fn: None,
         ctl_fn: None,
+        ses_proto_sigs,
         loaded_shards_mask: 0,
         registered_host_groups: 0,
+        has_pending_wu: false,
     }
+}
+
+#[inline]
+pub(crate) fn create_bare_boa_realm() -> WarmBoaRealm {
+    create_bare_boa_realm_for_tenant("")
 }
 
 /// Refreshes the cached JS function handles (`__slice_check_ses`, `__slice_ensure_shard`,
@@ -628,6 +727,7 @@ pub(crate) fn populate_realm_cached_handles(realm: &mut WarmBoaRealm) {
             .get(boa_engine::js_string!("__slice_check_ses"), &mut realm.ctx)
             .ok()
             .and_then(|v| v.as_object());
+        realm.ses_proto_sigs = capture_ses_proto_sigs(&realm.ctx);
     }
     if realm.ensure_shard_fn.is_none() {
         realm.ensure_shard_fn = global
@@ -710,11 +810,15 @@ pub(crate) fn eval_or_reuse_cached_script(
 /// WinterTC /WHATWG globals (`console.*`, `fetch`, `URL`, `Headers`, `Request`, `Response`,
 /// `ReadableStream`, `WritableStream`, `TransformStream`, `WebCrypto`, `Buffer`, `structuredClone`),
 /// and microtask/macrotask schedulers (`process.nextTick`, `queueMicrotask`, `setImmediate`, `setTimeout`).
-pub(crate) fn create_warm_boa_realm() -> WarmBoaRealm {
-    let mut realm = create_bare_boa_realm();
+pub(crate) fn create_warm_boa_realm_for_tenant(tenant_id: &str) -> WarmBoaRealm {
+    let mut realm = create_bare_boa_realm_for_tenant(tenant_id);
     let _ = crate::js_preludes::eval_ultra_core_prelude(&mut realm.ctx);
     populate_realm_cached_handles(&mut realm);
     realm
+}
+
+pub(crate) fn create_warm_boa_realm() -> WarmBoaRealm {
+    create_warm_boa_realm_for_tenant("")
 }
 
 #[inline]
@@ -747,6 +851,9 @@ pub(crate) fn ensure_realm_shards(
                 let _ = crate::js_preludes::eval_lazy_prelude_shard(shard_id, &mut realm.ctx);
             }
             realm.loaded_shards_mask |= bit;
+            if shard_id == 18 {
+                realm.ses_proto_sigs = capture_ses_proto_sigs(&realm.ctx);
+            }
             if shard_id == 8 && realm.init_worker_self_fn.is_none() {
                 realm.init_worker_self_fn = realm
                     .ctx
@@ -790,7 +897,7 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_http_req: Option<ActiveBoaHttpReq>,
     pub(crate) saved_http_res: Option<CapturedBoaHttpRes>,
     pub(crate) saved_wait_until_count: usize,
-    pub(crate) saved_dirty_subsystems: u8,
+    pub(crate) saved_dirty_subsystems: u16,
     pub(crate) saved_exec_dirty: u8,
     pub(crate) saved_custom_argv: Option<Vec<String>>,
     pub(crate) saved_process_exit: Option<i32>,
@@ -798,6 +905,7 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_unhandled_rejections: Vec<boa_engine::JsObject>,
     pub(crate) saved_uncaught_error: Option<String>,
     pub(crate) saved_ev_loop: Option<crate::event_loop::SavedEventLoopSnapshot>,
+    pub(crate) saved_wasm_state: Option<crate::wasm::WasmThreadState>,
 }
 
 impl SavedIsolateContextGuard {
@@ -888,6 +996,7 @@ impl SavedIsolateContextGuard {
             None
         };
         let saved_ev_loop = crate::event_loop::save_and_reset_event_loop_state();
+        let saved_wasm_state = crate::wasm::take_thread_wasm_state_if_nonempty();
 
         Self {
             saved_stdout,
@@ -920,6 +1029,7 @@ impl SavedIsolateContextGuard {
             saved_unhandled_rejections,
             saved_uncaught_error,
             saved_ev_loop,
+            saved_wasm_state,
         }
     }
 }
@@ -930,6 +1040,11 @@ impl Drop for SavedIsolateContextGuard {
             crate::event_loop::restore_event_loop_state(ev);
         }
         let child_dirty = BOA_DIRTY_SUBSYSTEMS.with(|d| d.get());
+        if let Some(ws) = self.saved_wasm_state.take() {
+            crate::wasm::restore_thread_wasm_state(ws);
+        } else if (child_dirty & DIRTY_WASM) != 0 {
+            crate::wasm::clear_thread_wasm_state();
+        }
         let child_exec_dirty = BOA_EXEC_DIRTY.with(|c| c.get());
         let union_exec_dirty = self.saved_exec_dirty | child_exec_dirty;
         BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(self.saved_dirty_subsystems));

@@ -2,8 +2,8 @@
 //! Task Draining (`drain_wait_until_tasks`), and Server WebSocket Frame Dispatch (`execute_websocket_event`).
 
 use crate::boa_realm::{
-    acquire_warm_boa_realm, call_realm_ctl, ensure_realm_shards, BOA_HTTP_REQ, BOA_HTTP_RES,
-    BOA_WAIT_UNTIL_COUNT, REALM_CTL_SET_DET_MODE, REALM_CTL_SYNC_ENV,
+    acquire_warm_boa_realm_for_tenant, call_realm_ctl, ensure_realm_shards, BOA_HTTP_REQ,
+    BOA_HTTP_RES, BOA_WAIT_UNTIL_COUNT, REALM_CTL_SET_DET_MODE, REALM_CTL_SYNC_ENV,
 };
 use crate::isolate::{ExecutionMetrics, SliceIsolate};
 use slice_cas::MappedCasArchive;
@@ -205,7 +205,8 @@ impl SliceIsolate {
         self.compartment.consume_fuel((count as u64) * 5)?;
 
         let flags = self.setup_boa_compartment_thread_locals();
-        let mut realm = acquire_warm_boa_realm();
+        let mut realm = acquire_warm_boa_realm_for_tenant(&self.compartment.tenant_id);
+        realm.has_pending_wu = false;
 
         if flags.has_env_keys {
             call_realm_ctl(&mut realm, REALM_CTL_SYNC_ENV, true);
@@ -256,7 +257,8 @@ impl SliceIsolate {
         };
 
         let flags = self.setup_boa_compartment_thread_locals();
-        let mut realm = acquire_warm_boa_realm();
+        let mut realm = acquire_warm_boa_realm_for_tenant(&self.compartment.tenant_id);
+        realm.has_pending_wu = false;
         ensure_realm_shards(&mut realm, (1 << 13) | (1 << 7), false);
 
         if flags.has_env_keys {

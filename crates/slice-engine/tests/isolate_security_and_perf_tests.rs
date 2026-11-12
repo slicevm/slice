@@ -438,3 +438,327 @@ fn test_iso_perf01_02_03_reset_for_request_http_dlp_and_warm_isolate_throughput(
         reset_ns_per_op, http_us_per_op
     );
 }
+
+#[test]
+fn test_multi_tenant_warm_realm_wait_until_and_ses_quarantine_isolation() {
+    // 1. Cross-tenant WarmBoaRealm affinity and waitUntil closure scrub on aborted turns
+    let script_a_abort = r#"
+        globalThis.__tenant_marker = "tenant-alpha-secret";
+        Slice.waitUntil(() => {
+            Slice.kv.set("hijacked_by_alpha", "leaked");
+        });
+        throw new Error("abort before HTTP response");
+    "#;
+    let bc_a_abort = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        script_a_abort,
+        true,
+    ));
+    let mut iso_a = SliceIsolate::spawn(
+        "mt-alpha",
+        1,
+        CapabilityToken::pure_compute(),
+        500_000,
+        8 * 1024 * 1024,
+    );
+    let req_a = HttpRequestContext {
+        method: "GET",
+        path: "/abort",
+        query: "",
+        tenant_id: "mt-alpha",
+        body: "",
+        headers: &[],
+    };
+    let _ = iso_a.execute_http_request(&bc_a_abort, None, &req_a);
+
+    let script_b = r#"
+        const globalLeak = typeof globalThis.__tenant_marker;
+        Slice.kv.set("beta_secret", "top-secret-beta");
+        Slice.waitUntil(() => {
+            Slice.kv.set("beta_bg", "clean");
+        });
+        Slice.respond(200, globalLeak, "text/plain");
+    "#;
+    let bc_b =
+        compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(script_b, true));
+    let mut iso_b = SliceIsolate::spawn(
+        "mt-beta",
+        2,
+        CapabilityToken::pure_compute(),
+        500_000,
+        8 * 1024 * 1024,
+    );
+    let req_b = HttpRequestContext {
+        method: "GET",
+        path: "/check",
+        query: "",
+        tenant_id: "mt-beta",
+        body: "",
+        headers: &[],
+    };
+    let out_b = iso_b
+        .execute_http_request(&bc_b, None, &req_b)
+        .expect("tenant beta HTTP request should succeed");
+    assert_eq!(out_b.response_body, "undefined");
+    assert_eq!(out_b.wait_until_count, 1);
+    iso_b
+        .drain_wait_until_tasks()
+        .expect("tenant beta waitUntil should drain cleanly");
+    assert_eq!(iso_b.kv_get("beta_bg").as_deref(), Some("clean"));
+    assert_eq!(
+        iso_b.kv_get("hijacked_by_alpha"),
+        None,
+        "aborted waitUntil closure from another tenant must never execute in tenant beta"
+    );
+
+    // Same-tenant subsequent request must also not drain stale aborted waitUntil closures
+    let script_a_next = r#"
+        Slice.waitUntil(() => {
+            Slice.kv.set("alpha_legit_bg", "ok");
+        });
+        Slice.respond(200, "ok", "text/plain");
+    "#;
+    let bc_a_next = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        script_a_next,
+        true,
+    ));
+    iso_a.reset_for_request("mt-alpha", 1, 500_000, 8 * 1024 * 1024);
+    let out_a_next = iso_a
+        .execute_http_request(&bc_a_next, None, &req_a)
+        .expect("subsequent tenant alpha request should succeed");
+    assert_eq!(out_a_next.wait_until_count, 1);
+    iso_a
+        .drain_wait_until_tasks()
+        .expect("legitimate waitUntil should succeed");
+    assert_eq!(iso_a.kv_get("alpha_legit_bg").as_deref(), Some("ok"));
+    assert_eq!(
+        iso_a.kv_get("hijacked_by_alpha"),
+        None,
+        "aborted waitUntil closure must be cleared when turn aborts"
+    );
+
+    // 2. Dynamic bracket prototype mutation + non-enumerable defineProperty + fuel exhaustion
+    //    plus attempted overwrite of globalThis.__slice_check_ses must quarantine the realm.
+    let script_ses_fuel = r#"
+        try { globalThis.__slice_check_ses = () => ""; } catch (_e) {}
+        const p = "proto" + "type";
+        const c = "const" + "ructor";
+        ({})[c][p].injectedAdmin = true;
+        Object.defineProperty(Array[p], "hiddenSlot", {
+            value: 42,
+            enumerable: false,
+            configurable: true
+        });
+        while (true) {}
+    "#;
+    let bc_ses_fuel = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        script_ses_fuel,
+        true,
+    ));
+    let mut iso_poison = SliceIsolate::spawn(
+        "mt-poison",
+        3,
+        CapabilityToken::pure_compute(),
+        5_000,
+        8 * 1024 * 1024,
+    );
+    let poison_err = iso_poison
+        .execute_bytecode(&bc_ses_fuel, None)
+        .expect_err("dynamic prototype mutation + infinite loop must trap");
+    assert!(
+        matches!(
+            poison_err,
+            SandboxViolation::CpuFuelExhausted { .. }
+                | SandboxViolation::IntrinsicMutationBlocked { .. }
+        ),
+        "unexpected violation: {:?}",
+        poison_err
+    );
+
+    // Verify both same-tenant retry and another tenant observe completely unpolluted prototypes
+    let verify_clean_js = r#"
+        const cleanObj = !("injectedAdmin" in ({}));
+        const cleanArr = Object.getOwnPropertyDescriptor(Array.prototype, "hiddenSlot") === undefined;
+        const sesLocked = Object.getOwnPropertyDescriptor(globalThis, "__slice_check_ses")?.writable === false;
+        `${cleanObj}:${cleanArr}:${sesLocked}`
+    "#;
+    let bc_verify = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        verify_clean_js,
+        true,
+    ));
+    iso_poison.reset_for_request("mt-poison", 3, 500_000, 8 * 1024 * 1024);
+    let m_same = iso_poison
+        .execute_bytecode(&bc_verify, None)
+        .expect("quarantined realm must be replaced with a clean realm for same tenant");
+    assert_eq!(m_same.return_value, "true:true:true");
+
+    let mut iso_other = SliceIsolate::spawn(
+        "mt-clean-observer",
+        4,
+        CapabilityToken::pure_compute(),
+        500_000,
+        8 * 1024 * 1024,
+    );
+    let m_other = iso_other
+        .execute_bytecode(&bc_verify, None)
+        .expect("other tenant must observe clean prototypes");
+    assert_eq!(m_other.return_value, "true:true:true");
+
+    // Also verify dynamic bracket prototype mutation without fuel exhaustion traps directly
+    let script_dyn_only = r#"
+        const p = "proto" + "type";
+        const c = "const" + "ructor";
+        ({})[c][p].injectedNoFuelTrap = 99;
+    "#;
+    let bc_dyn_only = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        script_dyn_only,
+        true,
+    ));
+    let dyn_err = iso_other
+        .execute_bytecode(&bc_dyn_only, None)
+        .expect_err("dynamic bracket prototype mutation must trap with IntrinsicMutationBlocked");
+    assert!(
+        matches!(dyn_err, SandboxViolation::IntrinsicMutationBlocked { .. }),
+        "expected IntrinsicMutationBlocked, got: {:?}",
+        dyn_err
+    );
+}
+
+#[test]
+fn test_multi_tenant_vfs_affinity_checkpoint_mtime_and_nested_sandbox_isolation() {
+    let fs_caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/tmp")
+        .with_write_prefix("/tmp");
+
+    // 1. Checkpoint & restore preserves custom file mtimeMs, and nested evalSandbox enforces
+    //    explicit empty allowWrite: [], isolated sub-tenants, and violation rollback.
+    let script_tenant_one = r#"
+        import * as fs from "node:fs";
+
+        fs.writeFileSync("/tmp/mt_doc.txt", "v1");
+        fs.utimesSync("/tmp/mt_doc.txt", 1710000000, 1710000000);
+        const mtimeBefore = Math.round(fs.statSync("/tmp/mt_doc.txt").mtimeMs);
+
+        const snap = Slice.checkpoint();
+        fs.writeFileSync("/tmp/mt_doc.txt", "v2-mutated");
+        fs.utimesSync("/tmp/mt_doc.txt", 1790000000, 1790000000);
+        const mtimeMutated = Math.round(fs.statSync("/tmp/mt_doc.txt").mtimeMs);
+
+        Slice.restore(snap);
+        const restoredBody = fs.readFileSync("/tmp/mt_doc.txt", "utf8");
+        const mtimeRestored = Math.round(fs.statSync("/tmp/mt_doc.txt").mtimeMs);
+
+        // Explicit empty allowWrite: [] must deny VFS writes even though parent has /tmp write
+        const deniedWrite = Slice.evalSandbox(
+            `const fs = require("node:fs"); fs.writeFileSync("/tmp/mt_doc.txt", "overwritten");`,
+            { allowWrite: [] }
+        );
+
+        // Isolated sub-tenant must get an isolated VFS without seeing or clobbering parent VFS
+        const subTenant = Slice.evalSandbox(
+            `const fs = require("node:fs");
+             const sawParent = fs.existsSync("/tmp/mt_doc.txt");
+             fs.writeFileSync("/tmp/mt_doc.txt", "plugin-local");
+             sawParent + ":" + fs.readFileSync("/tmp/mt_doc.txt", "utf8")`,
+            { tenantId: "isolated-plugin" }
+        );
+
+        // Same-tenant child that writes and then hits a violation must roll back partial VFS writes
+        const violatingChild = Slice.evalSandbox(
+            `const fs = require("node:fs");
+             fs.writeFileSync("/tmp/mt_doc.txt", "partial-before-fuel-trap");
+             while (true) {}`,
+            { fuel: 2500 }
+        );
+
+        const finalBody = fs.readFileSync("/tmp/mt_doc.txt", "utf8");
+        JSON.stringify({
+            mtimeBefore,
+            mtimeMutated,
+            mtimeRestored,
+            restoredBody,
+            deniedOk: deniedWrite.ok,
+            hasWriteViolation: String(deniedWrite.violation || "").includes("lacks filesystem write authority"),
+            subTenantVal: subTenant.returnValue,
+            violatingOk: violatingChild.ok,
+            finalBody
+        });
+    "#;
+    let bc_one = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        script_tenant_one,
+        true,
+    ));
+    let mut iso_one = SliceIsolate::spawn(
+        "vfs-tenant-one",
+        1,
+        fs_caps.clone(),
+        2_000_000,
+        16 * 1024 * 1024,
+    );
+    let m_one = iso_one
+        .execute_bytecode(&bc_one, None)
+        .expect("vfs-tenant-one script should succeed");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&m_one.return_value).expect("valid JSON summary");
+    assert_eq!(parsed["restoredBody"], "v1");
+    assert_eq!(parsed["mtimeBefore"], parsed["mtimeRestored"]);
+    assert_ne!(parsed["mtimeBefore"], parsed["mtimeMutated"]);
+    assert_eq!(parsed["deniedOk"], false);
+    assert_eq!(parsed["hasWriteViolation"], true);
+    assert_eq!(parsed["subTenantVal"], "false:plugin-local");
+    assert_eq!(parsed["violatingOk"], false);
+    assert_eq!(parsed["finalBody"], "v1");
+
+    // 2. Different tenant executing on the same OS thread must not see vfs-tenant-one's VFS files
+    let script_tenant_two = r#"
+        import * as fs from "node:fs";
+        fs.existsSync("/tmp/mt_doc.txt")
+    "#;
+    let bc_two = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        script_tenant_two,
+        true,
+    ));
+    let mut iso_two = SliceIsolate::spawn("vfs-tenant-two", 2, fs_caps, 500_000, 8 * 1024 * 1024);
+    let m_two = iso_two
+        .execute_bytecode(&bc_two, None)
+        .expect("vfs-tenant-two script should succeed");
+    assert_eq!(
+        m_two.return_value, "false",
+        "VFS files and mtimes from tenant one must not leak to tenant two on the same thread"
+    );
+
+    // 3. Microbenchmark warm single-tenant HTTP keep-alive fast path
+    let fast_http_src = r#"Slice.respond(200, "pong", "text/plain");"#;
+    let bc_fast = compile_source_to_bytecode(fast_http_src);
+    let mut warm_iso = SliceIsolate::spawn(
+        "bench-keepalive-tenant",
+        1,
+        CapabilityToken::pure_compute(),
+        500_000,
+        8 * 1024 * 1024,
+    );
+    let req = HttpRequestContext {
+        method: "GET",
+        path: "/ping",
+        query: "",
+        tenant_id: "bench-keepalive-tenant",
+        body: "",
+        headers: &[],
+    };
+    let _ = warm_iso
+        .execute_http_request_fast(&bc_fast, None, &req)
+        .expect("warmup");
+    let bench_iters = 500u32;
+    let t0 = Instant::now();
+    for _ in 0..bench_iters {
+        warm_iso.reset_for_request("bench-keepalive-tenant", 1, 500_000, 8 * 1024 * 1024);
+        let res = warm_iso
+            .execute_http_request_fast(&bc_fast, None, &req)
+            .expect("fast http");
+        assert_eq!(res.status_code, 200);
+    }
+    let us_per_req = (t0.elapsed().as_nanos() as f64 / 1_000.0) / (bench_iters as f64);
+    println!(
+        "[ISO-PERF] single-tenant warm execute_http_request_fast: {:.2} us/req",
+        us_per_req
+    );
+}

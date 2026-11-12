@@ -5,16 +5,11 @@ use crate::bindings::helpers::{
 };
 use crate::boa_realm::{
     check_boa_fs_read_ocap, check_boa_fs_write_ocap, has_boa_fs_read_ocap, norm_vfs_path,
-    BOA_DET_STATE, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VFS_TOMBSTONES,
+    BOA_DET_STATE, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VFS_MTIMES, BOA_VFS_TOMBSTONES,
 };
 use crate::intrinsics::fill_random_bytes;
 
 const VFS_SYMLINK_PREFIX: &[u8] = b"\x00__SLICE_SYMLINK__:";
-
-thread_local! {
-    static BOA_VFS_MTIMES: std::cell::RefCell<rustc_hash::FxHashMap<String, f64>> =
-        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
-}
 
 #[inline]
 pub(crate) fn is_vfs_tombstoned(norm: &str) -> bool {

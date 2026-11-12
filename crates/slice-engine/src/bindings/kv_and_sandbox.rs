@@ -249,25 +249,53 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_else(|| "{}".to_string());
-            let opts: SandboxEvalOptions = serde_json::from_str(&opts_json).unwrap_or_default();
+            let (opts, deny_read, deny_write, deny_net, deny_exec) = if opts_json == "{}" {
+                (SandboxEvalOptions::default(), false, false, false, false)
+            } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&opts_json) {
+                let has_empty_arr = |keys: &[&str]| -> bool {
+                    val.as_object().is_some_and(|obj| {
+                        keys.iter().any(|k| {
+                            obj.get(*k)
+                                .and_then(|v| v.as_array())
+                                .is_some_and(|a| a.is_empty())
+                        })
+                    })
+                };
+                let dr = has_empty_arr(&["allowRead", "readPrefixes", "fsRead"]);
+                let dw = has_empty_arr(&["allowWrite", "writePrefixes", "fsWrite"]);
+                let dn = has_empty_arr(&["allowNet", "netHosts"]);
+                let de = has_empty_arr(&["allowExec", "execBinaries"]);
+                let parsed: SandboxEvalOptions = serde_json::from_value(val).unwrap_or_default();
+                (parsed, dr, dw, dn, de)
+            } else {
+                (SandboxEvalOptions::default(), false, false, false, false)
+            };
 
             let scope_guard = SavedIsolateContextGuard::enter();
 
             let mut parent_caps = CapabilityToken::pure_compute();
-            for r in &scope_guard.saved_caps.read_prefixes {
-                parent_caps = parent_caps.with_read_prefix(r.clone());
+            if !deny_read {
+                for r in &scope_guard.saved_caps.read_prefixes {
+                    parent_caps = parent_caps.with_read_prefix(r.clone());
+                }
             }
-            for w in &scope_guard.saved_caps.write_prefixes {
-                parent_caps = parent_caps.with_write_prefix(w.clone());
+            if !deny_write {
+                for w in &scope_guard.saved_caps.write_prefixes {
+                    parent_caps = parent_caps.with_write_prefix(w.clone());
+                }
             }
-            for nh in &scope_guard.saved_net_hosts {
-                parent_caps = parent_caps.with_net_host(nh.clone());
+            if !deny_net {
+                for nh in &scope_guard.saved_net_hosts {
+                    parent_caps = parent_caps.with_net_host(nh.clone());
+                }
             }
             for (ek, ev) in &scope_guard.saved_env_map {
                 parent_caps = parent_caps.with_env(ek.clone(), ev.clone());
             }
-            for eb in &scope_guard.saved_exec_bins {
-                parent_caps = parent_caps.with_exec_binary(eb.clone());
+            if !deny_exec {
+                for eb in &scope_guard.saved_exec_bins {
+                    parent_caps = parent_caps.with_exec_binary(eb.clone());
+                }
             }
             let (parent_allow_cp, parent_max_cp) = scope_guard.saved_checkpoint_cap;
             parent_caps = parent_caps.with_checkpoints(parent_allow_cp);
@@ -293,28 +321,41 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             proxy_parent.egress_audit_secrets = scope_guard.saved_egress_secrets.clone();
             let parent_tenant_for_trace = scope_guard.saved_tenant.clone();
             let outcome = if cfg!(debug_assertions) {
+                let vfs_owner = crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| o.borrow().clone());
                 let vfs_files = crate::boa_realm::BOA_VFS_CACHE.with(|c| c.borrow().clone());
                 let vfs_dirs = crate::boa_realm::BOA_VFS_DIRS.with(|d| d.borrow().clone());
                 let vfs_tombs = crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| t.borrow().clone());
-                let (out, new_files, new_dirs, new_tombs) = std::thread::Builder::new()
-                    .name("slice-eval-sandbox".to_string())
-                    .stack_size(8 * 1024 * 1024)
-                    .spawn(move || {
-                        crate::boa_realm::BOA_VFS_CACHE.with(|c| *c.borrow_mut() = vfs_files);
-                        crate::boa_realm::BOA_VFS_DIRS.with(|d| *d.borrow_mut() = vfs_dirs);
-                        crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| *t.borrow_mut() = vfs_tombs);
-                        let res = proxy_parent.eval_sandbox(&code, opts);
-                        let nf = crate::boa_realm::BOA_VFS_CACHE.with(|c| c.borrow().clone());
-                        let nd = crate::boa_realm::BOA_VFS_DIRS.with(|d| d.borrow().clone());
-                        let nt = crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| t.borrow().clone());
-                        (res, nf, nd, nt)
-                    })
-                    .expect("failed to spawn slice-eval-sandbox thread")
-                    .join()
-                    .expect("slice-eval-sandbox thread panicked");
+                let vfs_mtimes = crate::boa_realm::BOA_VFS_MTIMES.with(|m| m.borrow().clone());
+                let (out, new_owner, new_files, new_dirs, new_tombs, new_mtimes) =
+                    std::thread::Builder::new()
+                        .name("slice-eval-sandbox".to_string())
+                        .stack_size(8 * 1024 * 1024)
+                        .spawn(move || {
+                            crate::boa_realm::BOA_VFS_OWNER_TENANT
+                                .with(|o| *o.borrow_mut() = vfs_owner);
+                            crate::boa_realm::BOA_VFS_CACHE.with(|c| *c.borrow_mut() = vfs_files);
+                            crate::boa_realm::BOA_VFS_DIRS.with(|d| *d.borrow_mut() = vfs_dirs);
+                            crate::boa_realm::BOA_VFS_TOMBSTONES
+                                .with(|t| *t.borrow_mut() = vfs_tombs);
+                            crate::boa_realm::BOA_VFS_MTIMES.with(|m| *m.borrow_mut() = vfs_mtimes);
+                            let res = proxy_parent.eval_sandbox(&code, opts);
+                            let no =
+                                crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| o.borrow().clone());
+                            let nf = crate::boa_realm::BOA_VFS_CACHE.with(|c| c.borrow().clone());
+                            let nd = crate::boa_realm::BOA_VFS_DIRS.with(|d| d.borrow().clone());
+                            let nt =
+                                crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| t.borrow().clone());
+                            let nm = crate::boa_realm::BOA_VFS_MTIMES.with(|m| m.borrow().clone());
+                            (res, no, nf, nd, nt, nm)
+                        })
+                        .expect("failed to spawn slice-eval-sandbox thread")
+                        .join()
+                        .expect("slice-eval-sandbox thread panicked");
+                crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| *o.borrow_mut() = new_owner);
                 crate::boa_realm::BOA_VFS_CACHE.with(|c| *c.borrow_mut() = new_files);
                 crate::boa_realm::BOA_VFS_DIRS.with(|d| *d.borrow_mut() = new_dirs);
                 crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| *t.borrow_mut() = new_tombs);
+                crate::boa_realm::BOA_VFS_MTIMES.with(|m| *m.borrow_mut() = new_mtimes);
                 out
             } else {
                 proxy_parent.eval_sandbox(&code, opts)

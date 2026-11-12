@@ -11,6 +11,8 @@
   globalThis.__shMask = 0;
   globalThis.__shardProps = {};
   var __lazyInited = false;
+  var __sesReady = false, __sesP = null, __sesN = null, __sesK = null, __sesL = null;
+  var __wu = [];
   globalThis.__slice_mark_lazy_inited = function() { __lazyInited = true; };
   function __loadShard(id) {
     if (!__lazyInited) {
@@ -68,9 +70,18 @@
         }
       }
       __slice_lazy_prelude(id);
+      if (id === 18 && __sesReady) {
+        __sesK[3] = Reflect.ownKeys(String.prototype);
+        __sesL[3] = __sesK[3].length;
+      }
     }
   }
-  globalThis.__slice_ensure_shard = __loadShard;
+  Object.defineProperty(globalThis, "__slice_ensure_shard", {
+    value: __loadShard,
+    writable: false,
+    enumerable: false,
+    configurable: false
+  });
 
   globalThis.__slice_dispatch_fetch = function(h) {
     if (!__slice_http_is_active()) return;
@@ -167,20 +178,7 @@
   });
   globalThis.process = __proc;
 
-  globalThis.__slice_check_ses = function() {
-    var p = [Object.prototype, Array.prototype, Function.prototype, String.prototype];
-    var n = ["Object.prototype", "Array.prototype", "Function.prototype", "String.prototype"];
-    for (var i = 0; i < 4; i++) {
-      var ks = Object.keys(p[i]);
-      if (ks.length > 0) {
-        for (var j = 0; j < ks.length; j++) delete p[i][ks[j]];
-        return n[i];
-      }
-    }
-    return "";
-  };
-
-  globalThis.__slice_sync_process_env = function(load) {
+  function __syncProcessEnv(load) {
     if (!load) {
       globalThis.process.env = { NODE_ENV: "production" };
       return;
@@ -188,7 +186,7 @@
     var m = JSON.parse(__slice_env_json());
     m.NODE_ENV = m.NODE_ENV || "production";
     globalThis.process.env = m;
-  };
+  }
 
   var __orand = Math.random;
   var __onow = Date.now;
@@ -196,7 +194,7 @@
   globalThis.performance = {
     now: __perfNowNative
   };
-  globalThis.__slice_set_det_mode = function(on) {
+  function __setDetMode(on) {
     if (on) {
       Math.random = function() {
         var v = __slice_det_random();
@@ -215,7 +213,7 @@
       Date.now = __onow;
       globalThis.performance.now = __perfNowNative;
     }
-  };
+  }
 
   // `process.nextTick` & `queueMicrotask`:
   // Speculative On-Demand `Promise.prototype.then` Hook:
@@ -255,42 +253,43 @@
     return __origThen.call(this, wF, wR);
   }
 
-  globalThis.__slice_set_next_tick_hook = function(enable) {
+  function __setNextTickHook(enable) {
     if (enable && !__ntHooked) {
       __ntHooked = true;
       Promise.prototype.then = __wrappedThen;
-    } else if (!enable && __ntHooked && __ntQ.length === 0) {
+    } else if (!enable && __ntHooked) {
+      __ntQ.length = 0;
       __ntHooked = false;
       Promise.prototype.then = __origThen;
     }
-  };
+  }
 
-  globalThis.__slice_reset_mt = function() {
+  function __resetMt() {
     __ntQ.length = 0;
     __qmQ.length = 0;
     __mtS = false;
-  };
+  }
 
-  globalThis.__slice_ctl = function(op, flag) {
+  function __ctl(op, flag) {
     if (op === 0) {
       __ntQ.length = 0;
       __qmQ.length = 0;
       __mtS = false;
     } else if (op === 1) {
-      globalThis.__slice_set_det_mode(flag);
+      __setDetMode(flag);
     } else if (op === 2) {
-      globalThis.__slice_sync_process_env(flag);
+      __syncProcessEnv(flag);
     } else if (op === 3) {
-      globalThis.__slice_set_next_tick_hook(flag);
+      __setNextTickHook(flag);
     } else if (op === 4) {
-      if (globalThis.__slice_wu) globalThis.__slice_wu.length = 0;
+      __wu.length = 0;
     } else if (op === 5) {
       var s = globalThis.__slice_active_http_server;
       if (s && typeof s._dispatchActiveHttpBridge === "function") {
         s._dispatchActiveHttpBridge();
       }
     }
-  };
+  }
 
   globalThis.__slice_set_als_wrap = function(wrapFn) {
     __alsWrap = wrapFn || null;
@@ -441,19 +440,17 @@
   globalThis.afterEach = function(f) { return __tMod().afterEach(f); };
   globalThis.expect = function(v) { return __tMod().expect(v); };
 
-  globalThis.__slice_wu = [];
-  globalThis.__slice_drain_wu = function() {
-    var wu = globalThis.__slice_wu;
-    if (!wu || wu.length === 0) return;
+  function __drainWu() {
+    if (__wu.length === 0) return;
     try {
-      while (wu.length > 0) {
-        var f = wu.shift();
+      while (__wu.length > 0) {
+        var f = __wu.shift();
         if (typeof f === "function") f();
       }
     } finally {
-      wu.length = 0;
+      __wu.length = 0;
     }
-  };
+  }
   globalThis.Slice = {
     request: function() {
       var t = __slice_http_tenant();
@@ -508,7 +505,7 @@
       return globalThis.Slice.mockSocket(addr, spec);
     },
     waitUntil: function(f) {
-      __slice_wu.push(f);
+      __wu.push(f);
       __slice_mark_wait_until();
     },
     kv: {
@@ -638,6 +635,86 @@
     writable: true,
     configurable: true,
     enumerable: false
+  });
+  var __origObjToStr = Object.prototype.toString;
+  var __origObjValOf = Object.prototype.valueOf;
+  var __origObjHasOwn = Object.prototype.hasOwnProperty;
+  __sesP = [
+    Object.prototype,
+    Array.prototype,
+    Function.prototype,
+    String.prototype,
+    Promise.prototype,
+    Uint8Array.prototype
+  ];
+  __sesN = [
+    "Object.prototype",
+    "Array.prototype",
+    "Function.prototype",
+    "String.prototype",
+    "Promise.prototype",
+    "Uint8Array.prototype"
+  ];
+  __sesK = [
+    Reflect.ownKeys(Object.prototype),
+    Reflect.ownKeys(Array.prototype),
+    Reflect.ownKeys(Function.prototype),
+    Reflect.ownKeys(String.prototype),
+    Reflect.ownKeys(Promise.prototype),
+    Reflect.ownKeys(Uint8Array.prototype)
+  ];
+  __sesL = [
+    __sesK[0].length,
+    __sesK[1].length,
+    __sesK[2].length,
+    __sesK[3].length,
+    __sesK[4].length,
+    __sesK[5].length
+  ];
+  __sesReady = true;
+  function __checkSes() {
+    if (
+      Object.prototype.toString !== __origObjToStr ||
+      Object.prototype.valueOf !== __origObjValOf ||
+      Object.prototype.hasOwnProperty !== __origObjHasOwn
+    ) {
+      return "Object.prototype";
+    }
+    if (!__ntHooked && Promise.prototype.then !== __origThen) {
+      return "Promise.prototype";
+    }
+    for (var i = 0; i < 6; i++) {
+      var p = __sesP[i];
+      var ks = Reflect.ownKeys(p);
+      var base = __sesK[i];
+      var mutated = ks.length !== __sesL[i];
+      if (!mutated) {
+        for (var k = 0; k < ks.length; k++) {
+          if (ks[k] !== base[k]) {
+            mutated = true;
+            break;
+          }
+        }
+      }
+      if (mutated) {
+        for (var j = 0; j < ks.length; j++) {
+          if (base.indexOf(ks[j]) === -1) {
+            try { delete p[ks[j]]; } catch (_e) {}
+          }
+        }
+        return __sesN[i];
+      }
+    }
+    return "";
+  }
+  Object.defineProperties(globalThis, {
+    __slice_check_ses: { value: __checkSes, writable: false, enumerable: false, configurable: false },
+    __slice_sync_process_env: { value: __syncProcessEnv, writable: false, enumerable: false, configurable: false },
+    __slice_set_det_mode: { value: __setDetMode, writable: false, enumerable: false, configurable: false },
+    __slice_set_next_tick_hook: { value: __setNextTickHook, writable: false, enumerable: false, configurable: false },
+    __slice_reset_mt: { value: __resetMt, writable: false, enumerable: false, configurable: false },
+    __slice_ctl: { value: __ctl, writable: false, enumerable: false, configurable: false },
+    __slice_drain_wu: { value: __drainWu, writable: false, enumerable: false, configurable: false }
   });
 })();
 
