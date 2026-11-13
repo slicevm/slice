@@ -8,6 +8,7 @@ use crate::boa_realm::{ensure_realm_shards, WarmBoaRealm, BOA_VIOLATION};
 use crate::js_preludes::detect_shards_and_boacas_flags;
 use crate::parser_and_compiler::extract_slice_rc_key;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::OnceLock;
 
 /// 8-byte magic header identifying an experimental `SLICEBC\x01` precompiled Boa container.
 pub const BOACAS_MAGIC: &[u8; 8] = b"SLICEBC\x01";
@@ -89,6 +90,9 @@ pub fn set_thread_tier_override(tier: Option<u8>) {
     THREAD_TIER_OVERRIDE.with(|c| c.set(code));
 }
 
+static ENV_TIER_OVERRIDE: OnceLock<Option<u8>> = OnceLock::new();
+static ENV_EXPER_BOACAS_ENABLED: OnceLock<bool> = OnceLock::new();
+
 /// Returns the active execution tier override (`Some(1)` = force Tier 1 Boa, `Some(0)` = force Tier 0 SLICESNP, `None` = default optimal Tier 1 with Tier 0/2 kernels).
 #[inline]
 pub fn active_tier_override() -> Option<u8> {
@@ -103,12 +107,23 @@ pub fn active_tier_override() -> Option<u8> {
         2 => return Some(0),
         _ => {}
     }
-    if let Ok(val) = std::env::var("SLICE_TIER") {
-        if let Some(parsed) = slice_sandbox::parse_tier_setting(&val) {
-            return parsed;
-        }
-    }
-    None
+    *ENV_TIER_OVERRIDE.get_or_init(|| {
+        std::env::var("SLICE_TIER")
+            .ok()
+            .and_then(|val| slice_sandbox::parse_tier_setting(&val))
+            .flatten()
+    })
+}
+
+#[inline]
+fn env_exper_boacas_default() -> bool {
+    *ENV_EXPER_BOACAS_ENABLED.get_or_init(|| {
+        std::env::var("SLICE_BOACAS")
+            .or_else(|_| std::env::var("SLICE_EXPER_BOACAS"))
+            .ok()
+            .and_then(|val| slice_sandbox::parse_bool_setting(&val))
+            .unwrap_or(true)
+    })
 }
 
 /// Returns `true` when `slice pack` / `slice compile` / `compile_source_to_bytecode` should emit
@@ -127,13 +142,7 @@ pub fn is_exper_boacas_build_enabled() -> bool {
         2 => return false,
         _ => {}
     }
-    if let Ok(val) = std::env::var("SLICE_BOACAS").or_else(|_| std::env::var("SLICE_EXPER_BOACAS"))
-    {
-        if let Some(b) = slice_sandbox::parse_bool_setting(&val) {
-            return b;
-        }
-    }
-    true
+    env_exper_boacas_default()
 }
 
 /// Returns `true` when `slice run` / `slice serve` should execute the precompiled `CodeBlock` fast-path
@@ -152,13 +161,7 @@ pub fn is_exper_boacas_runtime_enabled() -> bool {
         2 => return false,
         _ => {}
     }
-    if let Ok(val) = std::env::var("SLICE_BOACAS").or_else(|_| std::env::var("SLICE_EXPER_BOACAS"))
-    {
-        if let Some(b) = slice_sandbox::parse_bool_setting(&val) {
-            return b;
-        }
-    }
-    true
+    env_exper_boacas_default()
 }
 
 /// 32-byte binary header at the start of a `SLICEBC\x01` bytecode blob.

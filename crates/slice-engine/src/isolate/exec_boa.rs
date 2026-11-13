@@ -370,19 +370,37 @@ impl SliceIsolate {
         let has_net_hosts = !self.compartment.capabilities.allowed_net_hosts.is_empty();
         if has_net_hosts {
             BOA_NET_HOSTS.with(|h| {
-                *h.borrow_mut() = self.compartment.capabilities.allowed_net_hosts.clone();
+                let mut set = h.borrow_mut();
+                set.clear();
+                set.extend(
+                    self.compartment
+                        .capabilities
+                        .allowed_net_hosts
+                        .iter()
+                        .cloned(),
+                );
             });
         }
         let has_egress_secrets = !self.egress_audit_secrets.is_empty();
         if has_egress_secrets {
             BOA_EGRESS_SECRETS.with(|s| {
-                *s.borrow_mut() = self.egress_audit_secrets.clone();
+                let mut vec = s.borrow_mut();
+                vec.clear();
+                vec.extend(self.egress_audit_secrets.iter().cloned());
             });
         }
         let has_env_keys = !self.compartment.capabilities.allowed_env_keys.is_empty();
         if has_env_keys {
             BOA_ENV_MAP.with(|m| {
-                *m.borrow_mut() = self.compartment.capabilities.allowed_env_keys.clone();
+                let mut map = m.borrow_mut();
+                map.clear();
+                map.extend(
+                    self.compartment
+                        .capabilities
+                        .allowed_env_keys
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone())),
+                );
             });
         }
         let has_exec_bins = !self
@@ -392,7 +410,15 @@ impl SliceIsolate {
             .is_empty();
         if has_exec_bins {
             BOA_EXEC_BINS.with(|b| {
-                *b.borrow_mut() = self.compartment.capabilities.allowed_exec_binaries.clone();
+                let mut set = b.borrow_mut();
+                set.clear();
+                set.extend(
+                    self.compartment
+                        .capabilities
+                        .allowed_exec_binaries
+                        .iter()
+                        .cloned(),
+                );
             });
         }
 
@@ -435,21 +461,51 @@ impl SliceIsolate {
             BOA_ACTIVE_CAPS.with(|c| {
                 let mut caps = c.borrow_mut();
                 caps.read_prefixes.clear();
+                if caps.read_prefixes.capacity() > 64 {
+                    caps.read_prefixes.shrink_to(16);
+                }
                 caps.write_prefixes.clear();
+                if caps.write_prefixes.capacity() > 64 {
+                    caps.write_prefixes.shrink_to(16);
+                }
             });
         }
         if flags.has_net_hosts {
-            BOA_NET_HOSTS.with(|h| h.borrow_mut().clear());
+            BOA_NET_HOSTS.with(|h| {
+                let mut set = h.borrow_mut();
+                set.clear();
+                if set.capacity() > 64 {
+                    set.shrink_to(16);
+                }
+            });
         }
         if flags.has_egress_secrets {
-            BOA_EGRESS_SECRETS.with(|s| s.borrow_mut().clear());
+            BOA_EGRESS_SECRETS.with(|s| {
+                let mut vec = s.borrow_mut();
+                vec.clear();
+                if vec.capacity() > 64 {
+                    vec.shrink_to(16);
+                }
+            });
         }
         if flags.has_env_keys {
             call_realm_ctl(realm, REALM_CTL_SYNC_ENV, false);
-            BOA_ENV_MAP.with(|m| m.borrow_mut().clear());
+            BOA_ENV_MAP.with(|m| {
+                let mut map = m.borrow_mut();
+                map.clear();
+                if map.capacity() > 64 {
+                    map.shrink_to(16);
+                }
+            });
         }
         if flags.has_exec_bins {
-            BOA_EXEC_BINS.with(|b| b.borrow_mut().clear());
+            BOA_EXEC_BINS.with(|b| {
+                let mut set = b.borrow_mut();
+                set.clear();
+                if set.capacity() > 64 {
+                    set.shrink_to(16);
+                }
+            });
         }
         if has_next_tick {
             call_realm_ctl(realm, REALM_CTL_SET_NEXT_TICK, false);

@@ -3,8 +3,9 @@
 use crate::bindings::helpers::{bytes_to_js_array_buffer, with_buffer_source_bytes};
 use crate::wasm::{
     wasm_call_export, wasm_compile_module, wasm_create_memory, wasm_get_global, wasm_grow_memory,
-    wasm_instantiate_module, wasm_module_custom_sections, wasm_module_exports_json,
-    wasm_module_imports_json, wasm_set_global, wasm_sync_initial_memory_to_ab, wasm_validate_bytes,
+    wasm_instantiate_module, wasm_materialize_memory_ab, wasm_module_custom_sections,
+    wasm_module_exports_json, wasm_module_imports_json, wasm_set_global,
+    wasm_sync_initial_memory_to_ab, wasm_validate_bytes,
 };
 
 pub(crate) fn register_shard9_wasm_host_functions(ctx: &mut boa_engine::Context) {
@@ -177,14 +178,14 @@ pub(crate) fn register_shard9_wasm_host_functions(ctx: &mut boa_engine::Context)
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_wasm_sync_init_mem"),
         2,
-        NativeFunction::from_fn_ptr(|_this, args, _context| {
+        NativeFunction::from_fn_ptr(|_this, args, context| {
             let inst_id = args
                 .first()
                 .and_then(|v| v.as_number())
                 .map(|n| n as u32)
                 .unwrap_or(0);
             let Some(ab_obj) = args.get(1).and_then(|v| v.as_object()) else {
-                return Ok(BoaVal::undefined());
+                return wasm_materialize_memory_ab(inst_id, context);
             };
             match wasm_sync_initial_memory_to_ab(inst_id, &ab_obj) {
                 Ok(()) => Ok(BoaVal::undefined()),

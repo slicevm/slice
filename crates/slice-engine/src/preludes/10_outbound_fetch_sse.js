@@ -167,13 +167,18 @@
     return r;
   }
 
+  function __reqHeadersJson(req) {
+    if (req._h === null && req._hm === null) return "[]";
+    return JSON.stringify(req.headers.entries());
+  }
+
   function __doFetch(input, init) {
     var req = new Request(input, init);
     var sig = (init && init.signal) || req.signal || null;
     if (sig && sig.aborted) throw (sig.reason !== undefined ? sig.reason : __mkAbortErr());
     var reqBody = req._u8 instanceof Uint8Array ? req._u8 : req._body;
     var raw = JSON.parse(
-      __slice_fetch_sync(req.url, req.method, JSON.stringify(req.headers.entries()), reqBody, req.redirect || "follow")
+      __slice_fetch_sync(req.url, req.method, __reqHeadersJson(req), reqBody, req.redirect || "follow")
     );
     if (raw.__error) throw new Error(raw.__error);
     return __wireToResponse(raw, req.url);
@@ -187,7 +192,7 @@
         return Promise.reject(sig.reason !== undefined ? sig.reason : __mkAbortErr());
       }
       var dispatchFetch = function(reqBodyVal) {
-        var hdrs = JSON.stringify(req.headers.entries());
+        var hdrs = __reqHeadersJson(req);
         var fast = __slice_fetch_try_fast(req.url, req.method, hdrs, reqBodyVal, req.redirect || "follow");
         if (fast !== "") {
           var raw = JSON.parse(fast);

@@ -218,31 +218,32 @@
   // `Promise.prototype.then` is hooked to `__wrappedThen` so `nextTick` callbacks always
   // drain before any `.then()` or `queueMicrotask` handler in the same turn.
   var __ntQ = [];
+  var __ntH = 0;
   var __qmQ = [];
+  var __qmH = 0;
   var __mtS = false;
   var __ntHooked = false;
   var __alsWrap = null;
   var __origThen = Promise.prototype.then;
 
+  function __drainNt() {
+    while (__ntH < __ntQ.length) {
+      var n = __ntQ[__ntH];
+      __ntQ[__ntH++] = undefined;
+      if (n.a) n.f.apply(undefined, n.a);
+      else n.f();
+    }
+    __ntQ.length = 0;
+    __ntH = 0;
+  }
+
   function __wrappedThen(onF, onR) {
     var wF = typeof onF === "function" ? function(v) {
-      if (__ntQ.length > 0) {
-        while (__ntQ.length > 0) {
-          var n = __ntQ.shift();
-          if (n.a) n.f.apply(undefined, n.a);
-          else n.f();
-        }
-      }
+      if (__ntH < __ntQ.length) __drainNt();
       return onF(v);
     } : onF;
     var wR = typeof onR === "function" ? function(e) {
-      if (__ntQ.length > 0) {
-        while (__ntQ.length > 0) {
-          var n = __ntQ.shift();
-          if (n.a) n.f.apply(undefined, n.a);
-          else n.f();
-        }
-      }
+      if (__ntH < __ntQ.length) __drainNt();
       return onR(e);
     } : onR;
     return __origThen.call(this, wF, wR);
@@ -254,6 +255,7 @@
       Promise.prototype.then = __wrappedThen;
     } else if (!enable && __ntHooked) {
       __ntQ.length = 0;
+      __ntH = 0;
       __ntHooked = false;
       Promise.prototype.then = __origThen;
     }
@@ -261,14 +263,18 @@
 
   function __resetMt() {
     __ntQ.length = 0;
+    __ntH = 0;
     __qmQ.length = 0;
+    __qmH = 0;
     __mtS = false;
   }
 
   function __ctl(op, flag) {
     if (op === 0) {
       __ntQ.length = 0;
+      __ntH = 0;
       __qmQ.length = 0;
+      __qmH = 0;
       __mtS = false;
     } else if (op === 1) {
       __setDetMode(flag);
@@ -297,19 +303,22 @@
   }
 
   function __drainMt() {
-    while (__ntQ.length > 0 || __qmQ.length > 0) {
-      while (__ntQ.length > 0) {
-        var n = __ntQ.shift();
-        if (n.a) n.f.apply(undefined, n.a);
-        else n.f();
+    while (__ntH < __ntQ.length || __qmH < __qmQ.length) {
+      if (__ntH < __ntQ.length) {
+        __drainNt();
       }
-      if (__qmQ.length > 0) {
-        var q = __qmQ.shift();
+      if (__qmH < __qmQ.length) {
+        var q = __qmQ[__qmH];
+        __qmQ[__qmH++] = undefined;
+        if (__qmH >= __qmQ.length) {
+          __qmQ.length = 0;
+          __qmH = 0;
+        }
         q();
       }
     }
     __mtS = false;
-    if (__ntQ.length > 0 || __qmQ.length > 0) __schedMt();
+    if (__ntH < __ntQ.length || __qmH < __qmQ.length) __schedMt();
   }
 
   globalThis.process.nextTick = function(cb) {

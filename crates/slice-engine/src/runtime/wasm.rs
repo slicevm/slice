@@ -990,13 +990,15 @@ pub fn wasm_instantiate_module(
     let mut mem_pages = 0u32;
     if let Some(m) = active_mem {
         mem_pages = m.size(&store) as u32;
-        let data = m.data(&store);
-        shadow_mem.extend_from_slice(data);
         let (used, limit) = BOA_KV_MEM_BUDGET.with(|b| b.get());
         let added_bytes = (mem_pages as usize).saturating_mul(WASM_PAGE_BYTES);
         BOA_KV_MEM_BUDGET.with(|b| b.set((used.saturating_add(added_bytes), limit)));
         // If memory was imported with an existing ArrayBuffer, sync any data segment initialization back
+        // and initialize `shadow_mem` immediately; otherwise defer `shadow_mem` + `ArrayBuffer` lazily
+        // until JS accesses `exports.memory.buffer`.
         if let Some((_, _, Some(ref b_obj))) = imported_memory {
+            let data = m.data(&store);
+            shadow_mem.extend_from_slice(data);
             if let Ok(ab) = JsArrayBuffer::from_object(b_obj.clone()) {
                 if let Some(mut ab_data) = ab.data_mut() {
                     let len = ab_data.len().min(data.len());
@@ -1051,12 +1053,14 @@ pub fn wasm_sync_initial_memory_to_ab(inst_id: u32, ab_obj: &JsObject) -> Result
     let ab = JsArrayBuffer::from_object(ab_obj.clone())
         .map_err(|e| format!("TypeError: Expected ArrayBuffer: {}", e))?;
     WASM_STATE.with(|st| {
-        let s = st.borrow();
-        let Some(inst) = s.instances.get(&inst_id) else {
+        let mut s = st.borrow_mut();
+        let Some(inst) = s.instances.get_mut(&inst_id) else {
             return Err("TypeError: Invalid WebAssembly.Instance".to_string());
         };
         if let Some(mem) = inst.memory {
             let wm_slice = mem.data(&inst.store);
+            inst.shadow_mem.clear();
+            inst.shadow_mem.extend_from_slice(wm_slice);
             if let Some(mut ab_data) = ab.data_mut() {
                 let len = ab_data.len().min(wm_slice.len());
                 ab_data[..len].copy_from_slice(&wm_slice[..len]);
@@ -1064,6 +1068,32 @@ pub fn wasm_sync_initial_memory_to_ab(inst_id: u32, ab_obj: &JsObject) -> Result
         }
         Ok(())
     })
+}
+
+/// Lazily allocates and synchronizes a JS `ArrayBuffer` (and `shadow_mem` mirror) for `inst_id`
+/// the first time `exports.memory.buffer` is accessed in JavaScript.
+pub fn wasm_materialize_memory_ab(inst_id: u32, context: &mut Context) -> JsResult<JsValue> {
+    use boa_engine::object::builtins::AlignedVec;
+    let block = WASM_STATE.with(|st| -> Result<AlignedVec<u8>, String> {
+        let mut s = st.borrow_mut();
+        let Some(inst) = s.instances.get_mut(&inst_id) else {
+            return Err("TypeError: Invalid WebAssembly.Instance".to_string());
+        };
+        let Some(mem) = inst.memory else {
+            return Ok(AlignedVec::new(0));
+        };
+        let wm_slice = mem.data(&inst.store);
+        inst.shadow_mem.clear();
+        inst.shadow_mem.extend_from_slice(wm_slice);
+        Ok(AlignedVec::from_slice(0, wm_slice))
+    });
+    match block {
+        Ok(aligned) => {
+            let ab = JsArrayBuffer::from_byte_block(aligned, context)?;
+            Ok(ab.into())
+        }
+        Err(msg) => Err(JsNativeError::error().with_message(msg).into()),
+    }
 }
 
 /// Invokes an exported WASM function `export_name` on `inst_id`, synchronizing linear memory

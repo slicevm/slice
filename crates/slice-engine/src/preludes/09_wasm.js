@@ -54,12 +54,7 @@
       this._instId = descriptor._instId;
       this._pages = initPages;
       this._maxPages = maxPages;
-      this._buf = new ArrayBuffer(initPages * 65536);
-      try {
-        __slice_wasm_sync_init_mem(this._instId, this._buf);
-      } catch (e) {
-        __rethrowWasmError(e);
-      }
+      this._buf = null;
       return;
     }
     try {
@@ -75,6 +70,18 @@
 
   Object.defineProperty(Memory.prototype, "buffer", {
     get: function() {
+      if (this._buf === null) {
+        if (this._instId) {
+          try {
+            this._buf = __slice_wasm_sync_init_mem(this._instId);
+            this._pages = (this._buf.byteLength / 65536) >>> 0;
+          } catch (e) {
+            __rethrowWasmError(e);
+          }
+        } else {
+          this._buf = new ArrayBuffer(this._pages * 65536);
+        }
+      }
       return this._buf;
     },
     enumerable: true,
@@ -91,9 +98,11 @@
     }
     if (d > 0) {
       var newPages = prevPages + d;
-      var newBuf = new ArrayBuffer(newPages * 65536);
-      new Uint8Array(newBuf).set(new Uint8Array(this._buf));
-      this._buf = newBuf;
+      if (this._buf !== null) {
+        var newBuf = new ArrayBuffer(newPages * 65536);
+        new Uint8Array(newBuf).set(new Uint8Array(this._buf));
+        this._buf = newBuf;
+      }
       this._pages = newPages;
     }
     return prevPages;
@@ -251,6 +260,7 @@
       throw new TypeError("WebAssembly.Instance(): Argument 1 must be an object or undefined");
     }
     var importedMemObj = null;
+    var hasFuncImports = false;
     if (importObject) {
       var modKeys = Object.keys(importObject);
       for (var k = 0; k < modKeys.length; k++) {
@@ -258,8 +268,11 @@
         if (ns && typeof ns === "object") {
           var fKeys = Object.keys(ns);
           for (var j = 0; j < fKeys.length; j++) {
-            if (ns[fKeys[j]] instanceof Memory) {
-              importedMemObj = ns[fKeys[j]];
+            var impVal = ns[fKeys[j]];
+            if (impVal instanceof Memory) {
+              importedMemObj = impVal;
+            } else if (typeof impVal === "function") {
+              hasFuncImports = true;
             }
           }
         }
@@ -290,6 +303,9 @@
             maximum: item.maxPages !== null ? item.maxPages : undefined,
             _instId: instId
           });
+          if (hasFuncImports) {
+            void activeMemObj.buffer;
+          }
         }
         exportsObj[item.name] = activeMemObj;
       }
