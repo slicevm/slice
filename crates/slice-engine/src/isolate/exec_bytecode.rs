@@ -99,6 +99,8 @@ impl SliceIsolate {
 
         let module = decode_slicesnp_cached(bytecode);
         self.current_tier = ExecutionTier::Tier0LLIntSnapshot;
+        self.pending_tier0_throw = None;
+        self.last_exit_code = None;
 
         let instantiate_ns = start.elapsed().as_nanos() as u64;
         let mut last_val = JsValue::Undefined;
@@ -226,9 +228,12 @@ impl SliceIsolate {
                     last_val = v;
                 }
                 BytecodeOp::ReturnVar { var } => {
-                    if let Some(v) = self.env_vars.get(var) {
-                        last_val = v.clone();
-                    }
+                    last_val = self
+                        .env_vars
+                        .get(var)
+                        .cloned()
+                        .unwrap_or(JsValue::Undefined);
+                    break;
                 }
                 BytecodeOp::MonomorphicForLoop {
                     acc_var,
@@ -272,12 +277,25 @@ impl SliceIsolate {
                         .insert(idx_var.clone(), JsValue::Number(*limit as f64));
                     last_val = res;
                 }
-                BytecodeOp::EvalStmt(stmt) => match self.eval_stmt(stmt)? {
-                    ControlFlow::None(v) | ControlFlow::Return(v) => {
-                        last_val = v;
+                BytecodeOp::EvalStmt(stmt) => {
+                    let cf = self.eval_stmt(stmt)?;
+                    if let Some(thrown) = self.pending_tier0_throw.take() {
+                        self.last_exit_code = Some(1);
+                        self.last_return_json = None;
+                        last_val = JsValue::str(thrown);
+                        break;
                     }
-                    ControlFlow::Break | ControlFlow::Continue => {}
-                },
+                    match cf {
+                        ControlFlow::None(v) => {
+                            last_val = v;
+                        }
+                        ControlFlow::Return(v) => {
+                            last_val = v;
+                            break;
+                        }
+                        ControlFlow::Break | ControlFlow::Continue => {}
+                    }
+                }
                 BytecodeOp::BoaFullEsVm { js_code } => {
                     self.current_tier = ExecutionTier::Tier1Baseline;
                     self.compartment.consume_fuel(25)?;
@@ -363,14 +381,14 @@ impl SliceIsolate {
         if n >= 25 {
             self.current_tier = ExecutionTier::Tier2PeakNative;
         }
-        let mut a: u64 = 0;
-        let mut b: u64 = 1;
+        let mut a: f64 = 0.0;
+        let mut b: f64 = 1.0;
         for _ in 0..n {
-            let tmp = a.wrapping_add(b);
+            let tmp = a + b;
             a = b;
             b = tmp;
         }
-        Ok(JsValue::Number(a as f64))
+        Ok(JsValue::Number(a))
     }
 
     pub(crate) fn exec_crypto_digest(

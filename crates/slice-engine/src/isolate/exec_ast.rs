@@ -47,9 +47,33 @@ fn collect_local_var_names(stmts: &[Stmt], params: &[String], out: &mut Vec<Stri
     }
 }
 
+fn as_canonical_array_index(val: &JsValue) -> Option<usize> {
+    match val {
+        JsValue::Number(n) => {
+            if n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n < (u32::MAX as f64) {
+                Some(*n as usize)
+            } else {
+                None
+            }
+        }
+        JsValue::Str(s) => {
+            let u = s.parse::<u32>().ok()?;
+            if u < u32::MAX && u.to_string() == s.as_str() {
+                Some(u as usize)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 impl SliceIsolate {
     pub(crate) fn eval_stmt(&mut self, stmt: &Stmt) -> Result<ControlFlow, SandboxViolation> {
         self.compartment.consume_fuel(1)?;
+        if self.pending_tier0_throw.is_some() {
+            return Ok(ControlFlow::None(JsValue::Undefined));
+        }
         match stmt {
             Stmt::VarDecl { name, init, .. } => {
                 let val = if let Some(expr) = init {
@@ -57,6 +81,9 @@ impl SliceIsolate {
                 } else {
                     JsValue::Undefined
                 };
+                if self.pending_tier0_throw.is_some() {
+                    return Ok(ControlFlow::None(JsValue::Undefined));
+                }
                 self.env_vars.insert(name.clone(), val.clone());
                 Ok(ControlFlow::None(val))
             }
@@ -112,35 +139,50 @@ impl SliceIsolate {
                 step,
                 body,
             } => {
-                if let Some(init_stmt) = init {
-                    self.eval_stmt(init_stmt)?;
-                }
-                let mut last = JsValue::Undefined;
-                let mut iters: u64 = 0;
-                loop {
-                    if let Some(c) = cond {
-                        if !self.eval_expr(c)?.is_truthy() {
-                            break;
+                let saved_for_init = if let Some(Stmt::VarDecl { name, .. }) = init.as_deref() {
+                    Some((name.clone(), self.env_vars.get(name).cloned()))
+                } else {
+                    None
+                };
+                let loop_res = (|| -> Result<ControlFlow, SandboxViolation> {
+                    if let Some(init_stmt) = init {
+                        self.eval_stmt(init_stmt)?;
+                    }
+                    let mut last = JsValue::Undefined;
+                    let mut iters: u64 = 0;
+                    loop {
+                        if let Some(c) = cond {
+                            if !self.eval_expr(c)?.is_truthy() {
+                                break;
+                            }
+                        }
+                        iters += 1;
+                        self.compartment.consume_fuel(1)?;
+                        if iters == TIER1_PROMOTION_THRESHOLD {
+                            self.current_tier = ExecutionTier::Tier1Baseline;
+                        } else if iters == 10_000 {
+                            self.current_tier = ExecutionTier::Tier2PeakNative;
+                        }
+                        match self.eval_block(body)? {
+                            ControlFlow::None(v) => last = v,
+                            ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
+                            ControlFlow::Break => break,
+                            ControlFlow::Continue => {}
+                        }
+                        if let Some(s) = step {
+                            self.eval_expr(s)?;
                         }
                     }
-                    iters += 1;
-                    self.compartment.consume_fuel(1)?;
-                    if iters == TIER1_PROMOTION_THRESHOLD {
-                        self.current_tier = ExecutionTier::Tier1Baseline;
-                    } else if iters == 10_000 {
-                        self.current_tier = ExecutionTier::Tier2PeakNative;
-                    }
-                    match self.eval_block(body)? {
-                        ControlFlow::None(v) => last = v,
-                        ControlFlow::Return(v) => return Ok(ControlFlow::Return(v)),
-                        ControlFlow::Break => break,
-                        ControlFlow::Continue => {}
-                    }
-                    if let Some(s) = step {
-                        self.eval_expr(s)?;
+                    Ok(ControlFlow::None(last))
+                })();
+                if let Some((k, prev_opt)) = saved_for_init {
+                    if let Some(prev) = prev_opt {
+                        self.env_vars.insert(k, prev);
+                    } else {
+                        self.env_vars.remove(&k);
                     }
                 }
-                Ok(ControlFlow::None(last))
+                loop_res
             }
             Stmt::Return(expr_opt) => {
                 let val = if let Some(e) = expr_opt {
@@ -161,18 +203,59 @@ impl SliceIsolate {
     }
 
     pub(crate) fn eval_block(&mut self, stmts: &[Stmt]) -> Result<ControlFlow, SandboxViolation> {
-        let mut last = JsValue::Undefined;
+        let mut saved_outer: Vec<(String, Option<JsValue>)> = Vec::new();
         for s in stmts {
-            match self.eval_stmt(s)? {
-                ControlFlow::None(v) => last = v,
-                other => return Ok(other),
+            if let Stmt::VarDecl { name, .. } = s {
+                if !saved_outer.iter().any(|(k, _)| k == name) {
+                    saved_outer.push((name.clone(), self.env_vars.get(name).cloned()));
+                }
             }
         }
-        Ok(ControlFlow::None(last))
+        let mut last = JsValue::Undefined;
+        let mut out: Result<ControlFlow, SandboxViolation> = Ok(ControlFlow::None(last.clone()));
+        let mut returned_early = false;
+        for s in stmts {
+            if self.pending_tier0_throw.is_some() {
+                break;
+            }
+            match self.eval_stmt(s) {
+                Ok(ControlFlow::None(v)) => {
+                    if self.pending_tier0_throw.is_some() {
+                        break;
+                    }
+                    last = v;
+                }
+                Ok(other) => {
+                    out = Ok(other);
+                    returned_early = true;
+                    break;
+                }
+                Err(err) => {
+                    out = Err(err);
+                    returned_early = true;
+                    break;
+                }
+            }
+        }
+        for (k, prev_opt) in saved_outer {
+            if let Some(prev) = prev_opt {
+                self.env_vars.insert(k, prev);
+            } else {
+                self.env_vars.remove(&k);
+            }
+        }
+        if returned_early {
+            out
+        } else {
+            Ok(ControlFlow::None(last))
+        }
     }
 
     pub(crate) fn eval_expr(&mut self, expr: &Expr) -> Result<JsValue, SandboxViolation> {
         self.compartment.consume_fuel(1)?;
+        if self.pending_tier0_throw.is_some() {
+            return Ok(JsValue::Undefined);
+        }
         match expr {
             Expr::Literal(v) => Ok(v.clone()),
             Expr::Ident(name) => Ok(self
@@ -326,9 +409,8 @@ impl SliceIsolate {
                 let idx = self.eval_expr(index)?;
                 match target {
                     JsValue::Array(a) => {
-                        let idx_f = idx.to_number();
-                        if idx_f >= 0.0 && idx_f.fract() == 0.0 {
-                            Ok(a.get(idx_f as usize).cloned().unwrap_or(JsValue::Undefined))
+                        if let Some(i) = as_canonical_array_index(&idx) {
+                            Ok(a.get(i).cloned().unwrap_or(JsValue::Undefined))
                         } else {
                             Ok(JsValue::Undefined)
                         }
@@ -447,27 +529,29 @@ impl SliceIsolate {
         idx_val: JsValue,
         val: JsValue,
     ) -> Result<JsValue, SandboxViolation> {
-        let grow_bytes = if let Some(JsValue::Array(vec)) = self.env_vars.get(target) {
-            let i = idx_val.to_number().max(0.0) as usize;
-            if i >= vec.len() {
-                (i.saturating_add(1).saturating_sub(vec.len())).saturating_mul(16)
+        let arr_idx = as_canonical_array_index(&idx_val);
+        let grow_bytes =
+            if let (Some(JsValue::Array(vec)), Some(i)) = (self.env_vars.get(target), arr_idx) {
+                if i >= vec.len() {
+                    (i.saturating_add(1).saturating_sub(vec.len())).saturating_mul(16)
+                } else {
+                    0
+                }
             } else {
                 0
-            }
-        } else {
-            0
-        };
+            };
         if grow_bytes > 0 {
             self.compartment.alloc_memory(grow_bytes)?;
         }
         if let Some(container) = self.env_vars.get_mut(target) {
             match container {
                 JsValue::Array(vec) => {
-                    let i = idx_val.to_number().max(0.0) as usize;
-                    if i >= vec.len() {
-                        vec.resize(i + 1, JsValue::Undefined);
+                    if let Some(i) = arr_idx {
+                        if i >= vec.len() {
+                            vec.resize(i + 1, JsValue::Undefined);
+                        }
+                        vec[i] = val.clone();
                     }
-                    vec[i] = val.clone();
                 }
                 JsValue::Object(map) => {
                     map.insert(idx_val.to_string(), val.clone());
@@ -541,7 +625,14 @@ impl SliceIsolate {
                         }
                     }
                     "sqrt" => x.sqrt(),
-                    "pow" => x.powf(y),
+                    "pow" => {
+                        if eval_args.len() < 2 || y.is_nan() || (y.is_infinite() && x.abs() == 1.0)
+                        {
+                            f64::NAN
+                        } else {
+                            x.powf(y)
+                        }
+                    }
                     "sin" => x.sin(),
                     "cos" => x.cos(),
                     "max" => eval_args
@@ -580,16 +671,21 @@ impl SliceIsolate {
                             return Ok(Some(serde_json_to_js_value(&val)));
                         }
                         Err(e) => {
-                            return Ok(Some(JsValue::str(format!(
+                            self.pending_tier0_throw = Some(format!(
                                 "Uncaught SyntaxError: {}\n    at <main> (unknown at :1:12)",
                                 e
-                            ))));
+                            ));
+                            self.last_exit_code = Some(1);
+                            return Ok(Some(JsValue::Undefined));
                         }
                     }
                 }
-                return Ok(Some(JsValue::str(
-                    "Uncaught SyntaxError: Unexpected token in JSON\n    at <main> (unknown at :1:12)",
-                )));
+                self.pending_tier0_throw = Some(
+                    "Uncaught SyntaxError: Unexpected token in JSON\n    at <main> (unknown at :1:12)"
+                        .to_string(),
+                );
+                self.last_exit_code = Some(1);
+                return Ok(Some(JsValue::Undefined));
             }
             ("Object", "keys") => {
                 if let Some(JsValue::Object(map)) = eval_args.first() {
@@ -832,9 +928,10 @@ impl SliceIsolate {
             // Innovation 1: If this function is a pure numeric kernel compiled into `NumericOp`
             // and all arguments are numbers/booleans, execute directly on the unboxed 64-bit register VM!
             if let Some(ref num_ir) = func.compiled_numeric {
-                if args
-                    .iter()
-                    .all(|a| matches!(a, JsValue::Number(_) | JsValue::Bool(_)))
+                if args.len() >= func.params.len()
+                    && args
+                        .iter()
+                        .all(|a| matches!(a, JsValue::Number(_) | JsValue::Bool(_)))
                 {
                     let mut unboxed_args = [0.0f64; 6];
                     for (idx, a) in args.iter().take(6).enumerate() {
@@ -845,25 +942,27 @@ impl SliceIsolate {
                         .fuel_limit
                         .saturating_sub(self.compartment.fuel_consumed);
                     let mut steps: u64 = 0;
-                    let res = match num_ir.execute(
+                    match num_ir.execute(
                         &unboxed_args[..args.len().min(6)],
                         &mut steps,
                         remaining_fuel,
                         0,
                         &self.compartment.tenant_id,
                     ) {
-                        Ok(val) => val,
+                        Ok(Some(val)) => {
+                            let fuel_cost = (steps / 64).max(1);
+                            self.compartment.consume_fuel(fuel_cost)?;
+                            self.current_tier = ExecutionTier::Tier2PeakNative;
+                            return Ok(JsValue::Number(val));
+                        }
+                        Ok(None) => {}
                         Err(err) => {
                             let _ = self
                                 .compartment
                                 .consume_fuel(remaining_fuel.saturating_add(1));
                             return Err(err);
                         }
-                    };
-                    let fuel_cost = (steps / 64).max(1);
-                    self.compartment.consume_fuel(fuel_cost)?;
-                    self.current_tier = ExecutionTier::Tier2PeakNative;
-                    return Ok(JsValue::Number(res));
+                    }
                 }
             }
 
@@ -910,8 +1009,10 @@ impl SliceIsolate {
             }
 
             let res = match block_res? {
-                ControlFlow::Return(v) | ControlFlow::None(v) => v,
-                ControlFlow::Break | ControlFlow::Continue => JsValue::Undefined,
+                ControlFlow::Return(v) => v,
+                ControlFlow::None(_) | ControlFlow::Break | ControlFlow::Continue => {
+                    JsValue::Undefined
+                }
             };
             Ok(res)
         } else {

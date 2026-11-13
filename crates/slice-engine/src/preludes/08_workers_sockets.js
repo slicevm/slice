@@ -352,7 +352,6 @@
       var data = __deserializeMsg(payloadStr);
       w.emit("message", data);
       var msgEv = __makeMsgEvent(data);
-      if (typeof w.onmessage === "function") w.onmessage.call(w, msgEv);
       w.dispatchEvent(msgEv);
       return;
     }
@@ -364,7 +363,6 @@
       var errEv = new Event("error");
       errEv.message = payloadStr || "Worker error";
       errEv.error = errObj;
-      if (typeof w.onerror === "function") w.onerror.call(w, errEv);
       w.dispatchEvent(errEv);
       return;
     }
@@ -500,9 +498,6 @@
     var data = __deserializeMsg(msgJson);
     __workerSelfPort.emit("message", data);
     var ev = __makeMsgEvent(data);
-    if (typeof __workerSelfPort._onmessage === "function") {
-      __workerSelfPort._onmessage.call(__workerSelfPort, ev);
-    }
     if (typeof globalThis._workerOnMessage === "function") {
       globalThis._workerOnMessage.call(globalThis, ev);
     }

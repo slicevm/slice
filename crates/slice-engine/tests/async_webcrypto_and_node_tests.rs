@@ -3819,3 +3819,85 @@ gnwMomV88wDapKJU7o30vbsxDy4U8666gB0n8YH87ILIoKANCwXKh/mcZyWMm/r8
     assert_eq!(out["wcExportedJwkAlg"], "PS512");
     assert_eq!(out["wcRsaKeygenRejected"], true);
 }
+
+#[test]
+fn test_event_loop_same_tick_timer_cancellation_and_long_running_worker() {
+    // 1. Verify same-tick sibling clearTimeout / clearImmediate / clearInterval cancellation
+    let cancel_script = r#"
+const events: string[] = [];
+let t2: any;
+let ivPeer: any;
+let imm2: any;
+
+setTimeout(() => {
+    events.push("t1");
+    clearTimeout(t2);
+    clearInterval(ivPeer);
+}, 0);
+t2 = setTimeout(() => {
+    events.push("SHOULD_NOT_FIRE_T2");
+}, 0);
+ivPeer = setInterval(() => {
+    events.push("SHOULD_NOT_FIRE_IV_PEER");
+}, 0);
+
+setImmediate(() => {
+    events.push("imm1");
+    clearImmediate(imm2);
+});
+imm2 = setImmediate(() => {
+    events.push("SHOULD_NOT_FIRE_IMM2");
+});
+
+let selfCount = 0;
+const ivSelf = setInterval(() => {
+    selfCount += 1;
+    events.push("ivSelf:" + selfCount);
+    clearInterval(ivSelf);
+}, 5);
+
+setTimeout(() => {
+    console.log(JSON.stringify({ events, selfCount }));
+}, 25);
+"#;
+    let bundled_cancel = slice_cas::strip_typescript_and_normalize(cancel_script, true);
+    let bc_cancel = compile_source_to_bytecode(&bundled_cancel);
+    let mut iso_cancel = SliceIsolate::spawn(
+        "same-tick-timer-cancel",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    iso_cancel.set_deterministic_seed(Some(20261112));
+    let m_cancel = iso_cancel.execute_bytecode(&bc_cancel, None).unwrap();
+    let out_cancel: serde_json::Value = serde_json::from_str(&m_cancel.stdout[0]).unwrap();
+    assert_eq!(
+        out_cancel["events"],
+        serde_json::json!(["imm1", "t1", "ivSelf:1"])
+    );
+    assert_eq!(out_cancel["selfCount"], 1);
+
+    // 2. Verify a ref'd background Worker completing after > 5.0 seconds delivers its message cleanly
+    let worker_script = r#"
+const w = new Worker(
+    `setTimeout(() => { postMessage("worker-done-5150ms"); }, 5150);`,
+    { eval: true }
+);
+w.onmessage = (ev: any) => {
+    console.log("received:" + ev.data);
+    w.terminate();
+};
+"#;
+    let bundled_worker = slice_cas::strip_typescript_and_normalize(worker_script, true);
+    let bc_worker = compile_source_to_bytecode(&bundled_worker);
+    let mut iso_worker = SliceIsolate::spawn(
+        "long-running-worker-parent",
+        2,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        16 * 1024 * 1024,
+    );
+    let m_worker = iso_worker.execute_bytecode(&bc_worker, None).unwrap();
+    assert_eq!(m_worker.stdout, vec!["received:worker-done-5150ms"]);
+}

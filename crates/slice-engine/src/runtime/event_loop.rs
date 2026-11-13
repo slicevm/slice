@@ -981,7 +981,6 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
     }
 
     let mut total_ticks: usize = 0;
-    let mut idle_worker_polls: usize = 0;
 
     loop {
         if BOA_VIOLATION.with(|v| v.borrow().is_some())
@@ -1000,16 +999,14 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
         }
         let did_parent_w = crate::workers::poll_parent_worker_events_and_dispatch(ctx, None);
         let did_self_w = crate::workers::poll_worker_self_inbox_and_dispatch(ctx, None);
-        if did_parent_w || did_self_w {
-            idle_worker_polls = 0;
-            if BOA_VIOLATION.with(|v| v.borrow().is_some())
+        if (did_parent_w || did_self_w)
+            && (BOA_VIOLATION.with(|v| v.borrow().is_some())
                 || has_process_exit()
                 || has_uncaught_error()
-                || crate::workers::is_current_worker_terminated()
-            {
-                clear_event_loop_state();
-                return;
-            }
+                || crate::workers::is_current_worker_terminated())
+        {
+            clear_event_loop_state();
+            return;
         }
 
         // 2. Check and prune any queued or in-flight fetches whose AbortSignal has fired
@@ -1181,35 +1178,50 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
         }
 
         // 5. Fire all ready timers (`deadline_ms <= now_ms`) in deterministic `(deadline_ms, !is_immediate, id)` order
-        // so `setImmediate` check-phase tasks always execute before `setTimeout(0)` timers scheduled at the same millisecond.
+        // so `setImmediate` check-phase tasks always execute before `setTimeout(0)` timers scheduled at the same millisecond,
+        // re-verifying liveness right before each callback so `clearTimeout` / `clearInterval` / `timer.refresh()` inside an
+        // earlier callback in the same tick prevents cancelled or postponed timers from firing.
         let now_ms = current_event_loop_clock_ms();
-        type ReadyTimerEntry = (u32, u64, bool, JsObject, Vec<JsValue>, Option<JsValue>);
-        let mut ready_timers: Vec<ReadyTimerEntry> = Vec::new();
+        let mut ready_keys: Vec<(u64, bool, u32)> = Vec::new();
         EVENT_LOOP_STATE.with(|st| {
-            let mut loop_st = st.borrow_mut();
-            for timer in &mut loop_st.timers {
+            let loop_st = st.borrow();
+            for timer in &loop_st.timers {
                 if !timer.cancelled && timer.deadline_ms <= now_ms {
-                    ready_timers.push((
-                        timer.id,
-                        timer.deadline_ms,
-                        timer.is_immediate,
-                        timer.callback.clone(),
-                        timer.args.clone(),
-                        timer.als_snap.clone(),
-                    ));
-                    if let Some(iv) = timer.interval_ms {
-                        timer.deadline_ms = now_ms.saturating_add(iv);
-                    } else {
-                        timer.cancelled = true;
-                    }
+                    ready_keys.push((timer.deadline_ms, !timer.is_immediate, timer.id));
                 }
             }
-            loop_st.timers.retain(|t| !t.cancelled);
         });
 
-        if !ready_timers.is_empty() {
-            ready_timers.sort_by_key(|(id, deadline, is_imm, _, _, _)| (*deadline, !*is_imm, *id));
-            for (_id, _deadline, _is_imm, cb, args, als_snap) in ready_timers {
+        if !ready_keys.is_empty() {
+            ready_keys.sort_unstable();
+            for (_, _, timer_id) in ready_keys {
+                let next_ready = EVENT_LOOP_STATE.with(|st| {
+                    let mut loop_st = st.borrow_mut();
+                    let mut extracted = None;
+                    for timer in &mut loop_st.timers {
+                        if timer.id == timer_id && !timer.cancelled && timer.deadline_ms <= now_ms {
+                            extracted = Some((
+                                timer.callback.clone(),
+                                timer.args.clone(),
+                                timer.als_snap.clone(),
+                            ));
+                            if let Some(iv) = timer.interval_ms {
+                                timer.deadline_ms = now_ms.saturating_add(iv);
+                            } else {
+                                timer.cancelled = true;
+                            }
+                            break;
+                        }
+                    }
+                    loop_st.timers.retain(|t| !t.cancelled);
+                    if !loop_st.has_pending_work() {
+                        ACTIVE_ASYNC_ITEMS.with(|c| c.set(0));
+                    }
+                    extracted
+                });
+                let Some((cb, args, als_snap)) = next_ready else {
+                    continue;
+                };
                 total_ticks += 1;
                 if total_ticks > MAX_EVENT_LOOP_TICKS {
                     let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
@@ -1302,12 +1314,7 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                 let got_s =
                     crate::workers::poll_worker_self_inbox_and_dispatch(ctx, Some(wait_dur));
                 if got_p || got_s {
-                    idle_worker_polls = 0;
                     continue;
-                }
-                idle_worker_polls += 1;
-                if idle_worker_polls > 250 && next_timer_deadline.is_none() {
-                    break;
                 }
             }
             if let Some(target_ms) = next_timer_deadline {

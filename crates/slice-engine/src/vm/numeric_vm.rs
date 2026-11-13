@@ -19,7 +19,7 @@ use crate::value_and_ast::{
     js_math_max, js_math_min, js_math_round, js_to_int32, js_to_uint32, BinOp, Expr, JsFunction,
     JsValue, Stmt, UnaryOp,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use slice_sandbox::SandboxViolation;
 
@@ -144,36 +144,80 @@ impl CompilerCtx {
     }
 }
 
-fn prealloc_locals_in_stmts(ctx: &mut CompilerCtx, stmts: &[Stmt]) -> Option<()> {
+fn prealloc_locals_in_stmts(
+    ctx: &mut CompilerCtx,
+    stmts: &[Stmt],
+    enclosing_vars: &FxHashSet<String>,
+) -> Option<()> {
+    let mut block_vars: FxHashSet<String> = FxHashSet::default();
+    for stmt in stmts {
+        if let Stmt::VarDecl { name, .. } = stmt {
+            if enclosing_vars.contains(name) || !block_vars.insert(name.clone()) {
+                return None;
+            }
+            ctx.get_or_alloc_local(name)?;
+        }
+    }
+    let mut child_enclosing = enclosing_vars.clone();
+    child_enclosing.extend(block_vars);
+
     for stmt in stmts {
         match stmt {
-            Stmt::VarDecl { name, .. } => {
-                ctx.get_or_alloc_local(name)?;
-            }
             Stmt::If {
                 then_branch,
                 else_branch,
                 ..
             } => {
-                prealloc_locals_in_stmts(ctx, then_branch)?;
-                prealloc_locals_in_stmts(ctx, else_branch)?;
+                prealloc_locals_in_stmts(ctx, then_branch, &child_enclosing)?;
+                prealloc_locals_in_stmts(ctx, else_branch, &child_enclosing)?;
             }
             Stmt::While { body, .. } => {
-                prealloc_locals_in_stmts(ctx, body)?;
+                prealloc_locals_in_stmts(ctx, body, &child_enclosing)?;
             }
             Stmt::For { init, body, .. } => {
+                let mut for_enclosing = child_enclosing.clone();
                 if let Some(init_s) = init {
-                    prealloc_locals_in_stmts(ctx, std::slice::from_ref(init_s.as_ref()))?;
+                    if let Stmt::VarDecl { name, .. } = init_s.as_ref() {
+                        if for_enclosing.contains(name) {
+                            return None;
+                        }
+                        ctx.get_or_alloc_local(name)?;
+                        for_enclosing.insert(name.clone());
+                    }
                 }
-                prealloc_locals_in_stmts(ctx, body)?;
+                prealloc_locals_in_stmts(ctx, body, &for_enclosing)?;
             }
             Stmt::Block(inner) => {
-                prealloc_locals_in_stmts(ctx, inner)?;
+                prealloc_locals_in_stmts(ctx, inner, &child_enclosing)?;
             }
             _ => {}
         }
     }
     Some(())
+}
+
+fn stmts_always_return_value(stmts: &[Stmt]) -> bool {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Return(Some(_)) => return true,
+            Stmt::Return(None) => return false,
+            Stmt::Block(inner) if stmts_always_return_value(inner) => {
+                return true;
+            }
+            Stmt::If {
+                then_branch,
+                else_branch,
+                ..
+            } if !else_branch.is_empty()
+                && stmts_always_return_value(then_branch)
+                && stmts_always_return_value(else_branch) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Attempts to compile any [`JsFunction`] AST into an unboxed [`NumericFunc`].
@@ -204,6 +248,10 @@ pub fn try_compile_numeric_func(func: &JsFunction) -> Option<NumericFunc> {
         });
     }
 
+    if !stmts_always_return_value(&func.body) {
+        return None;
+    }
+
     let mut ctx = CompilerCtx {
         fn_name: func.name.clone(),
         locals: FxHashMap::default(),
@@ -214,14 +262,18 @@ pub fn try_compile_numeric_func(func: &JsFunction) -> Option<NumericFunc> {
         loop_stack: Vec::new(),
     };
 
+    let mut param_set: FxHashSet<String> = FxHashSet::default();
     for p in &func.params {
+        if !param_set.insert(p.clone()) {
+            return None;
+        }
         let r = ctx.alloc_reg()?;
         ctx.locals.insert(p.clone(), r);
     }
 
     // Pre-allocate permanent registers for all local declarations so temporary scratch registers
     // can be recycled after each statement without ever colliding with local variables.
-    prealloc_locals_in_stmts(&mut ctx, &func.body)?;
+    prealloc_locals_in_stmts(&mut ctx, &func.body, &param_set)?;
     ctx.temp_reg_base = ctx.next_reg;
 
     for stmt in &func.body {
@@ -491,12 +543,9 @@ fn compile_stmt(ctx: &mut CompilerCtx, stmt: &Stmt) -> Option<()> {
             Some(())
         }
         Stmt::Return(expr_opt) => {
+            let e = expr_opt.as_ref()?;
             let dst = ctx.alloc_reg()?;
-            if let Some(e) = expr_opt {
-                compile_expr_into(ctx, e, dst)?;
-            } else {
-                ctx.ops.push(NumericOp::LoadConst { dst, imm: 0.0 });
-            }
+            compile_expr_into(ctx, e, dst)?;
             ctx.ops.push(NumericOp::Return { src: dst });
             Some(())
         }
@@ -779,41 +828,105 @@ fn compile_expr_into(ctx: &mut CompilerCtx, expr: &Expr, dst: u8) -> Option<()> 
             }
             // 2. `Math.*` intrinsic call
             if let Expr::Member { object, property } = callee.as_ref() {
-                if matches!(object.as_ref(), Expr::Ident(o) if o == "Math") && !args.is_empty() {
-                    let kind = match property.as_str() {
-                        "abs" => MathOpKind::Abs,
-                        "floor" => MathOpKind::Floor,
-                        "ceil" => MathOpKind::Ceil,
-                        "round" => MathOpKind::Round,
-                        "trunc" => MathOpKind::Trunc,
-                        "sign" => MathOpKind::Sign,
-                        "sqrt" => MathOpKind::Sqrt,
-                        "pow" => MathOpKind::Pow,
-                        "sin" => MathOpKind::Sin,
-                        "cos" => MathOpKind::Cos,
-                        "max" => MathOpKind::Max,
-                        "min" => MathOpKind::Min,
-                        "imul" => MathOpKind::Imul,
-                        "clz32" => MathOpKind::Clz32,
-                        "fround" => MathOpKind::Fround,
-                        _ => return None,
-                    };
-                    let a0 = ctx.alloc_reg()?;
-                    compile_expr_into(ctx, &args[0], a0)?;
-                    let a1 = if args.len() >= 2 {
-                        let r = ctx.alloc_reg()?;
-                        compile_expr_into(ctx, &args[1], r)?;
-                        r
-                    } else {
-                        a0
-                    };
-                    ctx.ops.push(NumericOp::MathIntrinsic {
-                        dst,
-                        kind,
-                        arg0: a0,
-                        arg1: a1,
-                    });
-                    return Some(());
+                if matches!(object.as_ref(), Expr::Ident(o) if o == "Math") {
+                    match property.as_str() {
+                        "max" | "min" => {
+                            let is_max = property == "max";
+                            let kind = if is_max {
+                                MathOpKind::Max
+                            } else {
+                                MathOpKind::Min
+                            };
+                            let identity = if is_max {
+                                f64::NEG_INFINITY
+                            } else {
+                                f64::INFINITY
+                            };
+                            if args.is_empty() {
+                                ctx.ops.push(NumericOp::LoadConst { dst, imm: identity });
+                                return Some(());
+                            }
+                            let acc = ctx.alloc_reg()?;
+                            compile_expr_into(ctx, &args[0], acc)?;
+                            if args.len() == 1 {
+                                let id_reg = ctx.alloc_reg()?;
+                                ctx.ops.push(NumericOp::LoadConst {
+                                    dst: id_reg,
+                                    imm: identity,
+                                });
+                                ctx.ops.push(NumericOp::MathIntrinsic {
+                                    dst,
+                                    kind,
+                                    arg0: acc,
+                                    arg1: id_reg,
+                                });
+                                return Some(());
+                            }
+                            let scratch = ctx.alloc_reg()?;
+                            for extra_arg in &args[1..] {
+                                compile_expr_into(ctx, extra_arg, scratch)?;
+                                ctx.ops.push(NumericOp::MathIntrinsic {
+                                    dst: acc,
+                                    kind,
+                                    arg0: acc,
+                                    arg1: scratch,
+                                });
+                            }
+                            if acc != dst {
+                                ctx.ops.push(NumericOp::Move { dst, src: acc });
+                            }
+                            return Some(());
+                        }
+                        "pow" | "imul" => {
+                            if args.len() != 2 {
+                                return None;
+                            }
+                            let kind = if property == "pow" {
+                                MathOpKind::Pow
+                            } else {
+                                MathOpKind::Imul
+                            };
+                            let a0 = ctx.alloc_reg()?;
+                            let a1 = ctx.alloc_reg()?;
+                            compile_expr_into(ctx, &args[0], a0)?;
+                            compile_expr_into(ctx, &args[1], a1)?;
+                            ctx.ops.push(NumericOp::MathIntrinsic {
+                                dst,
+                                kind,
+                                arg0: a0,
+                                arg1: a1,
+                            });
+                            return Some(());
+                        }
+                        _ => {
+                            if args.len() != 1 {
+                                return None;
+                            }
+                            let kind = match property.as_str() {
+                                "abs" => MathOpKind::Abs,
+                                "floor" => MathOpKind::Floor,
+                                "ceil" => MathOpKind::Ceil,
+                                "round" => MathOpKind::Round,
+                                "trunc" => MathOpKind::Trunc,
+                                "sign" => MathOpKind::Sign,
+                                "sqrt" => MathOpKind::Sqrt,
+                                "sin" => MathOpKind::Sin,
+                                "cos" => MathOpKind::Cos,
+                                "clz32" => MathOpKind::Clz32,
+                                "fround" => MathOpKind::Fround,
+                                _ => return None,
+                            };
+                            let a0 = ctx.alloc_reg()?;
+                            compile_expr_into(ctx, &args[0], a0)?;
+                            ctx.ops.push(NumericOp::MathIntrinsic {
+                                dst,
+                                kind,
+                                arg0: a0,
+                                arg1: a0,
+                            });
+                            return Some(());
+                        }
+                    }
                 }
             }
             None
@@ -899,6 +1012,8 @@ fn eval_bin_f64(op: BinOp, a: f64, b: f64) -> f64 {
 impl NumericFunc {
     /// Executes this compiled numeric function on an unboxed register file `[f64; MAX_NUMERIC_REGS]`,
     /// tracking instruction steps in `steps_executed` and enforcing `max_steps` fuel limits.
+    /// Returns `Ok(None)` if a specialized op encounters a runtime value outside its exact fast-path domain,
+    /// allowing the caller to fall back cleanly to general evaluation.
     pub fn execute(
         &self,
         args: &[f64],
@@ -906,7 +1021,7 @@ impl NumericFunc {
         max_steps: u64,
         depth: usize,
         tenant_id: &str,
-    ) -> Result<f64, SandboxViolation> {
+    ) -> Result<Option<f64>, SandboxViolation> {
         if depth > MAX_NUMERIC_CALL_DEPTH {
             return Err(SandboxViolation::CpuFuelExhausted {
                 tenant_id: tenant_id.to_string(),
@@ -995,7 +1110,13 @@ impl NumericFunc {
                             }
                         }
                         MathOpKind::Sqrt => x.sqrt(),
-                        MathOpKind::Pow => x.powf(y),
+                        MathOpKind::Pow => {
+                            if y.is_nan() || (y.is_infinite() && x.abs() == 1.0) {
+                                f64::NAN
+                            } else {
+                                x.powf(y)
+                            }
+                        }
                         MathOpKind::Sin => x.sin(),
                         MathOpKind::Cos => x.cos(),
                         MathOpKind::Max => js_math_max(x, y),
@@ -1027,8 +1148,11 @@ impl NumericFunc {
                         });
                     }
                     let a0 = regs[*arg0 as usize];
-                    let res =
-                        self.execute(&[a0], steps_executed, max_steps, depth + 1, tenant_id)?;
+                    let Some(res) =
+                        self.execute(&[a0], steps_executed, max_steps, depth + 1, tenant_id)?
+                    else {
+                        return Ok(None);
+                    };
                     regs[*dst as usize] = res;
                     pc += 1;
                 }
@@ -1043,8 +1167,11 @@ impl NumericFunc {
                     }
                     let a0 = regs[*arg0 as usize];
                     let a1 = regs[*arg1 as usize];
-                    let res =
-                        self.execute(&[a0, a1], steps_executed, max_steps, depth + 1, tenant_id)?;
+                    let Some(res) =
+                        self.execute(&[a0, a1], steps_executed, max_steps, depth + 1, tenant_id)?
+                    else {
+                        return Ok(None);
+                    };
                     regs[*dst as usize] = res;
                     pc += 1;
                 }
@@ -1057,12 +1184,15 @@ impl NumericFunc {
                     c2,
                 } => {
                     let n_val = regs[*n_reg as usize];
-                    if n_val <= 0.0 {
+                    if n_val < 0.0 || !n_val.is_finite() || n_val.fract() != 0.0 || n_val > 78.0 {
+                        return Ok(None);
+                    }
+                    let n = n_val as u64;
+                    if n == 0 {
                         regs[*dst as usize] = *base0;
-                    } else if n_val <= 1.0 {
+                    } else if n == 1 {
                         regs[*dst as usize] = *base1;
                     } else {
-                        let n = n_val as u64;
                         *steps_executed = steps_executed.saturating_add(n);
                         if *steps_executed > max_steps {
                             return Err(SandboxViolation::CpuFuelExhausted {
@@ -1070,29 +1200,14 @@ impl NumericFunc {
                                 limit: max_steps,
                             });
                         }
-                        if (*c1 - 1.0).abs() < f64::EPSILON
-                            && (*c2 - 1.0).abs() < f64::EPSILON
-                            && (*base0 - 0.0).abs() < f64::EPSILON
-                            && (*base1 - 1.0).abs() < f64::EPSILON
-                        {
-                            let mut a: u64 = 0;
-                            let mut b: u64 = 1;
-                            for _ in 0..n {
-                                let tmp = a.wrapping_add(b);
-                                a = b;
-                                b = tmp;
-                            }
-                            regs[*dst as usize] = a as f64;
-                        } else {
-                            let mut prev2 = *base0;
-                            let mut prev1 = *base1;
-                            for _ in 2..=n {
-                                let next = (*c1) * prev1 + (*c2) * prev2;
-                                prev2 = prev1;
-                                prev1 = next;
-                            }
-                            regs[*dst as usize] = prev1;
+                        let mut prev2 = *base0;
+                        let mut prev1 = *base1;
+                        for _ in 2..=n {
+                            let next = (*c1) * prev1 + (*c2) * prev2;
+                            prev2 = prev1;
+                            prev1 = next;
                         }
+                        regs[*dst as usize] = prev1;
                     }
                     pc += 1;
                 }
@@ -1104,12 +1219,12 @@ impl NumericFunc {
                             limit: max_steps,
                         });
                     }
-                    return Ok(regs[*src as usize]);
+                    return Ok(Some(regs[*src as usize]));
                 }
             }
         }
 
         *steps_executed = steps_executed.saturating_add(local_steps & 255);
-        Ok(0.0)
+        Ok(None)
     }
 }
