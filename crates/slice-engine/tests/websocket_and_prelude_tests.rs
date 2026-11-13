@@ -1290,6 +1290,7 @@ fn test_websocket_zero_delay_interactive_roundtrips_and_unidirectional_burst() {
     let js = format!(
         r#"
         (async () => {{
+            const t0 = performance.now();
             const acks = await new Promise((resolve, reject) => {{
                 const ws = new WebSocket("ws://127.0.0.1:{port}/echo");
                 const list = [];
@@ -1319,7 +1320,9 @@ fn test_websocket_zero_delay_interactive_roundtrips_and_unidirectional_burst() {
                 ws2.onclose = () => resolve(true);
             }});
 
+            const wsElapsedMs = performance.now() - t0;
             console.log(JSON.stringify(acks));
+            console.log(String(wsElapsedMs));
         }})();
         "#,
         port = port
@@ -1336,9 +1339,23 @@ fn test_websocket_zero_delay_interactive_roundtrips_and_unidirectional_burst() {
         metrics.stdout[0],
         r#"["welcome","echo:msg-1","echo:msg-2","echo:msg-3","echo:msg-4","echo:msg-5"]"#
     );
+    let ws_elapsed_ms: f64 = metrics.stdout[1].parse().unwrap();
+    let ws_limit_ms: f64 = if cfg!(debug_assertions) { 250.0 } else { 100.0 };
     assert!(
-        elapsed < std::time::Duration::from_millis(250),
-        "interactive + burst WebSocket sessions took {:?} (expected fast zero-delay dispatch)",
-        elapsed
+        ws_elapsed_ms < ws_limit_ms,
+        "interactive + burst WebSocket sessions took {:.3}ms inside isolate (expected < {:.1}ms zero-delay dispatch)",
+        ws_elapsed_ms,
+        ws_limit_ms
+    );
+    let outer_limit = if cfg!(debug_assertions) {
+        std::time::Duration::from_millis(2000)
+    } else {
+        std::time::Duration::from_millis(250)
+    };
+    assert!(
+        elapsed < outer_limit,
+        "total isolate boot + WebSocket sessions took {:?} (expected < {:?})",
+        elapsed,
+        outer_limit
     );
 }

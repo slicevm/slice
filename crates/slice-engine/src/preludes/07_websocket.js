@@ -87,6 +87,7 @@
     this._id = info.id;
     this._isLive = Boolean(info.live);
     this._pollTimer = null;
+    this._pendingSendDispatch = false;
     this.protocol = info.protocol || protoStr;
     this._jsMockFn = null;
     for (var pat in __wsJsMocks) {
@@ -165,7 +166,7 @@
   };
 
   WebSocket.prototype._schedulePoll = function() {
-    if (!this._isLive || this._pollTimer !== null || this.readyState !== 1 || !this._hasInboundListeners()) {
+    if (!this._isLive || this._pollTimer !== null || this._pendingSendDispatch || this.readyState !== 1 || !this._hasInboundListeners()) {
       return;
     }
     var self = this;
@@ -179,14 +180,14 @@
         emptyTicks = 0;
         remaining = 250;
         __dispatchWsWireEvents(self, eventsJson);
-        if (self.readyState === 1 && self._pollTimer === null && self._hasInboundListeners()) {
+        if (self.readyState === 1 && self._pollTimer === null && !self._pendingSendDispatch && self._hasInboundListeners()) {
           self._pollTimer = setTimeout(step, 0);
         }
         return;
       }
       if (--remaining > 0 && self.readyState === 1 && self._hasInboundListeners()) {
         emptyTicks++;
-        self._pollTimer = setTimeout(step, emptyTicks === 1 ? 1 : 2);
+        self._pollTimer = setTimeout(step, emptyTicks <= 3 ? 0 : (emptyTicks === 4 ? 1 : 2));
       }
     }
     this._pollTimer = setTimeout(step, 0);
@@ -222,7 +223,9 @@
       }
     }
     if (eventsJson && eventsJson !== "[]") {
+      this._pendingSendDispatch = true;
       queueMicrotask(function() {
+        self._pendingSendDispatch = false;
         __dispatchWsWireEvents(self, eventsJson);
         if (self._isLive && self.readyState === 1) {
           self._schedulePoll();

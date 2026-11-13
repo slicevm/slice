@@ -2,6 +2,10 @@
 name = "slice-engine"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description.workspace = true
 autotests = false
 
 [lib]
@@ -15,7 +19,6 @@ blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
 boa_engine.workspace = true
 oxc.workspace = true
 rustc-hash.workspace = true
@@ -23,7 +26,6 @@ memchr.workspace = true
 aho-corasick.workspace = true
 compact_str.workspace = true
 parking_lot.workspace = true
-cow-utils.workspace = true
 smallvec.workspace = true
 itoa.workspace = true
 rustls.workspace = true
