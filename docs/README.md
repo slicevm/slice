@@ -1,6 +1,6 @@
 # Slice Documentation Index
 
-Welcome to the documentation hub for **Slice** (`v0.10.12`), a zero-trust JavaScript and TypeScript runtime built in Rust for multi-tenant edge services, SaaS plugin engines, and AI agent sandboxes.
+Welcome to the documentation hub for **Slice** (`v0.11.0`), a zero-trust JavaScript and TypeScript runtime built in Rust for multi-tenant edge services, SaaS plugin engines, and AI agent sandboxes.
 
 Documentation is organized into four tracks depending on what you are building:
 

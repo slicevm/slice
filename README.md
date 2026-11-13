@@ -1,7 +1,7 @@
 # Slice
 
 [![CI](https://github.com/slicevm/slice/actions/workflows/ci.yml/badge.svg)](https://github.com/slicevm/slice/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.10.12-blue)](https://github.com/slicevm/slice/releases)
+[![Version](https://img.shields.io/badge/version-v0.11.0-blue)](https://github.com/slicevm/slice/releases)
 [![Rust](https://img.shields.io/badge/rust-edition%202021-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green)](./LICENSE-MIT)
 [![Benchmarks](https://img.shields.io/badge/benchmarks-33%20workloads-brightgreen)](./tests/reports/latest.md)

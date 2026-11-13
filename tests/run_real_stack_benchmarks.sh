@@ -44,7 +44,7 @@ BENCH_TAGS="${1:-${SLICE_BENCH_TAGS:-all}}"
 METRICS_JSONL="${SLICE_BENCH_JSONL:-/tmp/slice_bench_metrics.jsonl}"
 rm -f "$METRICS_JSONL"
 
-SLICE_VERSION="${SLICE_VERSION:-0.10.12}"
+SLICE_VERSION="${SLICE_VERSION:-0.11.0}"
 SLICE_GIT_COMMIT="${SLICE_GIT_COMMIT:-$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo "abdbf89")}"
 SLICE_BENCH_TS_UTC="${SLICE_BENCH_TS_UTC:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
 CURRENT_APP_IDX=""

@@ -2066,7 +2066,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slice-cas"
-version = "0.10.12"
+version = "0.11.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2087,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "slice-cli"
-version = "0.10.12"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -2108,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "slice-engine"
-version = "0.10.12"
+version = "0.11.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2139,7 +2139,7 @@ dependencies = [
 
 [[package]]
 name = "slice-io"
-version = "0.10.12"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -2150,7 +2150,7 @@ dependencies = [
 
 [[package]]
 name = "slice-sandbox"
-version = "0.10.12"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "blake3",
