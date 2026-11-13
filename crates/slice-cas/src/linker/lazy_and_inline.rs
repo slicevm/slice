@@ -1,36 +1,11 @@
 //! Cold Method-Scoped `require` Inliner (`inline_cold_method_requires_ast`)
 //! and Eager Module Reachability Analyzer (`collect_eager_module_indices`).
 
-use crate::linker::tree_shaker::{is_any_require_call, is_js_ident_continue};
-use rustc_hash::FxHashSet;
-
-fn replace_whole_ident_in_slice(src: &str, ident: &str, replacement: &str) -> String {
-    let bytes = src.as_bytes();
-    let ibytes = ident.as_bytes();
-    let ilen = ibytes.len();
-    if ilen == 0 {
-        return src.to_string();
-    }
-    let finder = memchr::memmem::Finder::new(ibytes);
-    let mut out = String::with_capacity(src.len() + 64);
-    let mut last = 0usize;
-    let mut pos = 0usize;
-    while let Some(rel) = finder.find(&bytes[pos..]) {
-        let idx = pos + rel;
-        let end = idx + ilen;
-        let valid_start =
-            idx == 0 || (!is_js_ident_continue(bytes[idx - 1]) && bytes[idx - 1] != b'.');
-        let valid_end = end == bytes.len() || !is_js_ident_continue(bytes[end]);
-        if valid_start && valid_end {
-            out.push_str(&src[last..idx]);
-            out.push_str(replacement);
-            last = end;
-        }
-        pos = end;
-    }
-    out.push_str(&src[last..]);
-    out
-}
+use crate::linker::tree_shaker::is_any_require_call;
+use crate::linker::{
+    collect_mutated_binding_names, collect_top_level_cjs_reference_edits, slice_with_edits,
+};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// General-Purpose Cold Method-Scoped `require` Inliner (`inline_cold_method_requires_ast`):
 /// If a `/node_modules/` module has a top-level `const { a, b } = require("<dep_id>");` where
@@ -57,9 +32,8 @@ pub fn inline_cold_method_requires_ast(
         return cjs_code.to_string();
     }
 
-    // Collect cold class method body spans and non-computed class element key spans
+    // Collect cold class method body spans
     let mut cold_method_spans: Vec<(usize, usize)> = Vec::new();
-    let mut non_computed_key_spans: Vec<(usize, usize)> = Vec::new();
     let is_hot_method_name = |name: &str| {
         matches!(
             name,
@@ -92,10 +66,6 @@ pub fn inline_cold_method_requires_ast(
         for el in &cls.body.body {
             match el {
                 ClassElement::MethodDefinition(md) => {
-                    if !md.computed {
-                        let ksp = md.key.span();
-                        non_computed_key_spans.push((ksp.start as usize, ksp.end as usize));
-                    }
                     if md.kind == MethodDefinitionKind::Constructor {
                         continue;
                     }
@@ -108,10 +78,6 @@ pub fn inline_cold_method_requires_ast(
                     }
                 }
                 ClassElement::PropertyDefinition(pd) => {
-                    if !pd.computed {
-                        let ksp = pd.key.span();
-                        non_computed_key_spans.push((ksp.start as usize, ksp.end as usize));
-                    }
                     let pname = pd.key.name().unwrap_or_default();
                     if is_hot_method_name(&pname) {
                         continue;
@@ -144,8 +110,14 @@ pub fn inline_cold_method_requires_ast(
         return cjs_code.to_string();
     }
 
-    let mut stmt_spans_to_remove: Vec<(usize, usize)> = Vec::new();
-    let mut inline_bindings: Vec<(String, String)> = Vec::new();
+    struct CandidateDecl {
+        stmt_span: (usize, usize),
+        dep_id: String,
+        bindings: Vec<String>,
+    }
+
+    let mut candidates: Vec<CandidateDecl> = Vec::new();
+    let mut probe_map: FxHashMap<String, String> = FxHashMap::default();
 
     for stmt in &parser_ret.program.body {
         let Statement::VariableDeclaration(vd) = stmt else {
@@ -163,7 +135,7 @@ pub fn inline_cold_method_requires_ast(
         };
         if !single_consumer_deps.contains(&dep_id) {
             continue;
-        }
+        };
         let BindingPattern::ObjectPattern(obj_pat) = &decl.id else {
             continue;
         };
@@ -190,99 +162,91 @@ pub fn inline_cold_method_requires_ast(
         if !all_simple {
             continue;
         }
-
-        let decl_end = vd.span.end as usize;
-        let bytes = cjs_code.as_bytes();
-        let mut eligible = true;
         for b_name in &bindings {
-            let b_len = b_name.len();
-            let finder = memchr::memmem::Finder::new(b_name.as_bytes());
-            let mut pos = decl_end;
+            probe_map.insert(b_name.clone(), format!("require({:?}).{}", dep_id, b_name));
+        }
+        candidates.push(CandidateDecl {
+            stmt_span: (vd.span.start as usize, vd.span.end as usize),
+            dep_id,
+            bindings,
+        });
+    }
+
+    if candidates.is_empty() {
+        return cjs_code.to_string();
+    }
+
+    let candidate_spans: FxHashSet<(usize, usize)> =
+        candidates.iter().map(|c| c.stmt_span).collect();
+    let mutated = collect_mutated_binding_names(&parser_ret.program);
+    let mut all_ref_edits: Vec<(usize, usize, String)> = Vec::new();
+    collect_top_level_cjs_reference_edits(
+        &parser_ret.program,
+        &candidate_spans,
+        &probe_map,
+        &mut all_ref_edits,
+    );
+
+    let mut final_edits: Vec<(usize, usize, String)> = Vec::new();
+    for cand in &candidates {
+        let mut decl_edits: Vec<(usize, usize, String)> = Vec::new();
+        let mut eligible = true;
+        for b_name in &cand.bindings {
+            if mutated.contains(b_name) {
+                eligible = false;
+                break;
+            }
+            let expected_rep = format!("require({:?}).{}", cand.dep_id, b_name);
+            let expected_shorthand = format!("{}: {}", b_name, expected_rep);
             let mut ref_count = 0usize;
-            while let Some(rel) = finder.find(&bytes[pos..]) {
-                let idx = pos + rel;
-                let end = idx + b_len;
-                pos = end;
-                let valid_start =
-                    idx == 0 || (!is_js_ident_continue(bytes[idx - 1]) && bytes[idx - 1] != b'.');
-                let valid_end = end == bytes.len() || !is_js_ident_continue(bytes[end]);
-                if !valid_start || !valid_end {
-                    continue;
+            for (rs, re, rep) in &all_ref_edits {
+                if *rep == expected_rep || *rep == expected_shorthand {
+                    let in_cold_span = cold_method_spans
+                        .iter()
+                        .any(|&(cs, ce)| *rs >= cs && *re <= ce);
+                    if !in_cold_span {
+                        eligible = false;
+                        break;
+                    }
+                    ref_count += 1;
+                    decl_edits.push((*rs, *re, rep.clone()));
                 }
-                if non_computed_key_spans
-                    .iter()
-                    .any(|&(ks, ke)| idx >= ks && end <= ke)
-                {
-                    continue;
-                }
-                let in_cold_span = cold_method_spans.iter().any(|&(s, e)| idx >= s && end <= e);
-                if !in_cold_span {
-                    eligible = false;
-                    break;
-                }
-                ref_count += 1;
             }
             if !eligible || ref_count == 0 || ref_count > 2 {
                 eligible = false;
                 break;
             }
         }
-
         if eligible {
-            stmt_spans_to_remove.push((vd.span.start as usize, vd.span.end as usize));
-            for b_name in bindings {
-                inline_bindings.push((b_name.clone(), format!("require({:?}).{}", dep_id, b_name)));
-            }
+            final_edits.push((cand.stmt_span.0, cand.stmt_span.1, String::new()));
+            final_edits.extend(decl_edits);
         }
     }
 
-    if stmt_spans_to_remove.is_empty() {
+    if final_edits.is_empty() {
         return cjs_code.to_string();
     }
 
-    let mut edits: Vec<(usize, usize, String)> = Vec::new();
-    for (s, e) in &stmt_spans_to_remove {
-        edits.push((*s, *e, String::new()));
-    }
-    for &(ms, me) in &cold_method_spans {
-        let orig_slice = &cjs_code[ms..me];
-        let mut updated = orig_slice.to_string();
-        for (b_name, rep_expr) in &inline_bindings {
-            if updated.contains(b_name.as_str()) {
-                updated = replace_whole_ident_in_slice(&updated, b_name, rep_expr);
-            }
-        }
-        if updated != orig_slice {
-            edits.push((ms, me, updated));
-        }
-    }
-    edits.sort_by_key(|e| e.0);
-
-    let mut result = String::with_capacity(cjs_code.len() + 64);
-    let mut cursor = 0usize;
-    for (s, e, rep) in edits {
-        if s < cursor {
-            continue;
-        }
-        result.push_str(&cjs_code[cursor..s]);
-        result.push_str(&rep);
-        cursor = e;
-    }
-    result.push_str(&cjs_code[cursor..]);
-    result
+    final_edits.sort_by_key(|e| e.0);
+    slice_with_edits(cjs_code, 0, cjs_code.len(), &final_edits)
 }
 
 /// Computes the set of module indices `0..modules.len()` that are reachable from `entry_body`
-/// via **eager** `require(idx)` edges (excluding `require(idx)` calls inside lazy property getters
-/// `get prop() { ... }` or cold non-constructor class methods).
+/// via **eager** `require(idx)` edges (excluding `require(idx)` calls inside unpruned lazy
+/// property getters `get prop() { ... }` or cold non-constructor class methods).
 pub fn collect_eager_module_indices(
     entry_body: &str,
     modules: &[(String, String)],
+    subset_pruned: &[bool],
 ) -> FxHashSet<usize> {
     use oxc::ast::ast::{Expression, ObjectPropertyKind, PropertyKind, Statement};
     use oxc::span::GetSpan;
 
-    fn extract_eager_require_ids(code: &str, max_id: usize) -> Vec<usize> {
+    fn extract_eager_require_ids(
+        code: &str,
+        max_id: usize,
+        keep_export_getters_eager: bool,
+    ) -> Vec<usize> {
         let allocator = oxc::allocator::Allocator::default();
         let source_type = oxc::span::SourceType::mjs().with_module(false);
         let parser_ret = oxc::parser::Parser::new(&allocator, code, source_type).parse();
@@ -360,7 +324,7 @@ pub fn collect_eager_module_indices(
                             }
                         }
                     }
-                    Statement::ExpressionStatement(es) => {
+                    Statement::ExpressionStatement(es) if !keep_export_getters_eager => {
                         if let Expression::AssignmentExpression(assign) =
                             es.expression.without_parentheses()
                         {
@@ -414,11 +378,12 @@ pub fn collect_eager_module_indices(
 
     let max_id = modules.len();
     let mut eager_set = FxHashSet::default();
-    let mut queue = extract_eager_require_ids(entry_body, max_id);
+    let mut queue = extract_eager_require_ids(entry_body, max_id, false);
 
     while let Some(idx) = queue.pop() {
         if eager_set.insert(idx) {
-            for child in extract_eager_require_ids(&modules[idx].1, max_id) {
+            let keep_getters = subset_pruned.get(idx).copied().unwrap_or(false);
+            for child in extract_eager_require_ids(&modules[idx].1, max_id, keep_getters) {
                 if !eager_set.contains(&child) {
                     queue.push(child);
                 }

@@ -135,14 +135,111 @@ pub fn parse_tier_setting(raw: &str) -> Option<Option<u8>> {
     }
 }
 
+fn strip_toml_inline_comment(raw: &str) -> &str {
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut escaped = false;
+    for (idx, ch) in raw.char_indices() {
+        if in_double {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_double = true,
+            '\'' => in_single = true,
+            '#' => return raw[..idx].trim(),
+            _ => {}
+        }
+    }
+    raw.trim()
+}
+
 #[inline]
 pub(crate) fn parse_toml_string_array(raw: &str) -> Vec<String> {
-    let inner = raw.trim().trim_start_matches('[').trim_end_matches(']');
-    inner
-        .split(',')
-        .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
+    let cleaned = strip_toml_inline_comment(raw);
+    let inner = cleaned
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(cleaned);
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut had_quotes = false;
+
+    for ch in inner.chars() {
+        if let Some(q) = quote {
+            if q == '"' && escaped {
+                match ch {
+                    'n' => current.push('\n'),
+                    'r' => current.push('\r'),
+                    't' => current.push('\t'),
+                    '\\' => current.push('\\'),
+                    '"' => current.push('"'),
+                    other => {
+                        current.push('\\');
+                        current.push(other);
+                    }
+                }
+                escaped = false;
+            } else if q == '"' && ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' => {
+                if !had_quotes {
+                    current.clear();
+                }
+                quote = Some(ch);
+                had_quotes = true;
+            }
+            ',' => {
+                let val = if had_quotes {
+                    current.clone()
+                } else {
+                    current.trim().to_string()
+                };
+                if !val.is_empty() {
+                    items.push(val);
+                }
+                current.clear();
+                had_quotes = false;
+            }
+            _ => {
+                if !had_quotes {
+                    current.push(ch);
+                }
+            }
+        }
+    }
+    let tail = if had_quotes {
+        current
+    } else {
+        current.trim().to_string()
+    };
+    if !tail.is_empty() {
+        items.push(tail);
+    }
+    items
 }
 
 impl SliceManifest {
@@ -152,22 +249,17 @@ impl SliceManifest {
         let mut current_section = "";
 
         for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
+            let trimmed = strip_toml_inline_comment(line);
+            if trimmed.is_empty() {
                 continue;
             }
             if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                current_section = &trimmed[1..trimmed.len() - 1];
+                current_section = trimmed[1..trimmed.len() - 1].trim();
                 continue;
             }
             if let Some((k, v)) = trimmed.split_once('=') {
                 let key = k.trim();
-                let mut val = v.trim();
-                if !val.starts_with('"') && !val.starts_with('\'') && !val.starts_with('[') {
-                    if let Some((before_comment, _)) = val.split_once('#') {
-                        val = before_comment.trim();
-                    }
-                }
+                let val = v.trim();
                 match (current_section, key) {
                     ("package", "name") => {
                         manifest.name = val.trim_matches('"').trim_matches('\'').to_string();
@@ -376,5 +468,74 @@ RUNTIME_ENGINE = "Slice-NexusJS"
 "#,
             project_name
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SliceManifest;
+    use crate::manifest::dotenv::parse_dotenv_content;
+
+    #[test]
+    fn test_manifest_and_dotenv_inline_comments_and_quoted_hashes() {
+        let toml = r#"
+[package]
+name = "sveltekit-app" # inline comment on quoted string
+version = "0.1.0"
+entrypoint = "./build/slice-entry.js" # entry comment
+
+[server]
+static_dir = "./build/client" # static assets
+
+[limits]
+fuel = 50_000_000 # 50M instructions
+memory_mb = 64
+
+[capabilities]
+allow_net = ["api.internal:443", "127.0.0.1:8080"] # multi-host array
+allow_env = ["NODE_ENV", "HOOK_URL=https://example.com/#frag", "PAIR=a,b"] # trailing array comment
+"#;
+        let m = SliceManifest::parse_toml(toml);
+        assert_eq!(m.name, "sveltekit-app");
+        assert_eq!(m.entrypoint, "./build/slice-entry.js");
+        assert_eq!(m.static_dir.as_deref(), Some("./build/client"));
+        assert_eq!(m.fuel_limit, 50_000_000);
+        assert_eq!(m.memory_limit_kb, 64 * 1024);
+        assert!(m
+            .capabilities
+            .allowed_net_hosts
+            .contains("api.internal:443"));
+        assert!(m.capabilities.allowed_net_hosts.contains("127.0.0.1:8080"));
+        assert_eq!(
+            m.capabilities
+                .allowed_env_keys
+                .get("HOOK_URL")
+                .map(|s| s.as_str()),
+            Some("https://example.com/#frag")
+        );
+        assert_eq!(
+            m.capabilities
+                .allowed_env_keys
+                .get("PAIR")
+                .map(|s| s.as_str()),
+            Some("a,b")
+        );
+
+        let dotenv = r#"
+API_KEY="sec#ret_value_123" # trailing comment after double quotes
+SINGLE_SECRET='lit#eral_456' # trailing comment after single quotes
+PLAIN_VAL=hello_world # trailing comment after unquoted
+"#;
+        let (pairs, secrets) = parse_dotenv_content(dotenv);
+        assert_eq!(
+            pairs,
+            vec![
+                ("API_KEY".to_string(), "sec#ret_value_123".to_string()),
+                ("SINGLE_SECRET".to_string(), "lit#eral_456".to_string()),
+                ("PLAIN_VAL".to_string(), "hello_world".to_string()),
+            ]
+        );
+        assert!(secrets.contains(&"sec#ret_value_123".to_string()));
+        assert!(secrets.contains(&"lit#eral_456".to_string()));
     }
 }

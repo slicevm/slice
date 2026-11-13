@@ -93,17 +93,41 @@ pub fn parse_dotenv_content(content: &str) -> (Vec<(String, String)>, Vec<String
         if key_slice.is_empty() {
             continue;
         }
-        let mut val_part = raw_v.trim();
-        let val = if val_part.starts_with('"') && val_part.ends_with('"') && val_part.len() >= 2 {
-            unescape_double_quoted_dotenv(&val_part[1..val_part.len() - 1])
-        } else if val_part.starts_with('\'') && val_part.ends_with('\'') && val_part.len() >= 2 {
-            // Single-quoted `.env` values are literal according to POSIX shell / dotenv rules
-            val_part[1..val_part.len() - 1].to_string()
-        } else {
-            if let Some(hash_idx) = val_part.find(" #") {
-                val_part = val_part[..hash_idx].trim();
+        let val_part = raw_v.trim();
+        let val = if let Some(after_open) = val_part.strip_prefix('"') {
+            let mut end_quote = None;
+            let mut escaped = false;
+            for (ci, ch) in after_open.char_indices() {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    end_quote = Some(ci);
+                    break;
+                }
             }
-            val_part.to_string()
+            if let Some(eq_idx) = end_quote {
+                unescape_double_quoted_dotenv(&after_open[..eq_idx])
+            } else {
+                unescape_double_quoted_dotenv(after_open)
+            }
+        } else if let Some(after_open) = val_part.strip_prefix('\'') {
+            // Single-quoted `.env` values are literal according to POSIX shell / dotenv rules
+            if let Some(eq_idx) = after_open.find('\'') {
+                after_open[..eq_idx].to_string()
+            } else {
+                after_open.to_string()
+            }
+        } else {
+            let mut unquoted = val_part;
+            for (bi, ch) in val_part.char_indices() {
+                if ch == '#' && (bi == 0 || val_part.as_bytes()[bi - 1].is_ascii_whitespace()) {
+                    unquoted = val_part[..bi].trim();
+                    break;
+                }
+            }
+            unquoted.to_string()
         };
 
         if val.len() >= 6 && is_sensitive_env_key(key_slice) && seen_secrets.insert(val.clone()) {

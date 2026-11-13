@@ -559,3 +559,177 @@ engine.processCheckout({ requestId: "ORD-99", items: [] });
 
     let _ = std::fs::remove_dir_all(&test_dir);
 }
+
+#[test]
+fn test_single_file_ts_circular_entry_live_reexports_jsx_override_and_tsconfig_extends() {
+    let test_dir = std::env::temp_dir().join(format!(
+        "slice_bundler_edge_cases_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&test_dir);
+    std::fs::create_dir_all(&test_dir).expect("mkdir test_dir");
+
+    // 1. Single-file TypeScript fast path (.ts and .mts)
+    let single_ts = test_dir.join("single.ts");
+    std::fs::write(
+        &single_ts,
+        "interface Cfg { scale: number }\nconst cfg: Cfg = { scale: 7 };\nexport default cfg.scale * 6;\n",
+    )
+    .unwrap();
+    let bundled_single = bundle_entrypoint_with_deps(&single_ts).unwrap();
+    assert!(
+        !bundled_single.contains("interface Cfg"),
+        "Single-file .ts fast path must strip TypeScript declarations: {}",
+        bundled_single
+    );
+    assert!(bundled_single.contains("const cfg = { scale: 7 }"));
+
+    // 2. Circular entrypoint imports + hoisted function exports + live export * mutable bindings
+    let circ_dir = test_dir.join("circ");
+    std::fs::create_dir_all(&circ_dir).unwrap();
+    std::fs::write(
+        circ_dir.join("state.ts"),
+        "export let counter = 10;\nexport function bump(delta: number) { counter += delta; }\n",
+    )
+    .unwrap();
+    std::fs::write(circ_dir.join("barrel.ts"), "export * from './state';\n").unwrap();
+    std::fs::write(
+        circ_dir.join("helper.ts"),
+        "import { entryTag } from './entry';\nexport function describeEntry(): string { return 'seen:' + entryTag(); }\n",
+    )
+    .unwrap();
+    let circ_entry = circ_dir.join("entry.ts");
+    std::fs::write(
+        &circ_entry,
+        "import { describeEntry } from './helper';\nimport { counter, bump } from './barrel';\nexport function entryTag(): string { return 'root'; }\nbump(5);\nconsole.log(describeEntry() + ':' + counter);\n",
+    )
+    .unwrap();
+    let bundled_circ = bundle_entrypoint_with_deps(&circ_entry).unwrap();
+    assert!(
+        bundled_circ.contains("Object.defineProperty(exports,"),
+        "Live export * mutable binding must emit getter property descriptor:\n{}",
+        bundled_circ
+    );
+    assert!(
+        bundled_circ.contains("__slice_require("),
+        "Circular entrypoint bundle must register and invoke entrypoint via __slice_require:\n{}",
+        bundled_circ
+    );
+
+    // 3. Installed JSX runtime in node_modules overrides slice:jsx fallback, while slice:jsx/jsx-runtime resolves cleanly
+    let jsx_dir = test_dir.join("jsx_app");
+    let custom_react_dir = jsx_dir.join("node_modules/react");
+    std::fs::create_dir_all(&custom_react_dir).unwrap();
+    std::fs::write(
+        custom_react_dir.join("package.json"),
+        r#"{"name":"react","version":"19.0.0","exports":{"./jsx-runtime":"./jsx-runtime.js"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        custom_react_dir.join("jsx-runtime.js"),
+        "exports.jsx = function(tag, props) { return 'custom-react:' + tag + ':' + (props && props.id || ''); };\n",
+    )
+    .unwrap();
+    let jsx_entry = jsx_dir.join("app.js");
+    std::fs::write(
+        &jsx_entry,
+        "const customJsx = require('react/jsx-runtime');\nconst builtinJsx = require('slice:jsx/jsx-runtime');\nconsole.log(customJsx.jsx('div', { id: 'ok' }) + '|' + typeof builtinJsx.jsx);\n",
+    )
+    .unwrap();
+    let bundled_jsx = bundle_entrypoint_with_deps(&jsx_entry).unwrap();
+    assert!(
+        bundled_jsx.contains("custom-react:"),
+        "Installed node_modules/react/jsx-runtime must be bundled instead of falling back to slice:jsx:\n{}",
+        bundled_jsx
+    );
+    assert!(bundled_jsx.contains("require(\"slice:jsx\")"));
+
+    // 4. tsconfig.json extends "./tsconfig.base" (dot in basename, implicit .json) and array extends
+    let ts_dir = test_dir.join("tsconfig_proj");
+    std::fs::create_dir_all(ts_dir.join("src/utils")).unwrap();
+    std::fs::write(
+        ts_dir.join("tsconfig.base.json"),
+        r#"{"compilerOptions":{"baseUrl":".","paths":{"@utils/*":["src/utils/*"]}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        ts_dir.join("tsconfig.extra.json"),
+        r#"{"compilerOptions":{"strict":true}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        ts_dir.join("tsconfig.json"),
+        r#"{"extends":["./tsconfig.base","./tsconfig.extra"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        ts_dir.join("src/utils/math.mts"),
+        "export const add = (a: number, b: number): number => a + b;\n",
+    )
+    .unwrap();
+    let ts_entry = ts_dir.join("src/main.mts");
+    std::fs::write(
+        &ts_entry,
+        "import { add } from '@utils/math.mjs';\nconsole.log(add(19, 23));\n",
+    )
+    .unwrap();
+    let bundled_ts = bundle_entrypoint_with_deps(&ts_entry).unwrap();
+    assert!(bundled_ts.contains("const add = (a, b) => a + b"));
+
+    let _ = std::fs::remove_dir_all(&test_dir);
+}
+
+#[test]
+fn test_esm_default_import_cjs_barrel_tree_shaking_and_eager_modules() {
+    use crate::bundle_entrypoint_with_deps;
+
+    let test_dir = std::env::temp_dir().join(format!(
+        "slice_cjs_barrel_default_imp_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&test_dir);
+    let nm_pkg = test_dir.join("node_modules/toolkit");
+    std::fs::create_dir_all(&nm_pkg).unwrap();
+    std::fs::write(
+        nm_pkg.join("package.json"),
+        r#"{"name":"toolkit","main":"index.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        nm_pkg.join("used.js"),
+        "module.exports = function used(x) { return x * 2; };\n",
+    )
+    .unwrap();
+    std::fs::write(
+        nm_pkg.join("unused.js"),
+        "module.exports = function unused() { return 'UNUSED_BARREL_MARKER'; };\n",
+    )
+    .unwrap();
+    std::fs::write(
+        nm_pkg.join("index.js"),
+        "const used = require(\"./used.js\");\nconst unused = require(\"./unused.js\");\nmodule.exports = {\n  used,\n  unused,\n};\n",
+    )
+    .unwrap();
+    let entry = test_dir.join("index.ts");
+    std::fs::write(
+        &entry,
+        "import toolkit from 'toolkit';\nconsole.log(toolkit.used(21));\n",
+    )
+    .unwrap();
+
+    let bundled = bundle_entrypoint_with_deps(&entry).unwrap();
+    assert!(
+        !bundled.contains("UNUSED_BARREL_MARKER"),
+        "unreferenced CJS barrel sub-module should be pruned: {bundled}"
+    );
+    assert!(
+        !bundled.contains("= \"module.exports="),
+        "statically used CJS barrel sub-module should be eager for AOT precompilation: {bundled}"
+    );
+
+    let _ = std::fs::remove_dir_all(&test_dir);
+}

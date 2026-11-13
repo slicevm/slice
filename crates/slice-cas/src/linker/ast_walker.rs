@@ -753,17 +753,68 @@ pub fn collect_live_import_reference_edits(
     live_map: &rustc_hash::FxHashMap<String, String>,
     edits: &mut Vec<(usize, usize, String)>,
 ) {
+    if live_map.is_empty() {
+        return;
+    }
+    let mut top_shadow = rustc_hash::FxHashSet::default();
+    ident_edit_walker::bind_stmts(&program.body, &mut top_shadow);
+    for stmt in &program.body {
+        ident_edit_walker::walk_stmt(stmt, &top_shadow, live_map, edits);
+    }
+}
+
+/// Walks a single `Expression` while tracking inner lexical shadowing and emits span replacement
+/// edits (including `{ x }` -> `{ x: rep }` object shorthand expansion) for any unshadowed
+/// identifier matching `rename_map`.
+pub fn collect_expr_identifier_edits(
+    expr: &oxc::ast::ast::Expression<'_>,
+    rename_map: &rustc_hash::FxHashMap<String, String>,
+    edits: &mut Vec<(usize, usize, String)>,
+) {
+    if rename_map.is_empty() {
+        return;
+    }
+    let empty_shadow = rustc_hash::FxHashSet::default();
+    ident_edit_walker::walk_expr(expr, &empty_shadow, rename_map, edits);
+}
+
+/// Walks `program` for top-level CommonJS destructured bindings (excluding the candidate
+/// declaration statements themselves in `excluded_stmt_spans`) while tracking lexical shadowing
+/// across other top-level declarations and nested scopes.
+pub fn collect_top_level_cjs_reference_edits(
+    program: &oxc::ast::ast::Program<'_>,
+    excluded_stmt_spans: &rustc_hash::FxHashSet<(usize, usize)>,
+    rename_map: &rustc_hash::FxHashMap<String, String>,
+    edits: &mut Vec<(usize, usize, String)>,
+) {
+    use oxc::span::GetSpan;
+    if rename_map.is_empty() {
+        return;
+    }
+    let mut top_shadow = rustc_hash::FxHashSet::default();
+    for stmt in &program.body {
+        let sp = stmt.span();
+        if !excluded_stmt_spans.contains(&(sp.start as usize, sp.end as usize)) {
+            ident_edit_walker::bind_stmts(std::slice::from_ref(stmt), &mut top_shadow);
+        }
+    }
+    for stmt in &program.body {
+        let sp = stmt.span();
+        if !excluded_stmt_spans.contains(&(sp.start as usize, sp.end as usize)) {
+            ident_edit_walker::walk_stmt(stmt, &top_shadow, rename_map, edits);
+        }
+    }
+}
+
+mod ident_edit_walker {
+    use super::collect_binding_pattern_names;
     use oxc::ast::ast::{
         BindingPattern, ChainElement, ClassElement, Declaration, ExportDefaultDeclarationKind,
         Expression, ForStatementInit, ForStatementLeft, ObjectPropertyKind, Statement,
     };
     use rustc_hash::FxHashSet;
 
-    if live_map.is_empty() {
-        return;
-    }
-
-    fn bind_pat(pat: &BindingPattern<'_>, shadowed: &mut FxHashSet<String>) {
+    pub(super) fn bind_pat(pat: &BindingPattern<'_>, shadowed: &mut FxHashSet<String>) {
         let mut names = Vec::new();
         collect_binding_pattern_names(pat, &mut names);
         for (n, _) in names {
@@ -771,7 +822,7 @@ pub fn collect_live_import_reference_edits(
         }
     }
 
-    fn bind_stmts(stmts: &[Statement<'_>], shadowed: &mut FxHashSet<String>) {
+    pub(super) fn bind_stmts(stmts: &[Statement<'_>], shadowed: &mut FxHashSet<String>) {
         for s in stmts {
             match s {
                 Statement::VariableDeclaration(vd) => {
@@ -903,7 +954,7 @@ pub fn collect_live_import_reference_edits(
         }
     }
 
-    fn walk_expr(
+    pub(super) fn walk_expr(
         expr: &Expression<'_>,
         shadowed: &FxHashSet<String>,
         live_map: &rustc_hash::FxHashMap<String, String>,
@@ -958,6 +1009,18 @@ pub fn collect_live_import_reference_edits(
             Expression::UnaryExpression(u) => {
                 walk_expr(&u.argument, shadowed, live_map, edits);
             }
+            Expression::UpdateExpression(u) => {
+                if let oxc::ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id) =
+                    &u.argument
+                {
+                    let name = id.name.as_str();
+                    if !shadowed.contains(name) {
+                        if let Some(rep) = live_map.get(name) {
+                            edits.push((id.span.start as usize, id.span.end as usize, rep.clone()));
+                        }
+                    }
+                }
+            }
             Expression::ConditionalExpression(c) => {
                 walk_expr(&c.test, shadowed, live_map, edits);
                 walk_expr(&c.consequent, shadowed, live_map, edits);
@@ -965,6 +1028,18 @@ pub fn collect_live_import_reference_edits(
             }
             Expression::AssignmentExpression(a) => {
                 match &a.left {
+                    oxc::ast::ast::AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                        let name = id.name.as_str();
+                        if !shadowed.contains(name) {
+                            if let Some(rep) = live_map.get(name) {
+                                edits.push((
+                                    id.span.start as usize,
+                                    id.span.end as usize,
+                                    rep.clone(),
+                                ));
+                            }
+                        }
+                    }
                     oxc::ast::ast::AssignmentTarget::StaticMemberExpression(m) => {
                         walk_expr(&m.object, shadowed, live_map, edits);
                     }
@@ -1163,7 +1238,7 @@ pub fn collect_live_import_reference_edits(
         }
     }
 
-    fn walk_stmt(
+    pub(super) fn walk_stmt(
         stmt: &Statement<'_>,
         shadowed: &FxHashSet<String>,
         live_map: &rustc_hash::FxHashMap<String, String>,
@@ -1368,11 +1443,5 @@ pub fn collect_live_import_reference_edits(
             },
             _ => {}
         }
-    }
-
-    let mut top_shadow = FxHashSet::default();
-    bind_stmts(&program.body, &mut top_shadow);
-    for stmt in &program.body {
-        walk_stmt(stmt, &top_shadow, live_map, edits);
     }
 }

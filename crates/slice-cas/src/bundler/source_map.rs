@@ -180,7 +180,7 @@ pub fn map_bundled_error_location_with_offset(
                     let mut guess = rel_idx_0 + 1;
                     if let Some(stmt_text) = lines.get(b_line - 1).map(|s| s.trim()) {
                         if !stmt_text.is_empty() {
-                            if let Ok(orig_src) = std::fs::read_to_string(active_full) {
+                            if let Some(orig_src) = read_bounded_source_file(active_full) {
                                 if let Some((orig_idx, _)) = orig_src
                                     .lines()
                                     .enumerate()
@@ -236,18 +236,25 @@ pub fn map_bundled_error_location_with_offset(
                     }));
             if matches_line {
                 let rel_idx_0 = count_code_lines_between(&lines, marker_line_idx, line_1);
-                let mut resolved_line =
-                    lookup_embedded_line_map(active_line_map, rel_idx_0).unwrap_or(rel_idx_0 + 1);
-                if let Ok(orig_src) = std::fs::read_to_string(active_full) {
-                    if let Some((orig_idx, _)) = orig_src.lines().enumerate().find(|(_, ol)| {
-                        ol.contains(core_msg)
-                            || prefix_probe.is_some_and(|pp| {
-                                (ol.contains("throw ") || ol.contains("Error(")) && ol.contains(pp)
-                            })
-                    }) {
-                        resolved_line = orig_idx + 1;
+                let resolved_line = if let Some(mapped) =
+                    lookup_embedded_line_map(active_line_map, rel_idx_0)
+                {
+                    mapped
+                } else {
+                    let mut guess = rel_idx_0 + 1;
+                    if let Some(orig_src) = read_bounded_source_file(active_full) {
+                        if let Some((orig_idx, _)) = orig_src.lines().enumerate().find(|(_, ol)| {
+                            ol.contains(core_msg)
+                                || prefix_probe.is_some_and(|pp| {
+                                    (ol.contains("throw ") || ol.contains("Error("))
+                                        && ol.contains(pp)
+                                })
+                        }) {
+                            guess = orig_idx + 1;
+                        }
                     }
-                }
+                    guess
+                };
                 return format!("{} ({}:{})", error_msg, active_short, resolved_line);
             }
         }
@@ -283,6 +290,50 @@ fn count_code_lines_between(lines: &[&str], start_line_1: usize, target_line_1: 
         .count()
 }
 
+fn read_bounded_source_file(path_str: &str) -> Option<String> {
+    const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+    if path_str.is_empty()
+        || path_str.contains('\0')
+        || path_str.starts_with("\\\\.\\")
+        || path_str.starts_with("\\\\?\\")
+        || path_str.starts_with("//./")
+        || path_str.starts_with("//?/")
+    {
+        return None;
+    }
+    let path = std::path::Path::new(path_str);
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let ext = path.extension()?.to_str()?;
+    if !matches!(
+        ext,
+        "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts"
+    ) {
+        return None;
+    }
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() || meta.file_type().is_symlink() || meta.len() > MAX_SOURCE_BYTES
+    {
+        return None;
+    }
+    let canon = std::fs::canonicalize(path).ok()?;
+    let allowed = std::env::current_dir()
+        .ok()
+        .and_then(|d| std::fs::canonicalize(d).ok())
+        .is_some_and(|cwd| canon.starts_with(&cwd))
+        || std::fs::canonicalize(std::env::temp_dir())
+            .ok()
+            .is_some_and(|tmp| canon.starts_with(&tmp));
+    if !allowed {
+        return None;
+    }
+    std::fs::read_to_string(&canon).ok()
+}
+
 fn resolve_section_line(
     lines: &[&str],
     sec: &BundledSourceSection<'_>,
@@ -301,7 +352,7 @@ fn resolve_section_line(
             .trim_end_matches(';')
             .trim();
         if !probe.is_empty() && probe.len() >= 4 {
-            if let Ok(orig_src) = std::fs::read_to_string(sec.full_path) {
+            if let Some(orig_src) = read_bounded_source_file(sec.full_path) {
                 if let Some((orig_idx, _)) = orig_src
                     .lines()
                     .enumerate()

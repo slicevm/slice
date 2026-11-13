@@ -1202,3 +1202,99 @@ console.log(JSON.stringify({ memResults, smallOk, errBoom, errJson }));
         dlp_violation
     );
 }
+
+#[test]
+fn test_bundled_runtime_execution_circular_entry_live_reexports_crypto_alias_and_jsx_override() {
+    let test_dir = std::env::temp_dir().join(format!(
+        "slice_engine_bundled_exec_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&test_dir);
+    std::fs::create_dir_all(&test_dir).expect("mkdir test_dir");
+
+    // 1. Single-file TypeScript execution
+    let single_ts = test_dir.join("single.ts");
+    std::fs::write(
+        &single_ts,
+        "interface Cfg { scale: number }\nconst cfg: Cfg = { scale: 7 };\nconsole.log(cfg.scale * 6);\n",
+    )
+    .unwrap();
+    let bundled_single = slice_cas::bundle_entrypoint_with_deps(&single_ts).unwrap();
+    let m_single = run_source_isolated(
+        "single-ts-exec",
+        &bundled_single,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(m_single.stdout, vec!["42"]);
+
+    // 2. Circular entrypoint + hoisted function export + live export * mutable binding + aliased node:crypto
+    let circ_dir = test_dir.join("circ");
+    std::fs::create_dir_all(&circ_dir).unwrap();
+    std::fs::write(
+        circ_dir.join("state.ts"),
+        "export let counter = 10;\nexport function bump(delta: number) { counter += delta; }\n",
+    )
+    .unwrap();
+    std::fs::write(circ_dir.join("barrel.ts"), "export * from './state';\n").unwrap();
+    std::fs::write(
+        circ_dir.join("helper.ts"),
+        "import { entryTag } from './entry';\nimport { createHash as hash } from 'node:crypto';\nexport function describeEntry(): string { return 'seen:' + entryTag() + ':' + hash('sha256').update('ok').digest('hex').slice(0, 6); }\n",
+    )
+    .unwrap();
+    let circ_entry = circ_dir.join("entry.ts");
+    std::fs::write(
+        &circ_entry,
+        "import { describeEntry } from './helper';\nimport { counter, bump } from './barrel';\nexport function entryTag(): string { return 'root'; }\nbump(5);\nconsole.log(describeEntry() + ':' + counter);\n",
+    )
+    .unwrap();
+    let bundled_circ = slice_cas::bundle_entrypoint_with_deps(&circ_entry).unwrap();
+    let m_circ = run_source_isolated(
+        "circ-entry-exec",
+        &bundled_circ,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(m_circ.stdout, vec!["seen:root:268936:15"]);
+
+    // 3. Installed JSX runtime override + slice:jsx/jsx-runtime direct import
+    let jsx_dir = test_dir.join("jsx_app");
+    let custom_react_dir = jsx_dir.join("node_modules/react");
+    std::fs::create_dir_all(&custom_react_dir).unwrap();
+    std::fs::write(
+        custom_react_dir.join("package.json"),
+        r#"{"name":"react","version":"19.0.0","exports":{"./jsx-runtime":"./jsx-runtime.js"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        custom_react_dir.join("jsx-runtime.js"),
+        "exports.jsx = function(tag, props) { return 'custom-react:' + tag + ':' + (props && props.id || ''); };\n",
+    )
+    .unwrap();
+    let jsx_entry = jsx_dir.join("app.js");
+    std::fs::write(
+        &jsx_entry,
+        "const customJsx = require('react/jsx-runtime');\nconst builtinJsx = require('slice:jsx/jsx-runtime');\nconsole.log(customJsx.jsx('div', { id: 'ok' }) + '|' + typeof builtinJsx.jsx);\n",
+    )
+    .unwrap();
+    let bundled_jsx = slice_cas::bundle_entrypoint_with_deps(&jsx_entry).unwrap();
+    let m_jsx = run_source_isolated(
+        "jsx-override-exec",
+        &bundled_jsx,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(m_jsx.stdout, vec!["custom-react:div:ok|function"]);
+
+    let _ = std::fs::remove_dir_all(&test_dir);
+}

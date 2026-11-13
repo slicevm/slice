@@ -58,10 +58,17 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         .and_then(|e| e.to_str())
         .unwrap_or("");
     let is_jsx_entry = matches!(entry_ext, "tsx" | "jsx") || source_contains_jsx(&raw);
+    let is_ts_entry = matches!(entry_ext, "ts" | "tsx" | "mts" | "cts");
 
     // Fast path for single-file scripts with no imports/exports/requires/classes/JSX/WinterTC bridge
     if !is_jsx_entry && !entrypoint_needs_bundler_ac().is_match(&raw) {
-        return Ok(raw);
+        if !is_ts_entry {
+            return Ok(raw);
+        }
+        let stripped = strip_typescript_raw_with_ext(&raw, true, false);
+        if !entrypoint_needs_bundler_ac().is_match(&stripped) {
+            return Ok(stripped);
+        }
     }
 
     let _cache_guard = ResolverCacheGuard::new();
@@ -111,7 +118,7 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
             return Ok(mod_id);
         }
 
-        let is_ts = matches!(ext, "ts" | "tsx" | "jsx");
+        let is_ts = matches!(ext, "ts" | "tsx" | "jsx" | "mts" | "cts");
         let is_jsx_ext = matches!(ext, "tsx" | "jsx");
         let js_stripped = strip_typescript_raw_with_ext(&raw_src, is_ts, is_jsx_ext);
         let from_dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -145,10 +152,19 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     let _entry_id = visit_module(entry_path, &mut seen, &mut visited_order)?;
 
     fn compute_bundle_rc_key(payload: &str) -> String {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = rustc_hash::FxHasher::default();
-        payload.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+        let digest = blake3::hash(payload.as_bytes());
+        let key_u64 = u64::from_le_bytes(digest.as_bytes()[0..8].try_into().unwrap());
+        format!("{:016x}", key_u64)
+    }
+
+    fn compute_bundle_rc_key_parts(modules_code: &str, entry_body: &str) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(modules_code.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(entry_body.as_bytes());
+        let digest = hasher.finalize();
+        let key_u64 = u64::from_le_bytes(digest.as_bytes()[0..8].try_into().unwrap());
+        format!("{:016x}", key_u64)
     }
 
     // Single-Module Unwrapping + Persistent Realm Cache (`__slice_rc`):
@@ -222,6 +238,7 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     }
 
     // Pass 2: Reverse-topological Used-Exports Analysis & Oxc AST Dead-Declaration Elimination
+    let mut subset_pruned = vec![false; visited_order.len().saturating_sub(1)];
     for i in (0..visited_order.len() - 1).rev() {
         if !visited_order[i].0.contains("/node_modules/") {
             continue;
@@ -234,6 +251,7 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
                 require_summaries[i] = ModuleRequireSummary::default();
             }
             UsedExports::Subset(used_set) => {
+                subset_pruned[i] = true;
                 let pruned =
                     prune_and_minify_cjs_module_ast(&visited_order[i].1, Some(&used_set), false);
                 if pruned != visited_order[i].1 {
@@ -246,16 +264,34 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     }
 
     // Dense Integer Module IDs + Persistent Realm Module Cache (`__slice_rc`):
-    let (_entry_mod_id, mut entry_body) = visited_order.pop().unwrap();
-    if !visited_order.is_empty() {
-        let mut patterns: Vec<String> = Vec::with_capacity(visited_order.len() * 2);
-        let mut replacements: Vec<String> = Vec::with_capacity(visited_order.len() * 2);
+    let (entry_mod_id, mut entry_body) = visited_order.pop().unwrap();
+    let req_entry_dq = format!("require({:?})", entry_mod_id);
+    let req_entry_sq = format!("require('{}')", entry_mod_id);
+    let entry_is_imported = visited_order
+        .iter()
+        .any(|(_, b)| b.contains(&req_entry_dq) || b.contains(&req_entry_sq))
+        || entry_body.contains(&req_entry_dq)
+        || entry_body.contains(&req_entry_sq);
+    let entry_mod_idx = visited_order.len();
+
+    if !visited_order.is_empty() || entry_is_imported {
+        let cap = (visited_order.len() + usize::from(entry_is_imported)) * 2;
+        let mut patterns: Vec<String> = Vec::with_capacity(cap);
+        let mut replacements: Vec<String> = Vec::with_capacity(cap);
         for (idx, (mod_id, _)) in visited_order.iter().enumerate() {
             let mut idx_buf = itoa::Buffer::new();
             let to_pat = format!("require({})", idx_buf.format(idx));
             patterns.push(format!("require({:?})", mod_id));
             replacements.push(to_pat.clone());
             patterns.push(format!("require('{}')", mod_id));
+            replacements.push(to_pat);
+        }
+        if entry_is_imported {
+            let mut idx_buf = itoa::Buffer::new();
+            let to_pat = format!("require({})", idx_buf.format(entry_mod_idx));
+            patterns.push(format!("require({:?})", entry_mod_id));
+            replacements.push(to_pat.clone());
+            patterns.push(format!("require('{}')", entry_mod_id));
             replacements.push(to_pat);
         }
         if let Ok(ac) = aho_corasick::AhoCorasick::new(&patterns) {
@@ -270,7 +306,7 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         }
     }
 
-    let eager_indices = collect_eager_module_indices(&entry_body, &visited_order);
+    let eager_indices = collect_eager_module_indices(&entry_body, &visited_order, &subset_pruned);
 
     let mut modules_code = String::with_capacity(raw.len() + 1024);
     for (idx, (id, body)) in visited_order.iter().enumerate() {
@@ -293,8 +329,14 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
             idx, final_body
         ));
     }
+    if entry_is_imported {
+        modules_code.push_str(&format!(
+            "__slice_modules[{}] = function(exports, require, module) {{\n{}\n}};\n",
+            entry_mod_idx, entry_body
+        ));
+    }
 
-    let rc_key = compute_bundle_rc_key(&format!("{}\n{}", modules_code, entry_body));
+    let rc_key = compute_bundle_rc_key_parts(&modules_code, &entry_body);
     let mut bundle = String::with_capacity(modules_code.len() + entry_body.len() + 512);
     bundle.push_str(&format!(
         "var __slice_modules = {{}};//__SLICE_RC:{}\n",
@@ -318,12 +360,39 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     bundle.push_str("    return m.exports;\n");
     bundle.push_str("}\n");
     bundle.push_str(&modules_code);
-    let fn_kw = if has_top_level_await(&entry_body) {
+    let fn_kw = if !entry_is_imported && has_top_level_await(&entry_body) {
         "async function()"
     } else {
         "function()"
     };
-    if entry_body.contains("exports.default = __slice_default;") {
+    if entry_is_imported {
+        if entry_body.contains("exports.default = __slice_default;") {
+            bundle.push_str("var __h = null;\n");
+            bundle.push_str(&format!("__run = __rc[\"{}\"] = {} {{\n", rc_key, fn_kw));
+            bundle.push_str(&format!(
+                "if (!__h) {{ var __ee = __slice_require({}); __h = (__ee && __ee.default !== undefined) ? __ee.default : __ee; }}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n",
+                entry_mod_idx
+            ));
+        } else if (entry_body.contains("Slice.serve(")
+            || entry_body.contains("Deno.serve(")
+            || entry_body.contains("Bun.serve("))
+            && !entry_body.contains("Slice.respond(")
+        {
+            bundle.push_str("var __h = null;\n");
+            bundle.push_str(&format!("__run = __rc[\"{}\"] = {} {{\n", rc_key, fn_kw));
+            bundle.push_str("if (__h && globalThis.__slice_active_http_server && typeof __slice_http_is_active === 'function' && __slice_http_is_active()) { globalThis.__slice_dispatch_fetch(__h); return; }\n");
+            bundle.push_str(&format!(
+                "__slice_cache[{}] = undefined;\n__slice_require({});\nif (globalThis.__slice_active_http_server) __h = globalThis.__slice_active_http_server._handler;\n}};\n}}\n__run();\n",
+                entry_mod_idx, entry_mod_idx
+            ));
+        } else {
+            bundle.push_str(&format!("__run = __rc[\"{}\"] = {} {{\n", rc_key, fn_kw));
+            bundle.push_str(&format!(
+                "__slice_cache[{}] = undefined;\n__slice_require({});\n}};\n}}\n__run();\n",
+                entry_mod_idx, entry_mod_idx
+            ));
+        }
+    } else if entry_body.contains("exports.default = __slice_default;") {
         bundle.push_str("var __h = null;\n");
         bundle.push_str(&format!("__run = __rc[\"{}\"] = {} {{\n", rc_key, fn_kw));
         bundle.push_str("if (!__h) {\nvar require = __slice_require, exports = {}, module = { exports: exports };\n");

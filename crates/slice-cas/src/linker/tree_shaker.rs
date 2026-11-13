@@ -91,6 +91,9 @@ pub fn extract_referenced_identifiers_with_offsets(
     let mut i = 0usize;
     let mut prev_sig_byte = 0u8;
     let mut prev_was_regex_kw = false;
+    let mut prev_was_cond_kw = false;
+    let mut after_cond_close_paren = false;
+    let mut paren_stack: Vec<bool> = Vec::new();
     let mut in_template = false;
     let mut brace_depth = 0usize;
     let mut tpl_brace_stack: Vec<usize> = Vec::new();
@@ -106,6 +109,8 @@ pub fn extract_referenced_identifiers_with_offsets(
                 in_template = false;
                 prev_sig_byte = b'`';
                 prev_was_regex_kw = false;
+                prev_was_cond_kw = false;
+                after_cond_close_paren = false;
                 i += 1;
                 continue;
             }
@@ -114,6 +119,8 @@ pub fn extract_referenced_identifiers_with_offsets(
                 in_template = false;
                 prev_sig_byte = b'{';
                 prev_was_regex_kw = false;
+                prev_was_cond_kw = false;
+                after_cond_close_paren = false;
                 i += 2;
                 continue;
             }
@@ -149,6 +156,7 @@ pub fn extract_referenced_identifiers_with_offsets(
         // RegExp literal
         if b == b'/' {
             let can_start_regex = prev_was_regex_kw
+                || after_cond_close_paren
                 || prev_sig_byte == 0
                 || matches!(
                     prev_sig_byte,
@@ -198,6 +206,8 @@ pub fn extract_referenced_identifiers_with_offsets(
                 }
                 prev_sig_byte = b'/';
                 prev_was_regex_kw = false;
+                prev_was_cond_kw = false;
+                after_cond_close_paren = false;
                 continue;
             }
         }
@@ -219,6 +229,8 @@ pub fn extract_referenced_identifiers_with_offsets(
             }
             prev_sig_byte = q;
             prev_was_regex_kw = false;
+            prev_was_cond_kw = false;
+            after_cond_close_paren = false;
             continue;
         }
 
@@ -228,10 +240,31 @@ pub fn extract_referenced_identifiers_with_offsets(
             continue;
         }
 
+        if b == b'(' {
+            paren_stack.push(prev_was_cond_kw);
+            prev_sig_byte = b'(';
+            prev_was_regex_kw = false;
+            prev_was_cond_kw = false;
+            after_cond_close_paren = false;
+            i += 1;
+            continue;
+        }
+
+        if b == b')' {
+            after_cond_close_paren = paren_stack.pop().unwrap_or(false);
+            prev_sig_byte = b')';
+            prev_was_regex_kw = false;
+            prev_was_cond_kw = false;
+            i += 1;
+            continue;
+        }
+
         if b == b'{' {
             brace_depth += 1;
             prev_sig_byte = b'{';
             prev_was_regex_kw = false;
+            prev_was_cond_kw = false;
+            after_cond_close_paren = false;
             i += 1;
             continue;
         }
@@ -245,6 +278,8 @@ pub fn extract_referenced_identifiers_with_offsets(
             }
             prev_sig_byte = b'}';
             prev_was_regex_kw = false;
+            prev_was_cond_kw = false;
+            after_cond_close_paren = false;
             i += 1;
             continue;
         }
@@ -256,24 +291,29 @@ pub fn extract_referenced_identifiers_with_offsets(
                 i += 1;
             }
             let ident = &snippet[start..i];
-            prev_was_regex_kw = matches!(
-                ident,
-                "return"
-                    | "typeof"
-                    | "void"
-                    | "delete"
-                    | "in"
-                    | "of"
-                    | "instanceof"
-                    | "case"
-                    | "throw"
-                    | "else"
-                    | "yield"
-                    | "await"
-            );
-            if (prev_sig_byte != b'.' || (start >= 3 && &bytes[start - 3..start] == b"..."))
-                && !is_js_keyword(ident)
-            {
+            let is_member_prop =
+                prev_sig_byte == b'.' && !(start >= 3 && &bytes[start - 3..start] == b"...");
+            prev_was_regex_kw = !is_member_prop
+                && matches!(
+                    ident,
+                    "return"
+                        | "typeof"
+                        | "void"
+                        | "delete"
+                        | "in"
+                        | "of"
+                        | "instanceof"
+                        | "case"
+                        | "throw"
+                        | "else"
+                        | "do"
+                        | "new"
+                        | "yield"
+                        | "await"
+                );
+            prev_was_cond_kw = !is_member_prop && matches!(ident, "if" | "while" | "for" | "with");
+            after_cond_close_paren = false;
+            if !is_member_prop && !is_js_keyword(ident) {
                 out.push((ident.to_string(), base_offset + start as u32));
             }
             prev_sig_byte = bytes[i - 1];
@@ -282,6 +322,8 @@ pub fn extract_referenced_identifiers_with_offsets(
 
         prev_sig_byte = b;
         prev_was_regex_kw = false;
+        prev_was_cond_kw = false;
+        after_cond_close_paren = false;
         i += 1;
     }
 
@@ -316,12 +358,7 @@ pub(crate) fn is_any_require_call(expr: &oxc::ast::ast::Expression<'_>) -> Optio
     Some(str_lit.value.to_string())
 }
 
-fn collect_member_accesses_on_var(
-    code: &str,
-    var_name: &str,
-    skip_span: (usize, usize),
-    used_out: &mut FxHashSet<String>,
-) -> bool {
+fn has_ident_outside_span(code: &str, var_name: &str, allowed_span: (usize, usize)) -> bool {
     let bytes = code.as_bytes();
     let vbytes = var_name.as_bytes();
     let vlen = vbytes.len();
@@ -334,28 +371,204 @@ fn collect_member_accesses_on_var(
         let idx = pos + rel;
         let end = idx + vlen;
         pos = end;
-        if idx >= skip_span.0 && end <= skip_span.1 {
+        if idx >= allowed_span.0 && end <= allowed_span.1 {
             continue;
         }
         let valid_start =
             idx == 0 || (!is_js_ident_continue(bytes[idx - 1]) && bytes[idx - 1] != b'.');
         let valid_end = end == bytes.len() || !is_js_ident_continue(bytes[end]);
-        if !valid_start || !valid_end {
+        if valid_start && valid_end {
+            return true;
+        }
+    }
+    false
+}
+
+fn try_collect_esm_default_interop_props(
+    stmts: &[oxc::ast::ast::Statement<'_>],
+    stmt_idx: usize,
+    imp_var: &str,
+    imp_stmt_start: usize,
+    consumer_code: &str,
+) -> Option<FxHashSet<String>> {
+    use oxc::ast::ast::{BindingPattern, Expression, Statement};
+
+    let Statement::VariableDeclaration(def_vd) = stmts.get(stmt_idx + 1)? else {
+        return None;
+    };
+    if def_vd.declarations.len() != 1 {
+        return None;
+    }
+    let def_decl = &def_vd.declarations[0];
+    let BindingPattern::BindingIdentifier(def_ident) = &def_decl.id else {
+        return None;
+    };
+    let def_init = def_decl.init.as_ref()?;
+    let def_init_text = &consumer_code[def_vd.span.start as usize..def_vd.span.end as usize];
+    if !def_init_text.contains(imp_var) || expr_contains_assignment(def_init) {
+        return None;
+    }
+
+    let mut group_end = def_vd.span.end as usize;
+    let mut props = FxHashSet::default();
+
+    if let Some(Statement::VariableDeclaration(destr_vd)) = stmts.get(stmt_idx + 2) {
+        if destr_vd.declarations.len() == 1 {
+            let destr_decl = &destr_vd.declarations[0];
+            if let Some(Expression::Identifier(id_expr)) = &destr_decl.init {
+                if id_expr.name.as_str() == imp_var {
+                    group_end = destr_vd.span.end as usize;
+                    let BindingPattern::ObjectPattern(obj_pat) = &destr_decl.id else {
+                        return None;
+                    };
+                    if obj_pat.rest.is_some() {
+                        return None;
+                    }
+                    for prop in &obj_pat.properties {
+                        let key_name = prop.key.name()?;
+                        props.insert(key_name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if has_ident_outside_span(consumer_code, imp_var, (imp_stmt_start, group_end)) {
+        return None;
+    }
+
+    if !collect_member_accesses_on_var(
+        consumer_code,
+        def_ident.name.as_str(),
+        (imp_stmt_start, group_end),
+        &mut props,
+    ) {
+        return None;
+    }
+
+    props.insert("default".to_string());
+    props.insert("__esModule".to_string());
+    Some(props)
+}
+
+fn collect_member_accesses_on_var(
+    code: &str,
+    var_name: &str,
+    skip_span: (usize, usize),
+    used_out: &mut FxHashSet<String>,
+) -> bool {
+    let bytes = code.as_bytes();
+    let len = bytes.len();
+    let vbytes = var_name.as_bytes();
+    let vlen = vbytes.len();
+    if vlen == 0 {
+        return false;
+    }
+    let mut tpl_brace_stack: Vec<usize> = Vec::new();
+    let mut i = 0usize;
+    while i < len {
+        let b = bytes[i];
+        if b == b'/' && i + 1 < len {
+            if bytes[i + 1] == b'/' {
+                i += 2;
+                while i < len && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if bytes[i + 1] == b'*' {
+                i += 2;
+                while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(len);
+                continue;
+            }
+        }
+        if b == b'\'' || b == b'"' {
+            let q = b;
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(len);
+                    continue;
+                }
+                if bytes[i] == q {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
             continue;
         }
-        let after = code[end..].trim_start();
-        let Some(after_dot) = after.strip_prefix('.') else {
-            return false;
-        };
-        let prop_bytes = after_dot.as_bytes();
-        let prop_len = prop_bytes
-            .iter()
-            .take_while(|&&b| is_js_ident_continue(b))
-            .count();
-        if prop_len == 0 {
-            return false;
+        if b == b'`' || (b == b'}' && tpl_brace_stack.last() == Some(&0)) {
+            if b == b'}' {
+                tpl_brace_stack.pop();
+            }
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(len);
+                    continue;
+                }
+                if bytes[i] == b'`' {
+                    i += 1;
+                    break;
+                }
+                if bytes[i] == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
+                    tpl_brace_stack.push(0);
+                    i += 2;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
         }
-        used_out.insert(after_dot[..prop_len].to_string());
+        if b == b'{' {
+            if let Some(depth) = tpl_brace_stack.last_mut() {
+                *depth += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'}' {
+            if let Some(depth) = tpl_brace_stack.last_mut() {
+                *depth = depth.saturating_sub(1);
+            }
+            i += 1;
+            continue;
+        }
+        if is_js_ident_start(b) {
+            let start = i;
+            i += 1;
+            while i < len && is_js_ident_continue(bytes[i]) {
+                i += 1;
+            }
+            let end = i;
+            if end - start == vlen && &bytes[start..end] == vbytes {
+                if start >= skip_span.0 && end <= skip_span.1 {
+                    continue;
+                }
+                if start > 0 && bytes[start - 1] == b'.' {
+                    continue;
+                }
+                let after = code[end..].trim_start();
+                let Some(after_dot) = after.strip_prefix('.') else {
+                    return false;
+                };
+                let prop_bytes = after_dot.as_bytes();
+                let prop_len = prop_bytes
+                    .iter()
+                    .take_while(|&&pb| is_js_ident_continue(pb))
+                    .count();
+                if prop_len == 0 {
+                    return false;
+                }
+                used_out.insert(after_dot[..prop_len].to_string());
+            }
+            continue;
+        }
+        i += 1;
     }
     true
 }
@@ -400,7 +613,7 @@ pub fn extract_module_require_summary(consumer_code: &str) -> ModuleRequireSumma
     }
 
     // 2. Inspect top-level `const { ... } = require("<target>")` and `const x = require("<target>")`
-    for stmt in &parser_ret.program.body {
+    for (stmt_idx, stmt) in parser_ret.program.body.iter().enumerate() {
         let Statement::VariableDeclaration(vd) = stmt else {
             continue;
         };
@@ -430,7 +643,22 @@ pub fn extract_module_require_summary(consumer_code: &str) -> ModuleRequireSumma
                 BindingPattern::BindingIdentifier(ident) => {
                     let var_name = ident.name.as_str();
                     if var_name.starts_with("__imp_") {
-                        entry.forces_all = true;
+                        if vd.declarations.len() == 1 {
+                            if let Some(props) = try_collect_esm_default_interop_props(
+                                &parser_ret.program.body,
+                                stmt_idx,
+                                var_name,
+                                vd.span.start as usize,
+                                consumer_code,
+                            ) {
+                                entry.used_props.extend(props);
+                                entry.accounted += 1;
+                            } else {
+                                entry.forces_all = true;
+                            }
+                        } else {
+                            entry.forces_all = true;
+                        }
                     } else if collect_member_accesses_on_var(
                         consumer_code,
                         var_name,
@@ -528,7 +756,7 @@ pub fn analyze_module_used_exports(target_mod_id: &str, other_modules: &[&str]) 
         }
 
         let mut accounted = 0usize;
-        for stmt in &parser_ret.program.body {
+        for (stmt_idx, stmt) in parser_ret.program.body.iter().enumerate() {
             let Statement::VariableDeclaration(vd) = stmt else {
                 continue;
             };
@@ -555,17 +783,31 @@ pub fn analyze_module_used_exports(target_mod_id: &str, other_modules: &[&str]) 
                     BindingPattern::BindingIdentifier(ident) => {
                         let var_name = ident.name.as_str();
                         if var_name.starts_with("__imp_") {
-                            return UsedExports::All;
+                            if vd.declarations.len() != 1 {
+                                return UsedExports::All;
+                            }
+                            let Some(props) = try_collect_esm_default_interop_props(
+                                &parser_ret.program.body,
+                                stmt_idx,
+                                var_name,
+                                vd.span.start as usize,
+                                consumer_code,
+                            ) else {
+                                return UsedExports::All;
+                            };
+                            used_set.extend(props);
+                            accounted += 1;
+                        } else {
+                            if !collect_member_accesses_on_var(
+                                consumer_code,
+                                var_name,
+                                (decl.span.start as usize, decl.span.end as usize),
+                                &mut used_set,
+                            ) {
+                                return UsedExports::All;
+                            }
+                            accounted += 1;
                         }
-                        if !collect_member_accesses_on_var(
-                            consumer_code,
-                            var_name,
-                            (decl.span.start as usize, decl.span.end as usize),
-                            &mut used_set,
-                        ) {
-                            return UsedExports::All;
-                        }
-                        accounted += 1;
                     }
                     _ => return UsedExports::All,
                 }
@@ -636,6 +878,72 @@ fn pattern_has_live(pat: &oxc::ast::ast::BindingPattern<'_>, live: &FxHashSet<St
     names.iter().any(|n| live.contains(n))
 }
 
+fn expr_contains_assignment(expr: &oxc::ast::ast::Expression<'_>) -> bool {
+    use oxc::ast::ast::{
+        Argument, ArrayExpressionElement, ChainElement, Expression, ObjectPropertyKind,
+    };
+    match expr {
+        Expression::AssignmentExpression(_) | Expression::UpdateExpression(_) => true,
+        Expression::ParenthesizedExpression(p) => expr_contains_assignment(&p.expression),
+        Expression::SequenceExpression(seq) => seq.expressions.iter().any(expr_contains_assignment),
+        Expression::BinaryExpression(b) => {
+            expr_contains_assignment(&b.left) || expr_contains_assignment(&b.right)
+        }
+        Expression::LogicalExpression(l) => {
+            expr_contains_assignment(&l.left) || expr_contains_assignment(&l.right)
+        }
+        Expression::UnaryExpression(u) => expr_contains_assignment(&u.argument),
+        Expression::ConditionalExpression(c) => {
+            expr_contains_assignment(&c.test)
+                || expr_contains_assignment(&c.consequent)
+                || expr_contains_assignment(&c.alternate)
+        }
+        Expression::CallExpression(c) => {
+            expr_contains_assignment(&c.callee)
+                || c.arguments.iter().any(|a| match a {
+                    Argument::SpreadElement(sp) => expr_contains_assignment(&sp.argument),
+                    other => other.as_expression().is_some_and(expr_contains_assignment),
+                })
+        }
+        Expression::NewExpression(n) => {
+            expr_contains_assignment(&n.callee)
+                || n.arguments.iter().any(|a| match a {
+                    Argument::SpreadElement(sp) => expr_contains_assignment(&sp.argument),
+                    other => other.as_expression().is_some_and(expr_contains_assignment),
+                })
+        }
+        Expression::StaticMemberExpression(m) => expr_contains_assignment(&m.object),
+        Expression::ComputedMemberExpression(m) => {
+            expr_contains_assignment(&m.object) || expr_contains_assignment(&m.expression)
+        }
+        Expression::ObjectExpression(obj) => obj.properties.iter().any(|p| match p {
+            ObjectPropertyKind::ObjectProperty(op) => {
+                (op.computed && op.key.as_expression().is_some_and(expr_contains_assignment))
+                    || expr_contains_assignment(&op.value)
+            }
+            ObjectPropertyKind::SpreadProperty(sp) => expr_contains_assignment(&sp.argument),
+        }),
+        Expression::ArrayExpression(arr) => arr.elements.iter().any(|el| match el {
+            ArrayExpressionElement::SpreadElement(sp) => expr_contains_assignment(&sp.argument),
+            other => other.as_expression().is_some_and(expr_contains_assignment),
+        }),
+        Expression::ChainExpression(ch) => match &ch.expression {
+            ChainElement::CallExpression(c) => {
+                expr_contains_assignment(&c.callee)
+                    || c.arguments
+                        .iter()
+                        .any(|a| a.as_expression().is_some_and(expr_contains_assignment))
+            }
+            ChainElement::StaticMemberExpression(m) => expr_contains_assignment(&m.object),
+            ChainElement::ComputedMemberExpression(m) => {
+                expr_contains_assignment(&m.object) || expr_contains_assignment(&m.expression)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 fn match_exports_assignment_stmt(
     stmt: &oxc::ast::ast::Statement<'_>,
     src: &str,
@@ -695,18 +1003,92 @@ pub fn prune_and_minify_cjs_module_ast(
             match_exports_assignment_stmt(s, cjs_code).is_some_and(|(name, _)| name != "__esModule")
         });
 
-        if has_named_export_stmts {
-            // Step 1: Remove unused `exports.<Unused> = ...` and unused `module.exports = __slice_default`
-            program.body.retain(|stmt| {
-                if let Some((exp_name, _)) = match_exports_assignment_stmt(stmt, cjs_code) {
-                    exp_name == "__esModule" || used_set.contains(&exp_name)
-                } else {
-                    let sp = stmt.span();
-                    let text = cjs_code[sp.start as usize..sp.end as usize].trim();
-                    !text.starts_with("module.exports = __slice_default;")
-                        || used_set.contains("default")
+        let mut pruned_module_exports_obj_span: Option<(u32, Vec<String>)> = None;
+        if !has_named_export_stmts && cjs_code.matches("exports").count() == 1 {
+            for stmt in program.body.iter_mut() {
+                let Statement::ExpressionStatement(es) = stmt else {
+                    continue;
+                };
+                let oxc::ast::ast::Expression::AssignmentExpression(assign) =
+                    es.expression.get_inner_expression_mut()
+                else {
+                    continue;
+                };
+                if assign.operator != oxc::ast::ast::AssignmentOperator::Assign {
+                    continue;
                 }
-            });
+                let lhs_sp = assign.left.span();
+                if cjs_code[lhs_sp.start as usize..lhs_sp.end as usize].trim() != "module.exports" {
+                    continue;
+                }
+                let oxc::ast::ast::Expression::ObjectExpression(obj) = &mut assign.right else {
+                    continue;
+                };
+                let obj_text = &cjs_code[obj.span.start as usize..obj.span.end as usize];
+                if obj_text.contains("this.") {
+                    break;
+                }
+                let all_static_named = obj.properties.iter().all(|p| match p {
+                    oxc::ast::ast::ObjectPropertyKind::ObjectProperty(op) => {
+                        !op.computed && op.key.name().is_some()
+                    }
+                    oxc::ast::ast::ObjectPropertyKind::SpreadProperty(_) => false,
+                });
+                if !all_static_named {
+                    break;
+                }
+                let before_len = obj.properties.len();
+                obj.properties.retain(|p| {
+                    let oxc::ast::ast::ObjectPropertyKind::ObjectProperty(op) = p else {
+                        return true;
+                    };
+                    let Some(k_name) = op.key.name() else {
+                        return true;
+                    };
+                    if used_set.contains(k_name.as_ref()) {
+                        return true;
+                    }
+                    let is_pure_droppable = op.kind == oxc::ast::ast::PropertyKind::Get
+                        || matches!(
+                            op.value.without_parentheses(),
+                            oxc::ast::ast::Expression::Identifier(_)
+                                | oxc::ast::ast::Expression::FunctionExpression(_)
+                                | oxc::ast::ast::Expression::ArrowFunctionExpression(_)
+                                | oxc::ast::ast::Expression::ClassExpression(_)
+                                | oxc::ast::ast::Expression::NumericLiteral(_)
+                                | oxc::ast::ast::Expression::StringLiteral(_)
+                                | oxc::ast::ast::Expression::BooleanLiteral(_)
+                                | oxc::ast::ast::Expression::NullLiteral(_)
+                        );
+                    !is_pure_droppable
+                });
+                if obj.properties.len() != before_len {
+                    let mut kept_refs = Vec::new();
+                    for p in &obj.properties {
+                        let p_sp = p.span();
+                        let p_txt = &cjs_code[p_sp.start as usize..p_sp.end as usize];
+                        kept_refs.extend(extract_referenced_identifiers(p_txt));
+                    }
+                    pruned_module_exports_obj_span = Some((es.span.start, kept_refs));
+                }
+                break;
+            }
+        }
+
+        if has_named_export_stmts || pruned_module_exports_obj_span.is_some() {
+            // Step 1: Remove unused `exports.<Unused> = ...` and unused `module.exports = __slice_default`
+            if has_named_export_stmts {
+                program.body.retain(|stmt| {
+                    if let Some((exp_name, _)) = match_exports_assignment_stmt(stmt, cjs_code) {
+                        exp_name == "__esModule" || used_set.contains(&exp_name)
+                    } else {
+                        let sp = stmt.span();
+                        let text = cjs_code[sp.start as usize..sp.end as usize].trim();
+                        !text.starts_with("module.exports = __slice_default;")
+                            || used_set.contains("default")
+                    }
+                });
+            }
 
             // Step 2: Iterative Oxc Semantic Scope-Resolved Zero-Reference Pruning.
             for _ in 0..8 {
@@ -747,8 +1129,10 @@ pub fn prune_and_minify_cjs_module_ast(
                             }
                         }
                         let before_decls = vd.declarations.len();
-                        vd.declarations
-                            .retain(|decl| pattern_has_live(&decl.id, &referenced_root_syms));
+                        vd.declarations.retain(|decl| {
+                            pattern_has_live(&decl.id, &referenced_root_syms)
+                                || decl.init.as_ref().is_some_and(expr_contains_assignment)
+                        });
                         if vd.declarations.len() != before_decls {
                             changed = true;
                         }
@@ -829,11 +1213,26 @@ pub fn prune_and_minify_cjs_module_ast(
             let mut worklist: Vec<String> = Vec::new();
             for stmt in &program.body {
                 match stmt {
-                    Statement::FunctionDeclaration(_)
-                    | Statement::ClassDeclaration(_)
-                    | Statement::VariableDeclaration(_) => {}
+                    Statement::FunctionDeclaration(_) | Statement::ClassDeclaration(_) => {}
+                    Statement::VariableDeclaration(vd) => {
+                        for decl in &vd.declarations {
+                            if decl.init.as_ref().is_some_and(expr_contains_assignment) {
+                                let sp = decl.span();
+                                let text = cjs_code[sp.start as usize..sp.end as usize].trim();
+                                worklist.extend(extract_referenced_identifiers(text));
+                            }
+                        }
+                    }
                     _ => {
                         let sp = stmt.span();
+                        if let Some((obj_stmt_start, ref kept_refs)) =
+                            pruned_module_exports_obj_span
+                        {
+                            if sp.start == obj_stmt_start {
+                                worklist.extend(kept_refs.iter().cloned());
+                                continue;
+                            }
+                        }
                         let text = cjs_code[sp.start as usize..sp.end as usize].trim();
                         worklist.extend(extract_referenced_identifiers(text));
                     }
@@ -870,8 +1269,10 @@ pub fn prune_and_minify_cjs_module_ast(
                             }
                         }
                     }
-                    vd.declarations
-                        .retain(|decl| pattern_has_live(&decl.id, &live_idents));
+                    vd.declarations.retain(|decl| {
+                        pattern_has_live(&decl.id, &live_idents)
+                            || decl.init.as_ref().is_some_and(expr_contains_assignment)
+                    });
                 }
             }
 
