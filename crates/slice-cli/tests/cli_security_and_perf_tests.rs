@@ -438,7 +438,7 @@ fn test_external_cas_isolates_ambient_cwd_manifest_and_honors_explicit_config() 
         let explicit_arg = std::env::var("SLICE_TEST_EXPLICIT_CONFIG_PATH").unwrap();
 
         // 1. Running the external `.cas` inside `ambient_cwd` must NOT inherit `./slice.toml` or `./.env`
-        cmd_run(&[cas_arg.clone()]).unwrap();
+        cmd_run(std::slice::from_ref(&cas_arg)).unwrap();
         assert_eq!(
             LAST_CLI_EXIT_CODE.load(Ordering::Relaxed),
             0,

@@ -57,10 +57,7 @@ fn is_valid_decoded_hostname(h: &str, is_ipv6: bool) -> bool {
             return false;
         }
     }
-    if is_ipv6 && h.parse::<Ipv6Addr>().is_err() {
-        return false;
-    }
-    true
+    !is_ipv6 || h.parse::<Ipv6Addr>().is_ok()
 }
 
 /// Parsed and normalized HTTP/WebSocket URL authority and request target shared across
@@ -117,14 +114,13 @@ pub fn parse_http_authority_and_path(raw_url: &str) -> Option<ParsedHttpUrl<'_>>
         let (ipv6_raw, after_bracket) = rest.split_once(']')?;
         let p = if after_bracket.is_empty() || after_bracket == ":" {
             default_port
-        } else if let Some(ps) = after_bracket.strip_prefix(':') {
+        } else {
+            let ps = after_bracket.strip_prefix(':')?;
             let parsed = ps.parse::<u16>().ok()?;
             if parsed == 0 {
                 return None;
             }
             parsed
-        } else {
-            return None;
         };
         let ipv6_no_zone = match ipv6_raw.split_once('%') {
             Some((v6, _)) => v6,
