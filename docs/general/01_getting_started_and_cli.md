@@ -1,6 +1,6 @@
 # Chapter 01: Installation, Upgrading, Quickstart, `slice.toml` & Complete CLI Reference
 
-This chapter is your complete day-one guide to installing, upgrading, configuring, and operating **Slice (Nexus-JS)** (`v0.10.12`). By the end of this chapter, you will know how to install and update Slice on any operating system, scaffold a new TypeScript or SvelteKit 3 + Svelte 5 project, configure your `slice.toml` manifest and `.env` vault, run live development with `< 3 ms` `--watch` reloads, syntax-check scripts with `slice check`, use the interactive `slice repl` shell, and master all 14 CLI commands.
+This chapter is your complete day-one guide to installing, upgrading, configuring, and operating **Slice (Nexus-JS)** (`v0.11.0`). By the end of this chapter, you will know how to install and update Slice on any operating system, scaffold a new TypeScript or SvelteKit 3 + Svelte 5 project, configure your `slice.toml` manifest and `.env` vault, run live development with `< 3 ms` `--watch` reloads, syntax-check scripts with `slice check`, use the interactive `slice repl` shell, and master all 14 CLI commands.
 
 ---
 
@@ -594,7 +594,7 @@ Launches an interactive **SES-Locked TypeScript/JavaScript Compartment Shell** w
 **Example REPL Session:**
 ```text
 $ slice repl
-Slice (Nexus-JS) v0.10.12 Interactive SES-Locked Compartment Shell
+Slice (Nexus-JS) v0.11.0 Interactive SES-Locked Compartment Shell
 slice(ses)> const price: number = 250 * 4;
 => 1000
 slice(ses)> fib(20)
