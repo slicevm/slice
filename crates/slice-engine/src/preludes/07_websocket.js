@@ -77,7 +77,7 @@
     this.onopen = null;
     this._onmessage = null;
     this.onerror = null;
-    this.onclose = null;
+    this._onclose = null;
     var protoStr = "";
     if (Array.isArray(protocols)) protoStr = protocols.join(", ");
     else if (protocols !== undefined && protocols !== null) protoStr = String(protocols);
@@ -104,7 +104,8 @@
         self.dispatchEvent(oEvt);
         if (initialEvents) {
           __dispatchWsWireEvents(self, initialEvents);
-        } else if (self._isLive && self.readyState === 1) {
+        }
+        if (self._isLive && self.readyState === 1) {
           self._schedulePoll();
         }
       }
@@ -135,20 +136,36 @@
     enumerable: true
   });
 
+  Object.defineProperty(WebSocket.prototype, "onclose", {
+    get: function() {
+      return this._onclose;
+    },
+    set: function(fn) {
+      this._onclose = typeof fn === "function" ? fn : null;
+      if (this._onclose && this.readyState === 1) {
+        this._schedulePoll();
+      }
+    },
+    configurable: true,
+    enumerable: true
+  });
+
   WebSocket.prototype.addEventListener = function(type, listener, options) {
     _EventTarget.prototype.addEventListener.call(this, type, listener, options);
-    if (String(type) === "message" && this.readyState === 1) {
+    var t = String(type);
+    if ((t === "message" || t === "close") && this.readyState === 1) {
       this._schedulePoll();
     }
   };
 
-  WebSocket.prototype._hasMsgListeners = function() {
+  WebSocket.prototype._hasInboundListeners = function() {
     return typeof this._onmessage === "function"
-      || !!(this._et && this._et.message && this._et.message.length > 0);
+      || typeof this._onclose === "function"
+      || !!(this._et && ((this._et.message && this._et.message.length > 0) || (this._et.close && this._et.close.length > 0)));
   };
 
   WebSocket.prototype._schedulePoll = function() {
-    if (!this._isLive || this._pollTimer !== null || this.readyState !== 1 || !this._hasMsgListeners()) {
+    if (!this._isLive || this._pollTimer !== null || this.readyState !== 1 || !this._hasInboundListeners()) {
       return;
     }
     var self = this;
@@ -156,13 +173,18 @@
     var emptyTicks = 0;
     function step() {
       self._pollTimer = null;
-      if (self.readyState !== 1 || !self._hasMsgListeners()) return;
+      if (self.readyState !== 1 || !self._hasInboundListeners()) return;
       var eventsJson = __slice_ws_poll(self._id);
       if (eventsJson && eventsJson !== "[]") {
+        emptyTicks = 0;
+        remaining = 250;
         __dispatchWsWireEvents(self, eventsJson);
+        if (self.readyState === 1 && self._pollTimer === null && self._hasInboundListeners()) {
+          self._pollTimer = setTimeout(step, 0);
+        }
         return;
       }
-      if (--remaining > 0 && self.readyState === 1 && self._hasMsgListeners()) {
+      if (--remaining > 0 && self.readyState === 1 && self._hasInboundListeners()) {
         emptyTicks++;
         self._pollTimer = setTimeout(step, emptyTicks === 1 ? 1 : 2);
       }
@@ -202,6 +224,9 @@
     if (eventsJson && eventsJson !== "[]") {
       queueMicrotask(function() {
         __dispatchWsWireEvents(self, eventsJson);
+        if (self._isLive && self.readyState === 1) {
+          self._schedulePoll();
+        }
       });
     } else if (this._isLive) {
       this._schedulePoll();
