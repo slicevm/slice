@@ -75,7 +75,7 @@
     this.extensions = "";
     this.binaryType = "blob";
     this.onopen = null;
-    this.onmessage = null;
+    this._onmessage = null;
     this.onerror = null;
     this.onclose = null;
     var protoStr = "";
@@ -85,6 +85,8 @@
     var infoJson = __slice_ws_connect(this.url, protoStr);
     var info = JSON.parse(infoJson);
     this._id = info.id;
+    this._isLive = Boolean(info.live);
+    this._pollTimer = null;
     this.protocol = info.protocol || protoStr;
     this._jsMockFn = null;
     for (var pat in __wsJsMocks) {
@@ -102,6 +104,8 @@
         self.dispatchEvent(oEvt);
         if (initialEvents) {
           __dispatchWsWireEvents(self, initialEvents);
+        } else if (self._isLive && self.readyState === 1) {
+          self._schedulePoll();
         }
       }
     });
@@ -116,6 +120,53 @@
   WebSocket.prototype.OPEN = 1;
   WebSocket.prototype.CLOSING = 2;
   WebSocket.prototype.CLOSED = 3;
+
+  Object.defineProperty(WebSocket.prototype, "onmessage", {
+    get: function() {
+      return this._onmessage;
+    },
+    set: function(fn) {
+      this._onmessage = typeof fn === "function" ? fn : null;
+      if (this._onmessage && this.readyState === 1) {
+        this._schedulePoll();
+      }
+    },
+    configurable: true,
+    enumerable: true
+  });
+
+  WebSocket.prototype.addEventListener = function(type, listener, options) {
+    _EventTarget.prototype.addEventListener.call(this, type, listener, options);
+    if (String(type) === "message" && this.readyState === 1) {
+      this._schedulePoll();
+    }
+  };
+
+  WebSocket.prototype._hasMsgListeners = function() {
+    return typeof this._onmessage === "function"
+      || !!(this._et && this._et.message && this._et.message.length > 0);
+  };
+
+  WebSocket.prototype._schedulePoll = function() {
+    if (!this._isLive || this._pollTimer !== null || this.readyState !== 1 || !this._hasMsgListeners()) {
+      return;
+    }
+    var self = this;
+    var remaining = 250;
+    function step() {
+      self._pollTimer = null;
+      if (self.readyState !== 1 || !self._hasMsgListeners()) return;
+      var eventsJson = __slice_ws_poll(self._id);
+      if (eventsJson && eventsJson !== "[]") {
+        __dispatchWsWireEvents(self, eventsJson);
+        return;
+      }
+      if (--remaining > 0 && self.readyState === 1 && self._hasMsgListeners()) {
+        self._pollTimer = setTimeout(step, 2);
+      }
+    }
+    this._pollTimer = setTimeout(step, 1);
+  };
 
   WebSocket.prototype.send = function(data) {
     if (this.readyState === 2 || this.readyState === 3) {
@@ -150,6 +201,8 @@
       queueMicrotask(function() {
         __dispatchWsWireEvents(self, eventsJson);
       });
+    } else if (this._isLive) {
+      this._schedulePoll();
     }
   };
 
@@ -163,6 +216,10 @@
 
   WebSocket.prototype.close = function(code, reason) {
     if (this.readyState === 2 || this.readyState === 3) return;
+    if (this._pollTimer !== null) {
+      clearTimeout(this._pollTimer);
+      this._pollTimer = null;
+    }
     var c = code !== undefined ? Number(code) | 0 : 1000;
     var r = reason !== undefined ? String(reason) : "";
     this.readyState = 2;

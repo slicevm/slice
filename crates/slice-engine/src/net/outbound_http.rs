@@ -9,10 +9,10 @@ use crate::state_and_kv::verify_egress_secrets_slice;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 use slice_sandbox::SandboxViolation;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -72,13 +72,21 @@ pub(crate) struct OutboundUrlParts {
 
 static DEFAULT_TLS_CLIENT_CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
 static HAS_CUSTOM_ROOTS: AtomicBool = AtomicBool::new(false);
-static CUSTOM_ROOT_CERTS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+static CUSTOM_ROOT_CERTS: Mutex<(Vec<Vec<u8>>, [u8; 32])> = Mutex::new((Vec::new(), [0u8; 32]));
+static CUSTOM_TLS_CLIENT_CONFIGS: OnceLock<Mutex<FxHashMap<[u8; 32], Arc<rustls::ClientConfig>>>> =
+    OnceLock::new();
 
 /// Registers an additional trusted root CA certificate (in DER format) for outbound HTTPS `fetch()`.
 /// Used by enterprise internal PKI deployments and by the offline local TLS 1.3 test suite.
 pub fn register_custom_root_cert_der(cert_der: Vec<u8>) {
     if let Ok(mut guard) = CUSTOM_ROOT_CERTS.lock() {
-        guard.push(cert_der);
+        guard.0.push(cert_der);
+        let mut hasher = blake3::Hasher::new();
+        for der in &guard.0 {
+            hasher.update(&(der.len() as u64).to_le_bytes());
+            hasher.update(der);
+        }
+        guard.1 = *hasher.finalize().as_bytes();
         HAS_CUSTOM_ROOTS.store(true, Ordering::Release);
     }
 }
@@ -106,11 +114,25 @@ pub(crate) fn get_tls_client_config() -> Arc<rustls::ClientConfig> {
     if !HAS_CUSTOM_ROOTS.load(Ordering::Acquire) {
         return Arc::clone(DEFAULT_TLS_CLIENT_CONFIG.get_or_init(|| build_tls_client_config(&[])));
     }
+    let hash_key = CUSTOM_ROOT_CERTS.lock().map(|g| g.1).unwrap_or([0u8; 32]);
+    let cache = CUSTOM_TLS_CLIENT_CONFIGS.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(existing) = guard.get(&hash_key) {
+            return Arc::clone(existing);
+        }
+    }
     let extra = CUSTOM_ROOT_CERTS
         .lock()
-        .map(|g| g.clone())
+        .map(|g| g.0.clone())
         .unwrap_or_default();
-    build_tls_client_config(&extra)
+    let built = build_tls_client_config(&extra);
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= 32 {
+            guard.clear();
+        }
+        guard.insert(hash_key, Arc::clone(&built));
+    }
+    built
 }
 
 pub(crate) type ProxyTlsStream = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
@@ -132,6 +154,20 @@ impl OutboundStream {
             }
             OutboundStream::TunneledTls(s) => {
                 let _ = s.get_ref().get_ref().set_read_timeout(dur);
+            }
+        }
+    }
+
+    pub(crate) fn set_nonblocking(&mut self, nonblocking: bool) {
+        match self {
+            OutboundStream::Plain(s) => {
+                let _ = s.set_nonblocking(nonblocking);
+            }
+            OutboundStream::Tls(s) => {
+                let _ = s.get_ref().set_nonblocking(nonblocking);
+            }
+            OutboundStream::TunneledTls(s) => {
+                let _ = s.get_ref().get_ref().set_nonblocking(nonblocking);
             }
         }
     }
@@ -175,58 +211,62 @@ struct PooledOutboundConn {
 
 static SHARED_OUTBOUND_CONN_POOL: OnceLock<Mutex<FxHashMap<String, Vec<PooledOutboundConn>>>> =
     OnceLock::new();
-static SHARED_FETCH_SLAB_POOL: OnceLock<parking_lot::Mutex<slice_io::RegisteredBufferPool>> =
-    OnceLock::new();
-static FETCH_SLAB_ACQUIRE_COUNT: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static FETCH_SLAB_IN_USE: AtomicUsize = AtomicUsize::new(0);
+static FETCH_SLAB_ACQUIRE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static OUTBOUND_POOL_REUSE_COUNT: Cell<u64> = const { Cell::new(0) };
+    static FETCH_READ_BUF: RefCell<Box<[u8; slice_io::FIXED_BUFFER_SIZE]>> =
+        RefCell::new(Box::new([0u8; slice_io::FIXED_BUFFER_SIZE]));
 }
 
-fn shared_fetch_slab_pool() -> &'static parking_lot::Mutex<slice_io::RegisteredBufferPool> {
-    SHARED_FETCH_SLAB_POOL.get_or_init(|| {
-        parking_lot::Mutex::new(slice_io::RegisteredBufferPool::new(
-            slice_io::FIXED_BUFFER_COUNT,
-            slice_io::FIXED_BUFFER_SIZE,
-        ))
-    })
-}
-
-/// Returns the total number of times a fixed 64 KB slab was acquired from
-/// `slice-io::RegisteredBufferPool` across outbound HTTP `fetch()` operations.
+/// Returns the total number of times a fixed 64 KB slab slot was acquired across
+/// outbound HTTP `fetch()` operations.
 pub fn fetch_reactor_slab_acquire_count() -> u64 {
     FETCH_SLAB_ACQUIRE_COUNT.load(Ordering::Relaxed)
 }
 
-/// Returns the number of `slice-io::RegisteredBufferPool` 64 KB slabs currently in use.
+/// Returns the number of 64 KB fetch slab slots currently in use.
 /// Should return `0` when all outbound `fetch()` requests have settled (zero slab leaks).
 pub fn fetch_reactor_slab_in_use_count() -> usize {
-    shared_fetch_slab_pool().lock().in_use_count()
+    FETCH_SLAB_IN_USE.load(Ordering::Acquire)
 }
 
-/// Returns the number of `slice-io::RegisteredBufferPool` 64 KB slabs currently available (`0..=64`).
+/// Returns the number of 64 KB fetch slab slots currently available (`0..=64`).
 pub fn fetch_reactor_slab_available_count() -> usize {
-    shared_fetch_slab_pool().lock().available_count()
+    slice_io::FIXED_BUFFER_COUNT.saturating_sub(FETCH_SLAB_IN_USE.load(Ordering::Acquire))
 }
 
-/// Resets the `slice-io::RegisteredBufferPool` slab acquisition telemetry counter.
+/// Resets the fetch slab acquisition telemetry counter.
 pub fn reset_fetch_slab_telemetry() {
     FETCH_SLAB_ACQUIRE_COUNT.store(0, Ordering::Relaxed);
 }
 
 struct FetchSlabSlotGuard {
-    slot_idx: Option<u16>,
+    acquired: bool,
 }
 
 impl FetchSlabSlotGuard {
     #[inline]
     fn acquire() -> Self {
-        let slot_idx = shared_fetch_slab_pool().lock().acquire_slot();
-        if slot_idx.is_some() {
-            FETCH_SLAB_ACQUIRE_COUNT.fetch_add(1, Ordering::Relaxed);
+        let mut acquired = false;
+        let mut cur = FETCH_SLAB_IN_USE.load(Ordering::Relaxed);
+        while cur < slice_io::FIXED_BUFFER_COUNT {
+            match FETCH_SLAB_IN_USE.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    acquired = true;
+                    FETCH_SLAB_ACQUIRE_COUNT.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+                Err(actual) => cur = actual,
+            }
         }
-        Self { slot_idx }
+        Self { acquired }
     }
 
     #[inline]
@@ -240,21 +280,24 @@ impl FetchSlabSlotGuard {
         if limit == 0 {
             return Ok(0);
         }
-        if let Some(idx) = self.slot_idx {
-            let mut stack_buf = [0u8; 16384];
-            let step = limit.min(stack_buf.len());
-            let n = stream.read(&mut stack_buf[..step])?;
-            if n > 0 {
-                let mut guard = shared_fetch_slab_pool().lock();
-                if let Some(slab) = guard.buffer_mut(idx) {
-                    slab[..n].copy_from_slice(&stack_buf[..n]);
-                    dest.extend_from_slice(&slab[..n]);
-                    return Ok(n);
+        if self.acquired {
+            FETCH_READ_BUF.with(|cell| {
+                if let Ok(mut buf) = cell.try_borrow_mut() {
+                    let n = stream.read(&mut buf[..limit])?;
+                    if n > 0 {
+                        dest.extend_from_slice(&buf[..n]);
+                    }
+                    Ok(n)
+                } else {
+                    let mut fallback = [0u8; 4096];
+                    let step = limit.min(fallback.len());
+                    let n = stream.read(&mut fallback[..step])?;
+                    if n > 0 {
+                        dest.extend_from_slice(&fallback[..n]);
+                    }
+                    Ok(n)
                 }
-                drop(guard);
-                dest.extend_from_slice(&stack_buf[..n]);
-            }
-            Ok(n)
+            })
         } else {
             let mut fallback = [0u8; 4096];
             let step = limit.min(fallback.len());
@@ -269,8 +312,9 @@ impl FetchSlabSlotGuard {
 
 impl Drop for FetchSlabSlotGuard {
     fn drop(&mut self) {
-        if let Some(idx) = self.slot_idx.take() {
-            shared_fetch_slab_pool().lock().release(idx);
+        if self.acquired {
+            self.acquired = false;
+            FETCH_SLAB_IN_USE.fetch_sub(1, Ordering::Release);
         }
     }
 }
@@ -576,6 +620,181 @@ pub(crate) fn resolve_and_verify_ssrf_socket_addrs(
     Ok(addrs)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChunkDecodeState {
+    ReadingSizeLine,
+    ReadingData { remaining: usize },
+    ReadingDataCrlf { got_cr: bool },
+    ReadingTrailers,
+    Done,
+}
+
+/// Incremental O(N) HTTP/1.1 `Transfer-Encoding: chunked` stream decoder with checked arithmetic,
+/// strict hex length validation (`1..=16` hex digits), and bounded decoded payload size.
+pub struct ChunkedBodyDecoder {
+    state: ChunkDecodeState,
+    decoded: Vec<u8>,
+    max_decoded_bytes: usize,
+}
+
+impl ChunkedBodyDecoder {
+    #[inline]
+    pub fn new(max_decoded_bytes: usize) -> Self {
+        Self {
+            state: ChunkDecodeState::ReadingSizeLine,
+            decoded: Vec::new(),
+            max_decoded_bytes,
+        }
+    }
+
+    /// Feeds newly available raw bytes into the chunked state machine.
+    /// Returns `Ok((bytes_consumed_from_buf, is_done))`.
+    pub fn feed(&mut self, buf: &[u8]) -> Result<(usize, bool), std::io::Error> {
+        let mut pos = 0usize;
+        while pos < buf.len() {
+            match self.state {
+                ChunkDecodeState::ReadingSizeLine => {
+                    let Some(rel_end) = memchr::memmem::find(&buf[pos..], b"\r\n") else {
+                        if buf.len() - pos > 1024 {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "chunk header line exceeds 1024 bytes without CRLF",
+                            ));
+                        }
+                        return Ok((pos, false));
+                    };
+                    let size_line =
+                        std::str::from_utf8(&buf[pos..pos + rel_end]).map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "invalid UTF-8 in chunk size line",
+                            )
+                        })?;
+                    let size_hex = size_line.split(';').next().unwrap_or("").trim();
+                    if size_hex.is_empty()
+                        || size_hex.len() > 16
+                        || !size_hex.bytes().all(|b| b.is_ascii_hexdigit())
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "malformed hexadecimal chunk size",
+                        ));
+                    }
+                    let chunk_len = usize::from_str_radix(size_hex, 16).map_err(|_| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk size overflow")
+                    })?;
+                    pos = pos
+                        .checked_add(rel_end)
+                        .and_then(|v| v.checked_add(2))
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "chunk offset overflow",
+                            )
+                        })?;
+
+                    if chunk_len == 0 {
+                        self.state = ChunkDecodeState::ReadingTrailers;
+                    } else {
+                        let new_decoded_len =
+                            self.decoded.len().checked_add(chunk_len).ok_or_else(|| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "decoded chunked total overflow",
+                                )
+                            })?;
+                        if new_decoded_len > self.max_decoded_bytes {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::OutOfMemory,
+                                "chunked HTTP body exceeded maximum memory budget",
+                            ));
+                        }
+                        self.decoded.reserve(chunk_len.min(65536));
+                        self.state = ChunkDecodeState::ReadingData {
+                            remaining: chunk_len,
+                        };
+                    }
+                }
+                ChunkDecodeState::ReadingData { remaining } => {
+                    let avail = buf.len() - pos;
+                    let take = avail.min(remaining);
+                    self.decoded.extend_from_slice(&buf[pos..pos + take]);
+                    pos += take;
+                    let left = remaining - take;
+                    if left == 0 {
+                        self.state = ChunkDecodeState::ReadingDataCrlf { got_cr: false };
+                    } else {
+                        self.state = ChunkDecodeState::ReadingData { remaining: left };
+                    }
+                }
+                ChunkDecodeState::ReadingDataCrlf { got_cr } => {
+                    if !got_cr {
+                        if buf[pos] != b'\r' {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "missing CRLF after chunk payload",
+                            ));
+                        }
+                        pos += 1;
+                        if pos < buf.len() {
+                            if buf[pos] != b'\n' {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "missing CRLF after chunk payload",
+                                ));
+                            }
+                            pos += 1;
+                            self.state = ChunkDecodeState::ReadingSizeLine;
+                        } else {
+                            self.state = ChunkDecodeState::ReadingDataCrlf { got_cr: true };
+                        }
+                    } else {
+                        if buf[pos] != b'\n' {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "missing CRLF after chunk payload",
+                            ));
+                        }
+                        pos += 1;
+                        self.state = ChunkDecodeState::ReadingSizeLine;
+                    }
+                }
+                ChunkDecodeState::ReadingTrailers => {
+                    if buf.len() - pos < 2 {
+                        return Ok((pos, false));
+                    }
+                    if &buf[pos..pos + 2] == b"\r\n" {
+                        pos += 2;
+                        self.state = ChunkDecodeState::Done;
+                        return Ok((pos, true));
+                    }
+                    if let Some(trailer_end) = memchr::memmem::find(&buf[pos..], b"\r\n\r\n") {
+                        pos += trailer_end + 4;
+                        self.state = ChunkDecodeState::Done;
+                        return Ok((pos, true));
+                    }
+                    if buf.len() - pos > MAX_OUTBOUND_HEADER_BYTES {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "chunked trailer section exceeds maximum header budget",
+                        ));
+                    }
+                    return Ok((pos, false));
+                }
+                ChunkDecodeState::Done => {
+                    return Ok((pos, true));
+                }
+            }
+        }
+        Ok((pos, self.state == ChunkDecodeState::Done))
+    }
+
+    #[inline]
+    pub fn into_vec(self) -> Vec<u8> {
+        self.decoded
+    }
+}
+
 /// Strictly parses an HTTP/1.1 `Transfer-Encoding: chunked` body with checked arithmetic (`N-Sec-5`),
 /// strict hex length validation (`1..=16` hex digits), and bounded decoded payload size.
 /// Returns:
@@ -586,92 +805,13 @@ pub fn parse_chunked_body(
     raw: &[u8],
     max_decoded_bytes: usize,
 ) -> Result<Option<(Vec<u8>, usize)>, std::io::Error> {
-    let mut out = Vec::new();
-    let mut pos = 0usize;
-    while pos < raw.len() {
-        let Some(rel_end) = raw[pos..].windows(2).position(|w| w == b"\r\n") else {
-            if raw.len() - pos > 1024 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "chunk header line exceeds 1024 bytes without CRLF",
-                ));
-            }
-            return Ok(None);
-        };
-        let size_line = std::str::from_utf8(&raw[pos..pos + rel_end]).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid UTF-8 in chunk size line",
-            )
-        })?;
-        let size_hex = size_line.split(';').next().unwrap_or("").trim();
-        if size_hex.is_empty()
-            || size_hex.len() > 16
-            || !size_hex.bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "malformed hexadecimal chunk size",
-            ));
-        }
-        let chunk_len = usize::from_str_radix(size_hex, 16).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk size overflow")
-        })?;
-        let data_start = pos
-            .checked_add(rel_end)
-            .and_then(|v| v.checked_add(2))
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk offset overflow")
-            })?;
-
-        if chunk_len == 0 {
-            // Final `0\r\n` chunk; wait for trailing `\r\n` (or optional trailers + `\r\n\r\n`)
-            if raw.len() < data_start.saturating_add(2) {
-                return Ok(None);
-            }
-            if &raw[data_start..data_start + 2] == b"\r\n" {
-                return Ok(Some((out, data_start + 2)));
-            }
-            if let Some(trailer_end) = raw[data_start..].windows(4).position(|w| w == b"\r\n\r\n") {
-                return Ok(Some((out, data_start + trailer_end + 4)));
-            }
-            return Ok(None);
-        }
-
-        let new_decoded_len = out.len().checked_add(chunk_len).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "decoded chunked total overflow",
-            )
-        })?;
-        if new_decoded_len > max_decoded_bytes {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::OutOfMemory,
-                "chunked HTTP body exceeded maximum memory budget",
-            ));
-        }
-
-        let data_end = data_start.checked_add(chunk_len).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk data_end overflow")
-        })?;
-        let frame_end = data_end.checked_add(2).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk frame_end overflow")
-        })?;
-
-        if raw.len() < frame_end {
-            return Ok(None);
-        }
-        if &raw[data_end..frame_end] != b"\r\n" {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "missing CRLF after chunk payload",
-            ));
-        }
-
-        out.extend_from_slice(&raw[data_start..data_end]);
-        pos = frame_end;
+    let mut decoder = ChunkedBodyDecoder::new(max_decoded_bytes);
+    let (consumed, done) = decoder.feed(raw)?;
+    if done {
+        Ok(Some((decoder.into_vec(), consumed)))
+    } else {
+        Ok(None)
     }
-    Ok(None)
 }
 
 pub(crate) fn dial_fresh_outbound_stream(
@@ -889,35 +1029,11 @@ fn send_and_read_framed_http11(
         }
         Vec::new()
     } else if is_chunked {
+        let mut decoder = ChunkedBodyDecoder::new(effective_max_body);
+        let mut cursor = body_start;
         loop {
-            match parse_chunked_body(&raw_resp[body_start..], effective_max_body) {
-                Ok(Some((decoded, consumed))) => {
-                    if body_start + consumed < raw_resp.len() {
-                        peer_closed = true;
-                    }
-                    break decoded;
-                }
-                Ok(None) => {
-                    if raw_resp.len().saturating_sub(body_start)
-                        > effective_max_body.saturating_add(65536)
-                    {
-                        return Err(trap_outbound_memory_exceeded(
-                            raw_resp.len().saturating_sub(body_start),
-                            effective_max_body,
-                        ));
-                    }
-                    let n = slab_guard.read_chunk_via_slab(
-                        stream,
-                        &mut raw_resp,
-                        slice_io::FIXED_BUFFER_SIZE,
-                    )?;
-                    if n == 0 {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "truncated chunked HTTP response body",
-                        ));
-                    }
-                }
+            let (consumed, done) = match decoder.feed(&raw_resp[cursor..]) {
+                Ok(v) => v,
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::OutOfMemory {
                         return Err(trap_outbound_memory_exceeded(
@@ -927,6 +1043,28 @@ fn send_and_read_framed_http11(
                     }
                     return Err(e);
                 }
+            };
+            cursor += consumed;
+            if done {
+                if cursor < raw_resp.len() {
+                    peer_closed = true;
+                }
+                break decoder.into_vec();
+            }
+            if cursor >= 16384 {
+                raw_resp.drain(..cursor);
+                cursor = 0;
+            }
+            let n = slab_guard.read_chunk_via_slab(
+                stream,
+                &mut raw_resp,
+                slice_io::FIXED_BUFFER_SIZE,
+            )?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "truncated chunked HTTP response body",
+                ));
             }
         }
     } else if let Some(expected_len) = content_length {
@@ -948,7 +1086,11 @@ fn send_and_read_framed_http11(
         if raw_resp.len() > end_idx {
             peer_closed = true;
         }
-        raw_resp[body_start..end_idx].to_vec()
+        raw_resp.truncate(end_idx);
+        if body_start > 0 {
+            raw_resp.drain(..body_start);
+        }
+        raw_resp
     } else {
         peer_closed = true;
         loop {
@@ -976,7 +1118,10 @@ fn send_and_read_framed_http11(
                 ));
             }
         }
-        raw_resp[body_start..].to_vec()
+        if body_start > 0 {
+            raw_resp.drain(..body_start);
+        }
+        raw_resp
     };
 
     Ok(RawHttpResponse {
@@ -1470,4 +1615,74 @@ pub(crate) fn execute_outbound_fetch_with_redirects(
     }
 
     Err("RedirectError: redirect loop terminated".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunked_body_decoder_handles_arbitrary_split_boundaries_and_trailers() {
+        let payload_a = b"Hello, streaming ";
+        let payload_b = b"HTTP/1.1 chunked decoder with ";
+        let payload_c = vec![b'X'; 1024];
+        let mut wire = Vec::new();
+        wire.extend_from_slice(format!("{:x};ext=val\r\n", payload_a.len()).as_bytes());
+        wire.extend_from_slice(payload_a);
+        wire.extend_from_slice(b"\r\n");
+        wire.extend_from_slice(format!("{:X}\r\n", payload_b.len()).as_bytes());
+        wire.extend_from_slice(payload_b);
+        wire.extend_from_slice(b"\r\n");
+        wire.extend_from_slice(format!("{:x}\r\n", payload_c.len()).as_bytes());
+        wire.extend_from_slice(&payload_c);
+        wire.extend_from_slice(
+            b"\r\n0;final=1\r\nX-Trailer-One: 1\r\nX-Trailer-Two: 2\r\n\r\nEXTRA",
+        );
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(payload_a);
+        expected.extend_from_slice(payload_b);
+        expected.extend_from_slice(&payload_c);
+
+        for step in [1usize, 2, 7, 13, 64, wire.len()] {
+            let mut dec = ChunkedBodyDecoder::new(64 * 1024);
+            let mut cursor = 0usize;
+            let mut done = false;
+            while cursor < wire.len() && !done {
+                let end = (cursor + step).min(wire.len());
+                let (consumed, finished) = dec.feed(&wire[cursor..end]).expect("valid chunk feed");
+                cursor += consumed;
+                done = finished;
+                if !done && consumed == 0 {
+                    // Feed larger window when partial line or trailer needs delimiter
+                    let mut next_end = (end + step).min(wire.len());
+                    while !done {
+                        let (c2, f2) = dec
+                            .feed(&wire[cursor..next_end])
+                            .expect("valid expanded chunk feed");
+                        cursor += c2;
+                        done = f2;
+                        if done || c2 > 0 || next_end == wire.len() {
+                            break;
+                        }
+                        next_end = (next_end + step).min(wire.len());
+                    }
+                }
+            }
+            assert!(done, "decoder should finish for step={}", step);
+            assert_eq!(&wire[cursor..], b"EXTRA");
+            assert_eq!(dec.into_vec(), expected);
+        }
+    }
+
+    #[test]
+    fn chunked_body_decoder_enforces_size_limit_and_crlf_framing() {
+        let oversized = b"10\r\n0123456789abcdef\r\n0\r\n\r\n";
+        let err = parse_chunked_body(oversized, 8).expect_err("should reject over budget");
+        assert_eq!(err.kind(), std::io::ErrorKind::OutOfMemory);
+
+        let bad_crlf = b"4\r\nabcdXX0\r\n\r\n";
+        let err_framing = parse_chunked_body(bad_crlf, 1024).expect_err("should reject bad CRLF");
+        assert_eq!(err_framing.kind(), std::io::ErrorKind::InvalidData);
+    }
 }

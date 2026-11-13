@@ -78,6 +78,7 @@ thread_local! {
     static TCP_SOCKET_TABLE: RefCell<FxHashMap<u32, ActiveTcpSocket>> = RefCell::new(FxHashMap::default());
     static UDP_SOCKET_TABLE: RefCell<FxHashMap<u32, ActiveUdpSocket>> = RefCell::new(FxHashMap::default());
     pub(crate) static BOA_SOCKET_MOCKS: RefCell<FxHashMap<String, String>> = RefCell::new(FxHashMap::default());
+    static SOCKET_IO_BUF: RefCell<Box<[u8; 65_536]>> = RefCell::new(Box::new([0u8; 65_536]));
 }
 
 /// Clears all open TCP/UDP sockets and mock definitions on the current worker thread.
@@ -239,21 +240,21 @@ fn verify_socket_egress_dlp(payload: &[u8], target_label: &str) -> Result<(), St
     if payload.is_empty() {
         return Ok(());
     }
-    let tenant_id = BOA_ACTIVE_TENANT.with(|t| {
-        let b = t.borrow();
-        if b.is_empty() {
-            "boa-tenant".to_string()
-        } else {
-            b.clone()
-        }
-    });
-    let payload_str = String::from_utf8_lossy(payload);
-    let payload_b64 = base64_encode(payload, false);
     let dlp_err = BOA_EGRESS_SECRETS.with(|sec_cell| {
         let secrets = sec_cell.borrow();
         if secrets.is_empty() {
             return None;
         }
+        let tenant_id = BOA_ACTIVE_TENANT.with(|t| {
+            let b = t.borrow();
+            if b.is_empty() {
+                "boa-tenant".to_string()
+            } else {
+                b.clone()
+            }
+        });
+        let payload_str = String::from_utf8_lossy(payload);
+        let payload_b64 = base64_encode(payload, false);
         verify_egress_secrets_slice(&tenant_id, &secrets, target_label)
             .and_then(|()| verify_egress_secrets_slice(&tenant_id, &secrets, &payload_str))
             .and_then(|()| verify_egress_secrets_slice(&tenant_id, &secrets, &payload_b64))
@@ -656,36 +657,40 @@ pub fn tcp_socket_read(id: u32, max_bytes: usize, timeout_ms: u64) -> Result<Str
                 let read_to = Duration::from_millis(timeout_ms.clamp(1, 5_000));
                 stream.set_read_timeout(Some(read_to));
 
-                let mut buf = vec![0u8; cap.min(65_536)];
-                match stream.read(&mut buf) {
-                    Ok(0) => Ok(serde_json::json!({
-                        "bytesRead": 0,
-                        "eof": true,
-                        "dataBase64": ""
-                    })
-                    .to_string()),
-                    Ok(n) => {
-                        verify_transient_socket_io_budget_and_fuel(n)?;
-                        Ok(serde_json::json!({
-                            "bytesRead": n,
-                            "eof": false,
-                            "dataBase64": base64_encode(&buf[..n], false)
-                        })
-                        .to_string())
-                    }
-                    Err(e)
-                        if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut =>
-                    {
-                        Ok(serde_json::json!({
+                let step = cap.min(65_536);
+                SOCKET_IO_BUF.with(|cell| {
+                    let mut buf = cell.borrow_mut();
+                    match stream.read(&mut buf[..step]) {
+                        Ok(0) => Ok(serde_json::json!({
                             "bytesRead": 0,
-                            "eof": false,
-                            "timedOut": true,
+                            "eof": true,
                             "dataBase64": ""
                         })
-                        .to_string())
+                        .to_string()),
+                        Ok(n) => {
+                            verify_transient_socket_io_budget_and_fuel(n)?;
+                            Ok(serde_json::json!({
+                                "bytesRead": n,
+                                "eof": false,
+                                "dataBase64": base64_encode(&buf[..n], false)
+                            })
+                            .to_string())
+                        }
+                        Err(e)
+                            if e.kind() == ErrorKind::WouldBlock
+                                || e.kind() == ErrorKind::TimedOut =>
+                        {
+                            Ok(serde_json::json!({
+                                "bytesRead": 0,
+                                "eof": false,
+                                "timedOut": true,
+                                "dataBase64": ""
+                            })
+                            .to_string())
+                        }
+                        Err(e) => Err(format!("SocketReadError: {}", e)),
                     }
-                    Err(e) => Err(format!("SocketReadError: {}", e)),
-                }
+                })
             }
         }
     })
@@ -963,25 +968,98 @@ pub fn udp_socket_send_bytes(
                     .send_to(payload, target_addr)
                     .map_err(|e| format!("UdpSendError: {}", e))?;
 
-                // Non-blocking / short-poll check for immediate UDP response (e.g. local DNS / echo server)
-                let _ = udp.set_read_timeout(Some(Duration::from_millis(10)));
-                let mut recv_buf = [0u8; 65_536];
-                let mut replies = Vec::new();
-                if let Ok((n, src_addr)) = udp.recv_from(&mut recv_buf) {
-                    verify_transient_socket_io_budget_and_fuel(n)?;
-                    replies.push(serde_json::json!({
-                        "dataBase64": base64_encode(&recv_buf[..n], false),
-                        "size": n,
-                        "address": src_addr.ip().to_string(),
-                        "port": src_addr.port(),
-                        "family": if src_addr.is_ipv6() { "IPv6" } else { "IPv4" }
-                    }));
+                // Strictly non-blocking check (`0 ms` wait) for any already-arrived UDP reply
+                let _ = udp.set_nonblocking(true);
+                let recv_res = SOCKET_IO_BUF.with(|cell| {
+                    let mut recv_buf = cell.borrow_mut();
+                    let mut replies = Vec::new();
+                    while let Ok((n, src_addr)) = udp.recv_from(&mut recv_buf[..]) {
+                        verify_transient_socket_io_budget_and_fuel(n)?;
+                        replies.push(serde_json::json!({
+                            "dataBase64": base64_encode(&recv_buf[..n], false),
+                            "size": n,
+                            "address": src_addr.ip().to_string(),
+                            "port": src_addr.port(),
+                            "family": if src_addr.is_ipv6() { "IPv6" } else { "IPv4" }
+                        }));
+                        if replies.len() >= 16 {
+                            break;
+                        }
+                    }
+                    Ok::<Vec<serde_json::Value>, String>(replies)
+                });
+                let _ = udp.set_nonblocking(false);
+                let replies = recv_res?;
+                if replies.is_empty() {
+                    return Ok(format!("{{\"bytesSent\":{},\"replies\":[]}}", sent));
                 }
                 Ok(serde_json::json!({
                     "bytesSent": sent,
                     "replies": replies
                 })
                 .to_string())
+            }
+        }
+    })
+}
+
+/// Polls an active UDP socket for incoming datagrams (waiting up to `timeout_ms` for the first packet,
+/// or non-blocking when `timeout_ms == 0`).
+pub fn udp_socket_recv(id: u32, timeout_ms: u64) -> Result<String, String> {
+    UDP_SOCKET_TABLE.with(|u| {
+        let mut table = u.borrow_mut();
+        let Some(sock_entry) = table.get_mut(&id) else {
+            return Ok("{\"replies\":[]}".to_string());
+        };
+        match &mut sock_entry.backend {
+            UdpSocketBackend::Live(udp) => {
+                let nonblocking = timeout_ms == 0;
+                if nonblocking {
+                    let _ = udp.set_nonblocking(true);
+                } else {
+                    let _ =
+                        udp.set_read_timeout(Some(Duration::from_millis(timeout_ms.min(5_000))));
+                }
+                let recv_res = SOCKET_IO_BUF.with(|cell| {
+                    let mut recv_buf = cell.borrow_mut();
+                    let mut replies = Vec::new();
+                    if let Ok((n, src_addr)) = udp.recv_from(&mut recv_buf[..]) {
+                        verify_transient_socket_io_budget_and_fuel(n)?;
+                        replies.push(serde_json::json!({
+                            "dataBase64": base64_encode(&recv_buf[..n], false),
+                            "size": n,
+                            "address": src_addr.ip().to_string(),
+                            "port": src_addr.port(),
+                            "family": if src_addr.is_ipv6() { "IPv6" } else { "IPv4" }
+                        }));
+                        if !nonblocking {
+                            let _ = udp.set_nonblocking(true);
+                        }
+                        while replies.len() < 16 {
+                            match udp.recv_from(&mut recv_buf[..]) {
+                                Ok((n2, src2)) => {
+                                    verify_transient_socket_io_budget_and_fuel(n2)?;
+                                    replies.push(serde_json::json!({
+                                        "dataBase64": base64_encode(&recv_buf[..n2], false),
+                                        "size": n2,
+                                        "address": src2.ip().to_string(),
+                                        "port": src2.port(),
+                                        "family": if src2.is_ipv6() { "IPv6" } else { "IPv4" }
+                                    }));
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    Ok::<Vec<serde_json::Value>, String>(replies)
+                });
+                let _ = udp.set_nonblocking(false);
+                let _ = udp.set_read_timeout(Some(DEFAULT_SOCKET_TIMEOUT));
+                let replies = recv_res?;
+                if replies.is_empty() {
+                    return Ok("{\"replies\":[]}".to_string());
+                }
+                Ok(serde_json::json!({ "replies": replies }).to_string())
             }
         }
     })
@@ -1018,5 +1096,42 @@ pub fn classify_ip_literal(input: &str) -> u8 {
         Ok(IpAddr::V4(_)) => 4,
         Ok(IpAddr::V6(_)) => 6,
         Err(_) => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn udp_unidirectional_send_burst_is_nonblocking() {
+        let sink = UdpSocket::bind("127.0.0.1:0").expect("bind sink udp");
+        let sink_port = sink.local_addr().expect("sink local_addr").port();
+
+        BOA_NET_HOSTS.with(|s| {
+            let mut set = s.borrow_mut();
+            set.clear();
+            set.insert("127.0.0.1".to_string());
+        });
+        BOA_EGRESS_SECRETS.with(|s| s.borrow_mut().clear());
+
+        let bind_json = udp_socket_bind("udp4", "127.0.0.1", 0).expect("bind sender udp");
+        let parsed: serde_json::Value = serde_json::from_str(&bind_json).expect("json");
+        let sock_id = parsed["id"].as_u64().expect("socket id") as u32;
+
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            udp_socket_send_bytes(sock_id, b"ping", "127.0.0.1", sink_port)
+                .expect("nonblocking udp send");
+        }
+        let elapsed = start.elapsed();
+        let _ = udp_socket_close(sock_id);
+        BOA_NET_HOSTS.with(|s| s.borrow_mut().clear());
+
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "100 unidirectional UDP sends took {:?} (expected non-blocking < 250ms)",
+            elapsed
+        );
     }
 }

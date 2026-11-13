@@ -5,8 +5,9 @@ use crate::bindings::helpers::{
     with_buffer_source_bytes,
 };
 use crate::intrinsics::{
-    base64_decode, base64_encode, bytes_to_hex, hex_decode_bytes, whatwg_atob, whatwg_btoa_utf16,
-    zlib_compress_bytes, zlib_decompress_bytes,
+    base64_decode, base64_decode_bytes, base64_encode, bytes_to_hex, hex_decode_bytes,
+    hex_decode_raw_bytes, whatwg_atob_bytes, whatwg_btoa_utf16, zlib_compress_bytes,
+    zlib_decompress_bytes,
 };
 
 #[inline]
@@ -100,29 +101,25 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
                 return Ok(BoaVal::from(js_string!("")));
             };
             let js_s = first.to_string(context)?;
-            let ascii_cow: std::borrow::Cow<'_, str> = match js_s.as_str().variant() {
-                JsStrVariant::Latin1(bytes) => {
-                    let mut s = String::with_capacity(bytes.len());
-                    for &b in bytes {
-                        s.push(b as char);
-                    }
-                    std::borrow::Cow::Owned(s)
-                }
+            let decoded_res = match js_s.as_str().variant() {
+                JsStrVariant::Latin1(bytes) => whatwg_atob_bytes(bytes),
                 JsStrVariant::Utf16(units) => {
-                    if units.iter().any(|&u| u > 0x00FF) {
-                        return Err(JsNativeError::error()
-                            .with_message("InvalidCharacterError: The string to be decoded contains invalid characters.")
-                            .into());
-                    }
-                    let mut s = String::with_capacity(units.len());
+                    let mut raw = Vec::with_capacity(units.len());
                     for &u in units {
-                        s.push((u as u8) as char);
+                        if u > 0x00FF {
+                            return Err(JsNativeError::error()
+                                .with_message("InvalidCharacterError: The string to be decoded contains invalid characters.")
+                                .into());
+                        }
+                        raw.push(u as u8);
                     }
-                    std::borrow::Cow::Owned(s)
+                    whatwg_atob_bytes(&raw)
                 }
             };
-            match whatwg_atob(&ascii_cow) {
-                Ok(decoded) => Ok(BoaVal::from(js_string!(decoded))),
+            match decoded_res {
+                Ok(decoded) => Ok(BoaVal::from(boa_engine::JsString::from(
+                    boa_engine::string::JsStr::latin1(&decoded),
+                ))),
                 Err(msg) => Err(JsNativeError::error().with_message(msg).into()),
             }
         }),
@@ -387,13 +384,15 @@ pub(crate) fn register_buffer_host_functions(ctx: &mut boa_engine::Context) {
         js_string!("__slice_base64_decode_bytes"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
-            let s = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|js| js.to_std_string_escaped())
-                .unwrap_or_default();
-            let decoded = base64_decode(&s);
+            use boa_engine::string::JsStrVariant;
+            let Some(first) = args.first() else {
+                return bytes_to_js_uint8_array(&[], context);
+            };
+            let js = first.to_string(context)?;
+            let decoded = match js.as_str().variant() {
+                JsStrVariant::Latin1(bytes) => base64_decode_bytes(bytes),
+                JsStrVariant::Utf16(_) => base64_decode(&js.to_std_string_escaped()),
+            };
             bytes_to_js_uint8_array(&decoded, context)
         }),
     );
@@ -418,13 +417,15 @@ pub(crate) fn register_buffer_host_functions(ctx: &mut boa_engine::Context) {
         js_string!("__slice_hex_decode"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
-            let s = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|js| js.to_std_string_escaped())
-                .unwrap_or_default();
-            let decoded = hex_decode_bytes(&s);
+            use boa_engine::string::JsStrVariant;
+            let Some(first) = args.first() else {
+                return bytes_to_js_uint8_array(&[], context);
+            };
+            let js = first.to_string(context)?;
+            let decoded = match js.as_str().variant() {
+                JsStrVariant::Latin1(bytes) => hex_decode_raw_bytes(bytes),
+                JsStrVariant::Utf16(_) => hex_decode_bytes(&js.to_std_string_escaped()),
+            };
             bytes_to_js_uint8_array(&decoded, context)
         }),
     );
@@ -446,15 +447,37 @@ pub(crate) fn register_url_and_usp_host_functions(ctx: &mut boa_engine::Context)
         js_string!("__slice_url_can_parse"),
         2,
         NativeFunction::from_fn_ptr(|_this, args, context| {
+            use boa_engine::string::JsStrVariant;
             let Some(first) = args.first() else {
                 return Ok(BoaVal::from(false));
             };
-            let input = first.to_string(context)?.to_std_string_escaped();
-            let base = match args.get(1) {
-                Some(v) if !v.is_undefined() => Some(v.to_string(context)?.to_std_string_escaped()),
+            let js_input = first.to_string(context)?;
+            let input_cow: std::borrow::Cow<'_, str> = match js_input.as_str().variant() {
+                JsStrVariant::Latin1(bytes) if bytes.is_ascii() => {
+                    // SAFETY: `bytes.is_ascii()` guarantees valid UTF-8.
+                    std::borrow::Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) })
+                }
+                _ => std::borrow::Cow::Owned(js_input.to_std_string_escaped()),
+            };
+            let js_base = match args.get(1) {
+                Some(v) if !v.is_undefined() => Some(v.to_string(context)?),
                 _ => None,
             };
-            Ok(BoaVal::from(can_parse_whatwg_url(&input, base.as_deref())))
+            let base_cow: Option<std::borrow::Cow<'_, str>> = match js_base.as_ref() {
+                Some(b) => match b.as_str().variant() {
+                    JsStrVariant::Latin1(bytes) if bytes.is_ascii() => {
+                        Some(std::borrow::Cow::Borrowed(unsafe {
+                            std::str::from_utf8_unchecked(bytes)
+                        }))
+                    }
+                    _ => Some(std::borrow::Cow::Owned(b.to_std_string_escaped())),
+                },
+                None => None,
+            };
+            Ok(BoaVal::from(can_parse_whatwg_url(
+                input_cow.as_ref(),
+                base_cow.as_deref(),
+            )))
         }),
     );
 
