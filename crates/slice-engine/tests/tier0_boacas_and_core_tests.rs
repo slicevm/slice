@@ -1357,3 +1357,237 @@ console.log(step, tree, eq1, eq2, eq3, eq4, eq5, prodNoInit, hasNan, joinedNulls
         "outer-preserved s3:s2:s1:0 true false true false true 24 true 1,,,2 undefined undefined"
     );
 }
+
+#[test]
+fn test_tier0_tier1_parity_numeric_edge_cases_utf8_literals_and_control_flow() {
+    let parity_cases = [
+        // 1. Linear recurrence negative inputs and >78 overflow-free IEEE-754 f64 parity
+        r#"
+function fib(n: number): number {
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+function fibIter(n: number): number {
+    let a = 0;
+    let b = 1;
+    for (let i = 0; i < n; i++) {
+        let next = a + b;
+        a = b;
+        b = next;
+    }
+    return a;
+}
+console.log(fib(20), fib(-3), fibIter(78), fibIter(94));
+"#,
+        // 2. Variadic Math.max / Math.min, 0-arg identities, and Math.pow IEEE-754 edge cases
+        r#"
+function mathVariadic(): string {
+    const a = Math.max(1, 2, 10, 4);
+    const b = Math.min(5, -2, 8, -9);
+    const c = Math.max();
+    const d = Math.min();
+    const e = isNaN(Math.pow(5));
+    const f = isNaN(Math.pow(1, 0 / 0));
+    const g = isNaN(Math.pow(-1, 1 / 0));
+    return [a, b, c, d, e, f, g].join(",");
+}
+console.log(mathVariadic());
+"#,
+        // 3. Bare return and implicit undefined fall-off inside numeric-looking functions
+        r#"
+function maybeReturn(flag: number): any {
+    if (flag === 0) {
+        return;
+    }
+    if (flag === 1) {
+        return 42;
+    }
+}
+console.log(typeof maybeReturn(0), maybeReturn(1), typeof maybeReturn(2));
+"#,
+        // 4. Lexical block and loop variable shadowing
+        r#"
+function checkShadow(seed: number): number {
+    let x = seed;
+    {
+        let x = 999;
+    }
+    if (seed > 0) {
+        let x = 777;
+    }
+    for (let x = 0; x < 3; x++) {}
+    return x;
+}
+let top = 11;
+{
+    let top = 22;
+}
+console.log(checkShadow(5), top);
+"#,
+        // 5. Non-ASCII UTF-8 strings, hex/unicode escapes, binary/octal literals, and templates
+        r#"
+const s1 = "caf\u00e9";
+const s2 = "\x41\x42";
+const bin = 0b10101;
+const oct = 0o77;
+const tpl = `sum=${bin + oct}`;
+console.log(s1.length, s2, bin, oct, tpl);
+"#,
+        // 6. Non-index array assignments do not clobber element 0
+        r#"
+const arr = [10, 20, 30];
+arr[-1] = 99;
+arr[1.5] = 88;
+console.log(arr[0], arr[1], arr[2], arr.length);
+"#,
+        // 7. Caught JSON.parse error inside try/catch
+        r#"
+let caught = false;
+try {
+    JSON.parse("{broken");
+} catch (_err) {
+    caught = true;
+}
+console.log(caught);
+"#,
+    ];
+
+    for (idx, src) in parity_cases.iter().enumerate() {
+        crate::set_thread_tier_override(None);
+        let bc_default = compile_source_to_bytecode(src);
+        let mut iso_default = SliceIsolate::spawn(
+            format!("parity-default-{idx}"),
+            300 + idx as u32,
+            CapabilityToken::pure_compute(),
+            2_000_000,
+            4 * 1024 * 1024,
+        );
+        let m_default = iso_default.execute_bytecode(&bc_default, None).unwrap();
+
+        crate::set_thread_tier_override(Some(1));
+        let bc_tier1 = compile_source_to_bytecode(src);
+        crate::set_thread_tier_override(None);
+        let mut iso_tier1 = SliceIsolate::spawn(
+            format!("parity-tier1-{idx}"),
+            400 + idx as u32,
+            CapabilityToken::pure_compute(),
+            2_000_000,
+            4 * 1024 * 1024,
+        );
+        let m_tier1 = iso_tier1.execute_bytecode(&bc_tier1, None).unwrap();
+
+        assert_eq!(
+            m_default.stdout, m_tier1.stdout,
+            "Tier-0/default vs Tier-1 stdout mismatch on case {idx}"
+        );
+    }
+
+    // Verify forced Tier-0 block shadowing and non-canonical array index writes also preserve values
+    let forced_tier0_src = r#"
+function checkForcedShadow(): number {
+    let x = 1;
+    {
+        let x = 2;
+    }
+    return x;
+}
+const items = [7, 8];
+items[0 / 0] = 55;
+items[-2] = 66;
+console.log(checkForcedShadow(), items[0], items[1]);
+"#;
+    crate::set_thread_tier_override(Some(0));
+    let bc_forced = compile_source_to_bytecode(forced_tier0_src);
+    crate::set_thread_tier_override(None);
+    assert_eq!(&bc_forced[0..8], crate::SNAPSHOT_MAGIC);
+    let mut iso_forced = SliceIsolate::spawn(
+        "forced-tier0-shadow",
+        450,
+        CapabilityToken::pure_compute(),
+        500_000,
+        512 * 1024,
+    );
+    let m_forced = iso_forced.execute_bytecode(&bc_forced, None).unwrap();
+    assert_eq!(m_forced.stdout[0], "1 7 8");
+
+    // Verify uncaught JSON.parse failure in Tier-0 halts subsequent statements and sets exit_code = 1
+    let bad_json_tier0 = r#"
+const parsed = JSON.parse("{invalid");
+console.log("UNREACHABLE_AFTER_THROW", parsed);
+"#;
+    let bc_bad_json = compile_source_to_bytecode(bad_json_tier0);
+    assert_eq!(&bc_bad_json[0..8], crate::SNAPSHOT_MAGIC);
+    let mut iso_bad_json = SliceIsolate::spawn(
+        "tier0-bad-json-halt",
+        451,
+        CapabilityToken::pure_compute(),
+        500_000,
+        512 * 1024,
+    );
+    let m_bad_json = iso_bad_json.execute_bytecode(&bc_bad_json, None).unwrap();
+    assert!(m_bad_json.stdout.is_empty());
+    assert_eq!(m_bad_json.exit_code, Some(1));
+    assert!(m_bad_json.return_value.starts_with("Uncaught SyntaxError:"));
+
+    // Verify early top-level return in Tier-0 stops execution before trailing statements
+    let early_ret_src = r#"
+const ready = 21 * 2;
+return ready;
+console.log("DEAD_AFTER_RETURN");
+"#;
+    let bc_early_ret = compile_source_to_bytecode(early_ret_src);
+    assert_eq!(&bc_early_ret[0..8], crate::SNAPSHOT_MAGIC);
+    let mut iso_early_ret = SliceIsolate::spawn(
+        "tier0-early-top-return",
+        452,
+        CapabilityToken::pure_compute(),
+        500_000,
+        512 * 1024,
+    );
+    let m_early_ret = iso_early_ret.execute_bytecode(&bc_early_ret, None).unwrap();
+    assert!(m_early_ret.stdout.is_empty());
+    assert_eq!(m_early_ret.return_value, "42");
+
+    // Verify LinearRecurrence2 computes exact fib(78) and bails out (instead of returning 0 or wrapping u64) on NaN and >78
+    let fib78_src = r#"
+function fib(n: number): number {
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+return fib(78);
+"#;
+    let bc_fib78 = compile_source_to_bytecode(fib78_src);
+    assert_eq!(&bc_fib78[0..8], crate::SNAPSHOT_MAGIC);
+    let mut iso_fib78 = SliceIsolate::spawn(
+        "tier0-fib78-exact",
+        453,
+        CapabilityToken::pure_compute(),
+        500_000,
+        512 * 1024,
+    );
+    assert_eq!(
+        iso_fib78
+            .execute_bytecode(&bc_fib78, None)
+            .unwrap()
+            .return_value,
+        "8944394323791464"
+    );
+
+    for out_of_domain_call in ["fib(0 / 0)", "fib(94)"] {
+        let src_ood = format!(
+            "function fib(n: number): number {{ if (n <= 1) return n; return fib(n - 1) + fib(n - 2); }}\nreturn {out_of_domain_call};\n"
+        );
+        let bc_ood = compile_source_to_bytecode(&src_ood);
+        let mut iso_ood = SliceIsolate::spawn(
+            "tier0-fib-ood",
+            454,
+            CapabilityToken::pure_compute(),
+            2_000,
+            512 * 1024,
+        );
+        assert!(matches!(
+            iso_ood.execute_bytecode(&bc_ood, None),
+            Err(SandboxViolation::CpuFuelExhausted { .. })
+        ));
+    }
+}

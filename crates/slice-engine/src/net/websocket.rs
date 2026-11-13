@@ -629,7 +629,7 @@ pub(crate) fn ws_client_connect(raw_url: &str, protocols: &str) -> Result<String
 
     // 1. Always enforce OCap allow_net, Cloud Metadata SSRF, and URL Egress DLP first (even for mocks)
     let explicit_host_grant =
-        check_boa_outbound_fetch_ocap_and_dlp(&parts, raw_url, protocols, "")?;
+        check_boa_outbound_fetch_ocap_and_dlp(&parts, raw_url, protocols, b"")?;
 
     // 2. Check if a deterministic `Slice.mockWebSocket` matches `raw_url`
     let matched_mock = BOA_WS_MOCKS.with(|m| {

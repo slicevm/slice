@@ -68,7 +68,12 @@ pub fn is_builtin_module(spec: &str) -> bool {
 pub fn is_jsx_runtime_builtin(spec: &str) -> bool {
     matches!(
         spec,
-        "react"
+        "slice:jsx"
+            | "slice:jsx/jsx-runtime"
+            | "slice:jsx/jsx-dev-runtime"
+            | "slice/jsx-runtime"
+            | "slice/jsx-dev-runtime"
+            | "react"
             | "react/jsx-runtime"
             | "react/jsx-dev-runtime"
             | "preact"
@@ -82,7 +87,13 @@ pub fn is_jsx_runtime_builtin(spec: &str) -> bool {
 
 #[inline]
 pub fn normalize_builtin_specifier(spec: &str) -> String {
-    if spec.starts_with("node:")
+    if spec == "slice:jsx/jsx-runtime"
+        || spec == "slice:jsx/jsx-dev-runtime"
+        || spec == "slice/jsx-runtime"
+        || spec == "slice/jsx-dev-runtime"
+    {
+        "slice:jsx".to_string()
+    } else if spec.starts_with("node:")
         || spec.starts_with("slice:")
         || spec.starts_with("bun:")
         || spec.starts_with("cloudflare:")

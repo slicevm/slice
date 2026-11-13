@@ -101,7 +101,11 @@ impl CasBuilder {
         bytecode_compiler_fn: impl FnOnce(&str) -> Vec<u8>,
     ) {
         let spec = specifier.into();
-        let is_ts = spec.ends_with(".ts") || spec.ends_with(".tsx") || spec.ends_with(".jsx");
+        let is_ts = spec.ends_with(".ts")
+            || spec.ends_with(".tsx")
+            || spec.ends_with(".jsx")
+            || spec.ends_with(".mts")
+            || spec.ends_with(".cts");
         let normalized = strip_typescript_and_normalize(raw_source, is_ts);
         let bytecode = bytecode_compiler_fn(&normalized);
         self.modules.push((spec, path, normalized, bytecode));
@@ -140,7 +144,10 @@ impl CasBuilder {
                     stack.push(path);
                 } else if ft.is_file() {
                     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                        if matches!(ext, "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs") {
+                        if matches!(
+                            ext,
+                            "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts"
+                        ) {
                             let rel = path
                                 .strip_prefix(root_dir)
                                 .unwrap_or(&path)
@@ -148,7 +155,7 @@ impl CasBuilder {
                                 .replace('\\', "/");
                             let specifier = format!("./{}", rel);
                             let raw = std::fs::read_to_string(&path)?;
-                            let is_ts = matches!(ext, "ts" | "tsx" | "jsx");
+                            let is_ts = matches!(ext, "ts" | "tsx" | "jsx" | "mts" | "cts");
                             let normalized = strip_typescript_and_normalize(&raw, is_ts);
                             let bytecode = bytecode_compiler_fn(&normalized);
                             self.modules.push((specifier, path, normalized, bytecode));
@@ -247,11 +254,22 @@ impl CasBuilder {
                     compacted_line_1 += 1;
                 }
             }
-            let hash_hex = if is_static || is_manifest {
-                blake3::hash(bytecode).to_hex().to_string()
-            } else {
+            let hash_hex = {
                 let mut hasher = blake3::Hasher::new();
-                hasher.update(normalized_source.as_bytes());
+                let domain_tag: u8 = if is_static {
+                    0x01
+                } else if is_manifest {
+                    0x02
+                } else {
+                    0x03
+                };
+                hasher.update(&[domain_tag]);
+                if !is_static && !is_manifest {
+                    let src_bytes = normalized_source.as_bytes();
+                    hasher.update(&(src_bytes.len() as u64).to_le_bytes());
+                    hasher.update(src_bytes);
+                }
+                hasher.update(&(bytecode.len() as u64).to_le_bytes());
                 hasher.update(bytecode);
                 hasher.finalize().to_hex().to_string()
             };
@@ -268,9 +286,12 @@ impl CasBuilder {
                 let stripped_ext = specifier
                     .trim_end_matches(".tsx")
                     .trim_end_matches(".ts")
+                    .trim_end_matches(".mts")
+                    .trim_end_matches(".cts")
                     .trim_end_matches(".jsx")
                     .trim_end_matches(".js")
                     .trim_end_matches(".mjs")
+                    .trim_end_matches(".cjs")
                     .to_string();
                 radix_map.insert(stripped_ext.clone(), hash_hex.clone());
                 if let Some(bare) = stripped_ext.strip_prefix("./") {
@@ -283,8 +304,12 @@ impl CasBuilder {
                             .entrypoint
                             .trim_end_matches(".tsx")
                             .trim_end_matches(".ts")
+                            .trim_end_matches(".mts")
+                            .trim_end_matches(".cts")
                             .trim_end_matches(".jsx")
                             .trim_end_matches(".js")
+                            .trim_end_matches(".mjs")
+                            .trim_end_matches(".cjs")
                 {
                     entry_hash = hash_hex.clone();
                 }
@@ -368,7 +393,10 @@ impl CasBuilder {
                         bytecode_offset,
                         bytecode_len: bytecode.len() as u64,
                         original_specifier: specifier.clone(),
-                        is_typescript: specifier.ends_with(".ts") || specifier.ends_with(".tsx"),
+                        is_typescript: specifier.ends_with(".ts")
+                            || specifier.ends_with(".tsx")
+                            || specifier.ends_with(".mts")
+                            || specifier.ends_with(".cts"),
                     },
                 );
             }

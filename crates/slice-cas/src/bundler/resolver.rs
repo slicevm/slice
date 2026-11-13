@@ -514,6 +514,49 @@ fn load_tsconfig_value(config_path: &Path) -> Option<Arc<serde_json::Value>> {
     parsed
 }
 
+fn resolve_tsconfig_extends_path(parent_dir: &Path, ext_str: &str) -> Option<PathBuf> {
+    let try_with_json = |cand: PathBuf| -> Option<PathBuf> {
+        if cand.is_file() {
+            return Some(cand);
+        }
+        let appended = PathBuf::from(format!("{}.json", cand.display()));
+        if appended.is_file() {
+            return Some(appended);
+        }
+        let dir_cfg = cand.join("tsconfig.json");
+        if dir_cfg.is_file() {
+            return Some(dir_cfg);
+        }
+        None
+    };
+
+    if ext_str.starts_with('.') || Path::new(ext_str).is_absolute() {
+        return try_with_json(parent_dir.join(ext_str));
+    }
+
+    let mut cur = Some(parent_dir);
+    while let Some(dir) = cur {
+        let nm_cand = dir.join("node_modules").join(ext_str);
+        if let Some(found) = try_with_json(nm_cand.clone()) {
+            return Some(found);
+        }
+        let pkg_json = nm_cand.join("package.json");
+        if pkg_json.is_file() {
+            if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
+                if let Ok(pv) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if let Some(ts_rel) = pv.get("tsconfig").and_then(|v| v.as_str()) {
+                        if let Some(found) = try_with_json(nm_cand.join(ts_rel)) {
+                            return Some(found);
+                        }
+                    }
+                }
+            }
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
 fn load_tsconfig_value_uncached(config_path: &Path) -> Option<serde_json::Value> {
     if !config_path.is_file() {
         return None;
@@ -525,28 +568,36 @@ fn load_tsconfig_value_uncached(config_path: &Path) -> Option<serde_json::Value>
             serde_json::from_str::<serde_json::Value>(&cleaned)
         })
         .ok()?;
-    if let Some(ext_str) = val
-        .get("extends")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-    {
+    let extends_list: Vec<String> = match val.get("extends") {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => Vec::new(),
+    };
+    if !extends_list.is_empty() {
         if let Some(parent_dir) = config_path.parent() {
-            let mut ext_path = parent_dir.join(&ext_str);
-            if !ext_path.is_file() && ext_path.extension().is_none() {
-                ext_path.set_extension("json");
-            }
-            if let Some(parent_val) = load_tsconfig_value(&ext_path) {
-                if let Some(parent_co) = parent_val
-                    .get("compilerOptions")
-                    .and_then(|c| c.as_object())
-                {
-                    let co_entry = val
-                        .as_object_mut()?
-                        .entry("compilerOptions")
-                        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-                    if let Some(co_map) = co_entry.as_object_mut() {
-                        for (k, v) in parent_co {
-                            co_map.entry(k.clone()).or_insert_with(|| v.clone());
+            // TypeScript 5.0+ `extends: [base1, base2]`: later bases override earlier bases,
+            // and the child config overrides all bases. Iterating in reverse with `or_insert` achieves this.
+            for ext_str in extends_list.iter().rev() {
+                if let Some(ext_path) = resolve_tsconfig_extends_path(parent_dir, ext_str) {
+                    if let Some(parent_val) = load_tsconfig_value(&ext_path) {
+                        if let Some(parent_co) = parent_val
+                            .get("compilerOptions")
+                            .and_then(|c| c.as_object())
+                        {
+                            let co_entry = val
+                                .as_object_mut()?
+                                .entry("compilerOptions")
+                                .or_insert_with(|| {
+                                    serde_json::Value::Object(serde_json::Map::new())
+                                });
+                            if let Some(co_map) = co_entry.as_object_mut() {
+                                for (k, v) in parent_co {
+                                    co_map.entry(k.clone()).or_insert_with(|| v.clone());
+                                }
+                            }
                         }
                     }
                 }

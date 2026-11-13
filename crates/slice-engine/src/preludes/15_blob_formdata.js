@@ -137,5 +137,100 @@
     };
   }
   globalThis.FormData = FormData;
+
+  function __escapeMpAttr(s) {
+    return String(s)
+      .replace(/\r/g, "%0D")
+      .replace(/\n/g, "%0A")
+      .replace(/"/g, "%22");
+  }
+
+  function __unescapeMpAttr(s) {
+    return String(s)
+      .replace(/%22/gi, "\"")
+      .replace(/%0A/gi, "\n")
+      .replace(/%0D/gi, "\r");
+  }
+
+  globalThis.__slice_encode_formdata = function(rawBody, headers) {
+    var boundary = "----SliceFormBoundary";
+    if (headers && !headers.has("content-type")) {
+      headers.set("content-type", "multipart/form-data; boundary=" + boundary);
+    }
+    var chunks = [], es = rawBody.entries();
+    for (var i = 0; i < es.length; i++) {
+      var escName = __escapeMpAttr(es[i][0]);
+      var v = es[i][1];
+      if (v && v._isBlob) {
+        var fn = __escapeMpAttr(v.name !== undefined ? v.name : "blob");
+        var bType = v.type || "application/octet-stream";
+        chunks.push(
+          __slice_text_encode(
+            "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + escName + "\"; filename=\"" + fn + "\"\r\nContent-Type: " + bType + "\r\n\r\n"
+          )
+        );
+        chunks.push(new Uint8Array(v._u8));
+        chunks.push(__slice_text_encode("\r\n"));
+      } else {
+        chunks.push(
+          __slice_text_encode(
+            "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + escName + "\"\r\n\r\n" + String(v) + "\r\n"
+          )
+        );
+      }
+    }
+    chunks.push(__slice_text_encode("--" + boundary + "--\r\n"));
+    var mpU8 = __slice_concatU8(chunks);
+    return {
+      str: __slice_text_decode(mpU8, "utf-8", false, false),
+      u8: mpU8,
+      fd: rawBody
+    };
+  };
+
+  globalThis.__slice_parse_formdata = function(obj) {
+    var fd = new FormData();
+    var ct = (obj._ct || (obj.headers && obj.headers.get("content-type")) || "");
+    var bMatch = /multipart\/form-data\s*;\s*boundary=(?:"([^"]+)"|([^\s;]+))/i.exec(ct);
+    var rawText = obj._body || "";
+    if (bMatch) {
+      var boundary = "--" + (bMatch[1] || bMatch[2]);
+      var parts = rawText.split(boundary);
+      for (var p = 1; p < parts.length; p++) {
+        var seg = parts[p];
+        if (seg.indexOf("--") === 0) break;
+        if (seg.indexOf("\r\n") === 0) seg = seg.slice(2);
+        else if (seg.indexOf("\n") === 0) seg = seg.slice(1);
+        var sep = seg.indexOf("\r\n\r\n");
+        var sepLen = 4;
+        if (sep === -1) {
+          sep = seg.indexOf("\n\n");
+          sepLen = 2;
+        }
+        if (sep === -1) continue;
+        var hdrBlock = seg.slice(0, sep);
+        var valStr = seg.slice(sep + sepLen);
+        if (valStr.slice(-2) === "\r\n") valStr = valStr.slice(0, -2);
+        else if (valStr.slice(-1) === "\n") valStr = valStr.slice(0, -1);
+        var nMatch = /name="([^"]*)"/i.exec(hdrBlock);
+        if (!nMatch) continue;
+        var fieldName = __unescapeMpAttr(nMatch[1]);
+        var fnMatch = /filename="([^"]*)"/i.exec(hdrBlock);
+        if (fnMatch) {
+          var ctMatch = /content-type:\s*([^\r\n]+)/i.exec(hdrBlock);
+          var fType = ctMatch ? ctMatch[1].trim() : "application/octet-stream";
+          fd.append(fieldName, new File([valStr], __unescapeMpAttr(fnMatch[1]), { type: fType }));
+        } else {
+          fd.append(fieldName, valStr);
+        }
+      }
+      return fd;
+    }
+    if (!globalThis.URLSearchParams) __slice_ensure_shard(1);
+    var usp = new globalThis.URLSearchParams(rawText);
+    var es = usp.entries();
+    for (var i = 0; i < es.length; i++) fd.append(es[i][0], es[i][1]);
+    return fd;
+  };
 })();
 

@@ -269,6 +269,15 @@ fn verify_socket_egress_dlp(payload: &[u8], target_label: &str) -> Result<(), St
     Ok(())
 }
 
+#[inline]
+fn format_socket_host_port(clean_host: &str, port: u16) -> String {
+    if clean_host.contains(':') {
+        format!("[{}]:{}", clean_host, port)
+    } else {
+        format!("{}:{}", clean_host, port)
+    }
+}
+
 /// Verifies OCap `allow_net` permission for a raw TCP/UDP socket target `host:port`.
 /// Returns `Ok(has_explicit_match)`.
 fn verify_raw_socket_ocap(host: &str, port: u16) -> Result<bool, String> {
@@ -279,7 +288,7 @@ fn verify_raw_socket_ocap(host: &str, port: u16) -> Result<bool, String> {
         ));
     }
     let clean_host = slice_sandbox::extract_clean_hostname(&host.trim().to_ascii_lowercase());
-    let host_port = format!("{}:{}", clean_host, port);
+    let host_port = format_socket_host_port(&clean_host, port);
 
     if slice_sandbox::is_cloud_metadata_ssrf_target(&clean_host) {
         let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
@@ -300,7 +309,11 @@ fn verify_raw_socket_ocap(host: &str, port: u16) -> Result<bool, String> {
         if set.is_empty() {
             return (false, false, false);
         }
-        let mut explicit = set.contains(&host_port) || set.contains(&clean_host);
+        let mut explicit = set.contains(&host_port)
+            || set.contains(&clean_host)
+            || (clean_host.contains(':')
+                && (set.contains(&format!("[{}]", clean_host))
+                    || set.contains(&format!("{}:{}", clean_host, port))));
         if !explicit && (clean_host == "127.0.0.1" || clean_host == "localhost") {
             let alt = if clean_host == "127.0.0.1" {
                 "localhost"
@@ -386,7 +399,7 @@ fn verify_raw_socket_ocap(host: &str, port: u16) -> Result<bool, String> {
 
 fn make_socket_url_parts(host: &str, port: u16, is_tls: bool) -> OutboundUrlParts {
     let clean_host = slice_sandbox::extract_clean_hostname(&host.trim().to_ascii_lowercase());
-    let host_port = format!("{}:{}", clean_host, port);
+    let host_port = format_socket_host_port(&clean_host, port);
     OutboundUrlParts {
         is_https: is_tls,
         hostname: clean_host.clone(),
@@ -460,13 +473,15 @@ pub fn tcp_socket_connect(host: &str, port: u16, tls_mode: &str) -> Result<Strin
     let host_trimmed = host.trim();
     let is_tls = tls_mode.eq_ignore_ascii_case("on");
     let parts = make_socket_url_parts(host_trimmed, port, is_tls);
-    let host_port_key = format!("{}:{}", host_trimmed.to_ascii_lowercase(), port);
+    let host_port_key = parts.host_port.clone();
 
     // Check deterministic mock registry first
     if let Some(mock_spec) = BOA_SOCKET_MOCKS.with(|m| {
         let map = m.borrow();
         map.get(&host_port_key)
+            .or_else(|| map.get(&format!("{}:{}", host_trimmed.to_ascii_lowercase(), port)))
             .or_else(|| map.get(&host_trimmed.to_ascii_lowercase()))
+            .or_else(|| map.get(&parts.hostname))
             .cloned()
     }) {
         let id = next_socket_handle_id()?;
@@ -901,18 +916,19 @@ pub fn udp_socket_send_bytes(
         ));
     }
     verify_transient_socket_io_budget_and_fuel(payload.len())?;
-    let target_label = format!("udp://{}:{}", host.trim(), port);
-    verify_socket_egress_dlp(payload, &target_label)?;
-
     let host_trimmed = host.trim();
     let parts = make_socket_url_parts(host_trimmed, port, false);
-    let host_port_key = format!("{}:{}", host_trimmed.to_ascii_lowercase(), port);
+    let target_label = format!("udp://{}", parts.host_port);
+    verify_socket_egress_dlp(payload, &target_label)?;
+
+    let host_port_key = parts.host_port.clone();
 
     // Check deterministic mock registry
     let mock_spec_opt = BOA_SOCKET_MOCKS.with(|m| {
         let map = m.borrow();
         map.get(&format!("udp://{}", host_port_key))
             .or_else(|| map.get(&host_port_key))
+            .or_else(|| map.get(&format!("{}:{}", host_trimmed.to_ascii_lowercase(), port)))
             .cloned()
     });
 

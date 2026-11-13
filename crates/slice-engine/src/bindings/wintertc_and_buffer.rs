@@ -5,9 +5,57 @@ use crate::bindings::helpers::{
     with_buffer_source_bytes,
 };
 use crate::intrinsics::{
-    base64_decode, base64_encode, bytes_to_hex, hex_decode_bytes, whatwg_atob, whatwg_btoa,
+    base64_decode, base64_encode, bytes_to_hex, hex_decode_bytes, whatwg_atob, whatwg_btoa_utf16,
     zlib_compress_bytes, zlib_decompress_bytes,
 };
+
+#[inline]
+fn encode_js_string_utf8_into(
+    js_s: &boa_engine::JsString,
+    dest_slice: &mut [u8],
+) -> (usize, usize) {
+    use boa_engine::string::JsStrVariant;
+    match js_s.as_str().variant() {
+        JsStrVariant::Latin1(bytes) => {
+            if bytes.is_ascii() {
+                let n = bytes.len().min(dest_slice.len());
+                dest_slice[..n].copy_from_slice(&bytes[..n]);
+                return (n, n);
+            }
+            let mut read_utf16 = 0usize;
+            let mut written_utf8 = 0usize;
+            for &b in bytes {
+                let ch = b as char;
+                let need = ch.len_utf8();
+                if written_utf8 + need > dest_slice.len() {
+                    break;
+                }
+                ch.encode_utf8(&mut dest_slice[written_utf8..written_utf8 + need]);
+                written_utf8 += need;
+                read_utf16 += 1;
+            }
+            (read_utf16, written_utf8)
+        }
+        JsStrVariant::Utf16(units) => {
+            let mut read_utf16 = 0usize;
+            let mut written_utf8 = 0usize;
+            for item in char::decode_utf16(units.iter().copied()) {
+                let (ch, u16_units) = match item {
+                    Ok(c) => (c, c.len_utf16()),
+                    Err(_) => (char::REPLACEMENT_CHARACTER, 1usize),
+                };
+                let need = ch.len_utf8();
+                if written_utf8 + need > dest_slice.len() {
+                    break;
+                }
+                ch.encode_utf8(&mut dest_slice[written_utf8..written_utf8 + need]);
+                written_utf8 += need;
+                read_utf16 += u16_units;
+            }
+            (read_utf16, written_utf8)
+        }
+    }
+}
 
 pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Context) {
     use boa_engine::builtins::typed_array::TypedArray;
@@ -25,14 +73,19 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
         js_string!("__slice_btoa"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
-            let s = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|js| js.to_std_string_escaped())
-                .unwrap_or_default();
-            match whatwg_btoa(&s) {
-                Ok(encoded) => Ok(BoaVal::from(js_string!(encoded))),
+            use boa_engine::string::JsStrVariant;
+            let Some(first) = args.first() else {
+                return Ok(BoaVal::from(js_string!("")));
+            };
+            let js_s = first.to_string(context)?;
+            let res = match js_s.as_str().variant() {
+                JsStrVariant::Latin1(bytes) => Ok(base64_encode(bytes, false)),
+                JsStrVariant::Utf16(units) => whatwg_btoa_utf16(units),
+            };
+            match res {
+                Ok(encoded) => Ok(BoaVal::from(boa_engine::JsString::from(
+                    boa_engine::string::JsStr::latin1(encoded.as_bytes()),
+                ))),
                 Err(msg) => Err(JsNativeError::error().with_message(msg).into()),
             }
         }),
@@ -42,13 +95,33 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
         js_string!("__slice_atob"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
-            let s = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|js| js.to_std_string_escaped())
-                .unwrap_or_default();
-            match whatwg_atob(&s) {
+            use boa_engine::string::JsStrVariant;
+            let Some(first) = args.first() else {
+                return Ok(BoaVal::from(js_string!("")));
+            };
+            let js_s = first.to_string(context)?;
+            let ascii_cow: std::borrow::Cow<'_, str> = match js_s.as_str().variant() {
+                JsStrVariant::Latin1(bytes) => {
+                    let mut s = String::with_capacity(bytes.len());
+                    for &b in bytes {
+                        s.push(b as char);
+                    }
+                    std::borrow::Cow::Owned(s)
+                }
+                JsStrVariant::Utf16(units) => {
+                    if units.iter().any(|&u| u > 0x00FF) {
+                        return Err(JsNativeError::error()
+                            .with_message("InvalidCharacterError: The string to be decoded contains invalid characters.")
+                            .into());
+                    }
+                    let mut s = String::with_capacity(units.len());
+                    for &u in units {
+                        s.push((u as u8) as char);
+                    }
+                    std::borrow::Cow::Owned(s)
+                }
+            };
+            match whatwg_atob(&ascii_cow) {
                 Ok(decoded) => Ok(BoaVal::from(js_string!(decoded))),
                 Err(msg) => Err(JsNativeError::error().with_message(msg).into()),
             }
@@ -59,12 +132,10 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
         js_string!("__slice_text_encode_into"),
         2,
         NativeFunction::from_fn_ptr(|_this, args, context| {
-            let s = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|js| js.to_std_string_escaped())
-                .unwrap_or_default();
+            let js_s = match args.first() {
+                Some(v) => v.to_string(context)?,
+                None => js_string!(""),
+            };
             let Some(dest_obj) = args.get(1).and_then(|v| v.as_object()) else {
                 return Err(JsNativeError::typ()
                     .with_message("TextEncoder.encodeInto requires a Uint8Array destination")
@@ -78,15 +149,9 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
             if let Some(ta) = dest_obj.downcast_ref::<TypedArray>() {
                 if ta
                     .with_bytes_mut(|dest_slice| {
-                        for ch in s.chars() {
-                            let need = ch.len_utf8();
-                            if written_utf8 + need > dest_slice.len() {
-                                break;
-                            }
-                            ch.encode_utf8(&mut dest_slice[written_utf8..written_utf8 + need]);
-                            written_utf8 += need;
-                            read_utf16 += ch.len_utf16();
-                        }
+                        let (r, w) = encode_js_string_utf8_into(&js_s, dest_slice);
+                        read_utf16 = r;
+                        written_utf8 = w;
                     })
                     .is_some()
                 {
@@ -119,15 +184,9 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
                     let start = offset.min(data_mut.len());
                     let end = (start + byte_len).min(data_mut.len());
                     let dest_slice = &mut data_mut[start..end];
-                    for ch in s.chars() {
-                        let need = ch.len_utf8();
-                        if written_utf8 + need > dest_slice.len() {
-                            break;
-                        }
-                        ch.encode_utf8(&mut dest_slice[written_utf8..written_utf8 + need]);
-                        written_utf8 += need;
-                        read_utf16 += ch.len_utf16();
-                    }
+                    let (r, w) = encode_js_string_utf8_into(&js_s, dest_slice);
+                    read_utf16 = r;
+                    written_utf8 = w;
                 };
             }
 

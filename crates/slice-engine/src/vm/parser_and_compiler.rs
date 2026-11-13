@@ -64,7 +64,10 @@ pub(crate) enum Token {
     Eof,
 }
 
-pub(crate) fn tokenize_js(input: &str) -> Vec<Token> {
+pub(crate) fn tokenize_js(input: &str) -> Option<Vec<Token>> {
+    if !input.is_ascii() {
+        return None;
+    }
     let bytes = input.as_bytes();
     let mut tokens = Vec::new();
     let mut i = 0;
@@ -97,18 +100,26 @@ pub(crate) fn tokenize_js(input: &str) -> Vec<Token> {
             i += 1;
             let mut s = String::new();
             while i < bytes.len() && bytes[i] != quote {
+                if quote == b'`' && bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{'
+                {
+                    return None;
+                }
                 if bytes[i] == b'\\' && i + 1 < bytes.len() {
                     i += 1;
                     match bytes[i] {
                         b'n' => s.push('\n'),
                         b'r' => s.push('\r'),
                         b't' => s.push('\t'),
+                        b'x' | b'u' | b'0'..=b'7' => return None,
                         other => s.push(other as char),
                     }
                 } else {
                     s.push(bytes[i] as char);
                 }
                 i += 1;
+            }
+            if i >= bytes.len() {
+                return None;
             }
             i += 1;
             tokens.push(Token::Str(s));
@@ -118,16 +129,32 @@ pub(crate) fn tokenize_js(input: &str) -> Vec<Token> {
         if b.is_ascii_digit() || (b == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit())
         {
             let start = i;
-            if b == b'0' && i + 1 < bytes.len() && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X') {
-                i += 2;
-                let hex_start = i;
-                while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
-                    i += 1;
+            if b == b'0' && i + 1 < bytes.len() {
+                match bytes[i + 1] {
+                    b'b' | b'B' | b'o' | b'O' => return None,
+                    b'x' | b'X' => {
+                        i += 2;
+                        let hex_start = i;
+                        while i < bytes.len() && (bytes[i].is_ascii_hexdigit() || bytes[i] == b'_')
+                        {
+                            if bytes[i] == b'_' {
+                                return None;
+                            }
+                            i += 1;
+                        }
+                        if i == hex_start {
+                            return None;
+                        }
+                        let hex_str = &input[hex_start..i];
+                        let val = u64::from_str_radix(hex_str, 16).ok()?;
+                        if val > (1u64 << 53) {
+                            return None;
+                        }
+                        tokens.push(Token::Num(val as f64));
+                        continue;
+                    }
+                    _ => {}
                 }
-                let hex_str = &input[hex_start..i];
-                let val = u64::from_str_radix(hex_str, 16).unwrap_or(0) as f64;
-                tokens.push(Token::Num(val));
-                continue;
             }
             let mut seen_dot = b == b'.';
             let mut has_underscore = false;
@@ -272,14 +299,14 @@ pub(crate) fn tokenize_js(input: &str) -> Vec<Token> {
                 b'&' => tokens.push(Token::Amp),
                 b'|' => tokens.push(Token::Pipe),
                 b'^' => tokens.push(Token::Caret),
-                _ => {}
+                _ => return None,
             }
             i += 1;
         }
     }
 
     tokens.push(Token::Eof);
-    tokens
+    Some(tokens)
 }
 
 pub(crate) struct Parser {
@@ -1285,9 +1312,10 @@ pub(crate) fn compact_js_for_boa_bytecode(js: &str) -> String {
 /// statements, expressions, operators, and built-in calls in the Oxc AST belong to the exact
 /// subset supported by `SLICESNP` (`eval_stmt` / `eval_expr` / `NumericFuncIr`).
 pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
-    // Fast SIMD rejections for multi-module bundles, large scripts, or constructs not in Tier-0
+    // Fast SIMD rejections for non-ASCII, multi-module bundles, large scripts, or constructs not in Tier-0
     let src_bytes = source.as_bytes();
-    if src_bytes.len() > 4096
+    if !source.is_ascii()
+        || src_bytes.len() > 4096
         || memchr::memmem::find(src_bytes, b"var __slice_modules =").is_some()
         || memchr::memmem::find(src_bytes, b"__slice_").is_some()
         || memchr::memmem::find(src_bytes, b"node:").is_some()
@@ -1627,7 +1655,19 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                             && static_member_chain(&m.object).is_some()
                     }
                     AssignmentTarget::ComputedMemberExpression(m) if !m.optional => {
-                        a.operator == AssignmentOperator::Assign
+                        let non_array_idx = matches!(
+                            &m.expression,
+                            Expression::UnaryExpression(u) if u.operator == UnaryOperator::UnaryNegation
+                        ) || matches!(
+                            &m.expression,
+                            Expression::Identifier(id)
+                                if matches!(id.name.as_str(), "NaN" | "Infinity" | "undefined")
+                        ) || matches!(
+                            &m.expression,
+                            Expression::NumericLiteral(nl) if nl.value < 0.0 || nl.value.fract() != 0.0
+                        );
+                        !non_array_idx
+                            && a.operator == AssignmentOperator::Assign
                             && matches!(m.object, Expression::Identifier(_))
                             && is_supported_expr(&m.expression, in_function_depth)
                     }
@@ -1768,7 +1808,11 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                         .is_none_or(|alt| is_supported_stmt(alt, in_function_depth))
             }
             Statement::WhileStatement(ws) => {
-                in_function_depth > 0
+                (in_function_depth > 0
+                    || matches!(
+                        ws.test.without_parentheses(),
+                        Expression::BooleanLiteral(b) if b.value
+                    ))
                     && is_supported_expr(&ws.test, in_function_depth)
                     && is_supported_stmt(&ws.body, in_function_depth)
             }
@@ -1821,7 +1865,166 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
         }
     }
 
+    fn params_to_scope<'a>(params: &'a FormalParameters<'a>) -> Vec<&'a str> {
+        let mut scope = Vec::with_capacity(params.items.len());
+        for p in &params.items {
+            if let BindingPattern::BindingIdentifier(id) = &p.pattern {
+                scope.push(id.name.as_str());
+            }
+        }
+        scope
+    }
+
+    fn check_scope_stmt<'a>(
+        stmt: &'a Statement<'a>,
+        scope: &mut Vec<&'a str>,
+        block_depth: usize,
+    ) -> bool {
+        match stmt {
+            Statement::VariableDeclaration(vd) => {
+                if block_depth > 0 && vd.kind.is_var() {
+                    return false;
+                }
+                for decl in &vd.declarations {
+                    if let BindingPattern::BindingIdentifier(id) = &decl.id {
+                        let name = id.name.as_str();
+                        if scope.contains(&name) && (!vd.kind.is_var() || block_depth > 0) {
+                            return false;
+                        }
+                        if !scope.contains(&name) {
+                            scope.push(name);
+                        }
+                    }
+                    if let Some(init) = &decl.init {
+                        if !check_scope_expr(init) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+            Statement::BlockStatement(b) => {
+                let mark = scope.len();
+                let ok = b
+                    .body
+                    .iter()
+                    .all(|s| check_scope_stmt(s, scope, block_depth + 1));
+                scope.truncate(mark);
+                ok
+            }
+            Statement::IfStatement(ifs) => {
+                let mark = scope.len();
+                let then_ok = check_scope_stmt(&ifs.consequent, scope, block_depth + 1);
+                scope.truncate(mark);
+                let else_ok = ifs
+                    .alternate
+                    .as_ref()
+                    .is_none_or(|alt| check_scope_stmt(alt, scope, block_depth + 1));
+                scope.truncate(mark);
+                then_ok && else_ok
+            }
+            Statement::WhileStatement(ws) => {
+                let mark = scope.len();
+                let ok = check_scope_stmt(&ws.body, scope, block_depth + 1);
+                scope.truncate(mark);
+                ok
+            }
+            Statement::ForStatement(fs) => {
+                let mark = scope.len();
+                let init_ok = match &fs.init {
+                    Some(ForStatementInit::VariableDeclaration(vd)) => {
+                        if vd.kind.is_var() && block_depth > 0 {
+                            false
+                        } else {
+                            let mut ok = true;
+                            for decl in &vd.declarations {
+                                if let BindingPattern::BindingIdentifier(id) = &decl.id {
+                                    let name = id.name.as_str();
+                                    if scope.contains(&name) && !vd.kind.is_var() {
+                                        ok = false;
+                                        break;
+                                    }
+                                    if !scope.contains(&name) {
+                                        scope.push(name);
+                                    }
+                                }
+                            }
+                            ok
+                        }
+                    }
+                    _ => true,
+                };
+                let body_ok = init_ok && check_scope_stmt(&fs.body, scope, block_depth + 1);
+                scope.truncate(mark);
+                body_ok
+            }
+            Statement::FunctionDeclaration(fd) => fd.body.as_ref().is_none_or(|fb| {
+                let mut fn_scope = params_to_scope(&fd.params);
+                fb.statements
+                    .iter()
+                    .all(|s| check_scope_stmt(s, &mut fn_scope, 0))
+            }),
+            Statement::ExportDeclaration(exp) => match &exp.declaration {
+                Declaration::VariableDeclaration(vd) => {
+                    for decl in &vd.declarations {
+                        if let BindingPattern::BindingIdentifier(id) = &decl.id {
+                            let name = id.name.as_str();
+                            if scope.contains(&name) && !vd.kind.is_var() {
+                                return false;
+                            }
+                            if !scope.contains(&name) {
+                                scope.push(name);
+                            }
+                        }
+                        if let Some(init) = &decl.init {
+                            if !check_scope_expr(init) {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                }
+                Declaration::FunctionDeclaration(fd) => fd.body.as_ref().is_none_or(|fb| {
+                    let mut fn_scope = params_to_scope(&fd.params);
+                    fb.statements
+                        .iter()
+                        .all(|s| check_scope_stmt(s, &mut fn_scope, 0))
+                }),
+                _ => true,
+            },
+            Statement::ExpressionStatement(es) => check_scope_expr(&es.expression),
+            Statement::ReturnStatement(rs) => rs.argument.as_ref().is_none_or(check_scope_expr),
+            _ => true,
+        }
+    }
+
+    fn check_scope_expr<'a>(expr: &'a Expression<'a>) -> bool {
+        match expr {
+            Expression::ArrowFunctionExpression(arrow) => match &arrow.body {
+                ArrowFunctionBody::FunctionBody(fb) => {
+                    let mut fn_scope = params_to_scope(&arrow.params);
+                    fb.statements
+                        .iter()
+                        .all(|s| check_scope_stmt(s, &mut fn_scope, 0))
+                }
+                _ => true,
+            },
+            Expression::FunctionExpression(func) => func.body.as_ref().is_none_or(|fb| {
+                let mut fn_scope = params_to_scope(&func.params);
+                fb.statements
+                    .iter()
+                    .all(|s| check_scope_stmt(s, &mut fn_scope, 0))
+            }),
+            _ => true,
+        }
+    }
+
+    let mut top_scope = Vec::new();
     program.body.iter().all(|stmt| is_supported_stmt(stmt, 0))
+        && program
+            .body
+            .iter()
+            .all(|stmt| check_scope_stmt(stmt, &mut top_scope, 0))
 }
 
 /// Compiles JavaScript/TypeScript source into a compact binary `SLICEBC\x01`, `SLICEBOA`, or `SLICESNP` bytecode buffer.
@@ -1916,21 +2119,36 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
     let source = strip_typescript_and_normalize(raw_source, true);
     let src_bytes = source.as_bytes();
 
-    let has_direct_intrinsic_attack = (memchr::memmem::find(src_bytes, b"Object.prototype.")
-        .is_some()
-        || memchr::memmem::find(src_bytes, b"Array.prototype.").is_some()
-        || memchr::memmem::find(src_bytes, b"while (true)").is_some()
-        || memchr::memmem::find(src_bytes, b"while(true)").is_some())
+    let has_while_true = memchr::memmem::find(src_bytes, b"while (true)").is_some()
+        || memchr::memmem::find(src_bytes, b"while(true)").is_some();
+    let tier0_ast_ok = match tier_ov {
+        Some(0) => true,
+        Some(1) if !has_while_true => false,
+        _ => is_tier0_slicesnp_compatible_ast(&source),
+    };
+    let has_proto_mutation = (memchr::memmem::find(src_bytes, b"Object.prototype.").is_some()
+        || memchr::memmem::find(src_bytes, b"Array.prototype.").is_some())
+        && memchr::memmem::find(src_bytes, b"async ").is_none()
+        && memchr::memmem::find(src_bytes, b"await ").is_none()
+        && memchr::memmem::find(src_bytes, b"try ").is_none()
+        && memchr::memmem::find(src_bytes, b"try{").is_none();
+    let has_direct_intrinsic_attack = (has_proto_mutation || (has_while_true && tier0_ast_ok))
         && memchr::memmem::find(src_bytes, b"Slice.").is_none()
         && memchr::memmem::find(src_bytes, b"Worker").is_none();
 
     let route_to_tier1_boa = match tier_ov {
         Some(1) => !has_direct_intrinsic_attack,
         Some(0) => false,
-        _ => !has_direct_intrinsic_attack && !is_tier0_slicesnp_compatible_ast(&source),
+        _ => !has_direct_intrinsic_attack && !tier0_ast_ok,
     };
 
-    if route_to_tier1_boa {
+    let tokens_opt = if route_to_tier1_boa {
+        None
+    } else {
+        tokenize_js(&source)
+    };
+
+    if route_to_tier1_boa || (tokens_opt.is_none() && !has_direct_intrinsic_attack) {
         let boa_source = slice_cas::wrap_top_level_await_script(&source).unwrap_or(source);
         let compacted = compact_js_for_boa_bytecode(&boa_source);
         if use_boacas {
@@ -1948,7 +2166,7 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
     }
 
     let ts_hints = slice_cas::analyze_typescript_semantics(raw_source);
-    let tokens = tokenize_js(&source);
+    let tokens = tokens_opt.unwrap_or_else(|| vec![Token::Eof]);
     let mut parser = Parser::new(tokens);
     let stmts = parser.parse_program();
 

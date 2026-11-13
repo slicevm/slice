@@ -99,12 +99,14 @@ pub fn rewrite_cjs_requires_ast(
                     return;
                 };
                 let spec = str_lit.value.as_str();
-                let resolved_opt = if is_builtin_module(spec) || is_jsx_runtime_builtin(spec) {
+                let resolved_opt = if is_builtin_module(spec) {
                     Some(normalize_builtin_specifier(spec))
                 } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
                     let id = canonical_mod_id(&resolved_path);
                     deps_out.push(resolved_path);
                     Some(id)
+                } else if is_jsx_runtime_builtin(spec) {
+                    Some(normalize_builtin_specifier(spec))
                 } else {
                     None
                 };
@@ -150,12 +152,14 @@ pub fn rewrite_cjs_requires_ast(
             return;
         };
         let spec = str_lit.value.as_str();
-        let resolved_opt = if is_builtin_module(spec) || is_jsx_runtime_builtin(spec) {
+        let resolved_opt = if is_builtin_module(spec) {
             Some(normalize_builtin_specifier(spec))
         } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
             let id = canonical_mod_id(&resolved_path);
             deps_out.push(resolved_path);
             Some(id)
+        } else if is_jsx_runtime_builtin(spec) {
+            Some(normalize_builtin_specifier(spec))
         } else {
             None
         };
@@ -391,12 +395,14 @@ pub fn collect_require_edits_from_program(
             return;
         };
         let spec = str_lit.value.as_str();
-        let resolved_opt = if is_builtin_module(spec) || is_jsx_runtime_builtin(spec) {
+        let resolved_opt = if is_builtin_module(spec) {
             Some(normalize_builtin_specifier(spec))
         } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
             let id = canonical_mod_id(&resolved_path);
             deps_out.push(resolved_path);
             Some(id)
+        } else if is_jsx_runtime_builtin(spec) {
+            Some(normalize_builtin_specifier(spec))
         } else {
             None
         };

@@ -662,23 +662,43 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
         js_string!("__slice_text_encode"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
+            use boa_engine::string::JsStrVariant;
             let Some(first) = args.first() else {
                 return bytes_to_js_uint8_array(&[], context);
             };
             if first.is_undefined() {
                 return bytes_to_js_uint8_array(&[], context);
             }
-            if let Some(js_s) = first.as_string() {
-                if let boa_engine::string::JsStrVariant::Latin1(bytes) = js_s.as_str().variant() {
+            let js_s = match first.as_string() {
+                Some(s) => s.clone(),
+                None => first.to_string(context)?,
+            };
+            match js_s.as_str().variant() {
+                JsStrVariant::Latin1(bytes) => {
                     if bytes.is_ascii() {
                         return bytes_to_js_uint8_array(bytes, context);
                     }
+                    let mut out = Vec::with_capacity(bytes.len() * 2);
+                    for &b in bytes {
+                        if b < 0x80 {
+                            out.push(b);
+                        } else {
+                            out.push(0xC0 | (b >> 6));
+                            out.push(0x80 | (b & 0x3F));
+                        }
+                    }
+                    bytes_to_js_uint8_array(&out, context)
                 }
-                let owned = js_s.to_std_string_escaped();
-                return bytes_to_js_uint8_array(owned.as_bytes(), context);
+                JsStrVariant::Utf16(units) => {
+                    let mut out = Vec::with_capacity(units.len() * 3);
+                    for item in char::decode_utf16(units.iter().copied()) {
+                        let ch = item.unwrap_or(char::REPLACEMENT_CHARACTER);
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                    }
+                    bytes_to_js_uint8_array(&out, context)
+                }
             }
-            let s = first.to_string(context)?.to_std_string_escaped();
-            bytes_to_js_uint8_array(s.as_bytes(), context)
         }),
     );
 

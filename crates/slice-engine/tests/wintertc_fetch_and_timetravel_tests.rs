@@ -1351,3 +1351,299 @@ fn test_outbound_fetch_port_isolation_authority_alignment_and_https_proxy_connec
         "cleartext path/query/headers must never be visible to HTTPS_PROXY!"
     );
 }
+
+#[test]
+fn test_wintertc_binary_fetch_1xx_streams_headers_formdata_and_ws_upgrade() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // 1. Spawn a local HTTP/1.1 Keep-Alive server that emits `100 Continue` + binary `[0, 128, 255, 65]`
+    //    on request 1, and echoes binary request body bytes back on the SAME Keep-Alive socket on request 2.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server_handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut buf = [0u8; 4096];
+
+        // Request 1: read headers, send `100 Continue` followed by `200 OK` with non-UTF-8 binary payload
+        let mut req1 = Vec::new();
+        loop {
+            let n = stream.read(&mut buf).unwrap();
+            assert!(n > 0);
+            req1.extend_from_slice(&buf[..n]);
+            if req1.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let bin_payload: &[u8] = &[0x00, 0x80, 0xFF, 0x41, 0xFE, 0xC0];
+        let mut resp1 = Vec::new();
+        resp1.extend_from_slice(b"HTTP/1.1 100 Continue\r\n\r\n");
+        resp1.extend_from_slice(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                bin_payload.len()
+            )
+            .as_bytes(),
+        );
+        resp1.extend_from_slice(bin_payload);
+        stream.write_all(&resp1).unwrap();
+        stream.flush().unwrap();
+
+        // Request 2 on the same Keep-Alive socket: read binary POST body `[0, 129, 254, 255]` and echo it back
+        let mut req2 = Vec::new();
+        let hdr_end = loop {
+            let n = stream.read(&mut buf).unwrap();
+            assert!(n > 0);
+            req2.extend_from_slice(&buf[..n]);
+            if let Some(pos) = req2.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+        while req2.len() - hdr_end < 4 {
+            let n = stream.read(&mut buf).unwrap();
+            assert!(n > 0);
+            req2.extend_from_slice(&buf[..n]);
+        }
+        let posted = &req2[hdr_end..hdr_end + 4];
+        assert_eq!(posted, &[0x00, 0x81, 0xFE, 0xFF]);
+        let mut resp2 = Vec::new();
+        resp2.extend_from_slice(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\nConnection: close\r\n\r\n",
+        );
+        resp2.extend_from_slice(posted);
+        stream.write_all(&resp2).unwrap();
+        stream.flush().unwrap();
+    });
+
+    let caps = CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", port));
+    let js = format!(
+        r#"
+async function main() {{
+    // A. Outbound fetch: 100 Continue + lossless non-UTF-8 binary response + binary POST on Keep-Alive socket
+    const r1 = await fetch("http://127.0.0.1:{port}/bin", {{ headers: {{ "Expect": "100-continue" }} }});
+    const b1 = Array.from(await r1.bytes());
+    const r2 = await fetch("http://127.0.0.1:{port}/echo", {{
+        method: "POST",
+        body: new Uint8Array([0, 129, 254, 255]),
+    }});
+    const b2 = Array.from(new Uint8Array(await r2.arrayBuffer()));
+
+    // B. URL resolution with colon inside query/hash of relative input
+    const uRel = new URL("/callback?next=https://example.com:8443/a", "https://app.io/dir/page");
+    const uHash = new URL("step#ref=http://other.test", "https://app.io/dir/page");
+
+    // C. ReadableStream > 4096 chunks without buffer overflow + reader.releaseLock() cursor continuity + async Response(stream).bytes()
+    let produced = 0;
+    const bigStream = new ReadableStream({{
+        pull(c) {{
+            if (produced < 10000) {{
+                c.enqueue(produced++);
+            }} else {{
+                c.close();
+            }}
+        }}
+    }});
+    const rdA = bigStream.getReader();
+    const firstThree = [
+        (await rdA.read()).value,
+        (await rdA.read()).value,
+        (await rdA.read()).value,
+    ];
+    rdA.releaseLock();
+    const rdB = bigStream.getReader();
+    let countAfterRelease = 0;
+    let fourthVal = -1;
+    while (true) {{
+        const step = await rdB.read();
+        if (step.done) break;
+        if (countAfterRelease === 0) fourthVal = step.value;
+        countAfterRelease++;
+    }}
+    rdB.releaseLock();
+
+    let pullStep = 0;
+    const asyncBinStream = new ReadableStream({{
+        async pull(c) {{
+            await Promise.resolve();
+            if (pullStep === 0) {{
+                pullStep++;
+                c.enqueue(new Uint8Array([10, 128]));
+            }} else if (pullStep === 1) {{
+                pullStep++;
+                c.enqueue(new Uint8Array([255, 20]));
+            }} else {{
+                c.close();
+            }}
+        }}
+    }});
+    const resStreamBytes = Array.from(await new Response(asyncBinStream).bytes());
+
+    // D. Headers RFC 9110 tchar & CRLF validation +Response status [200, 599] RangeError + Response.error()
+    let badHdrName = false;
+    try {{ new Headers({{ "Bad Name": "1" }}); }} catch (e) {{ badHdrName = e instanceof TypeError; }}
+    let badHdrVal = false;
+    try {{ const h = new Headers(); h.set("x-ok", "v1\r\nv2"); }} catch (e) {{ badHdrVal = e instanceof TypeError; }}
+    let badStatus101 = false;
+    try {{ new Response("no", {{ status: 101 }}); }} catch (e) {{ badStatus101 = e instanceof RangeError; }}
+    let badStatus999 = false;
+    try {{ new Response("no", {{ status: 999 }}); }} catch (e) {{ badStatus999 = e instanceof RangeError; }}
+    const errRes = Response.error();
+    const errClone = errRes.clone();
+
+    // E. FormData multipart quote/newline escaping + Request.formData() round-trip
+    const fd = new FormData();
+    fd.append('field"quote\nline', "val-1");
+    fd.append("upload", new File(["hello-mp"], 'my"file.txt', {{ type: "text/plain" }}));
+    const fdReq = new Request("https://app.io/submit", {{ method: "POST", body: fd }});
+    const rawMp = await fdReq.clone().text();
+    const parsedFromWire = await new Request("https://app.io/submit", {{
+        method: "POST",
+        headers: {{ "content-type": fdReq.headers.get("content-type") || "" }},
+        body: rawMp,
+    }}).formData();
+    const uploaded = parsedFromWire.get("upload");
+
+    console.log(JSON.stringify({{
+        r1Status: r1.status,
+        b1,
+        b2,
+        uRel: uRel.href,
+        uHash: uHash.href,
+        firstThree,
+        fourthVal,
+        countAfterRelease,
+        resStreamBytes,
+        badHdrName,
+        badHdrVal,
+        badStatus101,
+        badStatus999,
+        errStatus: errClone.status,
+        hasEscapedName: rawMp.includes('name="field%22quote%0Aline"'),
+        hasEscapedFile: rawMp.includes('filename="my%22file.txt"'),
+        parsedField: parsedFromWire.get('field"quote\nline'),
+        parsedFileName: uploaded && uploaded.name,
+        parsedFileText: uploaded ? await uploaded.text() : "",
+    }}));
+}}
+main().catch(e => console.log("ERR:" + e + " | " + (e && e.stack)));
+"#,
+        port = port
+    );
+
+    let m = run_source_isolated(
+        "wintertc-step10-tenant",
+        &js,
+        caps,
+        25_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    crate::clear_outbound_conn_pool_for_tenant("wintertc-step10-tenant");
+    server_handle.join().unwrap();
+
+    assert!(
+        !m.stdout.is_empty() && !m.stdout[0].starts_with("ERR:"),
+        "wintertc-step10 JS error: stdout={:?}, exit={:?}, ret={}",
+        m.stdout,
+        m.exit_code,
+        m.return_value
+    );
+    let v: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(v["r1Status"], 200);
+    assert_eq!(v["b1"], serde_json::json!([0, 128, 255, 65, 254, 192]));
+    assert_eq!(v["b2"], serde_json::json!([0, 129, 254, 255]));
+    assert_eq!(
+        v["uRel"],
+        "https://app.io/callback?next=https://example.com:8443/a"
+    );
+    assert_eq!(v["uHash"], "https://app.io/dir/step#ref=http://other.test");
+    assert_eq!(v["firstThree"], serde_json::json!([0, 1, 2]));
+    assert_eq!(v["fourthVal"], 3);
+    assert_eq!(v["countAfterRelease"], 9997);
+    assert_eq!(v["resStreamBytes"], serde_json::json!([10, 128, 255, 20]));
+    assert_eq!(v["badHdrName"], true);
+    assert_eq!(v["badHdrVal"], true);
+    assert_eq!(v["badStatus101"], true);
+    assert_eq!(v["badStatus999"], true);
+    assert_eq!(v["errStatus"], 0);
+    assert_eq!(v["hasEscapedName"], true);
+    assert_eq!(v["hasEscapedFile"], true);
+    assert_eq!(v["parsedField"], "val-1");
+    assert_eq!(v["parsedFileName"], "my\"file.txt");
+    assert_eq!(v["parsedFileText"], "hello-mp");
+
+    // 2. Verify live HTTP request `Set-Cookie` cloning (`new Headers(req.headers).getSetCookie()`)
+    //    and `Slice.upgradeWebSocket` returning HTTP `101` without throwing RangeError.
+    let ws_src = r#"
+export default {
+    fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/cookies") {
+            const cloned = new Headers(req.headers);
+            return Response.json({ cookies: cloned.getSetCookie() });
+        }
+        return Slice.upgradeWebSocket({
+            open(ws) { ws.send("upgraded-ok"); }
+        });
+    }
+};
+"#;
+    let bundled_ws = slice_cas::strip_typescript_and_normalize(ws_src, true);
+    let bc_ws = crate::compile_source_to_bytecode(&bundled_ws);
+    let mut iso_http = SliceIsolate::spawn(
+        "ws-and-live-headers",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    let cookie_outcome = iso_http
+        .execute_http_request(
+            &bc_ws,
+            None,
+            &HttpRequestContext {
+                method: "GET",
+                path: "/cookies",
+                query: "",
+                tenant_id: "ws-and-live-headers",
+                body: "",
+                headers: &[
+                    ("Host", "edge.local"),
+                    ("Set-Cookie", "a=1; Path=/"),
+                    ("Set-Cookie", "b=2; HttpOnly"),
+                ],
+            },
+        )
+        .unwrap();
+    assert_eq!(cookie_outcome.status_code, 200);
+    let cj: serde_json::Value = serde_json::from_str(&cookie_outcome.response_body).unwrap();
+    assert_eq!(
+        cj["cookies"],
+        serde_json::json!(["a=1; Path=/", "b=2; HttpOnly"])
+    );
+
+    iso_http.reset_for_request("ws-and-live-headers", 2, 5_000_000, 8 * 1024 * 1024);
+    let ws_outcome = iso_http
+        .execute_http_request(
+            &bc_ws,
+            None,
+            &HttpRequestContext {
+                method: "GET",
+                path: "/ws",
+                query: "",
+                tenant_id: "ws-and-live-headers",
+                body: "",
+                headers: &[
+                    ("Host", "edge.local"),
+                    ("Upgrade", "websocket"),
+                    ("Connection", "Upgrade"),
+                ],
+            },
+        )
+        .unwrap();
+    assert_eq!(ws_outcome.status_code, 101);
+    assert!(ws_outcome.ws_upgraded);
+}

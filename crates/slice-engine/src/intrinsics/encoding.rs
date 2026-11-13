@@ -137,19 +137,15 @@ pub fn base64_decode(input: &str) -> Vec<u8> {
     out
 }
 
-/// Strict WHATWG `btoa`: encodes a Latin1 (`0x00..=0xFF`) string to standard Base64,
-/// returning `Err` if any code point exceeds `0xFF`.
-pub(crate) fn whatwg_btoa(input: &str) -> Result<String, &'static str> {
-    if input.is_ascii() {
-        return Ok(base64_encode(input.as_bytes(), false));
-    }
-    let mut bytes = Vec::with_capacity(input.len());
-    for ch in input.chars() {
-        let code = ch as u32;
-        if code > 0xFF {
+/// Strict WHATWG `btoa` over UTF-16 code units: encodes Latin1 (`0x0000..=0x00FF`) code units
+/// to standard Base64, returning `Err` if any code unit exceeds `0x00FF` (including unpaired surrogates).
+pub(crate) fn whatwg_btoa_utf16(units: &[u16]) -> Result<String, &'static str> {
+    let mut bytes = Vec::with_capacity(units.len());
+    for &u in units {
+        if u > 0x00FF {
             return Err("InvalidCharacterError: The string to be encoded contains characters outside of the Latin1 range.");
         }
-        bytes.push(code as u8);
+        bytes.push(u as u8);
     }
     Ok(base64_encode(&bytes, false))
 }

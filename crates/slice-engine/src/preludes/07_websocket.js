@@ -195,11 +195,15 @@
         __slice_mark_ws_upgrade();
       }
       if (!globalThis.Response) __slice_ensure_shard(11);
-      __slice_http_respond(101, "", "text/plain", JSON.stringify([["Upgrade", "websocket"]]));
-      return new globalThis.Response("", {
-        status: 101,
-        statusText: "Switching Protocols",
-        headers: { "Upgrade": "websocket", "Connection": "Upgrade" }
+      __slice_http_respond(
+        101,
+        "",
+        "",
+        JSON.stringify([["Upgrade", "websocket"], ["Connection", "Upgrade"]])
+      );
+      return globalThis.__slice_make_special_response(101, "Switching Protocols", {
+        "Upgrade": "websocket",
+        "Connection": "Upgrade"
       });
     };
   }

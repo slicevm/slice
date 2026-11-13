@@ -444,7 +444,7 @@ pub(crate) fn check_boa_outbound_fetch_ocap_and_dlp(
     parts: &OutboundUrlParts,
     raw_url: &str,
     headers_json: &str,
-    body: &str,
+    body: &[u8],
 ) -> Result<bool, String> {
     let tenant_id = BOA_ACTIVE_TENANT.with(|t| {
         let b = t.borrow();
@@ -499,9 +499,18 @@ pub(crate) fn check_boa_outbound_fetch_ocap_and_dlp(
         if secrets.is_empty() {
             return None;
         }
+        let body_lossy = String::from_utf8_lossy(body);
         verify_egress_secrets_slice(&tenant_id, &secrets, raw_url)
             .and_then(|()| verify_egress_secrets_slice(&tenant_id, &secrets, headers_json))
-            .and_then(|()| verify_egress_secrets_slice(&tenant_id, &secrets, body))
+            .and_then(|()| verify_egress_secrets_slice(&tenant_id, &secrets, &body_lossy))
+            .and_then(|()| {
+                if !body.is_empty() && !body.is_ascii() {
+                    let b64 = crate::intrinsics::base64_encode(body, false);
+                    verify_egress_secrets_slice(&tenant_id, &secrets, &b64)
+                } else {
+                    Ok(())
+                }
+            })
             .err()
     });
 
@@ -717,7 +726,7 @@ struct RawHttpResponse {
     status: u16,
     status_text: String,
     headers: Vec<(String, String)>,
-    body: String,
+    body: Vec<u8>,
     peer_closed: bool,
 }
 
@@ -765,84 +774,128 @@ fn send_and_read_framed_http11(
     });
 
     let mut raw_resp = Vec::with_capacity(4096);
+    let mut info_hops = 0usize;
 
-    // 1. Read until end of HTTP response headers (`\r\n\r\n`), capped at `MAX_OUTBOUND_HEADER_BYTES` (64 KB)
-    let (hdr_end, body_start) = loop {
-        if let Some(found) = find_header_delimiter(&raw_resp) {
-            if found.0 > MAX_OUTBOUND_HEADER_BYTES {
+    let (
+        body_start,
+        status_code,
+        status_text,
+        resp_headers,
+        is_chunked,
+        content_length,
+        mut peer_closed,
+    ) = loop {
+        // 1. Read until end of HTTP response headers (`\r\n\r\n`), capped at `MAX_OUTBOUND_HEADER_BYTES` (64 KB)
+        let (hdr_end, body_start) = loop {
+            if let Some(found) = find_header_delimiter(&raw_resp) {
+                if found.0 > MAX_OUTBOUND_HEADER_BYTES {
+                    return Err(trap_outbound_memory_exceeded(
+                        found.0,
+                        MAX_OUTBOUND_HEADER_BYTES,
+                    ));
+                }
+                break found;
+            }
+            if raw_resp.len() > MAX_OUTBOUND_HEADER_BYTES {
                 return Err(trap_outbound_memory_exceeded(
-                    found.0,
+                    raw_resp.len(),
                     MAX_OUTBOUND_HEADER_BYTES,
                 ));
             }
-            break found;
-        }
-        if raw_resp.len() > MAX_OUTBOUND_HEADER_BYTES {
-            return Err(trap_outbound_memory_exceeded(
-                raw_resp.len(),
-                MAX_OUTBOUND_HEADER_BYTES,
-            ));
-        }
-        let n =
-            slab_guard.read_chunk_via_slab(stream, &mut raw_resp, slice_io::FIXED_BUFFER_SIZE)?;
-        if n == 0 {
-            if raw_resp.is_empty() {
+            let n = slab_guard.read_chunk_via_slab(
+                stream,
+                &mut raw_resp,
+                slice_io::FIXED_BUFFER_SIZE,
+            )?;
+            if n == 0 {
+                if raw_resp.is_empty() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "peer closed connection before sending HTTP response headers",
+                    ));
+                }
+                break (raw_resp.len(), raw_resp.len());
+            }
+        };
+
+        let header_str = std::str::from_utf8(&raw_resp[..hdr_end]).unwrap_or("");
+        let mut lines = header_str.lines();
+        let status_line = lines.next().unwrap_or("HTTP/1.1 200 OK");
+        let mut status_parts = status_line.splitn(3, ' ');
+        let http_ver = status_parts.next().unwrap_or("HTTP/1.1");
+        let status_code: u16 = status_parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(200);
+        let status_text = status_parts.next().unwrap_or("OK").trim().to_string();
+
+        // Skip RFC 9110 interim `1xx` responses (`100 Continue`, `102 Processing`, `103 Early Hints`),
+        // except `101 Switching Protocols`.
+        if matches!(status_code, 100..=199) && status_code != 101 {
+            info_hops += 1;
+            if info_hops > 8 {
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "peer closed connection before sending HTTP response headers",
+                    std::io::ErrorKind::InvalidData,
+                    "too many 1xx informational HTTP responses",
                 ));
             }
-            break (raw_resp.len(), raw_resp.len());
+            raw_resp.drain(..body_start);
+            continue;
         }
-    };
 
-    let header_str = std::str::from_utf8(&raw_resp[..hdr_end]).unwrap_or("");
-    let mut lines = header_str.lines();
-    let status_line = lines.next().unwrap_or("HTTP/1.1 200 OK");
-    let mut status_parts = status_line.splitn(3, ' ');
-    let http_ver = status_parts.next().unwrap_or("HTTP/1.1");
-    let status_code: u16 = status_parts
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(200);
-    let status_text = status_parts.next().unwrap_or("OK").trim().to_string();
+        let mut resp_headers: Vec<(String, String)> = Vec::new();
+        let mut is_chunked = false;
+        let mut content_length: Option<usize> = None;
+        let mut peer_closed = http_ver.ends_with("1.0");
 
-    let mut resp_headers: Vec<(String, String)> = Vec::new();
-    let mut is_chunked = false;
-    let mut content_length: Option<usize> = None;
-    let mut peer_closed = http_ver.ends_with("1.0");
-
-    for line in lines {
-        if let Some((k, v)) = line.split_once(':') {
-            let key = k.trim().to_ascii_lowercase();
-            let val = v.trim().to_string();
-            let val_lower = val.to_ascii_lowercase();
-            if key == "transfer-encoding" && val_lower.contains("chunked") {
-                is_chunked = true;
-            } else if key == "content-length" {
-                if let Ok(len) = val.trim().parse::<usize>() {
-                    content_length = Some(len);
+        for line in lines {
+            if let Some((k, v)) = line.split_once(':') {
+                let key = k.trim().to_ascii_lowercase();
+                let val = v.trim().to_string();
+                let val_lower = val.to_ascii_lowercase();
+                if key == "transfer-encoding" && val_lower.contains("chunked") {
+                    is_chunked = true;
+                } else if key == "content-length" {
+                    if let Ok(len) = val.trim().parse::<usize>() {
+                        content_length = Some(len);
+                    }
+                } else if key == "connection" {
+                    if val_lower.contains("close") {
+                        peer_closed = true;
+                    } else if val_lower.contains("keep-alive") {
+                        peer_closed = false;
+                    }
                 }
-            } else if key == "connection" {
-                if val_lower.contains("close") {
-                    peer_closed = true;
-                } else if val_lower.contains("keep-alive") {
-                    peer_closed = false;
-                }
+                resp_headers.push((key, val));
             }
-            resp_headers.push((key, val));
         }
-    }
+
+        break (
+            body_start,
+            status_code,
+            status_text,
+            resp_headers,
+            is_chunked,
+            content_length,
+            peer_closed,
+        );
+    };
 
     // 2. Frame the response body with strict `effective_max_body` ceiling enforcement (`N-Sec-1` & `N-Sec-5`)
     let no_body_status = method == "HEAD" || matches!(status_code, 100..=199 | 204 | 304);
     let decoded_body = if no_body_status {
-        String::new()
+        if raw_resp.len() > body_start {
+            peer_closed = true;
+        }
+        Vec::new()
     } else if is_chunked {
         loop {
             match parse_chunked_body(&raw_resp[body_start..], effective_max_body) {
-                Ok(Some((decoded, _consumed))) => {
-                    break String::from_utf8_lossy(&decoded).into_owned();
+                Ok(Some((decoded, consumed))) => {
+                    if body_start + consumed < raw_resp.len() {
+                        peer_closed = true;
+                    }
+                    break decoded;
                 }
                 Ok(None) => {
                     if raw_resp.len().saturating_sub(body_start)
@@ -892,7 +945,10 @@ fn send_and_read_framed_http11(
             }
         }
         let end_idx = (body_start + expected_len).min(raw_resp.len());
-        String::from_utf8_lossy(&raw_resp[body_start..end_idx]).into_owned()
+        if raw_resp.len() > end_idx {
+            peer_closed = true;
+        }
+        raw_resp[body_start..end_idx].to_vec()
     } else {
         peer_closed = true;
         loop {
@@ -920,7 +976,7 @@ fn send_and_read_framed_http11(
                 ));
             }
         }
-        String::from_utf8_lossy(&raw_resp[body_start..]).into_owned()
+        raw_resp[body_start..].to_vec()
     };
 
     Ok(RawHttpResponse {
@@ -1058,7 +1114,7 @@ fn execute_single_http11_hop(
     dial_plan: OutboundHopDialPlan<'_>,
     method: &str,
     req_headers: &[(String, String)],
-    body: &str,
+    body: &[u8],
 ) -> Result<RawHttpResponse, String> {
     // N-Sec-2: Strictly validate method, request target, Host header, and all custom headers against CRLF / control char injection
     if !is_valid_http_header_name(method) {
@@ -1101,7 +1157,7 @@ fn execute_single_http11_hop(
     }
     if !body.is_empty() || matches!(method, "POST" | "PUT" | "PATCH") {
         let _ = write!(&mut req_buf, "Content-Length: {}\r\n\r\n", body.len());
-        req_buf.extend_from_slice(body.as_bytes());
+        req_buf.extend_from_slice(body);
     } else {
         req_buf.extend_from_slice(b"\r\n");
     }
@@ -1175,8 +1231,40 @@ struct WireFetchResponse {
     status_text: String,
     headers: Vec<(String, String)>,
     body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_base64: Option<String>,
     final_url: String,
     redirected: bool,
+}
+
+impl WireFetchResponse {
+    fn from_raw(resp: RawHttpResponse, final_url: String, redirected: bool) -> Self {
+        match String::from_utf8(resp.body) {
+            Ok(utf8_body) => Self {
+                status: resp.status,
+                status_text: resp.status_text,
+                headers: resp.headers,
+                body: utf8_body,
+                body_base64: None,
+                final_url,
+                redirected,
+            },
+            Err(err) => {
+                let bytes = err.into_bytes();
+                let b64 = crate::intrinsics::base64_encode(&bytes, false);
+                let lossy = String::from_utf8_lossy(&bytes).into_owned();
+                Self {
+                    status: resp.status,
+                    status_text: resp.status_text,
+                    headers: resp.headers,
+                    body: lossy,
+                    body_base64: Some(b64),
+                    final_url,
+                    redirected,
+                }
+            }
+        }
+    }
 }
 
 fn is_host_bypassed_by_no_proxy(hostname: &str, no_proxy_raw: &str) -> bool {
@@ -1242,13 +1330,13 @@ pub(crate) fn execute_outbound_fetch_with_redirects(
     initial_url: &str,
     initial_method: &str,
     initial_headers: &[(String, String)],
-    initial_body: &str,
+    initial_body: &[u8],
     redirect_mode: &str,
 ) -> Result<String, String> {
     let mut current_url = initial_url.to_string();
     let mut current_method = initial_method.to_string();
     let mut current_headers: Vec<(String, String)> = initial_headers.to_vec();
-    let mut current_body = initial_body.to_string();
+    let mut current_body = initial_body.to_vec();
     let mut redirected = false;
 
     for hop in 0..=MAX_REDIRECT_HOPS {
@@ -1324,14 +1412,11 @@ pub(crate) fn execute_outbound_fetch_with_redirects(
 
             if let Some(location) = location_opt {
                 if redirect_mode == "manual" {
-                    return serde_json::to_string(&WireFetchResponse {
-                        status: resp.status,
-                        status_text: resp.status_text,
-                        headers: resp.headers,
-                        body: resp.body,
-                        final_url: current_url,
+                    return serde_json::to_string(&WireFetchResponse::from_raw(
+                        resp,
+                        current_url,
                         redirected,
-                    })
+                    ))
                     .map_err(|e| e.to_string());
                 }
                 if redirect_mode == "error" {
@@ -1380,15 +1465,8 @@ pub(crate) fn execute_outbound_fetch_with_redirects(
             }
         }
 
-        return serde_json::to_string(&WireFetchResponse {
-            status: resp.status,
-            status_text: resp.status_text,
-            headers: resp.headers,
-            body: resp.body,
-            final_url: current_url,
-            redirected,
-        })
-        .map_err(|e| e.to_string());
+        return serde_json::to_string(&WireFetchResponse::from_raw(resp, current_url, redirected))
+            .map_err(|e| e.to_string());
     }
 
     Err("RedirectError: redirect loop terminated".to_string())

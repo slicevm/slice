@@ -1,3 +1,7 @@
+use crate::compiler::strip_js_comments;
+use crate::linker::{
+    inline_cold_method_requires_ast, prune_and_minify_cjs_module_ast, transform_module_to_cjs,
+};
 use crate::*;
 
 #[test]
@@ -182,4 +186,167 @@ console.log(identity(htmlTemplate));
         "TypeScript <T> generic arrow function must not be misparsed as JSX when HTML strings exist:\n{}",
         out
     );
+}
+
+#[test]
+fn test_pipeline_fusion_reused_parameter_names_and_scope_hazards() {
+    let code = r#"
+const total = items
+  .filter((x) => x > 1)
+  .map((x) => ({ x, doubled: x * 2 }))
+  .reduce((x, item) => x + item.doubled, 0);
+"#;
+    let fused = fuse_array_pipelines_ast(code);
+    assert!(
+        fused.contains("for (let __sl_i"),
+        "Expected filter+map+reduce chain with reused param names to fuse:\n{}",
+        fused
+    );
+    check_syntax_source(&fused, None)
+        .expect("Fused pipeline with reused parameter names and shorthand object must be valid JS");
+    assert!(
+        fused.contains("x: __sl_m"),
+        "Object shorthand {{ x }} must expand cleanly when renaming callback parameter:\n{}",
+        fused
+    );
+
+    // Async/await or `this`/`arguments` inside callback or receiver must bail out cleanly
+    let async_hazard =
+        "async function f(arr) { return arr.map((x) => await g(x)).reduce((a, b) => a + b, 0); }";
+    let unfused_async = fuse_array_pipelines_ast(async_hazard);
+    assert_eq!(unfused_async, async_hazard);
+
+    let this_hazard = "function m(arr) { return arr.some((x) => x === this.target); }";
+    let unfused_this = fuse_array_pipelines_ast(this_hazard);
+    assert_eq!(unfused_this, this_hazard);
+}
+
+#[test]
+fn test_crypto_import_aliases_and_subexports_preserved() {
+    let aliased_src = r#"
+import { createHash as hash, pbkdf2Sync } from "node:crypto";
+export function derive(input) {
+  return hash("sha256").update(pbkdf2Sync(input, "salt", 1, 16, "sha256")).digest("hex");
+}
+"#;
+    let mut deps = Vec::new();
+    let cjs_aliased =
+        transform_module_to_cjs(aliased_src, std::path::Path::new("."), None, &mut deps);
+    assert!(
+        cjs_aliased.contains("require(\"node:crypto\")"),
+        "Aliased and non-default node:crypto named imports must retain require(\"node:crypto\"):\n{}",
+        cjs_aliased
+    );
+    assert!(cjs_aliased.contains("createHash: hash") && cjs_aliased.contains("pbkdf2Sync"));
+
+    let ns_alias_src = r#"
+import * as crypto from "node:crypto";
+const c = crypto;
+export const id = () => c.randomUUID();
+"#;
+    let cjs_ns = transform_module_to_cjs(ns_alias_src, std::path::Path::new("."), None, &mut deps);
+    assert!(
+        cjs_ns.contains("const crypto = require(\"node:crypto\");"),
+        "Namespace node:crypto import assigned to another variable must retain require:\n{}",
+        cjs_ns
+    );
+
+    let unused_crypto_src = r#"
+import { createHash } from "node:crypto";
+export const answer = 42;
+"#;
+    let cjs_unused = transform_module_to_cjs(
+        unused_crypto_src,
+        std::path::Path::new("."),
+        None,
+        &mut deps,
+    );
+    assert!(
+        !cjs_unused.contains("require(\"node:crypto\")"),
+        "Completely unreferenced node:crypto specifier import should still be omitted:\n{}",
+        cjs_unused
+    );
+}
+
+#[test]
+fn test_comment_stripper_nested_templates_and_regex_after_parens() {
+    let js_src = r#"
+const msg = `outer ${`inner // keep-inner`} // keep-outer`;
+function check(ok, u) {
+  /* inline comment between tokens */
+  if (ok) return/*gap*/ /https?:\/\/example\.com\/path/.test(u);
+  return 0;
+}
+"#;
+    let stripped = strip_js_comments(js_src);
+    check_syntax_source(&stripped, None).expect("Comment-stripped JS must parse cleanly");
+    assert!(stripped.contains("inner // keep-inner"));
+    assert!(stripped.contains("} // keep-outer`"));
+    assert!(stripped.contains("return /https?:\\/\\/example\\.com\\/path/.test(u)"));
+}
+
+#[test]
+fn test_cjs_lazy_barrel_nested_arrays_and_tree_shaker_side_effect_init() {
+    let cjs_with_array = r#"const foo = require("./foo");
+const bar = require("./bar");
+module.exports = {
+  bar,
+  list: [
+    foo,
+  ],
+};"#;
+    let mut deps = Vec::new();
+    let transformed =
+        transform_module_to_cjs(cjs_with_array, std::path::Path::new("."), None, &mut deps);
+    check_syntax_source(&transformed, None)
+        .expect("CJS lazy barrel transform must not emit getter syntax inside nested array");
+    assert!(
+        transformed.contains("get bar()"),
+        "Direct top-level shorthand property on module.exports should become a lazy getter:\n{}",
+        transformed
+    );
+    assert!(
+        !transformed.contains("get foo()"),
+        "Array element `foo,` inside module.exports must never become `get foo()`:\n{}",
+        transformed
+    );
+
+    // Cold method require inliner must preserve string literals and object property keys
+    let cold_cjs = r#"const { parseTag } = require("/pkg/node_modules/tag/index.js");
+class Widget {
+  renderCold() {
+    return { parseTag: "parseTag", out: parseTag("x") };
+  }
+}"#;
+    let mut single_deps = rustc_hash::FxHashSet::default();
+    single_deps.insert("/pkg/node_modules/tag/index.js".to_string());
+    let inlined = inline_cold_method_requires_ast(cold_cjs, &single_deps);
+    check_syntax_source(&inlined, None).expect("Inlined cold method CJS must parse cleanly");
+    assert!(
+        inlined.contains(r#"parseTag: "parseTag""#),
+        "Object key and string literal matching binding name must remain untouched:\n{}",
+        inlined
+    );
+    assert!(
+        inlined.contains(r#"require("/pkg/node_modules/tag/index.js").parseTag("x")"#),
+        "Identifier call in cold method should be inlined:\n{}",
+        inlined
+    );
+
+    // Tree shaker must preserve `const local = exports.used = ...` when `used` is live
+    let side_effect_cjs = r#"
+exports.__esModule = true;
+const internalHelper = exports.liveApi = function(v) { return v + 1; };
+const deadFn = function() { return 0; };
+exports.deadApi = deadFn;
+"#;
+    let mut used = rustc_hash::FxHashSet::default();
+    used.insert("liveApi".to_string());
+    let pruned = prune_and_minify_cjs_module_ast(side_effect_cjs, Some(&used), false);
+    assert!(
+        pruned.contains("exports.liveApi"),
+        "Declarator with `exports.liveApi = ...` assignment must not be pruned when `internalHelper` has 0 local refs:\n{}",
+        pruned
+    );
+    assert!(!pruned.contains("deadApi"));
 }

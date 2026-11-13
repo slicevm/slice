@@ -81,6 +81,7 @@ pub struct SliceIsolate {
     pub(crate) last_return_json: Option<String>,
     pub(crate) last_exec_check_ses: bool,
     pub(crate) last_exit_code: Option<i32>,
+    pub(crate) pending_tier0_throw: Option<String>,
     pub(crate) process_argv: Vec<String>,
 }
 
@@ -121,6 +122,7 @@ impl SliceIsolate {
             last_return_json: None,
             last_exec_check_ses: false,
             last_exit_code: None,
+            pending_tier0_throw: None,
             process_argv: Vec::new(),
         }
     }

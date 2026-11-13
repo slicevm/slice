@@ -224,8 +224,9 @@ pub(crate) fn deflate_raw_compress(input: &[u8]) -> Vec<u8> {
     }
 
     let mut head = [usize::MAX; 4096];
-    let mut prev = vec![usize::MAX; input.len().min(32768)];
-    let mask = prev.len() - 1;
+    let win_len = input.len().next_power_of_two().clamp(2, 32768);
+    let mut prev = vec![usize::MAX; win_len];
+    let mask = win_len - 1;
     let mut pos = 0usize;
 
     while pos < input.len() {

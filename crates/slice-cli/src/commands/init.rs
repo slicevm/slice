@@ -325,15 +325,17 @@ fn init_sveltekit_template(target_dir: &std::path::Path, project_name: &str) -> 
     let manifest_path = target_dir.join("slice.toml");
     if !manifest_path.exists() {
         let toml_content = format!(
-            r#"[project]
+            r#"[package]
 name = "{project_name}"
 version = "0.1.0"
 entrypoint = "./build/slice-entry.js"
+
+[server]
 static_dir = "./build/client"
 
-[runtime]
-fuel_limit = 50_000_000
-memory_limit_mb = 64
+[limits]
+fuel = 50_000_000
+memory_mb = 64
 
 [capabilities]
 allow_env = ["NODE_ENV", "ORIGIN", "PORT"]

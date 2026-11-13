@@ -246,28 +246,23 @@ fn is_valid_whatwg_hostname(hostname: &str) -> bool {
 }
 
 #[inline]
-fn has_non_special_scheme(s: &str) -> bool {
-    let Some(ci) = s.find(':') else {
+fn has_rfc3986_scheme(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let Some(&first) = bytes.first() else {
         return false;
     };
-    if ci == 0 || s.find('/').is_some_and(|sl| sl < ci) {
+    if !first.is_ascii_alphabetic() {
         return false;
     }
-    let scheme = &s[..ci];
-    if !scheme
-        .bytes()
-        .next()
-        .is_some_and(|b| b.is_ascii_alphabetic())
-        || !scheme
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
-    {
-        return false;
+    for &b in &bytes[1..] {
+        if b == b':' {
+            return true;
+        }
+        if !b.is_ascii_alphanumeric() && !matches!(b, b'+' | b'-' | b'.') {
+            return false;
+        }
     }
-    !matches!(
-        scheme.to_ascii_lowercase().as_str(),
-        "http" | "https" | "ws" | "wss" | "file" | "ftp"
-    )
+    false
 }
 
 /// Resolves and parses a WHATWG `URL` from `input` and optional `base`, returning `None` if invalid.
@@ -277,28 +272,27 @@ pub fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<ParsedWhatwgU
     let cleaned_cow = strip_whatwg_ascii_tab_or_newline(trimmed_outer);
     let trimmed = cleaned_cow.as_ref();
 
-    let resolved_cow: Cow<'_, str> = if let Some(base_str) =
-        base.filter(|_| !trimmed.contains("://") && !has_non_special_scheme(trimmed))
-    {
-        let b = parse_whatwg_url(base_str, None)?;
-        if trimmed.starts_with("//") {
-            Cow::Owned(format!("{}{}", b.protocol, trimmed))
-        } else if trimmed.starts_with('/') || trimmed.starts_with('\\') {
-            Cow::Owned(format!("{}{}", b.origin, trimmed))
-        } else if trimmed.starts_with('?') {
-            Cow::Owned(format!("{}{}{}", b.origin, b.pathname, trimmed))
-        } else if trimmed.starts_with('#') {
-            Cow::Owned(format!("{}{}{}{}", b.origin, b.pathname, b.search, trimmed))
-        } else if trimmed.is_empty() {
-            Cow::Owned(b.href)
+    let resolved_cow: Cow<'_, str> =
+        if let Some(base_str) = base.filter(|_| !has_rfc3986_scheme(trimmed)) {
+            let b = parse_whatwg_url(base_str, None)?;
+            if trimmed.starts_with("//") {
+                Cow::Owned(format!("{}{}", b.protocol, trimmed))
+            } else if trimmed.starts_with('/') || trimmed.starts_with('\\') {
+                Cow::Owned(format!("{}{}", b.origin, trimmed))
+            } else if trimmed.starts_with('?') {
+                Cow::Owned(format!("{}{}{}", b.origin, b.pathname, trimmed))
+            } else if trimmed.starts_with('#') {
+                Cow::Owned(format!("{}{}{}{}", b.origin, b.pathname, b.search, trimmed))
+            } else if trimmed.is_empty() {
+                Cow::Owned(b.href)
+            } else {
+                let dir_end = b.pathname.rfind('/').map(|i| i + 1).unwrap_or(1);
+                let dir = &b.pathname[..dir_end];
+                Cow::Owned(format!("{}{}{}", b.origin, dir, trimmed))
+            }
         } else {
-            let dir_end = b.pathname.rfind('/').map(|i| i + 1).unwrap_or(1);
-            let dir = &b.pathname[..dir_end];
-            Cow::Owned(format!("{}{}{}", b.origin, dir, trimmed))
-        }
-    } else {
-        Cow::Borrowed(trimmed)
-    };
+            Cow::Borrowed(trimmed)
+        };
 
     let raw = resolved_cow.as_ref();
     let (before_hash, hash_raw) = match raw.find('#') {

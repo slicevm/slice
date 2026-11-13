@@ -34,7 +34,7 @@ fn get_module_mutable_exports(path: &Path) -> FxHashSet<String> {
         return FxHashSet::default();
     }
 
-    let is_ts = matches!(ext, "ts" | "tsx" | "jsx");
+    let is_ts = matches!(ext, "ts" | "tsx" | "jsx" | "mts" | "cts");
     let is_jsx_ext = matches!(ext, "tsx" | "jsx");
     let js_code = strip_typescript_raw_with_ext(&raw_src, is_ts, is_jsx_ext);
 
@@ -80,7 +80,7 @@ fn get_module_mutable_exports(path: &Path) -> FxHashSet<String> {
             }
             Statement::ExportFromDeclaration(exp_from) if !exp_from.export_kind.is_type() => {
                 let spec_str = exp_from.source.value.as_str();
-                if !is_builtin_module(spec_str) && !is_jsx_runtime_builtin(spec_str) {
+                if !is_builtin_module(spec_str) {
                     if let Some(inner_path) = resolve_module_specifier(from_dir, spec_str) {
                         let inner_mut = get_module_mutable_exports(&inner_path);
                         if !inner_mut.is_empty() {
@@ -92,6 +92,17 @@ fn get_module_mutable_exports(path: &Path) -> FxHashSet<String> {
                                 }
                             }
                         }
+                    }
+                }
+            }
+            Statement::ExportAllDeclaration(exp_all)
+                if !exp_all.export_kind.is_type() && exp_all.exported.is_none() =>
+            {
+                let spec_str = exp_all.source.value.as_str();
+                if !is_builtin_module(spec_str) {
+                    if let Some(inner_path) = resolve_module_specifier(from_dir, spec_str) {
+                        let inner_mut = get_module_mutable_exports(&inner_path);
+                        mutable_exported_names.extend(inner_mut);
                     }
                 }
             }
@@ -157,6 +168,96 @@ fn extract_quoted_specifier(s: &str) -> Option<(String, char)> {
     None
 }
 
+fn line_contains_ident_token(line: &str, ident: &str) -> bool {
+    let bytes = line.as_bytes();
+    let ibytes = ident.as_bytes();
+    let ilen = ibytes.len();
+    let len = bytes.len();
+    if ilen == 0 || len < ilen {
+        return false;
+    }
+    let is_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let mut i = 0usize;
+    while i < len {
+        let b = bytes[i];
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            break;
+        }
+        if b == b'\'' || b == b'"' || b == b'`' {
+            let q = b;
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(len);
+                    continue;
+                }
+                if bytes[i] == q {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if is_cont(b) {
+            let start = i;
+            i += 1;
+            while i < len && is_cont(bytes[i]) {
+                i += 1;
+            }
+            if &bytes[start..i] == ibytes {
+                return true;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn update_cjs_line_nesting(
+    line: &str,
+    brace_depth: &mut isize,
+    bracket_depth: &mut isize,
+    paren_depth: &mut isize,
+) {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+    while i < len {
+        let b = bytes[i];
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            break;
+        }
+        if b == b'\'' || b == b'"' || b == b'`' {
+            let q = b;
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(len);
+                    continue;
+                }
+                if bytes[i] == q {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        match b {
+            b'{' => *brace_depth += 1,
+            b'}' => *brace_depth -= 1,
+            b'[' => *bracket_depth += 1,
+            b']' => *bracket_depth -= 1,
+            b'(' => *paren_depth += 1,
+            b')' => *paren_depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
 fn apply_cjs_lazy_barrel_getters(mut body_lines: Vec<String>) -> Vec<String> {
     if body_lines.iter().any(|l| l.trim() == "module.exports = {") {
         let mut const_req_map: FxHashMap<String, (usize, String)> = FxHashMap::default();
@@ -178,28 +279,56 @@ fn apply_cjs_lazy_barrel_getters(mut body_lines: Vec<String>) -> Vec<String> {
         let mut to_remove_indices = FxHashSet::default();
         let mut shorthand_replacements: FxHashMap<usize, String> = FxHashMap::default();
 
+        let mut brace_depth = 0isize;
+        let mut bracket_depth = 0isize;
+        let mut paren_depth = 0isize;
+        let mut in_module_exports_obj = false;
+
         for (idx, line) in body_lines.iter().enumerate() {
             let t = line.trim();
-            if let Some(ident) = t.strip_suffix(',') {
-                let ident = ident.trim();
-                if let Some((decl_idx, req_expr)) = const_req_map.get(ident) {
-                    let used_elsewhere =
-                        body_lines
-                            .iter()
-                            .enumerate()
-                            .any(|(other_idx, other_line)| {
-                                other_idx != idx
-                                    && other_idx != *decl_idx
-                                    && other_line.contains(ident)
-                            });
-                    if !used_elsewhere {
-                        to_remove_indices.insert(*decl_idx);
-                        shorthand_replacements.insert(
-                            idx,
-                            format!("  get {}() {{ return {}; }},", ident, req_expr),
-                        );
+            if !in_module_exports_obj
+                && brace_depth == 0
+                && bracket_depth == 0
+                && paren_depth == 0
+                && t == "module.exports = {"
+            {
+                in_module_exports_obj = true;
+                update_cjs_line_nesting(t, &mut brace_depth, &mut bracket_depth, &mut paren_depth);
+                if brace_depth <= 0 {
+                    in_module_exports_obj = false;
+                }
+                continue;
+            }
+
+            if in_module_exports_obj && brace_depth == 1 && bracket_depth == 0 && paren_depth == 0 {
+                if let Some(ident) = t.strip_suffix(',') {
+                    let ident = ident.trim();
+                    if is_valid_js_identifier(ident) {
+                        if let Some((decl_idx, req_expr)) = const_req_map.get(ident) {
+                            let used_elsewhere =
+                                body_lines
+                                    .iter()
+                                    .enumerate()
+                                    .any(|(other_idx, other_line)| {
+                                        other_idx != idx
+                                            && other_idx != *decl_idx
+                                            && line_contains_ident_token(other_line, ident)
+                                    });
+                            if !used_elsewhere {
+                                to_remove_indices.insert(*decl_idx);
+                                shorthand_replacements.insert(
+                                    idx,
+                                    format!("  get {}() {{ return {}; }},", ident, req_expr),
+                                );
+                            }
+                        }
                     }
                 }
+            }
+
+            update_cjs_line_nesting(t, &mut brace_depth, &mut bracket_depth, &mut paren_depth);
+            if in_module_exports_obj && brace_depth <= 0 {
+                in_module_exports_obj = false;
             }
         }
         if !shorthand_replacements.is_empty() || !to_remove_indices.is_empty() {
@@ -333,9 +462,51 @@ fn try_transform_esm_to_cjs_ast(
         req_edits.sort_by_key(|e| e.0);
     }
 
+    let has_crypto_spec_import = parser_ret.program.body.iter().any(|stmt| {
+        if let Statement::ImportDeclaration(imp) = stmt {
+            !imp.import_kind.is_type()
+                && matches!(imp.source.value.as_str(), "crypto" | "node:crypto")
+                && imp.specifiers.as_ref().is_some_and(|s| !s.is_empty())
+        } else {
+            false
+        }
+    });
+    let crypto_scoping = if has_crypto_spec_import {
+        Some(
+            oxc::semantic::SemanticBuilder::new()
+                .build(&parser_ret.program)
+                .semantic
+                .into_scoping(),
+        )
+    } else {
+        None
+    };
+
+    let mut top_level_fn_names: FxHashSet<String> = FxHashSet::default();
+    for stmt in &parser_ret.program.body {
+        match stmt {
+            Statement::FunctionDeclaration(fd) => {
+                if let Some(id) = &fd.id {
+                    top_level_fn_names.insert(id.name.to_string());
+                }
+            }
+            Statement::ExportDeclaration(exp_decl) => {
+                if let Declaration::FunctionDeclaration(fd) = &exp_decl.declaration {
+                    if let Some(id) = &fd.id {
+                        top_level_fn_names.insert(id.name.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     let mut body_lines = Vec::with_capacity(parser_ret.program.body.len() + 4);
+    let mut hoisted_exports: Vec<(String, String)> = Vec::new();
     let mut deferred_exports: Vec<(String, String)> = Vec::new();
+    let mut live_getter_exports: Vec<(String, String)> = Vec::new();
     let mut has_default_export = false;
+    let mut has_any_esm_export = false;
     let mut req_counter = 0usize;
 
     for stmt in &parser_ret.program.body {
@@ -345,6 +516,33 @@ fn try_transform_esm_to_cjs_ast(
                     continue;
                 }
                 let spec = imp.source.value.as_str();
+                if matches!(spec, "crypto" | "node:crypto") {
+                    if let (Some(scoping), Some(specs)) = (&crypto_scoping, &imp.specifiers) {
+                        if !specs.is_empty() {
+                            let any_used = specs.iter().any(|s| match s {
+                                ImportDeclarationSpecifier::ImportDefaultSpecifier(d) => {
+                                    d.local.symbol_id.get().is_none_or(|id| {
+                                        !scoping.get_resolved_reference_ids(id).is_empty()
+                                    })
+                                }
+                                ImportDeclarationSpecifier::ImportNamespaceSpecifier(n) => {
+                                    n.local.symbol_id.get().is_none_or(|id| {
+                                        !scoping.get_resolved_reference_ids(id).is_empty()
+                                    })
+                                }
+                                ImportDeclarationSpecifier::ImportSpecifier(n) => {
+                                    !n.import_kind.is_type()
+                                        && n.local.symbol_id.get().is_none_or(|id| {
+                                            !scoping.get_resolved_reference_ids(id).is_empty()
+                                        })
+                                }
+                            });
+                            if !any_used {
+                                continue;
+                            }
+                        }
+                    }
+                }
                 let resolved_id = resolve_spec_and_record(spec, from_dir, deps_out);
                 let Some(specs) = &imp.specifiers else {
                     body_lines.push(format!("require({:?});", resolved_id));
@@ -445,16 +643,30 @@ fn try_transform_esm_to_cjs_ast(
                 if exp_all.export_kind.is_type() {
                     continue;
                 }
+                has_any_esm_export = true;
                 let spec = exp_all.source.value.as_str();
                 let resolved_id = resolve_spec_and_record(spec, from_dir, deps_out);
                 if let Some(exported) = &exp_all.exported {
                     let lhs = format_exports_lhs(exported.name().as_str());
                     body_lines.push(format!("{} = require({:?});", lhs, resolved_id));
                 } else {
-                    body_lines.push(format!(
-                        "Object.assign(exports, require({:?}));",
-                        resolved_id
-                    ));
+                    let target_has_mutable = !is_builtin_module(spec)
+                        && resolve_module_specifier(from_dir, spec)
+                            .is_some_and(|p| !get_module_mutable_exports(&p).is_empty());
+                    if target_has_mutable {
+                        req_counter += 1;
+                        let tmp_var = format!("__reexp_{}", req_counter);
+                        body_lines.push(format!(
+                            "const {tmp} = require({id:?}); Object.keys({tmp}).forEach(function(__k) {{ if (__k !== \"default\" && __k !== \"__esModule\") Object.defineProperty(exports, __k, {{ enumerable: true, configurable: true, get: function() {{ return {tmp}[__k]; }} }}); }});",
+                            tmp = tmp_var,
+                            id = resolved_id
+                        ));
+                    } else {
+                        body_lines.push(format!(
+                            "Object.assign(exports, require({:?}));",
+                            resolved_id
+                        ));
+                    }
                 }
             }
             Statement::ExportDefaultDeclaration(exp_def) => {
@@ -518,7 +730,7 @@ fn try_transform_esm_to_cjs_ast(
                     Declaration::FunctionDeclaration(fd) => {
                         body_lines.push(decl_src);
                         if let Some(id) = &fd.id {
-                            deferred_exports.push((id.name.to_string(), id.name.to_string()));
+                            hoisted_exports.push((id.name.to_string(), id.name.to_string()));
                         }
                     }
                     Declaration::ClassDeclaration(cd) => {
@@ -543,9 +755,13 @@ fn try_transform_esm_to_cjs_ast(
                     if exported_n == "default"
                         && exp_named.specifiers.len() == 1
                         && deferred_exports.is_empty()
+                        && hoisted_exports.is_empty()
+                        && live_getter_exports.is_empty()
                     {
                         has_default_export = true;
                         body_lines.push(format!("const __slice_default = {};", local_n));
+                    } else if top_level_fn_names.contains(&local_n) {
+                        hoisted_exports.push((exported_n, local_n));
                     } else {
                         deferred_exports.push((exported_n, local_n));
                     }
@@ -557,6 +773,13 @@ fn try_transform_esm_to_cjs_ast(
                 }
                 let spec_str = exp_from.source.value.as_str();
                 let resolved_id = resolve_spec_and_record(spec_str, from_dir, deps_out);
+                let target_mut = if !is_builtin_module(spec_str) {
+                    resolve_module_specifier(from_dir, spec_str)
+                        .map(|p| get_module_mutable_exports(&p))
+                        .unwrap_or_default()
+                } else {
+                    FxHashSet::default()
+                };
                 req_counter += 1;
                 let tmp_var = format!("__reexp_{}", req_counter);
                 let mut has_runtime_spec = false;
@@ -588,7 +811,11 @@ fn try_transform_esm_to_cjs_ast(
                         } else {
                             format!("{}[{:?}]", tmp_var, orig_n.as_str())
                         };
-                        deferred_exports.push((exp_n.to_string(), rhs));
+                        if target_mut.contains(orig_n.as_str()) {
+                            live_getter_exports.push((exp_n.to_string(), rhs));
+                        } else {
+                            deferred_exports.push((exp_n.to_string(), rhs));
+                        }
                     }
                 }
                 if has_runtime_spec {
@@ -608,50 +835,65 @@ fn try_transform_esm_to_cjs_ast(
         }
     }
 
-    let uses_crypto_obj = body_lines.iter().any(|l| {
-        !l.contains("require(\"node:crypto\")")
-            && (l.contains("crypto.")
-                || l.contains("createHash(")
-                || l.contains("createHmac(")
-                || l.contains("randomBytes(")
-                || l.contains("randomUUID(")
-                || l.contains("getRandomValues(")
-                || l.contains("timingSafeEqual("))
-    });
-    if !uses_crypto_obj {
-        body_lines.retain(|l| !l.contains("require(\"node:crypto\")"));
-    }
-
-    if has_default_export || !deferred_exports.is_empty() {
-        body_lines.push("exports.__esModule = true;".to_string());
-    }
-    let mutated_locals = if deferred_exports.is_empty() {
+    let has_named_exports = !hoisted_exports.is_empty()
+        || !deferred_exports.is_empty()
+        || !live_getter_exports.is_empty();
+    let mutated_locals = if hoisted_exports.is_empty() && deferred_exports.is_empty() {
         FxHashSet::default()
     } else {
         collect_mutated_binding_names(&parser_ret.program)
     };
+
+    let mut final_lines =
+        Vec::with_capacity(hoisted_exports.len() + body_lines.len() + deferred_exports.len() + 4);
+    if !hoisted_exports.is_empty() {
+        final_lines.push("exports.__esModule = true;".to_string());
+        for (export_name, local_name) in &hoisted_exports {
+            if is_valid_js_identifier(local_name) && mutated_locals.contains(local_name) {
+                final_lines.push(format!(
+                    "Object.defineProperty(exports, {:?}, {{ enumerable: true, configurable: true, get: function() {{ return {}; }} }});",
+                    export_name, local_name
+                ));
+            } else {
+                let lhs = format_exports_lhs(export_name);
+                final_lines.push(format!("{} = {};", lhs, local_name));
+            }
+        }
+    }
+    final_lines.extend(body_lines);
+
+    if hoisted_exports.is_empty() && (has_default_export || has_named_exports || has_any_esm_export)
+    {
+        final_lines.push("exports.__esModule = true;".to_string());
+    }
     for (export_name, local_name) in &deferred_exports {
         if is_valid_js_identifier(local_name) && mutated_locals.contains(local_name) {
-            body_lines.push(format!(
-                "Object.defineProperty(exports, {:?}, {{ enumerable: true, get: function() {{ return {}; }} }});",
+            final_lines.push(format!(
+                "Object.defineProperty(exports, {:?}, {{ enumerable: true, configurable: true, get: function() {{ return {}; }} }});",
                 export_name, local_name
             ));
         } else {
             let lhs = format_exports_lhs(export_name);
-            body_lines.push(format!("{} = {};", lhs, local_name));
+            final_lines.push(format!("{} = {};", lhs, local_name));
         }
     }
+    for (export_name, getter_rhs) in &live_getter_exports {
+        final_lines.push(format!(
+            "Object.defineProperty(exports, {:?}, {{ enumerable: true, configurable: true, get: function() {{ return {}; }} }});",
+            export_name, getter_rhs
+        ));
+    }
     if has_default_export {
-        body_lines.push("exports.default = __slice_default;".to_string());
-        if deferred_exports.is_empty() {
-            body_lines.push(
+        final_lines.push("exports.default = __slice_default;".to_string());
+        if !has_named_exports && !has_any_esm_export {
+            final_lines.push(
                 "module.exports = __slice_default; if (typeof module.exports === 'object' && module.exports !== null || typeof module.exports === 'function') { module.exports.default = __slice_default; module.exports.__esModule = true; }"
                     .to_string(),
             );
         }
     }
 
-    Some(body_lines.join("\n"))
+    Some(final_lines.join("\n"))
 }
 
 pub fn transform_module_to_cjs(
@@ -858,20 +1100,6 @@ pub fn transform_module_to_cjs(
         }
 
         body_lines.push(rewrite_cjs_requires_ast(raw_line, from_dir, deps_out));
-    }
-
-    let uses_crypto_obj = body_lines.iter().any(|l| {
-        !l.contains("require(\"node:crypto\")")
-            && (l.contains("crypto.")
-                || l.contains("createHash(")
-                || l.contains("createHmac(")
-                || l.contains("randomBytes(")
-                || l.contains("randomUUID(")
-                || l.contains("getRandomValues(")
-                || l.contains("timingSafeEqual("))
-    });
-    if !uses_crypto_obj {
-        body_lines.retain(|l| !l.contains("require(\"node:crypto\")"));
     }
 
     body_lines = apply_cjs_lazy_barrel_getters(body_lines);

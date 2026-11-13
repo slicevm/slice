@@ -224,6 +224,49 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
     );
 }
 
+fn extract_fetch_body_bytes(
+    arg: Option<&boa_engine::JsValue>,
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsResult<Vec<u8>> {
+    use boa_engine::string::JsStrVariant;
+    let Some(v) = arg else {
+        return Ok(Vec::new());
+    };
+    if v.is_undefined() || v.is_null() {
+        return Ok(Vec::new());
+    }
+    if v.as_object().is_some() {
+        return crate::bindings::helpers::extract_buffer_source_bytes(v, context);
+    }
+    let js_s = v.to_string(context)?;
+    match js_s.as_str().variant() {
+        JsStrVariant::Latin1(bytes) => {
+            if bytes.is_ascii() {
+                return Ok(bytes.to_vec());
+            }
+            let mut out = Vec::with_capacity(bytes.len() * 2);
+            for &b in bytes {
+                if b < 0x80 {
+                    out.push(b);
+                } else {
+                    out.push(0xC0 | (b >> 6));
+                    out.push(0x80 | (b & 0x3F));
+                }
+            }
+            Ok(out)
+        }
+        JsStrVariant::Utf16(units) => {
+            let mut out = Vec::with_capacity(units.len() * 3);
+            for item in char::decode_utf16(units.iter().copied()) {
+                let ch = item.unwrap_or(char::REPLACEMENT_CHARACTER);
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            }
+            Ok(out)
+        }
+    }
+}
+
 pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engine::Context) {
     use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
     if ctx
@@ -233,6 +276,7 @@ pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engin
     {
         return;
     }
+    crate::bindings::wintertc_and_buffer::register_buffer_host_functions(ctx);
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_mock_fetch"),
@@ -282,12 +326,7 @@ pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engin
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_else(|| "[]".to_string());
-            let body = args
-                .get(3)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
+            let body = extract_fetch_body_bytes(args.get(3), context)?;
             let redirect_mode = args
                 .get(4)
                 .map(|v| v.to_string(context))
@@ -376,12 +415,7 @@ pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engin
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_else(|| "[]".to_string());
-            let body = args
-                .get(3)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
+            let body = extract_fetch_body_bytes(args.get(3), context)?;
             let _redirect_mode = args
                 .get(4)
                 .map(|v| v.to_string(context))
@@ -451,12 +485,7 @@ pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engin
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_else(|| "[]".to_string());
-            let body = args
-                .get(3)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
+            let body = extract_fetch_body_bytes(args.get(3), context)?;
             let redirect_mode = args
                 .get(4)
                 .map(|v| v.to_string(context))

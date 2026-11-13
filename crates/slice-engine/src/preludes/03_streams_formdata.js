@@ -2,6 +2,18 @@
 (function() {
   var MAX_STREAM_CHUNKS = 4096;
 
+  function __popStreamChunk(s) {
+    var v = s._chunks[s._head++];
+    if (s._head === s._chunks.length) {
+      s._chunks.length = 0;
+      s._head = 0;
+    } else if (s._head >= 64 && s._head * 2 >= s._chunks.length) {
+      s._chunks = s._chunks.slice(s._head);
+      s._head = 0;
+    }
+    return v;
+  }
+
   function __RSCtrl(stream) {
     this._s = stream;
     this.desiredSize = 1;
@@ -9,14 +21,13 @@
   __RSCtrl.prototype.enqueue = function(chunk) {
     var s = this._s;
     if (s._closed) throw new TypeError("ReadableStream is already closed");
-    if (s._chunks.length >= MAX_STREAM_CHUNKS) {
+    if (s._chunks.length - s._head >= MAX_STREAM_CHUNKS) {
       throw new RangeError("ReadableStream buffer limit exceeded (" + MAX_STREAM_CHUNKS + " chunks)");
     }
     s._chunks.push(chunk);
     if (s._waiters && s._waiters.length > 0) {
       var w = s._waiters.shift();
-      var r = w.reader;
-      w.res({ value: s._chunks[r._idx++], done: false });
+      w.res({ value: __popStreamChunk(s), done: false });
     }
   };
   __RSCtrl.prototype.close = function() {
@@ -52,31 +63,31 @@
 
   function __RSReader(stream) {
     this._s = stream;
-    this._idx = 0;
+    this._released = false;
     this.closed = Promise.resolve(undefined);
   }
   __RSReader.prototype.read = function() {
+    if (this._released) return Promise.reject(new TypeError("ReadableStreamDefaultReader lock has been released"));
     var s = this._s;
     if (s._errored) return Promise.reject(s._errored);
-    if (this._idx < s._chunks.length) {
-      return Promise.resolve({ value: s._chunks[this._idx++], done: false });
+    if (s._head < s._chunks.length) {
+      return Promise.resolve({ value: __popStreamChunk(s), done: false });
     }
     if (!s._closed && s._src && typeof s._src.pull === "function") {
       try {
         var p = s._src.pull(s._ctrl);
         if (p && typeof p.then === "function") {
-          var selfR = this;
           return p.then(function() {
             if (s._errored) throw s._errored;
-            if (selfR._idx < s._chunks.length) return { value: s._chunks[selfR._idx++], done: false };
+            if (s._head < s._chunks.length) return { value: __popStreamChunk(s), done: false };
             return { value: undefined, done: true };
           });
         }
       } catch (e) {
         return Promise.reject(e);
       }
-      if (this._idx < s._chunks.length) {
-        return Promise.resolve({ value: s._chunks[this._idx++], done: false });
+      if (s._head < s._chunks.length) {
+        return Promise.resolve({ value: __popStreamChunk(s), done: false });
       }
     }
     if (!s._closed) {
@@ -92,15 +103,19 @@
     return Promise.resolve({ value: undefined, done: true });
   };
   __RSReader.prototype.cancel = function(reason) {
+    if (this._released) return Promise.reject(new TypeError("ReadableStreamDefaultReader lock has been released"));
     return this._s.cancel(reason);
   };
   __RSReader.prototype.releaseLock = function() {
+    if (this._released) return;
+    this._released = true;
     this._s.locked = false;
   };
   Object.freeze(__RSReader.prototype);
 
   function ReadableStream(underlyingSource) {
     this._chunks = [];
+    this._head = 0;
     this._waiters = null;
     this._closeWaiters = null;
     this._closed = false;
@@ -143,7 +158,7 @@
   ReadableStream.prototype._toText = function() {
     this._drainSync();
     var out = "";
-    for (var i = 0; i < this._chunks.length; i++) {
+    for (var i = this._head; i < this._chunks.length; i++) {
       var c = this._chunks[i];
       if (typeof c === "string") out += c;
       else if (c instanceof Uint8Array || c instanceof ArrayBuffer || (c && c.buffer instanceof ArrayBuffer)) {
@@ -153,17 +168,22 @@
         out += String(c);
       }
     }
+    this._chunks = [];
+    this._head = 0;
     return out;
   };
   ReadableStream.prototype._toBytes = function() {
     this._drainSync();
     var u8s = [];
-    for (var i = 0; i < this._chunks.length; i++) u8s.push(__slice_toU8(this._chunks[i]));
+    for (var i = this._head; i < this._chunks.length; i++) u8s.push(__slice_toU8(this._chunks[i]));
+    this._chunks = [];
+    this._head = 0;
     return __slice_concatU8(u8s);
   };
   ReadableStream.prototype.cancel = function(reason) {
     this._closed = true;
     this._chunks = [];
+    this._head = 0;
     if (this._src && typeof this._src.cancel === "function") {
       try { return Promise.resolve(this._src.cancel(reason)); } catch (e) { return Promise.reject(e); }
     }
@@ -205,7 +225,10 @@
   }
   ReadableStream.prototype.tee = function() {
     this._drainSync();
-    var copy1 = this._chunks.slice(), copy2 = this._chunks.slice();
+    var copy1 = this._chunks.slice(this._head), copy2 = copy1.slice();
+    this._chunks = [];
+    this._head = 0;
+    this._closed = true;
     return [
       ReadableStream.from(copy1),
       ReadableStream.from(copy2)
@@ -231,12 +254,45 @@
     }
     this._drainSync();
     var writer = transform.writable.getWriter();
-    for (var i = 0; i < this._chunks.length; i++) {
+    for (var i = this._head; i < this._chunks.length; i++) {
       writer.write(this._chunks[i]);
     }
+    this._chunks = [];
+    this._head = 0;
     writer.close();
     writer.releaseLock();
     return transform.readable;
+  };
+  ReadableStream.prototype._drainToBody = function(self) {
+    var st = this;
+    self._stream = null;
+    if (st._closed && !st._startPromise) {
+      var u8Sync = st._toBytes();
+      self._u8 = u8Sync;
+      if (!globalThis.TextDecoder) __slice_ensure_shard(2);
+      self._body = __slice_text_decode(u8Sync, "utf-8", false, false);
+      return Promise.resolve(self);
+    }
+    var startWait = st._startPromise ? st._startPromise : Promise.resolve();
+    return startWait.then(function() {
+      var reader = st.getReader();
+      var u8Parts = [];
+      function pump() {
+        return reader.read().then(function(step) {
+          if (step.done) {
+            reader.releaseLock();
+            var fullU8 = __slice_concatU8(u8Parts);
+            self._u8 = fullU8;
+            if (!globalThis.TextDecoder) __slice_ensure_shard(2);
+            self._body = __slice_text_decode(fullU8, "utf-8", false, false);
+            return self;
+          }
+          u8Parts.push(__slice_toU8(step.value));
+          return pump();
+        });
+      }
+      return pump();
+    });
   };
   globalThis.ReadableStream = ReadableStream;
 })();
