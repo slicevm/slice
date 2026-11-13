@@ -13,5 +13,5 @@ pub use pipeline_fusion::fuse_array_pipelines_ast;
 pub use semantics::{analyze_typescript_semantics, source_contains_jsx, TypeDirectedHints};
 pub use transpiler::{
     check_syntax_source, rewrite_cjs_require, strip_js_comments, strip_typescript_and_normalize,
-    strip_typescript_raw, strip_typescript_raw_with_ext,
+    strip_typescript_and_normalize_with_ext, strip_typescript_raw, strip_typescript_raw_with_ext,
 };

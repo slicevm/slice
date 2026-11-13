@@ -315,3 +315,127 @@ export function unusedHelper(x) {
 
     let _ = std::fs::remove_dir_all(&test_dir);
 }
+
+#[test]
+fn test_single_pass_ts_transpile_live_mutable_exports_and_streaming_exe_pack() {
+    let test_dir = std::env::temp_dir().join(format!(
+        "slice_cas_single_pass_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&test_dir);
+    std::fs::create_dir_all(&test_dir).unwrap();
+
+    // 1. Single-pass `.ts` compilation with `<T>` generic arrow, HTML strings, and `return` inside functions
+    let ts_mod = r#"
+        export interface Boxed<T> { value: T; tag: string; }
+        export const wrapBox = <T>(v: T): Boxed<T> => {
+            const tpl = "<section>ok</section>";
+            return { value: v, tag: tpl };
+        };
+    "#;
+    let stripped_fn_ret = crate::strip_typescript_raw_with_ext(ts_mod, true, false);
+    assert!(!stripped_fn_ret.contains("interface Boxed"));
+    assert!(stripped_fn_ret.contains("return {"));
+
+    // Top-level `return` script masking still roundtrips cleanly
+    let top_ret_ts = "const x: number = 41;\nif (x > 0) { return x + 1; }\nreturn 0;\n";
+    let stripped_top_ret = crate::strip_typescript_raw_with_ext(top_ret_ts, true, false);
+    assert!(!stripped_top_ret.contains(": number"));
+    assert!(stripped_top_ret.contains("return x + 1;"));
+    assert!(stripped_top_ret.contains("return 0;"));
+
+    // Extension-aware `.tsx` normalization compiles JSX directly without diagnostic fallback
+    let tsx_mod = "export const Badge = ({ label }: { label: string }) => <span>{label}</span>;\n";
+    let normalized_tsx = crate::strip_typescript_and_normalize_with_ext(tsx_mod, true, true);
+    assert!(!normalized_tsx.contains("label: string"));
+
+    // 2. Single-pass TypeScript live mutable ESM export detection (`export let` + `export declare let`)
+    let counter_ts = test_dir.join("counter.ts");
+    let entry_ts = test_dir.join("entry.ts");
+    std::fs::write(
+        &counter_ts,
+        r#"
+        export declare let ambientOnly: number;
+        export let count: number = 10;
+        export const fixed: number = 5;
+        export function increment(step: number): number {
+            count += step;
+            return count;
+        }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        &entry_ts,
+        r#"
+        import { count, fixed, increment } from "./counter.ts";
+        const before: number = count + fixed;
+        increment(7);
+        const after: number = count + fixed;
+        console.log(before, after);
+        "#,
+    )
+    .unwrap();
+
+    let bundled = crate::bundle_entrypoint_with_deps(&entry_ts).unwrap();
+    // `count` must be rewritten as a live property access on the CJS module namespace, while `fixed` stays direct
+    assert!(
+        bundled.contains(".count"),
+        "Expected live binding rewrite for mutated TypeScript `export let count`, got:\n{}",
+        bundled
+    );
+
+    // 3. Streaming `embed_cas_into_executable` roundtrip (including in-place overwrite of existing output)
+    let cas_path = test_dir.join("app.cas");
+    let mut builder = crate::CasBuilder::new("./entry.ts");
+    builder.add_module("./entry.ts", entry_ts.clone(), &bundled, |js| {
+        js.as_bytes().to_vec()
+    });
+    builder.write_to_file(&cas_path).unwrap();
+
+    let fake_host_exe = test_dir.join("fake_slice_host.bin");
+    // Deliberately non-64-byte-aligned size (70,013 bytes) to verify 64-byte padding + streaming copy
+    let host_bytes: Vec<u8> = (0..70_013usize).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&fake_host_exe, &host_bytes).unwrap();
+
+    let out_exe = test_dir.join("standalone_app.exe");
+    std::fs::write(&out_exe, b"preexisting-stale-output").unwrap();
+
+    let total_size = crate::embed_cas_into_executable(&fake_host_exe, &cas_path, &out_exe).unwrap();
+    let exe_bytes = std::fs::read(&out_exe).unwrap();
+    assert_eq!(exe_bytes.len() as u64, total_size);
+    let tail = &exe_bytes[exe_bytes.len() - 24..];
+    assert_eq!(&tail[16..24], b"SLICEEXE");
+    let cas_offset = u64::from_le_bytes(tail[0..8].try_into().unwrap()) as usize;
+    let cas_len = u64::from_le_bytes(tail[8..16].try_into().unwrap()) as usize;
+    assert_eq!(cas_offset % crate::CACHE_LINE_ALIGN, 0);
+
+    {
+        let embedded =
+            crate::MappedCasArchive::open_from_offset(&out_exe, cas_offset, cas_len).unwrap();
+        assert!(embedded.entrypoint_blob().is_some());
+        assert!(embedded.resolve_specifier("./entry.ts").is_some());
+        assert_eq!(embedded.header.blobs.len(), 1);
+    }
+
+    // Also verify `base_exe_path == output_exe_path` works safely via sibling staging file
+    let inplace_size = crate::embed_cas_into_executable(&out_exe, &cas_path, &out_exe).unwrap();
+    assert!(inplace_size > total_size);
+    let inplace_bytes = std::fs::read(&out_exe).unwrap();
+    let tail2 = &inplace_bytes[inplace_bytes.len() - 24..];
+    assert_eq!(&tail2[16..24], b"SLICEEXE");
+    let cas_offset2 = u64::from_le_bytes(tail2[0..8].try_into().unwrap()) as usize;
+    let cas_len2 = u64::from_le_bytes(tail2[8..16].try_into().unwrap()) as usize;
+    {
+        let embedded_inplace =
+            crate::MappedCasArchive::open_from_offset(&out_exe, cas_offset2, cas_len2).unwrap();
+        assert!(embedded_inplace.entrypoint_blob().is_some());
+        assert!(embedded_inplace.resolve_specifier("./entry.ts").is_some());
+    }
+
+    let _ = std::fs::remove_dir_all(&test_dir);
+}

@@ -7,27 +7,16 @@ use crate::linker::{
 };
 use std::path::Path;
 
-/// Masks any top-level `return <expr>;` statements (identified via `oxc::parser::Parser` with
-/// `allow_return_outside_function: true`) as `__slice_top_ret_stmt = <expr>;` so that Oxc's
-/// `SemanticBuilder` and `Transformer` can erase TypeScript annotations without rejecting
-/// top-level returns. Returns `Cow::Borrowed` when no top-level `return` statement exists.
-fn mask_top_level_returns_for_oxc(source: &str) -> (std::borrow::Cow<'_, str>, bool) {
-    let allocator = oxc::allocator::Allocator::default();
-    let parse_opts = oxc::parser::ParseOptions {
-        allow_return_outside_function: true,
-        ..Default::default()
-    };
-    let parsed = oxc::parser::Parser::new(
-        &allocator,
-        source,
-        oxc::span::SourceType::ts().with_module(true),
-    )
-    .with_options(parse_opts)
-    .parse();
-
+/// Extracts any top-level `return <expr>;` spans directly from an already-parsed Oxc `Program`
+/// (`allow_return_outside_function: true`). Returns an empty `SmallVec` for the 99.9%+ common case
+/// where `return` statements only appear inside functions, methods, or arrow bodies.
+fn extract_top_level_return_spans(
+    program: &oxc::ast::ast::Program<'_>,
+    source: &str,
+) -> smallvec::SmallVec<[(usize, usize, bool); 4]> {
     let mut top_ret_spans: smallvec::SmallVec<[(usize, usize, bool); 4]> =
         smallvec::SmallVec::new();
-    for stmt in &parsed.program.body {
+    for stmt in &program.body {
         if let oxc::ast::ast::Statement::ReturnStatement(ret) = stmt {
             let start = ret.span.start as usize;
             let has_arg = ret.argument.is_some();
@@ -36,13 +25,13 @@ fn mask_top_level_returns_for_oxc(source: &str) -> (std::borrow::Cow<'_, str>, b
             }
         }
     }
-    if top_ret_spans.is_empty() {
-        return (std::borrow::Cow::Borrowed(source), false);
-    }
+    top_ret_spans
+}
 
+fn build_masked_top_level_returns(source: &str, top_ret_spans: &[(usize, usize, bool)]) -> String {
     let mut out = String::with_capacity(source.len() + top_ret_spans.len() * 18);
     let mut cursor = 0usize;
-    for (start, end, has_arg) in top_ret_spans {
+    for &(start, end, has_arg) in top_ret_spans {
         if start < cursor {
             continue;
         }
@@ -55,86 +44,16 @@ fn mask_top_level_returns_for_oxc(source: &str) -> (std::borrow::Cow<'_, str>, b
         cursor = end;
     }
     out.push_str(&source[cursor..]);
-    (std::borrow::Cow::Owned(out), true)
+    out
 }
 
-/// Production TypeScript & JSX/TSX Compiler powered by **Oxc** (The Oxidation Compiler).
-///
-/// Uses `oxc::allocator::Allocator`, `oxc::parser::Parser`, `oxc::semantic::SemanticBuilder`,
-/// `oxc::transformer::Transformer` (with native JSX/TSX transformation enabled), and
-/// `oxc::codegen::Codegen` to lower TypeScript types, interfaces, enums, generics, and JSX/TSX
-/// elements into clean standard ECMAScript.
-pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
-    strip_typescript_raw_with_ext(source, is_ts, false)
-}
-
-/// Extension-aware Oxc TypeScript & JSX/TSX compiler:
-/// - When `is_jsx_ext` is `true` (`.tsx` or `.jsx`), parses directly as `SourceType::tsx()`.
-/// - When `is_jsx_ext` is `false` (`.ts` or inline TypeScript), parses as `SourceType::ts()` FIRST
-///   so TypeScript `<T>` generic arrow functions (like `const id = <T>(x: T): T => x`) are never
-///   misinterpreted as JSX tags even if the file also contains HTML strings (`"<div>...</div>"`),
-///   and only retries as `SourceType::tsx()` if `.ts` parsing reported syntax diagnostics.
-/// - Relies directly on `oxc::codegen::Codegen` (`CommentOptions::disabled()`) without running a
-///   redundant post-codegen line-by-line comment stripper.
-pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool) -> String {
-    if source.starts_with("var __slice_modules =") {
-        return source.to_string();
-    }
-    let has_jsx_hint =
-        is_jsx_ext || (is_ts && memchr::memmem::find(source.as_bytes(), b"@jsx").is_some());
-    if !is_ts && !has_jsx_hint && memchr::memmem::find(source.as_bytes(), b"interface ").is_none() {
-        return strip_js_comments(source);
-    }
-
-    let (parse_source_cow, had_top_return) = if memchr::memmem::find(source.as_bytes(), b"return ")
-        .is_some()
-        || memchr::memmem::find(source.as_bytes(), b"return;").is_some()
-    {
-        mask_top_level_returns_for_oxc(source)
-    } else {
-        (std::borrow::Cow::Borrowed(source), false)
-    };
-    let parse_source = parse_source_cow.as_ref();
-
-    let allocator = oxc::allocator::Allocator::default();
-    let parse_opts = oxc::parser::ParseOptions {
-        allow_return_outside_function: true,
-        ..Default::default()
-    };
-    let primary_source_type = if has_jsx_hint {
-        oxc::span::SourceType::tsx().with_module(true)
-    } else {
-        oxc::span::SourceType::ts().with_module(true)
-    };
-    let mut parser_ret = oxc::parser::Parser::new(&allocator, parse_source, primary_source_type)
-        .with_options(parse_opts)
-        .parse();
-    let mut active_path = if has_jsx_hint {
-        "module.tsx"
-    } else {
-        "module.ts"
-    };
-
-    // If `.ts` parsing had diagnostics, retry with `.tsx` in case JSX syntax was used
-    if !parser_ret.diagnostics.is_empty() && !has_jsx_hint {
-        let retry_ret = oxc::parser::Parser::new(
-            &allocator,
-            parse_source,
-            oxc::span::SourceType::tsx().with_module(true),
-        )
-        .with_options(parse_opts)
-        .parse();
-        if retry_ret.diagnostics.is_empty() {
-            parser_ret = retry_ret;
-            active_path = "module.tsx";
-        }
-    }
-
-    if !parser_ret.diagnostics.is_empty() {
-        return strip_js_comments(source);
-    }
-
-    let mut program = parser_ret.program;
+fn transpile_parsed_oxc_program<'a>(
+    allocator: &'a oxc::allocator::Allocator,
+    mut program: oxc::ast::ast::Program<'a>,
+    active_path: &str,
+    had_top_return: bool,
+    fallback_source: &str,
+) -> String {
     let scoping = oxc::semantic::SemanticBuilder::new()
         .build(&program)
         .semantic
@@ -143,11 +62,11 @@ pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool
     let mut transform_options = oxc::transformer::TransformOptions::default();
     transform_options.jsx.jsx_plugin = true;
     let transform_ret =
-        oxc::transformer::Transformer::new(&allocator, Path::new(active_path), &transform_options)
+        oxc::transformer::Transformer::new(allocator, Path::new(active_path), &transform_options)
             .build_with_scoping(scoping, &mut program);
 
     if !transform_ret.diagnostics.is_empty() {
-        return strip_js_comments(source);
+        return strip_js_comments(fallback_source);
     }
 
     let mut code = oxc::codegen::Codegen::new()
@@ -190,6 +109,95 @@ pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool
     } else {
         code
     }
+}
+
+/// Production TypeScript & JSX/TSX Compiler powered by **Oxc** (The Oxidation Compiler).
+///
+/// Uses `oxc::allocator::Allocator`, `oxc::parser::Parser`, `oxc::semantic::SemanticBuilder`,
+/// `oxc::transformer::Transformer` (with native JSX/TSX transformation enabled), and
+/// `oxc::codegen::Codegen` to lower TypeScript types, interfaces, enums, generics, and JSX/TSX
+/// elements into clean standard ECMAScript.
+pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
+    strip_typescript_raw_with_ext(source, is_ts, false)
+}
+
+/// Extension-aware Oxc TypeScript & JSX/TSX compiler:
+/// - When `is_jsx_ext` is `true` (`.tsx` or `.jsx`), parses directly as `SourceType::tsx()`.
+/// - When `is_jsx_ext` is `false` (`.ts` or inline TypeScript), parses as `SourceType::ts()` FIRST
+///   so TypeScript `<T>` generic arrow functions (like `const id = <T>(x: T): T => x`) are never
+///   misinterpreted as JSX tags even if the file also contains HTML strings (`"<div>...</div>"`),
+///   and only retries as `SourceType::tsx()` if `.ts` parsing reported syntax diagnostics.
+/// - Inspects `parser_ret.program.body` directly on the primary AST pass so modules containing
+///   `return` statements inside functions/methods are parsed only ONCE, masking and re-parsing
+///   only when an actual top-level `ReturnStatement` is present.
+/// - Relies directly on `oxc::codegen::Codegen` (`CommentOptions::disabled()`) without running a
+///   redundant post-codegen line-by-line comment stripper.
+pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool) -> String {
+    if source.starts_with("var __slice_modules =") {
+        return source.to_string();
+    }
+    let has_jsx_hint =
+        is_jsx_ext || (is_ts && memchr::memmem::find(source.as_bytes(), b"@jsx").is_some());
+    if !is_ts && !has_jsx_hint && memchr::memmem::find(source.as_bytes(), b"interface ").is_none() {
+        return strip_js_comments(source);
+    }
+
+    let allocator = oxc::allocator::Allocator::default();
+    let parse_opts = oxc::parser::ParseOptions {
+        allow_return_outside_function: true,
+        ..Default::default()
+    };
+    let mut active_source_type = if has_jsx_hint {
+        oxc::span::SourceType::tsx().with_module(true)
+    } else {
+        oxc::span::SourceType::ts().with_module(true)
+    };
+    let mut parser_ret = oxc::parser::Parser::new(&allocator, source, active_source_type)
+        .with_options(parse_opts)
+        .parse();
+    let mut active_path = if has_jsx_hint {
+        "module.tsx"
+    } else {
+        "module.ts"
+    };
+
+    // If `.ts` parsing had diagnostics, retry with `.tsx` in case JSX syntax was used
+    if !parser_ret.diagnostics.is_empty() && !has_jsx_hint {
+        let tsx_type = oxc::span::SourceType::tsx().with_module(true);
+        let retry_ret = oxc::parser::Parser::new(&allocator, source, tsx_type)
+            .with_options(parse_opts)
+            .parse();
+        if retry_ret.diagnostics.is_empty() {
+            parser_ret = retry_ret;
+            active_source_type = tsx_type;
+            active_path = "module.tsx";
+        }
+    }
+
+    if !parser_ret.diagnostics.is_empty() {
+        return strip_js_comments(source);
+    }
+
+    let top_ret_spans = extract_top_level_return_spans(&parser_ret.program, source);
+    if top_ret_spans.is_empty() {
+        return transpile_parsed_oxc_program(
+            &allocator,
+            parser_ret.program,
+            active_path,
+            false,
+            source,
+        );
+    }
+
+    let masked_source = build_masked_top_level_returns(source, &top_ret_spans);
+    let masked_alloc = oxc::allocator::Allocator::default();
+    let masked_ret = oxc::parser::Parser::new(&masked_alloc, &masked_source, active_source_type)
+        .with_options(parse_opts)
+        .parse();
+    if !masked_ret.diagnostics.is_empty() {
+        return strip_js_comments(source);
+    }
+    transpile_parsed_oxc_program(&masked_alloc, masked_ret.program, active_path, true, source)
 }
 
 /// Strips JSDoc/license block comments (`/* ... */`), `//` line comments, and blank lines
@@ -532,7 +540,15 @@ pub fn strip_js_comments(source: &str) -> String {
 }
 
 pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
-    let mut js_code = strip_typescript_raw(source, is_ts);
+    strip_typescript_and_normalize_with_ext(source, is_ts, false)
+}
+
+pub fn strip_typescript_and_normalize_with_ext(
+    source: &str,
+    is_ts: bool,
+    is_jsx_ext: bool,
+) -> String {
+    let mut js_code = strip_typescript_raw_with_ext(source, is_ts, is_jsx_ext);
     if ((js_code.contains("import ")
         && (js_code.contains("node:")
             || js_code.contains("slice:")

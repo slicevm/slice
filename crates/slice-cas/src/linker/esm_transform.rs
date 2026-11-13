@@ -2,7 +2,6 @@
 //! and Barrel Lazy-Getter Optimizer (`apply_cjs_lazy_barrel_getters`).
 
 use crate::bundler::resolve_module_specifier;
-use crate::compiler::strip_typescript_raw_with_ext;
 use crate::linker::builtins_and_ids::MUTABLE_EXPORTS_CACHE;
 use crate::linker::{
     collect_binding_pattern_names, collect_live_import_reference_edits,
@@ -34,13 +33,28 @@ fn get_module_mutable_exports(path: &Path) -> FxHashSet<String> {
         return FxHashSet::default();
     }
 
-    let is_ts = matches!(ext, "ts" | "tsx" | "jsx" | "mts" | "cts");
-    let is_jsx_ext = matches!(ext, "tsx" | "jsx");
-    let js_code = strip_typescript_raw_with_ext(&raw_src, is_ts, is_jsx_ext);
+    let is_jsx_ext =
+        matches!(ext, "tsx" | "jsx") || memchr::memmem::find(raw_src.as_bytes(), b"@jsx").is_some();
 
     let allocator = oxc::allocator::Allocator::default();
-    let source_type = oxc::span::SourceType::ts().with_module(true);
-    let parser_ret = oxc::parser::Parser::new(&allocator, &js_code, source_type).parse();
+    let primary_source_type = if is_jsx_ext {
+        oxc::span::SourceType::tsx().with_module(true)
+    } else {
+        oxc::span::SourceType::ts().with_module(true)
+    };
+    let mut parser_ret =
+        oxc::parser::Parser::new(&allocator, &raw_src, primary_source_type).parse();
+    if !parser_ret.diagnostics.is_empty() && !is_jsx_ext {
+        let retry_ret = oxc::parser::Parser::new(
+            &allocator,
+            &raw_src,
+            oxc::span::SourceType::tsx().with_module(true),
+        )
+        .parse();
+        if retry_ret.diagnostics.is_empty() {
+            parser_ret = retry_ret;
+        }
+    }
     if !parser_ret.diagnostics.is_empty() {
         return FxHashSet::default();
     }
@@ -54,13 +68,15 @@ fn get_module_mutable_exports(path: &Path) -> FxHashSet<String> {
         match stmt {
             Statement::ExportDeclaration(exp_decl) if !mutated_locals.is_empty() => {
                 if let Declaration::VariableDeclaration(vd) = &exp_decl.declaration {
-                    let mut pairs = Vec::new();
-                    for d in &vd.declarations {
-                        collect_binding_pattern_names(&d.id, &mut pairs);
-                    }
-                    for (exp_n, loc_n) in pairs {
-                        if mutated_locals.contains(&loc_n) {
-                            mutable_exported_names.insert(exp_n);
+                    if !vd.declare {
+                        let mut pairs = Vec::new();
+                        for d in &vd.declarations {
+                            collect_binding_pattern_names(&d.id, &mut pairs);
+                        }
+                        for (exp_n, loc_n) in pairs {
+                            if mutated_locals.contains(&loc_n) {
+                                mutable_exported_names.insert(exp_n);
+                            }
                         }
                     }
                 }

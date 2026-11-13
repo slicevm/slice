@@ -34,8 +34,8 @@ pub use bundler::{
 };
 pub use compiler::{
     analyze_typescript_semantics, check_syntax_source, fuse_array_pipelines_ast,
-    strip_typescript_and_normalize, strip_typescript_raw, strip_typescript_raw_with_ext,
-    TypeDirectedHints,
+    strip_typescript_and_normalize, strip_typescript_and_normalize_with_ext, strip_typescript_raw,
+    strip_typescript_raw_with_ext, TypeDirectedHints,
 };
 pub use linker::{has_top_level_await, wrap_top_level_await_script};
 
