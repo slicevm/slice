@@ -113,9 +113,12 @@ pub(crate) fn get_tls_client_config() -> Arc<rustls::ClientConfig> {
     build_tls_client_config(&extra)
 }
 
+pub(crate) type ProxyTlsStream = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+
 pub(crate) enum OutboundStream {
     Plain(TcpStream),
-    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
+    Tls(Box<ProxyTlsStream>),
+    TunneledTls(Box<rustls::StreamOwned<rustls::ClientConnection, Box<ProxyTlsStream>>>),
 }
 
 impl OutboundStream {
@@ -127,6 +130,9 @@ impl OutboundStream {
             OutboundStream::Tls(s) => {
                 let _ = s.get_ref().set_read_timeout(dur);
             }
+            OutboundStream::TunneledTls(s) => {
+                let _ = s.get_ref().get_ref().set_read_timeout(dur);
+            }
         }
     }
 }
@@ -136,6 +142,7 @@ impl Read for OutboundStream {
         match self {
             OutboundStream::Plain(s) => s.read(buf),
             OutboundStream::Tls(s) => s.read(buf),
+            OutboundStream::TunneledTls(s) => s.read(buf),
         }
     }
 }
@@ -145,6 +152,7 @@ impl Write for OutboundStream {
         match self {
             OutboundStream::Plain(s) => s.write(buf),
             OutboundStream::Tls(s) => s.write(buf),
+            OutboundStream::TunneledTls(s) => s.write(buf),
         }
     }
 
@@ -152,11 +160,13 @@ impl Write for OutboundStream {
         match self {
             OutboundStream::Plain(s) => s.flush(),
             OutboundStream::Tls(s) => s.flush(),
+            OutboundStream::TunneledTls(s) => s.flush(),
         }
     }
 }
 
 struct PooledOutboundConn {
+    proxy_key: String,
     is_https: bool,
     host_port: String,
     stream: OutboundStream,
@@ -307,15 +317,19 @@ fn current_tenant_id() -> String {
     })
 }
 
-fn take_pooled_stream(tenant_id: &str, is_https: bool, host_port: &str) -> Option<OutboundStream> {
+fn take_pooled_stream(
+    tenant_id: &str,
+    proxy_key: &str,
+    is_https: bool,
+    host_port: &str,
+) -> Option<OutboundStream> {
     let now = Instant::now();
     if let Ok(mut map) = shared_conn_pool().lock() {
         if let Some(vec) = map.get_mut(tenant_id) {
             vec.retain(|entry| now.duration_since(entry.last_used) < IDLE_CONN_TIMEOUT);
-            if let Some(pos) = vec
-                .iter()
-                .rposition(|e| e.is_https == is_https && e.host_port == host_port)
-            {
+            if let Some(pos) = vec.iter().rposition(|e| {
+                e.proxy_key == proxy_key && e.is_https == is_https && e.host_port == host_port
+            }) {
                 let entry = vec.swap_remove(pos);
                 return Some(entry.stream);
             }
@@ -326,6 +340,7 @@ fn take_pooled_stream(tenant_id: &str, is_https: bool, host_port: &str) -> Optio
 
 fn return_pooled_stream(
     tenant_id: String,
+    proxy_key: String,
     is_https: bool,
     host_port: String,
     stream: OutboundStream,
@@ -355,6 +370,7 @@ fn return_pooled_stream(
             vec.remove(0);
         }
         vec.push(PooledOutboundConn {
+            proxy_key,
             is_https,
             host_port,
             stream,
@@ -365,51 +381,30 @@ fn return_pooled_stream(
 
 pub(crate) fn parse_outbound_http_url(raw_url: &str) -> Option<OutboundUrlParts> {
     let trimmed = raw_url.trim();
-    let without_hash = trimmed.split('#').next().unwrap_or(trimmed);
-    let (is_https, default_port, rest) = if let Some(r) = without_hash.strip_prefix("http://") {
-        (false, 80u16, r)
-    } else {
-        let r = without_hash.strip_prefix("https://")?;
-        (true, 443u16, r)
-    };
-    let (authority, path_and_query) = match rest.find('/') {
-        Some(idx) => (&rest[..idx], &rest[idx..]),
-        None => (rest, "/"),
-    };
-    let host_port_raw = match authority.rfind('@') {
-        Some(idx) => &authority[idx + 1..],
-        None => authority,
-    };
-    let (hostname, port) = if let Some(ipv6_rest) = host_port_raw.strip_prefix('[') {
-        let (ipv6, after_bracket) = ipv6_rest.split_once(']')?;
-        let p = after_bracket
-            .strip_prefix(':')
-            .and_then(|ps| ps.parse::<u16>().ok())
-            .unwrap_or(default_port);
-        (format!("[{}]", ipv6.to_ascii_lowercase()), p)
-    } else if let Some((h, p_str)) = host_port_raw.rsplit_once(':') {
-        let p = p_str.parse::<u16>().ok()?;
-        (h.to_ascii_lowercase(), p)
-    } else {
-        (host_port_raw.to_ascii_lowercase(), default_port)
-    };
-    if hostname.is_empty() {
+    let (scheme, _) = trimmed.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
         return None;
     }
-    let clean_host = slice_sandbox::extract_clean_hostname(&hostname);
-    let host_port = format!("{}:{}", clean_host, port);
-    let host_header = if port == default_port {
-        hostname
+    let parsed = slice_sandbox::parse_http_authority_and_path(trimmed)?;
+    let clean_host = parsed.clean_host.into_owned();
+    let bracketed_host = if parsed.is_ipv6 {
+        format!("[{}]", clean_host)
     } else {
-        format!("{}:{}", hostname, port)
+        clean_host.clone()
+    };
+    let host_port = format!("{}:{}", bracketed_host, parsed.port);
+    let host_header = if parsed.port == parsed.default_port {
+        bracketed_host
+    } else {
+        host_port.clone()
     };
     Some(OutboundUrlParts {
-        is_https,
+        is_https: parsed.is_secure,
         hostname: clean_host,
-        port,
+        port: parsed.port,
         host_header,
         host_port,
-        path_and_query: path_and_query.to_string(),
+        path_and_query: parsed.path_and_query.into_owned(),
     })
 }
 
@@ -471,14 +466,13 @@ pub(crate) fn check_boa_outbound_fetch_ocap_and_dlp(
         return Err("NetAccessDenied: SSRF Cloud Metadata Endpoint Blocked".to_string());
     }
 
-    // 2. OCap Network Host Allowlist Verification
+    // 2. OCap Network Host Allowlist Verification (strict host or exact host:port match; never cross-grants ports)
     let (permitted, explicit_host_grant) = BOA_NET_HOSTS.with(|hosts_cell| {
         let hosts = hosts_cell.borrow();
-        if hosts.contains(&parts.host_port)
-            || hosts.contains(&parts.hostname)
-            || hosts.contains(&format!("{}:443", parts.hostname))
-            || hosts.contains(&format!("{}:80", parts.hostname))
-        {
+        let ipv6_match = parts.hostname.contains(':')
+            && (hosts.contains(&format!("[{}]", parts.hostname))
+                || hosts.contains(&format!("{}:{}", parts.hostname, parts.port)));
+        if hosts.contains(&parts.host_port) || hosts.contains(&parts.hostname) || ipv6_match {
             return (true, true);
         }
         if hosts.contains("*")
@@ -938,9 +932,130 @@ fn send_and_read_framed_http11(
     })
 }
 
+fn establish_proxy_connect_tunnel(
+    proxy_parts: &OutboundUrlParts,
+    proxy_addrs: &[SocketAddr],
+    target_parts: &OutboundUrlParts,
+) -> Result<OutboundStream, String> {
+    if !is_valid_http_header_value(&target_parts.host_port)
+        || target_parts
+            .host_port
+            .bytes()
+            .any(|b| b <= 0x20 || b == 0x7F)
+    {
+        return Err(
+            "InvalidConnectAuthority: target host:port contains invalid characters".to_string(),
+        );
+    }
+    let mut proxy_stream = dial_fresh_outbound_stream(proxy_parts, proxy_addrs)?;
+    let connect_req = format!(
+        "CONNECT {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Slice-NexusJS/{}\r\nProxy-Connection: keep-alive\r\n\r\n",
+        target_parts.host_port,
+        target_parts.host_port,
+        env!("CARGO_PKG_VERSION")
+    );
+    proxy_stream
+        .write_all(connect_req.as_bytes())
+        .and_then(|()| proxy_stream.flush())
+        .map_err(|e| {
+            format!(
+                "Proxy CONNECT write failed to {}: {}",
+                proxy_parts.host_port, e
+            )
+        })?;
+
+    let mut hdr_buf = Vec::with_capacity(256);
+    let mut byte = [0u8; 1];
+    loop {
+        if hdr_buf.len() >= MAX_OUTBOUND_HEADER_BYTES {
+            return Err(
+                "ProxyConnectError: CONNECT response headers exceeded 64 KB limit".to_string(),
+            );
+        }
+        let n = proxy_stream.read(&mut byte).map_err(|e| {
+            format!(
+                "Proxy CONNECT read failed from {}: {}",
+                proxy_parts.host_port, e
+            )
+        })?;
+        if n == 0 {
+            return Err(format!(
+                "ProxyConnectError: proxy {} closed connection during CONNECT handshake",
+                proxy_parts.host_port
+            ));
+        }
+        hdr_buf.push(byte[0]);
+        if hdr_buf.ends_with(b"\r\n\r\n") || hdr_buf.ends_with(b"\n\n") {
+            break;
+        }
+    }
+
+    let hdr_str = std::str::from_utf8(&hdr_buf)
+        .map_err(|_| "ProxyConnectError: invalid UTF-8 in CONNECT response".to_string())?;
+    let status_line = hdr_str.lines().next().unwrap_or("");
+    let status_code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    if status_code != 200 {
+        return Err(format!(
+            "ProxyConnectError: proxy {} rejected CONNECT tunnel to {} with status {}",
+            proxy_parts.host_port, target_parts.host_port, status_code
+        ));
+    }
+
+    let tls_cfg = get_tls_client_config();
+    let sni_host = target_parts
+        .hostname
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let server_name = rustls_pki_types::ServerName::try_from(sni_host).map_err(|e| {
+        format!(
+            "Invalid TLS SNI hostname '{}': {}",
+            target_parts.hostname, e
+        )
+    })?;
+    let client_conn = rustls::ClientConnection::new(tls_cfg, server_name).map_err(|e| {
+        format!(
+            "TLS initialization failed over proxy tunnel for {}: {}",
+            target_parts.host_port, e
+        )
+    })?;
+
+    match proxy_stream {
+        OutboundStream::Plain(tcp) => Ok(OutboundStream::Tls(Box::new(rustls::StreamOwned::new(
+            client_conn,
+            tcp,
+        )))),
+        OutboundStream::Tls(proxy_tls) => Ok(OutboundStream::TunneledTls(Box::new(
+            rustls::StreamOwned::new(client_conn, proxy_tls),
+        ))),
+        OutboundStream::TunneledTls(_) => {
+            Err("ProxyConnectError: nested proxy TLS tunnels are unsupported".to_string())
+        }
+    }
+}
+
+enum OutboundHopDialPlan<'a> {
+    Direct {
+        verified_addrs: &'a [SocketAddr],
+    },
+    HttpProxy {
+        proxy_parts: &'a OutboundUrlParts,
+        proxy_addrs: &'a [SocketAddr],
+    },
+    HttpsConnectProxy {
+        proxy_parts: &'a OutboundUrlParts,
+        proxy_addrs: &'a [SocketAddr],
+    },
+}
+
 fn execute_single_http11_hop(
-    parts: &OutboundUrlParts,
-    verified_addrs: &[SocketAddr],
+    target_parts: &OutboundUrlParts,
+    request_target: &str,
+    dial_plan: OutboundHopDialPlan<'_>,
     method: &str,
     req_headers: &[(String, String)],
     body: &str,
@@ -952,10 +1067,10 @@ fn execute_single_http11_hop(
             method
         ));
     }
-    if !is_valid_request_target(&parts.path_and_query) {
+    if !is_valid_request_target(request_target) {
         return Err("InvalidRequestTarget: URL path/query contains forbidden whitespace or control characters".to_string());
     }
-    if !is_valid_http_header_value(&parts.host_header) {
+    if !is_valid_http_header_value(&target_parts.host_header) {
         return Err("InvalidHostHeader: Host contains forbidden control characters".to_string());
     }
     for (k, v) in req_headers {
@@ -972,8 +1087,8 @@ fn execute_single_http11_hop(
         &mut req_buf,
         "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: Slice-NexusJS/{}\r\nConnection: keep-alive\r\n",
         method,
-        parts.path_and_query,
-        parts.host_header,
+        request_target,
+        target_parts.host_header,
         env!("CARGO_PKG_VERSION")
     );
     for (k, v) in req_headers {
@@ -992,18 +1107,27 @@ fn execute_single_http11_hop(
     }
 
     let tenant_id = current_tenant_id();
+    let proxy_key = match dial_plan {
+        OutboundHopDialPlan::Direct { .. } => "",
+        OutboundHopDialPlan::HttpProxy { proxy_parts, .. }
+        | OutboundHopDialPlan::HttpsConnectProxy { proxy_parts, .. } => &proxy_parts.host_port,
+    };
 
     // 1. Try tenant-scoped warm Keep-Alive stream from `SHARED_OUTBOUND_CONN_POOL` first (`N-Sec-7`)
-    if let Some(mut pooled_stream) =
-        take_pooled_stream(&tenant_id, parts.is_https, &parts.host_port)
-    {
+    if let Some(mut pooled_stream) = take_pooled_stream(
+        &tenant_id,
+        proxy_key,
+        target_parts.is_https,
+        &target_parts.host_port,
+    ) {
         if let Ok(resp) = send_and_read_framed_http11(&mut pooled_stream, &req_buf, method) {
             OUTBOUND_POOL_REUSE_COUNT.with(|c| c.set(c.get() + 1));
             if !resp.peer_closed {
                 return_pooled_stream(
                     tenant_id,
-                    parts.is_https,
-                    parts.host_port.clone(),
+                    proxy_key.to_string(),
+                    target_parts.is_https,
+                    target_parts.host_port.clone(),
                     pooled_stream,
                 );
             }
@@ -1012,15 +1136,32 @@ fn execute_single_http11_hop(
         // Stale idle connection closed by remote peer; fall through and dial fresh stream
     }
 
-    // 2. Dial fresh TCP (+ TLS 1.3 if `parts.is_https`) stream to the pin-verified SocketAddrs
-    let mut fresh_stream = dial_fresh_outbound_stream(parts, verified_addrs)?;
-    let resp = send_and_read_framed_http11(&mut fresh_stream, &req_buf, method)
-        .map_err(|e| format!("HTTP/1.1 exchange failed with {}: {}", parts.host_port, e))?;
+    // 2. Dial fresh TCP (+ HTTP CONNECT tunnel if HTTPS over proxy + TLS 1.3 if `target_parts.is_https`)
+    let mut fresh_stream = match dial_plan {
+        OutboundHopDialPlan::Direct { verified_addrs } => {
+            dial_fresh_outbound_stream(target_parts, verified_addrs)?
+        }
+        OutboundHopDialPlan::HttpProxy {
+            proxy_parts,
+            proxy_addrs,
+        } => dial_fresh_outbound_stream(proxy_parts, proxy_addrs)?,
+        OutboundHopDialPlan::HttpsConnectProxy {
+            proxy_parts,
+            proxy_addrs,
+        } => establish_proxy_connect_tunnel(proxy_parts, proxy_addrs, target_parts)?,
+    };
+    let resp = send_and_read_framed_http11(&mut fresh_stream, &req_buf, method).map_err(|e| {
+        format!(
+            "HTTP/1.1 exchange failed with {}: {}",
+            target_parts.host_port, e
+        )
+    })?;
     if !resp.peer_closed {
         return_pooled_stream(
             tenant_id,
-            parts.is_https,
-            parts.host_port.clone(),
+            proxy_key.to_string(),
+            target_parts.is_https,
+            target_parts.host_port.clone(),
             fresh_stream,
         );
     }
@@ -1121,36 +1262,57 @@ pub(crate) fn execute_outbound_fetch_with_redirects(
             &headers_json,
             &current_body,
         )?;
-        let (dial_parts, verified_addrs) =
-            if let Some(proxy_url) = resolve_active_proxy_url(parts.is_https, &parts.hostname) {
-                let mut p_parts = parse_outbound_http_url(&proxy_url)
-                    .ok_or_else(|| format!("Invalid proxy URL: {}", proxy_url))?;
-                let proxy_grant = check_boa_outbound_fetch_ocap_and_dlp(
-                    &p_parts,
-                    &proxy_url,
-                    &headers_json,
+        let resp = if let Some(proxy_url) =
+            resolve_active_proxy_url(parts.is_https, &parts.hostname)
+        {
+            let p_parts = parse_outbound_http_url(&proxy_url)
+                .ok_or_else(|| format!("Invalid proxy URL: {}", proxy_url))?;
+            let proxy_grant = check_boa_outbound_fetch_ocap_and_dlp(
+                &p_parts,
+                &proxy_url,
+                &headers_json,
+                &current_body,
+            )?;
+            let proxy_addrs = resolve_and_verify_ssrf_socket_addrs(&p_parts, proxy_grant)?;
+            if parts.is_https {
+                execute_single_http11_hop(
+                    &parts,
+                    &parts.path_and_query,
+                    OutboundHopDialPlan::HttpsConnectProxy {
+                        proxy_parts: &p_parts,
+                        proxy_addrs: &proxy_addrs,
+                    },
+                    &current_method,
+                    &current_headers,
                     &current_body,
-                )?;
-                let proxy_addrs = resolve_and_verify_ssrf_socket_addrs(&p_parts, proxy_grant)?;
-                p_parts.host_header = parts.host_header.clone();
-                p_parts.path_and_query = if !parts.is_https {
-                    current_url.clone()
-                } else {
-                    parts.path_and_query.clone()
-                };
-                (p_parts, proxy_addrs)
+                )?
             } else {
-                let addrs = resolve_and_verify_ssrf_socket_addrs(&parts, explicit_host_grant)?;
-                (parts.clone(), addrs)
-            };
-
-        let resp = execute_single_http11_hop(
-            &dial_parts,
-            &verified_addrs,
-            &current_method,
-            &current_headers,
-            &current_body,
-        )?;
+                let abs_target = format!("http://{}{}", parts.host_header, parts.path_and_query);
+                execute_single_http11_hop(
+                    &parts,
+                    &abs_target,
+                    OutboundHopDialPlan::HttpProxy {
+                        proxy_parts: &p_parts,
+                        proxy_addrs: &proxy_addrs,
+                    },
+                    &current_method,
+                    &current_headers,
+                    &current_body,
+                )?
+            }
+        } else {
+            let verified_addrs = resolve_and_verify_ssrf_socket_addrs(&parts, explicit_host_grant)?;
+            execute_single_http11_hop(
+                &parts,
+                &parts.path_and_query,
+                OutboundHopDialPlan::Direct {
+                    verified_addrs: &verified_addrs,
+                },
+                &current_method,
+                &current_headers,
+                &current_body,
+            )?
+        };
 
         let is_redirect = matches!(resp.status, 301 | 302 | 303 | 307 | 308);
         if is_redirect {

@@ -36,14 +36,24 @@ Write-Host "  Version : v$Version | Commit : $Commit | Tags : $Tags"
 Write-Host "========================================================================="
 
 if (-not $SkipDockerBuild) {
-    Write-Host "[1/3] Building Linux x86_64 Docker benchmark image..."
+    Write-Host "[1/4] Building Windows release binary + Linux x86_64 Docker benchmark image..."
+    cargo build --release --bin slice
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows cargo build --release failed with exit code $LASTEXITCODE"
+    }
     docker build -f tests/Dockerfile -t slice-real-stack-bench .
     if ($LASTEXITCODE -ne 0) {
         throw "Docker build failed with exit code $LASTEXITCODE"
     }
+} elseif (-not (Test-Path (Join-Path $RootDir "target\release\slice.exe"))) {
+    Write-Host "[1/4] Building Windows release binary..."
+    cargo build --release --bin slice
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows cargo build --release failed with exit code $LASTEXITCODE"
+    }
 }
 
-Write-Host "[2/3] Running benchmarks and generating timestamped report in tests/reports/..."
+Write-Host "[2/4] Running Linux x86_64 Docker benchmarks and generating timestamped report..."
 docker run --rm `
     -e "SLICE_BENCH_TAGS=$Tags" `
     -e "SLICE_ONLY_APPS=$OnlyApps" `
@@ -58,7 +68,23 @@ if ($LASTEXITCODE -ne 0) {
     throw "Docker benchmark run failed with exit code $LASTEXITCODE"
 }
 
-Write-Host "[3/3] Synchronizing summarized benchmark tables across README.md and docs/..."
+if ($Tags -eq "all" -or $Tags -match "(^|,)swarm(,|$)") {
+    Write-Host "[3/4] Measuring live Windows host MicroVM swarm + IOCP telemetry..."
+    $WinSliceExe = Join-Path $RootDir "target\release\slice.exe"
+    $WinMicrovmJsonPath = Join-Path $ReportsDir "_tmp_windows_microvm.json"
+    $WinOut = & $WinSliceExe microvm-bench --tenants=1000 --json
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows microvm-bench failed with exit code $LASTEXITCODE"
+    }
+    [System.IO.File]::WriteAllText($WinMicrovmJsonPath, ($WinOut -join "`n"), [System.Text.UTF8Encoding]::new($false))
+    node tests/scripts/generate_bench_report.mjs --from-json tests/reports/latest.json --windows-microvm $WinMicrovmJsonPath
+    Remove-Item -Force $WinMicrovmJsonPath -ErrorAction SilentlyContinue
+    if ($LASTEXITCODE -ne 0) {
+        throw "Merging Windows microvm telemetry failed with exit code $LASTEXITCODE"
+    }
+}
+
+Write-Host "[4/4] Synchronizing summarized benchmark tables across README.md and docs/..."
 node tests/scripts/sync_doc_benchmarks.mjs
 if ($LASTEXITCODE -ne 0) {
     throw "Doc benchmark sync failed with exit code $LASTEXITCODE"

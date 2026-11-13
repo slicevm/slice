@@ -27,17 +27,35 @@ struct ChildProcessSpawnOpts {
     shell: Option<serde_json::Value>,
 }
 
-/// Returns `true` if `key` is a dynamic-linker or shell startup injection environment variable
-/// (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, `BASH_ENV`, etc.) that must not be
-/// injected by untrusted scripts unless explicitly granted in the parent isolate's `BOA_ENV_MAP`.
+/// Returns `true` if `key` is a dynamic-linker, interpreter startup, or `PATH` override variable
+/// (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `NODE_OPTIONS`, `PYTHONPATH`, `BASH_ENV`, `PATH`, etc.)
+/// that must not be injected by untrusted scripts unless explicitly granted in `BOA_ENV_MAP`.
 #[inline]
 fn is_restricted_loader_env_key(key: &str) -> bool {
     let upper = key.trim().to_ascii_uppercase();
     upper.starts_with("LD_")
         || upper.starts_with("DYLD_")
+        || upper.starts_with("BASH_FUNC_")
         || matches!(
             upper.as_str(),
-            "BASH_ENV" | "ENV" | "GLIBC_TUNABLES" | "PROMPT_COMMAND" | "CDPATH"
+            "PATH"
+                | "IFS"
+                | "BASH_ENV"
+                | "ENV"
+                | "GLIBC_TUNABLES"
+                | "PROMPT_COMMAND"
+                | "CDPATH"
+                | "NODE_OPTIONS"
+                | "PYTHONPATH"
+                | "PYTHONSTARTUP"
+                | "PYTHONHOME"
+                | "PERL5OPT"
+                | "PERL5LIB"
+                | "RUBYOPT"
+                | "RUBYLIB"
+                | "JAVA_TOOL_OPTIONS"
+                | "_JAVA_OPTIONS"
+                | "DOTNET_STARTUP_HOOKS"
         )
 }
 
@@ -483,19 +501,20 @@ fn execute_sanitized_subprocess_sync(
         }
     }
 
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
+    let pipe_cap = (max_buffer as u64).saturating_add(1);
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
     let stdout_handle = std::thread::spawn(move || {
         let mut buf = Vec::new();
-        if let Some(ref mut p) = stdout_pipe {
-            let _ = p.read_to_end(&mut buf);
+        if let Some(p) = stdout_pipe {
+            let _ = p.take(pipe_cap).read_to_end(&mut buf);
         }
         buf
     });
     let stderr_handle = std::thread::spawn(move || {
         let mut buf = Vec::new();
-        if let Some(ref mut p) = stderr_pipe {
-            let _ = p.read_to_end(&mut buf);
+        if let Some(p) = stderr_pipe {
+            let _ = p.take(pipe_cap).read_to_end(&mut buf);
         }
         buf
     });
@@ -523,6 +542,14 @@ fn execute_sanitized_subprocess_sync(
     let stdout_bytes = stdout_handle.join().unwrap_or_default();
     let stderr_bytes = stderr_handle.join().unwrap_or_default();
 
+    // Ring 4: Output byte ceiling (`maxBuffer`), enforced even on timeout
+    if stdout_bytes.len().saturating_add(stderr_bytes.len()) > max_buffer {
+        return Err(
+            "RangeError [ERR_CHILD_PROCESS_STDIO_MAXBUFFER]: stdout/stderr maxBuffer length exceeded"
+                .to_string(),
+        );
+    }
+
     if timed_out {
         return Ok((
             None,
@@ -531,14 +558,6 @@ fn execute_sanitized_subprocess_sync(
             Some("SIGTERM".to_string()),
             Some(("ETIMEDOUT".to_string(), -110)),
         ));
-    }
-
-    // Ring 4: Output byte ceiling (`maxBuffer`)
-    if stdout_bytes.len().saturating_add(stderr_bytes.len()) > max_buffer {
-        return Err(
-            "RangeError [ERR_CHILD_PROCESS_STDIO_MAXBUFFER]: stdout/stderr maxBuffer length exceeded"
-                .to_string(),
-        );
     }
 
     Ok((Some(exit_code), stdout_bytes, stderr_bytes, None, None))
@@ -582,10 +601,14 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
 
             let tenant_id = active_tenant_id_or_default();
 
-            let shell_opt: Option<&str> = match &opts.shell {
-                Some(serde_json::Value::Bool(true)) => Some("/bin/sh"),
-                Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.as_str()),
-                _ => None,
+            let (shell_opt, is_custom_shell): (Option<&str>, bool) = match &opts.shell {
+                None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => {
+                    (None, false)
+                }
+                Some(serde_json::Value::String(s)) if s.is_empty() => (None, false),
+                Some(serde_json::Value::Number(n)) if n.as_f64() == Some(0.0) => (None, false),
+                Some(serde_json::Value::String(s)) => (Some(s.as_str()), true),
+                Some(_) => (Some("/bin/sh"), false),
             };
 
             let (exec_file, exec_args) = if let Some(sh_bin) = shell_opt {
@@ -604,22 +627,47 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
             let is_allowed = if let Some(sh_bin) = shell_opt {
                 let shell_allowed = allowed_bins.iter().any(|allowed| {
                     slice_sandbox::exec_binary_matches(sh_bin, allowed)
-                        || (sh_bin == "/bin/sh"
+                        || (!is_custom_shell
+                            && sh_bin == "/bin/sh"
                             && slice_sandbox::exec_binary_matches("sh", allowed))
                 });
                 if shell_allowed {
                     true
+                } else if is_custom_shell {
+                    // Custom `options.shell` executable must itself be explicitly permitted
+                    false
                 } else {
                     let full_cmd = &exec_args[1];
                     let has_meta = full_cmd.bytes().any(|b| {
                         matches!(
                             b,
-                            b'&' | b'|' | b';' | b'`' | b'$' | b'>' | b'<' | b'(' | b')'
+                            b'&' | b'|'
+                                | b';'
+                                | b'`'
+                                | b'$'
+                                | b'>'
+                                | b'<'
+                                | b'('
+                                | b')'
+                                | b'\n'
+                                | b'\r'
+                                | b'\0'
+                                | b'\\'
+                                | b'#'
+                                | b'*'
+                                | b'?'
+                                | b'['
+                                | b']'
+                                | b'{'
+                                | b'}'
+                                | b'~'
+                                | b'!'
                         )
                     });
                     if !has_meta {
                         let first_tok = full_cmd.split_whitespace().next().unwrap_or("");
                         !first_tok.is_empty()
+                            && !first_tok.contains(['\'', '"', '='])
                             && allowed_bins.iter().any(|allowed| {
                                 slice_sandbox::exec_binary_matches(first_tok, allowed)
                             })
@@ -645,7 +693,10 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
 
             // Verify `opts.cwd` against the tenant's `FsRead` capability before entering directory.
             if let Some(ref cwd_dir) = opts.cwd {
-                if !cwd_dir.trim().is_empty() && !check_boa_fs_read_ocap(cwd_dir) {
+                if !cwd_dir.trim().is_empty()
+                    && (crate::bindings::fs::is_host_unc_blocked(cwd_dir)
+                        || !check_boa_fs_read_ocap(cwd_dir))
+                {
                     let violation = SandboxViolation::FsReadDenied {
                         tenant_id,
                         path: cwd_dir.clone(),
@@ -661,14 +712,16 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                 return Err(JsNativeError::range().with_message(fuel_err).into());
             }
 
-            // Ring 2: Environment Sanitization — construct child environment strictly from
+            // Ring 2: Environment Sanitization - construct child environment strictly from
             // the tenant's attenuated `BOA_ENV_MAP` (never host `std::env::vars()`), blocking
-            // dynamic-linker injection variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc.).
+            // dynamic-linker, interpreter startup, and `PATH` injection variables.
             let tenant_env = BOA_ENV_MAP.with(|m| m.borrow().clone());
             let mut child_env = std::collections::BTreeMap::new();
             if let Some(custom_env) = opts.env {
                 for (k, v) in custom_env {
-                    if is_restricted_loader_env_key(&k) && !tenant_env.contains_key(&k) {
+                    if is_restricted_loader_env_key(&k)
+                        && !tenant_env.keys().any(|tk| tk.eq_ignore_ascii_case(&k))
+                    {
                         continue;
                     }
                     match v {

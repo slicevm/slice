@@ -222,18 +222,42 @@
       return __makeLiveReq();
     }
     if (!init && typeof input === "string") {
-      this.url = input;
-      this.method = "GET";
-      this.headers = new Headers();
-      this._body = "";
-      this._u8 = null;
-      this._fd = null;
-      this.redirect = "follow";
-      this.signal = __defaultReqSignal;
-      this.bodyUsed = false;
-      return;
+      var rSimple = Object.create(LazyReqProto);
+      rSimple.url = input;
+      rSimple.method = "GET";
+      rSimple._h = null;
+      rSimple._rawH = null;
+      rSimple._body = "";
+      rSimple._u8 = null;
+      rSimple._fd = null;
+      rSimple.redirect = "follow";
+      rSimple.signal = __defaultReqSignal;
+      rSimple.bodyUsed = false;
+      return rSimple;
     }
     var o = init || {};
+    var oh = o.headers;
+    if (
+      typeof input === "string" &&
+      (o.body === undefined || o.body === null || typeof o.body === "string") &&
+      (!oh || (typeof oh === "object" && !oh._isHeaders && !Array.isArray(oh)))
+    ) {
+      var rawMFast = o.method;
+      var rInit = Object.create(LazyReqProto);
+      rInit.url = input;
+      rInit.method = rawMFast
+        ? (rawMFast === "GET" || rawMFast === "POST" ? rawMFast : String(rawMFast).toUpperCase())
+        : "GET";
+      rInit._h = null;
+      rInit._rawH = oh || null;
+      rInit._body = typeof o.body === "string" ? o.body : "";
+      rInit._u8 = null;
+      rInit._fd = null;
+      rInit.redirect = o.redirect ? String(o.redirect) : "follow";
+      rInit.signal = o.signal || __defaultReqSignal;
+      rInit.bodyUsed = false;
+      return rInit;
+    }
     var isReq = Boolean(input && typeof input === "object" && input._isSliceReq);
     this.url = typeof input === "string"
       ? input
@@ -242,7 +266,6 @@
     this.method = rawM
       ? (rawM === "GET" || rawM === "POST" ? rawM : String(rawM).toUpperCase())
       : (isReq ? input.method : "GET");
-    var oh = o.headers;
     this.headers = (oh && oh._isHeaders) ? oh : new Headers(oh || (isReq ? input.headers : undefined));
     if (o.body !== undefined && o.body !== null) {
       if (typeof o.body === "string") {
@@ -397,6 +420,22 @@
       configurable: true,
       enumerable: false
     }
+  });
+  var LazyReqProto = Object.create(RP);
+  Object.defineProperty(LazyReqProto, "headers", {
+    get: function() {
+      if (!this._h) {
+        this._h = this._rawH ? new Headers(this._rawH) : new Headers();
+        this._rawH = null;
+      }
+      return this._h;
+    },
+    set: function(v) {
+      this._h = v;
+      this._rawH = null;
+    },
+    configurable: true,
+    enumerable: true
   });
   var LazyResProto = Object.create(SP);
   Object.defineProperty(LazyResProto, "headers", {
@@ -560,9 +599,19 @@
     return out.length > 0 ? JSON.stringify(out) : "";
   }
 
+  function __streamHasBinary(st) {
+    if (typeof st._drainSync === "function") st._drainSync();
+    var ch = st._chunks;
+    if (!ch) return false;
+    for (var i = 0; i < ch.length; i++) {
+      if (typeof ch[i] !== "string") return true;
+    }
+    return false;
+  }
+
   function __finishSliceRes(r) {
     if (r._h === null && !r._stream) {
-      var ctFast = r._ct || "text/plain;charset=UTF-8";
+      var ctFast = r._ct || (r._u8 instanceof Uint8Array ? "application/octet-stream" : "text/plain;charset=UTF-8");
       var hdrJsonFast = "";
       var rawH = r._rawH;
       if (rawH) {
@@ -581,23 +630,46 @@
         }
         if (extra) hdrJsonFast = JSON.stringify(extra);
       }
+      if (r._u8 instanceof Uint8Array) {
+        __slice_http_respond(r.status, r._u8, ctFast, hdrJsonFast);
+        return;
+      }
       var rbFast = r._body || (r._data !== undefined ? JSON.stringify(r._data) : "");
       __slice_http_respond(r.status, rbFast, ctFast, hdrJsonFast);
       return;
     }
     var h = r._h !== undefined ? r._h : r.headers;
-    var ct = (h && h._m && h._m["content-type"]) || r._ct || "text/plain;charset=UTF-8";
+    var hasBin = r._u8 instanceof Uint8Array;
+    var ct = (h && h._m && h._m["content-type"]) || r._ct || (hasBin ? "application/octet-stream" : "text/plain;charset=UTF-8");
     var hdrJson = h ? __resHdrJson(h) : "";
     if (r._stream) {
       var st = r._stream;
       if (st._startPromise) {
         st._startPromise.then(function() {
           var hs = r._h !== undefined ? r._h : r.headers;
-          __slice_http_respond(r.status, st._toText(), ct, hs ? __resHdrJson(hs) : "");
+          var isBinS = __streamHasBinary(st);
+          var ctS = (hs && hs._m && hs._m["content-type"]) || r._ct || (isBinS ? "application/octet-stream" : "text/plain;charset=UTF-8");
+          __slice_http_respond(
+            r.status,
+            isBinS && typeof st._toBytes === "function" ? st._toBytes() : st._toText(),
+            ctS,
+            hs ? __resHdrJson(hs) : ""
+          );
         });
         return;
       }
-      __slice_http_respond(r.status, st._toText(), ct, hdrJson);
+      var isBin = __streamHasBinary(st);
+      var ctStream = (h && h._m && h._m["content-type"]) || r._ct || (isBin ? "application/octet-stream" : "text/plain;charset=UTF-8");
+      __slice_http_respond(
+        r.status,
+        isBin && typeof st._toBytes === "function" ? st._toBytes() : st._toText(),
+        ctStream,
+        hdrJson
+      );
+      return;
+    }
+    if (hasBin) {
+      __slice_http_respond(r.status, r._u8, ct, hdrJson);
       return;
     }
     var rb = r._body || (r._data !== undefined ? JSON.stringify(r._data) : "");

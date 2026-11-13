@@ -212,7 +212,7 @@ By default, Slice runs on its **optimal execution path (`Tier 1`, `boacas = true
 1. Built-In Optimal Defaults (`tier = "tier1"`, `boacas = true`, `fuel = 50_000_000`, `memory = 16 MB`, `trust_directives = false`, zero ambient OCap)
        |
        v
-2. Project Manifest (`./slice.toml`, target folder `slice.toml`, or `.cas` embedded `manifest:/slice.toml`; note: `SliceManifest` defaults `memory_kb` to `4096 KB` if `[limits] memory_kb` is omitted in `slice.toml`)
+2. Project Manifest (`--config=<path>`, `./slice.toml` / target folder `slice.toml` for source runs, or `.cas` / standalone `SLICEEXE` embedded `manifest:/slice.toml` without ambient CWD `slice.toml` inheritance; note: `SliceManifest` defaults `memory_kb` to `4096 KB` if `[limits] memory_kb` is omitted in `slice.toml`)
        |
        v
 3. Top-of-File Inline Source Directives (`// @slice-...` - monotonically attenuated by default; full additive authority only when `--trust-directives` / `SLICE_TRUST_DIRECTIVES=1` / `[capabilities] trust_directives = true` is set)

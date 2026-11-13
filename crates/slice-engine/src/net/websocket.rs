@@ -34,6 +34,9 @@ pub const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 /// Maximum size of a single WebSocket frame or reassembled message (`4 MB`).
 pub const MAX_WS_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
+/// Maximum total buffered unread WebSocket frames/events per client session (`16 MB`).
+pub const MAX_WS_BUFFERED_BYTES: usize = 16 * 1024 * 1024;
+
 pub const WS_OPCODE_CONTINUATION: u8 = 0x0;
 pub const WS_OPCODE_TEXT: u8 = 0x1;
 pub const WS_OPCODE_BINARY: u8 = 0x2;
@@ -424,6 +427,20 @@ struct ActiveClientWebSocket {
     closed: bool,
     frag_opcode: Option<u8>,
     frag_payload: Vec<u8>,
+    buffered_mem_bytes: usize,
+}
+
+impl Drop for ActiveClientWebSocket {
+    fn drop(&mut self) {
+        if self.buffered_mem_bytes > 0 {
+            let release = self.buffered_mem_bytes;
+            self.buffered_mem_bytes = 0;
+            BOA_KV_MEM_BUDGET.with(|m| {
+                let (used, limit) = m.get();
+                m.set((used.saturating_sub(release), limit));
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -464,8 +481,90 @@ fn current_tenant_id() -> String {
 fn effective_ws_max_bytes() -> usize {
     BOA_KV_MEM_BUDGET.with(|m| {
         let (used, limit) = m.get();
-        limit.saturating_sub(used).min(MAX_WS_FRAME_BYTES)
+        if limit > 0 && limit < usize::MAX {
+            limit.saturating_sub(used).min(MAX_WS_FRAME_BYTES)
+        } else {
+            MAX_WS_FRAME_BYTES
+        }
     })
+}
+
+fn compute_ws_buffered_bytes(ws: &ActiveClientWebSocket) -> usize {
+    let pending = match &ws.backend {
+        ClientWsBackend::Live { pending_buf, .. } => pending_buf.len(),
+        ClientWsBackend::Mock { .. } => 0,
+    };
+    let events_bytes: usize = ws
+        .queued_events
+        .iter()
+        .map(|e| {
+            e.data
+                .len()
+                .saturating_add(e.reason.len())
+                .saturating_add(32)
+        })
+        .sum();
+    pending
+        .saturating_add(ws.frag_payload.len())
+        .saturating_add(events_bytes)
+}
+
+fn sync_ws_buffered_memory(ws: &mut ActiveClientWebSocket) -> Result<(), String> {
+    let next_buffered = compute_ws_buffered_bytes(ws);
+    if next_buffered > MAX_WS_BUFFERED_BYTES {
+        let tenant_id = current_tenant_id();
+        BOA_VIOLATION.with(|v| {
+            if v.borrow().is_none() {
+                *v.borrow_mut() = Some(SandboxViolation::MemoryCeilingExceeded {
+                    tenant_id,
+                    requested: next_buffered,
+                    limit: MAX_WS_BUFFERED_BYTES,
+                });
+            }
+        });
+        return Err(format!(
+            "MemoryCeilingExceeded: buffered WebSocket session data ({} bytes) exceeds {} bytes",
+            next_buffered, MAX_WS_BUFFERED_BYTES
+        ));
+    }
+    let prev_buffered = ws.buffered_mem_bytes;
+    if next_buffered > prev_buffered {
+        let delta = next_buffered - prev_buffered;
+        let exceeded = BOA_KV_MEM_BUDGET.with(|m| {
+            let (used, limit) = m.get();
+            if limit > 0 && limit < usize::MAX && used.saturating_add(delta) > limit {
+                Some((used.saturating_add(delta), limit))
+            } else {
+                m.set((used.saturating_add(delta), limit));
+                None
+            }
+        });
+        if let Some((requested, limit)) = exceeded {
+            let tenant_id = current_tenant_id();
+            BOA_VIOLATION.with(|v| {
+                if v.borrow().is_none() {
+                    *v.borrow_mut() = Some(SandboxViolation::MemoryCeilingExceeded {
+                        tenant_id,
+                        requested,
+                        limit,
+                    });
+                }
+            });
+            return Err(format!(
+                "MemoryCeilingExceeded: buffered WebSocket session data ({} bytes) exceeds tenant limit ({} bytes)",
+                requested, limit
+            ));
+        }
+        ws.buffered_mem_bytes = next_buffered;
+    } else if next_buffered < prev_buffered {
+        let release = prev_buffered - next_buffered;
+        BOA_KV_MEM_BUDGET.with(|m| {
+            let (used, limit) = m.get();
+            m.set((used.saturating_sub(release), limit));
+        });
+        ws.buffered_mem_bytes = next_buffered;
+    }
+    Ok(())
 }
 
 fn verify_ws_outbound_dlp(url: &str, payload_bytes: &[u8]) -> Result<(), String> {
@@ -565,6 +664,7 @@ pub(crate) fn ws_client_connect(raw_url: &str, protocols: &str) -> Result<String
                     closed: false,
                     frag_opcode: None,
                     frag_payload: Vec::new(),
+                    buffered_mem_bytes: 0,
                 },
             );
         });
@@ -672,11 +772,13 @@ pub(crate) fn ws_client_connect(raw_url: &str, protocols: &str) -> Result<String
         closed: false,
         frag_opcode: None,
         frag_payload: Vec::new(),
+        buffered_mem_bytes: 0,
     };
 
     // Drain any frames that arrived coalesced with the 101 response
     drain_available_live_frames(&mut ws, Duration::from_millis(5), false);
     initial_events.append(&mut ws.queued_events);
+    let _ = sync_ws_buffered_memory(&mut ws);
 
     CLIENT_WEBSOCKETS.with(|map| {
         map.borrow_mut().insert(ws_id, ws);
@@ -852,6 +954,32 @@ fn drain_available_live_frames(
                 break;
             }
             Ok(n) => {
+                let pending_after = pending_buf.len().saturating_add(n);
+                if pending_after > MAX_WS_BUFFERED_BYTES
+                    || pending_after > max_bytes.saturating_add(65_536)
+                {
+                    let tenant_id = current_tenant_id();
+                    let lim = max_bytes.min(MAX_WS_BUFFERED_BYTES);
+                    BOA_VIOLATION.with(|v| {
+                        if v.borrow().is_none() {
+                            *v.borrow_mut() = Some(SandboxViolation::MemoryCeilingExceeded {
+                                tenant_id,
+                                requested: pending_after,
+                                limit: lim,
+                            });
+                        }
+                    });
+                    ws.closed = true;
+                    ws.queued_events.push(WireWsEvent {
+                        event_type: "close".to_string(),
+                        is_binary: false,
+                        data: String::new(),
+                        code: 1009,
+                        reason: "MemoryCeilingExceeded: buffered WebSocket stream exceeded limit"
+                            .to_string(),
+                    });
+                    break;
+                }
                 pending_buf.extend_from_slice(&scratch[..n]);
                 stream.set_read_timeout(Some(Duration::from_millis(5)));
             }
@@ -948,6 +1076,7 @@ pub(crate) fn ws_client_send(
         }
 
         let events: Vec<WireWsEvent> = std::mem::take(&mut ws.queued_events);
+        sync_ws_buffered_memory(ws)?;
         serde_json::to_string(&events).map_err(|e| e.to_string())
     })
 }
@@ -963,6 +1092,7 @@ pub(crate) fn ws_client_poll(ws_id: u32) -> Result<String, String> {
             drain_available_live_frames(ws, Duration::from_millis(15), false);
         }
         let events: Vec<WireWsEvent> = std::mem::take(&mut ws.queued_events);
+        sync_ws_buffered_memory(ws)?;
         serde_json::to_string(&events).map_err(|e| e.to_string())
     })
 }
@@ -997,6 +1127,7 @@ pub(crate) fn ws_client_close(ws_id: u32, code: u16, reason: &str) -> Result<Str
             }
         }
         let events: Vec<WireWsEvent> = std::mem::take(&mut ws.queued_events);
+        let _ = sync_ws_buffered_memory(ws);
         serde_json::to_string(&events).map_err(|e| e.to_string())
     })
 }

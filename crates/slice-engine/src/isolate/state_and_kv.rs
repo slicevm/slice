@@ -2,7 +2,8 @@
 //! Deterministic SplitMix64 PRNG Re-export, and Outbound Egress Secret DLP Guard.
 
 use crate::boa_realm::{
-    BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VFS_TOMBSTONES, CHECKPOINT_SLAB, NEXT_CHECKPOINT_ID,
+    BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VFS_MTIMES, BOA_VFS_TOMBSTONES, CHECKPOINT_SLAB,
+    NEXT_CHECKPOINT_ID,
 };
 pub(crate) use crate::intrinsics::splitmix64_next_f64;
 use compact_str::CompactString;
@@ -19,6 +20,7 @@ pub(crate) struct StateCheckpoint {
     pub(crate) vfs_files: FxHashMap<String, Arc<Vec<u8>>>,
     pub(crate) vfs_dirs: FxHashSet<String>,
     pub(crate) vfs_tombstones: FxHashSet<String>,
+    pub(crate) vfs_mtimes: FxHashMap<String, f64>,
     pub(crate) tenant_kv: [Option<KvTenantMap>; 16],
 }
 
@@ -35,6 +37,14 @@ pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
         let b = t.borrow();
         if b.is_empty() {
             FxHashSet::default()
+        } else {
+            b.clone()
+        }
+    });
+    let vfs_mtimes = BOA_VFS_MTIMES.with(|m| {
+        let b = m.borrow();
+        if b.is_empty() {
+            FxHashMap::default()
         } else {
             b.clone()
         }
@@ -80,6 +90,7 @@ pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
                 vfs_files,
                 vfs_dirs,
                 vfs_tombstones,
+                vfs_mtimes,
                 tenant_kv,
             },
         );
@@ -121,6 +132,7 @@ pub(crate) fn restore_tenant_state(tenant_id: &str, checkpoint_id: u64) -> bool 
     BOA_VFS_CACHE.with(|c| *c.borrow_mut() = snap.vfs_files);
     BOA_VFS_DIRS.with(|d| *d.borrow_mut() = snap.vfs_dirs);
     BOA_VFS_TOMBSTONES.with(|t| *t.borrow_mut() = snap.vfs_tombstones);
+    BOA_VFS_MTIMES.with(|m| *m.borrow_mut() = snap.vfs_mtimes);
     let shards = EDGE_KV_SLAB
         .get_or_init(|| std::array::from_fn(|_| parking_lot::RwLock::new(FxHashMap::default())));
     for (idx, shard_snap) in snap.tenant_kv.into_iter().enumerate() {
@@ -324,13 +336,55 @@ pub(crate) fn edge_kv_set(tenant_id: &str, key: &str, val: &str, ttl_ms: u64) {
     guard.insert(CompactString::new(tenant_id), t_map);
 }
 
-pub(crate) fn edge_kv_del(tenant_id: &str, key: &str) -> bool {
+#[inline]
+pub(crate) fn edge_kv_entry_bytes(key: &str, entry: &KvEntry) -> usize {
+    let val_bytes = match &entry.val {
+        KvValue::Str(s) => s.len(),
+        KvValue::Int(_) => 24,
+    };
+    key.len().saturating_add(val_bytes)
+}
+
+#[inline]
+pub(crate) fn edge_kv_contains_live_key(tenant_id: &str, key: &str) -> bool {
+    let shard = edge_kv_shard(tenant_id, key);
+    let guard = shard.read();
+    guard
+        .get(tenant_id)
+        .and_then(|m| m.get(key))
+        .is_some_and(|entry| {
+            entry
+                .expires_at_ms
+                .is_none_or(|exp| current_epoch_ms() < exp)
+        })
+}
+
+pub(crate) fn edge_kv_tenant_bytes(tenant_id: &str) -> usize {
+    let Some(shards) = EDGE_KV_SLAB.get() else {
+        return 0;
+    };
+    let now = current_epoch_ms();
+    let mut total = 0usize;
+    for shard in shards {
+        let guard = shard.read();
+        if let Some(t_map) = guard.get(tenant_id) {
+            for (k, entry) in t_map {
+                if entry.expires_at_ms.is_none_or(|exp| now < exp) {
+                    total = total.saturating_add(edge_kv_entry_bytes(k.as_str(), entry));
+                }
+            }
+        }
+    }
+    total
+}
+
+pub(crate) fn edge_kv_del_bytes(tenant_id: &str, key: &str) -> Option<usize> {
     let shard = edge_kv_shard(tenant_id, key);
     let mut guard = shard.write();
     guard
         .get_mut(tenant_id)
         .and_then(|t_map| t_map.remove(key))
-        .is_some()
+        .map(|entry| edge_kv_entry_bytes(key, &entry))
 }
 
 pub(crate) fn edge_kv_incr(tenant_id: &str, key: &str, delta: i64) -> i64 {

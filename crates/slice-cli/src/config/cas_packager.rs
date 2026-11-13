@@ -20,13 +20,29 @@ pub(crate) fn build_cas_archive_with_static(
     entrypoint: &str,
     static_dir_opt: Option<&Path>,
 ) -> Result<slice_cas::CasIndexHeader> {
-    let manifest_toml_opt =
-        find_project_manifest_path(input_path).and_then(|mf| std::fs::read_to_string(&mf).ok());
+    let manifest_path_opt = find_project_manifest_path(input_path);
+    let manifest_toml_opt = manifest_path_opt
+        .as_ref()
+        .and_then(|mf| std::fs::read_to_string(mf).ok());
+    let mut manifest_static_dir: Option<std::path::PathBuf> = None;
     if let Some(ref raw_toml) = manifest_toml_opt {
         let m = SliceManifest::parse_toml(raw_toml);
         if let Some(b) = m.exper_boacas {
             if std::env::var("SLICE_EXPER_BOACAS").is_err() {
                 apply_boacas_override(Some(b));
+            }
+        }
+        if static_dir_opt.is_none() {
+            if let Some(sd) = m.static_dir {
+                let base = manifest_path_opt
+                    .as_deref()
+                    .and_then(|p| p.parent())
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                let candidate = base.join(sd);
+                if candidate.is_dir() {
+                    manifest_static_dir = Some(candidate);
+                }
             }
         }
     }
@@ -59,7 +75,7 @@ pub(crate) fn build_cas_archive_with_static(
         builder.embed_manifest_toml(raw_toml);
     }
 
-    if let Some(static_dir) = static_dir_opt {
+    if let Some(static_dir) = static_dir_opt.or(manifest_static_dir.as_deref()) {
         builder.ingest_static_directory(static_dir)?;
     }
 

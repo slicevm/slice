@@ -29,7 +29,7 @@ pub use manifest::{
 pub use net::{
     extract_clean_hostname, extract_clean_hostname_and_port, is_cloud_metadata_ip,
     is_cloud_metadata_ssrf_target, is_private_or_loopback_ip, is_private_or_loopback_ssrf_target,
-    parse_nonstandard_ipv4,
+    parse_http_authority_and_path, parse_nonstandard_ipv4, ParsedHttpUrl,
 };
 pub use vfs::{
     exec_binary_matches, is_rejected_vfs_candidate, normalize_vfs_path_cow,

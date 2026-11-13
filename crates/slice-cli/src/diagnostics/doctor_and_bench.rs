@@ -22,6 +22,7 @@ struct MicroVmBenchReport {
     total_swarm_time_ms: f64,
     per_tenant_memory_bytes: usize,
     process_rss_kb: u64,
+    cas_cold_boot_500_modules_ms: f64,
     cas_lookup_500_modules_us: f64,
     os_stat_syscalls: usize,
     io_ring_10k_completions_ms: f64,
@@ -134,6 +135,7 @@ console.log(status);
     }
 
     let total_swarm_ms = swarm_start.elapsed().as_secs_f64() * 1_000.0;
+    let swarm_rss_kb = measure_current_process_rss_kb();
     latencies_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let min_us = latencies_us[0];
     let p50_us = latencies_us[tenant_count / 2];
@@ -165,8 +167,9 @@ console.log(status);
     );
     cas_builder.write_to_file(&temp_cas)?;
 
-    let cas_t0 = Instant::now();
+    let open_t0 = Instant::now();
     let mapped_cas = MappedCasArchive::open(&temp_cas)?;
+    let cas_mem_t0 = Instant::now();
     let entry_blob = mapped_cas.entrypoint_blob().unwrap();
     let entry_bc = mapped_cas.get_bytecode_slice(entry_blob);
     let mut cas_isolate = SliceIsolate::spawn(
@@ -177,7 +180,42 @@ console.log(status);
         1024 * 1024,
     );
     let cas_metrics = cas_isolate.execute_bytecode(entry_bc, Some(&mapped_cas))?;
-    let cas_lookup_500_us = cas_t0.elapsed().as_nanos() as f64 / 1_000.0;
+    let cas_lookup_500_us = cas_mem_t0.elapsed().as_nanos() as f64 / 1_000.0;
+    let inproc_cold_ms = open_t0.elapsed().as_secs_f64() * 1_000.0;
+    drop(mapped_cas);
+
+    let cas_cold_boot_500_ms = match env::current_exe() {
+        Ok(exe)
+            if exe
+                .file_stem()
+                .is_some_and(|s| s.eq_ignore_ascii_case("slice")) =>
+        {
+            let _ = std::process::Command::new(&exe)
+                .arg("run")
+                .arg(&temp_cas)
+                .output();
+            let mut proc_samples_ms = Vec::with_capacity(5);
+            for _ in 0..5 {
+                let pt0 = Instant::now();
+                if let Ok(out) = std::process::Command::new(&exe)
+                    .arg("run")
+                    .arg(&temp_cas)
+                    .output()
+                {
+                    if out.status.success() {
+                        proc_samples_ms.push(pt0.elapsed().as_secs_f64() * 1_000.0);
+                    }
+                }
+            }
+            if proc_samples_ms.is_empty() {
+                inproc_cold_ms
+            } else {
+                proc_samples_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                proc_samples_ms[proc_samples_ms.len() / 2]
+            }
+        }
+        _ => inproc_cold_ms,
+    };
     let _ = std::fs::remove_file(&temp_cas);
 
     let mut io_engine = CompletionRingEngine::new(256, true)?;
@@ -215,7 +253,6 @@ console.log(f);
     let compute_us = comp_t0.elapsed().as_nanos() as f64 / 1_000.0;
 
     let blocked_attacks = run_security_containment_checks()?;
-    let rss_kb = measure_current_process_rss_kb();
 
     let report = MicroVmBenchReport {
         platform: env::consts::OS.to_string(),
@@ -228,7 +265,8 @@ console.log(f);
         cold_start_min_us: min_us,
         total_swarm_time_ms: total_swarm_ms,
         per_tenant_memory_bytes: cas_metrics.memory_used_bytes,
-        process_rss_kb: rss_kb,
+        process_rss_kb: swarm_rss_kb,
+        cas_cold_boot_500_modules_ms: cas_cold_boot_500_ms,
         cas_lookup_500_modules_us: cas_lookup_500_us,
         os_stat_syscalls: cas_metrics.os_stat_syscalls,
         io_ring_10k_completions_ms: io_10k_ms,
@@ -279,6 +317,10 @@ console.log(f);
             "  Total Host Process RSS        : {} KB ({:.2} MB)",
             report.process_rss_kb,
             report.process_rss_kb as f64 / 1024.0
+        );
+        println!(
+            "  500-Module Cold Process Boot  : {:.3} ms ({} OS stat syscalls)",
+            report.cas_cold_boot_500_modules_ms, report.os_stat_syscalls
         );
         println!(
             "  500-Module Zero-Stat CAS Load : {:.2} us ({} OS stat syscalls)",

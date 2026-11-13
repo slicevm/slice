@@ -8,7 +8,8 @@ use crate::sockets::{
 };
 use crate::workers::{
     worker_post_message_to_child, worker_self_meta_json, worker_self_post_message,
-    worker_self_set_listening, worker_set_child_ref, worker_spawn, worker_terminate_child,
+    worker_self_set_listening, worker_set_child_ref, worker_spawn_with_context,
+    worker_terminate_child,
 };
 
 pub(crate) fn register_shard8_workers_sockets_host_functions(ctx: &mut boa_engine::Context) {
@@ -305,7 +306,7 @@ pub(crate) fn register_shard8_workers_sockets_host_functions(ctx: &mut boa_engin
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_else(|| "{}".to_string());
-            match worker_spawn(&spec, &opts_json) {
+            match worker_spawn_with_context(&spec, &opts_json, Some(context)) {
                 Ok(id) => Ok(BoaVal::from(id as f64)),
                 Err(e) => Err(JsNativeError::error().with_message(e).into()),
             }

@@ -288,6 +288,11 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
                         let _ = try_consume_isolate_memory(usize::MAX / 2);
                         return Err(JsNativeError::range().with_message(msg).into());
                     }
+                    if msg.contains("CPU fuel budget exhausted")
+                        || msg.contains("empty block limit")
+                    {
+                        return Err(JsNativeError::range().with_message(msg).into());
+                    }
                     Err(JsNativeError::typ().with_message(msg).into())
                 }
             }
@@ -313,7 +318,9 @@ pub(crate) fn register_buffer_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(js_string!("")));
             };
             let hex = with_buffer_source_bytes(first, context, bytes_to_hex)?;
-            Ok(BoaVal::from(js_string!(hex)))
+            Ok(BoaVal::from(boa_engine::JsString::from(
+                boa_engine::string::JsStr::latin1(hex.as_bytes()),
+            )))
         }),
     );
 
@@ -342,7 +349,9 @@ pub(crate) fn register_buffer_host_functions(ctx: &mut boa_engine::Context) {
             let url_safe = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(false);
             let encoded =
                 with_buffer_source_bytes(first, context, |bytes| base64_encode(bytes, url_safe))?;
-            Ok(BoaVal::from(js_string!(encoded)))
+            Ok(BoaVal::from(boa_engine::JsString::from(
+                boa_engine::string::JsStr::latin1(encoded.as_bytes()),
+            )))
         }),
     );
 

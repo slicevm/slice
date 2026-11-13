@@ -11,6 +11,7 @@
   globalThis.__shMask = 0;
   globalThis.__shardProps = {};
   var __lazyInited = false;
+  var __wu = [];
   globalThis.__slice_mark_lazy_inited = function() { __lazyInited = true; };
   function __loadShard(id) {
     if (!__lazyInited) {
@@ -70,7 +71,12 @@
       __slice_lazy_prelude(id);
     }
   }
-  globalThis.__slice_ensure_shard = __loadShard;
+  Object.defineProperty(globalThis, "__slice_ensure_shard", {
+    value: __loadShard,
+    writable: false,
+    enumerable: false,
+    configurable: false
+  });
 
   globalThis.__slice_dispatch_fetch = function(h) {
     if (!__slice_http_is_active()) return;
@@ -167,20 +173,7 @@
   });
   globalThis.process = __proc;
 
-  globalThis.__slice_check_ses = function() {
-    var p = [Object.prototype, Array.prototype, Function.prototype, String.prototype];
-    var n = ["Object.prototype", "Array.prototype", "Function.prototype", "String.prototype"];
-    for (var i = 0; i < 4; i++) {
-      var ks = Object.keys(p[i]);
-      if (ks.length > 0) {
-        for (var j = 0; j < ks.length; j++) delete p[i][ks[j]];
-        return n[i];
-      }
-    }
-    return "";
-  };
-
-  globalThis.__slice_sync_process_env = function(load) {
+  function __syncProcessEnv(load) {
     if (!load) {
       globalThis.process.env = { NODE_ENV: "production" };
       return;
@@ -188,7 +181,7 @@
     var m = JSON.parse(__slice_env_json());
     m.NODE_ENV = m.NODE_ENV || "production";
     globalThis.process.env = m;
-  };
+  }
 
   var __orand = Math.random;
   var __onow = Date.now;
@@ -196,7 +189,7 @@
   globalThis.performance = {
     now: __perfNowNative
   };
-  globalThis.__slice_set_det_mode = function(on) {
+  function __setDetMode(on) {
     if (on) {
       Math.random = function() {
         var v = __slice_det_random();
@@ -215,7 +208,7 @@
       Date.now = __onow;
       globalThis.performance.now = __perfNowNative;
     }
-  };
+  }
 
   // `process.nextTick` & `queueMicrotask`:
   // Speculative On-Demand `Promise.prototype.then` Hook:
@@ -255,42 +248,43 @@
     return __origThen.call(this, wF, wR);
   }
 
-  globalThis.__slice_set_next_tick_hook = function(enable) {
+  function __setNextTickHook(enable) {
     if (enable && !__ntHooked) {
       __ntHooked = true;
       Promise.prototype.then = __wrappedThen;
-    } else if (!enable && __ntHooked && __ntQ.length === 0) {
+    } else if (!enable && __ntHooked) {
+      __ntQ.length = 0;
       __ntHooked = false;
       Promise.prototype.then = __origThen;
     }
-  };
+  }
 
-  globalThis.__slice_reset_mt = function() {
+  function __resetMt() {
     __ntQ.length = 0;
     __qmQ.length = 0;
     __mtS = false;
-  };
+  }
 
-  globalThis.__slice_ctl = function(op, flag) {
+  function __ctl(op, flag) {
     if (op === 0) {
       __ntQ.length = 0;
       __qmQ.length = 0;
       __mtS = false;
     } else if (op === 1) {
-      globalThis.__slice_set_det_mode(flag);
+      __setDetMode(flag);
     } else if (op === 2) {
-      globalThis.__slice_sync_process_env(flag);
+      __syncProcessEnv(flag);
     } else if (op === 3) {
-      globalThis.__slice_set_next_tick_hook(flag);
+      __setNextTickHook(flag);
     } else if (op === 4) {
-      if (globalThis.__slice_wu) globalThis.__slice_wu.length = 0;
+      __wu.length = 0;
     } else if (op === 5) {
       var s = globalThis.__slice_active_http_server;
       if (s && typeof s._dispatchActiveHttpBridge === "function") {
         s._dispatchActiveHttpBridge();
       }
     }
-  };
+  }
 
   globalThis.__slice_set_als_wrap = function(wrapFn) {
     __alsWrap = wrapFn || null;
@@ -441,19 +435,17 @@
   globalThis.afterEach = function(f) { return __tMod().afterEach(f); };
   globalThis.expect = function(v) { return __tMod().expect(v); };
 
-  globalThis.__slice_wu = [];
-  globalThis.__slice_drain_wu = function() {
-    var wu = globalThis.__slice_wu;
-    if (!wu || wu.length === 0) return;
+  function __drainWu() {
+    if (__wu.length === 0) return;
     try {
-      while (wu.length > 0) {
-        var f = wu.shift();
+      while (__wu.length > 0) {
+        var f = __wu.shift();
         if (typeof f === "function") f();
       }
     } finally {
-      wu.length = 0;
+      __wu.length = 0;
     }
-  };
+  }
   globalThis.Slice = {
     request: function() {
       var t = __slice_http_tenant();
@@ -468,6 +460,13 @@
       };
     },
     respond: function(s, b, ct) {
+      if (
+        b !== null &&
+        typeof b === "object" &&
+        (b instanceof Uint8Array || b instanceof ArrayBuffer || (b.buffer instanceof ArrayBuffer))
+      ) {
+        return __slice_http_respond(s, __slice_toU8(b), ct || "application/octet-stream", "");
+      }
       return __slice_http_respond(
         s,
         typeof b === "string" ? b : JSON.stringify(b),
@@ -508,7 +507,7 @@
       return globalThis.Slice.mockSocket(addr, spec);
     },
     waitUntil: function(f) {
-      __slice_wu.push(f);
+      __wu.push(f);
       __slice_mark_wait_until();
     },
     kv: {
@@ -612,32 +611,93 @@
     });
   }
   var __origArrFill = Array.prototype.fill;
+  var __sliceArrFill = function(v, s, e) {
+    var len = this ? (this.length >>> 0) : 0;
+    if (len > 64) {
+      var st = s === undefined ? 0 : (s < 0 ? Math.max(len + Number(s), 0) : Math.min(Number(s), len));
+      var en = e === undefined ? len : (e < 0 ? Math.max(len + Number(e), 0) : Math.min(Number(e), len));
+      var cnt = en > st ? (en - st) : 0;
+      if (cnt > 64) __slice_charge_mem(cnt * 8, Math.floor(cnt / 16) + 1);
+    }
+    return __origArrFill.apply(this, arguments);
+  };
   Object.defineProperty(Array.prototype, "fill", {
-    value: function(v, s, e) {
-      var len = this ? (this.length >>> 0) : 0;
-      if (len > 64) {
-        var st = s === undefined ? 0 : (s < 0 ? Math.max(len + Number(s), 0) : Math.min(Number(s), len));
-        var en = e === undefined ? len : (e < 0 ? Math.max(len + Number(e), 0) : Math.min(Number(e), len));
-        var cnt = en > st ? (en - st) : 0;
-        if (cnt > 64) __slice_charge_mem(cnt * 8, Math.floor(cnt / 16) + 1);
-      }
-      return __origArrFill.apply(this, arguments);
-    },
+    value: __sliceArrFill,
     writable: true,
     configurable: true,
     enumerable: false
   });
   var __origStrRepeat = String.prototype.repeat;
+  var __sliceStrRepeat = function(count) {
+    var n = Number(count) || 0;
+    var bytes = String(this).length * (n > 0 ? Math.floor(n) : 0);
+    if (bytes > 64) __slice_charge_mem(bytes, Math.floor(bytes / 64) + 1);
+    return __origStrRepeat.call(this, count);
+  };
   Object.defineProperty(String.prototype, "repeat", {
-    value: function(count) {
-      var n = Number(count) || 0;
-      var bytes = String(this).length * (n > 0 ? Math.floor(n) : 0);
-      if (bytes > 64) __slice_charge_mem(bytes, Math.floor(bytes / 64) + 1);
-      return __origStrRepeat.call(this, count);
-    },
+    value: __sliceStrRepeat,
     writable: true,
     configurable: true,
     enumerable: false
+  });
+  var __origObjToStr = Object.prototype.toString;
+  var __origObjValOf = Object.prototype.valueOf;
+  var __origObjHasOwn = Object.prototype.hasOwnProperty;
+  var __origArrPush = Array.prototype.push;
+  var __origArrPop = Array.prototype.pop;
+  var __origArrSlice = Array.prototype.slice;
+  var __origFnCall = Function.prototype.call;
+  var __origFnApply = Function.prototype.apply;
+  var __origFnBind = Function.prototype.bind;
+  var __origStrSlice = String.prototype.slice;
+  var __origPromiseCatch = Promise.prototype.catch;
+  var __origU8Subarray = Uint8Array.prototype.subarray;
+  __slice_capture_ses_sigs(0);
+  function __checkSes() {
+    if (
+      Object.prototype.toString !== __origObjToStr ||
+      Object.prototype.valueOf !== __origObjValOf ||
+      Object.prototype.hasOwnProperty !== __origObjHasOwn
+    ) {
+      return "Object.prototype";
+    }
+    if (
+      Array.prototype.push !== __origArrPush ||
+      Array.prototype.pop !== __origArrPop ||
+      Array.prototype.slice !== __origArrSlice ||
+      Array.prototype.fill !== __sliceArrFill
+    ) {
+      return "Array.prototype";
+    }
+    if (
+      Function.prototype.call !== __origFnCall ||
+      Function.prototype.apply !== __origFnApply ||
+      Function.prototype.bind !== __origFnBind
+    ) {
+      return "Function.prototype";
+    }
+    if (
+      String.prototype.slice !== __origStrSlice ||
+      String.prototype.repeat !== __sliceStrRepeat
+    ) {
+      return "String.prototype";
+    }
+    if ((!__ntHooked && Promise.prototype.then !== __origThen) || Promise.prototype.catch !== __origPromiseCatch) {
+      return "Promise.prototype";
+    }
+    if (Uint8Array.prototype.subarray !== __origU8Subarray) {
+      return "Uint8Array.prototype";
+    }
+    return "";
+  }
+  Object.defineProperties(globalThis, {
+    __slice_check_ses: { value: __checkSes, writable: false, enumerable: false, configurable: false },
+    __slice_sync_process_env: { value: __syncProcessEnv, writable: false, enumerable: false, configurable: false },
+    __slice_set_det_mode: { value: __setDetMode, writable: false, enumerable: false, configurable: false },
+    __slice_set_next_tick_hook: { value: __setNextTickHook, writable: false, enumerable: false, configurable: false },
+    __slice_reset_mt: { value: __resetMt, writable: false, enumerable: false, configurable: false },
+    __slice_ctl: { value: __ctl, writable: false, enumerable: false, configurable: false },
+    __slice_drain_wu: { value: __drainWu, writable: false, enumerable: false, configurable: false }
   });
 })();
 

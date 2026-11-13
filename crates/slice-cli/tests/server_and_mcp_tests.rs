@@ -1010,3 +1010,610 @@ fn test_issue_16_mcp_multiple_audit_secrets_deterministic_seed_and_schema_sync()
     assert!(p1["compileTimeNs"].as_u64().unwrap() >= 1);
     assert!(p1["execTimeNs"].as_u64().unwrap() >= 1);
 }
+
+#[test]
+fn test_mcp_persistent_kv_memory_accounting_checkpoint_caps_and_bounded_lines() {
+    use crate::diagnostics::mcp::{read_bounded_mcp_line, McpLineRead};
+    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use slice_engine::SliceIsolate;
+    use slice_sandbox::CapabilityToken;
+    use std::io::Cursor;
+
+    // 1. Bounded MCP stdin line reader caps memory on oversized lines and recovers for next line
+    let mut raw_stream = b"a".repeat(2048);
+    raw_stream.push(b'\n');
+    raw_stream.extend_from_slice(br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#);
+    raw_stream.push(b'\n');
+    let mut cursor = Cursor::new(raw_stream);
+    let mut line_buf = Vec::new();
+    assert_eq!(
+        read_bounded_mcp_line(&mut cursor, &mut line_buf, 1024).unwrap(),
+        McpLineRead::TooLong
+    );
+    assert!(line_buf.is_empty());
+    assert_eq!(
+        read_bounded_mcp_line(&mut cursor, &mut line_buf, 1024).unwrap(),
+        McpLineRead::Line
+    );
+    assert_eq!(
+        std::str::from_utf8(&line_buf).unwrap(),
+        r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#
+    );
+    assert_eq!(
+        read_bounded_mcp_line(&mut cursor, &mut line_buf, 1024).unwrap(),
+        McpLineRead::Eof
+    );
+
+    // 2. Persistent Slice.kv byte footprint is retained across slice_eval_ts calls (never wiped to 0)
+    let mut kv_iso = SliceIsolate::spawn(
+        "mcp-kv-mem-persist",
+        120,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        16 * 1024, // 16 KB total compartment limit (4 KB base + 12 KB KV headroom)
+    );
+    let big_val = "v".repeat(8000);
+    let set1 = handle_mcp_jsonrpc_line(
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "slice_kv_set",
+                "arguments": { "key": "k1", "value": big_val }
+            }
+        })
+        .to_string(),
+        &mut kv_iso,
+    )
+    .unwrap();
+    assert!(set1.contains(r#""isError":false"#), "got: {}", set1);
+
+    // Run a slice_eval_ts call in between; this must NOT reset persistent KV accounting to 0!
+    let eval_mid = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"1 + 1"}}}"#,
+        &mut kv_iso,
+    )
+    .unwrap();
+    assert!(eval_mid.contains(r#""isError":false"#), "got: {}", eval_mid);
+
+    // Now writing another 8 KB key must fail because 4 KB + 8 KB + 8 KB > 16 KB!
+    let set2 = handle_mcp_jsonrpc_line(
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "slice_kv_set",
+                "arguments": { "key": "k2", "value": big_val }
+            }
+        })
+        .to_string(),
+        &mut kv_iso,
+    )
+    .unwrap();
+    assert!(
+        set2.contains(r#""isError":true"#),
+        "second 8 KB KV write after slice_eval_ts must exceed 16 KB ceiling, got: {}",
+        set2
+    );
+
+    // 3. slice_checkpoint enforces allow_checkpoints = false and max_checkpoints
+    let no_cp_caps = CapabilityToken::pure_compute().with_checkpoints(false);
+    let mut no_cp_iso = SliceIsolate::spawn("mcp-no-cp", 121, no_cp_caps, 1_000_000, 1024 * 1024);
+    let cp_denied = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"slice_checkpoint","arguments":{"action":"checkpoint"}}}"#,
+        &mut no_cp_iso,
+    )
+    .unwrap();
+    assert!(
+        cp_denied.contains(r#""isError":true"#),
+        "got: {}",
+        cp_denied
+    );
+    assert!(
+        cp_denied.contains("CapabilityDenied: checkpoints")
+            && cp_denied.contains("checkpoint denied"),
+        "got: {}",
+        cp_denied
+    );
+
+    let one_cp_caps = CapabilityToken::pure_compute()
+        .with_checkpoints(true)
+        .with_max_checkpoints(Some(1));
+    let mut one_cp_iso =
+        SliceIsolate::spawn("mcp-one-cp", 122, one_cp_caps, 1_000_000, 1024 * 1024);
+    let cp_ok = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"slice_checkpoint","arguments":{"action":"checkpoint"}}}"#,
+        &mut one_cp_iso,
+    )
+    .unwrap();
+    assert!(cp_ok.contains(r#""isError":false"#), "got: {}", cp_ok);
+    let cp_second = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"slice_checkpoint","arguments":{"action":"checkpoint"}}}"#,
+        &mut one_cp_iso,
+    )
+    .unwrap();
+    assert!(
+        cp_second.contains(r#""isError":true"#),
+        "got: {}",
+        cp_second
+    );
+}
+
+#[test]
+fn test_http_server_large_chunked_pipelining_binary_responses_and_head_framing() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let script = r#"
+Slice.serve(async (req) => {
+    const url = new URL(req.url);
+    if (url.pathname === "/upload") {
+        const txt = await req.text();
+        return new Response("len=" + txt.length, {
+            headers: { "content-type": "text/plain" }
+        });
+    }
+    if (url.pathname === "/bin") {
+        return new Response(new Uint8Array([0, 127, 128, 255, 65]), {
+            headers: { "content-type": "application/octet-stream" }
+        });
+    }
+    if (url.pathname === "/no-content") {
+        return new Response("ignored", { status: 204 });
+    }
+    if (url.pathname === "/not-modified") {
+        return new Response("ignored-304", { status: 304 });
+    }
+    return new Response("not-found", { status: 404 });
+});
+"#;
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bytecode = Arc::new(compile_source_to_bytecode(&bundled));
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let bc_server = Arc::clone(&bytecode);
+    let counter_server = Arc::clone(&counter);
+
+    let server_handle = std::thread::spawn(move || {
+        SliceIsolate::prewarm_boa_pool(1);
+        SliceIsolate::prewarm_boa_bundle(&bc_server);
+        let mut read_buf = vec![0u8; 65536];
+        let mut write_buf = Vec::with_capacity(4096);
+        if let Ok((stream, _)) = listener.accept() {
+            let _ = serve_connection_keep_alive(
+                stream,
+                0,
+                &bc_server,
+                None,
+                None,
+                None,
+                &CapabilityToken::pure_compute(),
+                5_000_000,
+                16 * 1024 * 1024,
+                &mut read_buf,
+                &mut write_buf,
+                Some((&counter_server, 5)),
+            );
+        }
+    });
+
+    // Build a >64 KB chunked POST (90,000 bytes in 3x 30,000-byte chunks) followed immediately
+    // on the same TCP stream by 4 pipelined requests (HEAD, 204, 304, binary GET).
+    let chunk_part = "x".repeat(30_000);
+    let chunk_header = format!("{:x}\r\n", chunk_part.len());
+    let mut payload = Vec::with_capacity(100_000);
+    payload.extend_from_slice(
+        b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n",
+    );
+    for _ in 0..3 {
+        payload.extend_from_slice(chunk_header.as_bytes());
+        payload.extend_from_slice(chunk_part.as_bytes());
+        payload.extend_from_slice(b"\r\n");
+    }
+    payload.extend_from_slice(b"0\r\n\r\n");
+    payload.extend_from_slice(
+        concat!(
+            "HEAD /bin HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /no-content HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /not-modified HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /bin HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+
+    let mut client = TcpStream::connect(addr).unwrap();
+    client.write_all(&payload).unwrap();
+    client.flush().unwrap();
+
+    let mut raw_resp = Vec::new();
+    client.read_to_end(&mut raw_resp).unwrap();
+    server_handle.join().unwrap();
+
+    assert_eq!(counter.load(Ordering::Relaxed), 5);
+
+    fn take_header_block(buf: &[u8]) -> (&str, &[u8]) {
+        let pos = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("missing HTTP response header delimiter");
+        let hdr = std::str::from_utf8(&buf[..pos]).expect("UTF-8 response headers");
+        (hdr, &buf[pos + 4..])
+    }
+
+    // 1. POST /upload -> 200 OK, body "len=90000" (9 bytes)
+    let (h1, rest) = take_header_block(&raw_resp);
+    assert!(h1.starts_with("HTTP/1.1 200 OK\r\n"), "h1: {}", h1);
+    assert!(h1.contains("\r\nContent-Length: 9"), "h1: {}", h1);
+    assert_eq!(&rest[..9], b"len=90000");
+    let rest = &rest[9..];
+
+    // 2. HEAD /bin -> 200 OK, Content-Length: 5, 0 wire body bytes
+    let (h2, rest) = take_header_block(rest);
+    assert!(h2.starts_with("HTTP/1.1 200 OK\r\n"), "h2: {}", h2);
+    assert!(h2.contains("\r\nContent-Length: 5"), "h2: {}", h2);
+    assert!(
+        rest.starts_with(b"HTTP/1.1 204 "),
+        "HEAD response leaked body bytes before 204: {:?}",
+        &rest[..rest.len().min(32)]
+    );
+
+    // 3. GET /no-content -> 204 No Content, 0 wire body bytes
+    let (h3, rest) = take_header_block(rest);
+    assert!(h3.starts_with("HTTP/1.1 204 No Content\r\n"), "h3: {}", h3);
+    assert!(
+        rest.starts_with(b"HTTP/1.1 304 "),
+        "204 response leaked body bytes before 304: {:?}",
+        &rest[..rest.len().min(32)]
+    );
+
+    // 4. GET /not-modified -> 304 Not Modified, 0 wire body bytes
+    let (h4, rest) = take_header_block(rest);
+    assert!(
+        h4.starts_with("HTTP/1.1 304 Not Modified\r\n"),
+        "h4: {}",
+        h4
+    );
+    assert!(
+        rest.starts_with(b"HTTP/1.1 200 "),
+        "304 response leaked body bytes before final 200: {:?}",
+        &rest[..rest.len().min(32)]
+    );
+
+    // 5. GET /bin -> 200 OK, exact raw binary bytes [0, 127, 128, 255, 65]
+    let (h5, rest) = take_header_block(rest);
+    assert!(h5.starts_with("HTTP/1.1 200 OK\r\n"), "h5: {}", h5);
+    assert!(h5.contains("\r\nContent-Length: 5"), "h5: {}", h5);
+    assert_eq!(rest, &[0u8, 127, 128, 255, 65]);
+}
+
+#[test]
+fn test_http_server_framing_smuggling_guards_and_non_101_websocket_rejection() {
+    use std::net::Shutdown;
+    use std::sync::Arc;
+
+    let script = r#"
+Slice.serve((req) => {
+    const url = new URL(req.url);
+    if (url.pathname === "/smuggle") {
+        return new Response("safe-body", {
+            headers: {
+                "Transfer-Encoding": "chunked",
+                "Content-Length": "999",
+                "Connection": "upgrade",
+                "X-Custom-Ok": "yes"
+            }
+        });
+    }
+    if (url.pathname === "/ws-denied") {
+        return Response.json({ denied: true }, { status: 401 });
+    }
+    return new Response("ok");
+});
+"#;
+    let bundled = slice_cas::strip_typescript_and_normalize(script, true);
+    let bytecode = Arc::new(compile_source_to_bytecode(&bundled));
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bc_server = Arc::clone(&bytecode);
+
+    // Accept 4 connections sequentially:
+    // 1. Valid keep-alive pair (/smuggle + /ws-denied with Upgrade header)
+    // 2. Whitespace in header name -> 400
+    // 3. Invalid Transfer-Encoding: chunked, cow -> 400
+    // 4. CRLF request line terminated only by bare LF-LF -> 400 on EOF
+    let server_handle = std::thread::spawn(move || {
+        SliceIsolate::prewarm_boa_pool(1);
+        SliceIsolate::prewarm_boa_bundle(&bc_server);
+        let mut read_buf = vec![0u8; 65536];
+        let mut write_buf = Vec::with_capacity(4096);
+        for _ in 0..4 {
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = serve_connection_keep_alive(
+                    stream,
+                    0,
+                    &bc_server,
+                    None,
+                    None,
+                    None,
+                    &CapabilityToken::pure_compute(),
+                    2_000_000,
+                    4 * 1024 * 1024,
+                    &mut read_buf,
+                    &mut write_buf,
+                    None,
+                );
+            }
+        }
+    });
+
+    // Connection 1: custom framing header stripping + non-101 WebSocket rejection
+    {
+        let mut c1 = TcpStream::connect(addr).unwrap();
+        let reqs = concat!(
+            "GET /smuggle HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /ws-denied HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade, close\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        );
+        c1.write_all(reqs.as_bytes()).unwrap();
+        let mut out = String::new();
+        c1.read_to_string(&mut out).unwrap();
+
+        let lower = out.to_ascii_lowercase();
+        assert!(
+            !lower.contains("transfer-encoding:"),
+            "injected Transfer-Encoding leaked: {}",
+            out
+        );
+        assert!(
+            !out.contains("Content-Length: 999"),
+            "injected Content-Length leaked: {}",
+            out
+        );
+        assert!(out.contains("Content-Length: 9\r\n"), "out: {}", out);
+        assert!(out.contains("x-custom-ok: yes\r\n") || out.contains("X-Custom-Ok: yes\r\n"));
+        assert!(
+            out.contains("HTTP/1.1 401 Unauthorized\r\n"),
+            "unupgraded route must return 401, not 101: {}",
+            out
+        );
+        assert!(
+            !out.contains("101 Switching Protocols"),
+            "unexpected 101 hijack: {}",
+            out
+        );
+        assert!(out.contains(r#"{"denied":true}"#), "out: {}", out);
+    }
+
+    // Connection 2: RFC 9112 Section 5.1 whitespace before colon in header name -> 400
+    {
+        let mut c2 = TcpStream::connect(addr).unwrap();
+        c2.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nX-Bad : 1\r\n\r\n")
+            .unwrap();
+        let mut out = String::new();
+        c2.read_to_string(&mut out).unwrap();
+        assert!(
+            out.starts_with("HTTP/1.1 400 Bad Request"),
+            "expected 400 on header whitespace, got: {}",
+            out
+        );
+    }
+
+    // Connection 3: multi-token Transfer-Encoding -> 400
+    {
+        let mut c3 = TcpStream::connect(addr).unwrap();
+        c3.write_all(b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked, cow\r\n\r\n0\r\n\r\n")
+            .unwrap();
+        let mut out = String::new();
+        c3.read_to_string(&mut out).unwrap();
+        assert!(
+            out.starts_with("HTTP/1.1 400 Bad Request"),
+            "expected 400 on multi-token Transfer-Encoding, got: {}",
+            out
+        );
+    }
+
+    // Connection 4: CRLF request line followed by bare LF-LF must NOT parse as complete headers
+    {
+        let mut c4 = TcpStream::connect(addr).unwrap();
+        c4.write_all(b"GET /smuggle HTTP/1.1\r\nHost: localhost\n\n")
+            .unwrap();
+        c4.shutdown(Shutdown::Write).unwrap();
+        let mut out = String::new();
+        c4.read_to_string(&mut out).unwrap();
+        assert!(
+            out.starts_with("HTTP/1.1 400 Bad Request"),
+            "expected 400 on mixed CRLF + bare LF-LF, got: {}",
+            out
+        );
+    }
+
+    server_handle.join().unwrap();
+}
+
+#[test]
+fn test_tenant_id_kv_namespace_isolation_bounded_cas_cache_and_embedded_static_cas() {
+    use crate::cmd_serve;
+    use crate::http_server::{clear_tenant_cas_cache, sanitize_tenant_id, tenant_cas_cache_len};
+    use std::borrow::Cow;
+    use std::sync::Arc;
+
+    // 1. Tenant ID sanitization preserves clean dotted IDs without allocation and strips `:` / `..`
+    assert!(matches!(
+        sanitize_tenant_id("acme.prod-1_eu"),
+        Cow::Borrowed("acme.prod-1_eu")
+    ));
+    assert_eq!(sanitize_tenant_id("org:admin"), "orgadmin");
+    assert_eq!(sanitize_tenant_id("../etc/passwd"), "etcpasswd");
+
+    // 2. `X-Slice-Tenant: org:admin` cannot collide with `X-Slice-Tenant: org` + key `admin:secret`
+    let kv_script = r#"
+const req = Slice.request();
+if (req.path === "/set") {
+    Slice.kv.set("admin:secret", "vault-token-77");
+    Slice.respond(200, "stored", "text/plain");
+} else {
+    const val = Slice.kv.get("secret") ?? "NONE";
+    Slice.respond(200, val, "text/plain");
+}
+"#;
+    let kv_bc = Arc::new(compile_source_to_bytecode(kv_script));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let kv_bc_srv = Arc::clone(&kv_bc);
+    let kv_srv = std::thread::spawn(move || {
+        SliceIsolate::prewarm_boa_pool(1);
+        SliceIsolate::prewarm_boa_bundle(&kv_bc_srv);
+        let mut read_buf = vec![0u8; 65536];
+        let mut write_buf = Vec::with_capacity(4096);
+        if let Ok((stream, _)) = listener.accept() {
+            let _ = serve_connection_keep_alive(
+                stream,
+                0,
+                &kv_bc_srv,
+                None,
+                None,
+                None,
+                &CapabilityToken::pure_compute(),
+                2_000_000,
+                4 * 1024 * 1024,
+                &mut read_buf,
+                &mut write_buf,
+                None,
+            );
+        }
+    });
+
+    let mut kv_client = TcpStream::connect(addr).unwrap();
+    kv_client
+        .write_all(
+            concat!(
+                "GET /set HTTP/1.1\r\nHost: localhost\r\nX-Slice-Tenant: org\r\n\r\n",
+                "GET /get HTTP/1.1\r\nHost: localhost\r\nX-Slice-Tenant: org:admin\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut kv_resp = String::new();
+    kv_client.read_to_string(&mut kv_resp).unwrap();
+    kv_srv.join().unwrap();
+    assert!(kv_resp.contains("stored"), "kv_resp: {}", kv_resp);
+    assert!(
+        kv_resp.ends_with("NONE") && !kv_resp.contains("vault-token-77"),
+        "cross-tenant colon injection leaked KV secret: {}",
+        kv_resp
+    );
+
+    // 3. `default.cas` fallback deduplicates bytecode across 1,200 unknown tenant headers and stays bounded
+    let tmp_root = env::temp_dir().join(format!("slice_tenant_static_cas_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_root);
+    let tenant_dir = tmp_root.join("tenants");
+    std::fs::create_dir_all(&tenant_dir).unwrap();
+
+    let default_ts = tenant_dir.join("default.ts");
+    std::fs::write(
+        &default_ts,
+        "Slice.respond(200, \"default-ok\", \"text/plain\");\n",
+    )
+    .unwrap();
+    let default_cas = tenant_dir.join("default.cas");
+    build_cas_archive(&default_ts, &default_cas, "./default.ts").unwrap();
+
+    clear_tenant_cas_cache();
+    let first_arc = resolve_tenant_bytecode_hotswap(&tenant_dir, "missing-tenant-0").unwrap();
+    for i in 1..1200 {
+        let next_arc =
+            resolve_tenant_bytecode_hotswap(&tenant_dir, &format!("missing-tenant-{}", i)).unwrap();
+        assert!(
+            Arc::ptr_eq(&first_arc, &next_arc),
+            "default.cas fallback must reuse a single canonical Arc<Vec<u8>>"
+        );
+    }
+    let (by_tenant_len, by_path_len) = tenant_cas_cache_len();
+    assert_eq!(by_tenant_len, 0);
+    assert_eq!(by_path_len, 1);
+
+    // 4. Packing a project with `[server] static_dir` embeds static assets into `.cas`, and
+    //    `slice serve app.cas` serves them cleanly when `./public` is absent on disk.
+    let app_dir = tmp_root.join("app");
+    std::fs::create_dir_all(app_dir.join("public")).unwrap();
+    std::fs::write(
+        app_dir.join("slice.toml"),
+        "[package]\nname = \"embedded-static-app\"\nmain = \"./index.ts\"\n\n[server]\nstatic_dir = \"./public\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app_dir.join("public").join("hello.txt"),
+        "embedded-static-ok",
+    )
+    .unwrap();
+    std::fs::write(
+        app_dir.join("index.ts"),
+        "Slice.serve(() => new Response(\"dynamic-ok\"));\n",
+    )
+    .unwrap();
+
+    let packed_cas = tmp_root.join("packed_app.cas");
+    build_cas_archive(&app_dir, &packed_cas, "./index.ts").unwrap();
+
+    // Remove the entire source and `./public` directory so disk `static_dir` no longer exists!
+    std::fs::remove_dir_all(&app_dir).unwrap();
+    let mapped = MappedCasArchive::open(&packed_cas).unwrap();
+    let embedded_table = slice_cas::StaticAssetTable::from_cas_archive(&mapped);
+    assert!(
+        embedded_table.resolve("/hello.txt").is_some(),
+        "expected /hello.txt embedded into .cas archive from slice.toml [server] static_dir"
+    );
+    drop(embedded_table);
+    drop(mapped);
+
+    // Pick a free ephemeral port and run `cmd_serve` with `--max-requests=2`
+    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let serve_port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let cas_arg = packed_cas.to_string_lossy().to_string();
+    let serve_thread = std::thread::spawn(move || {
+        cmd_serve(&[
+            cas_arg,
+            format!("--port={}", serve_port),
+            "--host=127.0.0.1".to_string(),
+            "--workers=1".to_string(),
+            "--max-requests=2".to_string(),
+        ])
+    });
+
+    let mut serve_client = None;
+    for _ in 0..50 {
+        if let Ok(s) = TcpStream::connect(("127.0.0.1", serve_port)) {
+            serve_client = Some(s);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut serve_client = serve_client.expect("connect to cmd_serve on packed .cas");
+    serve_client
+        .write_all(
+            concat!(
+                "GET /hello.txt HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                "GET /dynamic HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut serve_out = String::new();
+    serve_client.read_to_string(&mut serve_out).unwrap();
+    serve_thread.join().unwrap().unwrap();
+
+    assert!(
+        serve_out.contains("embedded-static-ok"),
+        "out: {}",
+        serve_out
+    );
+    assert!(serve_out.contains("dynamic-ok"), "out: {}", serve_out);
+
+    let _ = std::fs::remove_dir_all(&tmp_root);
+}

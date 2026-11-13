@@ -428,3 +428,113 @@ fn test_default_cli_zero_fs_containment_across_run_cas_and_serve() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn test_external_cas_isolates_ambient_cwd_manifest_and_honors_explicit_config() {
+    use crate::commands::run::{cmd_run, LAST_CLI_EXIT_CODE};
+    use std::sync::atomic::Ordering;
+
+    if let Ok(cas_arg) = std::env::var("SLICE_TEST_ISOLATED_CAS_PATH") {
+        let explicit_arg = std::env::var("SLICE_TEST_EXPLICIT_CONFIG_PATH").unwrap();
+
+        // 1. Running the external `.cas` inside `ambient_cwd` must NOT inherit `./slice.toml` or `./.env`
+        cmd_run(std::slice::from_ref(&cas_arg)).unwrap();
+        assert_eq!(
+            LAST_CLI_EXIT_CODE.load(Ordering::Relaxed),
+            0,
+            "external .cas must not inherit ambient CWD slice.toml or .env"
+        );
+
+        // 2. Explicit `--config=<path>` grants the configured capabilities cleanly
+        cmd_run(&[format!("--config={}", explicit_arg), cas_arg]).unwrap();
+        assert_eq!(
+            LAST_CLI_EXIT_CODE.load(Ordering::Relaxed),
+            42,
+            "explicit --config=<path> must apply to external .cas execution"
+        );
+        LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);
+        return;
+    }
+
+    let tmp_dir =
+        std::env::temp_dir().join(format!("slice_cas_cwd_isolation_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let ambient_cwd = tmp_dir.join("ambient_project");
+    let build_dir = tmp_dir.join("clean_build");
+    std::fs::create_dir_all(&ambient_cwd).unwrap();
+    std::fs::create_dir_all(&build_dir).unwrap();
+
+    // Ambient CWD contains a permissive slice.toml and .env
+    std::fs::write(
+        ambient_cwd.join(".env"),
+        "DOTENV_AMBIENT_SECRET=leaked_from_cwd_dotenv\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ambient_cwd.join("slice.toml"),
+        r#"
+[package]
+name = "ambient-cwd"
+entrypoint = "./unused.ts"
+
+[capabilities]
+allow_read = ["/"]
+allow_net = ["*"]
+allow_env = ["TOML_AMBIENT_VAR=leaked_from_cwd_toml"]
+env_file = ".env"
+"#,
+    )
+    .unwrap();
+
+    // Explicit config file for opt-in verification
+    let explicit_toml = tmp_dir.join("explicit_host.toml");
+    std::fs::write(
+        &explicit_toml,
+        r#"
+[capabilities]
+allow_env = ["EXPLICIT_CONFIG_VAR=granted_via_flag"]
+"#,
+    )
+    .unwrap();
+
+    // Build an external .cas archive in `clean_build` (zero embedded capabilities)
+    let probe_src = build_dir.join("probe.ts");
+    std::fs::write(
+        &probe_src,
+        r#"
+        if (process.env.TOML_AMBIENT_VAR || process.env.DOTENV_AMBIENT_SECRET) {
+            process.exit(41);
+        }
+        if (process.env.EXPLICIT_CONFIG_VAR === "granted_via_flag") {
+            process.exit(42);
+        }
+        process.exit(0);
+        "#,
+    )
+    .unwrap();
+    let cas_path = build_dir.join("untrusted_probe.cas");
+    build_cas_archive(&probe_src, &cas_path, "./probe.ts").unwrap();
+
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .current_dir(&ambient_cwd)
+        .env(
+            "SLICE_TEST_ISOLATED_CAS_PATH",
+            cas_path.to_string_lossy().as_ref(),
+        )
+        .env(
+            "SLICE_TEST_EXPLICIT_CONFIG_PATH",
+            explicit_toml.to_string_lossy().as_ref(),
+        )
+        .arg("--exact")
+        .arg("cli_tests::cli_security_and_perf_tests::test_external_cas_isolates_ambient_cwd_manifest_and_honors_explicit_config")
+        .arg("--nocapture")
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "isolated CWD subprocess verification failed with status: {}",
+        status
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

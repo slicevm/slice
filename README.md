@@ -165,18 +165,18 @@ workers = 8
 ## Benchmarks at a Glance
 
 <!-- BENCHMARK_SUMMARY_START -->
-Across **33 real-world TypeScript apps, frameworks (`Hono`, `UnJS`, `Express`, `SvelteKit 3`), and agent case studies**, Slice (`v0.10.12`) beats **Deno (`v2.9.8`)** on **33/33**, **Node.js (`v27.0.0-alpha.0.0.0`)** on **33/33**, **Bun (`v1.4.4`)** on **29/33** cold one-shot runs, and **all 3 runtimes on 33/33 workloads in `--warm` pooled execution**.
+Across **33 real-world TypeScript apps, frameworks (`Hono`, `UnJS`, `Express`, `SvelteKit 3`), and agent case studies**, Slice (`v0.10.12`) beats **Deno (`v2.9.8`)** on **33/33**, **Node.js (`v27.0.0-alpha.0.0.0`)** on **33/33**, **Bun (`v1.4.4`)** on **28/33** cold one-shot runs, and **all 3 runtimes on 33/33 workloads in `--warm` pooled execution**.
 
 | Metric (`Linux x86_64`) | Slice (`v0.10.12`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha.0.0.0`) |
 | :--- | :---: | :---: | :---: | :---: |
-| **Isolate Cold Start (`P50` / `P99`)** | **`1.24 us` / `2.10 us`** | Process / VM | Process / VM | Process / VM |
-| **1,000-Tenant Swarm (Boot + Exec)** | **`1.50 ms` (`19.69 MB` RSS)** | `> 5,000 ms` | `> 15,000 ms` | `> 30,000 ms` |
-| **HTTP/1.1 Keep-Alive (`16k` Reqs)** | **`148,865 req/s`** (Tier-0) / **`154,737 req/s`** (Tier-1) | `96,712 req/s` | `100,758 req/s` | `57,158 req/s` |
-| **33-Workload Cold `.cas` Total** | **`500.8 ms`** (`1.39x` Bun / `5.43x` Node) | `696.7 ms` | `1,748.9 ms` | `2,717.7 ms` |
-| **33-Workload `--warm` Pooled Total** | **`170.4 ms`** (`4.09x` Bun / `15.95x` Node) | `696.7 ms` | `1,748.9 ms` | `2,717.7 ms` |
-| **Peak Memory (`Max RSS` Range)** | **`13.75 - 22.13 MB`** | `25.85 - 40.88 MB` | `45.71 - 62.29 MB` | `69.90 - 93.50 MB` |
+| **Isolate Cold Start (`P50` / `P99`)** | **`1.28 us` / `1.38 us`** | Process / VM | Process / VM | Process / VM |
+| **1,000-Tenant Swarm (Boot + Exec)** | **`1.49 ms` (`7.75 MB` RSS)** | `> 5,000 ms` | `> 15,000 ms` | `> 30,000 ms` |
+| **HTTP/1.1 Keep-Alive (`16k` Reqs)** | **`156,688 req/s`** (Tier-0) / **`146,827 req/s`** (Tier-1) | `96,828 req/s` | `102,218 req/s` | `54,845 req/s` |
+| **33-Workload Cold `.cas` Total** | **`511.2 ms`** (`1.35x` Bun / `5.30x` Node) | `691.5 ms` | `1,753.8 ms` | `2,709.2 ms` |
+| **33-Workload `--warm` Pooled Total** | **`176.8 ms`** (`3.91x` Bun / `15.32x` Node) | `691.5 ms` | `1,753.8 ms` | `2,709.2 ms` |
+| **Peak Memory (`Max RSS` Range)** | **`14.00 - 22.25 MB`** | `26.13 - 41.75 MB` | `45.82 - 62.31 MB` | `69.90 - 93.01 MB` |
 
-Full 33-workload breakdown, per-app latency and RSS tables, and run provenance (`4c5089a`, `2026-11-12T02:06:39Z`): **[`tests/reports/latest.md`](./tests/reports/latest.md)** (archive: [`bench_v0.10.12_20261112_020639Z_4c5089a.md`](./tests/reports/bench_v0.10.12_20261112_020639Z_4c5089a.md)).
+Full 33-workload breakdown, per-app latency and RSS tables, and run provenance (`4d021ab`, `2026-11-13T02:14:57Z`): **[`tests/reports/latest.md`](./tests/reports/latest.md)** (archive: [`bench_v0.10.12_20261113_021457Z_4d021ab.md`](./tests/reports/bench_v0.10.12_20261113_021457Z_4d021ab.md)).
 <!-- BENCHMARK_SUMMARY_END -->
 
 To reproduce the full Linux `x86_64` Docker benchmark suite locally and regenerate [`tests/reports/latest.md`](./tests/reports/latest.md):

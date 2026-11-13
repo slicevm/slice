@@ -80,6 +80,18 @@ impl RegisteredBufferPool {
         }
     }
 
+    /// Returns the total number of registered slab slots in `O(1)`.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.buffers.len()
+    }
+
+    /// Returns the byte length of each fixed slab buffer in `O(1)`.
+    #[inline]
+    pub fn buffer_size(&self) -> usize {
+        self.buf_size
+    }
+
     /// Returns the number of currently acquired slab slots in `O(1)` (`IO-PERF-01`).
     #[inline]
     pub fn in_use_count(&self) -> usize {
@@ -116,7 +128,9 @@ impl RegisteredBufferPool {
         let slot = idx as usize;
         if slot < self.in_use.len() && self.in_use[slot] {
             let n = dirty_len.min(self.buffers[slot].len());
-            self.buffers[slot][..n].fill(0);
+            let slice = &mut self.buffers[slot][..n];
+            slice.fill(0);
+            std::hint::black_box(slice);
             self.in_use[slot] = false;
             self.free_stack[self.free_len] = idx;
             self.free_len += 1;
@@ -146,11 +160,12 @@ impl RegisteredBufferPool {
             buf_index,
             self.buffers.len()
         );
+        let slot_cap = self.buffers[slot].len().min(self.buf_size);
         ensure!(
-            (len as usize) <= self.buf_size,
+            (len as usize) <= slot_cap,
             "IoSubmission length {} exceeds fixed slab buffer size {}",
             len,
-            self.buf_size
+            slot_cap
         );
         Ok(())
     }

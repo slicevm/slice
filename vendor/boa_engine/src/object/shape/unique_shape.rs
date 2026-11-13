@@ -1,4 +1,7 @@
-use std::{cell::RefCell, fmt::Debug};
+use std::{
+    cell::{Cell, RefCell},
+    fmt::Debug,
+};
 
 use boa_gc::{Finalize, Gc, GcRefCell, Trace, WeakGc};
 
@@ -10,8 +13,12 @@ use super::{
 };
 
 /// The internal representation of [`UniqueShape`].
-#[derive(Default, Debug, Trace, Finalize)]
+#[derive(Debug, Trace, Finalize)]
 struct Inner {
+    /// Monotonic process-unique shape identifier (bumped on in-place attribute/table rewrites).
+    #[unsafe_ignore_trace]
+    id: Cell<u64>,
+
     /// The property table that maps a [`PropertyKey`] to a slot in the objects storage.
     //
     // SAFETY: This is safe because nothing in this field needs tracing.
@@ -28,9 +35,16 @@ struct Inner {
 /// the builtin object.
 ///
 /// Cloning this does a shallow clone.
-#[derive(Default, Debug, Clone, Trace, Finalize)]
+#[derive(Debug, Clone, Trace, Finalize)]
 pub(crate) struct UniqueShape {
     inner: Gc<Inner>,
+}
+
+impl Default for UniqueShape {
+    #[inline]
+    fn default() -> Self {
+        Self::new(None, PropertyTableInner::default())
+    }
 }
 
 impl UniqueShape {
@@ -38,6 +52,7 @@ impl UniqueShape {
     pub(crate) fn new(prototype: JsPrototype, property_table: PropertyTableInner) -> Self {
         Self {
             inner: Gc::new(Inner {
+                id: Cell::new(super::next_shape_id()),
                 property_table: RefCell::new(property_table),
                 prototype: GcRefCell::new(prototype),
             }),
@@ -49,6 +64,7 @@ impl UniqueShape {
         property_table: PropertyTableInner,
         prototype: JsPrototype,
     ) {
+        self.inner.id.set(super::next_shape_id());
         *self.inner.property_table.borrow_mut() = property_table;
         *self.inner.prototype.borrow_mut() = prototype;
     }
@@ -147,7 +163,7 @@ impl UniqueShape {
         if slot.attributes.width_match(key.attributes) {
             slot.attributes = key.attributes;
             property_table.keys[index].1.attributes = key.attributes;
-            // TODO: invalidate the pointer.
+            self.inner.id.set(super::next_shape_id());
             return ChangeTransition {
                 shape: self.clone().into(),
                 action: ChangeTransitionAction::Nothing,
@@ -238,6 +254,12 @@ impl UniqueShape {
     pub(crate) fn with_property_keys<R>(&self, f: impl FnOnce(&[(PropertyKey, Slot)]) -> R) -> R {
         let property_table = self.property_table().borrow();
         f(&property_table.keys)
+    }
+
+    /// Return the unique monotonic 64-bit identifier of the [`UniqueShape`].
+    #[inline]
+    pub(crate) fn id(&self) -> u64 {
+        self.inner.id.get()
     }
 
     /// Return location in memory of the [`UniqueShape`].

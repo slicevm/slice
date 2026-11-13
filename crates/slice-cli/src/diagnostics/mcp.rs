@@ -1,10 +1,73 @@
 use crate::config::ResolvedExecutionConfig;
 use anyhow::Result;
 use slice_engine::SliceIsolate;
-use std::io::Write;
+use std::io::{BufRead, Write};
 
-///Maximum allowed MCP JSON-RPC 2.0 request line length (`4 MB`) (`CLI-SEC-04`).
+/// Maximum allowed MCP JSON-RPC 2.0 request line length (`4 MB`) (`CLI-SEC-04`).
 pub(crate) const MAX_MCP_LINE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Upper bound on per-call `slice_eval_ts` `fuel` override when raising above baseline.
+const MAX_MCP_EVAL_FUEL: u64 = 100_000_000;
+
+/// Upper bound on per-call `slice_eval_ts` `memory` override when raising above baseline (`256 MB`).
+const MAX_MCP_EVAL_MEMORY_BYTES: usize = 256 * 1024 * 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum McpLineRead {
+    Eof,
+    Line,
+    TooLong,
+}
+
+/// Reads a single `\n`-delimited JSON-RPC line from `reader` into `out` while bounding
+/// in-memory growth strictly at `max_bytes` and draining any oversized remainder without OOM.
+pub(crate) fn read_bounded_mcp_line<R: BufRead>(
+    reader: &mut R,
+    out: &mut Vec<u8>,
+    max_bytes: usize,
+) -> std::io::Result<McpLineRead> {
+    out.clear();
+    let mut over_limit = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if out.is_empty() && !over_limit {
+                return Ok(McpLineRead::Eof);
+            }
+            return Ok(if over_limit {
+                McpLineRead::TooLong
+            } else {
+                McpLineRead::Line
+            });
+        }
+        if let Some(nl_pos) = memchr::memchr(b'\n', available) {
+            if !over_limit {
+                if out.len().saturating_add(nl_pos) > max_bytes {
+                    over_limit = true;
+                    out.clear();
+                } else {
+                    out.extend_from_slice(&available[..nl_pos]);
+                }
+            }
+            reader.consume(nl_pos + 1);
+            return Ok(if over_limit {
+                McpLineRead::TooLong
+            } else {
+                McpLineRead::Line
+            });
+        }
+        let chunk_len = available.len();
+        if !over_limit {
+            if out.len().saturating_add(chunk_len) > max_bytes {
+                over_limit = true;
+                out.clear();
+            } else {
+                out.extend_from_slice(available);
+            }
+        }
+        reader.consume(chunk_len);
+    }
+}
 
 fn push_string_or_array_arg(args: &serde_json::Value, key: &str, out: &mut Vec<String>) {
     if let Some(val) = args.get(key) {
@@ -68,17 +131,43 @@ pub(crate) fn cmd_mcp(args: &[String]) -> Result<()> {
     }
 
     let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
     let mut stdout = std::io::stdout();
-    let mut line = String::new();
-    while stdin.read_line(&mut line)? > 0 {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            if let Some(resp_json) = handle_mcp_jsonrpc_line(trimmed, &mut isolate) {
-                writeln!(stdout, "{}", resp_json)?;
+    let mut raw_line = Vec::with_capacity(4096);
+    loop {
+        match read_bounded_mcp_line(&mut reader, &mut raw_line, MAX_MCP_LINE_BYTES)? {
+            McpLineRead::Eof => break,
+            McpLineRead::TooLong => {
+                let err_resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": { "code": -32600, "message": "Invalid Request: MCP JSON-RPC line exceeds 4 MB limit" }
+                });
+                writeln!(stdout, "{}", err_resp)?;
                 stdout.flush()?;
             }
+            McpLineRead::Line => {
+                let line_str = match std::str::from_utf8(&raw_line) {
+                    Ok(s) => s.trim(),
+                    Err(e) => {
+                        let err_resp = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": null,
+                            "error": { "code": -32700, "message": format!("Parse error: invalid UTF-8 ({})", e) }
+                        });
+                        writeln!(stdout, "{}", err_resp)?;
+                        stdout.flush()?;
+                        continue;
+                    }
+                };
+                if !line_str.is_empty() {
+                    if let Some(resp_json) = handle_mcp_jsonrpc_line(line_str, &mut isolate) {
+                        writeln!(stdout, "{}", resp_json)?;
+                        stdout.flush()?;
+                    }
+                }
+            }
         }
-        line.clear();
     }
     Ok(())
 }
@@ -239,26 +328,38 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                     }
                     let saved_fuel_limit = isolate.compartment.fuel_limit;
                     let saved_mem_limit = isolate.compartment.memory_limit_bytes;
+                    let saved_cp_taken = isolate.checkpoints_taken;
+                    let saved_cp_restored = isolate.restores_performed;
+                    let saved_cp_restore_ns = isolate.restore_time_ns;
                     isolate.compartment.fuel_consumed = 0;
-                    isolate.compartment.memory_used_bytes = 0;
+                    isolate.sync_live_kv_memory();
                     isolate.checkpoints_taken = 0;
                     isolate.restores_performed = 0;
                     isolate.restore_time_ns = 0;
+                    let fuel_override_cap = saved_fuel_limit.max(MAX_MCP_EVAL_FUEL);
                     if let Some(req_fuel) = opts.fuel {
-                        if req_fuel > isolate.compartment.fuel_limit {
-                            isolate.compartment.fuel_limit = req_fuel;
+                        let capped_fuel = req_fuel.min(fuel_override_cap);
+                        opts.fuel = Some(capped_fuel);
+                        if capped_fuel > isolate.compartment.fuel_limit {
+                            isolate.compartment.fuel_limit = capped_fuel;
                         }
                     }
+                    let mem_override_cap = saved_mem_limit.max(MAX_MCP_EVAL_MEMORY_BYTES);
                     if let Some(req_mem) = opts.memory_bytes {
-                        if req_mem > isolate.compartment.memory_limit_bytes {
-                            isolate.compartment.memory_limit_bytes = req_mem;
+                        let capped_mem = req_mem.min(mem_override_cap);
+                        opts.memory_bytes = Some(capped_mem);
+                        if capped_mem > isolate.compartment.memory_limit_bytes {
+                            isolate.compartment.memory_limit_bytes = capped_mem;
                         }
                     }
                     let outcome = isolate.eval_sandbox(code, opts);
                     isolate.compartment.fuel_limit = saved_fuel_limit;
                     isolate.compartment.memory_limit_bytes = saved_mem_limit;
                     isolate.compartment.fuel_consumed = 0;
-                    isolate.compartment.memory_used_bytes = 0;
+                    isolate.sync_live_kv_memory();
+                    isolate.checkpoints_taken = saved_cp_taken;
+                    isolate.restores_performed = saved_cp_restored;
+                    isolate.restore_time_ns = saved_cp_restore_ns;
                     let payload = serde_json::json!({
                         "ok": outcome.ok,
                         "value": outcome.return_value,
@@ -287,9 +388,20 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                 "slice_kv_set" => {
                     let key = args.get("key").and_then(|k| k.as_str()).unwrap_or("");
                     let val = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                    let ok = isolate.kv_set(key, val, 0).is_ok();
+                    isolate.sync_live_kv_memory();
+                    let res = isolate.kv_set(key, val, 0);
+                    isolate.sync_live_kv_memory();
+                    let ok = res.is_ok();
+                    let body = match res {
+                        Ok(()) => serde_json::json!({"ok": true, "key": key}),
+                        Err(violation) => serde_json::json!({
+                            "ok": false,
+                            "key": key,
+                            "violation": violation.to_string()
+                        }),
+                    };
                     serde_json::json!({
-                        "content": [{ "type": "text", "text": serde_json::json!({"ok": ok, "key": key}).to_string() }],
+                        "content": [{ "type": "text", "text": body.to_string() }],
                         "isError": !ok
                     })
                 }
@@ -307,21 +419,52 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                         .and_then(|a| a.as_str())
                         .unwrap_or("checkpoint");
                     if action == "restore" {
-                        let snap_id = args
-                            .get("snapshot_id")
-                            .and_then(|s| s.as_u64())
-                            .unwrap_or(0);
-                        let restored = isolate.restore(snap_id);
-                        serde_json::json!({
-                            "content": [{ "type": "text", "text": serde_json::json!({"action": "restore", "snapshot_id": snap_id, "restored": restored}).to_string() }],
-                            "isError": !restored
-                        })
+                        if !isolate.compartment.capabilities.allow_checkpoints {
+                            let violation = slice_sandbox::SandboxViolation::CheckpointDenied {
+                                tenant_id: isolate.compartment.tenant_id.clone(),
+                                reason:
+                                    "guest checkpoints/restores are disabled for this compartment"
+                                        .to_string(),
+                            };
+                            serde_json::json!({
+                                "content": [{ "type": "text", "text": serde_json::json!({"action": "restore", "restored": false, "violation": violation.to_string()}).to_string() }],
+                                "isError": true
+                            })
+                        } else {
+                            let snap_id = args
+                                .get("snapshot_id")
+                                .and_then(|s| s.as_u64())
+                                .unwrap_or(0);
+                            let restored = isolate.restore(snap_id);
+                            if restored {
+                                isolate.restores_performed =
+                                    isolate.restores_performed.saturating_add(1);
+                                isolate.sync_live_kv_memory();
+                            }
+                            serde_json::json!({
+                                "content": [{ "type": "text", "text": serde_json::json!({"action": "restore", "snapshot_id": snap_id, "restored": restored}).to_string() }],
+                                "isError": !restored
+                            })
+                        }
                     } else {
-                        let snap_id = isolate.checkpoint();
-                        serde_json::json!({
-                            "content": [{ "type": "text", "text": serde_json::json!({"action": "checkpoint", "snapshot_id": snap_id}).to_string() }],
-                            "isError": false
-                        })
+                        match isolate
+                            .compartment
+                            .verify_checkpoint(isolate.checkpoints_taken)
+                        {
+                            Ok(()) => {
+                                let snap_id = isolate.checkpoint();
+                                isolate.checkpoints_taken =
+                                    isolate.checkpoints_taken.saturating_add(1);
+                                serde_json::json!({
+                                    "content": [{ "type": "text", "text": serde_json::json!({"action": "checkpoint", "snapshot_id": snap_id}).to_string() }],
+                                    "isError": false
+                                })
+                            }
+                            Err(violation) => serde_json::json!({
+                                "content": [{ "type": "text", "text": serde_json::json!({"action": "checkpoint", "ok": false, "violation": violation.to_string()}).to_string() }],
+                                "isError": true
+                            }),
+                        }
                     }
                 }
                 _ => {

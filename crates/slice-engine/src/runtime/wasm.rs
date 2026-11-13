@@ -113,7 +113,7 @@ struct StandaloneMemoryEntry {
 }
 
 #[derive(Default)]
-struct WasmThreadState {
+pub(crate) struct WasmThreadState {
     next_id: u32,
     modules: FxHashMap<u32, CompiledModuleEntry>,
     instances: FxHashMap<u32, ActiveWasmInstance>,
@@ -126,6 +126,14 @@ impl WasmThreadState {
         mark_subsystem_dirty(DIRTY_WASM);
         self.next_id = self.next_id.wrapping_add(1).max(1);
         self.next_id
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.instances.is_empty()
+            && self.modules.is_empty()
+            && self.memories.is_empty()
+            && self.import_funcs.is_empty()
     }
 }
 
@@ -158,24 +166,37 @@ impl Drop for ActiveBoaCtxGuard {
     }
 }
 
-/// Clears transient per-request host function callbacks while preserving cached WASM modules/instances
-/// if within the thread pool cap (`MAX_WASM_INSTANCES_PER_THREAD`).
+/// Clears all per-turn WASM instances, linear memories, module handles, and imported JS closures
+/// from thread-local state while preserving compiled `wasmi::Module` artifacts in `GLOBAL_WASM_MODULE_CACHE`.
 pub fn clear_thread_wasm_state() {
     WASM_STATE.with(|st| {
         let mut s = st.borrow_mut();
-        if s.instances.len() > MAX_WASM_INSTANCES_PER_THREAD {
-            s.instances.clear();
-            s.import_funcs.clear();
-        }
-        if s.modules.len() > MAX_WASM_INSTANCES_PER_THREAD {
-            s.modules.clear();
-        }
-        if s.memories.len() > MAX_WASM_INSTANCES_PER_THREAD {
-            s.memories.clear();
-        }
+        s.instances.clear();
+        s.import_funcs.clear();
+        s.modules.clear();
+        s.memories.clear();
     });
     ACTIVE_BOA_CTX_PTR.with(|p| p.set(std::ptr::null_mut()));
     ACTIVE_MEM_AB_PTR.with(|p| p.set(std::ptr::null()));
+}
+
+#[inline]
+pub(crate) fn take_thread_wasm_state_if_nonempty() -> Option<WasmThreadState> {
+    WASM_STATE.with(|st| {
+        let mut s = st.borrow_mut();
+        if s.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut *s))
+        }
+    })
+}
+
+#[inline]
+pub(crate) fn restore_thread_wasm_state(saved: WasmThreadState) {
+    WASM_STATE.with(|st| {
+        *st.borrow_mut() = saved;
+    });
 }
 
 #[inline]
@@ -227,7 +248,7 @@ fn record_wasm_fuel_violation() {
 }
 
 #[inline]
-fn check_wasm_memory_pages_budget(total_pages: u32) -> Result<usize, String> {
+fn check_wasm_memory_pages_budget(total_pages: u32, added_pages: u32) -> Result<usize, String> {
     if total_pages > MAX_WASM_MEMORY_PAGES {
         let req_bytes = (total_pages as usize).saturating_mul(WASM_PAGE_BYTES);
         let max_bytes = (MAX_WASM_MEMORY_PAGES as usize) * WASM_PAGE_BYTES;
@@ -238,9 +259,10 @@ fn check_wasm_memory_pages_budget(total_pages: u32) -> Result<usize, String> {
         ));
     }
     let req_bytes = (total_pages as usize).saturating_mul(WASM_PAGE_BYTES);
+    let added_bytes = (added_pages as usize).saturating_mul(WASM_PAGE_BYTES);
     let (used, limit) = BOA_KV_MEM_BUDGET.with(|m| m.get());
-    if req_bytes > limit || used.saturating_add(total_pages as usize * 1024) > limit {
-        record_wasm_memory_violation(req_bytes, limit);
+    if req_bytes > limit || used.saturating_add(added_bytes) > limit {
+        record_wasm_memory_violation(req_bytes.max(used.saturating_add(added_bytes)), limit);
         return Err(format!(
             "RangeError: WebAssembly linear memory ({} bytes) exceeds isolate memory cage ({} bytes)",
             req_bytes, limit
@@ -446,9 +468,10 @@ pub fn wasm_create_memory(initial_pages: u32, max_pages: Option<u32>) -> Result<
             ));
         }
     }
-    check_wasm_memory_pages_budget(initial_pages)?;
+    check_wasm_memory_pages_budget(initial_pages, initial_pages)?;
     let (used, limit) = BOA_KV_MEM_BUDGET.with(|m| m.get());
-    BOA_KV_MEM_BUDGET.with(|m| m.set((used.saturating_add(initial_pages as usize * 1024), limit)));
+    let added_bytes = (initial_pages as usize).saturating_mul(WASM_PAGE_BYTES);
+    BOA_KV_MEM_BUDGET.with(|m| m.set((used.saturating_add(added_bytes), limit)));
 
     let mem_id = WASM_STATE.with(|st| {
         let mut s = st.borrow_mut();
@@ -487,14 +510,14 @@ pub fn wasm_grow_memory(mem_id: u32, inst_id: u32, delta_pages: u32) -> Result<i
                     ));
                 }
             }
-            check_wasm_memory_pages_budget(new_pages)?;
+            check_wasm_memory_pages_budget(new_pages, delta_pages)?;
             match mem.grow(&mut inst.store, delta_pages.into()) {
                 Ok(prev) => {
                     let new_byte_len = (new_pages as usize) * WASM_PAGE_BYTES;
                     inst.shadow_mem.resize(new_byte_len, 0);
                     let (used, limit) = BOA_KV_MEM_BUDGET.with(|m| m.get());
-                    BOA_KV_MEM_BUDGET
-                        .with(|m| m.set((used.saturating_add(delta_pages as usize * 1024), limit)));
+                    let added_bytes = (delta_pages as usize).saturating_mul(WASM_PAGE_BYTES);
+                    BOA_KV_MEM_BUDGET.with(|m| m.set((used.saturating_add(added_bytes), limit)));
                     Ok(prev as i32)
                 }
                 Err(e) => Err(format!("RangeError: WebAssembly.Memory.grow() failed: {}", e)),
@@ -517,11 +540,11 @@ pub fn wasm_grow_memory(mem_id: u32, inst_id: u32, delta_pages: u32) -> Result<i
                 ));
             }
         }
-        check_wasm_memory_pages_budget(new_pages)?;
+        check_wasm_memory_pages_budget(new_pages, delta_pages)?;
         entry.pages = new_pages;
         let (used, limit) = BOA_KV_MEM_BUDGET.with(|m| m.get());
-        BOA_KV_MEM_BUDGET
-            .with(|m| m.set((used.saturating_add(delta_pages as usize * 1024), limit)));
+        let added_bytes = (delta_pages as usize).saturating_mul(WASM_PAGE_BYTES);
+        BOA_KV_MEM_BUDGET.with(|m| m.set((used.saturating_add(added_bytes), limit)));
         Ok(prev as i32)
     })
 }
@@ -822,7 +845,7 @@ pub fn wasm_instantiate_module(
                         }
                     }
                 }
-                if let Err(msg) = check_wasm_memory_pages_budget(actual_pages) {
+                if let Err(msg) = check_wasm_memory_pages_budget(actual_pages, actual_pages) {
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
                 let eff_max = max_pages
@@ -872,7 +895,7 @@ pub fn wasm_instantiate_module(
     for exp in module.exports() {
         if let ExternType::Memory(mem_ty) = exp.ty() {
             let min_pages = mem_ty.minimum() as u32;
-            if let Err(msg) = check_wasm_memory_pages_budget(min_pages) {
+            if let Err(msg) = check_wasm_memory_pages_budget(min_pages, min_pages) {
                 return Err(JsNativeError::range().with_message(msg).into());
             }
         }
@@ -970,7 +993,8 @@ pub fn wasm_instantiate_module(
         let data = m.data(&store);
         shadow_mem.extend_from_slice(data);
         let (used, limit) = BOA_KV_MEM_BUDGET.with(|b| b.get());
-        BOA_KV_MEM_BUDGET.with(|b| b.set((used.saturating_add(mem_pages as usize * 1024), limit)));
+        let added_bytes = (mem_pages as usize).saturating_mul(WASM_PAGE_BYTES);
+        BOA_KV_MEM_BUDGET.with(|b| b.set((used.saturating_add(added_bytes), limit)));
         // If memory was imported with an existing ArrayBuffer, sync any data segment initialization back
         if let Some((_, _, Some(ref b_obj))) = imported_memory {
             if let Ok(ab) = JsArrayBuffer::from_object(b_obj.clone()) {

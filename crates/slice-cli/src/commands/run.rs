@@ -32,7 +32,11 @@ fn is_known_slice_runtime_flag(arg: &str) -> bool {
             | "--no-checkpoints"
             | "--trust-directives"
             | "--no-trust-directives"
+            | "--no-directives"
+            | "--untrusted"
     ) || arg.starts_with("--allow-")
+        || arg.starts_with("--config=")
+        || arg.starts_with("--trust-directives=")
         || arg.starts_with("--fuel=")
         || arg.starts_with("--memory=")
         || arg.starts_with("--memory-kb=")
@@ -131,7 +135,7 @@ pub(crate) fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
         SliceIsolate::prewarm_boa_pool(1);
     }
 
-    let mut exec_cfg = ResolvedExecutionConfig::from_cli_args(&args[1..])?;
+    let mut exec_cfg = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(&args[1..], false)?;
     if let Some(toml_str) = archive.get_manifest_toml() {
         exec_cfg.apply_manifest_toml(toml_str, None);
     }
@@ -146,10 +150,21 @@ pub(crate) fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
         let mut standalone_argv = Vec::with_capacity(args.len() + 1);
         standalone_argv.push("slice".to_string());
         standalone_argv.push(args[0].clone());
-        for a in &args[1..] {
-            if a != "--quiet" && a != "-q" && a != "--metrics" && a != "--warm" {
+        let mut ai = 1;
+        while ai < args.len() {
+            let a = &args[ai];
+            if a == "--" {
+                standalone_argv.extend(args[ai + 1..].iter().cloned());
+                break;
+            }
+            if a == "--config" {
+                ai += 2;
+                continue;
+            }
+            if !is_known_slice_runtime_flag(a) {
                 standalone_argv.push(a.clone());
             }
+            ai += 1;
         }
         isolate.set_process_argv(standalone_argv);
     }
@@ -191,7 +206,6 @@ pub(crate) fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
 
 pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);
-    let mut exec_cfg = ResolvedExecutionConfig::from_cli_args(args)?;
     let mut quiet = false;
     let mut print_metrics = false;
     let mut watch_mode = false;
@@ -212,6 +226,13 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
                 }
             }
             break;
+        }
+        if arg == "--config" {
+            if i + 1 >= args.len() {
+                bail!("Flag --config requires a manifest file path");
+            }
+            i += 2;
+            continue;
         }
         if target_opt.is_none() && eval_opt.is_none() {
             if arg == "--check" || arg == "-c" {
@@ -272,6 +293,10 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         }
         i += 1;
     }
+
+    let is_external_cas = target_opt.as_deref().is_some_and(|t| t.ends_with(".cas"));
+    let mut exec_cfg =
+        ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(args, !is_external_cas)?;
 
     if let Some((raw_code, print_result)) = eval_opt {
         exec_cfg.apply_inline_directives(&raw_code, Some(Path::new(".")));
@@ -409,7 +434,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     let metrics = if target.ends_with(".cas") {
         let archive = MappedCasArchive::open(path)?;
         if let Some(toml_str) = archive.get_manifest_toml() {
-            exec_cfg.apply_manifest_toml(toml_str, path.parent());
+            exec_cfg.apply_manifest_toml(toml_str, None);
         }
         let prewarm_pool = exec_cfg.warm_pool;
         let deterministic_seed = exec_cfg.deterministic_seed;

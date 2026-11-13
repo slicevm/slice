@@ -940,6 +940,13 @@ impl PropertyMap {
 
         false
     }
+
+    /// Returns the current length of the shape-backed property slot storage vector.
+    #[inline]
+    #[must_use]
+    pub const fn storage_len(&self) -> usize {
+        self.storage.len()
+    }
 }
 
 /// An iterator over the indexed property entries of an `Object`.

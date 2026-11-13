@@ -10,9 +10,18 @@ pub use root_shape::RootShape;
 pub use shared_shape::SharedShape;
 pub(crate) use unique_shape::UniqueShape;
 
-use std::fmt::Debug;
+use std::{
+    fmt::Debug,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use boa_gc::{Finalize, Trace};
+
+#[inline]
+pub(crate) fn next_shape_id() -> u64 {
+    static NEXT_SHAPE_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_SHAPE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 use crate::property::PropertyKey;
 
@@ -225,6 +234,16 @@ impl Shape {
         match &self.inner {
             Inner::Shared(shape) => shape.with_property_keys(f),
             Inner::Unique(shape) => shape.with_property_keys(f),
+        }
+    }
+
+    /// Return the unique monotonic 64-bit identifier of the [`Shape`].
+    #[inline]
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        match &self.inner {
+            Inner::Shared(shape) => shape.id(),
+            Inner::Unique(shape) => shape.id(),
         }
     }
 

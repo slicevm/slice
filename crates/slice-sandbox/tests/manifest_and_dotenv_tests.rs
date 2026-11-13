@@ -213,3 +213,42 @@ const x = 1 + 2;
     assert_eq!(dirs.port, Some(9090));
     assert_eq!(dirs.workers, Some(2));
 }
+
+#[test]
+fn test_inline_directives_block_comments_strict_prologue_and_code_stop() {
+    // Directives inside single-line or multi-line block comments must be ignored
+    let commented_out = r#"/* // @slice-allow-net: * */
+/*
+// @slice-allow-read: ["/"]
+// @slice-allow-write: ["/"]
+*/
+// @slice-fuel: 777_000
+const msg = `
+// @slice-allow-net: evil.example.com:443
+`;
+// @slice-allow-exec: ["sh"]
+"#;
+    let dirs = parse_inline_directives(commented_out);
+    assert!(
+        dirs.allow_net.is_empty(),
+        "block-commented or template-literal allow-net must be ignored"
+    );
+    assert!(dirs.allow_read.is_empty());
+    assert!(dirs.allow_write.is_empty());
+    assert!(dirs.allow_exec.is_empty());
+    assert_eq!(dirs.fuel_limit, Some(777_000));
+
+    // Code following a block comment on the same line must terminate directive scanning
+    let code_after_comment = "/* license */ const ready = true;\n// @slice-allow-net: *\n";
+    let dirs_after = parse_inline_directives(code_after_comment);
+    assert!(dirs_after.allow_net.is_empty());
+
+    // UTF-8 BOM + "use strict" prologue before header directives remains supported
+    let strict_prologue = "\u{feff}\"use strict\";\n// @slice-fuel: 450_000\n// @slice-allow-net: api.example.com:443\nexport default 1;\n";
+    let dirs_strict = parse_inline_directives(strict_prologue);
+    assert_eq!(dirs_strict.fuel_limit, Some(450_000));
+    assert_eq!(
+        dirs_strict.allow_net,
+        vec!["api.example.com:443".to_string()]
+    );
+}

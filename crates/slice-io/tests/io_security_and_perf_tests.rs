@@ -126,4 +126,18 @@ fn test_io_perf_lifo_slab_cache_warm_and_o1_telemetry() {
         elapsed,
         elapsed.as_nanos() as f64 / (iterations as f64)
     );
+
+    let scrub_iters = 50_000usize;
+    let scrub_start = Instant::now();
+    for _ in 0..scrub_iters {
+        let (idx, buf) = pool.acquire().unwrap();
+        buf[..256].fill(0x5A);
+        pool.release_zeroed(idx, 256);
+    }
+    let scrub_elapsed = scrub_start.elapsed();
+    println!(
+        "[IO-PERF] 50,000 iterations of (acquire + 256B write + release_zeroed): {:?} ({:.2} ns/iter)",
+        scrub_elapsed,
+        scrub_elapsed.as_nanos() as f64 / (scrub_iters as f64)
+    );
 }

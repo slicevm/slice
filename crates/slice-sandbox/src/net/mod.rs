@@ -3,13 +3,205 @@
 use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+#[inline]
+fn decode_hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[inline]
+fn percent_decode_host_cow(raw: &str) -> Option<Cow<'_, str>> {
+    let bytes = raw.as_bytes();
+    if !bytes.contains(&b'%') {
+        return Some(Cow::Borrowed(raw));
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = decode_hex_nibble(bytes[i + 1])?;
+            let lo = decode_hex_nibble(bytes[i + 2])?;
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok().map(Cow::Owned)
+}
+
+#[inline]
+fn is_valid_decoded_hostname(h: &str, is_ipv6: bool) -> bool {
+    if h.is_empty() {
+        return false;
+    }
+    for b in h.bytes() {
+        if b <= 0x20
+            || b == 0x7F
+            || matches!(
+                b,
+                b'/' | b'\\' | b'?' | b'#' | b'@' | b'[' | b']' | b'<' | b'>' | b'|' | b'^' | b'`'
+            )
+        {
+            return false;
+        }
+        if !is_ipv6 && b == b':' {
+            return false;
+        }
+    }
+    !is_ipv6 || h.parse::<Ipv6Addr>().is_ok()
+}
+
+/// Parsed and normalized HTTP/WebSocket URL authority and request target shared across
+/// `slice-sandbox` OCap checks and `slice-engine` outbound `fetch()` / `WebSocket` clients.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedHttpUrl<'a> {
+    pub is_secure: bool,
+    pub clean_host: Cow<'a, str>,
+    pub is_ipv6: bool,
+    pub port: u16,
+    pub default_port: u16,
+    pub path_and_query: Cow<'a, str>,
+}
+
+/// Parses an `http://`, `https://`, `ws://`, or `wss://` URL using unified WHATWG authority
+/// delimiter rules (`['/', '?', '#', '\\']`), rejecting userinfo `@`, empty hostnames, control
+/// characters, and invalid ports, while percent-decoding `%XX` hostnames.
+pub fn parse_http_authority_and_path(raw_url: &str) -> Option<ParsedHttpUrl<'_>> {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() || trimmed.bytes().any(|b| b <= 0x20 || b == 0x7F) {
+        return None;
+    }
+    let (scheme, after_scheme) = trimmed.split_once("://")?;
+    let (is_secure, default_port) =
+        if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss") {
+            (true, 443u16)
+        } else if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("ws") {
+            (false, 80u16)
+        } else {
+            return None;
+        };
+
+    let without_hash = after_scheme.split('#').next().unwrap_or(after_scheme);
+    let (authority, path_and_query) = match without_hash.find(['/', '?', '\\']) {
+        Some(idx) => {
+            let auth = &without_hash[..idx];
+            let delim = without_hash.as_bytes()[idx];
+            let pq = match delim {
+                b'/' => Cow::Borrowed(&without_hash[idx..]),
+                b'?' => Cow::Owned(format!("/{}", &without_hash[idx..])),
+                b'\\' => Cow::Owned(format!("/{}", &without_hash[idx + 1..])),
+                _ => Cow::Borrowed("/"),
+            };
+            (auth, pq)
+        }
+        None => (without_hash, Cow::Borrowed("/")),
+    };
+
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+
+    let (clean_host, is_ipv6, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let (ipv6_raw, after_bracket) = rest.split_once(']')?;
+        let p = if after_bracket.is_empty() || after_bracket == ":" {
+            default_port
+        } else {
+            let ps = after_bracket.strip_prefix(':')?;
+            let parsed = ps.parse::<u16>().ok()?;
+            if parsed == 0 {
+                return None;
+            }
+            parsed
+        };
+        let ipv6_no_zone = match ipv6_raw.split_once('%') {
+            Some((v6, _)) => v6,
+            None => ipv6_raw,
+        };
+        if !is_valid_decoded_hostname(ipv6_no_zone, true) {
+            return None;
+        }
+        let clean = if ipv6_no_zone.bytes().any(|b| b.is_ascii_uppercase()) {
+            Cow::Owned(ipv6_no_zone.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(ipv6_no_zone)
+        };
+        (clean, true, p)
+    } else {
+        let (host_raw, p) = match authority.rsplit_once(':') {
+            Some((h, p_str)) => {
+                if h.contains(':') {
+                    return None;
+                }
+                if p_str.is_empty() {
+                    (h, default_port)
+                } else {
+                    let parsed = p_str.parse::<u16>().ok()?;
+                    if parsed == 0 {
+                        return None;
+                    }
+                    (h, parsed)
+                }
+            }
+            None => (authority, default_port),
+        };
+        if host_raw.is_empty() {
+            return None;
+        }
+        let decoded = percent_decode_host_cow(host_raw)?;
+        let clean: Cow<'_, str> = match decoded {
+            Cow::Borrowed(b) => {
+                let no_dot = b.trim_end_matches('.');
+                if !is_valid_decoded_hostname(no_dot, false) {
+                    return None;
+                }
+                if no_dot.bytes().any(|c| c.is_ascii_uppercase()) {
+                    Cow::Owned(no_dot.to_ascii_lowercase())
+                } else {
+                    Cow::Borrowed(no_dot)
+                }
+            }
+            Cow::Owned(mut s) => {
+                while s.ends_with('.') {
+                    s.pop();
+                }
+                if !is_valid_decoded_hostname(&s, false) {
+                    return None;
+                }
+                s.make_ascii_lowercase();
+                Cow::Owned(s)
+            }
+        };
+        (clean, false, p)
+    };
+
+    Some(ParsedHttpUrl {
+        is_secure,
+        clean_host,
+        is_ipv6,
+        port,
+        default_port,
+        path_and_query,
+    })
+}
+
 /// Extracts `(clean_lowercase_hostname, explicit_port, scheme_default_port)` from a `host`,
 /// `host:port`, `[ipv6]:port`, or full URL string.
 ///
 /// Security (`SBX-SEC-02`, `SBX-SEC-03`) & Performance (`SBX-PERF-01`):
+/// - Splits URL authority at the earliest byte in `['/', '?', '#', '\\']`.
+/// - Percent-decodes `%XX` hostnames when `%` is present while returning `Cow::Borrowed`
+///   whenever the hostname slice is already lowercase ASCII without percent escapes.
 /// - Strips trailing DNS root dots (`"metadata.google.internal."` -> `"metadata.google.internal"`).
 /// - Strips IPv6 zone identifiers (`"[fe80::1%eth0]:80"` -> `"fe80::1"`).
-/// - Returns `Cow::Borrowed` whenever the hostname slice is already lowercase ASCII (zero heap allocation).
 #[inline]
 pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>, Option<u16>) {
     let mut trimmed = host.trim();
@@ -22,7 +214,7 @@ pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>
         }
         trimmed = after_scheme;
     }
-    if let Some((authority, _)) = trimmed.split_once(['/', '?', '#']) {
+    if let Some((authority, _)) = trimmed.split_once(['/', '?', '#', '\\']) {
         trimmed = authority;
     }
     if let Some((_, after_auth)) = trimmed.rsplit_once('@') {
@@ -30,8 +222,10 @@ pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>
     }
 
     let mut explicit_port = None;
+    let mut is_bracketed_ipv6 = false;
     let without_port = if let Some(rest) = trimmed.strip_prefix('[') {
         if let Some((ipv6, after_bracket)) = rest.split_once(']') {
+            is_bracketed_ipv6 = true;
             if let Some(port_str) = after_bracket.strip_prefix(':') {
                 if let Ok(p) = port_str.parse::<u16>() {
                     explicit_port = Some(p);
@@ -56,6 +250,7 @@ pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>
             }
             h
         } else if let Some((v6_clean, _zone)) = trimmed.split_once('%') {
+            is_bracketed_ipv6 = true;
             v6_clean
         } else {
             trimmed
@@ -63,6 +258,17 @@ pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>
     } else {
         trimmed
     };
+
+    if !is_bracketed_ipv6 && without_port.as_bytes().contains(&b'%') {
+        if let Some(decoded) = percent_decode_host_cow(without_port) {
+            let mut s = decoded.into_owned();
+            while s.ends_with('.') {
+                s.pop();
+            }
+            s.make_ascii_lowercase();
+            return (Cow::Owned(s), explicit_port, scheme_default_port);
+        }
+    }
 
     let without_trailing_dot = without_port.trim_end_matches('.');
     let clean_cow = if without_trailing_dot.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -128,15 +334,26 @@ pub fn parse_nonstandard_ipv4(h: &str) -> Option<Ipv4Addr> {
 
 /// Extracts an embedded IPv4 address from IPv6 transition/tunneling mechanisms (`SBX-SEC-03`):
 /// - IPv4-mapped IPv6 (`::ffff:a.b.c.d`)
+/// - SIIT IPv4-translated IPv6 (`::ffff:0:a.b.c.d`, RFC 2765)
 /// - IPv4-compatible IPv6 (`::a.b.c.d`, excluding `::` and `::1`)
-/// - RFC 6052 Well-Known NAT64 (`64:ff9b::a.b.c.d`) and RFC 8215 Local-Use NAT64 (`64:ff9b:1::a.b.c.d`)
+/// - RFC 6052 Well-Known NAT64 (`64:ff9b::a.b.c.d`) and RFC 8215 Local-Use NAT64 (`64:ff9b:1::/48`)
 /// - RFC 3056 6to4 (`2002:aabb:ccdd::/48`)
+/// - RFC 4380 Teredo (`2001:0000::/32`, XOR-obfuscated client IPv4 in `segs[6..8]`)
 #[inline]
 fn extract_embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
     if let Some(mapped) = v6.to_ipv4_mapped() {
         return Some(mapped);
     }
     let segs = v6.segments();
+    // SIIT IPv4-translated `::ffff:0:a.b.c.d` (`::ffff:0:0/96`, RFC 2765)
+    if segs[0..4] == [0, 0, 0, 0] && segs[4] == 0xffff && segs[5] == 0 {
+        return Some(Ipv4Addr::new(
+            (segs[6] >> 8) as u8,
+            segs[6] as u8,
+            (segs[7] >> 8) as u8,
+            segs[7] as u8,
+        ));
+    }
     // IPv4-compatible `::a.b.c.d` (excluding `::` and `::1`)
     if segs[0..6] == [0, 0, 0, 0, 0, 0] && (segs[6] != 0 || segs[7] > 1) {
         return Some(Ipv4Addr::new(
@@ -146,13 +363,10 @@ fn extract_embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
             segs[7] as u8,
         ));
     }
-    // NAT64 Well-Known `64:ff9b::/96` or Local-Use `64:ff9b:1::/48`
+    // NAT64 Well-Known `64:ff9b::/96` or RFC 8215 Local-Use `64:ff9b:1::/48`
     if segs[0] == 0x0064
         && segs[1] == 0xff9b
-        && (segs[2] == 0 || segs[2] == 1)
-        && segs[3] == 0
-        && segs[4] == 0
-        && segs[5] == 0
+        && ((segs[2] == 0 && segs[3] == 0 && segs[4] == 0 && segs[5] == 0) || segs[2] == 0x0001)
     {
         return Some(Ipv4Addr::new(
             (segs[6] >> 8) as u8,
@@ -168,6 +382,17 @@ fn extract_embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
             segs[1] as u8,
             (segs[2] >> 8) as u8,
             segs[2] as u8,
+        ));
+    }
+    // Teredo `2001:0000::/32` (client IPv4 XOR-obfuscated with 0xffff in segs[6..8])
+    if segs[0] == 0x2001 && segs[1] == 0x0000 {
+        let s6 = !segs[6];
+        let s7 = !segs[7];
+        return Some(Ipv4Addr::new(
+            (s6 >> 8) as u8,
+            s6 as u8,
+            (s7 >> 8) as u8,
+            s7 as u8,
         ));
     }
     None
@@ -284,10 +509,10 @@ pub fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let octs = v4.octets();
-            v4.is_loopback()
+            octs[0] == 0 // 0.0.0.0/8 ("This network", RFC 1122 / Linux 0.0.0.1 loopback)
+                || v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
-                || v4.is_unspecified()
                 || v4.is_broadcast()
                 || v4.is_multicast()
                 || v4.is_documentation()
@@ -297,10 +522,18 @@ pub fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
                 || octs[0] >= 240 // 240.0.0.0/4 Reserved for future use
         }
         IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            // Unconditionally block RFC 8215 Local-Use NAT64 (`64:ff9b:1::/48`),
+            // SIIT (`::ffff:0:0/96`), and RFC 4380 Teredo (`2001:0000::/32`).
+            if (segs[0] == 0x0064 && segs[1] == 0xff9b && segs[2] == 0x0001)
+                || (segs[0..4] == [0, 0, 0, 0] && segs[4] == 0xffff && segs[5] == 0)
+                || (segs[0] == 0x2001 && segs[1] == 0x0000)
+            {
+                return true;
+            }
             if let Some(embedded_v4) = extract_embedded_ipv4(v6) {
                 return is_private_or_loopback_ip(IpAddr::V4(embedded_v4));
             }
-            let segs = v6.segments();
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()

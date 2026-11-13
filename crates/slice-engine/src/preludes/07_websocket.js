@@ -191,8 +191,11 @@
       if (handlerOrOpts) {
         globalThis.__slice_ws_server_handler = handlerOrOpts;
       }
+      if (typeof __slice_mark_ws_upgrade === "function") {
+        __slice_mark_ws_upgrade();
+      }
       if (!globalThis.Response) __slice_ensure_shard(11);
-      __slice_http_respond("", 101, "text/plain", JSON.stringify([["Upgrade", "websocket"]]));
+      __slice_http_respond(101, "", "text/plain", JSON.stringify([["Upgrade", "websocket"]]));
       return new globalThis.Response("", {
         status: 101,
         statusText: "Switching Protocols",

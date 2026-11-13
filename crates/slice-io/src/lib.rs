@@ -12,6 +12,7 @@ pub mod slab;
 
 pub use ring::{
     CompletionRingEngine, IoCompletion, IoSubmission, RingStatus, DEFAULT_RING_ENTRIES,
+    MAX_RING_ENTRIES,
 };
 pub use slab::{RegisteredBufferPool, FIXED_BUFFER_COUNT, FIXED_BUFFER_SIZE};
 
