@@ -1158,3 +1158,187 @@ fn test_http_fast_outcome_and_server_websocket_dispatch() {
         other => panic!("expected text frame, got {:?}", other),
     }
 }
+
+#[test]
+fn test_websocket_zero_delay_interactive_roundtrips_and_unidirectional_burst() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        // Session 1: 6 sequential request-response echoes + server welcome frame
+        if let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.set_nodelay(true);
+            let mut req_buf = [0u8; 2048];
+            let n = stream.read(&mut req_buf).unwrap();
+            let req_str = String::from_utf8_lossy(&req_buf[..n]);
+            let key = req_str
+                .lines()
+                .find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    if k.trim().eq_ignore_ascii_case("sec-websocket-key") {
+                        Some(v.trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            let accept = crate::compute_websocket_accept_key(&key);
+            let handshake = format!(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+                accept
+            );
+            stream.write_all(handshake.as_bytes()).unwrap();
+            stream.flush().unwrap();
+
+            let welcome =
+                crate::encode_websocket_frame(true, crate::WS_OPCODE_TEXT, None, b"welcome");
+            stream.write_all(&welcome).unwrap();
+            stream.flush().unwrap();
+
+            let mut pending = Vec::new();
+            loop {
+                match crate::read_websocket_message_from_stream(
+                    &mut stream,
+                    &mut pending,
+                    true,
+                    65536,
+                ) {
+                    Ok(Some((crate::WS_OPCODE_TEXT, payload))) => {
+                        let mut reply_bytes = b"echo:".to_vec();
+                        reply_bytes.extend_from_slice(&payload);
+                        let reply = crate::encode_websocket_frame(
+                            true,
+                            crate::WS_OPCODE_TEXT,
+                            None,
+                            &reply_bytes,
+                        );
+                        stream.write_all(&reply).unwrap();
+                        stream.flush().unwrap();
+                    }
+                    Ok(Some((crate::WS_OPCODE_CLOSE, close_payload))) => {
+                        let close_reply = crate::encode_websocket_frame(
+                            true,
+                            crate::WS_OPCODE_CLOSE,
+                            None,
+                            &close_payload,
+                        );
+                        let _ = stream.write_all(&close_reply);
+                        let _ = stream.flush();
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        // Session 2: Unidirectional burst of 20 frames with no server replies until close
+        if let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.set_nodelay(true);
+            let mut req_buf = [0u8; 2048];
+            let n = stream.read(&mut req_buf).unwrap();
+            let req_str = String::from_utf8_lossy(&req_buf[..n]);
+            let key = req_str
+                .lines()
+                .find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    if k.trim().eq_ignore_ascii_case("sec-websocket-key") {
+                        Some(v.trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            let accept = crate::compute_websocket_accept_key(&key);
+            let handshake = format!(
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+                accept
+            );
+            stream.write_all(handshake.as_bytes()).unwrap();
+            stream.flush().unwrap();
+
+            let mut pending = Vec::new();
+            let mut count = 0usize;
+            loop {
+                match crate::read_websocket_message_from_stream(
+                    &mut stream,
+                    &mut pending,
+                    true,
+                    65536,
+                ) {
+                    Ok(Some((crate::WS_OPCODE_TEXT, _))) => {
+                        count += 1;
+                    }
+                    Ok(Some((crate::WS_OPCODE_CLOSE, close_payload))) => {
+                        assert_eq!(count, 20);
+                        let close_reply = crate::encode_websocket_frame(
+                            true,
+                            crate::WS_OPCODE_CLOSE,
+                            None,
+                            &close_payload,
+                        );
+                        let _ = stream.write_all(&close_reply);
+                        let _ = stream.flush();
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+        }
+    });
+
+    let js = format!(
+        r#"
+        (async () => {{
+            const acks = await new Promise((resolve, reject) => {{
+                const ws = new WebSocket("ws://127.0.0.1:{port}/echo");
+                const list = [];
+                let step = 0;
+                ws.onerror = reject;
+                ws.onmessage = (ev) => {{
+                    list.push(String(ev.data));
+                    if (step < 5) {{
+                        step++;
+                        ws.send("msg-" + step);
+                    }} else {{
+                        ws.close(1000, "done");
+                    }}
+                }};
+                ws.onclose = () => resolve(list);
+            }});
+
+            await new Promise((resolve, reject) => {{
+                const ws2 = new WebSocket("ws://127.0.0.1:{port}/burst");
+                ws2.onerror = reject;
+                ws2.onopen = () => {{
+                    for (let i = 0; i < 20; i++) {{
+                        ws2.send("fire-" + i);
+                    }}
+                    ws2.close(1000, "burst-done");
+                }};
+                ws2.onclose = () => resolve(true);
+            }});
+
+            console.log(JSON.stringify(acks));
+        }})();
+        "#,
+        port = port
+    );
+
+    let caps = CapabilityToken::pure_compute().with_net_host(format!("127.0.0.1:{}", port));
+    let start = std::time::Instant::now();
+    let metrics =
+        run_source_isolated("ws-zero-delay", &js, caps, 5_000_000, 8 * 1024 * 1024).unwrap();
+    let elapsed = start.elapsed();
+    let _ = server.join();
+
+    assert_eq!(
+        metrics.stdout[0],
+        r#"["welcome","echo:msg-1","echo:msg-2","echo:msg-3","echo:msg-4","echo:msg-5"]"#
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(250),
+        "interactive + burst WebSocket sessions took {:?} (expected fast zero-delay dispatch)",
+        elapsed
+    );
+}

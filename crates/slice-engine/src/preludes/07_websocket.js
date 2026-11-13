@@ -153,6 +153,7 @@
     }
     var self = this;
     var remaining = 250;
+    var emptyTicks = 0;
     function step() {
       self._pollTimer = null;
       if (self.readyState !== 1 || !self._hasMsgListeners()) return;
@@ -162,10 +163,11 @@
         return;
       }
       if (--remaining > 0 && self.readyState === 1 && self._hasMsgListeners()) {
-        self._pollTimer = setTimeout(step, 2);
+        emptyTicks++;
+        self._pollTimer = setTimeout(step, emptyTicks === 1 ? 1 : 2);
       }
     }
-    this._pollTimer = setTimeout(step, 1);
+    this._pollTimer = setTimeout(step, 0);
   };
 
   WebSocket.prototype.send = function(data) {

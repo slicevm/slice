@@ -815,6 +815,8 @@ fn drain_available_live_frames(
     } else {
         stream.set_read_timeout(Some(read_timeout));
     }
+    let mut read_calls = 0u32;
+    let mut follow_up_timeout_set = false;
     let mut scratch = [0u8; 4096];
 
     loop {
@@ -967,6 +969,16 @@ fn drain_available_live_frames(
             break;
         }
 
+        if !nonblocking
+            && read_calls > 0
+            && !follow_up_timeout_set
+            && read_timeout < Duration::from_millis(5)
+        {
+            stream.set_read_timeout(Some(Duration::from_millis(5)));
+            follow_up_timeout_set = true;
+        }
+        read_calls = read_calls.saturating_add(1);
+
         match stream.read(&mut scratch) {
             Ok(0) => {
                 ws.closed = true;
@@ -1007,9 +1019,6 @@ fn drain_available_live_frames(
                     break;
                 }
                 pending_buf.extend_from_slice(&scratch[..n]);
-                if !nonblocking {
-                    stream.set_read_timeout(Some(Duration::from_millis(5)));
-                }
             }
             Err(ref e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
