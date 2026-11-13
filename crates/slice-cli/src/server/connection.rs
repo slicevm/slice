@@ -10,12 +10,29 @@ use std::time::Instant;
 
 /// Maximum allowed inbound HTTP request body size (`4 MB`).
 pub(crate) const MAX_INBOUND_BODY_BYTES: usize = 4 * 1024 * 1024;
-/// Static assets larger than `4 MB` stream directly in `64 KB` chunks rather than buffering in `write_buf`.
-const STATIC_STREAM_THRESHOLD_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum pipelined static asset size eligible for write_buf coalescing (`16 KB`).
+/// Static assets larger than `16 KB` (or non-pipelined responses) write directly from the
+/// zero-copy `mmap` payload slice without copying into `write_buf`.
+const STATIC_COALESCE_MAX_BYTES: usize = 16 * 1024;
+/// Capacity ceiling above which `write_buf` is shrunk back to `16 KB` after flushing.
+const WRITE_BUF_SHRINK_THRESHOLD_BYTES: usize = 65_536;
+const WRITE_BUF_RESTING_CAPACITY_BYTES: usize = 16_384;
+
+static CRLF2_FINDER: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+    std::sync::LazyLock::new(|| memchr::memmem::Finder::new(b"\r\n\r\n"));
+static LF2_FINDER: std::sync::LazyLock<memchr::memmem::Finder<'static>> =
+    std::sync::LazyLock::new(|| memchr::memmem::Finder::new(b"\n\n"));
 
 #[inline]
 pub(crate) fn find_http_header_end(buf: &[u8]) -> Option<(usize, usize)> {
-    if let Some(i) = memchr::memmem::find(buf, b"\r\n\r\n") {
+    find_http_header_end_from(buf, 0)
+}
+
+#[inline]
+pub(crate) fn find_http_header_end_from(buf: &[u8], scan_from: usize) -> Option<(usize, usize)> {
+    let start = scan_from.min(buf.len());
+    if let Some(rel) = CRLF2_FINDER.find(&buf[start..]) {
+        let i = start + rel;
         return Some((i, i + 4));
     }
     // Do not fall back to bare `\n\n` if the request line uses CRLF (`\r\n`) framing.
@@ -23,7 +40,9 @@ pub(crate) fn find_http_header_end(buf: &[u8]) -> Option<(usize, usize)> {
     if first_lf > 0 && buf[first_lf - 1] == b'\r' {
         return None;
     }
-    if let Some(i) = memchr::memmem::find(buf, b"\n\n") {
+    let lf_start = scan_from.saturating_sub(1).min(buf.len());
+    if let Some(rel) = LF2_FINDER.find(&buf[lf_start..]) {
+        let i = lf_start + rel;
         return Some((i, i + 2));
     }
     None
@@ -55,11 +74,19 @@ fn is_forbidden_custom_response_header(name: &str) -> bool {
 }
 
 #[inline]
+fn clear_and_trim_write_buf(write_buf: &mut Vec<u8>) {
+    write_buf.clear();
+    if write_buf.capacity() > WRITE_BUF_SHRINK_THRESHOLD_BYTES {
+        write_buf.shrink_to(WRITE_BUF_RESTING_CAPACITY_BYTES);
+    }
+}
+
+#[inline]
 fn flush_pending_write_buf<S: Write>(stream: &mut S, write_buf: &mut Vec<u8>) -> Result<()> {
     if !write_buf.is_empty() {
         stream.write_all(write_buf)?;
         stream.flush()?;
-        write_buf.clear();
+        clear_and_trim_write_buf(write_buf);
     }
     Ok(())
 }
@@ -330,10 +357,12 @@ pub(crate) fn serve_connection_with_isolate(
         let mut narrowed_timeout = false;
 
         // 1. Read until complete HTTP headers (`\r\n\r\n`) are present in `read_buf[..filled]`
+        let mut hdr_scan_cursor = 0usize;
         let (hdr_end, body_offset) = loop {
-            if let Some(pos) = find_http_header_end(&read_buf[..filled]) {
+            if let Some(pos) = find_http_header_end_from(&read_buf[..filled], hdr_scan_cursor) {
                 break pos;
             }
+            hdr_scan_cursor = filled.saturating_sub(3);
             if !carry_buf.is_empty() && filled < read_buf.len() {
                 let pull = carry_buf.len().min(read_buf.len() - filled);
                 read_buf[filled..filled + pull].copy_from_slice(&carry_buf[..pull]);
@@ -588,20 +617,27 @@ pub(crate) fn serve_connection_with_isolate(
         let body_end: usize;
 
         if is_chunked_te {
-            let mut chunk_raw =
-                Vec::with_capacity(body_filled.saturating_add(carry_buf.len()).max(1024));
-            chunk_raw.extend_from_slice(&after_hdr_buf[..body_filled]);
+            let mut decoder = slice_engine::ChunkedBodyDecoder::new(MAX_INBOUND_BODY_BYTES);
+            let mut pending_chunk_buf =
+                Vec::with_capacity(body_filled.saturating_add(carry_buf.len()).min(16384));
+            if body_filled > 0 {
+                pending_chunk_buf.extend_from_slice(&after_hdr_buf[..body_filled]);
+            }
             if !carry_buf.is_empty() {
-                chunk_raw.extend_from_slice(&carry_buf);
+                pending_chunk_buf.extend_from_slice(&carry_buf);
                 carry_buf.clear();
             }
+            let mut raw_wire_seen = pending_chunk_buf.len();
             let mut scratch = [0u8; 8192];
             let mut body_deadline_opt: Option<Instant> = None;
-            let (decoded, consumed_raw) = loop {
-                match slice_engine::parse_chunked_body(&chunk_raw, MAX_INBOUND_BODY_BYTES) {
-                    Ok(Some(res)) => break res,
-                    Ok(None) => {
-                        if chunk_raw.len() > MAX_INBOUND_BODY_BYTES.saturating_add(65536) {
+            let (decoded, leftover_start) = loop {
+                match decoder.feed(&pending_chunk_buf) {
+                    Ok((consumed, true)) => break (decoder.into_vec(), consumed),
+                    Ok((consumed, false)) => {
+                        if consumed > 0 {
+                            pending_chunk_buf.drain(..consumed);
+                        }
+                        if raw_wire_seen > MAX_INBOUND_BODY_BYTES.saturating_add(65536) {
                             let _ = flush_pending_write_buf(&mut stream, write_buf);
                             return write_http_error_and_close(
                                 &mut stream,
@@ -646,7 +682,10 @@ pub(crate) fn serve_connection_with_isolate(
                                     r#"{"error":"TRUNCATED_CHUNKED_BODY"}"#,
                                 );
                             }
-                            Ok(n) => chunk_raw.extend_from_slice(&scratch[..n]),
+                            Ok(n) => {
+                                raw_wire_seen = raw_wire_seen.saturating_add(n);
+                                pending_chunk_buf.extend_from_slice(&scratch[..n]);
+                            }
                         }
                     }
                     Err(e) => {
@@ -665,13 +704,14 @@ pub(crate) fn serve_connection_with_isolate(
                 }
             };
             // Preserve any pipelined bytes that arrived after the chunked terminator without overflowing `after_hdr_buf`.
-            let leftover = chunk_raw.len().saturating_sub(consumed_raw);
+            let leftover = pending_chunk_buf.len().saturating_sub(leftover_start);
             let fit = leftover.min(after_hdr_buf.len());
             if fit > 0 {
-                after_hdr_buf[..fit].copy_from_slice(&chunk_raw[consumed_raw..consumed_raw + fit]);
+                after_hdr_buf[..fit]
+                    .copy_from_slice(&pending_chunk_buf[leftover_start..leftover_start + fit]);
             }
             if leftover > fit {
-                carry_buf.extend_from_slice(&chunk_raw[consumed_raw + fit..]);
+                carry_buf.extend_from_slice(&pending_chunk_buf[leftover_start + fit..]);
             }
             filled = body_offset + fit;
             body_end = body_offset;
@@ -822,9 +862,12 @@ pub(crate) fn serve_connection_with_isolate(
                             push_u64_ascii(write_buf, total_us);
                             write_buf.extend_from_slice(b"\r\nX-Slice-Fuel-Used: 0\r\n\r\n");
                             if method != "HEAD" {
-                                if asset.payload.len() > STATIC_STREAM_THRESHOLD_BYTES {
+                                if !has_more_pipelined
+                                    || asset.payload.len() > STATIC_COALESCE_MAX_BYTES
+                                    || !keep_alive
+                                {
                                     stream.write_all(write_buf)?;
-                                    write_buf.clear();
+                                    clear_and_trim_write_buf(write_buf);
                                     for chunk in asset.payload.chunks(65536) {
                                         stream.write_all(chunk)?;
                                     }
@@ -846,7 +889,7 @@ pub(crate) fn serve_connection_with_isolate(
                         {
                             if !write_buf.is_empty() {
                                 stream.write_all(write_buf)?;
-                                write_buf.clear();
+                                clear_and_trim_write_buf(write_buf);
                             }
                             if !keep_alive || reached_max {
                                 stream.flush()?;
@@ -1058,7 +1101,7 @@ pub(crate) fn serve_connection_with_isolate(
                 }
                 if !has_more_pipelined || write_buf.len() >= 32768 {
                     stream.write_all(write_buf)?;
-                    write_buf.clear();
+                    clear_and_trim_write_buf(write_buf);
                 }
 
                 // Phase N1.3: Execute deferred `Slice.waitUntil(fn)` tasks AFTER response is prepared/sent!
@@ -1085,7 +1128,7 @@ pub(crate) fn serve_connection_with_isolate(
                     write_buf.extend_from_slice(err_body.as_bytes());
                 }
                 stream.write_all(write_buf)?;
-                write_buf.clear();
+                clear_and_trim_write_buf(write_buf);
             }
         }
 

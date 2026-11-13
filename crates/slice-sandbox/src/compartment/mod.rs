@@ -408,7 +408,7 @@ impl TenantCompartment {
     /// and strict directory-boundary matching.
     #[inline]
     pub fn verify_fs_read(&self, path: &str) -> Result<(), SandboxViolation> {
-        if is_rejected_vfs_candidate(path) {
+        if self.capabilities.allowed_read_prefixes.is_empty() || is_rejected_vfs_candidate(path) {
             return Err(self.trap_fs_read(path));
         }
         let norm_cand = normalize_vfs_path_cow(path);
@@ -424,7 +424,7 @@ impl TenantCompartment {
     /// and strict directory-boundary matching.
     #[inline]
     pub fn verify_fs_write(&self, path: &str) -> Result<(), SandboxViolation> {
-        if is_rejected_vfs_candidate(path) {
+        if self.capabilities.allowed_write_prefixes.is_empty() || is_rejected_vfs_candidate(path) {
             return Err(self.trap_fs_write(path));
         }
         let norm_cand = normalize_vfs_path_cow(path);
@@ -447,6 +447,9 @@ impl TenantCompartment {
     ///   and formatting `host:port` candidates onto a stack buffer.
     #[inline]
     pub fn verify_net_connect(&self, host: &str) -> Result<(), SandboxViolation> {
+        if self.capabilities.allowed_net_hosts.is_empty() {
+            return Err(self.trap_net_access(host));
+        }
         let trimmed = host.trim();
         if trimmed.is_empty() || trimmed.bytes().any(|b| b <= 0x20 || b == 0x7F) {
             return Err(self.trap_net_access(host));
@@ -531,6 +534,9 @@ impl TenantCompartment {
     /// By default (`allowed_exec_binaries` empty), all subprocess execution is denied.
     #[inline]
     pub fn verify_exec_binary(&self, binary: &str) -> Result<(), SandboxViolation> {
+        if self.capabilities.allowed_exec_binaries.is_empty() {
+            return Err(self.trap_exec_denied(binary));
+        }
         let trimmed = binary.trim();
         if trimmed.is_empty() || memchr::memmem::find(trimmed.as_bytes(), b"..").is_some() {
             return Err(self.trap_exec_denied(binary));

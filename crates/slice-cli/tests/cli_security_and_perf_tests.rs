@@ -538,3 +538,60 @@ allow_env = ["EXPLICIT_CONFIG_VAR=granted_via_flag"]
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn test_incremental_http_header_cursor_and_single_pass_manifest_dedup() {
+    use crate::config::ResolvedExecutionConfig;
+    use crate::server::connection::find_http_header_end_from;
+
+    // 1. Incremental header cursor finds `\r\n\r\n` even when split across fragmented TCP reads
+    let raw = b"GET /api/v1/items HTTP/1.1\r\nHost: localhost:8787\r\nX-Custom: abcdef\r\n\r\nBODY";
+    let mut filled = 0usize;
+    let mut cursor = 0usize;
+    let mut found = None;
+    for step in [7usize, 19, 25, 16, 2, 1, 4] {
+        filled = (filled + step).min(raw.len());
+        if let Some(pos) = find_http_header_end_from(&raw[..filled], cursor) {
+            found = Some(pos);
+            break;
+        }
+        cursor = filled.saturating_sub(3);
+    }
+    assert_eq!(found, Some((raw.len() - 8, raw.len() - 4)));
+    assert_eq!(&raw[found.unwrap().1..], b"BODY");
+
+    // 2. Single-pass manifest loading skips duplicate re-read when target resolves to same slice.toml
+    let tmp_dir =
+        std::env::temp_dir().join(format!("slice_cli_manifest_dedup_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let manifest_path = tmp_dir.join("slice.toml");
+    let script_path = tmp_dir.join("index.ts");
+    std::fs::write(
+        &manifest_path,
+        "[limits]\nfuel = 1234567\n[capabilities]\nallow_env = [\"DEDUP_KEY=v1\"]\n",
+    )
+    .unwrap();
+    std::fs::write(&script_path, "console.log('ok');\n").unwrap();
+
+    let mut cfg = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(&[], false).unwrap();
+    cfg.apply_target_path_manifest(&script_path);
+    assert_eq!(cfg.fuel_limit, 1_234_567);
+    assert_eq!(
+        cfg.caps
+            .allowed_env_keys
+            .get("DEDUP_KEY")
+            .map(String::as_str),
+        Some("v1")
+    );
+    // Mutating the file on disk after `loaded_manifest_path` recorded it must be skipped on duplicate target apply
+    std::fs::write(
+        &manifest_path,
+        "[limits]\nfuel = 9999999\n[capabilities]\nallow_env = [\"DEDUP_KEY=v2\"]\n",
+    )
+    .unwrap();
+    cfg.apply_target_path_manifest(&script_path);
+    assert_eq!(cfg.fuel_limit, 1_234_567);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

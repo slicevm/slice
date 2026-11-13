@@ -286,14 +286,16 @@ pub fn vfs_normalized_candidate_matches_prefix(norm_cand: &str, allowed_prefix: 
         return true;
     }
 
-    // Cross-platform `/tmp` <-> `std::env::temp_dir()` equivalence
+    // Cross-platform `/tmp` <-> `std::env::temp_dir()` equivalence (cached once per process)
     if norm_pref == "/tmp" || norm_pref.starts_with("/tmp/") {
-        let os_tmp = normalize_vfs_path_lexical(&std::env::temp_dir().to_string_lossy());
+        static NORMALIZED_OS_TMP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let os_tmp = NORMALIZED_OS_TMP
+            .get_or_init(|| normalize_vfs_path_lexical(&std::env::temp_dir().to_string_lossy()));
         if !os_tmp.is_empty() {
-            let mapped_pref = if norm_pref == "/tmp" {
-                os_tmp
+            let mapped_pref: Cow<'_, str> = if norm_pref == "/tmp" {
+                Cow::Borrowed(os_tmp.as_str())
             } else {
-                format!("{}{}", os_tmp, &norm_pref[4..])
+                Cow::Owned(format!("{}{}", os_tmp, &norm_pref[4..]))
             };
             if path_starts_with_dir_boundary(norm_cand, &mapped_pref) {
                 return true;

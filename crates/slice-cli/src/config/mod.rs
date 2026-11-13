@@ -85,6 +85,7 @@ pub(crate) struct ResolvedExecutionConfig {
     pub(crate) trust_directives: bool,
     pub(crate) trace_output_path: Option<PathBuf>,
     pub(crate) has_explicit_config: bool,
+    pub(crate) loaded_manifest_path: Option<PathBuf>,
     pub(crate) cli_fuel_override: Option<u64>,
     pub(crate) cli_mem_override: Option<usize>,
     pub(crate) cli_boacas_override: Option<bool>,
@@ -172,10 +173,13 @@ impl ResolvedExecutionConfig {
         let mut cli_trust_directives_override = None;
 
         // 1. Apply explicit `--config <path>` or `./slice.toml` (when ambient CWD loading is enabled)
+        let mut loaded_manifest_path: Option<PathBuf> = None;
         let loaded_manifest_opt: Option<(String, PathBuf)> =
             if let Some(ref cfg_path) = explicit_config_path {
                 let raw = std::fs::read_to_string(cfg_path)
                     .with_context(|| format!("Failed to read --config {}", cfg_path.display()))?;
+                loaded_manifest_path =
+                    Some(std::fs::canonicalize(cfg_path).unwrap_or_else(|_| cfg_path.clone()));
                 let base = cfg_path
                     .parent()
                     .filter(|p| !p.as_os_str().is_empty())
@@ -185,9 +189,15 @@ impl ResolvedExecutionConfig {
             } else if load_ambient_cwd {
                 let cwd_manifest = Path::new("slice.toml");
                 if cwd_manifest.exists() {
-                    std::fs::read_to_string(cwd_manifest)
-                        .ok()
-                        .map(|raw| (raw, PathBuf::from(".")))
+                    if let Ok(raw) = std::fs::read_to_string(cwd_manifest) {
+                        loaded_manifest_path = Some(
+                            std::fs::canonicalize(cwd_manifest)
+                                .unwrap_or_else(|_| cwd_manifest.to_path_buf()),
+                        );
+                        Some((raw, PathBuf::from(".")))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -211,13 +221,13 @@ impl ResolvedExecutionConfig {
             if let Some(wk) = m.server_workers {
                 server_workers = Some(wk);
             }
-            if let Some(sd) = m.static_dir {
+            if let Some(ref sd) = m.static_dir {
                 static_dir = Some(manifest_base.join(sd));
             }
-            if let Some(tc) = m.tls_cert {
+            if let Some(ref tc) = m.tls_cert {
                 tls_cert = Some(manifest_base.join(tc));
             }
-            if let Some(tk) = m.tls_key {
+            if let Some(ref tk) = m.tls_key {
                 tls_key = Some(manifest_base.join(tk));
             }
             if let Some(td) = m.trust_directives {
@@ -229,8 +239,8 @@ impl ResolvedExecutionConfig {
             if let Some(t) = m.tier {
                 apply_tier_override(Some(t));
             }
-            merge_manifest_toml_into_caps_and_dlp(
-                &raw,
+            merge_parsed_manifest_into_caps_and_dlp(
+                m,
                 Some(manifest_base.as_path()),
                 &mut caps,
                 &mut audit_secrets,
@@ -607,6 +617,7 @@ impl ResolvedExecutionConfig {
             trust_directives,
             trace_output_path,
             has_explicit_config,
+            loaded_manifest_path,
             cli_fuel_override,
             cli_mem_override,
             cli_boacas_override,
@@ -665,18 +676,18 @@ impl ResolvedExecutionConfig {
             }
             if let Some(dir) = base_dir {
                 if self.cli_static_override.is_none() {
-                    if let Some(sd) = m.static_dir {
-                        self.static_dir = Some(dir.join(&sd));
+                    if let Some(ref sd) = m.static_dir {
+                        self.static_dir = Some(dir.join(sd));
                     }
                 }
                 if self.cli_tls_cert_override.is_none() {
-                    if let Some(tc) = m.tls_cert {
-                        self.tls_cert = Some(dir.join(&tc));
+                    if let Some(ref tc) = m.tls_cert {
+                        self.tls_cert = Some(dir.join(tc));
                     }
                 }
                 if self.cli_tls_key_override.is_none() {
-                    if let Some(tk) = m.tls_key {
-                        self.tls_key = Some(dir.join(&tk));
+                    if let Some(ref tk) = m.tls_key {
+                        self.tls_key = Some(dir.join(tk));
                     }
                 }
             }
@@ -686,8 +697,8 @@ impl ResolvedExecutionConfig {
                 }
             }
         }
-        merge_manifest_toml_into_caps_and_dlp(
-            raw_toml,
+        merge_parsed_manifest_into_caps_and_dlp(
+            m,
             base_dir,
             &mut self.caps,
             &mut self.audit_secrets,
@@ -881,13 +892,20 @@ impl ResolvedExecutionConfig {
     }
 
     /// Discovers and applies `slice.toml` for `target_path` (if one exists in `target_path`,
-    /// its parent directory, or its grandparent directory).
+    /// its parent directory, or its grandparent directory), skipping a duplicate disk read and
+    /// TOML parse when the discovered manifest is identical to the ambient `./slice.toml` already loaded.
     pub(crate) fn apply_target_path_manifest(&mut self, target_path: &Path) {
         if self.has_explicit_config {
             return;
         }
         if let Some(manifest_file) = find_project_manifest_path(target_path) {
+            let canon =
+                std::fs::canonicalize(&manifest_file).unwrap_or_else(|_| manifest_file.clone());
+            if self.loaded_manifest_path.as_deref() == Some(canon.as_path()) {
+                return;
+            }
             if let Ok(raw) = std::fs::read_to_string(&manifest_file) {
+                self.loaded_manifest_path = Some(canon);
                 self.apply_manifest_toml(&raw, manifest_file.parent());
             }
         }
@@ -915,6 +933,7 @@ pub(crate) fn merge_manifest_toml_into_caps(raw_toml: &str, caps: &mut Capabilit
     merge_manifest_toml_into_caps_and_dlp(raw_toml, None, caps, &mut dummy_secrets);
 }
 
+#[cfg(test)]
 pub(crate) fn merge_manifest_toml_into_caps_and_dlp(
     raw_toml: &str,
     base_dir: Option<&Path>,
@@ -922,6 +941,15 @@ pub(crate) fn merge_manifest_toml_into_caps_and_dlp(
     audit_secrets: &mut Vec<String>,
 ) {
     let m = SliceManifest::parse_toml(raw_toml);
+    merge_parsed_manifest_into_caps_and_dlp(m, base_dir, caps, audit_secrets);
+}
+
+pub(crate) fn merge_parsed_manifest_into_caps_and_dlp(
+    m: SliceManifest,
+    base_dir: Option<&Path>,
+    caps: &mut CapabilityToken,
+    audit_secrets: &mut Vec<String>,
+) {
     for r in m.capabilities.allowed_read_prefixes {
         if !caps.allowed_read_prefixes.contains(&r) {
             caps.allowed_read_prefixes.push(r);

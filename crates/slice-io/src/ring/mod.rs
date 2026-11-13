@@ -60,6 +60,8 @@ pub struct RingStatus {
 pub struct CompletionRingEngine {
     #[cfg(target_os = "linux")]
     linux_ring: Option<io_uring::IoUring>,
+    #[cfg(target_os = "linux")]
+    linux_registered_addrs: Box<[usize]>,
     #[cfg(target_os = "windows")]
     iocp_handle: isize,
     pub status: RingStatus,
@@ -89,6 +91,26 @@ impl CompletionRingEngine {
                 io_uring::IoUring::new(clamped_entries).ok()
             };
 
+            let mut registered_addrs: Box<[usize]> = Box::new([]);
+            if let Some(ref ring) = ring_opt {
+                let iovecs: Vec<libc::iovec> = buffer_pool
+                    .buffers
+                    .iter()
+                    .map(|b| libc::iovec {
+                        iov_base: b.as_ptr() as *mut libc::c_void,
+                        iov_len: b.len(),
+                    })
+                    .collect();
+                if unsafe { ring.submitter().register_buffers(&iovecs) }.is_ok() {
+                    registered_addrs = buffer_pool
+                        .buffers
+                        .iter()
+                        .map(|b| b.as_ptr() as usize)
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice();
+                }
+            }
+
             let backend_name = if ring_opt.is_some() {
                 if sqpoll_active {
                     "Linux io_uring (SQPOLL + Fixed Buffers)"
@@ -101,6 +123,7 @@ impl CompletionRingEngine {
 
             Ok(Self {
                 linux_ring: ring_opt,
+                linux_registered_addrs: registered_addrs,
                 status: RingStatus {
                     backend_name,
                     sqpoll_enabled: sqpoll_active,
@@ -246,15 +269,32 @@ impl CompletionRingEngine {
                                 len,
                                 user_data,
                             } => {
-                                let ptr = self.buffer_pool.buffers[buf_index as usize].as_mut_ptr();
-                                let entry = io_uring::opcode::Read::new(
-                                    io_uring::types::Fd(fd as i32),
-                                    ptr,
-                                    len,
-                                )
-                                .offset(offset)
-                                .build()
-                                .user_data(user_data);
+                                let slot = buf_index as usize;
+                                let ptr = self.buffer_pool.buffers[slot].as_mut_ptr();
+                                let is_reg = self
+                                    .linux_registered_addrs
+                                    .get(slot)
+                                    .is_some_and(|&addr| addr == ptr as usize);
+                                let entry = if is_reg {
+                                    io_uring::opcode::ReadFixed::new(
+                                        io_uring::types::Fd(fd as i32),
+                                        ptr,
+                                        len,
+                                        buf_index,
+                                    )
+                                    .offset(offset)
+                                    .build()
+                                    .user_data(user_data)
+                                } else {
+                                    io_uring::opcode::Read::new(
+                                        io_uring::types::Fd(fd as i32),
+                                        ptr,
+                                        len,
+                                    )
+                                    .offset(offset)
+                                    .build()
+                                    .user_data(user_data)
+                                };
                                 sq.push(&entry).map_err(|_| {
                                     anyhow::anyhow!("io_uring submission queue full")
                                 })?;
@@ -266,15 +306,32 @@ impl CompletionRingEngine {
                                 len,
                                 user_data,
                             } => {
-                                let ptr = self.buffer_pool.buffers[buf_index as usize].as_ptr();
-                                let entry = io_uring::opcode::Write::new(
-                                    io_uring::types::Fd(fd as i32),
-                                    ptr,
-                                    len,
-                                )
-                                .offset(offset)
-                                .build()
-                                .user_data(user_data);
+                                let slot = buf_index as usize;
+                                let ptr = self.buffer_pool.buffers[slot].as_ptr();
+                                let is_reg = self
+                                    .linux_registered_addrs
+                                    .get(slot)
+                                    .is_some_and(|&addr| addr == ptr as usize);
+                                let entry = if is_reg {
+                                    io_uring::opcode::WriteFixed::new(
+                                        io_uring::types::Fd(fd as i32),
+                                        ptr,
+                                        len,
+                                        buf_index,
+                                    )
+                                    .offset(offset)
+                                    .build()
+                                    .user_data(user_data)
+                                } else {
+                                    io_uring::opcode::Write::new(
+                                        io_uring::types::Fd(fd as i32),
+                                        ptr,
+                                        len,
+                                    )
+                                    .offset(offset)
+                                    .build()
+                                    .user_data(user_data)
+                                };
                                 sq.push(&entry).map_err(|_| {
                                     anyhow::anyhow!("io_uring submission queue full")
                                 })?;
@@ -330,23 +387,33 @@ impl CompletionRingEngine {
             }
 
             let mut completions = Vec::with_capacity(ops.len());
-            for _ in 0..ops.len() {
-                let mut bytes: u32 = 0;
-                let mut key: usize = 0;
-                let mut overlapped: *mut core::ffi::c_void = core::ptr::null_mut();
+            let mut batch_entries = [windows_iocp::OverlappedEntry {
+                lp_completion_key: 0,
+                lp_overlapped: core::ptr::null_mut(),
+                internal: 0,
+                dw_number_of_bytes_transferred: 0,
+            }; 64];
+
+            while completions.len() < ops.len() {
+                let want = (ops.len() - completions.len()).min(batch_entries.len()) as u32;
+                let mut removed: u32 = 0;
                 let ok = unsafe {
-                    windows_iocp::GetQueuedCompletionStatus(
+                    windows_iocp::GetQueuedCompletionStatusEx(
                         self.iocp_handle,
-                        &mut bytes,
-                        &mut key,
-                        &mut overlapped,
+                        batch_entries.as_mut_ptr(),
+                        want,
+                        &mut removed,
                         100,
+                        0,
                     )
                 };
-                if ok != 0 {
+                if ok == 0 || removed == 0 {
+                    break;
+                }
+                for entry in &batch_entries[..(removed as usize).min(batch_entries.len())] {
                     completions.push(IoCompletion {
-                        user_data: key as u64,
-                        result: bytes as i32,
+                        user_data: entry.lp_completion_key as u64,
+                        result: entry.dw_number_of_bytes_transferred as i32,
                         flags: 0,
                     });
                 }
