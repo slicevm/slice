@@ -79,5 +79,7 @@ pub(crate) fn build_cas_archive_with_static(
         builder.ingest_static_directory(static_dir)?;
     }
 
-    builder.write_to_file(output_path)
+    let header = builder.write_to_file(output_path)?;
+    crate::server::notify_tenant_cas_updated();
+    Ok(header)
 }

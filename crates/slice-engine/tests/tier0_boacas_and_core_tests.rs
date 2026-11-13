@@ -1591,3 +1591,86 @@ return fib(78);
         ));
     }
 }
+
+#[test]
+fn test_microtask_cursor_ordering_and_monomorphic_loop_closed_form() {
+    let loop_src = r#"
+function sumUnit(n: number): number {
+    let acc: number = 0;
+    for (let i: number = 0; i < n; i++) {
+        acc += i;
+    }
+    return acc;
+}
+function sumScaled(n: number): number {
+    let acc: number = 0;
+    for (let i: number = 0; i < n; i++) {
+        acc += i * 3;
+    }
+    return acc;
+}
+function sumFrac(n: number): number {
+    let acc: number = 0;
+    for (let i: number = 0; i < n; i++) {
+        acc += i * 0.5;
+    }
+    return acc;
+}
+console.log(sumUnit(10000));
+console.log(sumScaled(5000));
+console.log(sumFrac(101));
+"#;
+    let bc = compile_source_to_bytecode(loop_src);
+    let mut iso = SliceIsolate::spawn(
+        "closed-form-loop-tenant",
+        455,
+        CapabilityToken::pure_compute(),
+        500_000,
+        512 * 1024,
+    );
+    let m_loop = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(m_loop.stdout, vec!["49995000", "37492500", "2525"]);
+
+    // Verify FIFO ordering and compaction across > 300 queued nextTicks and microtasks,
+    // plus root-level JSON.parse shape consistency across repeated object parses.
+    let micro_and_json_src = r#"
+const order = [];
+for (let i = 0; i < 320; i++) {
+    process.nextTick(() => {
+        order.push("nt:" + i);
+        if (i === 160) {
+            queueMicrotask(() => order.push("qm:nested"));
+        }
+    });
+    if (i < 150) {
+        queueMicrotask(() => order.push("qm:" + i));
+    }
+}
+let jsonAcc = 0;
+for (let j = 0; j < 25; j++) {
+    const parsed = JSON.parse('{"id":' + j + ',"label":"item-' + j + '","ok":true}');
+    if (parsed.ok && parsed.label === "item-" + j) {
+        jsonAcc += parsed.id;
+    }
+}
+setTimeout(() => {
+    console.log([
+        order.length,
+        order[0],
+        order[319],
+        order[320],
+        order[order.length - 1],
+        jsonAcc
+    ].join("|"));
+}, 0);
+"#;
+    let m_micro = run_source_isolated(
+        "microtask-cursor-tenant",
+        micro_and_json_src,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(m_micro.stdout, vec!["471|nt:0|nt:319|qm:0|qm:nested|300"]);
+}

@@ -4,7 +4,7 @@ use crate::bindings::helpers::with_buffer_source_bytes;
 use crate::sockets::{
     classify_ip_literal, register_socket_mock, tcp_socket_close, tcp_socket_connect,
     tcp_socket_read, tcp_socket_starttls, tcp_socket_write, tcp_socket_write_bytes,
-    udp_socket_bind, udp_socket_close, udp_socket_send, udp_socket_send_bytes,
+    udp_socket_bind, udp_socket_close, udp_socket_recv, udp_socket_send, udp_socket_send_bytes,
 };
 use crate::workers::{
     worker_post_message_to_child, worker_self_meta_json, worker_self_post_message,
@@ -14,6 +14,7 @@ use crate::workers::{
 
 pub(crate) fn register_shard8_workers_sockets_host_functions(ctx: &mut boa_engine::Context) {
     use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    crate::bindings::wintertc_and_buffer::register_buffer_host_functions(ctx);
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_tcp_connect"), ctx)
@@ -254,6 +255,27 @@ pub(crate) fn register_shard8_workers_sockets_host_functions(ctx: &mut boa_engin
                     Ok(json) => Ok(BoaVal::from(js_string!(json))),
                     Err(e) => Err(JsNativeError::error().with_message(e).into()),
                 }
+            }
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_udp_recv"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, _context| {
+            let id = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
+            let timeout_ms = args
+                .get(1)
+                .and_then(|v| v.as_number())
+                .map(|n| n.max(0.0) as u64)
+                .unwrap_or(0);
+            match udp_socket_recv(id, timeout_ms) {
+                Ok(json) => Ok(BoaVal::from(js_string!(json))),
+                Err(e) => Err(JsNativeError::error().with_message(e).into()),
             }
         }),
     );

@@ -202,3 +202,36 @@ fn test_sbx_perf_zero_alloc_hot_paths_and_throughput() {
         elapsed.as_nanos() as f64 / (iterations as f64)
     );
 }
+
+#[test]
+fn test_empty_capability_fast_reject_and_cached_tmp_prefix_equivalence() {
+    let pure_tenant = TenantCompartment::new(
+        "pure-tenant",
+        2,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        4 * 1024 * 1024,
+    );
+    assert!(pure_tenant
+        .verify_fs_read("/app/data/../secret.json")
+        .is_err());
+    assert!(pure_tenant.verify_fs_write("/tmp/out.txt").is_err());
+    assert!(pure_tenant
+        .verify_net_connect("https://api.example.com:443/v1")
+        .is_err());
+    assert!(pure_tenant.verify_exec_binary("git").is_err());
+
+    let tmp_sub = std::env::temp_dir()
+        .join("slice_sbx_tmp_equiv_probe")
+        .join("item.txt");
+    let tmp_caps =
+        CapabilityToken::pure_compute().with_write_prefix("/tmp/slice_sbx_tmp_equiv_probe");
+    let tmp_tenant = TenantCompartment::new("tmp-tenant", 3, tmp_caps, 1_000_000, 4 * 1024 * 1024);
+    assert!(tmp_tenant
+        .verify_fs_write(&tmp_sub.to_string_lossy())
+        .is_ok());
+    let outside_tmp = std::env::temp_dir().join("slice_sbx_tmp_equiv_probe_sibling.txt");
+    assert!(tmp_tenant
+        .verify_fs_write(&outside_tmp.to_string_lossy())
+        .is_err());
+}

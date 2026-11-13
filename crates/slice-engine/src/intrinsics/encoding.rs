@@ -49,11 +49,10 @@ pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
     unsafe { String::from_utf8_unchecked(hex_bytes) }
 }
 
-/// Decodes a hexadecimal string into raw bytes (stopping at the first non-hex byte pair,
+/// Decodes hexadecimal raw bytes into raw bytes (stopping at the first non-hex byte pair,
 /// matching Node.js `Buffer.from(str, 'hex')` semantics).
 #[inline]
-pub(crate) fn hex_decode_bytes(s: &str) -> Vec<u8> {
-    let bytes = s.as_bytes();
+pub(crate) fn hex_decode_raw_bytes(bytes: &[u8]) -> Vec<u8> {
     let pairs = bytes.len() / 2;
     let mut out = Vec::with_capacity(pairs);
     for i in 0..pairs {
@@ -72,6 +71,13 @@ pub(crate) fn hex_decode_bytes(s: &str) -> Vec<u8> {
         out.push((hi << 4) | lo);
     }
     out
+}
+
+/// Decodes a hexadecimal string into raw bytes (stopping at the first non-hex byte pair,
+/// matching Node.js `Buffer.from(str, 'hex')` semantics).
+#[inline]
+pub(crate) fn hex_decode_bytes(s: &str) -> Vec<u8> {
+    hex_decode_raw_bytes(s.as_bytes())
 }
 
 pub fn base64_encode(data: &[u8], url_safe: bool) -> String {
@@ -118,11 +124,12 @@ pub fn base64_decoded_len_bytes(bytes: &[u8]) -> usize {
     (valid * 3) >> 2
 }
 
-pub fn base64_decode(input: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity((input.len() * 3) / 4);
+#[inline]
+pub fn base64_decode_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity((bytes.len() * 3) / 4);
     let mut buf = 0u32;
     let mut bits = 0u32;
-    for &b in input.as_bytes() {
+    for &b in bytes {
         let val = B64_LENIENT_LUT[b as usize];
         if val == 0xFF {
             continue;
@@ -135,6 +142,10 @@ pub fn base64_decode(input: &str) -> Vec<u8> {
         }
     }
     out
+}
+
+pub fn base64_decode(input: &str) -> Vec<u8> {
+    base64_decode_bytes(input.as_bytes())
 }
 
 /// Strict WHATWG `btoa` over UTF-16 code units: encodes Latin1 (`0x0000..=0x00FF`) code units
@@ -150,26 +161,26 @@ pub(crate) fn whatwg_btoa_utf16(units: &[u16]) -> Result<String, &'static str> {
     Ok(base64_encode(&bytes, false))
 }
 
-/// Strict WHATWG `atob`: strips ASCII whitespace, validates Base64 alphabet and padding,
-/// and returns decoded Latin1 bytes (mapped 1:1 to `0x00..=0xFF` code points).
-pub(crate) fn whatwg_atob(input: &str) -> Result<String, &'static str> {
-    let cleaned: std::borrow::Cow<'_, [u8]> = if input
-        .bytes()
-        .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c))
+/// Strict WHATWG `atob` directly into raw Latin1 bytes (`0x00..=0xFF`).
+pub(crate) fn whatwg_atob_bytes(raw_bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let cleaned: std::borrow::Cow<'_, [u8]> = if raw_bytes
+        .iter()
+        .any(|&b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c))
     {
         std::borrow::Cow::Owned(
-            input
-                .bytes()
+            raw_bytes
+                .iter()
+                .copied()
                 .filter(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c))
                 .collect(),
         )
     } else {
-        std::borrow::Cow::Borrowed(input.as_bytes())
+        std::borrow::Cow::Borrowed(raw_bytes)
     };
     if cleaned.len() % 4 == 1 {
         return Err("InvalidCharacterError: The string to be decoded is not correctly encoded.");
     }
-    let mut out_chars = String::with_capacity((cleaned.len() * 3) / 4);
+    let mut out_bytes = Vec::with_capacity((cleaned.len() * 3) / 4);
     let mut buf = 0u32;
     let mut bits = 0u32;
     let mut pad_count = 0usize;
@@ -194,9 +205,42 @@ pub(crate) fn whatwg_atob(input: &str) -> Result<String, &'static str> {
         bits += 6;
         if bits >= 8 {
             bits -= 8;
-            let byte = ((buf >> bits) & 0xff) as u8;
-            out_chars.push(byte as char);
+            out_bytes.push(((buf >> bits) & 0xff) as u8);
         }
     }
+    Ok(out_bytes)
+}
+
+/// Strict WHATWG `atob`: strips ASCII whitespace, validates Base64 alphabet and padding,
+/// and returns decoded Latin1 bytes (mapped 1:1 to `0x00..=0xFF` code points).
+#[allow(dead_code)]
+pub(crate) fn whatwg_atob(input: &str) -> Result<String, &'static str> {
+    let bytes = whatwg_atob_bytes(input.as_bytes())?;
+    let mut out_chars = String::with_capacity(bytes.len());
+    for b in bytes {
+        out_chars.push(b as char);
+    }
     Ok(out_chars)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whatwg_atob_and_btoa_preserve_full_latin1_byte_range() {
+        let all_bytes: Vec<u8> = (0u8..=255u8).collect();
+        let encoded = base64_encode(&all_bytes, false);
+        let decoded = whatwg_atob_bytes(encoded.as_bytes()).expect("valid base64");
+        assert_eq!(decoded, all_bytes);
+
+        let units: Vec<u16> = all_bytes.iter().map(|&b| b as u16).collect();
+        let encoded_utf16 = whatwg_btoa_utf16(&units).expect("valid latin1 units");
+        assert_eq!(encoded_utf16, encoded);
+
+        assert!(whatwg_atob_bytes(b" \t\r\nSGVsbG8=\n ").is_ok());
+        assert!(whatwg_atob_bytes(b"SGVsbG8===").is_err());
+        assert!(whatwg_atob_bytes(b"SGVs=bG8=").is_err());
+        assert!(whatwg_atob_bytes(b"abcde").is_err());
+    }
 }

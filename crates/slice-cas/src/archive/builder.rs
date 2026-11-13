@@ -3,7 +3,7 @@
 use crate::archive::{
     detect_static_mime_type, CasBlobEntry, CasIndexHeader, CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION,
 };
-use crate::compiler::strip_typescript_and_normalize;
+use crate::compiler::strip_typescript_and_normalize_with_ext;
 use anyhow::{bail, Context, Result};
 use rustc_hash::FxHashMap;
 use std::fs::File;
@@ -101,12 +101,10 @@ impl CasBuilder {
         bytecode_compiler_fn: impl FnOnce(&str) -> Vec<u8>,
     ) {
         let spec = specifier.into();
-        let is_ts = spec.ends_with(".ts")
-            || spec.ends_with(".tsx")
-            || spec.ends_with(".jsx")
-            || spec.ends_with(".mts")
-            || spec.ends_with(".cts");
-        let normalized = strip_typescript_and_normalize(raw_source, is_ts);
+        let is_jsx_ext = spec.ends_with(".tsx") || spec.ends_with(".jsx");
+        let is_ts =
+            is_jsx_ext || spec.ends_with(".ts") || spec.ends_with(".mts") || spec.ends_with(".cts");
+        let normalized = strip_typescript_and_normalize_with_ext(raw_source, is_ts, is_jsx_ext);
         let bytecode = bytecode_compiler_fn(&normalized);
         self.modules.push((spec, path, normalized, bytecode));
     }
@@ -155,8 +153,10 @@ impl CasBuilder {
                                 .replace('\\', "/");
                             let specifier = format!("./{}", rel);
                             let raw = std::fs::read_to_string(&path)?;
-                            let is_ts = matches!(ext, "ts" | "tsx" | "jsx" | "mts" | "cts");
-                            let normalized = strip_typescript_and_normalize(&raw, is_ts);
+                            let is_jsx_ext = matches!(ext, "tsx" | "jsx");
+                            let is_ts = is_jsx_ext || matches!(ext, "ts" | "mts" | "cts");
+                            let normalized =
+                                strip_typescript_and_normalize_with_ext(&raw, is_ts, is_jsx_ext);
                             let bytecode = bytecode_compiler_fn(&normalized);
                             self.modules.push((specifier, path, normalized, bytecode));
                             count += 1;

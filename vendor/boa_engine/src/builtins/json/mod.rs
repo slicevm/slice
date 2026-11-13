@@ -667,7 +667,8 @@ impl Json {
                                         self.syntax_err("expected string key in JSON object")
                                     );
                                 }
-                                if depth < SHAPE_CACHE_DEPTHS
+                                if depth > 0
+                                    && depth < SHAPE_CACHE_DEPTHS
                                     && let Some(ref chain) = self.depth_chains[depth]
                                     && let Some((exp_key, _)) = chain.first()
                                     && let Some(after_quote) =
@@ -710,7 +711,7 @@ impl Json {
                                     Vec::with_capacity(4),
                                     IndexedProperties::default(),
                                 );
-                                let chain_builder = (depth < SHAPE_CACHE_DEPTHS)
+                                let chain_builder = (depth > 0 && depth < SHAPE_CACHE_DEPTHS)
                                     .then(|| Vec::with_capacity(8));
                                 stack.push(ContainerFrame::ObjectGeneric {
                                     props,
@@ -895,7 +896,8 @@ impl Json {
                                         let matched = *matched_len;
                                         let frame_depth = *depth;
                                         let prev_shape = chain[matched - 1].1.clone();
-                                        let chain_builder = (frame_depth < SHAPE_CACHE_DEPTHS
+                                        let chain_builder = (frame_depth > 0
+                                            && frame_depth < SHAPE_CACHE_DEPTHS
                                             && matched < MAX_CHAIN_KEYS)
                                             .then(|| chain[..matched].to_vec());
                                         let props = PropertyMap::from_parts(
@@ -1025,7 +1027,8 @@ impl Json {
                                         else {
                                             unreachable!()
                                         };
-                                        if depth < SHAPE_CACHE_DEPTHS
+                                        if depth > 0
+                                            && depth < SHAPE_CACHE_DEPTHS
                                             && let Some(built) = chain_builder
                                             && !built.is_empty()
                                         {

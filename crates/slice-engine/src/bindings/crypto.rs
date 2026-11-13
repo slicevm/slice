@@ -2,9 +2,10 @@
 //! Ed25519, X25519, ECDSA P-256/P-384, RSA PKCS#1 v1.5 / RSA-PSS, PBKDF2, HKDF, scrypt, CSPRNG).
 
 use crate::bindings::helpers::{
-    bytes_to_js_array_buffer, bytes_to_js_uint8_array, compute_webcrypto_hmac,
+    bytes_to_js_array_buffer, bytes_to_js_uint8_array, compute_webcrypto_hmac_stack,
     consume_crypto_kdf_fuel, extract_buffer_source_bytes, normalize_webcrypto_hash_name,
-    try_consume_isolate_memory, with_buffer_source_bytes, with_two_buffer_source_bytes,
+    try_consume_isolate_memory, with_active_tenant, with_buffer_source_bytes,
+    with_optional_buffer_source_bytes, with_two_buffer_source_bytes,
 };
 use crate::bindings::wintertc_and_buffer::register_buffer_host_functions;
 use crate::boa_realm::{BOA_ACTIVE_TENANT, BOA_DET_STATE};
@@ -225,14 +226,29 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                     ))
                     .into());
             }
-            let digest = with_buffer_source_bytes(data_arg, context, |bytes| match norm_alg {
-                "SHA-1" => sha1_bytes(bytes).to_vec(),
-                "SHA-256" => sha256_bytes(bytes).to_vec(),
-                "SHA-384" => sha384_bytes(bytes).to_vec(),
-                "SHA-512" => sha512_bytes(bytes).to_vec(),
-                _ => Vec::new(),
+            let (digest_buf, digest_len) = with_buffer_source_bytes(data_arg, context, |bytes| {
+                let mut out = [0u8; 64];
+                match norm_alg {
+                    "SHA-1" => {
+                        let d = sha1_bytes(bytes);
+                        out[..20].copy_from_slice(&d);
+                        (out, 20usize)
+                    }
+                    "SHA-256" => {
+                        let d = sha256_bytes(bytes);
+                        out[..32].copy_from_slice(&d);
+                        (out, 32usize)
+                    }
+                    "SHA-384" => {
+                        let d = sha384_bytes(bytes);
+                        out[..48].copy_from_slice(&d);
+                        (out, 48usize)
+                    }
+                    "SHA-512" => (sha512_bytes(bytes), 64usize),
+                    _ => (out, 0usize),
+                }
             })?;
-            bytes_to_js_array_buffer(&digest, context)
+            bytes_to_js_array_buffer(&digest_buf[..digest_len], context)
         }),
     );
 
@@ -262,28 +278,35 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 .map(|n| n as u32)
                 .unwrap_or(0);
             if handle_id != 0 {
-                let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
                 let cached_sig = with_buffer_source_bytes(data_arg, context, |data_bytes| {
-                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
-                        CachedCryptoKeyMaterial::Hmac { ring_key, .. } => {
-                            let tag = ring::hmac::sign(ring_key, data_bytes);
-                            Some(tag.as_ref().to_vec())
-                        }
-                        _ => None,
+                    with_active_tenant(|tenant| {
+                        with_cached_crypto_key(handle_id, tenant, |mat| match mat {
+                            CachedCryptoKeyMaterial::Hmac { ring_key, .. } => {
+                                let tag = ring::hmac::sign(ring_key, data_bytes);
+                                let slice = tag.as_ref();
+                                let mut out = [0u8; 64];
+                                let len = slice.len().min(64);
+                                out[..len].copy_from_slice(&slice[..len]);
+                                Some((out, len))
+                            }
+                            _ => None,
+                        })
+                        .flatten()
                     })
-                    .flatten()
                 })?;
-                if let Some(sig_bytes) = cached_sig {
-                    return bytes_to_js_array_buffer(&sig_bytes, context);
+                if let Some((sig_buf, sig_len)) = cached_sig {
+                    return bytes_to_js_array_buffer(&sig_buf[..sig_len], context);
                 }
             }
             let mac_opt = with_two_buffer_source_bytes(
                 key_arg,
                 data_arg,
                 context,
-                |key_bytes, data_bytes| compute_webcrypto_hmac(&hash_name, key_bytes, data_bytes),
+                |key_bytes, data_bytes| {
+                    compute_webcrypto_hmac_stack(&hash_name, key_bytes, data_bytes)
+                },
             )?;
-            let Some(mac) = mac_opt else {
+            let Some((mac_buf, mac_len)) = mac_opt else {
                 return Err(JsNativeError::error()
                     .with_message(format!(
                         "NotSupportedError: Unsupported HMAC hash '{}'",
@@ -291,7 +314,7 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                     ))
                     .into());
             };
-            bytes_to_js_array_buffer(&mac, context)
+            bytes_to_js_array_buffer(&mac_buf[..mac_len], context)
         }),
     );
 
@@ -320,19 +343,20 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 .map(|n| n as u32)
                 .unwrap_or(0);
             if handle_id != 0 {
-                let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
                 let cached_ok = with_two_buffer_source_bytes(
                     sig_arg,
                     data_arg,
                     context,
                     |sig_bytes, data_bytes| {
-                        with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
-                            CachedCryptoKeyMaterial::Hmac { ring_key, .. } => {
-                                Some(ring::hmac::verify(ring_key, data_bytes, sig_bytes).is_ok())
-                            }
-                            _ => None,
+                        with_active_tenant(|tenant| {
+                            with_cached_crypto_key(handle_id, tenant, |mat| match mat {
+                                CachedCryptoKeyMaterial::Hmac { ring_key, .. } => Some(
+                                    ring::hmac::verify(ring_key, data_bytes, sig_bytes).is_ok(),
+                                ),
+                                _ => None,
+                            })
+                            .flatten()
                         })
-                        .flatten()
                     },
                 )?;
                 if let Some(ok) = cached_ok {
@@ -345,8 +369,8 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 data_arg,
                 context,
                 |sig_bytes, data_bytes| {
-                    compute_webcrypto_hmac(&hash_name, &key_bytes, data_bytes)
-                        .map(|expected| constant_time_eq(&expected, sig_bytes))
+                    compute_webcrypto_hmac_stack(&hash_name, &key_bytes, data_bytes)
+                        .map(|(expected, len)| constant_time_eq(&expected[..len], sig_bytes))
                 },
             )?;
             let Some(ok) = verified_opt else {
@@ -440,15 +464,34 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                     .with_message(format!("Unsupported hash algorithm '{}'", algo))
                     .into());
             };
-            let digest = with_buffer_source_bytes(data_arg, context, |bytes| match norm_alg {
-                "SHA-1" => sha1_bytes(bytes).to_vec(),
-                "SHA-256" => sha256_bytes(bytes).to_vec(),
-                "SHA-384" => sha384_bytes(bytes).to_vec(),
-                "SHA-512" => sha512_bytes(bytes).to_vec(),
-                "MD5" => md5_bytes(bytes).to_vec(),
-                _ => Vec::new(),
+            let (digest_buf, digest_len) = with_buffer_source_bytes(data_arg, context, |bytes| {
+                let mut out = [0u8; 64];
+                match norm_alg {
+                    "SHA-1" => {
+                        let d = sha1_bytes(bytes);
+                        out[..20].copy_from_slice(&d);
+                        (out, 20usize)
+                    }
+                    "SHA-256" => {
+                        let d = sha256_bytes(bytes);
+                        out[..32].copy_from_slice(&d);
+                        (out, 32usize)
+                    }
+                    "SHA-384" => {
+                        let d = sha384_bytes(bytes);
+                        out[..48].copy_from_slice(&d);
+                        (out, 48usize)
+                    }
+                    "SHA-512" => (sha512_bytes(bytes), 64usize),
+                    "MD5" => {
+                        let d = md5_bytes(bytes);
+                        out[..16].copy_from_slice(&d);
+                        (out, 16usize)
+                    }
+                    _ => (out, 0usize),
+                }
             })?;
-            bytes_to_js_uint8_array(&digest, context)
+            bytes_to_js_uint8_array(&digest_buf[..digest_len], context)
         }),
     );
 
@@ -472,14 +515,14 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 key_arg,
                 data_arg,
                 context,
-                |key_bytes, data_bytes| compute_webcrypto_hmac(&algo, key_bytes, data_bytes),
+                |key_bytes, data_bytes| compute_webcrypto_hmac_stack(&algo, key_bytes, data_bytes),
             )?;
-            let Some(mac) = mac_opt else {
+            let Some((mac_buf, mac_len)) = mac_opt else {
                 return Err(JsNativeError::error()
                     .with_message(format!("Unsupported HMAC algorithm '{}'", algo))
                     .into());
             };
-            bytes_to_js_uint8_array(&mac, context)
+            bytes_to_js_uint8_array(&mac_buf[..mac_len], context)
         }),
     );
 
@@ -552,12 +595,6 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 .and_then(|v| v.as_number())
                 .map(|n| n as u32)
                 .unwrap_or(0);
-            let key_bytes = match args.get(3) {
-                Some(v) if !v.is_undefined() && !v.is_null() => {
-                    extract_buffer_source_bytes(v, context)?
-                }
-                _ => Vec::new(),
-            };
             let iv_bytes = match args.get(4) {
                 Some(v) if !v.is_undefined() && !v.is_null() => {
                     extract_buffer_source_bytes(v, context)?
@@ -575,67 +612,56 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 .and_then(|v| v.as_number())
                 .map(|n| n as usize)
                 .unwrap_or(128);
-            let data_bytes = match args.get(7) {
-                Some(v) if !v.is_undefined() && !v.is_null() => {
-                    extract_buffer_source_bytes(v, context)?
-                }
-                _ => Vec::new(),
-            };
             let auto_pad = args.get(8).and_then(|v| v.as_boolean()).unwrap_or(true);
-            let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
 
             if alg.eq_ignore_ascii_case("AES-GCM")
                 || alg.eq_ignore_ascii_case("aes-128-gcm")
                 || alg.eq_ignore_ascii_case("aes-256-gcm")
             {
-                let res = if handle_id != 0 {
-                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
-                        CachedCryptoKeyMaterial::AesGcm { less_safe, raw } => {
-                            if is_encrypt {
-                                Some(aes_gcm_seal_with_key(
-                                    less_safe,
-                                    &iv_bytes,
-                                    &aad_bytes,
-                                    &data_bytes,
-                                    tag_bits,
-                                ))
-                            } else {
-                                Some(aes_gcm_open_with_key(
-                                    less_safe,
-                                    raw,
-                                    &iv_bytes,
-                                    &aad_bytes,
-                                    &data_bytes,
-                                    tag_bits,
-                                ))
-                            }
-                        }
-                        _ => None,
-                    })
-                    .flatten()
+                let cached_res = if handle_id != 0 {
+                    with_optional_buffer_source_bytes(args.get(7), context, |data_bytes| {
+                        with_active_tenant(|tenant| {
+                            with_cached_crypto_key(handle_id, tenant, |mat| match mat {
+                                CachedCryptoKeyMaterial::AesGcm { less_safe, raw } => {
+                                    if is_encrypt {
+                                        Some(aes_gcm_seal_with_key(
+                                            less_safe, &iv_bytes, &aad_bytes, data_bytes, tag_bits,
+                                        ))
+                                    } else {
+                                        Some(aes_gcm_open_with_key(
+                                            less_safe, raw, &iv_bytes, &aad_bytes, data_bytes,
+                                            tag_bits,
+                                        ))
+                                    }
+                                }
+                                _ => None,
+                            })
+                            .flatten()
+                        })
+                    })?
                 } else {
                     None
                 };
-                let out = match res {
+                let out = match cached_res {
                     Some(r) => r,
                     None => {
-                        if is_encrypt {
-                            aes_gcm_encrypt(
-                                &key_bytes,
-                                &iv_bytes,
-                                &aad_bytes,
-                                &data_bytes,
-                                tag_bits,
-                            )
-                        } else {
-                            aes_gcm_decrypt(
-                                &key_bytes,
-                                &iv_bytes,
-                                &aad_bytes,
-                                &data_bytes,
-                                tag_bits,
-                            )
-                        }
+                        let key_bytes = match args.get(3) {
+                            Some(v) if !v.is_undefined() && !v.is_null() => {
+                                extract_buffer_source_bytes(v, context)?
+                            }
+                            _ => Vec::new(),
+                        };
+                        with_optional_buffer_source_bytes(args.get(7), context, |data_bytes| {
+                            if is_encrypt {
+                                aes_gcm_encrypt(
+                                    &key_bytes, &iv_bytes, &aad_bytes, data_bytes, tag_bits,
+                                )
+                            } else {
+                                aes_gcm_decrypt(
+                                    &key_bytes, &iv_bytes, &aad_bytes, data_bytes, tag_bits,
+                                )
+                            }
+                        })?
                     }
                 }
                 .map_err(|msg| {
@@ -648,39 +674,45 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 || alg.eq_ignore_ascii_case("aes-128-cbc")
                 || alg.eq_ignore_ascii_case("aes-256-cbc")
             {
-                let res = if handle_id != 0 {
-                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
-                        CachedCryptoKeyMaterial::AesCbc { expanded, .. } => {
-                            if is_encrypt {
-                                Some(aes_cbc_encrypt_with_expanded(
-                                    expanded,
-                                    &iv_bytes,
-                                    &data_bytes,
-                                    auto_pad,
-                                ))
-                            } else {
-                                Some(aes_cbc_decrypt_with_expanded(
-                                    expanded,
-                                    &iv_bytes,
-                                    &data_bytes,
-                                    auto_pad,
-                                ))
-                            }
-                        }
-                        _ => None,
-                    })
-                    .flatten()
+                let cached_res = if handle_id != 0 {
+                    with_optional_buffer_source_bytes(args.get(7), context, |data_bytes| {
+                        with_active_tenant(|tenant| {
+                            with_cached_crypto_key(handle_id, tenant, |mat| match mat {
+                                CachedCryptoKeyMaterial::AesCbc { expanded, .. } => {
+                                    if is_encrypt {
+                                        Some(aes_cbc_encrypt_with_expanded(
+                                            expanded, &iv_bytes, data_bytes, auto_pad,
+                                        ))
+                                    } else {
+                                        Some(aes_cbc_decrypt_with_expanded(
+                                            expanded, &iv_bytes, data_bytes, auto_pad,
+                                        ))
+                                    }
+                                }
+                                _ => None,
+                            })
+                            .flatten()
+                        })
+                    })?
                 } else {
                     None
                 };
-                let out = match res {
+                let out = match cached_res {
                     Some(r) => r,
                     None => {
-                        if is_encrypt {
-                            aes_cbc_encrypt(&key_bytes, &iv_bytes, &data_bytes, auto_pad)
-                        } else {
-                            aes_cbc_decrypt(&key_bytes, &iv_bytes, &data_bytes, auto_pad)
-                        }
+                        let key_bytes = match args.get(3) {
+                            Some(v) if !v.is_undefined() && !v.is_null() => {
+                                extract_buffer_source_bytes(v, context)?
+                            }
+                            _ => Vec::new(),
+                        };
+                        with_optional_buffer_source_bytes(args.get(7), context, |data_bytes| {
+                            if is_encrypt {
+                                aes_cbc_encrypt(&key_bytes, &iv_bytes, data_bytes, auto_pad)
+                            } else {
+                                aes_cbc_decrypt(&key_bytes, &iv_bytes, data_bytes, auto_pad)
+                            }
+                        })?
                     }
                 }
                 .map_err(|msg| {
@@ -1413,59 +1445,74 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 .and_then(|v| v.as_number())
                 .map(|n| n as u32)
                 .unwrap_or(0);
-            let key_fallback = match args.get(3) {
-                Some(v) if !v.is_undefined() && !v.is_null() => {
-                    extract_buffer_source_bytes(v, context)?
-                }
-                _ => Vec::new(),
-            };
-            let msg_bytes = match args.get(4) {
-                Some(v) if !v.is_undefined() && !v.is_null() => {
-                    extract_buffer_source_bytes(v, context)?
-                }
-                _ => Vec::new(),
-            };
             let asn1_der = args.get(5).and_then(|v| v.as_boolean()).unwrap_or(false);
-            let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
 
             if alg.eq_ignore_ascii_case("Ed25519") {
                 let sig_res = if handle_id != 0 {
-                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
-                        CachedCryptoKeyMaterial::Ed25519Private { seed, .. } => {
-                            Some(ed25519_sign_bytes(seed, &msg_bytes).map(|s| s.to_vec()))
-                        }
-                        _ => None,
-                    })
-                    .flatten()
+                    with_optional_buffer_source_bytes(args.get(4), context, |msg_bytes| {
+                        with_active_tenant(|tenant| {
+                            with_cached_crypto_key(handle_id, tenant, |mat| match mat {
+                                CachedCryptoKeyMaterial::Ed25519Private { seed, .. } => {
+                                    Some(ed25519_sign_bytes(seed, msg_bytes))
+                                }
+                                _ => None,
+                            })
+                            .flatten()
+                        })
+                    })?
                 } else {
                     None
                 };
-                let sig = match sig_res {
+                let sig_arr = match sig_res {
                     Some(r) => r,
-                    None => extract_ed25519_seed(&key_fallback)
-                        .and_then(|seed| ed25519_sign_bytes(&seed, &msg_bytes).map(|s| s.to_vec())),
+                    None => {
+                        let key_fallback = match args.get(3) {
+                            Some(v) if !v.is_undefined() && !v.is_null() => {
+                                extract_buffer_source_bytes(v, context)?
+                            }
+                            _ => Vec::new(),
+                        };
+                        with_optional_buffer_source_bytes(args.get(4), context, |msg_bytes| {
+                            extract_ed25519_seed(&key_fallback)
+                                .and_then(|seed| ed25519_sign_bytes(&seed, msg_bytes))
+                        })?
+                    }
                 }
                 .map_err(|msg| JsNativeError::error().with_message(msg))?;
-                return bytes_to_js_array_buffer(&sig, context);
+                return bytes_to_js_array_buffer(&sig_arr, context);
             }
 
             if alg.eq_ignore_ascii_case("ECDSA") || alg.eq_ignore_ascii_case("ec") {
                 let sig_res = if handle_id != 0 {
-                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
-                        CachedCryptoKeyMaterial::EcdsaPrivate {
-                            curve: k_curve,
-                            pkcs8,
-                            ..
-                        } => Some(ecdsa_sign_bytes(k_curve, pkcs8, &msg_bytes, asn1_der)),
-                        _ => None,
-                    })
-                    .flatten()
+                    with_optional_buffer_source_bytes(args.get(4), context, |msg_bytes| {
+                        with_active_tenant(|tenant| {
+                            with_cached_crypto_key(handle_id, tenant, |mat| match mat {
+                                CachedCryptoKeyMaterial::EcdsaPrivate {
+                                    curve: k_curve,
+                                    pkcs8,
+                                    ..
+                                } => Some(ecdsa_sign_bytes(k_curve, pkcs8, msg_bytes, asn1_der)),
+                                _ => None,
+                            })
+                            .flatten()
+                        })
+                    })?
                 } else {
                     None
                 };
                 let sig = match sig_res {
                     Some(r) => r,
-                    None => ecdsa_sign_bytes(&curve, &key_fallback, &msg_bytes, asn1_der),
+                    None => {
+                        let key_fallback = match args.get(3) {
+                            Some(v) if !v.is_undefined() && !v.is_null() => {
+                                extract_buffer_source_bytes(v, context)?
+                            }
+                            _ => Vec::new(),
+                        };
+                        with_optional_buffer_source_bytes(args.get(4), context, |msg_bytes| {
+                            ecdsa_sign_bytes(&curve, &key_fallback, msg_bytes, asn1_der)
+                        })?
+                    }
                 }
                 .map_err(|msg| JsNativeError::error().with_message(msg))?;
                 return bytes_to_js_array_buffer(&sig, context);
@@ -1480,19 +1527,33 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 }
                 let use_pss = alg.eq_ignore_ascii_case("RSA-PSS");
                 let sig_res = if handle_id != 0 {
-                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
-                        CachedCryptoKeyMaterial::RsaPrivate { pkcs8, .. } => {
-                            Some(rsa_sign_bytes_with_alg(pkcs8, &msg_bytes, use_pss, &curve))
-                        }
-                        _ => None,
-                    })
-                    .flatten()
+                    with_optional_buffer_source_bytes(args.get(4), context, |msg_bytes| {
+                        with_active_tenant(|tenant| {
+                            with_cached_crypto_key(handle_id, tenant, |mat| match mat {
+                                CachedCryptoKeyMaterial::RsaPrivate { pkcs8, .. } => {
+                                    Some(rsa_sign_bytes_with_alg(pkcs8, msg_bytes, use_pss, &curve))
+                                }
+                                _ => None,
+                            })
+                            .flatten()
+                        })
+                    })?
                 } else {
                     None
                 };
                 let sig = match sig_res {
                     Some(r) => r,
-                    None => rsa_sign_bytes_with_alg(&key_fallback, &msg_bytes, use_pss, &curve),
+                    None => {
+                        let key_fallback = match args.get(3) {
+                            Some(v) if !v.is_undefined() && !v.is_null() => {
+                                extract_buffer_source_bytes(v, context)?
+                            }
+                            _ => Vec::new(),
+                        };
+                        with_optional_buffer_source_bytes(args.get(4), context, |msg_bytes| {
+                            rsa_sign_bytes_with_alg(&key_fallback, msg_bytes, use_pss, &curve)
+                        })?
+                    }
                 }
                 .map_err(|msg| JsNativeError::error().with_message(msg))?;
                 return bytes_to_js_array_buffer(&sig, context);
@@ -1529,75 +1590,109 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 .and_then(|v| v.as_number())
                 .map(|n| n as u32)
                 .unwrap_or(0);
-            let pub_fallback = match args.get(3) {
-                Some(v) if !v.is_undefined() && !v.is_null() => {
-                    extract_buffer_source_bytes(v, context)?
-                }
-                _ => Vec::new(),
+            let (Some(sig_arg), Some(msg_arg)) = (args.get(4), args.get(5)) else {
+                return Ok(BoaVal::from(false));
             };
-            let sig_bytes = match args.get(4) {
-                Some(v) if !v.is_undefined() && !v.is_null() => {
-                    extract_buffer_source_bytes(v, context)?
-                }
-                _ => Vec::new(),
-            };
-            let msg_bytes = match args.get(5) {
-                Some(v) if !v.is_undefined() && !v.is_null() => {
-                    extract_buffer_source_bytes(v, context)?
-                }
-                _ => Vec::new(),
-            };
-            let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
 
             if alg.eq_ignore_ascii_case("Ed25519") {
                 let verified = if handle_id != 0 {
-                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
-                        CachedCryptoKeyMaterial::Ed25519Public { pub_bytes }
-                        | CachedCryptoKeyMaterial::Ed25519Private { pub_bytes, .. } => {
-                            Some(ed25519_verify_bytes(pub_bytes, &msg_bytes, &sig_bytes))
-                        }
-                        _ => None,
-                    })
-                    .flatten()
+                    with_two_buffer_source_bytes(
+                        sig_arg,
+                        msg_arg,
+                        context,
+                        |sig_bytes, msg_bytes| {
+                            with_active_tenant(|tenant| {
+                                with_cached_crypto_key(handle_id, tenant, |mat| match mat {
+                                    CachedCryptoKeyMaterial::Ed25519Public { pub_bytes }
+                                    | CachedCryptoKeyMaterial::Ed25519Private {
+                                        pub_bytes, ..
+                                    } => {
+                                        Some(ed25519_verify_bytes(pub_bytes, msg_bytes, sig_bytes))
+                                    }
+                                    _ => None,
+                                })
+                                .flatten()
+                            })
+                        },
+                    )?
                 } else {
                     None
                 };
                 let ok = match verified {
                     Some(v) => v,
-                    None => match extract_ed25519_pub(&pub_fallback) {
-                        Ok(pk) => ed25519_verify_bytes(&pk, &msg_bytes, &sig_bytes),
-                        Err(_) => false,
-                    },
+                    None => {
+                        let pub_fallback = match args.get(3) {
+                            Some(v) if !v.is_undefined() && !v.is_null() => {
+                                extract_buffer_source_bytes(v, context)?
+                            }
+                            _ => Vec::new(),
+                        };
+                        match extract_ed25519_pub(&pub_fallback) {
+                            Ok(pk) => with_two_buffer_source_bytes(
+                                sig_arg,
+                                msg_arg,
+                                context,
+                                |sig_bytes, msg_bytes| {
+                                    ed25519_verify_bytes(&pk, msg_bytes, sig_bytes)
+                                },
+                            )?,
+                            Err(_) => false,
+                        }
+                    }
                 };
                 return Ok(BoaVal::from(ok));
             }
 
             if alg.eq_ignore_ascii_case("ECDSA") || alg.eq_ignore_ascii_case("ec") {
                 let verified = if handle_id != 0 {
-                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
-                        CachedCryptoKeyMaterial::EcdsaPublic {
-                            curve: k_curve,
-                            pub_bytes,
-                        }
-                        | CachedCryptoKeyMaterial::EcdsaPrivate {
-                            curve: k_curve,
-                            pub_bytes,
-                            ..
-                        } => Some(ecdsa_verify_bytes(
-                            k_curve, pub_bytes, &msg_bytes, &sig_bytes,
-                        )),
-                        _ => None,
-                    })
-                    .flatten()
+                    with_two_buffer_source_bytes(
+                        sig_arg,
+                        msg_arg,
+                        context,
+                        |sig_bytes, msg_bytes| {
+                            with_active_tenant(|tenant| {
+                                with_cached_crypto_key(handle_id, tenant, |mat| match mat {
+                                    CachedCryptoKeyMaterial::EcdsaPublic {
+                                        curve: k_curve,
+                                        pub_bytes,
+                                    }
+                                    | CachedCryptoKeyMaterial::EcdsaPrivate {
+                                        curve: k_curve,
+                                        pub_bytes,
+                                        ..
+                                    } => Some(ecdsa_verify_bytes(
+                                        k_curve, pub_bytes, msg_bytes, sig_bytes,
+                                    )),
+                                    _ => None,
+                                })
+                                .flatten()
+                            })
+                        },
+                    )?
                 } else {
                     None
                 };
                 let ok = match verified {
                     Some(v) => v,
-                    None => match extract_ecdsa_pub(&curve, &pub_fallback) {
-                        Ok(pk) => ecdsa_verify_bytes(&curve, &pk, &msg_bytes, &sig_bytes),
-                        Err(_) => false,
-                    },
+                    None => {
+                        let pub_fallback = match args.get(3) {
+                            Some(v) if !v.is_undefined() && !v.is_null() => {
+                                extract_buffer_source_bytes(v, context)?
+                            }
+                            _ => Vec::new(),
+                        };
+                        match extract_ecdsa_pub(&curve, &pub_fallback) {
+                            Ok(pk) => with_two_buffer_source_bytes(
+                                sig_arg,
+                                msg_arg,
+                                context,
+                                |sig_bytes, msg_bytes| {
+                                    ecdsa_verify_bytes(&curve, &pk, msg_bytes, sig_bytes)
+                                },
+                            )?,
+                            Err(_) => false,
+                        }
+                    }
                 };
                 return Ok(BoaVal::from(ok));
             }
@@ -1611,28 +1706,52 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 }
                 let use_pss = alg.eq_ignore_ascii_case("RSA-PSS");
                 let verified = if handle_id != 0 {
-                    with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
-                        CachedCryptoKeyMaterial::RsaPublic { spki }
-                        | CachedCryptoKeyMaterial::RsaPrivate { spki, .. } => {
-                            Some(rsa_verify_bytes_with_alg(
-                                spki, &msg_bytes, &sig_bytes, use_pss, &curve,
-                            ))
-                        }
-                        _ => None,
-                    })
-                    .flatten()
+                    with_two_buffer_source_bytes(
+                        sig_arg,
+                        msg_arg,
+                        context,
+                        |sig_bytes, msg_bytes| {
+                            with_active_tenant(|tenant| {
+                                with_cached_crypto_key(handle_id, tenant, |mat| match mat {
+                                    CachedCryptoKeyMaterial::RsaPublic { spki }
+                                    | CachedCryptoKeyMaterial::RsaPrivate { spki, .. } => {
+                                        Some(rsa_verify_bytes_with_alg(
+                                            spki, msg_bytes, sig_bytes, use_pss, &curve,
+                                        ))
+                                    }
+                                    _ => None,
+                                })
+                                .flatten()
+                            })
+                        },
+                    )?
                 } else {
                     None
                 };
                 let ok = match verified {
                     Some(v) => v,
-                    None => rsa_verify_bytes_with_alg(
-                        &pub_fallback,
-                        &msg_bytes,
-                        &sig_bytes,
-                        use_pss,
-                        &curve,
-                    ),
+                    None => {
+                        let pub_fallback = match args.get(3) {
+                            Some(v) if !v.is_undefined() && !v.is_null() => {
+                                extract_buffer_source_bytes(v, context)?
+                            }
+                            _ => Vec::new(),
+                        };
+                        with_two_buffer_source_bytes(
+                            sig_arg,
+                            msg_arg,
+                            context,
+                            |sig_bytes, msg_bytes| {
+                                rsa_verify_bytes_with_alg(
+                                    &pub_fallback,
+                                    msg_bytes,
+                                    sig_bytes,
+                                    use_pss,
+                                    &curve,
+                                )
+                            },
+                        )?
+                    }
                 };
                 return Ok(BoaVal::from(ok));
             }
@@ -1665,54 +1784,63 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 .and_then(|v| v.as_number())
                 .map(|n| n as u32)
                 .unwrap_or(0);
-            let priv_fallback = match args.get(2) {
-                Some(v) if !v.is_undefined() && !v.is_null() => {
-                    extract_buffer_source_bytes(v, context)?
-                }
-                _ => Vec::new(),
-            };
             let pub_id = args
                 .get(3)
                 .and_then(|v| v.as_number())
                 .map(|n| n as u32)
                 .unwrap_or(0);
-            let pub_fallback = match args.get(4) {
-                Some(v) if !v.is_undefined() && !v.is_null() => {
-                    extract_buffer_source_bytes(v, context)?
-                }
-                _ => Vec::new(),
-            };
-            let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
 
             let cached_seed = if priv_id != 0 {
-                with_cached_crypto_key(priv_id, &tenant, |mat| match mat {
-                    CachedCryptoKeyMaterial::X25519Private { seed, .. } => Some(*seed),
-                    _ => None,
+                with_active_tenant(|tenant| {
+                    with_cached_crypto_key(priv_id, tenant, |mat| match mat {
+                        CachedCryptoKeyMaterial::X25519Private { seed, .. } => Some(*seed),
+                        _ => None,
+                    })
+                    .flatten()
                 })
-                .flatten()
             } else {
                 None
             };
             let priv_seed = match cached_seed {
                 Some(s) => s,
-                None => extract_x25519_seed(&priv_fallback)
-                    .map_err(|msg| JsNativeError::error().with_message(msg))?,
+                None => {
+                    let priv_fallback = match args.get(2) {
+                        Some(v) if !v.is_undefined() && !v.is_null() => {
+                            extract_buffer_source_bytes(v, context)?
+                        }
+                        _ => Vec::new(),
+                    };
+                    extract_x25519_seed(&priv_fallback)
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?
+                }
             };
 
             let cached_pub = if pub_id != 0 {
-                with_cached_crypto_key(pub_id, &tenant, |mat| match mat {
-                    CachedCryptoKeyMaterial::X25519Public { pub_bytes }
-                    | CachedCryptoKeyMaterial::X25519Private { pub_bytes, .. } => Some(*pub_bytes),
-                    _ => None,
+                with_active_tenant(|tenant| {
+                    with_cached_crypto_key(pub_id, tenant, |mat| match mat {
+                        CachedCryptoKeyMaterial::X25519Public { pub_bytes }
+                        | CachedCryptoKeyMaterial::X25519Private { pub_bytes, .. } => {
+                            Some(*pub_bytes)
+                        }
+                        _ => None,
+                    })
+                    .flatten()
                 })
-                .flatten()
             } else {
                 None
             };
             let peer_pub = match cached_pub {
                 Some(p) => p,
-                None => extract_x25519_pub(&pub_fallback)
-                    .map_err(|msg| JsNativeError::error().with_message(msg))?,
+                None => {
+                    let pub_fallback = match args.get(4) {
+                        Some(v) if !v.is_undefined() && !v.is_null() => {
+                            extract_buffer_source_bytes(v, context)?
+                        }
+                        _ => Vec::new(),
+                    };
+                    extract_x25519_pub(&pub_fallback)
+                        .map_err(|msg| JsNativeError::error().with_message(msg))?
+                }
             };
 
             let shared = x25519_diffie_hellman(&priv_seed, &peer_pub)

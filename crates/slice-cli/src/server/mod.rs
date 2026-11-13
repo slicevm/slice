@@ -313,11 +313,54 @@ fn wake_accept_workers(port: u16, workers: usize) {
 
 const MAX_TENANT_CACHE_ENTRIES: usize = 1024;
 
+const TENANT_STAT_TTL: std::time::Duration = std::time::Duration::from_millis(250);
+
+static TENANT_FS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+struct TenantDirWatchRegistry {
+    watched_dirs: rustc_hash::FxHashSet<PathBuf>,
+    watcher: Option<notify::RecommendedWatcher>,
+}
+
+static TENANT_DIR_WATCHERS: std::sync::OnceLock<std::sync::Mutex<TenantDirWatchRegistry>> =
+    std::sync::OnceLock::new();
+
+#[inline]
+pub(crate) fn notify_tenant_cas_updated() {
+    TENANT_FS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+fn ensure_tenant_dir_watched(tenant_dir: &Path) {
+    use notify::{RecursiveMode, Watcher};
+    let reg = TENANT_DIR_WATCHERS.get_or_init(|| {
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if res.is_ok() {
+                TENANT_FS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
+            }
+        })
+        .ok();
+        std::sync::Mutex::new(TenantDirWatchRegistry {
+            watched_dirs: rustc_hash::FxHashSet::default(),
+            watcher,
+        })
+    });
+    if let Ok(mut guard) = reg.lock() {
+        if !guard.watched_dirs.contains(tenant_dir) && guard.watched_dirs.len() < 64 {
+            if let Some(ref mut w) = guard.watcher {
+                let _ = w.watch(tenant_dir, RecursiveMode::NonRecursive);
+            }
+            guard.watched_dirs.insert(tenant_dir.to_path_buf());
+        }
+    }
+}
+
 pub(crate) struct TenantHotSwapEntry {
     pub(crate) tenant_dir: PathBuf,
     pub(crate) resolved_path: PathBuf,
     pub(crate) mtime_ns: u128,
     pub(crate) file_len: u64,
+    pub(crate) verified_gen: u64,
+    pub(crate) last_stat_check: std::time::Instant,
     pub(crate) bytecode: std::sync::Arc<Vec<u8>>,
 }
 
@@ -424,25 +467,39 @@ pub(crate) fn resolve_tenant_bytecode_hotswap(
     }
 
     TENANT_CAS_CACHE.with(|cache| {
+        let cur_gen = TENANT_FS_GENERATION.load(std::sync::atomic::Ordering::Acquire);
         // Fast path: dedicated `<tenant_id>.cas` already cached for this `tenant_dir`
-        if let Some(entry) = cache.borrow().by_tenant.get(safe_tenant.as_ref()) {
-            if entry.tenant_dir == tenant_dir {
-                if let Ok(meta) = std::fs::metadata(&entry.resolved_path) {
-                    if meta.is_file() {
-                        let file_len = meta.len();
-                        let mtime_ns = meta
-                            .modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_nanos())
-                            .unwrap_or(0);
-                        if entry.mtime_ns == mtime_ns && entry.file_len == file_len {
-                            return Some(std::sync::Arc::clone(&entry.bytecode));
+        {
+            let mut borrow = cache.borrow_mut();
+            if let Some(entry) = borrow.by_tenant.get_mut(safe_tenant.as_ref()) {
+                if entry.tenant_dir == tenant_dir {
+                    if entry.verified_gen == cur_gen
+                        && entry.last_stat_check.elapsed() < TENANT_STAT_TTL
+                    {
+                        return Some(std::sync::Arc::clone(&entry.bytecode));
+                    }
+                    if let Ok(meta) = std::fs::metadata(&entry.resolved_path) {
+                        if meta.is_file() {
+                            let file_len = meta.len();
+                            let mtime_ns = meta
+                                .modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_nanos())
+                                .unwrap_or(0);
+                            if entry.mtime_ns == mtime_ns && entry.file_len == file_len {
+                                entry.verified_gen = cur_gen;
+                                entry.last_stat_check = std::time::Instant::now();
+                                return Some(std::sync::Arc::clone(&entry.bytecode));
+                            }
                         }
                     }
                 }
             }
         }
+
+        ensure_tenant_dir_watched(tenant_dir);
+        let cur_gen = TENANT_FS_GENERATION.load(std::sync::atomic::Ordering::Acquire);
 
         let mut candidate = tenant_dir.join(format!("{}.cas", safe_tenant));
         let mut is_default_fallback = false;
@@ -487,6 +544,8 @@ pub(crate) fn resolve_tenant_bytecode_hotswap(
                             resolved_path: canonical_path,
                             mtime_ns,
                             file_len,
+                            verified_gen: cur_gen,
+                            last_stat_check: std::time::Instant::now(),
                             bytecode: std::sync::Arc::clone(&arc_bc),
                         },
                     );
@@ -528,6 +587,8 @@ pub(crate) fn resolve_tenant_bytecode_hotswap(
                     resolved_path: canonical_path,
                     mtime_ns,
                     file_len,
+                    verified_gen: cur_gen,
+                    last_stat_check: std::time::Instant::now(),
                     bytecode: std::sync::Arc::clone(&arc_bc),
                 },
             );

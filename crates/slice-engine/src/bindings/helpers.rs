@@ -50,6 +50,21 @@ pub(crate) fn with_buffer_source_bytes<R>(
     Ok(f(&fallback))
 }
 
+/// Invokes `f` with a zero-copy borrowed `&[u8]` slice when `val` is `Some` and neither
+/// `undefined` nor `null`; otherwise invokes `f(&[])`.
+#[inline]
+pub(crate) fn with_optional_buffer_source_bytes<R>(
+    val: Option<&boa_engine::JsValue>,
+    context: &mut boa_engine::Context,
+    f: impl FnMut(&[u8]) -> R,
+) -> boa_engine::JsResult<R> {
+    let mut f = f;
+    match val {
+        Some(v) if !v.is_undefined() && !v.is_null() => with_buffer_source_bytes(v, context, f),
+        _ => Ok(f(&[])),
+    }
+}
+
 /// Invokes `f` with two zero-copy borrowed `&[u8]` slices simultaneously.
 #[inline]
 pub(crate) fn with_two_buffer_source_bytes<R>(
@@ -190,15 +205,45 @@ pub(crate) fn normalize_webcrypto_hash_name(raw: &str) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn compute_webcrypto_hmac(hash_name: &str, key: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+#[inline]
+pub(crate) fn compute_webcrypto_hmac_stack(
+    hash_name: &str,
+    key: &[u8],
+    data: &[u8],
+) -> Option<([u8; 64], usize)> {
+    let mut out = [0u8; 64];
     match normalize_webcrypto_hash_name(hash_name)? {
-        "SHA-1" => Some(hmac_sha1_bytes(key, data).to_vec()),
-        "SHA-256" => Some(hmac_sha256_bytes(key, data).to_vec()),
-        "SHA-384" => Some(hmac_sha384_bytes(key, data).to_vec()),
-        "SHA-512" => Some(hmac_sha512_bytes(key, data).to_vec()),
-        "MD5" => Some(hmac_md5_bytes(key, data).to_vec()),
+        "SHA-1" => {
+            let d = hmac_sha1_bytes(key, data);
+            out[..20].copy_from_slice(&d);
+            Some((out, 20))
+        }
+        "SHA-256" => {
+            let d = hmac_sha256_bytes(key, data);
+            out[..32].copy_from_slice(&d);
+            Some((out, 32))
+        }
+        "SHA-384" => {
+            let d = hmac_sha384_bytes(key, data);
+            out[..48].copy_from_slice(&d);
+            Some((out, 48))
+        }
+        "SHA-512" => {
+            let d = hmac_sha512_bytes(key, data);
+            Some((d, 64))
+        }
+        "MD5" => {
+            let d = hmac_md5_bytes(key, data);
+            out[..16].copy_from_slice(&d);
+            Some((out, 16))
+        }
         _ => None,
     }
+}
+
+#[inline]
+pub(crate) fn with_active_tenant<R>(f: impl FnOnce(&str) -> R) -> R {
+    BOA_ACTIVE_TENANT.with(|t| f(&t.borrow()))
 }
 
 /// Charges `cost` CPU fuel against the active isolate's `BOA_FUEL_BUDGET`, recording

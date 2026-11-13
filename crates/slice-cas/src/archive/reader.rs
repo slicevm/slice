@@ -296,43 +296,111 @@ impl MappedCasArchive {
 
 /// Embeds a compiled `.cas` archive into a copy of the `slice` runtime binary to produce a
 /// zero-dependency standalone executable (`slice compile`).
+///
+/// Streams both the base runtime binary and the `.cas` archive through bounded 256 KB
+/// `BufReader`/`BufWriter` buffers into an atomic sibling staging file so packing never
+/// allocates multi-megabyte heap copies of the executable image.
 pub fn embed_cas_into_executable(
     base_exe_path: &Path,
     cas_file_path: &Path,
     output_exe_path: &Path,
 ) -> Result<u64> {
-    let mut exe_bytes = std::fs::read(base_exe_path)
-        .with_context(|| format!("Failed to read base executable {}", base_exe_path.display()))?;
-    let cas_bytes = std::fs::read(cas_file_path)
-        .with_context(|| format!("Failed to read CAS archive {}", cas_file_path.display()))?;
+    use std::io::{BufReader, BufWriter, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    let rem = exe_bytes.len() % CACHE_LINE_ALIGN;
-    if rem != 0 {
-        exe_bytes.resize(exe_bytes.len() + (CACHE_LINE_ALIGN - rem), 0);
-    }
+    static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
-    let cas_offset = exe_bytes.len() as u64;
-    let cas_len = cas_bytes.len() as u64;
+    let parent_dir = output_exe_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let out_name = output_exe_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("slice_out");
+    let seq = STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staging_path = parent_dir.join(format!(
+        ".{}.slice_compile_{}_{}.tmp",
+        out_name,
+        std::process::id(),
+        seq
+    ));
 
-    exe_bytes.extend_from_slice(&cas_bytes);
-    exe_bytes.extend_from_slice(&cas_offset.to_le_bytes());
-    exe_bytes.extend_from_slice(&cas_len.to_le_bytes());
-    exe_bytes.extend_from_slice(b"SLICEEXE");
+    let write_result = (|| -> Result<u64> {
+        let base_file = std::fs::File::open(base_exe_path).with_context(|| {
+            format!("Failed to open base executable {}", base_exe_path.display())
+        })?;
+        let cas_file = std::fs::File::open(cas_file_path)
+            .with_context(|| format!("Failed to open CAS archive {}", cas_file_path.display()))?;
+        let out_file = std::fs::File::create(&staging_path).with_context(|| {
+            format!(
+                "Failed to create staging executable {}",
+                staging_path.display()
+            )
+        })?;
 
-    std::fs::write(output_exe_path, &exe_bytes).with_context(|| {
-        format!(
-            "Failed to write standalone executable to {}",
-            output_exe_path.display()
-        )
-    })?;
+        let mut base_reader = BufReader::with_capacity(256 * 1024, base_file);
+        let mut cas_reader = BufReader::with_capacity(256 * 1024, cas_file);
+        let mut writer = BufWriter::with_capacity(256 * 1024, out_file);
+
+        let exe_len = std::io::copy(&mut base_reader, &mut writer).with_context(|| {
+            format!(
+                "Failed to stream base executable {}",
+                base_exe_path.display()
+            )
+        })?;
+
+        let rem = (exe_len as usize) % CACHE_LINE_ALIGN;
+        let pad_len = if rem != 0 { CACHE_LINE_ALIGN - rem } else { 0 };
+        if pad_len > 0 {
+            let zero_pad = [0u8; CACHE_LINE_ALIGN];
+            writer.write_all(&zero_pad[..pad_len])?;
+        }
+
+        let cas_offset = exe_len + (pad_len as u64);
+        let cas_len = std::io::copy(&mut cas_reader, &mut writer)
+            .with_context(|| format!("Failed to stream CAS archive {}", cas_file_path.display()))?;
+
+        writer.write_all(&cas_offset.to_le_bytes())?;
+        writer.write_all(&cas_len.to_le_bytes())?;
+        writer.write_all(b"SLICEEXE")?;
+        writer.flush()?;
+
+        let inner_file = writer.into_inner().map_err(|e| e.into_error())?;
+        inner_file.sync_data()?;
+        Ok(cas_offset + cas_len + 24)
+    })();
+
+    let total_len = match write_result {
+        Ok(n) => n,
+        Err(err) => {
+            let _ = std::fs::remove_file(&staging_path);
+            return Err(err);
+        }
+    };
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(output_exe_path)?.permissions();
+        let mut perms = std::fs::metadata(&staging_path)?.permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(output_exe_path, perms)?;
+        std::fs::set_permissions(&staging_path, perms)?;
     }
 
-    Ok(exe_bytes.len() as u64)
+    if let Err(_first_err) = std::fs::rename(&staging_path, output_exe_path) {
+        if output_exe_path.exists() {
+            let _ = std::fs::remove_file(output_exe_path);
+        }
+        if let Err(rename_err) = std::fs::rename(&staging_path, output_exe_path) {
+            let _ = std::fs::remove_file(&staging_path);
+            return Err(rename_err).with_context(|| {
+                format!(
+                    "Failed to finalize standalone executable at {}",
+                    output_exe_path.display()
+                )
+            });
+        }
+    }
+
+    Ok(total_len)
 }

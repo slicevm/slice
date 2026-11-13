@@ -508,10 +508,7 @@
   // WinterTC `connect(address, options)` (`cloudflare:sockets` & `Slice.connect`)
   function __b64ToU8(b64) {
     if (!b64) return new Uint8Array(0);
-    var bin = atob(b64);
-    var out = new Uint8Array(bin.length);
-    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) & 0xff;
-    return out;
+    return __slice_base64_decode_bytes(b64);
   }
   globalThis.__slice_b64ToU8 = __b64ToU8;
 

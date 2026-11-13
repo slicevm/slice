@@ -112,18 +112,26 @@ impl OsNativeFileWatcher {
         }
     }
 
-    /// Blocks on the OS kernel event channel (with zero polling CPU when idle) or until `watch_once`
-    /// deadline expires, debouncing rapid save bursts (15 ms) and confirming fingerprint change.
+    /// Blocks on the OS kernel event channel (with zero polling CPU and zero disk `stat` walks
+    /// when idle in `--watch` mode) or until `watch_once` deadline expires, debouncing rapid save
+    /// bursts (15 ms) and confirming fingerprint change.
     pub(crate) fn wait_for_change(&mut self, watch_once: bool) -> bool {
         use std::time::{Duration, Instant};
         let wait_start = Instant::now();
-        let timeout = if watch_once {
-            Duration::from_millis(50)
-        } else {
-            Duration::from_millis(500)
-        };
         loop {
-            let _ = self.rx.recv_timeout(timeout);
+            if !watch_once && self._watcher.is_some() {
+                // True kernel-blocking wait (`ReadDirectoryChangesW` / `inotify` / `kqueue`) with 0 idle wakeups
+                if self.rx.recv().is_err() {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            } else {
+                let timeout = if watch_once {
+                    Duration::from_millis(50)
+                } else {
+                    Duration::from_millis(500)
+                };
+                let _ = self.rx.recv_timeout(timeout);
+            }
             // Drain any coalesced save events within a 15ms debounce window
             let debounce_deadline = Instant::now() + Duration::from_millis(15);
             while self

@@ -2151,6 +2151,16 @@ run();
     let active_threads = crate::fetch_reactor_active_threads();
     let thread_reuses = crate::fetch_reactor_pool_reuse_count();
     let slab_acquires = crate::fetch_reactor_slab_acquire_count();
+
+    // `fetch_reactor_slab_in_use_count()` is process-global across parallel test threads.
+    // If a sibling test (`AbortSignal.timeout` / concurrent `fetch`) currently has a socket
+    // read in flight, wait briefly for that concurrent read to settle before asserting 0 leaks.
+    let settle_deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    while crate::fetch_reactor_slab_in_use_count() > 0
+        && std::time::Instant::now() < settle_deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     let slabs_in_use = crate::fetch_reactor_slab_in_use_count();
     let slabs_avail = crate::fetch_reactor_slab_available_count();
 

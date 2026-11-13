@@ -568,14 +568,14 @@ fn sync_ws_buffered_memory(ws: &mut ActiveClientWebSocket) -> Result<(), String>
 }
 
 fn verify_ws_outbound_dlp(url: &str, payload_bytes: &[u8]) -> Result<(), String> {
-    let tenant_id = current_tenant_id();
-    let payload_str = String::from_utf8_lossy(payload_bytes);
-    let payload_b64 = base64_encode(payload_bytes, false);
     let dlp_err = BOA_EGRESS_SECRETS.with(|sec_cell| {
         let secrets = sec_cell.borrow();
         if secrets.is_empty() {
             return None;
         }
+        let tenant_id = current_tenant_id();
+        let payload_str = String::from_utf8_lossy(payload_bytes);
+        let payload_b64 = base64_encode(payload_bytes, false);
         verify_egress_secrets_slice(&tenant_id, &secrets, url)
             .and_then(|()| verify_egress_secrets_slice(&tenant_id, &secrets, &payload_str))
             .and_then(|()| verify_egress_secrets_slice(&tenant_id, &secrets, &payload_b64))
@@ -608,6 +608,7 @@ fn normalize_ws_url_to_http(raw_url: &str) -> Option<String> {
 struct WsConnectOutcome {
     id: u32,
     protocol: String,
+    live: bool,
     events: Vec<WireWsEvent>,
 }
 
@@ -671,6 +672,7 @@ pub(crate) fn ws_client_connect(raw_url: &str, protocols: &str) -> Result<String
         return serde_json::to_string(&WsConnectOutcome {
             id: ws_id,
             protocol: selected_proto,
+            live: false,
             events: Vec::new(),
         })
         .map_err(|e| e.to_string());
@@ -776,7 +778,7 @@ pub(crate) fn ws_client_connect(raw_url: &str, protocols: &str) -> Result<String
     };
 
     // Drain any frames that arrived coalesced with the 101 response
-    drain_available_live_frames(&mut ws, Duration::from_millis(5), false);
+    drain_available_live_frames(&mut ws, Duration::ZERO, false);
     initial_events.append(&mut ws.queued_events);
     let _ = sync_ws_buffered_memory(&mut ws);
 
@@ -787,6 +789,7 @@ pub(crate) fn ws_client_connect(raw_url: &str, protocols: &str) -> Result<String
     serde_json::to_string(&WsConnectOutcome {
         id: ws_id,
         protocol: negotiated_protocol,
+        live: true,
         events: initial_events,
     })
     .map_err(|e| e.to_string())
@@ -806,7 +809,14 @@ fn drain_available_live_frames(
         return;
     };
 
-    stream.set_read_timeout(Some(read_timeout));
+    let nonblocking = read_timeout.is_zero();
+    if nonblocking {
+        stream.set_nonblocking(true);
+    } else {
+        stream.set_read_timeout(Some(read_timeout));
+    }
+    let mut read_calls = 0u32;
+    let mut follow_up_timeout_set = false;
     let mut scratch = [0u8; 4096];
 
     loop {
@@ -820,8 +830,14 @@ fn drain_available_live_frames(
                             let mask = Some(next_ws_mask_key());
                             let pong =
                                 encode_websocket_frame(true, WS_OPCODE_PONG, mask, &frame.payload);
+                            if nonblocking {
+                                stream.set_nonblocking(false);
+                            }
                             let _ = stream.write_all(&pong);
                             let _ = stream.flush();
+                            if nonblocking {
+                                stream.set_nonblocking(true);
+                            }
                         }
                         WS_OPCODE_PONG => {}
                         WS_OPCODE_CLOSE => {
@@ -834,6 +850,9 @@ fn drain_available_live_frames(
                                 code,
                                 reason,
                             });
+                            if nonblocking {
+                                stream.set_nonblocking(false);
+                            }
                             return;
                         }
                         WS_OPCODE_TEXT | WS_OPCODE_BINARY => {
@@ -867,6 +886,9 @@ fn drain_available_live_frames(
                                     reason: "InvalidWebSocketFrame: unexpected continuation frame"
                                         .to_string(),
                                 });
+                                if nonblocking {
+                                    stream.set_nonblocking(false);
+                                }
                                 return;
                             };
                             if ws.frag_payload.len().saturating_add(frame.payload.len()) > max_bytes
@@ -884,6 +906,9 @@ fn drain_available_live_frames(
                                         });
                                 });
                                 ws.closed = true;
+                                if nonblocking {
+                                    stream.set_nonblocking(false);
+                                }
                                 return;
                             }
                             ws.frag_payload.extend_from_slice(&frame.payload);
@@ -928,6 +953,9 @@ fn drain_available_live_frames(
                         code: 1002,
                         reason: err,
                     });
+                    if nonblocking {
+                        stream.set_nonblocking(false);
+                    }
                     return;
                 }
             }
@@ -940,6 +968,16 @@ fn drain_available_live_frames(
         {
             break;
         }
+
+        if !nonblocking
+            && read_calls > 0
+            && !follow_up_timeout_set
+            && read_timeout < Duration::from_millis(5)
+        {
+            stream.set_read_timeout(Some(Duration::from_millis(5)));
+            follow_up_timeout_set = true;
+        }
+        read_calls = read_calls.saturating_add(1);
 
         match stream.read(&mut scratch) {
             Ok(0) => {
@@ -981,7 +1019,6 @@ fn drain_available_live_frames(
                     break;
                 }
                 pending_buf.extend_from_slice(&scratch[..n]);
-                stream.set_read_timeout(Some(Duration::from_millis(5)));
             }
             Err(ref e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
@@ -993,6 +1030,10 @@ fn drain_available_live_frames(
                 break;
             }
         }
+    }
+
+    if nonblocking {
+        stream.set_nonblocking(false);
     }
 }
 
@@ -1071,12 +1112,15 @@ pub(crate) fn ws_client_send(
                     .write_all(&frame)
                     .and_then(|()| stream.flush())
                     .map_err(|e| format!("WebSocket write to {} failed: {}", url_clone, e))?;
-                drain_available_live_frames(ws, Duration::from_millis(50), false);
+                drain_available_live_frames(ws, Duration::ZERO, false);
             }
         }
 
         let events: Vec<WireWsEvent> = std::mem::take(&mut ws.queued_events);
         sync_ws_buffered_memory(ws)?;
+        if events.is_empty() {
+            return Ok("[]".to_string());
+        }
         serde_json::to_string(&events).map_err(|e| e.to_string())
     })
 }
@@ -1089,10 +1133,13 @@ pub(crate) fn ws_client_poll(ws_id: u32) -> Result<String, String> {
             return Ok("[]".to_string());
         };
         if !ws.closed {
-            drain_available_live_frames(ws, Duration::from_millis(15), false);
+            drain_available_live_frames(ws, Duration::from_millis(2), false);
         }
         let events: Vec<WireWsEvent> = std::mem::take(&mut ws.queued_events);
         sync_ws_buffered_memory(ws)?;
+        if events.is_empty() {
+            return Ok("[]".to_string());
+        }
         serde_json::to_string(&events).map_err(|e| e.to_string())
     })
 }
@@ -1113,7 +1160,7 @@ pub(crate) fn ws_client_close(ws_id: u32, code: u16, reason: &str) -> Result<Str
                     encode_websocket_frame(true, WS_OPCODE_CLOSE, Some(mask), &close_payload);
                 let _ = stream.write_all(&frame);
                 let _ = stream.flush();
-                drain_available_live_frames(ws, Duration::from_millis(20), true);
+                drain_available_live_frames(ws, Duration::from_millis(50), true);
             }
             ws.closed = true;
             if !ws.queued_events.iter().any(|e| e.event_type == "close") {

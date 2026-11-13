@@ -75,9 +75,9 @@
     this.extensions = "";
     this.binaryType = "blob";
     this.onopen = null;
-    this.onmessage = null;
+    this._onmessage = null;
     this.onerror = null;
-    this.onclose = null;
+    this._onclose = null;
     var protoStr = "";
     if (Array.isArray(protocols)) protoStr = protocols.join(", ");
     else if (protocols !== undefined && protocols !== null) protoStr = String(protocols);
@@ -85,6 +85,8 @@
     var infoJson = __slice_ws_connect(this.url, protoStr);
     var info = JSON.parse(infoJson);
     this._id = info.id;
+    this._isLive = Boolean(info.live);
+    this._pollTimer = null;
     this.protocol = info.protocol || protoStr;
     this._jsMockFn = null;
     for (var pat in __wsJsMocks) {
@@ -103,6 +105,9 @@
         if (initialEvents) {
           __dispatchWsWireEvents(self, initialEvents);
         }
+        if (self._isLive && self.readyState === 1) {
+          self._schedulePoll();
+        }
       }
     });
   }
@@ -116,6 +121,76 @@
   WebSocket.prototype.OPEN = 1;
   WebSocket.prototype.CLOSING = 2;
   WebSocket.prototype.CLOSED = 3;
+
+  Object.defineProperty(WebSocket.prototype, "onmessage", {
+    get: function() {
+      return this._onmessage;
+    },
+    set: function(fn) {
+      this._onmessage = typeof fn === "function" ? fn : null;
+      if (this._onmessage && this.readyState === 1) {
+        this._schedulePoll();
+      }
+    },
+    configurable: true,
+    enumerable: true
+  });
+
+  Object.defineProperty(WebSocket.prototype, "onclose", {
+    get: function() {
+      return this._onclose;
+    },
+    set: function(fn) {
+      this._onclose = typeof fn === "function" ? fn : null;
+      if (this._onclose && this.readyState === 1) {
+        this._schedulePoll();
+      }
+    },
+    configurable: true,
+    enumerable: true
+  });
+
+  WebSocket.prototype.addEventListener = function(type, listener, options) {
+    _EventTarget.prototype.addEventListener.call(this, type, listener, options);
+    var t = String(type);
+    if ((t === "message" || t === "close") && this.readyState === 1) {
+      this._schedulePoll();
+    }
+  };
+
+  WebSocket.prototype._hasInboundListeners = function() {
+    return typeof this._onmessage === "function"
+      || typeof this._onclose === "function"
+      || !!(this._et && ((this._et.message && this._et.message.length > 0) || (this._et.close && this._et.close.length > 0)));
+  };
+
+  WebSocket.prototype._schedulePoll = function() {
+    if (!this._isLive || this._pollTimer !== null || this.readyState !== 1 || !this._hasInboundListeners()) {
+      return;
+    }
+    var self = this;
+    var remaining = 250;
+    var emptyTicks = 0;
+    function step() {
+      self._pollTimer = null;
+      if (self.readyState !== 1 || !self._hasInboundListeners()) return;
+      var eventsJson = __slice_ws_poll(self._id);
+      if (eventsJson && eventsJson !== "[]") {
+        emptyTicks = 0;
+        remaining = 250;
+        __dispatchWsWireEvents(self, eventsJson);
+        if (self.readyState === 1 && self._pollTimer === null && self._hasInboundListeners()) {
+          self._pollTimer = setTimeout(step, 0);
+        }
+        return;
+      }
+      if (--remaining > 0 && self.readyState === 1 && self._hasInboundListeners()) {
+        emptyTicks++;
+        self._pollTimer = setTimeout(step, emptyTicks === 1 ? 1 : 2);
+      }
+    }
+    this._pollTimer = setTimeout(step, 0);
+  };
 
   WebSocket.prototype.send = function(data) {
     if (this.readyState === 2 || this.readyState === 3) {
@@ -149,7 +224,12 @@
     if (eventsJson && eventsJson !== "[]") {
       queueMicrotask(function() {
         __dispatchWsWireEvents(self, eventsJson);
+        if (self._isLive && self.readyState === 1) {
+          self._schedulePoll();
+        }
       });
+    } else if (this._isLive) {
+      this._schedulePoll();
     }
   };
 
@@ -163,6 +243,10 @@
 
   WebSocket.prototype.close = function(code, reason) {
     if (this.readyState === 2 || this.readyState === 3) return;
+    if (this._pollTimer !== null) {
+      clearTimeout(this._pollTimer);
+      this._pollTimer = null;
+    }
     var c = code !== undefined ? Number(code) | 0 : 1000;
     var r = reason !== undefined ? String(reason) : "";
     this.readyState = 2;

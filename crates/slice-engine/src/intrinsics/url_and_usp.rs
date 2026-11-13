@@ -480,8 +480,199 @@ pub fn parse_whatwg_url(input: &str, base: Option<&str>) -> Option<ParsedWhatwgU
     })
 }
 
-/// Fast zero-exception check for `URL.canParse(input, base)`.
 #[inline]
+fn is_valid_rfc3986_scheme_part(scheme_part: &str) -> bool {
+    let Some(&first) = scheme_part.as_bytes().first() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && scheme_part.as_bytes()[1..]
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+}
+
+#[inline]
+fn is_special_scheme_ci(scheme_part: &str) -> bool {
+    scheme_part.eq_ignore_ascii_case("http")
+        || scheme_part.eq_ignore_ascii_case("https")
+        || scheme_part.eq_ignore_ascii_case("ws")
+        || scheme_part.eq_ignore_ascii_case("wss")
+        || scheme_part.eq_ignore_ascii_case("file")
+        || scheme_part.eq_ignore_ascii_case("ftp")
+}
+
+#[inline]
+fn validate_authority_rest(rest: &str, is_special: bool, is_file: bool) -> bool {
+    let path_split = if is_special {
+        rest.find(['/', '\\'])
+    } else {
+        rest.find('/')
+    };
+    let auth_host = match path_split {
+        Some(pi) => &rest[..pi],
+        None => rest,
+    };
+    let host_port = match auth_host.rfind('@') {
+        Some(ai) => &auth_host[ai + 1..],
+        None => auth_host,
+    };
+    if host_port.is_empty() && is_special && !is_file {
+        return false;
+    }
+    let ipv6_end = host_port.find(']');
+    let hostname = match host_port.rfind(':') {
+        Some(pci) if ipv6_end.is_none_or(|bracket| bracket < pci) => {
+            let prt_raw = &host_port[pci + 1..];
+            if !prt_raw.is_empty() {
+                if !prt_raw.bytes().all(|b| b.is_ascii_digit()) {
+                    return false;
+                }
+                let Ok(port_num) = prt_raw.parse::<u32>() else {
+                    return false;
+                };
+                if port_num > 65535 {
+                    return false;
+                }
+            }
+            &host_port[..pci]
+        }
+        _ => host_port,
+    };
+    !((is_special || !hostname.is_empty()) && !is_file && !is_valid_whatwg_hostname(hostname))
+}
+
+#[inline]
+fn validate_resolved_whatwg_url(raw: &str) -> bool {
+    let before_hash = match raw.find('#') {
+        Some(hi) => &raw[..hi],
+        None => raw,
+    };
+    let before_query = match before_hash.find('?') {
+        Some(qi) => &before_hash[..qi],
+        None => before_hash,
+    };
+    let Some(si) = before_query.find("://") else {
+        let Some(ci) = before_query.find(':') else {
+            return false;
+        };
+        if ci == 0 {
+            return false;
+        }
+        let scheme_part = &before_query[..ci];
+        if !is_valid_rfc3986_scheme_part(scheme_part) || is_special_scheme_ci(scheme_part) {
+            return false;
+        }
+        let path_part = &before_query[ci + 1..];
+        return !path_part.starts_with('/') && !path_part.starts_with('\\');
+    };
+    if si == 0 {
+        return false;
+    }
+    let scheme_part = &before_query[..si];
+    if !is_valid_rfc3986_scheme_part(scheme_part) {
+        return false;
+    }
+    let is_special = is_special_scheme_ci(scheme_part);
+    let is_file = scheme_part.eq_ignore_ascii_case("file");
+    validate_authority_rest(&before_query[si + 3..], is_special, is_file)
+}
+
+/// Fast zero-allocation check for `URL.canParse(input, base)`.
 pub fn can_parse_whatwg_url(input: &str, base: Option<&str>) -> bool {
+    let trimmed_outer = input.trim_matches(|c: char| (c as u32) <= 0x20);
+    let cleaned_cow = strip_whatwg_ascii_tab_or_newline(trimmed_outer);
+    let trimmed = cleaned_cow.as_ref();
+
+    let Some(base_str) = base.filter(|_| !has_rfc3986_scheme(trimmed)) else {
+        return validate_resolved_whatwg_url(trimmed);
+    };
+
+    let base_trimmed_outer = base_str.trim_matches(|c: char| (c as u32) <= 0x20);
+    let base_cleaned_cow = strip_whatwg_ascii_tab_or_newline(base_trimmed_outer);
+    let base_trimmed = base_cleaned_cow.as_ref();
+    if !validate_resolved_whatwg_url(base_trimmed) {
+        return false;
+    }
+
+    let base_before_hash = match base_trimmed.find('#') {
+        Some(hi) => &base_trimmed[..hi],
+        None => base_trimmed,
+    };
+    let base_before_query = match base_before_hash.find('?') {
+        Some(qi) => &base_before_hash[..qi],
+        None => base_before_hash,
+    };
+    if let Some(si) = base_before_query.find("://") {
+        let scheme_part = &base_before_query[..si];
+        if is_special_scheme_ci(scheme_part) && !scheme_part.eq_ignore_ascii_case("file") {
+            if let Some(after_slashes) = trimmed.strip_prefix("//") {
+                let rel_before_hash = match after_slashes.find('#') {
+                    Some(hi) => &after_slashes[..hi],
+                    None => after_slashes,
+                };
+                let rel_before_query = match rel_before_hash.find('?') {
+                    Some(qi) => &rel_before_hash[..qi],
+                    None => rel_before_hash,
+                };
+                return validate_authority_rest(rel_before_query, true, false);
+            }
+            return true;
+        }
+    }
+
     parse_whatwg_url(input, base).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn can_parse_whatwg_url_matches_full_parser_across_edge_cases() {
+        let cases: &[(&str, Option<&str>)] = &[
+            ("https://example.com/api/v1?x=1#frag", None),
+            ("  \thttps://exam\nple.com:8443/a/b\r ", None),
+            ("http://[::1]:8080/health", None),
+            ("http://[::1:bad]/health", None),
+            ("https://user:pass@sub.domain.io:65535/", None),
+            ("https://sub.domain.io:65536/", None),
+            ("https://sub.domain.io:abc/", None),
+            ("https://", None),
+            ("http://evil.com\\@127.0.0.1/", None),
+            ("mailto:alice@example.com", None),
+            ("mailto:/invalid-opaque-slash", None),
+            ("https:opaque-not-allowed", None),
+            ("file:///var/log/syslog", None),
+            ("custom+scheme://host/path", None),
+            ("custom+scheme:///empty-host-ok", None),
+            ("custom+scheme://bad\\host/path", None),
+            (
+                "/v2/items?limit=10",
+                Some("https://api.example.com/v1/users"),
+            ),
+            (
+                "//cdn.example.com:443/app.js",
+                Some("https://api.example.com/v1"),
+            ),
+            ("//:99999/bad", Some("https://api.example.com/v1")),
+            ("?page=2", Some("https://api.example.com/v1/list")),
+            ("#section", Some("https://api.example.com/v1/list?a=1")),
+            ("", Some("https://api.example.com/v1")),
+            ("rel/path", Some("mailto:alice@example.com")),
+            ("//authority", Some("mailto:alice@example.com")),
+            ("/ok", Some("not a valid base")),
+            ("123bad://host", None),
+            ("", None),
+        ];
+
+        for &(input, base) in cases {
+            let expected = parse_whatwg_url(input, base).is_some();
+            let actual = can_parse_whatwg_url(input, base);
+            assert_eq!(
+                actual, expected,
+                "parity mismatch for input={:?}, base={:?}",
+                input, base
+            );
+        }
+    }
 }

@@ -1298,3 +1298,69 @@ fn test_bundled_runtime_execution_circular_entry_live_reexports_crypto_alias_and
 
     let _ = std::fs::remove_dir_all(&test_dir);
 }
+
+#[test]
+fn test_wasm_lazy_memory_buffer_materialization_and_sync() {
+    let script = r#"
+        const sec = (id, body) => [id, body.length, ...body];
+        const str = (s) => [s.length, ...Array.from(s, (c) => c.charCodeAt(0))];
+        const body = (bytes) => [bytes.length, ...bytes];
+
+        // Module with 1 memory page, NO imports, and 2 exports: memory + write_and_add(offset, val)
+        const wasmBytes = new Uint8Array([
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,
+            // Type 0: (i32, i32) -> i32
+            ...sec(0x01, [0x01, 0x60, 0x02, 0x7F, 0x7F, 0x01, 0x7F]),
+            // Function 0 -> Type 0
+            ...sec(0x03, [0x01, 0x00]),
+            // Memory: min=1, max=3
+            ...sec(0x05, [0x01, 0x01, 0x01, 0x03]),
+            // Exports: memory (mem 0), write_and_add (func 0)
+            ...sec(0x07, [
+                0x02,
+                ...str("memory"), 0x02, 0x00,
+                ...str("write_and_add"), 0x00, 0x00
+            ]),
+            // Code: mem[offset] = mem[offset] + val; return mem[offset];
+            ...sec(0x0A, [
+                0x01,
+                ...body([
+                    0x00,
+                    0x20, 0x00,
+                    0x20, 0x00, 0x28, 0x02, 0x00,
+                    0x20, 0x01, 0x6A,
+                    0x36, 0x02, 0x00,
+                    0x20, 0x00, 0x28, 0x02, 0x00,
+                    0x0B
+                ])
+            ])
+        ]);
+
+        const inst = new WebAssembly.Instance(new WebAssembly.Module(wasmBytes));
+        // Execute multiple Wasm calls BEFORE ever accessing exports.memory.buffer
+        const r1 = inst.exports.write_and_add(32, 77);
+        const r2 = inst.exports.write_and_add(32, 23);
+
+        // Now materialize exports.memory.buffer lazily and verify Wasm-written word is intact
+        const view = new Int32Array(inst.exports.memory.buffer);
+        const lazyRead = view[8]; // byte offset 32
+
+        // Mutate from JS, call Wasm again, and grow memory
+        view[8] = 500;
+        const r3 = inst.exports.write_and_add(32, 25);
+        const oldPages = inst.exports.memory.grow(1);
+        const grownView = new Int32Array(inst.exports.memory.buffer);
+
+        console.log([r1, r2, lazyRead, r3, oldPages, grownView.byteLength, grownView[8]].join(":"));
+    "#;
+
+    let metrics = run_source_isolated(
+        "wasm-lazy-mem",
+        script,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(metrics.stdout, vec!["77:100:100:525:1:131072:525"]);
+}

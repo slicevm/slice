@@ -223,72 +223,103 @@ pub(crate) fn deflate_raw_compress(input: &[u8]) -> Vec<u8> {
         return bw.finish();
     }
 
-    let mut head = [usize::MAX; 4096];
-    let win_len = input.len().next_power_of_two().clamp(2, 32768);
-    let mut prev = vec![usize::MAX; win_len];
-    let mask = win_len - 1;
-    let mut pos = 0usize;
+    struct DeflateScratch {
+        head: [u32; 4096],
+        prev: [u32; 32768],
+    }
 
-    while pos < input.len() {
-        let mut best_len = 0usize;
-        let mut best_dist = 0usize;
+    thread_local! {
+        static DEFLATE_SCRATCH: std::cell::RefCell<Box<DeflateScratch>> = std::cell::RefCell::new(
+            Box::new(DeflateScratch {
+                head: [u32::MAX; 4096],
+                prev: [u32::MAX; 32768],
+            }),
+        );
+    }
 
-        if pos + 3 <= input.len() {
-            let h = lz77_hash3(input, pos);
-            let mut cand = head[h];
-            head[h] = pos;
-            if !prev.is_empty() {
-                prev[pos & mask] = cand;
+    const MASK: usize = 32767;
+    DEFLATE_SCRATCH.with(|cell| {
+        let mut fallback;
+        let scratch: &mut DeflateScratch = match cell.try_borrow_mut() {
+            Ok(mut guard) => {
+                guard.head.fill(u32::MAX);
+                return compress_lz77_with_scratch(input, &mut bw, &mut guard);
             }
+            Err(_) => {
+                fallback = Box::new(DeflateScratch {
+                    head: [u32::MAX; 4096],
+                    prev: [u32::MAX; 32768],
+                });
+                &mut fallback
+            }
+        };
+        compress_lz77_with_scratch(input, &mut bw, scratch)
+    });
 
-            let max_len = (input.len() - pos).min(258);
-            let mut chain_steps = 0usize;
-            while cand != usize::MAX && pos > cand && (pos - cand) <= 32768 && chain_steps < 24 {
-                chain_steps += 1;
-                if input[cand + best_len] == input[pos + best_len]
-                    && input[cand..cand + 3] == input[pos..pos + 3]
+    fn compress_lz77_with_scratch(
+        input: &[u8],
+        bw: &mut DeflateBitWriter,
+        scratch: &mut DeflateScratch,
+    ) {
+        let mut pos = 0usize;
+        while pos < input.len() {
+            let mut best_len = 0usize;
+            let mut best_dist = 0usize;
+
+            if pos + 3 <= input.len() && pos < u32::MAX as usize {
+                let h = lz77_hash3(input, pos);
+                let mut cand = scratch.head[h] as usize;
+                scratch.head[h] = pos as u32;
+                scratch.prev[pos & MASK] = cand as u32;
+
+                let max_len = (input.len() - pos).min(258);
+                let mut chain_steps = 0usize;
+                while cand != u32::MAX as usize
+                    && pos > cand
+                    && (pos - cand) <= 32768
+                    && chain_steps < 24
                 {
-                    let mut mlen = 3usize;
-                    while mlen < max_len && input[cand + mlen] == input[pos + mlen] {
-                        mlen += 1;
-                    }
-                    if mlen > best_len {
-                        best_len = mlen;
-                        best_dist = pos - cand;
-                        if best_len == max_len {
-                            break;
+                    chain_steps += 1;
+                    if input[cand + best_len] == input[pos + best_len]
+                        && input[cand..cand + 3] == input[pos..pos + 3]
+                    {
+                        let mut mlen = 3usize;
+                        while mlen < max_len && input[cand + mlen] == input[pos + mlen] {
+                            mlen += 1;
+                        }
+                        if mlen > best_len {
+                            best_len = mlen;
+                            best_dist = pos - cand;
+                            if best_len == max_len {
+                                break;
+                            }
                         }
                     }
-                }
-                if prev.is_empty() {
-                    break;
-                }
-                let next_cand = prev[cand & mask];
-                if next_cand >= cand {
-                    break;
-                }
-                cand = next_cand;
-            }
-        }
-
-        if best_len >= 3 {
-            bw.write_length_dist(best_len, best_dist);
-            let step_end = (pos + best_len).min(input.len());
-            pos += 1;
-            while pos < step_end {
-                if pos + 3 <= input.len() {
-                    let h = lz77_hash3(input, pos);
-                    let prev_head = head[h];
-                    head[h] = pos;
-                    if !prev.is_empty() {
-                        prev[pos & mask] = prev_head;
+                    let next_cand = scratch.prev[cand & MASK] as usize;
+                    if next_cand == u32::MAX as usize || next_cand >= cand {
+                        break;
                     }
+                    cand = next_cand;
                 }
+            }
+
+            if best_len >= 3 {
+                bw.write_length_dist(best_len, best_dist);
+                let step_end = (pos + best_len).min(input.len());
+                pos += 1;
+                while pos < step_end {
+                    if pos + 3 <= input.len() && pos < u32::MAX as usize {
+                        let h = lz77_hash3(input, pos);
+                        let prev_head = scratch.head[h];
+                        scratch.head[h] = pos as u32;
+                        scratch.prev[pos & MASK] = prev_head;
+                    }
+                    pos += 1;
+                }
+            } else {
+                bw.write_fixed_sym(input[pos] as u16);
                 pos += 1;
             }
-        } else {
-            bw.write_fixed_sym(input[pos] as u16);
-            pos += 1;
         }
     }
 

@@ -255,20 +255,39 @@ impl SliceIsolate {
                         .get(acc_var)
                         .map(|v| v.to_number())
                         .unwrap_or(0.0);
-                    if (*scale - 1.0).abs() < f64::EPSILON {
-                        let mut sum_i: i64 = 0;
-                        let mut i = *start;
-                        while i < *limit {
-                            sum_i = sum_i.wrapping_add(i);
-                            i += 1;
-                        }
-                        acc += sum_i as f64;
-                    } else {
-                        let mut i = *start;
-                        let s = *scale;
-                        while i < *limit {
-                            acc += (i as f64) * s;
-                            i += 1;
+                    if iterations > 0 {
+                        let n = iterations as u128;
+                        let two_first_last = (*start as i128) + (*limit as i128) - 1;
+                        let arith_sum_i128 = if n.is_multiple_of(2) {
+                            ((n / 2) as i128).saturating_mul(two_first_last)
+                        } else {
+                            (n as i128).saturating_mul(two_first_last / 2)
+                        };
+                        if (*scale - 1.0).abs() < f64::EPSILON {
+                            let sum_i: i64 = if n.is_multiple_of(2) {
+                                ((n / 2) as u64).wrapping_mul(two_first_last as u64) as i64
+                            } else {
+                                (n as u64).wrapping_mul((two_first_last / 2) as u64) as i64
+                            };
+                            acc += sum_i as f64;
+                        } else {
+                            let s = *scale;
+                            let exact_int_domain = s.is_finite()
+                                && s.fract() == 0.0
+                                && acc.is_finite()
+                                && acc.fract() == 0.0
+                                && arith_sum_i128.unsigned_abs() < (1u128 << 53)
+                                && (acc.abs() + (arith_sum_i128 as f64 * s).abs())
+                                    < 9_007_199_254_740_992.0;
+                            if exact_int_domain {
+                                acc += (arith_sum_i128 as f64) * s;
+                            } else {
+                                let mut i = *start;
+                                while i < *limit {
+                                    acc += (i as f64) * s;
+                                    i += 1;
+                                }
+                            }
                         }
                     }
                     let res = JsValue::Number(acc);

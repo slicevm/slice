@@ -82,3 +82,19 @@ fn test_ring_entry_clamping_and_extended_pool_aliasing() {
     }];
     assert!(max_engine.submit_and_reap(&over_slot_len).is_err());
 }
+
+#[test]
+fn test_large_batch_completion_reaping_across_multi_chunk_windows() {
+    let mut engine = CompletionRingEngine::new(256, false).unwrap();
+    let ops: Vec<IoSubmission> = (0..80u64)
+        .map(|i| IoSubmission::Nop {
+            user_data: 10_000 + i,
+        })
+        .collect();
+    let completions = engine.submit_and_reap(&ops).unwrap();
+    assert_eq!(completions.len(), 80);
+    let mut seen: Vec<u64> = completions.iter().map(|c| c.user_data).collect();
+    seen.sort_unstable();
+    let expected: Vec<u64> = (10_000..10_080).collect();
+    assert_eq!(seen, expected);
+}
