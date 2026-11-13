@@ -19,6 +19,11 @@ pub(crate) fn with_buffer_source_bytes<R>(
     use boa_engine::object::builtins::JsArrayBuffer;
 
     if let Some(s) = val.as_string() {
+        if let boa_engine::string::JsStrVariant::Latin1(bytes) = s.as_str().variant() {
+            if bytes.is_ascii() {
+                return Ok(f(bytes));
+            }
+        }
         let owned = s.to_std_string_escaped();
         return Ok(f(owned.as_bytes()));
     }

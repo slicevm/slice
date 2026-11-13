@@ -146,7 +146,58 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .and_then(|v| v.as_number())
                 .map(|n| n as u32)
                 .unwrap_or(0);
+            if shard_id == 18 {
+                let pre = crate::boa_realm::proto_sig(
+                    &context.intrinsics().constructors().string().prototype(),
+                );
+                let res = eval_lazy_prelude_shard(shard_id, context)?;
+                let post = crate::boa_realm::proto_sig(
+                    &context.intrinsics().constructors().string().prototype(),
+                );
+                crate::boa_realm::BOA_SES_INTL_SIG_PAIR.with(|p| p.set(Some((pre, post))));
+                return Ok(res);
+            }
             eval_lazy_prelude_shard(shard_id, context)
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_capture_ses_sigs"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let mode = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as i32)
+                .unwrap_or(0);
+            match mode {
+                0 => {
+                    let sigs = crate::boa_realm::capture_ses_proto_sigs(context);
+                    crate::boa_realm::BOA_SES_BASELINE_SIGS.with(|s| s.set(Some(sigs)));
+                    Ok(BoaVal::undefined())
+                }
+                1 => {
+                    let cur_str = crate::boa_realm::proto_sig(
+                        &context.intrinsics().constructors().string().prototype(),
+                    );
+                    let matches = crate::boa_realm::BOA_SES_BASELINE_SIGS
+                        .with(|s| s.get().is_some_and(|sigs| sigs[3] == cur_str));
+                    Ok(BoaVal::from(matches))
+                }
+                2 => {
+                    let cur_str = crate::boa_realm::proto_sig(
+                        &context.intrinsics().constructors().string().prototype(),
+                    );
+                    crate::boa_realm::BOA_SES_BASELINE_SIGS.with(|s| {
+                        if let Some(mut sigs) = s.get() {
+                            sigs[3] = cur_str;
+                            s.set(Some(sigs));
+                        }
+                    });
+                    Ok(BoaVal::undefined())
+                }
+                _ => Ok(BoaVal::undefined()),
+            }
         }),
     );
 
@@ -327,9 +378,16 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
             }
             if first.is_object() {
                 let decoded = with_buffer_source_bytes(first, context, |bytes| {
-                    String::from_utf8_lossy(bytes).into_owned()
+                    if bytes.is_ascii() {
+                        BoaVal::from(boa_engine::JsString::from(
+                            boa_engine::string::JsStr::latin1(bytes),
+                        ))
+                    } else {
+                        let s = String::from_utf8_lossy(bytes);
+                        BoaVal::from(js_string!(s.as_ref()))
+                    }
                 })?;
-                return Ok(BoaVal::from(js_string!(decoded)));
+                return Ok(decoded);
             }
             let s = first.to_string(context)?.to_std_string_escaped();
             Ok(BoaVal::from(js_string!(s)))
@@ -604,11 +662,22 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
         js_string!("__slice_text_encode"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
-            let s = match args.first() {
-                None => String::new(),
-                Some(v) if v.is_undefined() => String::new(),
-                Some(v) => v.to_string(context)?.to_std_string_escaped(),
+            let Some(first) = args.first() else {
+                return bytes_to_js_uint8_array(&[], context);
             };
+            if first.is_undefined() {
+                return bytes_to_js_uint8_array(&[], context);
+            }
+            if let Some(js_s) = first.as_string() {
+                if let boa_engine::string::JsStrVariant::Latin1(bytes) = js_s.as_str().variant() {
+                    if bytes.is_ascii() {
+                        return bytes_to_js_uint8_array(bytes, context);
+                    }
+                }
+                let owned = js_s.to_std_string_escaped();
+                return bytes_to_js_uint8_array(owned.as_bytes(), context);
+            }
+            let s = first.to_string(context)?.to_std_string_escaped();
             bytes_to_js_uint8_array(s.as_bytes(), context)
         }),
     );

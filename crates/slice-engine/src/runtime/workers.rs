@@ -193,6 +193,7 @@ impl ParentWorkerRegistry {
     }
 
     fn reset(&mut self) {
+        self.next_worker_id = 1;
         for (_, mut h) in self.workers.drain() {
             h.terminated.store(true, Ordering::Release);
             let _ = h.inbound_tx.send(WorkerInboundCmd::Terminate);
@@ -668,7 +669,7 @@ pub(crate) fn worker_spawn_with_context(
     WORKER_ACTIVE_COUNT.with(|c| c.set(c.get().saturating_add(1)));
 
     let worker_name = opts.name.unwrap_or_else(|| format!("worker-{}", worker_id));
-    let child_tenant = format!("{}:worker-{}", parent_tenant, worker_id);
+    let child_tenant = format!("{}:worker", parent_tenant);
     let bytecode = compile_or_get_worker_bytecode(&raw_script);
 
     let job = WorkerJob {

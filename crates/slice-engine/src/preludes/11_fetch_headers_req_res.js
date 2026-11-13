@@ -222,18 +222,42 @@
       return __makeLiveReq();
     }
     if (!init && typeof input === "string") {
-      this.url = input;
-      this.method = "GET";
-      this.headers = new Headers();
-      this._body = "";
-      this._u8 = null;
-      this._fd = null;
-      this.redirect = "follow";
-      this.signal = __defaultReqSignal;
-      this.bodyUsed = false;
-      return;
+      var rSimple = Object.create(LazyReqProto);
+      rSimple.url = input;
+      rSimple.method = "GET";
+      rSimple._h = null;
+      rSimple._rawH = null;
+      rSimple._body = "";
+      rSimple._u8 = null;
+      rSimple._fd = null;
+      rSimple.redirect = "follow";
+      rSimple.signal = __defaultReqSignal;
+      rSimple.bodyUsed = false;
+      return rSimple;
     }
     var o = init || {};
+    var oh = o.headers;
+    if (
+      typeof input === "string" &&
+      (o.body === undefined || o.body === null || typeof o.body === "string") &&
+      (!oh || (typeof oh === "object" && !oh._isHeaders && !Array.isArray(oh)))
+    ) {
+      var rawMFast = o.method;
+      var rInit = Object.create(LazyReqProto);
+      rInit.url = input;
+      rInit.method = rawMFast
+        ? (rawMFast === "GET" || rawMFast === "POST" ? rawMFast : String(rawMFast).toUpperCase())
+        : "GET";
+      rInit._h = null;
+      rInit._rawH = oh || null;
+      rInit._body = typeof o.body === "string" ? o.body : "";
+      rInit._u8 = null;
+      rInit._fd = null;
+      rInit.redirect = o.redirect ? String(o.redirect) : "follow";
+      rInit.signal = o.signal || __defaultReqSignal;
+      rInit.bodyUsed = false;
+      return rInit;
+    }
     var isReq = Boolean(input && typeof input === "object" && input._isSliceReq);
     this.url = typeof input === "string"
       ? input
@@ -242,7 +266,6 @@
     this.method = rawM
       ? (rawM === "GET" || rawM === "POST" ? rawM : String(rawM).toUpperCase())
       : (isReq ? input.method : "GET");
-    var oh = o.headers;
     this.headers = (oh && oh._isHeaders) ? oh : new Headers(oh || (isReq ? input.headers : undefined));
     if (o.body !== undefined && o.body !== null) {
       if (typeof o.body === "string") {
@@ -397,6 +420,22 @@
       configurable: true,
       enumerable: false
     }
+  });
+  var LazyReqProto = Object.create(RP);
+  Object.defineProperty(LazyReqProto, "headers", {
+    get: function() {
+      if (!this._h) {
+        this._h = this._rawH ? new Headers(this._rawH) : new Headers();
+        this._rawH = null;
+      }
+      return this._h;
+    },
+    set: function(v) {
+      this._h = v;
+      this._rawH = null;
+    },
+    configurable: true,
+    enumerable: true
   });
   var LazyResProto = Object.create(SP);
   Object.defineProperty(LazyResProto, "headers", {

@@ -11,7 +11,6 @@
   globalThis.__shMask = 0;
   globalThis.__shardProps = {};
   var __lazyInited = false;
-  var __sesReady = false, __sesP = null, __sesN = null, __sesK = null, __sesL = null;
   var __wu = [];
   globalThis.__slice_mark_lazy_inited = function() { __lazyInited = true; };
   function __loadShard(id) {
@@ -70,10 +69,6 @@
         }
       }
       __slice_lazy_prelude(id);
-      if (id === 18 && __sesReady) {
-        __sesK[3] = Reflect.ownKeys(String.prototype);
-        __sesL[3] = __sesK[3].length;
-      }
     }
   }
   Object.defineProperty(globalThis, "__slice_ensure_shard", {
@@ -616,29 +611,31 @@
     });
   }
   var __origArrFill = Array.prototype.fill;
+  var __sliceArrFill = function(v, s, e) {
+    var len = this ? (this.length >>> 0) : 0;
+    if (len > 64) {
+      var st = s === undefined ? 0 : (s < 0 ? Math.max(len + Number(s), 0) : Math.min(Number(s), len));
+      var en = e === undefined ? len : (e < 0 ? Math.max(len + Number(e), 0) : Math.min(Number(e), len));
+      var cnt = en > st ? (en - st) : 0;
+      if (cnt > 64) __slice_charge_mem(cnt * 8, Math.floor(cnt / 16) + 1);
+    }
+    return __origArrFill.apply(this, arguments);
+  };
   Object.defineProperty(Array.prototype, "fill", {
-    value: function(v, s, e) {
-      var len = this ? (this.length >>> 0) : 0;
-      if (len > 64) {
-        var st = s === undefined ? 0 : (s < 0 ? Math.max(len + Number(s), 0) : Math.min(Number(s), len));
-        var en = e === undefined ? len : (e < 0 ? Math.max(len + Number(e), 0) : Math.min(Number(e), len));
-        var cnt = en > st ? (en - st) : 0;
-        if (cnt > 64) __slice_charge_mem(cnt * 8, Math.floor(cnt / 16) + 1);
-      }
-      return __origArrFill.apply(this, arguments);
-    },
+    value: __sliceArrFill,
     writable: true,
     configurable: true,
     enumerable: false
   });
   var __origStrRepeat = String.prototype.repeat;
+  var __sliceStrRepeat = function(count) {
+    var n = Number(count) || 0;
+    var bytes = String(this).length * (n > 0 ? Math.floor(n) : 0);
+    if (bytes > 64) __slice_charge_mem(bytes, Math.floor(bytes / 64) + 1);
+    return __origStrRepeat.call(this, count);
+  };
   Object.defineProperty(String.prototype, "repeat", {
-    value: function(count) {
-      var n = Number(count) || 0;
-      var bytes = String(this).length * (n > 0 ? Math.floor(n) : 0);
-      if (bytes > 64) __slice_charge_mem(bytes, Math.floor(bytes / 64) + 1);
-      return __origStrRepeat.call(this, count);
-    },
+    value: __sliceStrRepeat,
     writable: true,
     configurable: true,
     enumerable: false
@@ -646,39 +643,16 @@
   var __origObjToStr = Object.prototype.toString;
   var __origObjValOf = Object.prototype.valueOf;
   var __origObjHasOwn = Object.prototype.hasOwnProperty;
-  __sesP = [
-    Object.prototype,
-    Array.prototype,
-    Function.prototype,
-    String.prototype,
-    Promise.prototype,
-    Uint8Array.prototype
-  ];
-  __sesN = [
-    "Object.prototype",
-    "Array.prototype",
-    "Function.prototype",
-    "String.prototype",
-    "Promise.prototype",
-    "Uint8Array.prototype"
-  ];
-  __sesK = [
-    Reflect.ownKeys(Object.prototype),
-    Reflect.ownKeys(Array.prototype),
-    Reflect.ownKeys(Function.prototype),
-    Reflect.ownKeys(String.prototype),
-    Reflect.ownKeys(Promise.prototype),
-    Reflect.ownKeys(Uint8Array.prototype)
-  ];
-  __sesL = [
-    __sesK[0].length,
-    __sesK[1].length,
-    __sesK[2].length,
-    __sesK[3].length,
-    __sesK[4].length,
-    __sesK[5].length
-  ];
-  __sesReady = true;
+  var __origArrPush = Array.prototype.push;
+  var __origArrPop = Array.prototype.pop;
+  var __origArrSlice = Array.prototype.slice;
+  var __origFnCall = Function.prototype.call;
+  var __origFnApply = Function.prototype.apply;
+  var __origFnBind = Function.prototype.bind;
+  var __origStrSlice = String.prototype.slice;
+  var __origPromiseCatch = Promise.prototype.catch;
+  var __origU8Subarray = Uint8Array.prototype.subarray;
+  __slice_capture_ses_sigs(0);
   function __checkSes() {
     if (
       Object.prototype.toString !== __origObjToStr ||
@@ -687,30 +661,32 @@
     ) {
       return "Object.prototype";
     }
-    if (!__ntHooked && Promise.prototype.then !== __origThen) {
+    if (
+      Array.prototype.push !== __origArrPush ||
+      Array.prototype.pop !== __origArrPop ||
+      Array.prototype.slice !== __origArrSlice ||
+      Array.prototype.fill !== __sliceArrFill
+    ) {
+      return "Array.prototype";
+    }
+    if (
+      Function.prototype.call !== __origFnCall ||
+      Function.prototype.apply !== __origFnApply ||
+      Function.prototype.bind !== __origFnBind
+    ) {
+      return "Function.prototype";
+    }
+    if (
+      String.prototype.slice !== __origStrSlice ||
+      String.prototype.repeat !== __sliceStrRepeat
+    ) {
+      return "String.prototype";
+    }
+    if ((!__ntHooked && Promise.prototype.then !== __origThen) || Promise.prototype.catch !== __origPromiseCatch) {
       return "Promise.prototype";
     }
-    for (var i = 0; i < 6; i++) {
-      var p = __sesP[i];
-      var ks = Reflect.ownKeys(p);
-      var base = __sesK[i];
-      var mutated = ks.length !== __sesL[i];
-      if (!mutated) {
-        for (var k = 0; k < ks.length; k++) {
-          if (ks[k] !== base[k]) {
-            mutated = true;
-            break;
-          }
-        }
-      }
-      if (mutated) {
-        for (var j = 0; j < ks.length; j++) {
-          if (base.indexOf(ks[j]) === -1) {
-            try { delete p[ks[j]]; } catch (_e) {}
-          }
-        }
-        return __sesN[i];
-      }
+    if (Uint8Array.prototype.subarray !== __origU8Subarray) {
+      return "Uint8Array.prototype";
     }
     return "";
   }

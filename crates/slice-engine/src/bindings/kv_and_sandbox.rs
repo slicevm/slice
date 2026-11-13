@@ -287,6 +287,14 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 .unwrap_or_else(|| "{}".to_string());
             let (opts, deny_read, deny_write, deny_net, deny_exec) = if opts_json == "{}" {
                 (SandboxEvalOptions::default(), false, false, false, false)
+            } else if !opts_json.contains("[]") {
+                (
+                    serde_json::from_str::<SandboxEvalOptions>(&opts_json).unwrap_or_default(),
+                    false,
+                    false,
+                    false,
+                    false,
+                )
             } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&opts_json) {
                 let has_empty_arr = |keys: &[&str]| -> bool {
                     val.as_object().is_some_and(|obj| {

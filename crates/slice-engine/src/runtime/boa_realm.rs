@@ -72,6 +72,7 @@ pub(crate) struct BoaFsCaps {
 }
 
 pub(crate) type CapturedBoaHttpRes = (u16, String, Option<Vec<u8>>, String, Vec<(String, String)>);
+pub(crate) type SesProtoSig = (u64, usize, usize);
 
 thread_local! {
     pub(crate) static SNP_MODULE_CACHE: std::cell::RefCell<FxHashMap<u64, std::sync::Arc<BytecodeModule>>> =
@@ -137,6 +138,10 @@ thread_local! {
         const { std::cell::Cell::new((true, u32::MAX)) };
     pub(crate) static BOA_ALS_ACTIVE: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    pub(crate) static BOA_SES_BASELINE_SIGS: std::cell::Cell<Option<[SesProtoSig; 6]>> =
+        const { std::cell::Cell::new(None) };
+    pub(crate) static BOA_SES_INTL_SIG_PAIR: std::cell::Cell<Option<(SesProtoSig, SesProtoSig)>> =
+        const { std::cell::Cell::new(None) };
     pub(crate) static BOA_ALS_SNAP: std::cell::RefCell<boa_engine::JsValue> =
         const { std::cell::RefCell::new(boa_engine::JsValue::undefined()) };
     pub(crate) static BOA_ACTIVE_SOURCE_PTR_LEN: std::cell::Cell<(usize, usize)> =
@@ -606,8 +611,17 @@ pub(crate) fn ensure_vfs_tenant_affinity(vfs_ns: &str) {
     });
 }
 
+pub(crate) const SES_PROTO_NAMES: [&str; 6] = [
+    "Object.prototype",
+    "Array.prototype",
+    "Function.prototype",
+    "String.prototype",
+    "Promise.prototype",
+    "Uint8Array.prototype",
+];
+
 #[inline]
-fn proto_sig(obj: &boa_engine::JsObject) -> (u64, usize, usize) {
+pub(crate) fn proto_sig(obj: &boa_engine::JsObject) -> SesProtoSig {
     let b = obj.borrow();
     (
         b.shape().id(),
@@ -617,7 +631,7 @@ fn proto_sig(obj: &boa_engine::JsObject) -> (u64, usize, usize) {
 }
 
 #[inline]
-pub(crate) fn capture_ses_proto_sigs(ctx: &boa_engine::Context) -> [(u64, usize, usize); 6] {
+pub(crate) fn capture_ses_proto_sigs(ctx: &boa_engine::Context) -> [SesProtoSig; 6] {
     let c = ctx.intrinsics().constructors();
     [
         proto_sig(&c.object().prototype()),
@@ -630,8 +644,14 @@ pub(crate) fn capture_ses_proto_sigs(ctx: &boa_engine::Context) -> [(u64, usize,
 }
 
 #[inline]
-pub(crate) fn has_ses_proto_sig_mismatch(realm: &WarmBoaRealm) -> bool {
-    capture_ses_proto_sigs(&realm.ctx) != realm.ses_proto_sigs
+pub(crate) fn first_ses_proto_sig_mismatch(realm: &WarmBoaRealm) -> Option<&'static str> {
+    let cur = capture_ses_proto_sigs(&realm.ctx);
+    for (idx, name) in SES_PROTO_NAMES.iter().enumerate() {
+        if cur[idx] != realm.ses_proto_sigs[idx] {
+            return Some(name);
+        }
+    }
+    None
 }
 
 #[inline]
@@ -695,6 +715,7 @@ pub(crate) fn create_bare_boa_realm_for_tenant(tenant_id: &str) -> WarmBoaRealm 
         .build()
         .unwrap_or_else(|_| boa_engine::Context::default());
     register_slice_native_host_functions(&mut ctx);
+    BOA_SES_BASELINE_SIGS.with(|s| s.set(None));
     let ses_proto_sigs = capture_ses_proto_sigs(&ctx);
     WarmBoaRealm {
         owner_tenant: CompactString::new(tenant_id),
@@ -730,7 +751,9 @@ pub(crate) fn populate_realm_cached_handles(realm: &mut WarmBoaRealm) {
             .get(boa_engine::js_string!("__slice_check_ses"), &mut realm.ctx)
             .ok()
             .and_then(|v| v.as_object());
-        realm.ses_proto_sigs = capture_ses_proto_sigs(&realm.ctx);
+        realm.ses_proto_sigs = BOA_SES_BASELINE_SIGS
+            .with(|s| s.replace(None))
+            .unwrap_or_else(|| capture_ses_proto_sigs(&realm.ctx));
     }
     if realm.ensure_shard_fn.is_none() {
         realm.ensure_shard_fn = global
@@ -842,6 +865,9 @@ pub(crate) fn ensure_realm_shards(
     for shard_id in crate::js_preludes::SHARD_LOAD_ORDER {
         let bit = 1u32 << shard_id;
         if (missing & bit) != 0 {
+            let str_clean_before_intl = shard_id == 18
+                && proto_sig(&realm.ctx.intrinsics().constructors().string().prototype())
+                    == realm.ses_proto_sigs[3];
             if lazy_getters_active {
                 if let Some(ref ensure_fn) = realm.ensure_shard_fn {
                     let _ = ensure_fn.call(
@@ -854,8 +880,9 @@ pub(crate) fn ensure_realm_shards(
                 let _ = crate::js_preludes::eval_lazy_prelude_shard(shard_id, &mut realm.ctx);
             }
             realm.loaded_shards_mask |= bit;
-            if shard_id == 18 {
-                realm.ses_proto_sigs = capture_ses_proto_sigs(&realm.ctx);
+            if str_clean_before_intl {
+                realm.ses_proto_sigs[3] =
+                    proto_sig(&realm.ctx.intrinsics().constructors().string().prototype());
             }
             if shard_id == 8 && realm.init_worker_self_fn.is_none() {
                 realm.init_worker_self_fn = realm
@@ -910,6 +937,7 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_uncaught_error: Option<String>,
     pub(crate) saved_ev_loop: Option<crate::event_loop::SavedEventLoopSnapshot>,
     pub(crate) saved_wasm_state: Option<crate::wasm::WasmThreadState>,
+    pub(crate) saved_ses_intl_pair: Option<(SesProtoSig, SesProtoSig)>,
 }
 
 impl SavedIsolateContextGuard {
@@ -1002,6 +1030,7 @@ impl SavedIsolateContextGuard {
         };
         let saved_ev_loop = crate::event_loop::save_and_reset_event_loop_state();
         let saved_wasm_state = crate::wasm::take_thread_wasm_state_if_nonempty();
+        let saved_ses_intl_pair = BOA_SES_INTL_SIG_PAIR.with(|p| p.replace(None));
 
         Self {
             saved_stdout,
@@ -1036,6 +1065,7 @@ impl SavedIsolateContextGuard {
             saved_uncaught_error,
             saved_ev_loop,
             saved_wasm_state,
+            saved_ses_intl_pair,
         }
     }
 }
@@ -1114,5 +1144,6 @@ impl Drop for SavedIsolateContextGuard {
         BOA_HTTP_RES.with(|res| *res.borrow_mut() = self.saved_http_res.take());
         BOA_WS_UPGRADED.with(|w| w.set(self.saved_ws_upgraded));
         BOA_WAIT_UNTIL_COUNT.with(|c| c.set(self.saved_wait_until_count));
+        BOA_SES_INTL_SIG_PAIR.with(|p| p.set(self.saved_ses_intl_pair));
     }
 }

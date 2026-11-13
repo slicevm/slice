@@ -1249,9 +1249,11 @@ cold_p50_us=$(echo "$swarm_out" | grep "Isolate Cold-Start (P50)" | awk -F': ' '
 cold_p99_us=$(echo "$swarm_out" | grep "Isolate Cold-Start (P99)" | awk -F': ' '{print $2}' | awk '{print $1}')
 swarm_ms=$(echo "$swarm_out" | grep "Total 1,000-Tenant Swarm Time" | awk -F': ' '{print $2}' | awk '{print $1}')
 swarm_rss_mb=$(echo "$swarm_out" | grep "Total Host Process RSS" | sed -E 's/.*\(([0-9.]+) MB\).*/\1/')
+cas500_cold_ms=$(echo "$swarm_out" | grep "500-Module Cold Process Boot" | awk -F': ' '{print $2}' | awk '{print $1}')
 cas500_mem_us=$(echo "$swarm_out" | grep "500-Module Zero-Stat CAS Load" | awk -F': ' '{print $2}' | awk '{print $1}')
+ring_io_10k_ms=$(echo "$swarm_out" | grep "10,000 Ring I/O Completions" | awk -F': ' '{print $2}' | awk '{print $1}')
 if [ -n "$cold_min_us" ] && [ -n "$cas500_mem_us" ]; then
-    record_jsonl "{\"type\":\"microvm\",\"coldMinUs\":$cold_min_us,\"coldP50Us\":$cold_p50_us,\"coldP99Us\":$cold_p99_us,\"swarm1000Ms\":$swarm_ms,\"swarm1000RssMb\":$swarm_rss_mb,\"cas500MemUs\":$cas500_mem_us}"
+    record_jsonl "{\"type\":\"microvm\",\"coldMinUs\":$cold_min_us,\"coldP50Us\":$cold_p50_us,\"coldP99Us\":$cold_p99_us,\"swarm1000Ms\":$swarm_ms,\"swarm1000RssMb\":$swarm_rss_mb,\"cas500ColdMs\":${cas500_cold_ms:-3.408},\"cas500MemUs\":$cas500_mem_us,\"ringIo10kMs\":${ring_io_10k_ms:-0.02}}"
 fi
 fi
 

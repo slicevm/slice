@@ -3,22 +3,22 @@
 
 use crate::boa_realm::{
     acquire_warm_boa_realm, acquire_warm_boa_realm_for_tenant, call_realm_ctl,
-    capture_ses_proto_sigs, create_bare_boa_realm, create_bare_boa_realm_for_tenant,
-    create_warm_boa_realm, ensure_realm_shards, ensure_vfs_tenant_affinity,
-    eval_or_reuse_cached_script, has_process_exit, has_ses_proto_sig_mismatch, has_uncaught_error,
-    mark_exec_dirty, release_warm_boa_realm, try_acquire_pooled_boa_realm,
-    try_acquire_pooled_boa_realm_for_tenant, vfs_owner_namespace, WarmBoaRealm, BOA_ACTIVE_CAPS,
-    BOA_ACTIVE_TENANT, BOA_CHECKPOINT_STATS, BOA_CONTEXT_POOL, BOA_CUSTOM_ARGV, BOA_DET_STATE,
-    BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, BOA_EXEC_DIRTY,
-    BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET,
-    BOA_LAST_CHILD_PROC_VIOLATION, BOA_LAST_EXIT_CODE, BOA_NET_HOSTS, BOA_PROCESS_EXIT, BOA_STDOUT,
-    BOA_UNCAUGHT_ERROR, BOA_UNHANDLED_REJECTIONS, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VFS_MTIMES,
-    BOA_VFS_OWNER_TENANT, BOA_VFS_TOMBSTONES, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED,
-    CHECKPOINT_SLAB, DIRTY_FETCH_MOCK, DIRTY_SOCKETS, DIRTY_WASM, DIRTY_WEBSOCKET, DIRTY_WORKERS,
-    EXEC_DIRTY_ARGV, EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS,
-    EXEC_DIRTY_UNCAUGHT, HOST_GROUP_DET, HOST_GROUP_HTTP_BRIDGE, HOST_GROUP_KV_SANDBOX,
-    HOST_GROUP_SEMVER_FAST, REALM_CTL_DISPATCH_HTTP_BRIDGE, REALM_CTL_RESET_MT, REALM_CTL_RESET_WU,
-    REALM_CTL_SET_DET_MODE, REALM_CTL_SET_NEXT_TICK, REALM_CTL_SYNC_ENV,
+    create_bare_boa_realm, create_bare_boa_realm_for_tenant, create_warm_boa_realm,
+    ensure_realm_shards, ensure_vfs_tenant_affinity, eval_or_reuse_cached_script,
+    first_ses_proto_sig_mismatch, has_process_exit, has_uncaught_error, mark_exec_dirty,
+    release_warm_boa_realm, try_acquire_pooled_boa_realm, try_acquire_pooled_boa_realm_for_tenant,
+    vfs_owner_namespace, WarmBoaRealm, BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_CHECKPOINT_STATS,
+    BOA_CONTEXT_POOL, BOA_CUSTOM_ARGV, BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS,
+    BOA_ENV_MAP, BOA_EXEC_BINS, BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ,
+    BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_LAST_EXIT_CODE,
+    BOA_NET_HOSTS, BOA_PROCESS_EXIT, BOA_SES_INTL_SIG_PAIR, BOA_STDOUT, BOA_UNCAUGHT_ERROR,
+    BOA_UNHANDLED_REJECTIONS, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VFS_MTIMES, BOA_VFS_OWNER_TENANT,
+    BOA_VFS_TOMBSTONES, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, CHECKPOINT_SLAB,
+    DIRTY_FETCH_MOCK, DIRTY_SOCKETS, DIRTY_WASM, DIRTY_WEBSOCKET, DIRTY_WORKERS, EXEC_DIRTY_ARGV,
+    EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS, EXEC_DIRTY_UNCAUGHT,
+    HOST_GROUP_DET, HOST_GROUP_HTTP_BRIDGE, HOST_GROUP_KV_SANDBOX, HOST_GROUP_SEMVER_FAST,
+    REALM_CTL_DISPATCH_HTTP_BRIDGE, REALM_CTL_RESET_MT, REALM_CTL_RESET_WU, REALM_CTL_SET_DET_MODE,
+    REALM_CTL_SET_NEXT_TICK, REALM_CTL_SYNC_ENV,
 };
 use crate::boacas::{
     BOACAS_FLAG_HAS_HTTP_BRIDGE, BOACAS_FLAG_HAS_KV_SANDBOX, BOACAS_FLAG_HAS_NEXT_TICK,
@@ -292,6 +292,7 @@ impl SliceIsolate {
     pub(crate) fn setup_boa_compartment_thread_locals(&self) -> BoaSessionFlags {
         BOA_STDOUT.with(|out| out.borrow_mut().clear());
         BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
+        BOA_SES_INTL_SIG_PAIR.with(|p| p.set(None));
         BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(0));
         let stale_exec_dirty = BOA_EXEC_DIRTY.with(|c| c.replace(0));
         if stale_exec_dirty != 0 {
@@ -612,9 +613,16 @@ impl SliceIsolate {
         self.restore_time_ns = cp_restore_ns;
 
         let pending_violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
-        let proto_sig_changed = has_ses_proto_sig_mismatch(&realm);
+        if let Some((pre_intl, post_intl)) = BOA_SES_INTL_SIG_PAIR.with(|p| p.replace(None)) {
+            if realm.ses_proto_sigs[3] == pre_intl {
+                realm.ses_proto_sigs[3] = post_intl;
+            }
+            realm.loaded_shards_mask |= 1 << 18;
+        }
         let mut ses_mutated_target = String::new();
-        if check_ses || proto_sig_changed || pending_violation.is_some() {
+        if let Some(proto_name) = first_ses_proto_sig_mismatch(&realm) {
+            ses_mutated_target.push_str(proto_name);
+        } else if check_ses || pending_violation.is_some() {
             if let Some(check_fn) = realm.ses_check_fn.clone() {
                 if let Ok(v) = check_fn.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
                 {
@@ -622,8 +630,6 @@ impl SliceIsolate {
                         let st = s.to_std_string_escaped();
                         if !st.is_empty() {
                             ses_mutated_target = st;
-                        } else if proto_sig_changed {
-                            realm.ses_proto_sigs = capture_ses_proto_sigs(&realm.ctx);
                         }
                     }
                 }
@@ -938,8 +944,11 @@ impl SliceIsolate {
                     || js_code.contains("__proto__")
                     || js_code.contains("Reflect")
                     || js_code.contains("defineProperty")
+                    || js_code.contains("defineProperties")
+                    || js_code.contains("setPrototypeOf")
+                    || js_code.contains("getPrototypeOf")
+                    || js_code.contains("constructor")
                     || js_code.contains("Object[")
-                    || js_code.contains("][")
             });
         self.last_exec_check_ses = has_ses_keywords;
         let check_ses = should_check_ses && has_ses_keywords;
@@ -1065,7 +1074,7 @@ impl SliceIsolate {
 
         let has_ses_flag = (header.feature_flags & BOACAS_FLAG_NEEDS_SES_CHECK) != 0;
         self.last_exec_check_ses = has_ses_flag;
-        let check_ses = should_check_ses && (has_ses_flag || is_cold_bare_realm);
+        let check_ses = should_check_ses && has_ses_flag;
 
         self.finish_boa_compartment_execution(
             realm,

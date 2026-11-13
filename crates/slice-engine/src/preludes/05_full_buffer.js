@@ -32,7 +32,16 @@
 
   Buffer.from = function(value, encOrOffset, length) {
     if (typeof value === "string") {
-      var e = encOrOffset ? String(encOrOffset).toLowerCase() : "utf8";
+      if (!encOrOffset || encOrOffset === "utf8" || encOrOffset === "utf-8") {
+        return __wrapBuf(__slice_text_encode(value));
+      }
+      if (encOrOffset === "base64" || encOrOffset === "base64url") {
+        return __wrapBuf(__slice_base64_decode_bytes(value));
+      }
+      if (encOrOffset === "hex") {
+        return __wrapBuf(__slice_hex_decode(value));
+      }
+      var e = String(encOrOffset).toLowerCase();
       if (e === "base64" || e === "base64url") {
         return __wrapBuf(__slice_base64_decode_bytes(value));
       }
@@ -135,6 +144,12 @@
   };
 
   Buffer.prototype.toString = function(encoding, start, end) {
+    if (start === undefined && end === undefined) {
+      if (!encoding || encoding === "utf8" || encoding === "utf-8") return __slice_buf_to_utf8(this);
+      if (encoding === "base64") return __slice_base64_encode_bytes(this, false);
+      if (encoding === "hex") return __slice_bytes_to_hex(this);
+      if (encoding === "base64url") return __slice_base64_encode_bytes(this, true);
+    }
     var len = this.length;
     if (len === 0) return "";
     var s = start === undefined ? 0 : Math.max(0, Number(start) | 0);
