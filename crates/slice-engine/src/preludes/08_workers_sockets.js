@@ -597,11 +597,17 @@
       }
     });
 
+    var remHost = meta.remoteAddress && meta.remoteAddress.indexOf(":") !== -1 && meta.remoteAddress.charCodeAt(0) !== 91
+      ? "[" + meta.remoteAddress + "]"
+      : meta.remoteAddress;
     var remStr = meta.remotePort
-      ? (meta.remoteAddress + ":" + meta.remotePort)
+      ? (remHost + ":" + meta.remotePort)
       : (meta.remoteAddress || (origHostname + ":" + meta.port));
+    var locHost = meta.localAddress && meta.localAddress.indexOf(":") !== -1 && meta.localAddress.charCodeAt(0) !== 91
+      ? "[" + meta.localAddress + "]"
+      : meta.localAddress;
     var locStr = meta.localPort
-      ? (meta.localAddress + ":" + meta.localPort)
+      ? (locHost + ":" + meta.localPort)
       : (meta.localAddress || "127.0.0.1:0");
     var openedPromise = Promise.resolve({
       remoteAddress: remStr,

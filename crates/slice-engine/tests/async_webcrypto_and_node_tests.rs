@@ -3901,3 +3901,192 @@ w.onmessage = (ev: any) => {
     let m_worker = iso_worker.execute_bytecode(&bc_worker, None).unwrap();
     assert_eq!(m_worker.stdout, vec!["received:worker-done-5150ms"]);
 }
+
+#[test]
+fn test_webcrypto_truncated_gcm_kdf_bounds_encoding_surrogates_and_ipv6_net() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // Bind IPv6 loopback `[::1]:0` if available on this host, else IPv4 `127.0.0.1:0`
+    let (listener, connect_host, expected_ip, allow_entry) = match TcpListener::bind("[::1]:0") {
+        Ok(l) => {
+            let p = l.local_addr().unwrap().port();
+            (
+                l,
+                "::1".to_string(),
+                "::1".to_string(),
+                format!("[::1]:{}", p),
+            )
+        }
+        Err(_) => {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let p = l.local_addr().unwrap().port();
+            (
+                l,
+                "127.0.0.1".to_string(),
+                "127.0.0.1".to_string(),
+                format!("127.0.0.1:{}", p),
+            )
+        }
+    };
+    let port = listener.local_addr().unwrap().port();
+    let srv_handle = std::thread::spawn(move || {
+        if let Ok((mut s, _)) = listener.accept() {
+            let mut b = [0u8; 64];
+            let _ = s.read(&mut b);
+            let _ = s.write_all(b"pong");
+        }
+    });
+
+    let script = format!(
+        r#"
+import crypto from "node:crypto";
+import zlib from "node:zlib";
+import net from "node:net";
+
+async function run() {{
+    // 1. WebCrypto AES-GCM with 96-bit and 64-bit authentication tags (round-trip + tamper rejection)
+    const key = await globalThis.crypto.subtle.generateKey(
+        {{ name: "AES-GCM", length: 256 }},
+        true,
+        ["encrypt", "decrypt"]
+    );
+    const iv = new Uint8Array([1,2,3,4,5,6,7,8,9,10,11,12]);
+    const aad = new TextEncoder().encode("header-aad-v1");
+    const plain = new TextEncoder().encode("truncated-gcm-tag-secret-payload!");
+    const ct96 = new Uint8Array(
+        await globalThis.crypto.subtle.encrypt(
+            {{ name: "AES-GCM", iv, additionalData: aad, tagLength: 96 }},
+            key,
+            plain
+        )
+    );
+    const dec96 = new TextDecoder().decode(
+        await globalThis.crypto.subtle.decrypt(
+            {{ name: "AES-GCM", iv, additionalData: aad, tagLength: 96 }},
+            key,
+            ct96
+        )
+    );
+    const tampered = new Uint8Array(ct96);
+    tampered[tampered.length - 1] ^= 1;
+    let tamperRejected = false;
+    try {{
+        await globalThis.crypto.subtle.decrypt(
+            {{ name: "AES-GCM", iv, additionalData: aad, tagLength: 96 }},
+            key,
+            tampered
+        );
+    }} catch (_e) {{
+        tamperRejected = true;
+    }}
+
+    // Also verify node:crypto createCipheriv/createDecipheriv with authTagLength: 12
+    const rawKey = new Uint8Array(await globalThis.crypto.subtle.exportKey("raw", key));
+    const cip = crypto.createCipheriv("aes-256-gcm", rawKey, iv, {{ authTagLength: 12 }});
+    cip.setAAD(aad);
+    const cBody = Buffer.concat([cip.update("node-gcm-96"), cip.final()]);
+    const cTag = cip.getAuthTag();
+    const decip = crypto.createDecipheriv("aes-256-gcm", rawKey, iv, {{ authTagLength: 12 }});
+    decip.setAAD(aad);
+    decip.setAuthTag(cTag);
+    const nodeGcmDec = Buffer.concat([decip.update(cBody), decip.final()]).toString("utf8");
+
+    // 2. PBKDF2 > u32::MAX must reject cleanly (never wrap to 1 iteration), and HKDF > 255*HashLen throws RangeError
+    let pbkdf2OverflowRejected = false;
+    try {{
+        crypto.pbkdf2Sync("pw", "salt", 4294967297, 32, "sha256");
+    }} catch (e) {{
+        pbkdf2OverflowRejected = e instanceof RangeError;
+    }}
+    let hkdfOversizeRangeErr = false;
+    try {{
+        crypto.hkdfSync("sha256", "ikm", "salt", "info", 9000);
+    }} catch (e) {{
+        hkdfOversizeRangeErr = e instanceof RangeError;
+    }}
+
+    // 3. btoa unpaired surrogate throws DOMException("InvalidCharacterError"),
+    //    and TextEncoder encode & encodeInto replace unpaired surrogates with U+FFFD [0xEF, 0xBF, 0xBD]
+    let btoaSurrogateDomEx = false;
+    try {{
+        btoa("ok\uD800");
+    }} catch (e) {{
+        btoaSurrogateDomEx = (e instanceof DOMException) && e.name === "InvalidCharacterError";
+    }}
+    const encBytes = Array.from(new TextEncoder().encode("A\uD800B"));
+    const intoBuf = new Uint8Array(8);
+    const intoRes = new TextEncoder().encodeInto("A\uDC00B", intoBuf);
+    const intoSlice = Array.from(intoBuf.subarray(0, intoRes.written));
+
+    // 4. Non-power-of-two (1000-byte) repetitive DEFLATE/Gzip round-trip
+    const repBuf = Buffer.alloc(1000);
+    for (let i = 0; i < 1000; i++) repBuf[i] = (i % 17) + 65;
+    const gz = zlib.gzipSync(repBuf);
+    const ungz = zlib.gunzipSync(gz);
+    const deflateExact = Buffer.compare(repBuf, ungz) === 0;
+
+    // 5. node:net remoteAddress / remotePort parsing (including IPv6 `[::1]:port`)
+    const addrInfo = await new Promise((resolve, reject) => {{
+        const sock = net.createConnection({{ host: {host:?}, port: {port} }}, () => {{
+            const info = {{
+                remoteAddress: sock.remoteAddress,
+                remotePort: sock.remotePort,
+                localPortValid: typeof sock.localPort === "number" && sock.localPort > 0,
+            }};
+            sock.end("ping");
+            resolve(info);
+        }});
+        sock.on("error", reject);
+    }});
+
+    console.log(JSON.stringify({{
+        ct96Len: ct96.length,
+        plainLen: plain.length,
+        dec96,
+        tamperRejected,
+        nodeGcmDec,
+        pbkdf2OverflowRejected,
+        hkdfOversizeRangeErr,
+        btoaSurrogateDomEx,
+        encBytes,
+        intoRead: intoRes.read,
+        intoWritten: intoRes.written,
+        intoSlice,
+        deflateExact,
+        addrInfo,
+    }}));
+}}
+run();
+"#,
+        host = connect_host,
+        port = port
+    );
+
+    let bundled = slice_cas::strip_typescript_and_normalize(&script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let caps = CapabilityToken::pure_compute().with_net_host(allow_entry);
+    let mut iso = SliceIsolate::spawn("step10-crypto-net", 1, caps, 15_000_000, 16 * 1024 * 1024);
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    let _ = srv_handle.join();
+
+    let v: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(
+        v["ct96Len"].as_u64().unwrap(),
+        v["plainLen"].as_u64().unwrap() + 12
+    );
+    assert_eq!(v["dec96"], "truncated-gcm-tag-secret-payload!");
+    assert_eq!(v["tamperRejected"], true);
+    assert_eq!(v["nodeGcmDec"], "node-gcm-96");
+    assert_eq!(v["pbkdf2OverflowRejected"], true);
+    assert_eq!(v["hkdfOversizeRangeErr"], true);
+    assert_eq!(v["btoaSurrogateDomEx"], true);
+    assert_eq!(v["encBytes"], serde_json::json!([65, 239, 191, 189, 66]));
+    assert_eq!(v["intoRead"], 3);
+    assert_eq!(v["intoWritten"], 5);
+    assert_eq!(v["intoSlice"], serde_json::json!([65, 239, 191, 189, 66]));
+    assert_eq!(v["deflateExact"], true);
+    assert_eq!(v["addrInfo"]["remoteAddress"], expected_ip);
+    assert_eq!(v["addrInfo"]["remotePort"], port);
+    assert_eq!(v["addrInfo"]["localPortValid"], true);
+}

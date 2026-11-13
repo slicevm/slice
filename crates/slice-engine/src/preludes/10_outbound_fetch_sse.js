@@ -159,18 +159,24 @@
     };
   }
 
+  function __wireToResponse(raw, fallbackUrl) {
+    var bodyArg = raw.bodyBase64 ? __slice_base64_decode_bytes(raw.bodyBase64) : raw.body;
+    var r = new Response(bodyArg, { status: raw.status, statusText: raw.statusText, headers: raw.headers });
+    r.url = raw.finalUrl || fallbackUrl;
+    r.redirected = Boolean(raw.redirected);
+    return r;
+  }
+
   function __doFetch(input, init) {
     var req = new Request(input, init);
     var sig = (init && init.signal) || req.signal || null;
     if (sig && sig.aborted) throw (sig.reason !== undefined ? sig.reason : __mkAbortErr());
+    var reqBody = req._u8 instanceof Uint8Array ? req._u8 : req._body;
     var raw = JSON.parse(
-      __slice_fetch_sync(req.url, req.method, JSON.stringify(req.headers.entries()), req._body, req.redirect || "follow")
+      __slice_fetch_sync(req.url, req.method, JSON.stringify(req.headers.entries()), reqBody, req.redirect || "follow")
     );
     if (raw.__error) throw new Error(raw.__error);
-    var r = new Response(raw.body, { status: raw.status, statusText: raw.statusText, headers: raw.headers });
-    r.url = raw.finalUrl || req.url;
-    r.redirected = Boolean(raw.redirected);
-    return r;
+    return __wireToResponse(raw, req.url);
   }
 
   globalThis.fetch = function(input, init) {
@@ -180,53 +186,53 @@
       if (sig && sig.aborted) {
         return Promise.reject(sig.reason !== undefined ? sig.reason : __mkAbortErr());
       }
-      var hdrs = JSON.stringify(req.headers.entries());
-      var fast = __slice_fetch_try_fast(req.url, req.method, hdrs, req._body, req.redirect || "follow");
-      if (fast !== "") {
-        var raw = JSON.parse(fast);
-        if (raw.__error) return Promise.reject(new Error(raw.__error));
-        var r = new Response(raw.body, { status: raw.status, statusText: raw.statusText, headers: raw.headers });
-        r.url = raw.finalUrl || req.url;
-        r.redirected = Boolean(raw.redirected);
-        return Promise.resolve(r);
-      }
-      return new Promise(function(res, rej) {
-        var settled = false;
-        if (sig && typeof sig.addEventListener === "function") {
-          sig.addEventListener("abort", function() {
-            if (!settled) {
-              settled = true;
-              rej(sig.reason !== undefined ? sig.reason : __mkAbortErr());
-            }
-          });
+      var dispatchFetch = function(reqBodyVal) {
+        var hdrs = JSON.stringify(req.headers.entries());
+        var fast = __slice_fetch_try_fast(req.url, req.method, hdrs, reqBodyVal, req.redirect || "follow");
+        if (fast !== "") {
+          var raw = JSON.parse(fast);
+          if (raw.__error) return Promise.reject(new Error(raw.__error));
+          return Promise.resolve(__wireToResponse(raw, req.url));
         }
-        __slice_fetch_enqueue(
-          req.url,
-          req.method,
-          hdrs,
-          req._body,
-          req.redirect || "follow",
-          function(rawStr) {
-            if (settled) return;
-            settled = true;
-            var raw2 = JSON.parse(rawStr);
-            if (raw2.__error) {
-              rej(new Error(raw2.__error));
-              return;
-            }
-            var r2 = new Response(raw2.body, { status: raw2.status, statusText: raw2.statusText, headers: raw2.headers });
-            r2.url = raw2.finalUrl || req.url;
-            r2.redirected = Boolean(raw2.redirected);
-            res(r2);
-          },
-          function(errReason) {
-            if (settled) return;
-            settled = true;
-            rej(errReason !== undefined ? errReason : __mkAbortErr());
-          },
-          sig
-        );
-      });
+        return new Promise(function(res, rej) {
+          var settled = false;
+          if (sig && typeof sig.addEventListener === "function") {
+            sig.addEventListener("abort", function() {
+              if (!settled) {
+                settled = true;
+                rej(sig.reason !== undefined ? sig.reason : __mkAbortErr());
+              }
+            });
+          }
+          __slice_fetch_enqueue(
+            req.url,
+            req.method,
+            hdrs,
+            reqBodyVal,
+            req.redirect || "follow",
+            function(rawStr) {
+              if (settled) return;
+              settled = true;
+              var raw2 = JSON.parse(rawStr);
+              if (raw2.__error) {
+                rej(new Error(raw2.__error));
+                return;
+              }
+              res(__wireToResponse(raw2, req.url));
+            },
+            function(errReason) {
+              if (settled) return;
+              settled = true;
+              rej(errReason !== undefined ? errReason : __mkAbortErr());
+            },
+            sig
+          );
+        });
+      };
+      if (req._stream) {
+        return req.bytes().then(dispatchFetch);
+      }
+      return dispatchFetch(req._u8 instanceof Uint8Array ? req._u8 : req._body);
     } catch (e) {
       return Promise.reject(e);
     }
@@ -247,18 +253,25 @@
         o = c || {};
       }
       var h = new Headers(o.headers);
-      var bd = o.body === undefined || o.body === null ? "" : (typeof o.body === "string" ? o.body : JSON.stringify(o.body));
-      if (typeof o.body === "object" && o.body !== null && !h._m["content-type"]) {
-        h._m["content-type"] = "application/json";
+      var isBin = o.body instanceof Uint8Array || o.body instanceof ArrayBuffer || Boolean(o.body && o.body.buffer instanceof ArrayBuffer);
+      var wireObj = {
+        status: o.status || 200,
+        statusText: o.statusText || "OK",
+        headers: h.entries(),
+        body: ""
+      };
+      if (isBin) {
+        wireObj.bodyBase64 = __slice_base64_encode_bytes(__slice_toU8(o.body), false);
+      } else {
+        wireObj.body = o.body === undefined || o.body === null ? "" : (typeof o.body === "string" ? o.body : JSON.stringify(o.body));
+        if (typeof o.body === "object" && o.body !== null && !h._m["content-type"]) {
+          h._m["content-type"] = "application/json";
+          wireObj.headers = h.entries();
+        }
       }
       __slice_mock_fetch(
         m === "*" ? u : (m + " " + u),
-        JSON.stringify({
-          status: o.status || 200,
-          statusText: o.statusText || "OK",
-          headers: h.entries(),
-          body: bd
-        })
+        JSON.stringify(wireObj)
       );
     };
   }

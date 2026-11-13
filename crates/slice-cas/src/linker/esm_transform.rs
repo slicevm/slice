@@ -172,20 +172,45 @@ fn line_contains_ident_token(line: &str, ident: &str) -> bool {
     let bytes = line.as_bytes();
     let ibytes = ident.as_bytes();
     let ilen = ibytes.len();
-    if ilen == 0 || bytes.len() < ilen {
+    let len = bytes.len();
+    if ilen == 0 || len < ilen {
         return false;
     }
     let is_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
-    let mut pos = 0usize;
-    while let Some(rel) = memchr::memmem::find(&bytes[pos..], ibytes) {
-        let idx = pos + rel;
-        let end = idx + ilen;
-        let ok_start = idx == 0 || !is_cont(bytes[idx - 1]);
-        let ok_end = end == bytes.len() || !is_cont(bytes[end]);
-        if ok_start && ok_end {
-            return true;
+    let mut i = 0usize;
+    while i < len {
+        let b = bytes[i];
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            break;
         }
-        pos = idx + 1;
+        if b == b'\'' || b == b'"' || b == b'`' {
+            let q = b;
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(len);
+                    continue;
+                }
+                if bytes[i] == q {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if is_cont(b) {
+            let start = i;
+            i += 1;
+            while i < len && is_cont(bytes[i]) {
+                i += 1;
+            }
+            if &bytes[start..i] == ibytes {
+                return true;
+            }
+            continue;
+        }
+        i += 1;
     }
     false
 }

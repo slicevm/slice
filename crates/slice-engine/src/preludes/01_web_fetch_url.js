@@ -223,14 +223,24 @@
     return "/" + out.join("/") + (p.length > 1 && p.charCodeAt(p.length - 1) === 47 && out.length > 0 ? "/" : "");
   }
 
-  function __hasNonSpecialScheme(s) {
-    var ci = s.indexOf(":");
-    if (ci <= 0) return false;
-    var sl = s.indexOf("/");
-    if (sl !== -1 && sl < ci) return false;
-    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*$/.test(s.slice(0, ci))) return false;
-    var p = s.slice(0, ci + 1).toLowerCase();
-    return p !== "http:" && p !== "https:" && p !== "ws:" && p !== "wss:" && p !== "file:" && p !== "ftp:";
+  function __hasRfc3986Scheme(s) {
+    var len = s.length;
+    if (len < 2) return false;
+    var c0 = s.charCodeAt(0);
+    if (!((c0 >= 65 && c0 <= 90) || (c0 >= 97 && c0 <= 122))) return false;
+    for (var i = 1; i < len; i++) {
+      var c = s.charCodeAt(i);
+      if (c === 58) return true;
+      var ok =
+        (c >= 65 && c <= 90) ||
+        (c >= 97 && c <= 122) ||
+        (c >= 48 && c <= 57) ||
+        c === 43 ||
+        c === 45 ||
+        c === 46;
+      if (!ok) return false;
+    }
+    return false;
   }
 
   var FastUrlProto;
@@ -282,7 +292,7 @@
       if (fastU !== null) return fastU;
     }
     var raw = (input && input._isSliceUrl) ? input.href : (typeof input === "string" ? input.trim() : String(input).trim());
-    if (base !== undefined && raw.indexOf("https://") !== 0 && raw.indexOf("http://") !== 0 && raw.indexOf("://") === -1 && !__hasNonSpecialScheme(raw)) {
+    if (base !== undefined && !__hasRfc3986Scheme(raw)) {
       if (typeof base === "string" && raw.charCodeAt(0) === 47 && raw.charCodeAt(1) !== 47) {
         var bsi = base.indexOf("://");
         if (bsi > 0 && base.indexOf("?", bsi + 3) === -1 && base.indexOf("#", bsi + 3) === -1) {

@@ -1808,7 +1808,11 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                         .is_none_or(|alt| is_supported_stmt(alt, in_function_depth))
             }
             Statement::WhileStatement(ws) => {
-                in_function_depth > 0
+                (in_function_depth > 0
+                    || matches!(
+                        ws.test.without_parentheses(),
+                        Expression::BooleanLiteral(b) if b.value
+                    ))
                     && is_supported_expr(&ws.test, in_function_depth)
                     && is_supported_stmt(&ws.body, in_function_depth)
             }
@@ -2115,18 +2119,27 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
     let source = strip_typescript_and_normalize(raw_source, true);
     let src_bytes = source.as_bytes();
 
-    let has_direct_intrinsic_attack = (memchr::memmem::find(src_bytes, b"Object.prototype.")
-        .is_some()
-        || memchr::memmem::find(src_bytes, b"Array.prototype.").is_some()
-        || memchr::memmem::find(src_bytes, b"while (true)").is_some()
-        || memchr::memmem::find(src_bytes, b"while(true)").is_some())
+    let has_while_true = memchr::memmem::find(src_bytes, b"while (true)").is_some()
+        || memchr::memmem::find(src_bytes, b"while(true)").is_some();
+    let tier0_ast_ok = match tier_ov {
+        Some(0) => true,
+        Some(1) if !has_while_true => false,
+        _ => is_tier0_slicesnp_compatible_ast(&source),
+    };
+    let has_proto_mutation = (memchr::memmem::find(src_bytes, b"Object.prototype.").is_some()
+        || memchr::memmem::find(src_bytes, b"Array.prototype.").is_some())
+        && memchr::memmem::find(src_bytes, b"async ").is_none()
+        && memchr::memmem::find(src_bytes, b"await ").is_none()
+        && memchr::memmem::find(src_bytes, b"try ").is_none()
+        && memchr::memmem::find(src_bytes, b"try{").is_none();
+    let has_direct_intrinsic_attack = (has_proto_mutation || (has_while_true && tier0_ast_ok))
         && memchr::memmem::find(src_bytes, b"Slice.").is_none()
         && memchr::memmem::find(src_bytes, b"Worker").is_none();
 
     let route_to_tier1_boa = match tier_ov {
         Some(1) => !has_direct_intrinsic_attack,
         Some(0) => false,
-        _ => !has_direct_intrinsic_attack && !is_tier0_slicesnp_compatible_ast(&source),
+        _ => !has_direct_intrinsic_attack && !tier0_ast_ok,
     };
 
     let tokens_opt = if route_to_tier1_boa {

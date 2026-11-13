@@ -1,13 +1,27 @@
 // Slice (Nexus-JS) Lazy Prelude Shard 2: Encoding (`btoa`, `atob`, `TextEncoder`, `TextDecoder`) (`02_encoding_events.js`)
 (function() {
+  function __throwInvalidChar(e) {
+    var msg = e && e.message ? String(e.message) : "InvalidCharacterError";
+    if (!globalThis.DOMException) __slice_ensure_shard(13);
+    throw new globalThis.DOMException(msg, "InvalidCharacterError");
+  }
+
   globalThis.btoa = function(s) {
     if (arguments.length === 0) throw new TypeError("btoa requires at least 1 argument");
-    return __slice_btoa(String(s));
+    try {
+      return __slice_btoa(typeof s === "string" ? s : String(s));
+    } catch (e) {
+      __throwInvalidChar(e);
+    }
   };
 
   globalThis.atob = function(s) {
     if (arguments.length === 0) throw new TypeError("atob requires at least 1 argument");
-    return __slice_atob(String(s));
+    try {
+      return __slice_atob(typeof s === "string" ? s : String(s));
+    } catch (e) {
+      __throwInvalidChar(e);
+    }
   };
 
   function TextEncoder() {

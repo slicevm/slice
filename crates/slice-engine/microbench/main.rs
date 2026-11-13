@@ -130,6 +130,7 @@ fib(30);
                 black_box(&iv_12),
                 black_box(aad),
                 black_box(&ct),
+                black_box(&key_256),
                 128,
             )
             .expect("open");

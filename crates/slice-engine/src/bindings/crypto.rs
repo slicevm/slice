@@ -590,7 +590,7 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
             {
                 let res = if handle_id != 0 {
                     with_cached_crypto_key(handle_id, &tenant, |mat| match mat {
-                        CachedCryptoKeyMaterial::AesGcm { less_safe, .. } => {
+                        CachedCryptoKeyMaterial::AesGcm { less_safe, raw } => {
                             if is_encrypt {
                                 Some(aes_gcm_seal_with_key(
                                     less_safe,
@@ -602,6 +602,7 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                             } else {
                                 Some(aes_gcm_open_with_key(
                                     less_safe,
+                                    raw,
                                     &iv_bytes,
                                     &aad_bytes,
                                     &data_bytes,
@@ -1755,21 +1756,32 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 }
                 _ => Vec::new(),
             };
-            let iterations_or_n = args
-                .get(5)
-                .and_then(|v| v.as_number())
-                .map(|n| n.max(0.0) as usize)
-                .unwrap_or(1);
-            let byte_len = args
-                .get(6)
-                .and_then(|v| v.as_number())
-                .map(|n| n.max(0.0) as usize)
-                .unwrap_or(32);
-            if byte_len > 1_048_576 {
+            let raw_iters_or_n = args.get(5).and_then(|v| v.as_number()).unwrap_or(1.0);
+            if !raw_iters_or_n.is_finite() || raw_iters_or_n < 0.0 || raw_iters_or_n.fract() != 0.0
+            {
+                return Err(JsNativeError::range()
+                    .with_message("OperationError: KDF iterations/cost must be a non-negative integer")
+                    .into());
+            }
+            let iterations_or_n = if raw_iters_or_n > (usize::MAX as f64) {
+                return Err(JsNativeError::range()
+                    .with_message("OperationError: KDF iterations/cost exceeds supported range")
+                    .into());
+            } else {
+                raw_iters_or_n as usize
+            };
+            let raw_byte_len = args.get(6).and_then(|v| v.as_number()).unwrap_or(32.0);
+            if !raw_byte_len.is_finite() || raw_byte_len < 0.0 || raw_byte_len.fract() != 0.0 {
+                return Err(JsNativeError::range()
+                    .with_message("OperationError: Derived key length must be a non-negative integer")
+                    .into());
+            }
+            if raw_byte_len > 1_048_576.0 {
                 return Err(JsNativeError::range()
                     .with_message("Derived key length exceeds 1MB sandbox limit")
                     .into());
             }
+            let byte_len = raw_byte_len as usize;
 
             if alg.eq_ignore_ascii_case("PBKDF2") {
                 if iterations_or_n == 0 {
@@ -1777,20 +1789,29 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                         .with_message("OperationError: PBKDF2 iterations must be greater than 0")
                         .into());
                 }
+                let Ok(iters_u32) = u32::try_from(iterations_or_n) else {
+                    return Err(JsNativeError::range()
+                        .with_message("OperationError: PBKDF2 iterations exceed unsigned 32-bit range")
+                        .into());
+                };
                 let blocks = byte_len.div_ceil(32).max(1) as u64;
-                let fuel_cost = ((iterations_or_n as u64).saturating_mul(blocks) / 100).max(10);
+                let fuel_cost = ((iters_u32 as u64).saturating_mul(blocks) / 100).max(10);
                 if let Err(msg) = consume_crypto_kdf_fuel(fuel_cost) {
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
-                let derived =
-                    pbkdf2_derive_bytes(&hash, &secret, &salt, iterations_or_n as u32, byte_len)
-                        .map_err(|msg| {
-                            if msg.contains("sandbox memory limit") {
-                                JsNativeError::range().with_message(msg)
-                            } else {
-                                JsNativeError::error().with_message(msg)
-                            }
-                        })?;
+                if iters_u32 > 10_000_000 {
+                    return Err(JsNativeError::range()
+                        .with_message("OperationError: PBKDF2 iterations exceed maximum sandbox limit (10,000,000)")
+                        .into());
+                }
+                let derived = pbkdf2_derive_bytes(&hash, &secret, &salt, iters_u32, byte_len)
+                    .map_err(|msg| {
+                        if msg.contains("sandbox memory limit") || msg.contains("maximum") {
+                            JsNativeError::range().with_message(msg)
+                        } else {
+                            JsNativeError::error().with_message(msg)
+                        }
+                    })?;
                 if let Err(msg) = try_consume_isolate_memory(derived.len()) {
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
@@ -1803,8 +1824,10 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 }
                 let derived =
                     hkdf_derive_bytes(&hash, &secret, &salt, &info, byte_len).map_err(|msg| {
-                        if msg.contains("sandbox memory limit") {
-                            JsNativeError::range().with_message(msg)
+                        if msg.contains("sandbox memory limit")
+                            || msg.contains("output length exceeds maximum")
+                        {
+                            JsNativeError::range().with_message(format!("OperationError: {}", msg))
                         } else {
                             JsNativeError::error().with_message(msg)
                         }
