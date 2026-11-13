@@ -2,6 +2,11 @@
 name = "slice-cli"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
 autotests = false
 
 [[bin]]
@@ -17,7 +22,6 @@ slice-engine = { path = "../slice-engine" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
-libc.workspace = true
 notify.workspace = true
 memchr.workspace = true
 itoa.workspace = true
@@ -32,4 +36,5 @@ criterion.workspace = true
 name = "microbench"
 path = "microbench/main.rs"
 harness = false
+test = true
 

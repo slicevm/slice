@@ -2,21 +2,26 @@
 name = "slice-sandbox"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
 autotests = false
 
 [lib]
 bench = false
 
 [dependencies]
-anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
-libc.workspace = true
-blake3.workspace = true
 rustc-hash.workspace = true
 memchr.workspace = true
 cow-utils.workspace = true
 smallvec.workspace = true
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

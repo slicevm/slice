@@ -2071,7 +2071,6 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "blake3",
- "compact_str",
  "cow-utils",
  "criterion",
  "itoa",
@@ -2082,7 +2081,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "thiserror",
 ]
 
 [[package]]
@@ -2092,7 +2090,6 @@ dependencies = [
  "anyhow",
  "criterion",
  "itoa",
- "libc",
  "memchr",
  "notify",
  "rustc-hash",
@@ -2115,7 +2112,6 @@ dependencies = [
  "blake3",
  "boa_engine",
  "compact_str",
- "cow-utils",
  "criterion",
  "itoa",
  "memchr",
@@ -2131,7 +2127,6 @@ dependencies = [
  "slice-io",
  "slice-sandbox",
  "smallvec",
- "thiserror",
  "wasmi",
  "webpki-roots",
  "x25519-dalek",
@@ -2145,15 +2140,12 @@ dependencies = [
  "criterion",
  "io-uring",
  "libc",
- "thiserror",
 ]
 
 [[package]]
 name = "slice-sandbox"
 version = "0.11.0"
 dependencies = [
- "anyhow",
- "blake3",
  "cow-utils",
  "criterion",
  "libc",
