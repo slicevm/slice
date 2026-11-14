@@ -20,9 +20,10 @@ use crate::intrinsics::{
     hkdf_derive_bytes, insert_cached_crypto_key, inspect_rsa_private_key, inspect_rsa_public_key,
     make_ring_aead_key, md5_bytes, pbkdf2_derive_bytes, rsa_private_components_to_pkcs8,
     rsa_public_components_to_info, rsa_sign_bytes_with_alg, rsa_verify_bytes_with_alg,
-    scrypt_derive_bytes, sha1_bytes, sha256_bytes, sha384_bytes, sha512_bytes,
-    with_cached_crypto_key, x25519_diffie_hellman, x25519_keypair_from_seed, x25519_pub_to_spki,
-    x25519_seed_to_pkcs8_v1, AesExpandedKey, CachedCryptoKeyMaterial,
+    sample_unbiased_u64_below, scrypt_derive_bytes, sha1_bytes, sha256_bytes, sha384_bytes,
+    sha512_bytes, with_cached_crypto_key, x25519_diffie_hellman, x25519_keypair_from_seed,
+    x25519_pub_to_spki, x25519_seed_to_pkcs8_v1, AesExpandedKey, CachedCryptoKeyMaterial,
+    MAX_CRYPTO_RANDOM_INT_RANGE,
 };
 
 pub(crate) fn register_node_crypto_bootstrap_host_function(ctx: &mut boa_engine::Context) {
@@ -443,6 +444,39 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                 }
             });
             bytes_to_js_uint8_array(&buf, context)
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_crypto_random_int"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, _context| {
+            let Some(range_f) = args.first().and_then(|v| v.as_number()) else {
+                return Err(JsNativeError::typ()
+                    .with_message("ERR_INVALID_ARG_TYPE: range must be a safe integer")
+                    .into());
+            };
+            if !range_f.is_finite()
+                || range_f.fract() != 0.0
+                || !(1.0..=(MAX_CRYPTO_RANDOM_INT_RANGE as f64)).contains(&range_f)
+            {
+                return Err(JsNativeError::range()
+                    .with_message(
+                        "ERR_OUT_OF_RANGE: The value of `max - min` must be in 1..=281474976710655",
+                    )
+                    .into());
+            }
+            let range = range_f as u64;
+            let sampled = BOA_DET_STATE.with(|s| {
+                if let Some((mut prng, clk)) = s.get() {
+                    let v = sample_unbiased_u64_below(range, Some(&mut prng));
+                    s.set(Some((prng, clk)));
+                    v
+                } else {
+                    sample_unbiased_u64_below(range, None)
+                }
+            });
+            Ok(BoaVal::from(sampled as f64))
         }),
     );
 
