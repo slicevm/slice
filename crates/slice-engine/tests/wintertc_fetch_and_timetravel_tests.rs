@@ -108,6 +108,7 @@ export default {
         query: "filter=canary",
         tenant_id: "f1-edge-tenant",
         body: r#"{"msg":"ship-it"}"#,
+        body_bytes: None,
         headers: &headers,
     };
     iso.reset_for_request("f1-edge-tenant", 2, 2_000_000, 8 * 1024 * 1024);
@@ -133,6 +134,7 @@ export default {
         query: "",
         tenant_id: "f1-edge-tenant",
         body: "",
+        body_bytes: None,
         headers: &headers,
     };
     iso.reset_for_request("f1-edge-tenant", 2, 2_000_000, 8 * 1024 * 1024);
@@ -196,6 +198,7 @@ export default {
         query: "",
         tenant_id: "f2-sse-tenant",
         body: "",
+        body_bytes: None,
         headers: &headers,
     };
     let out1 = iso.execute_http_request(&bc, None, &req1).unwrap();
@@ -219,6 +222,7 @@ export default {
         query: "",
         tenant_id: "f2-sse-tenant",
         body: "",
+        body_bytes: None,
         headers: &headers,
     };
     let out2 = iso.execute_http_request(&bc, None, &req2).unwrap();
@@ -1610,6 +1614,7 @@ export default {
                 query: "",
                 tenant_id: "ws-and-live-headers",
                 body: "",
+                body_bytes: None,
                 headers: &[
                     ("Host", "edge.local"),
                     ("Set-Cookie", "a=1; Path=/"),
@@ -1636,6 +1641,7 @@ export default {
                 query: "",
                 tenant_id: "ws-and-live-headers",
                 body: "",
+                body_bytes: None,
                 headers: &[
                     ("Host", "edge.local"),
                     ("Upgrade", "websocket"),

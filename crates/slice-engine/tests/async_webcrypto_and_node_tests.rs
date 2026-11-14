@@ -1918,6 +1918,7 @@ run();
         query: "",
         tenant_id: "phase3-http-tenant",
         body: r#"{"ping":1}"#,
+        body_bytes: None,
         headers: &[("content-type", "application/json")],
     };
     let outcome = iso.execute_http_request(&bc, None, &req_ctx).unwrap();

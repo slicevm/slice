@@ -1094,6 +1094,7 @@ fn test_http_fast_outcome_and_server_websocket_dispatch() {
         query: "x=1",
         tenant_id: "http-fast-tenant",
         body: "",
+        body_bytes: None,
         headers: &[("host", "localhost")],
     };
     for slot in 1..=3 {

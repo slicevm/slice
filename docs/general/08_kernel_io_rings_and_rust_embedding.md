@@ -159,7 +159,7 @@ fn handle_custom_http() -> anyhow::Result<()> {
         4 * 1024 * 1024,
     );
 
-    // Borrow zero-copy slices directly from your socket buffer
+    // Borrow zero-copy slices directly from your socket buffer (`body_bytes` carries raw non-UTF-8 payloads)
     let headers = [("host", "api.slice.local"), ("x-slice-tenant", "acme-corp")];
     let req_ctx = HttpRequestContext {
         method: "GET",
@@ -167,6 +167,7 @@ fn handle_custom_http() -> anyhow::Result<()> {
         query: "verbose=1",
         tenant_id: "acme-corp",
         body: "",
+        body_bytes: None,
         headers: &headers,
     };
 

@@ -13,8 +13,6 @@
     if (typeof arg === "number") return Buffer.alloc(arg);
     return Buffer.from(arg, encOrOffset, length);
   }
-  Object.setPrototypeOf(Buffer.prototype, __u8Proto);
-  Object.setPrototypeOf(Buffer, __U8);
   Buffer.prototype._isBuffer = true;
   Buffer.poolSize = 8192;
 
@@ -30,57 +28,86 @@
            e === "utf16le" || e === "utf-16le";
   };
 
-  Buffer.from = function(value, encOrOffset, length) {
-    if (typeof value === "string") {
-      if (!encOrOffset || encOrOffset === "utf8" || encOrOffset === "utf-8") {
-        return __wrapBuf(__slice_text_encode(value));
-      }
-      if (encOrOffset === "base64" || encOrOffset === "base64url") {
-        return __wrapBuf(__slice_base64_decode_bytes(value));
-      }
-      if (encOrOffset === "hex") {
-        return __wrapBuf(__slice_hex_decode(value));
-      }
-      var e = String(encOrOffset).toLowerCase();
-      if (e === "base64" || e === "base64url") {
-        return __wrapBuf(__slice_base64_decode_bytes(value));
-      }
-      if (e === "hex") {
-        return __wrapBuf(__slice_hex_decode(value));
-      }
-      if (e === "latin1" || e === "binary" || e === "ascii") {
-        var n = value.length, u = new __U8(n);
-        var mask = e === "ascii" ? 0x7f : 0xff;
-        for (var i = 0; i < n; i++) u[i] = value.charCodeAt(i) & mask;
-        return __wrapBuf(u);
-      }
-      if (e === "utf16le" || e === "utf-16le" || e === "ucs2" || e === "ucs-2") {
-        var n16 = value.length, u16 = new __U8(n16 * 2);
-        for (var k = 0; k < n16; k++) {
-          var code = value.charCodeAt(k);
-          u16[k * 2] = code & 0xff;
-          u16[k * 2 + 1] = (code >>> 8) & 0xff;
-        }
-        return __wrapBuf(u16);
-      }
+  var __SAB = typeof SharedArrayBuffer === "function" ? SharedArrayBuffer : null;
+  var __toPrimSym = (typeof Symbol === "function" && Symbol.toPrimitive) ? Symbol.toPrimitive : null;
+
+  function __fromString(value, encOrOffset) {
+    if (!encOrOffset || encOrOffset === "utf8" || encOrOffset === "utf-8") {
       return __wrapBuf(__slice_text_encode(value));
     }
-    if (value instanceof ArrayBuffer) {
-      var off = encOrOffset !== undefined ? Math.max(0, Number(encOrOffset) | 0) : 0;
-      var maxLen = Math.max(0, value.byteLength - off);
-      var len2 = length !== undefined ? Math.min(maxLen, Math.max(0, Number(length) | 0)) : maxLen;
-      return __wrapBuf(new __U8(value, off, len2));
+    if (encOrOffset === "base64" || encOrOffset === "base64url") {
+      return __wrapBuf(__slice_base64_decode_bytes(value));
+    }
+    if (encOrOffset === "hex") {
+      return __wrapBuf(__slice_hex_decode(value));
+    }
+    var e = String(encOrOffset).toLowerCase();
+    if (e === "base64" || e === "base64url") {
+      return __wrapBuf(__slice_base64_decode_bytes(value));
+    }
+    if (e === "hex") {
+      return __wrapBuf(__slice_hex_decode(value));
+    }
+    if (e === "latin1" || e === "binary" || e === "ascii") {
+      var n = value.length, u = new __U8(n);
+      var mask = e === "ascii" ? 0x7f : 0xff;
+      for (var i = 0; i < n; i++) u[i] = value.charCodeAt(i) & mask;
+      return __wrapBuf(u);
+    }
+    if (e === "utf16le" || e === "utf-16le" || e === "ucs2" || e === "ucs-2") {
+      var n16 = value.length, u16 = new __U8(n16 * 2);
+      for (var k = 0; k < n16; k++) {
+        var code = value.charCodeAt(k);
+        u16[k * 2] = code & 0xff;
+        u16[k * 2 + 1] = (code >>> 8) & 0xff;
+      }
+      return __wrapBuf(u16);
+    }
+    if (!Buffer.isEncoding(e)) {
+      throw new TypeError("Unknown encoding: " + String(encOrOffset));
+    }
+    return __wrapBuf(__slice_text_encode(value));
+  }
+
+  Buffer.from = function(value, encOrOffset, length) {
+    if (typeof value === "string") {
+      return __fromString(value, encOrOffset);
+    }
+    if (value === null || typeof value !== "object") {
+      throw new TypeError("The first argument must be of type string, Buffer, ArrayBuffer, Array, or Array-like Object");
     }
     if (value instanceof __U8) {
       return __wrapBuf(new __U8(value));
     }
-    if (value && ArrayBuffer.isView(value)) {
-      return __wrapBuf(new __U8(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength)));
+    if (value instanceof ArrayBuffer || (__SAB !== null && value instanceof __SAB)) {
+      if (encOrOffset === undefined && length === undefined) {
+        return __wrapBuf(new __U8(value));
+      }
+      if (length === undefined) {
+        return __wrapBuf(new __U8(value, encOrOffset));
+      }
+      return __wrapBuf(new __U8(value, encOrOffset, length));
     }
-    if (Array.isArray(value) || (value && typeof value.length === "number")) {
+    if (ArrayBuffer.isView(value)) {
+      if (!(value instanceof DataView)) {
+        return __wrapBuf(new __U8(value));
+      }
+    }
+    if (typeof value.valueOf === "function") {
+      var unboxed = value.valueOf();
+      if (unboxed !== null && unboxed !== undefined && unboxed !== value) {
+        if (typeof unboxed === "string") return __fromString(unboxed, encOrOffset);
+        if (typeof unboxed === "object") return Buffer.from(unboxed, encOrOffset, length);
+      }
+    }
+    if (__toPrimSym !== null && typeof value[__toPrimSym] === "function") {
+      var prim = value[__toPrimSym]("string");
+      if (typeof prim === "string") return __fromString(prim, encOrOffset);
+    }
+    if (!(value instanceof DataView) && (Array.isArray(value) || typeof value.length === "number")) {
       return __wrapBuf(new __U8(value));
     }
-    if (value && value.type === "Buffer" && Array.isArray(value.data)) {
+    if (value.type === "Buffer" && Array.isArray(value.data)) {
       return __wrapBuf(new __U8(value.data));
     }
     throw new TypeError("The first argument must be of type string, Buffer, ArrayBuffer, Array, or Array-like Object");
@@ -143,38 +170,43 @@
     return a.length === b.length ? 0 : (a.length < b.length ? -1 : 1);
   };
 
-  Buffer.prototype.toString = function(encoding, start, end) {
-    if (start === undefined && end === undefined) {
-      if (!encoding || encoding === "utf8" || encoding === "utf-8") return __slice_buf_to_utf8(this);
-      if (encoding === "base64") return __slice_base64_encode_bytes(this, false);
-      if (encoding === "hex") return __slice_bytes_to_hex(this);
-      if (encoding === "base64url") return __slice_base64_encode_bytes(this, true);
-    }
-    var len = this.length;
-    if (len === 0) return "";
-    var s = start === undefined ? 0 : Math.max(0, Number(start) | 0);
-    var e = end === undefined ? len : Math.min(len, Number(end) | 0);
-    if (s >= e) return "";
-    var view = (s === 0 && e === len) ? this : __u8Proto.subarray.call(this, s, e);
-    var enc = encoding ? String(encoding).toLowerCase() : "utf8";
-    if (enc === "hex") return __slice_bytes_to_hex(view);
-    if (enc === "base64") return __slice_base64_encode_bytes(view, false);
-    if (enc === "base64url") return __slice_base64_encode_bytes(view, true);
-    if (enc === "latin1" || enc === "binary") return __slice_text_decode(view, "latin1", false, true);
-    if (enc === "ascii") {
-      var out = "";
-      for (var i = 0; i < view.length; i++) out += String.fromCharCode(view[i] & 0x7f);
-      return out;
-    }
-    if (enc === "utf16le" || enc === "utf-16le" || enc === "ucs2" || enc === "ucs-2") {
-      var out16 = "", pairLen = view.length - (view.length % 2);
-      for (var j = 0; j < pairLen; j += 2) {
-        out16 += String.fromCharCode(view[j] | (view[j + 1] << 8));
+  Object.defineProperty(Buffer.prototype, "toString", {
+    value: function(encoding, start, end) {
+      if (start === undefined && end === undefined) {
+        if (!encoding || encoding === "utf8" || encoding === "utf-8") return __slice_buf_to_utf8(this);
+        if (encoding === "base64") return __slice_base64_encode_bytes(this, false);
+        if (encoding === "hex") return __slice_bytes_to_hex(this);
+        if (encoding === "base64url") return __slice_base64_encode_bytes(this, true);
       }
-      return out16;
-    }
-    return __slice_text_decode(view, "utf-8", false, true);
-  };
+      var len = this.length;
+      if (len === 0) return "";
+      var s = start === undefined ? 0 : Math.max(0, Number(start) | 0);
+      var e = end === undefined ? len : Math.min(len, Number(end) | 0);
+      if (s >= e) return "";
+      var view = (s === 0 && e === len) ? this : __u8Proto.subarray.call(this, s, e);
+      var enc = encoding ? String(encoding).toLowerCase() : "utf8";
+      if (enc === "hex") return __slice_bytes_to_hex(view);
+      if (enc === "base64") return __slice_base64_encode_bytes(view, false);
+      if (enc === "base64url") return __slice_base64_encode_bytes(view, true);
+      if (enc === "latin1" || enc === "binary") return __slice_text_decode(view, "latin1", false, true);
+      if (enc === "ascii") {
+        var out = "";
+        for (var i = 0; i < view.length; i++) out += String.fromCharCode(view[i] & 0x7f);
+        return out;
+      }
+      if (enc === "utf16le" || enc === "utf-16le" || enc === "ucs2" || enc === "ucs-2") {
+        var out16 = "", pairLen = view.length - (view.length % 2);
+        for (var j = 0; j < pairLen; j += 2) {
+          out16 += String.fromCharCode(view[j] | (view[j + 1] << 8));
+        }
+        return out16;
+      }
+      return __slice_text_decode(view, "utf-8", false, true);
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true
+  });
 
   Buffer.prototype.subarray = function(start, end) {
     return __wrapBuf(__u8Proto.subarray.call(this, start, end));
@@ -284,6 +316,9 @@
       };
     })(__binM[bi]);
   }
+
+  Object.setPrototypeOf(Buffer.prototype, __u8Proto);
+  Object.setPrototypeOf(Buffer, __U8);
 
   globalThis.Buffer = Buffer;
 })();

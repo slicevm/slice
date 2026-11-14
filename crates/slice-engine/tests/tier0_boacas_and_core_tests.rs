@@ -485,6 +485,7 @@ new EdgeRouter().handle();
         tenant_id: "n1-edge-tenant",
         headers: &headers,
         body: r#"{"item":"gpu-node"}"#,
+        body_bytes: None,
     };
 
     let outcome = isolate.execute_http_request(&bc, None, &req_ctx).unwrap();

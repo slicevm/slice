@@ -134,7 +134,7 @@
     Proto.listenerCount = function(type) {
       var k = String(type);
       var n = (this._nodeEv && this._nodeEv[k]) ? this._nodeEv[k].length : 0;
-      var et = (this._l && this._l[k]) ? this._l[k].length : 0;
+      var et = (this._et && this._et[k]) ? this._et[k].length : 0;
       var onProp = (typeof this["on" + k] === "function") ? 1 : 0;
       return n + et + onProp;
     };
@@ -172,6 +172,13 @@
   MessagePort.prototype.constructor = MessagePort;
   __attachNodeEmitterProto(MessagePort.prototype);
 
+  MessagePort.prototype.addEventListener = function(type, callback, options) {
+    EventTarget.prototype.addEventListener.call(this, type, callback, options);
+    if (String(type) === "message" && this._et && this._et.message && this._et.message.length > 0) {
+      this.start();
+    }
+  };
+
   Object.defineProperty(MessagePort.prototype, "onmessage", {
     configurable: true,
     enumerable: true,
@@ -184,7 +191,7 @@
 
   MessagePort.prototype._hasAsyncListeners = function() {
     var hasNode = Boolean(this._nodeEv && this._nodeEv.message && this._nodeEv.message.length > 0);
-    var hasEt = Boolean(this._started && this._l && this._l.message && this._l.message.length > 0);
+    var hasEt = Boolean(this._started && this._et && this._et.message && this._et.message.length > 0);
     return Boolean(this._onmessage || hasNode || hasEt);
   };
 
@@ -194,11 +201,8 @@
       var snap = this._nodeEv.message.slice();
       for (var i = 0; i < snap.length; i++) snap[i].call(this, cloned);
     }
-    var ev = __makeMsgEvent(cloned);
-    if (typeof this._onmessage === "function") {
-      this._onmessage.call(this, ev);
-    }
-    if (this._l && this._l.message && this._l.message.length > 0) {
+    if (typeof this._onmessage === "function" || (this._et && this._et.message && this._et.message.length > 0)) {
+      var ev = __makeMsgEvent(cloned);
       this.dispatchEvent(ev);
     }
   };
@@ -216,10 +220,21 @@
     }
   };
 
-  MessagePort.prototype.postMessage = function(value) {
+  MessagePort.prototype.postMessage = function(value, transferOrOptions) {
     if (this._closed || !this._entangled || this._entangled._closed) return;
+    if (!globalThis.structuredClone) __slice_ensure_shard(16);
+    var cloneOpts = undefined;
+    if (transferOrOptions !== undefined && transferOrOptions !== null) {
+      if (Array.isArray(transferOrOptions)) {
+        cloneOpts = { transfer: transferOrOptions };
+      } else if (typeof transferOrOptions === "object" && transferOrOptions.transfer !== undefined) {
+        cloneOpts = { transfer: transferOrOptions.transfer };
+      }
+    }
+    var cloned = cloneOpts !== undefined
+      ? globalThis.structuredClone(value, cloneOpts)
+      : globalThis.structuredClone(value);
     var target = this._entangled;
-    var cloned = __deserializeMsg(__serializeMsg(value));
     target._syncQueue.push(cloned);
     if (target._hasAsyncListeners()) {
       queueMicrotask(function() {
@@ -576,7 +591,7 @@
       cancel: function() {
         markClosed();
       }
-    });
+    }, { highWaterMark: 0 });
 
     var writable = new WritableStream({
       write: function(chunk) {

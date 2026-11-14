@@ -17,6 +17,14 @@
     this._stop = false;
     this._stopImm = false;
   }
+  Event.NONE = 0;
+  Event.CAPTURING_PHASE = 1;
+  Event.AT_TARGET = 2;
+  Event.BUBBLING_PHASE = 3;
+  Event.prototype.NONE = 0;
+  Event.prototype.CAPTURING_PHASE = 1;
+  Event.prototype.AT_TARGET = 2;
+  Event.prototype.BUBBLING_PHASE = 3;
   Event.prototype.preventDefault = function() {
     if (this.cancelable) this.defaultPrevented = true;
   };
@@ -38,6 +46,11 @@
   CustomEvent.prototype = Object.create(Event.prototype);
   CustomEvent.prototype.constructor = CustomEvent;
 
+  function __extractCapture(options) {
+    if (typeof options === "object" && options !== null) return Boolean(options.capture);
+    return Boolean(options);
+  }
+
   function EventTarget() {
     this._et = null;
   }
@@ -47,57 +60,102 @@
   };
   EventTarget.prototype.addEventListener = function(type, listener, options) {
     if (listener === null || listener === undefined) return;
-    if (typeof listener !== "function" && (typeof listener !== "object" || typeof listener.handleEvent !== "function")) {
-      return;
+    if (typeof listener !== "function" && typeof listener !== "object") {
+      throw new TypeError("The \"listener\" argument must be of type function or an instance of Object");
     }
-    var o = (typeof options === "object" && options !== null) ? options : { capture: Boolean(options) };
-    var sig = o.signal || null;
-    if (sig && sig.aborted) return;
+    var hasObjOpts = typeof options === "object" && options !== null;
+    var capture = hasObjOpts ? Boolean(options.capture) : Boolean(options);
+    var once = hasObjOpts ? Boolean(options.once) : false;
+    var passive = hasObjOpts ? Boolean(options.passive) : false;
+    var sig = hasObjOpts ? options.signal : null;
+    if (sig !== null && sig !== undefined) {
+      if (typeof sig !== "object" || typeof sig.aborted !== "boolean") {
+        throw new TypeError("The \"options.signal\" property must be an instance of AbortSignal");
+      }
+      if (sig.aborted) return;
+    }
     var t = String(type);
     var map = this._ensureEt();
     var list = map[t] || (map[t] = []);
     for (var i = 0; i < list.length; i++) {
-      if (list[i].fn === listener) return;
+      var cur = list[i];
+      if (!cur.removed && cur.fn === listener && cur.capture === capture) return;
     }
-    list.push({ fn: listener, once: Boolean(o.once) });
+    var record = {
+      fn: listener,
+      once: once,
+      capture: capture,
+      passive: passive,
+      removed: false
+    };
+    list.push(record);
     if (sig && typeof sig.addEventListener === "function") {
       var self = this;
       sig.addEventListener("abort", function() {
-        self.removeEventListener(t, listener);
-      });
+        self.removeEventListener(t, listener, capture);
+      }, { once: true });
     }
   };
-  EventTarget.prototype.removeEventListener = function(type, listener) {
-    if (!this._et) return;
+  EventTarget.prototype.removeEventListener = function(type, listener, options) {
+    if (!this._et || listener === null || listener === undefined) return;
+    var capture = __extractCapture(options);
     var t = String(type), list = this._et[t];
     if (!list) return;
-    var nx = [];
     for (var i = 0; i < list.length; i++) {
-      if (list[i].fn !== listener) nx.push(list[i]);
+      var item = list[i];
+      if (!item.removed && item.fn === listener && item.capture === capture) {
+        item.removed = true;
+        list.splice(i, 1);
+        return;
+      }
     }
-    this._et[t] = nx;
   };
   EventTarget.prototype.dispatchEvent = function(event) {
     if (!event || typeof event.type !== "string") throw new TypeError("dispatchEvent requires an Event");
+    if (event._dispatching) {
+      throw new DOMException("The event is already being dispatched.", "InvalidStateError");
+    }
+    event._dispatching = true;
+    event._stop = false;
+    event._stopImm = false;
     event.target = this;
     event.currentTarget = this;
     event.srcElement = this;
+    event.eventPhase = 2;
     var t = event.type;
-    var onProp = this["on" + t];
-    if (typeof onProp === "function") {
-      try { onProp.call(this, event); } catch (_e) {}
-    }
-    if (this._et && this._et[t]) {
-      var snapshot = this._et[t].slice();
-      for (var i = 0; i < snapshot.length; i++) {
-        if (event._stopImm) break;
-        var item = snapshot[i];
-        if (item.once) this.removeEventListener(t, item.fn);
-        try {
-          if (typeof item.fn === "function") item.fn.call(this, event);
-          else if (item.fn && typeof item.fn.handleEvent === "function") item.fn.handleEvent(event);
-        } catch (_e2) {}
+    try {
+      var onProp = this["on" + t];
+      if (typeof onProp === "function") {
+        try { onProp.call(this, event); } catch (_e) {}
       }
+      if (!event._stopImm && this._et && this._et[t] && this._et[t].length > 0) {
+        var snapshot = this._et[t].slice();
+        for (var i = 0; i < snapshot.length; i++) {
+          if (event._stopImm) break;
+          var item = snapshot[i];
+          if (item.removed) continue;
+          if (item.once) {
+            item.removed = true;
+            var liveList = this._et && this._et[t];
+            if (liveList) {
+              var idx = liveList.indexOf(item);
+              if (idx !== -1) liveList.splice(idx, 1);
+            }
+          }
+          try {
+            if (typeof item.fn === "function") {
+              item.fn.call(this, event);
+            } else if (item.fn !== null && typeof item.fn === "object") {
+              var he = item.fn.handleEvent;
+              if (typeof he === "function") he.call(item.fn, event);
+            }
+          } catch (_e2) {}
+        }
+      }
+    } finally {
+      event.currentTarget = null;
+      event.eventPhase = 0;
+      event._dispatching = false;
     }
     return !event.defaultPrevented;
   };

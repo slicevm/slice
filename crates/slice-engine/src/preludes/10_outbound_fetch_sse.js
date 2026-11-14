@@ -1,6 +1,8 @@
 // Slice (Nexus-JS) Lazy Prelude Shard 10: Outbound Fetch, AbortSignal/AbortController & SSE (`10_outbound_fetch_sse.js`)
 (function() {
-  if (!globalThis.DOMException) __slice_ensure_shard(13);
+  if (!globalThis.EventTarget) __slice_ensure_shard(13);
+  var _EventTarget = globalThis.EventTarget;
+  var _Event = globalThis.Event;
   function __mkAbortErr() {
     return new DOMException("The operation was aborted.", "AbortError");
   }
@@ -9,23 +11,13 @@
   }
 
   function AbortSignal() {
+    _EventTarget.call(this);
     this.aborted = false;
     this.reason = undefined;
     this.onabort = null;
-    this._ls = [];
   }
-  AbortSignal.prototype.addEventListener = function(t, fn) {
-    if (t === "abort" && typeof fn === "function") this._ls.push(fn);
-  };
-  AbortSignal.prototype.removeEventListener = function(t, fn) {
-    if (t === "abort") {
-      var nx = [];
-      for (var i = 0; i < this._ls.length; i++) {
-        if (this._ls[i] !== fn) nx.push(this._ls[i]);
-      }
-      this._ls = nx;
-    }
-  };
+  AbortSignal.prototype = Object.create(_EventTarget.prototype);
+  AbortSignal.prototype.constructor = AbortSignal;
   AbortSignal.prototype.throwIfAborted = function() {
     if (this.aborted) throw this.reason;
   };
@@ -33,26 +25,14 @@
     if (this.aborted) return;
     this.aborted = true;
     this.reason = r !== undefined ? r : __mkAbortErr();
-    var ev = { type: "abort", target: this };
-    if (typeof this.onabort === "function") {
-      try { this.onabort(ev); } catch (_e) {}
+    if (typeof this.onabort === "function" || (this._et && this._et.abort && this._et.abort.length > 0)) {
+      _EventTarget.prototype.dispatchEvent.call(this, new _Event("abort"));
     }
-    var ls = this._ls.slice();
-    this._ls = [];
-    for (var i = 0; i < ls.length; i++) {
-      try { ls[i](ev); } catch (_e2) {}
-    }
-  };
-  AbortSignal.prototype.dispatchEvent = function(ev) {
-    if (ev && ev.type === "abort") {
-      this._fire(this.reason);
-      return true;
-    }
-    return true;
   };
   AbortSignal.abort = function(r) {
     var s = new AbortSignal();
-    s._fire(r !== undefined ? r : __mkAbortErr());
+    s.aborted = true;
+    s.reason = r !== undefined ? r : __mkAbortErr();
     return s;
   };
   AbortSignal.timeout = function(ms) {
@@ -153,9 +133,7 @@
       var h = o.headers instanceof Headers ? o.headers : new Headers(o.headers);
       if (!h._m["content-type"]) h._m["content-type"] = "text/event-stream; charset=utf-8";
       if (!h._m["cache-control"]) h._m["cache-control"] = "no-cache";
-      var r = new Response(__colSse(src), { status: o.status || 200, statusText: o.statusText, headers: h });
-      r._ct = h._m["content-type"];
-      return r;
+      return new Response(__colSse(src), { status: o.status || 200, statusText: o.statusText, headers: h });
     };
   }
 
@@ -168,7 +146,7 @@
   }
 
   function __reqHeadersJson(req) {
-    if (req._h === null && req._hm === null) return "[]";
+    if (req._h === null && req._hm === null && !req._ct) return "[]";
     return JSON.stringify(req.headers.entries());
   }
 
@@ -176,7 +154,7 @@
     var req = new Request(input, init);
     var sig = (init && init.signal) || req.signal || null;
     if (sig && sig.aborted) throw (sig.reason !== undefined ? sig.reason : __mkAbortErr());
-    var reqBody = req._u8 instanceof Uint8Array ? req._u8 : req._body;
+    var reqBody = req._u8 instanceof Uint8Array ? req._u8 : (req._body || "");
     var raw = JSON.parse(
       __slice_fetch_sync(req.url, req.method, __reqHeadersJson(req), reqBody, req.redirect || "follow")
     );
@@ -237,7 +215,7 @@
       if (req._stream) {
         return req.bytes().then(dispatchFetch);
       }
-      return dispatchFetch(req._u8 instanceof Uint8Array ? req._u8 : req._body);
+      return dispatchFetch(req._u8 instanceof Uint8Array ? req._u8 : (req._body || ""));
     } catch (e) {
       return Promise.reject(e);
     }
@@ -246,7 +224,8 @@
   if (globalThis.Slice) {
     globalThis.Slice.streamSSE = function(src, init) {
       var r = Response.sse(src, init);
-      __slice_http_respond(r.status, r._body, r._ct, "");
+      var ctSse = r.headers.get("content-type") || "text/event-stream; charset=utf-8";
+      __slice_http_respond(r.status, r._body || "", ctSse, "");
       return r;
     };
     globalThis.Slice.fetchSync = __doFetch;

@@ -616,7 +616,7 @@ pub(crate) fn serve_connection_with_isolate(
 
         let content_length = seen_content_length.unwrap_or(0);
         let mut body_filled = filled.saturating_sub(body_offset);
-        let mut owned_body_opt: Option<String> = None;
+        let mut owned_body_bytes_opt: Option<Vec<u8>> = None;
         let body_end: usize;
 
         if is_chunked_te {
@@ -718,7 +718,7 @@ pub(crate) fn serve_connection_with_isolate(
             }
             filled = body_offset + fit;
             body_end = body_offset;
-            owned_body_opt = Some(String::from_utf8_lossy(&decoded).into_owned());
+            owned_body_bytes_opt = Some(decoded);
         } else if content_length <= after_hdr_buf.len() {
             if !carry_buf.is_empty() && body_filled < after_hdr_buf.len() {
                 let pull = carry_buf.len().min(after_hdr_buf.len() - body_filled);
@@ -803,7 +803,7 @@ pub(crate) fn serve_connection_with_isolate(
                 filled = body_offset;
             }
             body_end = body_offset;
-            owned_body_opt = Some(String::from_utf8_lossy(&large_body).into_owned());
+            owned_body_bytes_opt = Some(large_body);
         }
 
         let body_len = content_length.min(body_filled);
@@ -913,17 +913,18 @@ pub(crate) fn serve_connection_with_isolate(
             }
         }
 
-        let body_str: &str = if let Some(ref owned) = owned_body_opt {
-            owned.as_str()
+        let raw_body_bytes: &[u8] = if let Some(ref owned) = owned_body_bytes_opt {
+            owned.as_slice()
         } else {
-            std::str::from_utf8(&after_hdr_buf[..body_len]).unwrap_or("")
+            &after_hdr_buf[..body_len]
         };
         let req_ctx = slice_engine::HttpRequestContext {
             method,
             path,
             query,
             tenant_id,
-            body: body_str,
+            body: "",
+            body_bytes: Some(raw_body_bytes),
             headers: &headers_stack[..headers_len],
         };
 

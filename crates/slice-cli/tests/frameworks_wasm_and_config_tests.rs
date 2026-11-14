@@ -650,6 +650,7 @@ tls_key = "./certs/server.key"
         query: "x=1",
         tenant_id: "phase3-slice-serve",
         body: "",
+        body_bytes: None,
         headers: &[],
     };
     let outcome = iso.execute_http_request(&bc, None, &req_ctx).unwrap();
@@ -1154,6 +1155,199 @@ console.log(JSON.stringify(summary));
     );
 
     iso.reset_for_request("wave3-cli-iso", 2, 5_000_000, 8 * 1024 * 1024);
+    let warm_m = iso
+        .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+        .unwrap();
+    assert_eq!(
+        warm_m.stdout.first().map(String::as_str),
+        Some(expected_json)
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_wave4_issues_114_to_121_cli_direct_cas_cold_and_warm_matrix() {
+    use crate::commands::pack_and_compile::cmd_pack;
+    use crate::commands::run::cmd_run;
+    use crate::LAST_CLI_EXIT_CODE;
+    use slice_cas::MappedCasArchive;
+    use slice_engine::SliceIsolate;
+    use slice_sandbox::CapabilityToken;
+    use std::sync::atomic::Ordering;
+
+    let tmp_dir =
+        std::env::temp_dir().join(format!("slice_wave4_cli_matrix_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let entry_ts = tmp_dir.join("wave4_cli.ts");
+    let cas_path = tmp_dir.join("wave4_cli.cas");
+
+    let script = r#"
+import { Buffer } from "node:buffer";
+
+async function runWave4() {
+  // #114: structuredClone shared ArrayBuffer, view byteOffset, transfer, and DataCloneError
+  const sab = new ArrayBuffer(16);
+  const fullView = new Uint8Array(sab);
+  fullView.set([10, 20, 30, 40, 50, 60, 70, 80], 0);
+  const slicedView = new Uint8Array(sab, 4, 4);
+  const cloned = structuredClone({ a: fullView, b: slicedView });
+  const sharedIdentity = cloned.a.buffer === cloned.b.buffer && cloned.b.byteOffset === 4 && cloned.b[0] === 50;
+
+  let cloneFnErr = "";
+  try {
+    structuredClone(() => 1);
+  } catch (e: any) {
+    cloneFnErr = e.name;
+  }
+
+  // #115: eager Response.json validation + post-construction mutation isolation
+  let badJsonErr = "";
+  try {
+    Response.json(undefined);
+  } catch (e: any) {
+    badJsonErr = e.name;
+  }
+  const payload = { nested: [1, 2] };
+  const jsonRes = Response.json(payload);
+  payload.nested.push(999);
+  const parsedJson = await jsonRes.json();
+
+  // #116 + #121: lossless non-UTF8 binary FormData roundtrip + authoritative Content-Type
+  const rawBin = new Uint8Array([0x00, 0x80, 0xff, 0x0d, 0x0a, 0xfe]);
+  const fd = new FormData();
+  fd.append("blob", new File([rawBin], "raw.bin", { type: "application/octet-stream" }));
+  const binReq = new Request("https://example.com/upload", { method: "POST", body: fd });
+  const parsedFd = await binReq.formData();
+  const outFile = parsedFd.get("blob") as File;
+  const outBytes = new Uint8Array(await outFile.arrayBuffer());
+  const binExact = outBytes.length === 6 && outBytes[0] === 0x00 && outBytes[1] === 0x80 && outBytes[2] === 0xff && outBytes[5] === 0xfe;
+
+  const customBlobRes = new Response(rawBin, { headers: { "Content-Type": "application/wasm" } });
+  const blobType = (await customBlobRes.blob()).type;
+
+  // #117: async pull() ReadableStream with timer-delayed enqueue + reader.closed
+  let closedResolved = false;
+  let pulled = 0;
+  const rs = new ReadableStream({
+    async pull(ctrl) {
+      await new Promise((r) => setTimeout(r, 1));
+      pulled++;
+      if (pulled <= 2) ctrl.enqueue("chunk" + pulled);
+      else ctrl.close();
+    }
+  });
+  const reader = rs.getReader();
+  reader.closed.then(() => { closedResolved = true; });
+  const c1 = await reader.read();
+  const c2 = await reader.read();
+  const c3 = await reader.read();
+  await Promise.resolve();
+
+  // #119: Buffer.from(Uint16Array) element truncation vs Buffer.from(ArrayBuffer, offset, len)
+  const u16 = new Uint16Array([257, 514]);
+  const bFromTyped = Buffer.from(u16);
+  const bView = Buffer.from(u16.buffer, 2, 2);
+
+  // #120: EventTarget removed-listener during dispatch + AbortSignal instanceof EventTarget
+  const et = new EventTarget();
+  const order: string[] = [];
+  const second = () => order.push("second");
+  et.addEventListener("tick", () => {
+    order.push("first");
+    et.removeEventListener("tick", second);
+  });
+  et.addEventListener("tick", second);
+  et.dispatchEvent(new Event("tick"));
+  const ac = new AbortController();
+  const signalIsEt = ac.signal instanceof EventTarget;
+
+  const summary = {
+    sharedIdentity,
+    cloneFnErr,
+    badJsonErr,
+    jsonLen: parsedJson.nested.length,
+    binExact,
+    blobType,
+    streamOut: `${c1.value},${c2.value},${c3.done},${closedResolved}`,
+    bufTyped: `${bFromTyped.length}:${bFromTyped[0]}:${bFromTyped[1]}:${bView.length}`,
+    evOrder: order.join(","),
+    signalIsEt,
+  };
+
+  if (
+    !summary.sharedIdentity ||
+    summary.cloneFnErr !== "DataCloneError" ||
+    summary.badJsonErr !== "TypeError" ||
+    summary.jsonLen !== 2 ||
+    !summary.binExact ||
+    summary.blobType !== "application/wasm" ||
+    summary.streamOut !== "chunk1,chunk2,true,true" ||
+    summary.bufTyped !== "2:1:2:2" ||
+    summary.evOrder !== "first" ||
+    !summary.signalIsEt
+  ) {
+    throw new Error("Wave 4 CLI matrix failed: " + JSON.stringify(summary));
+  }
+  console.log(JSON.stringify(summary));
+}
+
+runWave4();
+"#;
+    std::fs::write(&entry_ts, script).unwrap();
+
+    // 1. Direct `.ts` CLI run
+    cmd_run(&[
+        entry_ts.to_string_lossy().to_string(),
+        "--quiet".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    // 2. Pack `.ts` -> `.cas` and run both cold and `--warm`
+    cmd_pack(&[
+        entry_ts.to_string_lossy().to_string(),
+        cas_path.to_string_lossy().to_string(),
+    ])
+    .unwrap();
+
+    cmd_run(&[
+        cas_path.to_string_lossy().to_string(),
+        "--quiet".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    cmd_run(&[
+        cas_path.to_string_lossy().to_string(),
+        "--warm".to_string(),
+        "--quiet".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    // 3. Verify exact JSON stdout across cold + warm MappedCasArchive turns
+    let expected_json = r#"{"sharedIdentity":true,"cloneFnErr":"DataCloneError","badJsonErr":"TypeError","jsonLen":2,"binExact":true,"blobType":"application/wasm","streamOut":"chunk1,chunk2,true,true","bufTyped":"2:1:2:2","evOrder":"first","signalIsEt":true}"#;
+    let archive = MappedCasArchive::open(&cas_path).unwrap();
+    let entry = archive.entrypoint_blob().unwrap();
+    let mut iso = SliceIsolate::spawn(
+        "wave4-cli-iso",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    let cold_m = iso
+        .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+        .unwrap();
+    assert_eq!(
+        cold_m.stdout.first().map(String::as_str),
+        Some(expected_json)
+    );
+
+    iso.reset_for_request("wave4-cli-iso", 2, 5_000_000, 8 * 1024 * 1024);
     let warm_m = iso
         .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
         .unwrap();

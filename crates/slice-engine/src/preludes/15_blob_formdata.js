@@ -145,13 +145,6 @@
       .replace(/"/g, "%22");
   }
 
-  function __unescapeMpAttr(s) {
-    return String(s)
-      .replace(/%22/gi, "\"")
-      .replace(/%0A/gi, "\n")
-      .replace(/%0D/gi, "\r");
-  }
-
   globalThis.__slice_encode_formdata = function(rawBody, headers) {
     var boundary = "----SliceFormBoundary";
     if (headers && !headers.has("content-type")) {
@@ -180,57 +173,52 @@
       }
     }
     chunks.push(__slice_text_encode("--" + boundary + "--\r\n"));
-    var mpU8 = __slice_concatU8(chunks);
     return {
-      str: __slice_text_decode(mpU8, "utf-8", false, false),
-      u8: mpU8,
-      fd: rawBody
+      str: null,
+      u8: __slice_concatU8(chunks)
     };
   };
 
   globalThis.__slice_parse_formdata = function(obj) {
-    var fd = new FormData();
-    var ct = (obj._ct || (obj.headers && obj.headers.get("content-type")) || "");
-    var bMatch = /multipart\/form-data\s*;\s*boundary=(?:"([^"]+)"|([^\s;]+))/i.exec(ct);
-    var rawText = obj._body || "";
-    if (bMatch) {
-      var boundary = "--" + (bMatch[1] || bMatch[2]);
-      var parts = rawText.split(boundary);
-      for (var p = 1; p < parts.length; p++) {
-        var seg = parts[p];
-        if (seg.indexOf("--") === 0) break;
-        if (seg.indexOf("\r\n") === 0) seg = seg.slice(2);
-        else if (seg.indexOf("\n") === 0) seg = seg.slice(1);
-        var sep = seg.indexOf("\r\n\r\n");
-        var sepLen = 4;
-        if (sep === -1) {
-          sep = seg.indexOf("\n\n");
-          sepLen = 2;
-        }
-        if (sep === -1) continue;
-        var hdrBlock = seg.slice(0, sep);
-        var valStr = seg.slice(sep + sepLen);
-        if (valStr.slice(-2) === "\r\n") valStr = valStr.slice(0, -2);
-        else if (valStr.slice(-1) === "\n") valStr = valStr.slice(0, -1);
-        var nMatch = /name="([^"]*)"/i.exec(hdrBlock);
-        if (!nMatch) continue;
-        var fieldName = __unescapeMpAttr(nMatch[1]);
-        var fnMatch = /filename="([^"]*)"/i.exec(hdrBlock);
-        if (fnMatch) {
-          var ctMatch = /content-type:\s*([^\r\n]+)/i.exec(hdrBlock);
-          var fType = ctMatch ? ctMatch[1].trim() : "application/octet-stream";
-          fd.append(fieldName, new File([valStr], __unescapeMpAttr(fnMatch[1]), { type: fType }));
+    var ct = (obj && obj.headers && typeof obj.headers.get === "function")
+      ? (obj.headers.get("content-type") || "")
+      : "";
+    if (/^\s*multipart\/form-data(?:\s*;|$)/i.test(ct)) {
+      var bMatch = /;\s*boundary=(?:"([^"]*)"|([^\s;]+))/i.exec(ct);
+      var boundary = bMatch ? (bMatch[1] !== undefined ? bMatch[1] : bMatch[2]) : "";
+      if (!boundary) {
+        throw new TypeError("Failed to parse multipart/form-data: missing boundary parameter");
+      }
+      var rawBytes = (obj && typeof obj._borrowBytes === "function")
+        ? obj._borrowBytes()
+        : __slice_text_encode((obj && obj._body) || "");
+      var rawParts = __slice_multipart_parse(rawBytes, boundary);
+      var fd = new FormData();
+      for (var p = 0; p < rawParts.length; p++) {
+        var item = rawParts[p];
+        if (item[1]) {
+          fd.append(item[0], new File([item[4]], item[2], { type: item[3] }));
         } else {
-          fd.append(fieldName, valStr);
+          fd.append(item[0], item[2]);
         }
       }
       return fd;
     }
-    if (!globalThis.URLSearchParams) __slice_ensure_shard(1);
-    var usp = new globalThis.URLSearchParams(rawText);
-    var es = usp.entries();
-    for (var i = 0; i < es.length; i++) fd.append(es[i][0], es[i][1]);
-    return fd;
+    if (/^\s*application\/x-www-form-urlencoded(?:\s*;|$)/i.test(ct)) {
+      if (!globalThis.URLSearchParams) __slice_ensure_shard(1);
+      var rawText = (obj && typeof obj._getText === "function")
+        ? obj._getText()
+        : ((obj && obj._body) || "");
+      var qsInput = rawText.charCodeAt(0) === 63 ? ("?" + rawText) : rawText;
+      var usp = new globalThis.URLSearchParams(qsInput);
+      var fdUrl = new FormData();
+      var es = usp.entries();
+      for (var i = 0; i < es.length; i++) fdUrl.append(es[i][0], es[i][1]);
+      return fdUrl;
+    }
+    throw new TypeError(
+      "Content-Type was not one of \"multipart/form-data\" or \"application/x-www-form-urlencoded\""
+    );
   };
 })();
 

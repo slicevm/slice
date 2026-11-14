@@ -44,6 +44,8 @@ pub(crate) struct ActiveBoaHttpReq {
     pub(crate) query: String,
     pub(crate) tenant_id: String,
     pub(crate) body: String,
+    pub(crate) body_bytes: Vec<u8>,
+    pub(crate) has_raw_body_bytes: bool,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) headers_len: usize,
 }
@@ -856,6 +858,7 @@ pub(crate) fn ensure_realm_shards(
     needed_mask: u32,
     init_lazy_getters: bool,
 ) {
+    let needed_mask = crate::js_preludes::expand_shard_prerequisites(needed_mask);
     let missing = needed_mask & !realm.loaded_shards_mask;
     if init_lazy_getters && (realm.loaded_shards_mask & 1) == 0 {
         let _ = crate::js_preludes::eval_lazy_getters_init_prelude(&mut realm.ctx);
