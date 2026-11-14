@@ -537,10 +537,8 @@
     var st = this;
     self._stream = null;
     if (st._closed && !st._startPromise && !st._pulling) {
-      var u8Sync = st._toBytes();
-      self._u8 = u8Sync;
-      if (!globalThis.TextDecoder) __slice_ensure_shard(2);
-      self._body = __slice_text_decode(u8Sync, "utf-8", false, false);
+      self._u8 = st._toBytes();
+      self._body = null;
       return Promise.resolve(self);
     }
     var startWait = st._startPromise ? st._startPromise : Promise.resolve();
@@ -551,10 +549,8 @@
         return reader.read().then(function(step) {
           if (step.done) {
             reader.releaseLock();
-            var fullU8 = __slice_concatU8(u8Parts);
-            self._u8 = fullU8;
-            if (!globalThis.TextDecoder) __slice_ensure_shard(2);
-            self._body = __slice_text_decode(fullU8, "utf-8", false, false);
+            self._u8 = __slice_concatU8(u8Parts);
+            self._body = null;
             return self;
           }
           u8Parts.push(__slice_toU8(step.value));

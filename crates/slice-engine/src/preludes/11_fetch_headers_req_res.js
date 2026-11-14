@@ -204,16 +204,65 @@
     };
   }
 
+  function __borrowBodyBytes(obj) {
+    if (obj._isLiveReq) {
+      if (obj._u8 === null) {
+        obj._u8 = typeof __slice_http_body_bytes === "function"
+          ? __slice_http_body_bytes()
+          : __slice_text_encode(__slice_http_body() || "");
+      }
+      return obj._u8;
+    }
+    if (obj._u8 instanceof Uint8Array) return obj._u8;
+    return __slice_text_encode(obj._body || "");
+  }
+
   function __extractBodyBytes(obj) {
+    if (obj._isLiveReq) {
+      return new Uint8Array(__borrowBodyBytes(obj));
+    }
     if (obj._u8 instanceof Uint8Array) return new Uint8Array(obj._u8);
-    var s = obj._body || (obj._data !== undefined ? JSON.stringify(obj._data) : "");
-    return __slice_text_encode(s);
+    return __slice_text_encode(obj._body || "");
+  }
+
+  function __getBodyText(obj) {
+    if (obj._isLiveReq) {
+      if (obj._b === null) {
+        if (obj._u8 instanceof Uint8Array) {
+          if (!globalThis.TextDecoder) __slice_ensure_shard(2);
+          obj._b = __slice_text_decode(obj._u8, "utf-8", false, false);
+        } else {
+          obj._b = __slice_http_body() || "";
+        }
+      }
+      return obj._b;
+    }
+    if (typeof obj._body === "string") return obj._body;
+    if (obj._u8 instanceof Uint8Array) {
+      if (!globalThis.TextDecoder) __slice_ensure_shard(2);
+      var decoded = __slice_text_decode(obj._u8, "utf-8", false, false);
+      obj._body = decoded;
+      return decoded;
+    }
+    return "";
+  }
+
+  function __effectiveContentType(obj) {
+    if (obj._h === null && obj._hm === null && !obj._isLiveReq) {
+      return obj._ct || "";
+    }
+    return obj.headers.get("content-type") || "";
   }
 
   function __bodyToFormData(obj) {
-    if (obj._fd && obj._fd._isFormData) return obj._fd;
     if (!globalThis.FormData) __slice_ensure_shard(15);
     return globalThis.__slice_parse_formdata(obj);
+  }
+
+  function __isStreamPendingOrOpen(st) {
+    if (!st || typeof st._toText !== "function") return false;
+    if (typeof st._isAsyncPending === "function" && st._isAsyncPending()) return true;
+    return Boolean(!st._closed || st._startPromise);
   }
 
   function __normHttpBody(rawBody, headers) {
@@ -221,7 +270,7 @@
       if (headers && !headers.has("content-type")) {
         headers.set("content-type", "application/x-www-form-urlencoded;charset=UTF-8");
       }
-      return { str: rawBody.toString(), u8: null, fd: null };
+      return { str: rawBody.toString(), u8: null };
     }
     if (typeof rawBody === "object" && rawBody !== null) {
       if (rawBody._isFormData) {
@@ -231,38 +280,39 @@
         if (rawBody.type && headers && !headers.has("content-type")) {
           headers.set("content-type", rawBody.type);
         }
-        if (!globalThis.TextDecoder) __slice_ensure_shard(2);
-        var u8b = new Uint8Array(rawBody._u8);
-        return { str: __slice_text_decode(u8b, "utf-8", false, false), u8: u8b, fd: null };
+        return { str: null, u8: new Uint8Array(rawBody._u8) };
       }
       if (
         rawBody instanceof Uint8Array ||
         rawBody instanceof ArrayBuffer ||
         (rawBody.buffer instanceof ArrayBuffer)
       ) {
-        if (!globalThis.TextDecoder) __slice_ensure_shard(2);
-        var u8 = new Uint8Array(__slice_toU8(rawBody));
-        return { str: __slice_text_decode(u8, "utf-8", false, false), u8: u8, fd: null };
+        return { str: null, u8: new Uint8Array(__slice_toU8(rawBody)) };
       }
       if (typeof rawBody._toText === "function") {
         if (__streamHasBinary(rawBody) && typeof rawBody._toBytes === "function") {
-          var stU8 = rawBody._toBytes();
-          if (!globalThis.TextDecoder) __slice_ensure_shard(2);
           return {
-            str: __slice_text_decode(stU8, "utf-8", false, false),
-            u8: stU8,
-            fd: null
+            str: null,
+            u8: rawBody._toBytes()
           };
         }
-        var txt = rawBody._toText();
         return {
-          str: txt,
-          u8: null,
-          fd: null
+          str: rawBody._toText(),
+          u8: null
         };
       }
     }
-    return { str: JSON.stringify(rawBody), u8: null, fd: null };
+    if (typeof rawBody === "string") {
+      if (headers && !headers.has("content-type")) {
+        headers.set("content-type", "text/plain;charset=UTF-8");
+      }
+      return { str: rawBody, u8: null };
+    }
+    var coerced = String(rawBody);
+    if (headers && !headers.has("content-type")) {
+      headers.set("content-type", "text/plain;charset=UTF-8");
+    }
+    return { str: coerced, u8: null };
   }
 
   var __defaultReqSignal = {
@@ -282,7 +332,7 @@
     r._h = null;
     r._b = null;
     r._u8 = null;
-    r._fd = null;
+    r._stream = null;
     r.redirect = "follow";
     r.signal = __defaultReqSignal;
     r.bodyUsed = false;
@@ -300,9 +350,10 @@
       rSimple._h = null;
       rSimple._hm = null;
       rSimple._hsc = null;
-      rSimple._body = "";
+      rSimple._ct = "";
+      rSimple._stream = null;
+      rSimple._body = null;
       rSimple._u8 = null;
-      rSimple._fd = null;
       rSimple.redirect = "follow";
       rSimple.signal = __defaultReqSignal;
       rSimple.bodyUsed = false;
@@ -329,9 +380,12 @@
         rInit._hsc = null;
       }
       rInit._stream = null;
-      rInit._body = typeof o.body === "string" ? o.body : "";
+      var isStrReqBody = typeof o.body === "string";
+      rInit._body = isStrReqBody ? o.body : null;
       rInit._u8 = null;
-      rInit._fd = null;
+      rInit._ct = (isStrReqBody && (!rInit._hm || rInit._hm["content-type"] === undefined))
+        ? "text/plain;charset=UTF-8"
+        : "";
       rInit.redirect = o.redirect ? String(o.redirect) : "follow";
       rInit.signal = o.signal || __defaultReqSignal;
       rInit.bodyUsed = false;
@@ -351,27 +405,31 @@
       if (typeof o.body === "string") {
         this._body = o.body;
         this._u8 = null;
-        this._fd = null;
-      } else if (typeof o.body === "object" && typeof o.body._toText === "function" && (!o.body._closed || o.body._startPromise)) {
+        if (!this.headers._m["content-type"]) {
+          this.headers._m["content-type"] = "text/plain;charset=UTF-8";
+        }
+      } else if (typeof o.body === "object" && __isStreamPendingOrOpen(o.body)) {
         this._stream = o.body;
-        this._body = "";
+        this._body = null;
         this._u8 = null;
-        this._fd = null;
       } else {
         var nb = __normHttpBody(o.body, this.headers);
         this._body = nb.str;
         this._u8 = nb.u8;
-        this._fd = nb.fd;
       }
     } else if (isReq) {
       this._stream = input._stream || null;
-      this._body = input._body;
-      this._u8 = input._u8 ? new Uint8Array(input._u8) : null;
-      this._fd = input._fd || null;
+      var inU8 = input._isLiveReq ? __borrowBodyBytes(input) : input._u8;
+      if (inU8 instanceof Uint8Array) {
+        this._u8 = new Uint8Array(inU8);
+        this._body = null;
+      } else {
+        this._body = input._body;
+        this._u8 = null;
+      }
     } else {
-      this._body = "";
+      this._body = null;
       this._u8 = null;
-      this._fd = null;
     }
     this.redirect = o.redirect ? String(o.redirect) : (isReq && input.redirect ? input.redirect : "follow");
     this.signal = o.signal || (isReq && input.signal ? input.signal : __defaultReqSignal);
@@ -389,12 +447,11 @@
         rSimple._h = null;
         rSimple._hm = null;
         rSimple._hsc = null;
-        rSimple._data = undefined;
         rSimple._stream = null;
-        rSimple._body = typeof body === "string" ? body : "";
+        var isSimpleStr = typeof body === "string";
+        rSimple._body = isSimpleStr ? body : null;
         rSimple._u8 = null;
-        rSimple._fd = null;
-        rSimple._ct = "text/plain;charset=UTF-8";
+        rSimple._ct = isSimpleStr ? "text/plain;charset=UTF-8" : "";
         rSimple._isSliceRes = true;
         rSimple.bodyUsed = false;
         return rSimple;
@@ -403,20 +460,17 @@
       this.statusText = "OK";
       this.ok = true;
       this.headers = new Headers();
-      this._data = undefined;
       this._stream = null;
-      if (typeof body === "object" && typeof body._toText === "function" && (!body._closed || body._startPromise)) {
+      if (typeof body === "object" && __isStreamPendingOrOpen(body)) {
         this._stream = body;
-        this._body = "";
+        this._body = null;
         this._u8 = null;
-        this._fd = null;
-        this.headers._m["content-type"] = "text/plain;charset=UTF-8";
       } else {
         var nbFast = __normHttpBody(body, this.headers);
         this._body = nbFast.str;
         this._u8 = nbFast.u8;
-        this._fd = nbFast.fd;
       }
+      this._ct = "";
       this._isSliceRes = true;
       this.bodyUsed = false;
       return;
@@ -447,12 +501,13 @@
         rInit._hm = null;
         rInit._hsc = null;
       }
-      rInit._data = undefined;
       rInit._stream = null;
-      rInit._body = typeof body === "string" ? body : "";
+      var isInitStr = typeof body === "string";
+      rInit._body = isInitStr ? body : null;
       rInit._u8 = null;
-      rInit._fd = null;
-      rInit._ct = typeof body === "string" ? "text/plain;charset=UTF-8" : "";
+      rInit._ct = (isInitStr && (!rInit._hm || rInit._hm["content-type"] === undefined))
+        ? "text/plain;charset=UTF-8"
+        : "";
       rInit._isSliceRes = true;
       rInit.bodyUsed = false;
       return rInit;
@@ -461,29 +516,25 @@
     this.statusText = stText;
     this.ok = st >= 200 && st < 300;
     this.headers = (oh && oh._isHeaders) ? new Headers(oh) : new Headers(oh);
-    this._data = undefined;
     this._stream = null;
+    this._ct = "";
     if (body === undefined || body === null) {
-      this._body = "";
+      this._body = null;
       this._u8 = null;
-      this._fd = null;
     } else if (typeof body === "string") {
       this._body = body;
       this._u8 = null;
-      this._fd = null;
       if (!this.headers._m["content-type"]) {
         this.headers._m["content-type"] = "text/plain;charset=UTF-8";
       }
-    } else if (typeof body === "object" && typeof body._toText === "function" && (!body._closed || body._startPromise)) {
+    } else if (typeof body === "object" && __isStreamPendingOrOpen(body)) {
       this._stream = body;
-      this._body = "";
+      this._body = null;
       this._u8 = null;
-      this._fd = null;
     } else {
       var nb = __normHttpBody(body, this.headers);
       this._body = nb.str;
       this._u8 = nb.u8;
-      this._fd = nb.fd;
     }
     this._isSliceRes = true;
     this.bodyUsed = false;
@@ -491,6 +542,7 @@
 
   var RP = Request.prototype, SP = Response.prototype;
   var LiveReqProto = Object.create(RP);
+  LiveReqProto._isLiveReq = true;
   Object.defineProperties(LiveReqProto, {
     method: {
       get: function() { return this._m || (this._m = __slice_http_method() || "GET"); },
@@ -511,10 +563,7 @@
       enumerable: true
     },
     _body: {
-      get: function() {
-        if (this._b === null) this._b = __slice_http_body() || "";
-        return this._b;
-      },
+      get: function() { return __getBodyText(this); },
       set: function(v) { this._b = v; },
       configurable: true,
       enumerable: false
@@ -526,11 +575,14 @@
       if (!this._h) {
         var h = Object.create(Headers.prototype);
         h._live = false;
-        h._m = this._hm || Object.create(null);
+        var hm = this._hm || Object.create(null);
+        if (this._ct && hm["content-type"] === undefined) hm["content-type"] = this._ct;
+        h._m = hm;
         h._sc = this._hsc || null;
         this._h = h;
         this._hm = null;
         this._hsc = null;
+        this._ct = "";
       }
       return this._h;
     },
@@ -538,6 +590,7 @@
       this._h = v;
       this._hm = null;
       this._hsc = null;
+      this._ct = "";
     },
     configurable: true,
     enumerable: true
@@ -555,6 +608,7 @@
         this._h = h;
         this._hm = null;
         this._hsc = null;
+        this._ct = "";
       }
       return this._h;
     },
@@ -562,44 +616,54 @@
       this._h = v;
       this._hm = null;
       this._hsc = null;
+      this._ct = "";
     },
     configurable: true,
     enumerable: true
   });
 
+  RP._borrowBytes = SP._borrowBytes = function() {
+    return __borrowBodyBytes(this);
+  };
+  RP._getText = SP._getText = function() {
+    return __getBodyText(this);
+  };
+
   RP.text = SP.text = function() {
     this.bodyUsed = true;
     if (this._stream) {
-      return this._stream._drainToBody(this).then(function(s) { return s._body; });
+      return this._stream._drainToBody(this).then(__getBodyText);
     }
-    if (this._data !== undefined && !this._body) this._body = JSON.stringify(this._data);
-    return Promise.resolve(this._body);
+    return Promise.resolve(__getBodyText(this));
   };
   RP.json = SP.json = function() {
     this.bodyUsed = true;
     if (this._stream) {
-      return this._stream._drainToBody(this).then(function(s) { return JSON.parse(s._body); });
+      return this._stream._drainToBody(this).then(function(s) {
+        return JSON.parse(__getBodyText(s));
+      });
     }
-    if (this._data !== undefined) return Promise.resolve(this._data);
-    try { return Promise.resolve(JSON.parse(this._body)); } catch (e) { return Promise.reject(e); }
+    try {
+      return Promise.resolve(JSON.parse(__getBodyText(this)));
+    } catch (e) {
+      return Promise.reject(e);
+    }
   };
   RP.textSync = SP.textSync = function() {
     this.bodyUsed = true;
     if (this._stream) {
-      this._body = this._stream._toText();
+      if (__streamHasBinary(this._stream) && typeof this._stream._toBytes === "function") {
+        this._u8 = this._stream._toBytes();
+        this._body = null;
+      } else {
+        this._body = this._stream._toText();
+      }
       this._stream = null;
     }
-    if (this._data !== undefined && !this._body) this._body = JSON.stringify(this._data);
-    return this._body;
+    return __getBodyText(this);
   };
   RP.jsonSync = SP.jsonSync = function() {
-    this.bodyUsed = true;
-    if (this._stream) {
-      this._body = this._stream._toText();
-      this._stream = null;
-    }
-    if (this._data !== undefined) return this._data;
-    return JSON.parse(this._body);
+    return JSON.parse(this.textSync());
   };
   RP.arrayBuffer = SP.arrayBuffer = function() {
     this.bodyUsed = true;
@@ -618,7 +682,7 @@
   RP.blob = SP.blob = function() {
     this.bodyUsed = true;
     if (!globalThis.Blob) __slice_ensure_shard(15);
-    var cType = this._ct || this.headers.get("content-type") || "";
+    var cType = __effectiveContentType(this);
     if (this._stream) {
       return this._stream._drainToBody(this).then(function(s) {
         return new globalThis.Blob([__extractBodyBytes(s)], { type: cType });
@@ -631,27 +695,41 @@
     if (this._stream) {
       return this._stream._drainToBody(this).then(function(s) { return __bodyToFormData(s); });
     }
-    return Promise.resolve(__bodyToFormData(this));
+    try {
+      return Promise.resolve(__bodyToFormData(this));
+    } catch (e) {
+      return Promise.reject(e);
+    }
   };
   RP.clone = function() {
+    if (this.bodyUsed || (this._stream && this._stream.locked)) {
+      throw new TypeError("Cannot clone a disturbed or locked Request");
+    }
     var stClone = null;
     if (this._stream && typeof this._stream.tee === "function") {
       var pair = this._stream.tee();
       this._stream = pair[0];
       stClone = pair[1];
     }
+    var liveU8 = this._isLiveReq ? __borrowBodyBytes(this) : this._u8;
+    var hasBin = !stClone && (liveU8 instanceof Uint8Array);
     var r = new Request(this.url, {
       method: this.method,
       headers: new Headers(this.headers),
-      body: stClone || this._body,
+      body: stClone ? stClone : (hasBin ? null : this._body),
       redirect: this.redirect,
       signal: this.signal
     });
-    if (this._u8) r._u8 = new Uint8Array(this._u8);
-    if (this._fd) r._fd = this._fd;
+    if (hasBin) {
+      r._u8 = new Uint8Array(liveU8);
+      r._body = null;
+    }
     return r;
   };
   SP.clone = function() {
+    if (this.bodyUsed || (this._stream && this._stream.locked)) {
+      throw new TypeError("Cannot clone a disturbed or locked Response");
+    }
     if (this.status < 200 || this.status > 599) {
       var sr = __makeSpecialResponse(this.status, this.statusText, null);
       sr._h = new Headers(this.headers);
@@ -664,28 +742,39 @@
       this._stream = pair[0];
       stClone = pair[1];
     }
-    if (this._data !== undefined && !this._body) this._body = JSON.stringify(this._data);
-    var r = new Response(stClone || this._body, {
+    var hasBin = !stClone && (this._u8 instanceof Uint8Array);
+    var r = new Response(stClone ? stClone : (hasBin ? null : this._body), {
       status: this.status,
       statusText: this.statusText,
       headers: new Headers(this.headers)
     });
-    if (this._u8) r._u8 = new Uint8Array(this._u8);
-    if (this._fd) r._fd = this._fd;
+    if (hasBin) {
+      r._u8 = new Uint8Array(this._u8);
+      r._body = null;
+    }
     return r;
   };
   var __bodyDesc = {
     get: function() {
       if (this._stream) return this._stream;
-      if (!this._body && !this._u8 && this._data === undefined) return null;
+      if (this._isLiveReq) {
+        var liveB = __borrowBodyBytes(this);
+        if ((!liveB || liveB.byteLength === 0) && (this.method === "GET" || this.method === "HEAD")) {
+          return null;
+        }
+      } else if (this._body === null && !this._u8) {
+        return null;
+      }
       if (!globalThis.ReadableStream) __slice_ensure_shard(3);
       var b = __extractBodyBytes(this);
-      return new globalThis.ReadableStream({
+      var rs = new globalThis.ReadableStream({
         start: function(c) {
           if (b.byteLength > 0) c.enqueue(b);
           c.close();
         }
       });
+      this._stream = rs;
+      return rs;
     }
   };
   Object.defineProperty(RP, "body", __bodyDesc);
@@ -703,18 +792,21 @@
       r._hm = null;
       r._hsc = null;
     }
-    r._data = undefined;
     r._stream = null;
-    r._body = "";
+    r._body = null;
     r._u8 = null;
-    r._fd = null;
     r._ct = "";
     r._isSliceRes = true;
     r.bodyUsed = false;
     return r;
   }
   globalThis.__slice_make_special_response = __makeSpecialResponse;
+
   Response.json = function(data, init) {
+    var jsonStr = JSON.stringify(data);
+    if (jsonStr === undefined) {
+      throw new TypeError("Value is not JSON serializable");
+    }
     if (!init) {
       var rFast = Object.create(LazyResProto);
       rFast.status = 200;
@@ -723,11 +815,9 @@
       rFast._h = null;
       rFast._hm = null;
       rFast._hsc = null;
-      rFast._data = data;
       rFast._stream = null;
-      rFast._body = "";
+      rFast._body = jsonStr;
       rFast._u8 = null;
-      rFast._fd = null;
       rFast._ct = "application/json";
       rFast._isSliceRes = true;
       rFast.bodyUsed = false;
@@ -757,28 +847,29 @@
           rJson._hsc = null;
           rJson._ct = "application/json";
         }
-        rJson._data = data;
         rJson._stream = null;
-        rJson._body = "";
+        rJson._body = jsonStr;
         rJson._u8 = null;
-        rJson._fd = null;
         rJson._isSliceRes = true;
         rJson.bodyUsed = false;
         return rJson;
       }
     }
     var r = new Response(null, typeof init === "number" ? { status: init } : init);
+    r._body = jsonStr;
     if (r._h === null) {
       if (!r._hm || r._hm["content-type"] === undefined) r._ct = "application/json";
     } else if (!r.headers._m["content-type"]) {
       r.headers._m["content-type"] = "application/json";
     }
-    r._data = data;
     return r;
   };
   Response.redirect = function(url, status) {
-    var st = status || 302;
-    return new Response("", { status: st, headers: { location: String(url) } });
+    var st = status === undefined ? 302 : Number(status);
+    if (st !== 301 && st !== 302 && st !== 303 && st !== 307 && st !== 308) {
+      throw new RangeError("Failed to execute 'redirect' on 'Response': Invalid redirect status code.");
+    }
+    return new Response(null, { status: st, headers: { location: String(url) } });
   };
   Response.error = function() {
     var r = __makeSpecialResponse(0, "", null);
@@ -835,24 +926,23 @@
         __slice_http_respond(r.status, r._u8, ctFast, hdrJsonFast);
         return;
       }
-      var rbFast = r._body || (r._data !== undefined ? JSON.stringify(r._data) : "");
-      __slice_http_respond(r.status, rbFast, ctFast, hdrJsonFast);
+      __slice_http_respond(r.status, r._body || "", ctFast, hdrJsonFast);
       return;
     }
-    var h = r._h !== undefined ? r._h : r.headers;
+    var h = r._h !== undefined && r._h !== null ? r._h : r.headers;
     var hasBin = r._u8 instanceof Uint8Array;
     var ct = (h && h._m && h._m["content-type"]) || r._ct || (isNoBodyStatus ? "" : (hasBin ? "application/octet-stream" : "text/plain;charset=UTF-8"));
     var hdrJson = h ? __resHdrJson(h) : "";
     if (r._stream) {
       var st = r._stream;
-      if (st._startPromise) {
-        st._startPromise.then(function() {
-          var hs = r._h !== undefined ? r._h : r.headers;
-          var isBinS = __streamHasBinary(st);
+      if (typeof st._isAsyncPending === "function" && st._isAsyncPending()) {
+        st._drainToBody(r).then(function() {
+          var hs = r._h !== undefined && r._h !== null ? r._h : r.headers;
+          var isBinS = r._u8 instanceof Uint8Array;
           var ctS = (hs && hs._m && hs._m["content-type"]) || r._ct || (isBinS ? "application/octet-stream" : "text/plain;charset=UTF-8");
           __slice_http_respond(
             r.status,
-            isBinS && typeof st._toBytes === "function" ? st._toBytes() : st._toText(),
+            isBinS ? r._u8 : (r._body || ""),
             ctS,
             hs ? __resHdrJson(hs) : ""
           );
@@ -873,8 +963,7 @@
       __slice_http_respond(r.status, r._u8, ct, hdrJson);
       return;
     }
-    var rb = r._body || (r._data !== undefined ? JSON.stringify(r._data) : "");
-    __slice_http_respond(r.status, rb, ct, hdrJson);
+    __slice_http_respond(r.status, r._body || "", ct, hdrJson);
   }
 
   globalThis.Headers = Headers;

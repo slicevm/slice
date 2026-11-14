@@ -44,6 +44,8 @@ pub(crate) struct ActiveBoaHttpReq {
     pub(crate) query: String,
     pub(crate) tenant_id: String,
     pub(crate) body: String,
+    pub(crate) body_bytes: Vec<u8>,
+    pub(crate) has_raw_body_bytes: bool,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) headers_len: usize,
 }

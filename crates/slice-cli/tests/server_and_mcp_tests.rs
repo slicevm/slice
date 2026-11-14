@@ -1671,6 +1671,7 @@ fn test_issue_105_tenant_url_prefix_slicing_non_ascii_wire_guard_and_host_bind()
         query: "q=1",
         tenant_id: "url-guard-tenant",
         body: "",
+        body_bytes: None,
         headers: &[("host", "localhost")],
     };
     let embedder_out = iso

@@ -650,6 +650,7 @@ tls_key = "./certs/server.key"
         query: "x=1",
         tenant_id: "phase3-slice-serve",
         body: "",
+        body_bytes: None,
         headers: &[],
     };
     let outcome = iso.execute_http_request(&bc, None, &req_ctx).unwrap();

@@ -114,8 +114,34 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
         js_string!("__slice_http_body"),
         0,
         NativeFunction::from_fn_ptr(|_this, _args, _context| {
-            let s = BOA_HTTP_REQ.with(|r| r.borrow().body.clone());
+            let s = BOA_HTTP_REQ.with(|r| {
+                let borrow = r.borrow();
+                if borrow.has_raw_body_bytes
+                    && borrow.body.is_empty()
+                    && !borrow.body_bytes.is_empty()
+                {
+                    String::from_utf8_lossy(&borrow.body_bytes).into_owned()
+                } else {
+                    borrow.body.clone()
+                }
+            });
             Ok(BoaVal::from(js_string!(s)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_body_bytes"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, context| {
+            BOA_HTTP_REQ.with(|r| {
+                let borrow = r.borrow();
+                let bytes: &[u8] = if borrow.has_raw_body_bytes {
+                    &borrow.body_bytes
+                } else {
+                    borrow.body.as_bytes()
+                };
+                crate::bindings::helpers::bytes_to_js_uint8_array(bytes, context)
+            })
         }),
     );
 

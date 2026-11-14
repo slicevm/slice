@@ -12,6 +12,9 @@ use slice_sandbox::SandboxViolation;
 use std::borrow::Cow;
 
 /// Zero-copy HTTP/1.1 request view borrowed directly from the worker thread's 64 KB socket read buffer.
+///
+/// When `body_bytes` is `Some(raw)`, exact binary request bytes are preserved without UTF-8
+/// lossy replacement; when `body_bytes` is `None`, `body.as_bytes()` is used.
 #[derive(Debug, Clone, Copy)]
 pub struct HttpRequestContext<'a> {
     pub method: &'a str,
@@ -19,6 +22,7 @@ pub struct HttpRequestContext<'a> {
     pub query: &'a str,
     pub tenant_id: &'a str,
     pub body: &'a str,
+    pub body_bytes: Option<&'a [u8]>,
     pub headers: &'a [(&'a str, &'a str)],
 }
 
@@ -83,7 +87,18 @@ fn populate_boa_http_req(req: &HttpRequestContext<'_>) {
         borrow.tenant_id.clear();
         borrow.tenant_id.push_str(req.tenant_id);
         borrow.body.clear();
-        borrow.body.push_str(req.body);
+        borrow.body_bytes.clear();
+        if let Some(raw) = req.body_bytes {
+            borrow.body_bytes.extend_from_slice(raw);
+            borrow.has_raw_body_bytes = true;
+            if !req.body.is_empty() {
+                borrow.body.push_str(req.body);
+            }
+        } else {
+            borrow.has_raw_body_bytes = false;
+            borrow.body.push_str(req.body);
+            borrow.body_bytes.extend_from_slice(req.body.as_bytes());
+        }
         borrow.headers_len = req.headers.len();
         for (idx, &(k, v)) in req.headers.iter().enumerate() {
             if idx < borrow.headers.len() {

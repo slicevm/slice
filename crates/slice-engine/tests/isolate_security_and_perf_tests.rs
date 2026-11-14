@@ -31,6 +31,7 @@ fn test_iso_sec01_wait_until_fuel_memory_dlp_and_ses_lockdown() {
         query: "",
         tenant_id: "iso-sec01-fuel",
         body: "",
+        body_bytes: None,
         headers: &[],
     };
     let outcome = iso_fuel
@@ -416,6 +417,7 @@ fn test_iso_perf01_02_03_reset_for_request_http_dlp_and_warm_isolate_throughput(
         query: "",
         tenant_id: "perf-tenant-a",
         body: "",
+        body_bytes: None,
         headers: &[("accept", "application/json")],
     };
 
@@ -466,6 +468,7 @@ fn test_multi_tenant_warm_realm_wait_until_and_ses_quarantine_isolation() {
         query: "",
         tenant_id: "mt-alpha",
         body: "",
+        body_bytes: None,
         headers: &[],
     };
     let _ = iso_a.execute_http_request(&bc_a_abort, None, &req_a);
@@ -493,6 +496,7 @@ fn test_multi_tenant_warm_realm_wait_until_and_ses_quarantine_isolation() {
         query: "",
         tenant_id: "mt-beta",
         body: "",
+        body_bytes: None,
         headers: &[],
     };
     let out_b = iso_b
@@ -742,6 +746,7 @@ fn test_multi_tenant_vfs_affinity_checkpoint_mtime_and_nested_sandbox_isolation(
         query: "",
         tenant_id: "bench-keepalive-tenant",
         body: "",
+        body_bytes: None,
         headers: &[],
     };
     let _ = warm_iso

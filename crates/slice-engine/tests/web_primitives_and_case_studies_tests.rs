@@ -294,6 +294,7 @@ Slice.respond(200, JSON.stringify({
         tenant_id: "nested-guard-tenant",
         headers: &[("X-Test", "1")],
         body: "{}",
+        body_bytes: None,
     };
     let outcome = isolate.execute_http_request(&bc, None, &req_ctx).unwrap();
     assert_eq!(outcome.status_code, 200);

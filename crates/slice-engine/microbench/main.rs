@@ -518,6 +518,7 @@ fn bench_http_cli_and_host_fs(c: &mut Criterion) {
             query: "tier=0",
             tenant_id: "tenant-default",
             body: "",
+            body_bytes: None,
             headers: &hdrs,
         };
         let mut slot = 1u32;
@@ -556,6 +557,7 @@ Slice.respond(
             query: "region=iad",
             tenant_id: "tenant-default",
             body: "",
+            body_bytes: None,
             headers: &hdrs,
         };
         let mut slot = 1u32;

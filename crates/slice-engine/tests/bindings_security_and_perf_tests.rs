@@ -238,6 +238,7 @@ fn test_sec04_http_response_header_egress_dlp_blocking() {
         tenant_id: "sec04-http-dlp",
         headers: &[],
         body: "",
+        body_bytes: None,
     };
 
     let err = iso
@@ -440,6 +441,7 @@ fn test_default_pure_compute_fs_deny_by_default_across_all_surfaces() {
         query: "",
         tenant_id: "http-default-deny",
         body: "",
+        body_bytes: None,
         headers: &[],
     };
     let mut http_iso = SliceIsolate::spawn(

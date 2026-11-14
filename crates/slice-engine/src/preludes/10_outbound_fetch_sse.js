@@ -133,9 +133,7 @@
       var h = o.headers instanceof Headers ? o.headers : new Headers(o.headers);
       if (!h._m["content-type"]) h._m["content-type"] = "text/event-stream; charset=utf-8";
       if (!h._m["cache-control"]) h._m["cache-control"] = "no-cache";
-      var r = new Response(__colSse(src), { status: o.status || 200, statusText: o.statusText, headers: h });
-      r._ct = h._m["content-type"];
-      return r;
+      return new Response(__colSse(src), { status: o.status || 200, statusText: o.statusText, headers: h });
     };
   }
 
@@ -148,7 +146,7 @@
   }
 
   function __reqHeadersJson(req) {
-    if (req._h === null && req._hm === null) return "[]";
+    if (req._h === null && req._hm === null && !req._ct) return "[]";
     return JSON.stringify(req.headers.entries());
   }
 
@@ -156,7 +154,7 @@
     var req = new Request(input, init);
     var sig = (init && init.signal) || req.signal || null;
     if (sig && sig.aborted) throw (sig.reason !== undefined ? sig.reason : __mkAbortErr());
-    var reqBody = req._u8 instanceof Uint8Array ? req._u8 : req._body;
+    var reqBody = req._u8 instanceof Uint8Array ? req._u8 : (req._body || "");
     var raw = JSON.parse(
       __slice_fetch_sync(req.url, req.method, __reqHeadersJson(req), reqBody, req.redirect || "follow")
     );
@@ -217,7 +215,7 @@
       if (req._stream) {
         return req.bytes().then(dispatchFetch);
       }
-      return dispatchFetch(req._u8 instanceof Uint8Array ? req._u8 : req._body);
+      return dispatchFetch(req._u8 instanceof Uint8Array ? req._u8 : (req._body || ""));
     } catch (e) {
       return Promise.reject(e);
     }
@@ -226,7 +224,8 @@
   if (globalThis.Slice) {
     globalThis.Slice.streamSSE = function(src, init) {
       var r = Response.sse(src, init);
-      __slice_http_respond(r.status, r._body, r._ct, "");
+      var ctSse = r.headers.get("content-type") || "text/event-stream; charset=utf-8";
+      __slice_http_respond(r.status, r._body || "", ctSse, "");
       return r;
     };
     globalThis.Slice.fetchSync = __doFetch;
