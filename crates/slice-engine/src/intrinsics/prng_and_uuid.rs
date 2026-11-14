@@ -98,6 +98,46 @@ pub fn fill_random_bytes(dest: &mut [u8], det_prng: Option<&mut u64>) {
     HOST_CSPRNG_POOL.with(|pool| pool.borrow_mut().fill_bytes(dest));
 }
 
+/// Maximum exclusive span (`max - min`) permitted by Node.js `crypto.randomInt`: `2^48 - 1`.
+pub const MAX_CRYPTO_RANDOM_INT_RANGE: u64 = 0xFFFF_FFFF_FFFF;
+
+/// Samples an unbiased integer uniformly in `0..range` (`1 <= range <= 2^48 - 1`) using bitmask
+/// rejection sampling over either the deterministic SplitMix64 PRNG (`--deterministic`) or the
+/// thread-local buffered OS CSPRNG (`HOST_CSPRNG_POOL`) with zero heap allocations.
+#[inline]
+pub fn sample_unbiased_u64_below(range: u64, det_prng: Option<&mut u64>) -> u64 {
+    if range <= 1 {
+        return 0;
+    }
+    let bits = 64 - (range - 1).leading_zeros();
+    let mask = if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+
+    if let Some(state) = det_prng {
+        loop {
+            let candidate = splitmix64_next_u64(state) & mask;
+            if candidate < range {
+                return candidate;
+            }
+        }
+    }
+
+    HOST_CSPRNG_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        let mut raw = [0u8; 8];
+        loop {
+            pool.fill_bytes(&mut raw);
+            let candidate = u64::from_le_bytes(raw) & mask;
+            if candidate < range {
+                return candidate;
+            }
+        }
+    })
+}
+
 /// Generates an RFC 4122 UUIDv4 string (`xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`),
 /// using deterministic PRNG state when active or OS CSPRNG otherwise.
 pub fn generate_uuid_v4(det_prng: Option<&mut u64>) -> String {

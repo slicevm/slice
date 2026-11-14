@@ -29,6 +29,7 @@ pub(crate) const REALM_CTL_SYNC_ENV: i32 = 2;
 pub(crate) const REALM_CTL_SET_NEXT_TICK: i32 = 3;
 pub(crate) const REALM_CTL_RESET_WU: i32 = 4;
 pub(crate) const REALM_CTL_DISPATCH_HTTP_BRIDGE: i32 = 5;
+pub(crate) const REALM_CTL_RESET_FS_WATCHERS: i32 = 6;
 
 pub(crate) const HOST_GROUP_HTTP_BRIDGE: u8 = 1 << 0;
 pub(crate) const HOST_GROUP_SEMVER_FAST: u8 = 1 << 1;
@@ -81,14 +82,19 @@ thread_local! {
         std::cell::RefCell::new(Vec::with_capacity(16));
     pub(crate) static BOA_CONTEXT_POOL: std::cell::RefCell<std::mem::ManuallyDrop<Vec<WarmBoaRealm>>> =
         const { std::cell::RefCell::new(std::mem::ManuallyDrop::new(Vec::new())) };
-    pub(crate) static BOA_VFS_CACHE: std::cell::RefCell<FxHashMap<String, std::sync::Arc<Vec<u8>>>> =
-        std::cell::RefCell::new(FxHashMap::default());
-    pub(crate) static BOA_VFS_DIRS: std::cell::RefCell<FxHashSet<String>> =
-        std::cell::RefCell::new(FxHashSet::default());
-    pub(crate) static BOA_VFS_TOMBSTONES: std::cell::RefCell<FxHashSet<String>> =
-        std::cell::RefCell::new(FxHashSet::default());
-    pub(crate) static BOA_VFS_MTIMES: std::cell::RefCell<FxHashMap<String, f64>> =
-        std::cell::RefCell::new(FxHashMap::default());
+    pub(crate) static BOA_VFS_STATE: std::cell::RefCell<crate::bindings::fs::VfsState> =
+        const {
+            std::cell::RefCell::new(crate::bindings::fs::VfsState {
+                inodes: Vec::new(),
+                free_inodes: Vec::new(),
+                paths: FxHashMap::with_hasher(rustc_hash::FxBuildHasher),
+                fds: Vec::new(),
+                free_fds: Vec::new(),
+                open_fd_total: 0,
+                total_accounted_bytes: 0,
+                has_active_watchers: false,
+            })
+        };
     pub(crate) static BOA_VFS_OWNER_TENANT: std::cell::RefCell<CompactString> =
         const { std::cell::RefCell::new(CompactString::const_new("")) };
     pub(crate) static BOA_ACTIVE_CAPS: std::cell::RefCell<BoaFsCaps> =
@@ -601,10 +607,7 @@ pub(crate) fn ensure_vfs_tenant_affinity(vfs_ns: &str) {
     BOA_VFS_OWNER_TENANT.with(|owner| {
         let mut cur = owner.borrow_mut();
         if cur.as_str() != vfs_ns {
-            BOA_VFS_CACHE.with(|c| c.borrow_mut().clear());
-            BOA_VFS_DIRS.with(|d| d.borrow_mut().clear());
-            BOA_VFS_TOMBSTONES.with(|t| t.borrow_mut().clear());
-            BOA_VFS_MTIMES.with(|m| m.borrow_mut().clear());
+            BOA_VFS_STATE.with(|v| v.borrow_mut().clear());
             cur.clear();
             cur.push_str(vfs_ns);
         }

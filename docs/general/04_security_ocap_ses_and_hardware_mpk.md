@@ -39,7 +39,7 @@ allow_write = ["/tmp/cache"]
 
 ### 2.2 Via CLI Flags
 ```bash
-slice run ./src/pipeline.ts --allow-read=/app/public,/tmp/cache --allow-write=/tmp/cache
+slice run ./src/pipeline.ts --allow-read=/app/public --allow-read=/tmp/cache --allow-write=/tmp/cache
 ```
 
 ### 2.3 Path Traversal (`..`), NUL Byte & Device/UNC Blocking
@@ -55,7 +55,7 @@ OCap Violation: Compartment 'cli-tenant' lacks filesystem read authority for '/a
 ```
 
 ### 2.4 Copy-on-Write VFS Mutations (Host Disk Preservation)
-Even when `allow_write` is granted for a directory, `writeFileSync`, `appendFileSync`, `copyFileSync`, `renameSync`, `unlinkSync`, and `rmSync` operate strictly inside the isolate's in-memory copy-on-write VFS (`BOA_VFS_CACHE` and VFS tombstones). Unlinking or removing a path masks any underlying host entry inside the isolate without deleting files from the host OS disk, and `Slice.checkpoint()` / `Slice.restore()` rolls VFS writes and tombstones back in `< 5 us`.
+Even when `allow_write` is granted for a directory, `writeFileSync`, `appendFileSync`, `copyFileSync`, `renameSync`, `unlinkSync`, `rmSync`, and `openSync`/`writeSync` operate strictly inside the isolate's inode-backed in-memory copy-on-write VFS (`BOA_VFS_STATE`). Unlinking or removing a path records a VFS tombstone that masks any underlying host entry inside the isolate without deleting files from the host OS disk (keeping unlinked open file descriptors readable/writable until `closeSync`), and `Slice.checkpoint()` / `Slice.restore()` rolls VFS inodes, open FDs, tombstones, and memory budget accounting back in `< 5 us`.
 
 ---
 

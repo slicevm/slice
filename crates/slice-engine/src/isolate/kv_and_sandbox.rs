@@ -3,9 +3,9 @@
 
 use crate::isolate::SliceIsolate;
 use crate::state_and_kv::{
-    checkpoint_tenant_state, clear_tenant_checkpoints, edge_kv_contains_live_key,
-    edge_kv_del_bytes, edge_kv_get, edge_kv_incr, edge_kv_set, edge_kv_tenant_bytes,
-    release_tenant_checkpoint, restore_tenant_state,
+    checkpoint_tenant_state, clear_tenant_checkpoints, edge_kv_del_bytes, edge_kv_get,
+    edge_kv_incr_checked, edge_kv_set_checked, edge_kv_tenant_bytes, release_tenant_checkpoint,
+    restore_tenant_state,
 };
 use serde::{Deserialize, Serialize};
 use slice_sandbox::{CapabilityToken, SandboxViolation};
@@ -95,13 +95,37 @@ impl SliceIsolate {
     }
 
     /// Writes a value (with optional TTL in milliseconds, `0` = no expiry) into this tenant's
-    /// isolated `Slice.kv` partition, charging byte growth against the compartment memory limit.
+    /// isolated `Slice.kv` partition, charging signed byte deltas against the compartment memory limit.
     #[inline]
     pub fn kv_set(&mut self, key: &str, val: &str, ttl_ms: u64) -> Result<(), SandboxViolation> {
-        let added = key.len().saturating_add(val.len());
-        self.compartment.alloc_memory(added)?;
-        edge_kv_set(&self.compartment.tenant_id, key, val, ttl_ms);
-        Ok(())
+        let current_used = self.compartment.memory_used_bytes;
+        let mem_limit = self.compartment.memory_limit_bytes;
+        match edge_kv_set_checked(
+            &self.compartment.tenant_id,
+            key,
+            val,
+            ttl_ms,
+            current_used,
+            mem_limit,
+        ) {
+            Ok(delta) => {
+                if delta > 0 {
+                    self.compartment.alloc_memory(delta as usize)?;
+                } else if delta < 0 {
+                    self.compartment.memory_used_bytes = self
+                        .compartment
+                        .memory_used_bytes
+                        .saturating_sub(delta.unsigned_abs())
+                        .max(4096);
+                }
+                Ok(())
+            }
+            Err(requested) => Err(SandboxViolation::MemoryCeilingExceeded {
+                tenant_id: self.compartment.tenant_id.clone(),
+                requested,
+                limit: mem_limit,
+            }),
+        }
     }
 
     /// Deletes a key from this tenant's isolated `Slice.kv` partition.
@@ -122,11 +146,33 @@ impl SliceIsolate {
     /// Atomically increments a 64-bit integer counter in this tenant's isolated `Slice.kv` partition.
     #[inline]
     pub fn kv_incr(&mut self, key: &str, delta: i64) -> Result<i64, SandboxViolation> {
-        if !edge_kv_contains_live_key(&self.compartment.tenant_id, key) {
-            self.compartment
-                .alloc_memory(key.len().saturating_add(24))?;
+        let current_used = self.compartment.memory_used_bytes;
+        let mem_limit = self.compartment.memory_limit_bytes;
+        match edge_kv_incr_checked(
+            &self.compartment.tenant_id,
+            key,
+            delta,
+            current_used,
+            mem_limit,
+        ) {
+            Ok((next, mem_delta)) => {
+                if mem_delta > 0 {
+                    self.compartment.alloc_memory(mem_delta as usize)?;
+                } else if mem_delta < 0 {
+                    self.compartment.memory_used_bytes = self
+                        .compartment
+                        .memory_used_bytes
+                        .saturating_sub(mem_delta.unsigned_abs())
+                        .max(4096);
+                }
+                Ok(next)
+            }
+            Err(requested) => Err(SandboxViolation::MemoryCeilingExceeded {
+                tenant_id: self.compartment.tenant_id.clone(),
+                requested,
+                limit: mem_limit,
+            }),
         }
-        Ok(edge_kv_incr(&self.compartment.tenant_id, key, delta))
     }
 
     /// Returns the live byte footprint currently retained by this tenant in the `Slice.kv` slab.
@@ -288,10 +334,12 @@ impl SliceIsolate {
             Some((
                 crate::boa_realm::BOA_VFS_OWNER_TENANT
                     .with(|o| std::mem::take(&mut *o.borrow_mut())),
-                crate::boa_realm::BOA_VFS_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut())),
-                crate::boa_realm::BOA_VFS_DIRS.with(|d| std::mem::take(&mut *d.borrow_mut())),
-                crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| std::mem::take(&mut *t.borrow_mut())),
-                crate::boa_realm::BOA_VFS_MTIMES.with(|m| std::mem::take(&mut *m.borrow_mut())),
+                crate::boa_realm::BOA_VFS_STATE.with(|v| {
+                    let mut vfs = v.borrow_mut();
+                    let snap = vfs.snapshot_with_fds();
+                    vfs.clear();
+                    snap
+                }),
             ))
         } else if !child_iso
             .compartment
@@ -301,10 +349,7 @@ impl SliceIsolate {
         {
             Some((
                 crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| o.borrow().clone()),
-                crate::boa_realm::BOA_VFS_CACHE.with(|c| c.borrow().clone()),
-                crate::boa_realm::BOA_VFS_DIRS.with(|d| d.borrow().clone()),
-                crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| t.borrow().clone()),
-                crate::boa_realm::BOA_VFS_MTIMES.with(|m| m.borrow().clone()),
+                crate::boa_realm::BOA_VFS_STATE.with(|v| v.borrow().snapshot_with_fds()),
             ))
         } else {
             None
@@ -315,12 +360,10 @@ impl SliceIsolate {
         let exec_time_ns = (exec_start.elapsed().as_nanos() as u64).max(1);
 
         if has_isolated_sub_tenant || exec_res.is_err() {
-            if let Some((owner, files, dirs, tombs, mtimes)) = saved_vfs {
+            if let Some((owner, snap)) = saved_vfs {
                 crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| *o.borrow_mut() = owner);
-                crate::boa_realm::BOA_VFS_CACHE.with(|c| *c.borrow_mut() = files);
-                crate::boa_realm::BOA_VFS_DIRS.with(|d| *d.borrow_mut() = dirs);
-                crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| *t.borrow_mut() = tombs);
-                crate::boa_realm::BOA_VFS_MTIMES.with(|m| *m.borrow_mut() = mtimes);
+                crate::boa_realm::BOA_VFS_STATE
+                    .with(|v| v.borrow_mut().restore_from_snapshot(snap));
             }
         }
         if child_iso.checkpoints_taken > 0 {

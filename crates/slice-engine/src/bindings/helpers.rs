@@ -268,6 +268,80 @@ pub(crate) fn consume_crypto_kdf_fuel(cost: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Trips Boa's loop-iteration and recursion runtime limits to `1` so a guest script cannot
+/// swallow a fatal sandbox budget violation (`MemoryCeilingExceeded` or `CpuFuelExhausted`)
+/// inside `try { ... } catch {}` and continue looping.
+#[inline]
+pub(crate) fn trip_isolate_oom_limits(context: &mut boa_engine::Context) {
+    context.runtime_limits_mut().set_loop_iteration_limit(1);
+    context.runtime_limits_mut().set_recursion_limit(1);
+}
+
+/// Records `SandboxViolation::MemoryCeilingExceeded` in `BOA_VIOLATION` (preserving the first
+/// violation of the turn) and returns the formatted `RangeError` message.
+#[cold]
+#[inline(never)]
+pub(crate) fn record_isolate_memory_violation(requested: usize, limit: usize) -> String {
+    let tenant_id = active_tenant_id_or_default();
+    let violation = SandboxViolation::MemoryCeilingExceeded {
+        tenant_id,
+        requested,
+        limit,
+    };
+    let msg = violation.to_string();
+    BOA_VIOLATION.with(|v| {
+        if v.borrow().is_none() {
+            *v.borrow_mut() = Some(violation);
+        }
+    });
+    format!("RangeError: {}", msg)
+}
+
+/// Releases `released_bytes` from `BOA_KV_MEM_BUDGET` (`net_used` clamped at `0` so pre-existing
+/// cross-turn state deletions cannot underflow the active isolate's compartment baseline).
+#[inline]
+pub(crate) fn release_isolate_memory(released_bytes: usize) {
+    if released_bytes == 0 {
+        return;
+    }
+    BOA_KV_MEM_BUDGET.with(|m| {
+        let (used, limit) = m.get();
+        if limit == usize::MAX {
+            return;
+        }
+        m.set((used.saturating_sub(released_bytes), limit));
+    });
+}
+
+/// Applies a signed `delta_bytes` adjustment to `BOA_KV_MEM_BUDGET`.
+/// Positive deltas enforce `limit` and record `SandboxViolation::MemoryCeilingExceeded` on overflow;
+/// negative deltas reclaim memory down to the compartment baseline floor.
+#[inline]
+pub(crate) fn try_adjust_isolate_memory(delta_bytes: isize) -> Result<(), String> {
+    if delta_bytes == 0 {
+        return Ok(());
+    }
+    if delta_bytes < 0 {
+        release_isolate_memory(delta_bytes.unsigned_abs());
+        return Ok(());
+    }
+    try_consume_isolate_memory(delta_bytes as usize)
+}
+
+/// Context-aware signed memory adjustment that also trips `trip_isolate_oom_limits(context)` on OOM.
+#[inline]
+#[allow(dead_code)]
+pub(crate) fn try_adjust_isolate_memory_ctx(
+    delta_bytes: isize,
+    context: &mut boa_engine::Context,
+) -> Result<(), String> {
+    let res = try_adjust_isolate_memory(delta_bytes);
+    if res.is_err() {
+        trip_isolate_oom_limits(context);
+    }
+    res
+}
+
 /// Charges `added_bytes` against the active isolate's `BOA_KV_MEM_BUDGET` ceiling (`max_memory_bytes`).
 /// If the ceiling is exceeded, records `SandboxViolation::MemoryCeilingExceeded` in `BOA_VIOLATION`
 /// and returns `Err` with the violation message.
@@ -287,21 +361,23 @@ pub(crate) fn try_consume_isolate_memory(added_bytes: usize) -> Result<(), Strin
         }
     });
     if let Some((requested, limit)) = exceeded {
-        let tenant_id = active_tenant_id_or_default();
-        let violation = SandboxViolation::MemoryCeilingExceeded {
-            tenant_id,
-            requested,
-            limit,
-        };
-        let msg = violation.to_string();
-        BOA_VIOLATION.with(|v| {
-            if v.borrow().is_none() {
-                *v.borrow_mut() = Some(violation);
-            }
-        });
-        return Err(format!("RangeError: {}", msg));
+        return Err(record_isolate_memory_violation(requested, limit));
     }
     Ok(())
+}
+
+/// Charges `added_bytes` against `BOA_KV_MEM_BUDGET` and trips `trip_isolate_oom_limits(context)`
+/// immediately on overflow so `try { ... } catch {}` loops cannot swallow OOM.
+#[inline]
+pub(crate) fn try_consume_isolate_memory_ctx(
+    added_bytes: usize,
+    context: &mut boa_engine::Context,
+) -> Result<(), String> {
+    let res = try_consume_isolate_memory(added_bytes);
+    if res.is_err() {
+        trip_isolate_oom_limits(context);
+    }
+    res
 }
 
 #[inline]
