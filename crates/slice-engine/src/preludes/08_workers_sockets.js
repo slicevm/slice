@@ -213,10 +213,21 @@
     }
   };
 
-  MessagePort.prototype.postMessage = function(value) {
+  MessagePort.prototype.postMessage = function(value, transferOrOptions) {
     if (this._closed || !this._entangled || this._entangled._closed) return;
+    if (!globalThis.structuredClone) __slice_ensure_shard(16);
+    var cloneOpts = undefined;
+    if (transferOrOptions !== undefined && transferOrOptions !== null) {
+      if (Array.isArray(transferOrOptions)) {
+        cloneOpts = { transfer: transferOrOptions };
+      } else if (typeof transferOrOptions === "object" && transferOrOptions.transfer !== undefined) {
+        cloneOpts = { transfer: transferOrOptions.transfer };
+      }
+    }
+    var cloned = cloneOpts !== undefined
+      ? globalThis.structuredClone(value, cloneOpts)
+      : globalThis.structuredClone(value);
     var target = this._entangled;
-    var cloned = __deserializeMsg(__serializeMsg(value));
     target._syncQueue.push(cloned);
     if (target._hasAsyncListeners()) {
       queueMicrotask(function() {
