@@ -62,10 +62,16 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
                 } else {
                     borrow.path.as_str()
                 };
+                let needs_leading_slash = !path.starts_with('/');
                 let q = borrow.query.as_str();
-                let mut s = String::with_capacity(7 + host.len() + path.len() + q.len() + 1);
+                let mut s = String::with_capacity(
+                    7 + host.len() + usize::from(needs_leading_slash) + path.len() + q.len() + 1,
+                );
                 s.push_str("http://");
                 s.push_str(host);
+                if needs_leading_slash {
+                    s.push('/');
+                }
                 s.push_str(path);
                 if !q.is_empty() {
                     s.push('?');

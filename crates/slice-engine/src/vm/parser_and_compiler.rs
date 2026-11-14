@@ -1386,6 +1386,150 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
         }
     }
 
+    #[inline]
+    fn is_tier0_disallowed_ident(name: &str) -> bool {
+        matches!(
+            name,
+            "arguments"
+                | "globalThis"
+                | "window"
+                | "self"
+                | "process"
+                | "Buffer"
+                | "WebAssembly"
+                | "Symbol"
+                | "Proxy"
+                | "Reflect"
+                | "Object"
+                | "Array"
+                | "String"
+                | "Number"
+                | "Boolean"
+                | "Function"
+                | "JSON"
+                | "Math"
+                | "Date"
+                | "RegExp"
+                | "Promise"
+                | "Map"
+                | "Set"
+                | "WeakMap"
+                | "WeakSet"
+                | "WeakRef"
+                | "FinalizationRegistry"
+                | "Error"
+                | "TypeError"
+                | "RangeError"
+                | "SyntaxError"
+                | "ReferenceError"
+                | "URIError"
+                | "EvalError"
+                | "AggregateError"
+                | "DOMException"
+                | "BigInt"
+                | "ArrayBuffer"
+                | "SharedArrayBuffer"
+                | "DataView"
+                | "Atomics"
+                | "Uint8Array"
+                | "Uint8ClampedArray"
+                | "Int8Array"
+                | "Uint16Array"
+                | "Int16Array"
+                | "Uint32Array"
+                | "Int32Array"
+                | "Float32Array"
+                | "Float64Array"
+                | "BigInt64Array"
+                | "BigUint64Array"
+                | "Intl"
+                | "URL"
+                | "URLSearchParams"
+                | "URLPattern"
+                | "Headers"
+                | "Request"
+                | "Response"
+                | "TextEncoder"
+                | "TextDecoder"
+                | "TextEncoderStream"
+                | "TextDecoderStream"
+                | "AbortController"
+                | "AbortSignal"
+                | "Event"
+                | "CustomEvent"
+                | "MessageEvent"
+                | "CloseEvent"
+                | "ErrorEvent"
+                | "EventTarget"
+                | "WebSocket"
+                | "Worker"
+                | "MessageChannel"
+                | "MessagePort"
+                | "BroadcastChannel"
+                | "Blob"
+                | "File"
+                | "FormData"
+                | "ReadableStream"
+                | "WritableStream"
+                | "TransformStream"
+                | "CompressionStream"
+                | "DecompressionStream"
+                | "ByteLengthQueuingStrategy"
+                | "CountQueuingStrategy"
+                | "navigator"
+                | "location"
+                | "crypto"
+                | "performance"
+                | "console"
+                | "fs"
+                | "Slice"
+                | "WinterTC"
+                | "Deno"
+                | "Bun"
+                | "require"
+                | "module"
+                | "exports"
+                | "__dirname"
+                | "__filename"
+                | "fetch"
+                | "setTimeout"
+                | "setInterval"
+                | "setImmediate"
+                | "clearTimeout"
+                | "clearInterval"
+                | "clearImmediate"
+                | "queueMicrotask"
+                | "structuredClone"
+                | "btoa"
+                | "atob"
+                | "escape"
+                | "unescape"
+                | "eval"
+                | "parseInt"
+                | "parseFloat"
+                | "isNaN"
+                | "isFinite"
+                | "encodeURI"
+                | "decodeURI"
+                | "encodeURIComponent"
+                | "decodeURIComponent"
+                | "describe"
+                | "it"
+                | "expect"
+                | "beforeEach"
+                | "afterEach"
+        )
+    }
+
+    #[inline]
+    fn is_tier0_disallowed_target_ident(name: &str) -> bool {
+        is_tier0_disallowed_ident(name)
+            || matches!(
+                name,
+                "undefined" | "NaN" | "Infinity" | "print" | "env" | "test"
+            )
+    }
+
     fn is_supported_call(
         callee: &Expression<'_>,
         args: &[Argument<'_>],
@@ -1403,80 +1547,13 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
         match callee {
             Expression::Identifier(id) => {
                 let name = id.name.as_str();
-                // Reject global Web/Node constructors or test runner globals not in Tier-0
-                !matches!(
-                    name,
-                    "setTimeout"
-                        | "setInterval"
-                        | "setImmediate"
-                        | "clearTimeout"
-                        | "clearInterval"
-                        | "clearImmediate"
-                        | "queueMicrotask"
-                        | "structuredClone"
-                        | "btoa"
-                        | "atob"
-                        | "escape"
-                        | "unescape"
-                        | "eval"
-                        | "Function"
-                        | "Symbol"
-                        | "BigInt"
-                        | "RegExp"
-                        | "Map"
-                        | "Set"
-                        | "WeakMap"
-                        | "WeakSet"
-                        | "Promise"
-                        | "Proxy"
-                        | "Reflect"
-                        | "Date"
-                        | "Error"
-                        | "TypeError"
-                        | "RangeError"
-                        | "SyntaxError"
-                        | "URL"
-                        | "URLSearchParams"
-                        | "URLPattern"
-                        | "Headers"
-                        | "Request"
-                        | "Response"
-                        | "TextEncoder"
-                        | "TextDecoder"
-                        | "AbortController"
-                        | "AbortSignal"
-                        | "Event"
-                        | "CustomEvent"
-                        | "MessageEvent"
-                        | "CloseEvent"
-                        | "EventTarget"
-                        | "WebSocket"
-                        | "Worker"
-                        | "MessageChannel"
-                        | "MessagePort"
-                        | "Blob"
-                        | "File"
-                        | "FormData"
-                        | "ReadableStream"
-                        | "WritableStream"
-                        | "TransformStream"
-                        | "CompressionStream"
-                        | "DecompressionStream"
-                        | "Buffer"
-                        | "Uint8Array"
-                        | "Int32Array"
-                        | "Float64Array"
-                        | "ArrayBuffer"
-                        | "DataView"
-                        | "WebAssembly"
-                        | "describe"
-                        | "it"
-                        | "test"
-                        | "expect"
-                        | "beforeEach"
-                        | "afterEach"
-                        | "require"
-                )
+                match name {
+                    "print" | "fetch" | "env" | "Number" | "String" | "Boolean" | "isNaN"
+                    | "isFinite" => true,
+                    "parseInt" | "parseFloat" => args.len() == 1,
+                    "test" => false,
+                    _ => !is_tier0_disallowed_ident(name),
+                }
             }
             Expression::StaticMemberExpression(member) if !member.optional => {
                 let prop = member.property.name.as_str();
@@ -1526,16 +1603,20 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                         "crypto.subtle" => {
                             return prop == "digest";
                         }
-                        "crypto" | "process" | "Buffer" | "Response" | "URL" | "WebAssembly"
-                        | "Reflect" | "Date" | "performance" | "Number" | "String" | "Promise"
-                        | "globalThis" | "self" => {
+                        _ if is_tier0_disallowed_target_ident(
+                            chain.split('.').next().unwrap_or(chain.as_str()),
+                        ) =>
+                        {
                             return false;
                         }
                         _ => {}
                     }
                 }
                 if matches!(prop, "push" | "pop") {
-                    return matches!(member.object, Expression::Identifier(_));
+                    return matches!(
+                        &member.object,
+                        Expression::Identifier(id) if !is_tier0_disallowed_target_ident(id.name.as_str())
+                    );
                 }
                 if matches!(
                     prop,
@@ -1564,19 +1645,7 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
             | Expression::BooleanLiteral(_)
             | Expression::NullLiteral(_) => true,
             Expression::TemplateLiteral(tpl) => tpl.expressions.is_empty() && tpl.quasis.len() == 1,
-            Expression::Identifier(id) => !matches!(
-                id.name.as_str(),
-                "arguments"
-                    | "globalThis"
-                    | "window"
-                    | "self"
-                    | "process"
-                    | "Buffer"
-                    | "WebAssembly"
-                    | "Symbol"
-                    | "Proxy"
-                    | "Reflect"
-            ),
+            Expression::Identifier(id) => !is_tier0_disallowed_ident(id.name.as_str()),
             Expression::ParenthesizedExpression(p) => {
                 is_supported_expr(&p.expression, in_function_depth)
             }
@@ -1592,8 +1661,9 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
             }
             Expression::UpdateExpression(u) => {
                 matches!(
-                    u.argument,
-                    SimpleAssignmentTarget::AssignmentTargetIdentifier(_)
+                    &u.argument,
+                    SimpleAssignmentTarget::AssignmentTargetIdentifier(id)
+                        if !is_tier0_disallowed_target_ident(id.name.as_str())
                 )
             }
             Expression::BinaryExpression(b) => {
@@ -1649,10 +1719,28 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                     return false;
                 }
                 match &a.left {
-                    AssignmentTarget::AssignmentTargetIdentifier(_) => true,
+                    AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                        !is_tier0_disallowed_target_ident(id.name.as_str())
+                    }
                     AssignmentTarget::StaticMemberExpression(m) if !m.optional => {
-                        a.operator == AssignmentOperator::Assign
-                            && static_member_chain(&m.object).is_some()
+                        if a.operator != AssignmentOperator::Assign {
+                            return false;
+                        }
+                        if let Some(chain) = static_member_chain(&m.object) {
+                            if slice_sandbox::is_frozen_intrinsic(&chain)
+                                || slice_sandbox::is_frozen_intrinsic(&format!(
+                                    "{}.{}",
+                                    chain, m.property.name
+                                ))
+                            {
+                                return true;
+                            }
+                        }
+                        matches!(
+                            &m.object,
+                            Expression::Identifier(id)
+                                if !is_tier0_disallowed_target_ident(id.name.as_str())
+                        )
                     }
                     AssignmentTarget::ComputedMemberExpression(m) if !m.optional => {
                         let non_array_idx = matches!(
@@ -1668,7 +1756,11 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                         );
                         !non_array_idx
                             && a.operator == AssignmentOperator::Assign
-                            && matches!(m.object, Expression::Identifier(_))
+                            && matches!(
+                                &m.object,
+                                Expression::Identifier(id)
+                                    if !is_tier0_disallowed_target_ident(id.name.as_str())
+                            )
                             && is_supported_expr(&m.expression, in_function_depth)
                     }
                     _ => false,
@@ -1762,7 +1854,10 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
             return false;
         }
         let decl = &vd.declarations[0];
-        if !matches!(decl.id, BindingPattern::BindingIdentifier(_)) {
+        let BindingPattern::BindingIdentifier(id) = &decl.id else {
+            return false;
+        };
+        if is_tier0_disallowed_target_ident(id.name.as_str()) {
             return false;
         }
         decl.init

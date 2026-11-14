@@ -6,12 +6,6 @@ use std::io::{BufRead, Write};
 /// Maximum allowed MCP JSON-RPC 2.0 request line length (`4 MB`) (`CLI-SEC-04`).
 pub(crate) const MAX_MCP_LINE_BYTES: usize = 4 * 1024 * 1024;
 
-/// Upper bound on per-call `slice_eval_ts` `fuel` override when raising above baseline.
-const MAX_MCP_EVAL_FUEL: u64 = 100_000_000;
-
-/// Upper bound on per-call `slice_eval_ts` `memory` override when raising above baseline (`256 MB`).
-const MAX_MCP_EVAL_MEMORY_BYTES: usize = 256 * 1024 * 1024;
-
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum McpLineRead {
     Eof,
@@ -227,9 +221,9 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                         "type": "object",
                         "properties": {
                             "code": { "type": "string", "description": "TypeScript or JavaScript source code to evaluate" },
-                            "fuel": { "type": "integer", "description": "Maximum CPU instruction fuel budget" },
-                            "memory": { "type": "integer", "description": "Maximum memory ceiling in bytes" },
-                            "memoryBytes": { "type": "integer", "description": "Maximum memory ceiling in bytes (alias for memory)" },
+                            "fuel": { "type": "integer", "description": "Optional CPU instruction fuel budget, attenuated against the server --fuel ceiling" },
+                            "memory": { "type": "integer", "description": "Optional memory ceiling in bytes, attenuated against the server --memory ceiling" },
+                            "memoryBytes": { "type": "integer", "description": "Optional memory ceiling in bytes (alias for memory), attenuated against the server --memory ceiling" },
                             "allowRead": { "type": ["string", "array"], "description": "Optional allowed VFS read prefix(es) attenuated against server grants" },
                             "allowWrite": { "type": ["string", "array"], "description": "Optional allowed VFS write prefix(es) attenuated against server grants" },
                             "allowNet": { "type": ["string", "array"], "description": "Optional allowed network host(s) attenuated against server grants" },
@@ -238,8 +232,8 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                             "auditSecret": { "type": ["string", "array"], "description": "Optional secret(s) to guard against egress leakage" },
                             "auditSecrets": { "type": ["string", "array"], "description": "Optional array of secrets to guard against egress leakage" },
                             "deterministicSeed": { "type": "integer", "description": "Optional deterministic seed for Math.random() and Date.now()" },
-                            "checkpoints": { "type": "boolean", "description": "Whether guest Slice.checkpoint() / Slice.restore() calls are allowed" },
-                            "maxCheckpoints": { "type": "integer", "description": "Maximum number of guest checkpoints allowed during evaluation" }
+                            "checkpoints": { "type": "boolean", "description": "Whether guest Slice.checkpoint() / Slice.restore() calls are allowed (attenuated against server grants)" },
+                            "maxCheckpoints": { "type": "integer", "description": "Maximum number of guest checkpoints allowed during evaluation (attenuated against remaining server --max-checkpoints quota)" }
                         },
                         "required": ["code"]
                     }
@@ -304,7 +298,7 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                         .or_else(|| args.get("memoryBytes"))
                         .and_then(|v| v.as_u64())
                     {
-                        opts.memory_bytes = Some(m as usize);
+                        opts.memory_bytes = Some(usize::try_from(m).unwrap_or(usize::MAX));
                     }
                     push_string_or_array_arg(&args, "allowRead", &mut opts.allow_read);
                     push_string_or_array_arg(&args, "allowWrite", &mut opts.allow_write);
@@ -324,42 +318,16 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                         opts.checkpoints = Some(cp);
                     }
                     if let Some(max_cp) = args.get("maxCheckpoints").and_then(|v| v.as_u64()) {
-                        opts.max_checkpoints = Some(max_cp.min(u32::MAX as u64) as u32);
+                        opts.max_checkpoints = Some(u32::try_from(max_cp).unwrap_or(u32::MAX));
                     }
-                    let saved_fuel_limit = isolate.compartment.fuel_limit;
-                    let saved_mem_limit = isolate.compartment.memory_limit_bytes;
-                    let saved_cp_taken = isolate.checkpoints_taken;
-                    let saved_cp_restored = isolate.restores_performed;
-                    let saved_cp_restore_ns = isolate.restore_time_ns;
+                    // Strictly attenuate per-call fuel, memory, and checkpoint limits against
+                    // the host MCP isolate's configured ceilings (never raise fuel_limit,
+                    // memory_limit_bytes, or reset session checkpoints_taken).
                     isolate.compartment.fuel_consumed = 0;
                     isolate.sync_live_kv_memory();
-                    isolate.checkpoints_taken = 0;
-                    isolate.restores_performed = 0;
-                    isolate.restore_time_ns = 0;
-                    let fuel_override_cap = saved_fuel_limit.max(MAX_MCP_EVAL_FUEL);
-                    if let Some(req_fuel) = opts.fuel {
-                        let capped_fuel = req_fuel.min(fuel_override_cap);
-                        opts.fuel = Some(capped_fuel);
-                        if capped_fuel > isolate.compartment.fuel_limit {
-                            isolate.compartment.fuel_limit = capped_fuel;
-                        }
-                    }
-                    let mem_override_cap = saved_mem_limit.max(MAX_MCP_EVAL_MEMORY_BYTES);
-                    if let Some(req_mem) = opts.memory_bytes {
-                        let capped_mem = req_mem.min(mem_override_cap);
-                        opts.memory_bytes = Some(capped_mem);
-                        if capped_mem > isolate.compartment.memory_limit_bytes {
-                            isolate.compartment.memory_limit_bytes = capped_mem;
-                        }
-                    }
                     let outcome = isolate.eval_sandbox(code, opts);
-                    isolate.compartment.fuel_limit = saved_fuel_limit;
-                    isolate.compartment.memory_limit_bytes = saved_mem_limit;
                     isolate.compartment.fuel_consumed = 0;
                     isolate.sync_live_kv_memory();
-                    isolate.checkpoints_taken = saved_cp_taken;
-                    isolate.restores_performed = saved_cp_restored;
-                    isolate.restore_time_ns = saved_cp_restore_ns;
                     let payload = serde_json::json!({
                         "ok": outcome.ok,
                         "value": outcome.return_value,

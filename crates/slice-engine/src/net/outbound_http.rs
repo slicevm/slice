@@ -54,10 +54,12 @@ pub fn is_valid_http_header_value(val: &str) -> bool {
     val.bytes().all(|b| b == b'\t' || (b >= 0x20 && b != 0x7F))
 }
 
-/// Validates an HTTP request target (`path_and_query`) to prevent request line splitting via spaces or control chars.
+/// Validates an HTTP/1.1 request target (`origin-form` / `path_and_query`) per RFC 9112 Section 3.2:
+/// requires non-empty visible US-ASCII (`VCHAR`, `0x21..=0x7E`), rejecting spaces, control chars,
+/// obs-text (`0x80..=0xFF`), and CRLF request-line splitting payloads.
 #[inline]
 pub fn is_valid_request_target(target: &str) -> bool {
-    !target.is_empty() && target.bytes().all(|b| b > 0x20 && b != 0x7F)
+    !target.is_empty() && target.bytes().all(|b| b > 0x20 && b < 0x7F)
 }
 
 #[derive(Debug, Clone)]

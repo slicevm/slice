@@ -1,5 +1,5 @@
 use super::{apply_boacas_override, find_project_manifest_path};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use slice_cas::CasBuilder;
 use slice_engine::compile_source_to_bytecode;
 use slice_sandbox::SliceManifest;
@@ -21,9 +21,13 @@ pub(crate) fn build_cas_archive_with_static(
     static_dir_opt: Option<&Path>,
 ) -> Result<slice_cas::CasIndexHeader> {
     let manifest_path_opt = find_project_manifest_path(input_path);
-    let manifest_toml_opt = manifest_path_opt
-        .as_ref()
-        .and_then(|mf| std::fs::read_to_string(mf).ok());
+    let manifest_toml_opt = match &manifest_path_opt {
+        Some(mf) => Some(
+            std::fs::read_to_string(mf)
+                .with_context(|| format!("Failed to read manifest {}", mf.display()))?,
+        ),
+        None => None,
+    };
     let mut manifest_static_dir: Option<std::path::PathBuf> = None;
     if let Some(ref raw_toml) = manifest_toml_opt {
         let m = SliceManifest::parse_toml(raw_toml);

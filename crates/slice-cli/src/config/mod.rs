@@ -1,9 +1,21 @@
 pub(crate) mod cas_packager;
+pub(crate) mod flags;
+pub(crate) mod secrets_and_env;
 pub(crate) mod watcher;
 
 #[cfg(test)]
 pub(crate) use cas_packager::build_cas_archive;
 pub(crate) use cas_packager::build_cas_archive_with_static;
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) use flags::parse_u64_digits;
+pub(crate) use flags::{
+    is_known_slice_runtime_flag, match_non_empty_flag_path, match_non_empty_flag_value,
+    skip_runtime_flag_with_separate_value,
+};
+pub(crate) use secrets_and_env::{
+    apply_dotenv_file_to_caps_and_dlp, load_audit_egress_file, maybe_register_sensitive_env_dlp,
+    register_audit_egress_spec,
+};
 #[cfg(test)]
 pub(crate) use watcher::collect_watch_fingerprint;
 pub(crate) use watcher::OsNativeFileWatcher;
@@ -40,25 +52,6 @@ mod win_ctrlc {
 pub(crate) fn install_ctrlc_handler() {
     #[cfg(windows)]
     win_ctrlc::install();
-}
-
-/// Zero-allocation parser that extracts ASCII digits from `raw` (ignoring underscores, spaces, or
-/// unit suffixes) into a `u64`. Returns `None` if no digits are present or if overflow occurs.
-#[inline]
-pub(crate) fn parse_u64_digits(raw: &str) -> Option<u64> {
-    let mut acc: u64 = 0;
-    let mut saw_digit = false;
-    for &b in raw.as_bytes() {
-        if b.is_ascii_digit() {
-            saw_digit = true;
-            acc = acc.checked_mul(10)?.checked_add((b - b'0') as u64)?;
-        }
-    }
-    if saw_digit {
-        Some(acc)
-    } else {
-        None
-    }
 }
 
 /// Unified execution configuration (`CapabilityToken`, `fuel_limit`, `mem_limit`, `audit_secrets`,
@@ -104,23 +97,11 @@ fn extract_explicit_config_path(args: &[String]) -> Result<Option<PathBuf>> {
     let mut found: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
-        let arg = &args[i];
-        if arg == "--" {
+        if args[i] == "--" {
             break;
         }
-        if arg == "--config" {
-            if i + 1 >= args.len() || args[i + 1].trim().is_empty() {
-                anyhow::bail!("Flag --config requires a manifest file path");
-            }
-            found = Some(PathBuf::from(args[i + 1].trim()));
-            i += 2;
-            continue;
-        } else if let Some(val) = arg.strip_prefix("--config=") {
-            let trimmed = val.trim();
-            if trimmed.is_empty() {
-                anyhow::bail!("Flag --config= requires a non-empty manifest file path");
-            }
-            found = Some(PathBuf::from(trimmed));
+        if let Some(cfg_path) = match_non_empty_flag_path(args, &mut i, "--config")? {
+            found = Some(cfg_path);
         }
         i += 1;
     }
@@ -144,6 +125,7 @@ impl ResolvedExecutionConfig {
         let mut mem_limit: usize = 16 * 1024 * 1024;
         let mut audit_secrets = Vec::new();
         let mut audit_egress_specs = Vec::new();
+        let mut audit_egress_files = Vec::new();
         let mut env_files = Vec::new();
         let mut warm_pool = false;
         let mut deterministic_seed = None;
@@ -172,7 +154,7 @@ impl ResolvedExecutionConfig {
         let mut cli_tls_key_override = None;
         let mut cli_trust_directives_override = None;
 
-        // 1. Apply explicit `--config <path>` or `./slice.toml` (when ambient CWD loading is enabled)
+        // 1. Apply explicit `--config <path>` or `./slice.toml` (fail-closed if present and unreadable)
         let mut loaded_manifest_path: Option<PathBuf> = None;
         let loaded_manifest_opt: Option<(String, PathBuf)> =
             if let Some(ref cfg_path) = explicit_config_path {
@@ -189,15 +171,14 @@ impl ResolvedExecutionConfig {
             } else if load_ambient_cwd {
                 let cwd_manifest = Path::new("slice.toml");
                 if cwd_manifest.exists() {
-                    if let Ok(raw) = std::fs::read_to_string(cwd_manifest) {
-                        loaded_manifest_path = Some(
-                            std::fs::canonicalize(cwd_manifest)
-                                .unwrap_or_else(|_| cwd_manifest.to_path_buf()),
-                        );
-                        Some((raw, PathBuf::from(".")))
-                    } else {
-                        None
-                    }
+                    let raw = std::fs::read_to_string(cwd_manifest).with_context(|| {
+                        format!("Failed to read manifest {}", cwd_manifest.display())
+                    })?;
+                    loaded_manifest_path = Some(
+                        std::fs::canonicalize(cwd_manifest)
+                            .unwrap_or_else(|_| cwd_manifest.to_path_buf()),
+                    );
+                    Some((raw, PathBuf::from(".")))
                 } else {
                     None
                 }
@@ -244,26 +225,28 @@ impl ResolvedExecutionConfig {
                 Some(manifest_base.as_path()),
                 &mut caps,
                 &mut audit_secrets,
-            );
+            )?;
         }
 
         // 2. Apply `SLICE_*` environment variables (override slice.toml, overridden by CLI flags)
         if let Ok(v) = std::env::var("SLICE_FUEL") {
-            if let Some(parsed) = parse_u64_digits(&v) {
+            if let Some(parsed) = flags::parse_u64_digits(&v) {
                 fuel_limit = parsed;
                 cli_fuel_override = Some(parsed);
             }
         }
         if let Ok(v) = std::env::var("SLICE_MEMORY_KB") {
-            if let Some(parsed) = parse_u64_digits(&v) {
-                let bytes = (parsed as usize).saturating_mul(1024);
+            if let Some(parsed) = flags::parse_u64_digits(&v) {
+                let bytes = usize::try_from(parsed)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(1024);
                 mem_limit = bytes;
                 cli_mem_override = Some(bytes);
             }
         }
         if let Ok(v) = std::env::var("SLICE_MEMORY") {
-            if let Some(parsed) = parse_u64_digits(&v) {
-                let bytes = parsed as usize;
+            if let Some(parsed) = flags::parse_u64_digits(&v) {
+                let bytes = usize::try_from(parsed).unwrap_or(usize::MAX);
                 mem_limit = bytes;
                 cli_mem_override = Some(bytes);
             }
@@ -293,21 +276,13 @@ impl ResolvedExecutionConfig {
         if let Ok(v) = std::env::var("SLICE_ALLOW_ENV") {
             for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                 if let Some((k, val)) = item.split_once('=') {
-                    if val.len() >= 6
-                        && slice_sandbox::is_sensitive_env_key(k)
-                        && !audit_secrets.contains(&val.to_string())
-                    {
-                        audit_secrets.push(val.to_string());
-                    }
-                    caps = caps.with_env(k.trim(), val.trim());
+                    let kt = k.trim();
+                    let vt = val.trim();
+                    maybe_register_sensitive_env_dlp(kt, vt, &mut audit_secrets);
+                    caps = caps.with_env(kt, vt);
                 } else {
                     let env_val = std::env::var(item).unwrap_or_default();
-                    if env_val.len() >= 6
-                        && slice_sandbox::is_sensitive_env_key(item)
-                        && !audit_secrets.contains(&env_val)
-                    {
-                        audit_secrets.push(env_val.clone());
-                    }
+                    maybe_register_sensitive_env_dlp(item, &env_val, &mut audit_secrets);
                     caps = caps.with_env(item, env_val);
                 }
             }
@@ -318,8 +293,17 @@ impl ResolvedExecutionConfig {
                 env_files.push(PathBuf::from(trimmed));
             }
         }
+        if let Ok(v) = std::env::var("SLICE_AUDIT_EGRESS_FILE") {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                audit_egress_files.push(PathBuf::from(trimmed));
+            }
+        }
         if let Ok(v) = std::env::var("SLICE_AUDIT_EGRESS") {
-            audit_egress_specs.push(v);
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                audit_egress_specs.push(trimmed.to_string());
+            }
         }
         if let Ok(v) = std::env::var("SLICE_CHECKPOINTS") {
             if let Some(b) = slice_sandbox::parse_bool_setting(&v) {
@@ -327,8 +311,8 @@ impl ResolvedExecutionConfig {
             }
         }
         if let Ok(v) = std::env::var("SLICE_MAX_CHECKPOINTS") {
-            if let Some(n) = parse_u64_digits(&v) {
-                caps = caps.with_max_checkpoints(Some(n.min(u32::MAX as u64) as u32));
+            if let Some(n) = flags::parse_u64_digits(&v) {
+                caps = caps.with_max_checkpoints(Some(u32::try_from(n).unwrap_or(u32::MAX)));
             }
         }
         if let Ok(v) = std::env::var("SLICE_WARM") {
@@ -338,7 +322,7 @@ impl ResolvedExecutionConfig {
             }
         }
         if let Ok(v) = std::env::var("SLICE_DETERMINISTIC_SEED") {
-            if let Some(seed) = parse_u64_digits(&v) {
+            if let Some(seed) = flags::parse_u64_digits(&v) {
                 deterministic_seed = Some(seed);
                 cli_det_override = Some(Some(seed));
             }
@@ -401,20 +385,40 @@ impl ResolvedExecutionConfig {
             }
         }
 
-        // 3. Apply explicit CLI inline flags (highest precedence)
+        // 3. Apply explicit CLI inline flags (highest precedence, fail-closed on empty/missing file paths)
         let mut arg_idx = 0;
         while arg_idx < args.len() {
-            let arg = &args[arg_idx];
-            if arg == "--" {
+            if args[arg_idx] == "--" {
                 break;
             }
-            if arg == "--config" {
-                arg_idx += 2;
-                continue;
-            } else if arg.starts_with("--config=") {
+            if match_non_empty_flag_path(args, &mut arg_idx, "--config")?.is_some() {
                 arg_idx += 1;
                 continue;
             }
+            if let Some(ef) = match_non_empty_flag_path(args, &mut arg_idx, "--env-file")? {
+                env_files.push(ef);
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(sf) = match_non_empty_flag_path(args, &mut arg_idx, "--audit-egress-file")?
+            {
+                audit_egress_files.push(sf);
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(sec) = match_non_empty_flag_value(args, &mut arg_idx, "--audit-egress")? {
+                let sec_owned = sec.to_string();
+                audit_egress_specs.push(sec_owned);
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(tr) = match_non_empty_flag_path(args, &mut arg_idx, "--trace")? {
+                trace_output_path = Some(tr);
+                arg_idx += 1;
+                continue;
+            }
+
+            let arg = &args[arg_idx];
             if let Some(prefix) = arg.strip_prefix("--allow-read=") {
                 caps = caps.with_read_prefix(prefix);
             } else if let Some(prefix) = arg.strip_prefix("--allow-write=") {
@@ -431,30 +435,14 @@ impl ResolvedExecutionConfig {
                 }
             } else if let Some(kv) = arg.strip_prefix("--allow-env=") {
                 if let Some((k, v)) = kv.split_once('=') {
-                    if v.len() >= 6
-                        && slice_sandbox::is_sensitive_env_key(k)
-                        && !audit_secrets.contains(&v.to_string())
-                    {
-                        audit_secrets.push(v.to_string());
-                    }
+                    maybe_register_sensitive_env_dlp(k, v, &mut audit_secrets);
                     caps = caps.with_env(k, v);
                 } else {
                     let k = kv.trim();
                     let v = std::env::var(k).unwrap_or_default();
-                    if v.len() >= 6
-                        && slice_sandbox::is_sensitive_env_key(k)
-                        && !audit_secrets.contains(&v)
-                    {
-                        audit_secrets.push(v.clone());
-                    }
+                    maybe_register_sensitive_env_dlp(k, &v, &mut audit_secrets);
                     caps = caps.with_env(k, v);
                 }
-            } else if let Some(ef) = arg.strip_prefix("--env-file=") {
-                if !ef.is_empty() {
-                    env_files.push(PathBuf::from(ef));
-                }
-            } else if let Some(sec) = arg.strip_prefix("--audit-egress=") {
-                audit_egress_specs.push(sec.to_string());
             } else if arg == "--no-checkpoints" {
                 caps = caps.with_checkpoints(false);
             } else if arg == "--checkpoints" {
@@ -464,43 +452,25 @@ impl ResolvedExecutionConfig {
                     caps = caps.with_checkpoints(b);
                 }
             } else if let Some(mcp_str) = arg.strip_prefix("--max-checkpoints=") {
-                if let Some(n) = parse_u64_digits(mcp_str) {
-                    caps = caps.with_max_checkpoints(Some(n.min(u32::MAX as u64) as u32));
-                }
-            } else if let Some(sec_file) = arg.strip_prefix("--audit-egress-file=") {
-                if !sec_file.is_empty() {
-                    if let Ok(raw) = std::fs::read_to_string(sec_file) {
-                        let (_, dotenv_secs) = slice_sandbox::parse_dotenv_content(&raw);
-                        for s in dotenv_secs {
-                            if !audit_secrets.contains(&s) {
-                                audit_secrets.push(s);
-                            }
-                        }
-                        for line in raw.lines().map(str::trim) {
-                            if !line.is_empty()
-                                && !line.starts_with('#')
-                                && !line.contains('=')
-                                && !audit_secrets.contains(&line.to_string())
-                            {
-                                audit_secrets.push(line.to_string());
-                            }
-                        }
-                    }
+                if let Some(n) = flags::parse_u64_digits(mcp_str) {
+                    caps = caps.with_max_checkpoints(Some(u32::try_from(n).unwrap_or(u32::MAX)));
                 }
             } else if let Some(f) = arg.strip_prefix("--fuel=") {
-                if let Some(parsed) = parse_u64_digits(f) {
+                if let Some(parsed) = flags::parse_u64_digits(f) {
                     fuel_limit = parsed;
                     cli_fuel_override = Some(parsed);
                 }
             } else if let Some(m) = arg.strip_prefix("--memory=") {
-                if let Some(parsed) = parse_u64_digits(m) {
-                    let bytes = parsed as usize;
+                if let Some(parsed) = flags::parse_u64_digits(m) {
+                    let bytes = usize::try_from(parsed).unwrap_or(usize::MAX);
                     mem_limit = bytes;
                     cli_mem_override = Some(bytes);
                 }
             } else if let Some(mkb) = arg.strip_prefix("--memory-kb=") {
-                if let Some(parsed) = parse_u64_digits(mkb) {
-                    let bytes = (parsed as usize).saturating_mul(1024);
+                if let Some(parsed) = flags::parse_u64_digits(mkb) {
+                    let bytes = usize::try_from(parsed)
+                        .unwrap_or(usize::MAX)
+                        .saturating_mul(1024);
                     mem_limit = bytes;
                     cli_mem_override = Some(bytes);
                 }
@@ -576,17 +546,15 @@ impl ResolvedExecutionConfig {
                     trust_directives = b;
                     cli_trust_directives_override = Some(b);
                 }
-            } else if let Some(tr_str) = arg.strip_prefix("--trace=") {
-                let trimmed = tr_str.trim();
-                if !trimmed.is_empty() {
-                    trace_output_path = Some(PathBuf::from(trimmed));
-                }
             }
             arg_idx += 1;
         }
 
         for ef in &env_files {
             apply_dotenv_file_to_caps_and_dlp(ef, &mut caps, &mut audit_secrets)?;
+        }
+        for sf in &audit_egress_files {
+            load_audit_egress_file(sf, &mut audit_secrets)?;
         }
         let cli_audit_base = explicit_config_path
             .as_deref()
@@ -599,7 +567,7 @@ impl ResolvedExecutionConfig {
                 }
             });
         for spec in &audit_egress_specs {
-            register_audit_egress_spec(spec, cli_audit_base, &caps, &mut audit_secrets);
+            register_audit_egress_spec(spec, cli_audit_base, &caps, &mut audit_secrets)?;
         }
 
         Ok(Self {
@@ -635,7 +603,11 @@ impl ResolvedExecutionConfig {
 
     /// Merges a target project's `slice.toml` or embedded `.cas` manifest TOML into this
     /// configuration, updating settings unless already overridden by `--config`, `SLICE_*` env vars, or CLI flags.
-    pub(crate) fn apply_manifest_toml(&mut self, raw_toml: &str, base_dir: Option<&Path>) {
+    pub(crate) fn apply_manifest_toml(
+        &mut self,
+        raw_toml: &str,
+        base_dir: Option<&Path>,
+    ) -> Result<()> {
         let m = SliceManifest::parse_toml(raw_toml);
         if !self.has_explicit_config {
             if self.cli_fuel_override.is_none() {
@@ -702,12 +674,16 @@ impl ResolvedExecutionConfig {
             base_dir,
             &mut self.caps,
             &mut self.audit_secrets,
-        );
+        )
     }
 
     /// Applies top-of-file inline source directives (`// @slice-...`) from an entrypoint script,
     /// overriding `slice.toml` defaults while respecting `SLICE_*` env vars and CLI flags.
-    pub(crate) fn apply_inline_directives(&mut self, source: &str, base_dir: Option<&Path>) {
+    pub(crate) fn apply_inline_directives(
+        &mut self,
+        source: &str,
+        base_dir: Option<&Path>,
+    ) -> Result<()> {
         let trimmed = source.trim_start_matches('\u{feff}').trim_start();
         if !trimmed.starts_with("//")
             && !trimmed.starts_with("/*")
@@ -715,7 +691,7 @@ impl ResolvedExecutionConfig {
             && !trimmed.starts_with("\"use strict\"")
             && !trimmed.starts_with("'use strict'")
         {
-            return;
+            return Ok(());
         }
         let dirs = slice_sandbox::parse_inline_directives(source);
         if self.cli_fuel_override.is_none() {
@@ -767,7 +743,7 @@ impl ResolvedExecutionConfig {
             }
         }
         for sec in dirs.audit_egress {
-            register_audit_egress_spec(&sec, base_dir, &self.caps, &mut self.audit_secrets);
+            register_audit_egress_spec(&sec, base_dir, &self.caps, &mut self.audit_secrets)?;
         }
 
         if self.trust_directives {
@@ -790,21 +766,19 @@ impl ResolvedExecutionConfig {
                 }
             }
             for (k, v) in dirs.allow_env {
-                if v.len() >= 6
-                    && slice_sandbox::is_sensitive_env_key(&k)
-                    && !self.audit_secrets.contains(&v)
-                {
-                    self.audit_secrets.push(v.clone());
-                }
+                maybe_register_sensitive_env_dlp(&k, &v, &mut self.audit_secrets);
                 self.caps.allowed_env_keys.entry(k).or_insert(v);
             }
-            if let (Some(ef), Some(dir)) = (dirs.env_file, base_dir) {
-                let env_path = dir.join(&ef);
-                let _ = apply_dotenv_file_to_caps_and_dlp(
+            if let Some(ef) = dirs.env_file {
+                let env_path = match base_dir {
+                    Some(dir) => dir.join(&ef),
+                    None => PathBuf::from(&ef),
+                };
+                apply_dotenv_file_to_caps_and_dlp(
                     &env_path,
                     &mut self.caps,
                     &mut self.audit_secrets,
-                );
+                )?;
             }
             if self.cli_tls_cert_override.is_none() {
                 if let Some(tc) = dirs.tls_cert {
@@ -889,48 +863,51 @@ impl ResolvedExecutionConfig {
                 }
             }
         }
+        Ok(())
     }
 
     /// Discovers and applies `slice.toml` for `target_path` (if one exists in `target_path`,
     /// its parent directory, or its grandparent directory), skipping a duplicate disk read and
     /// TOML parse when the discovered manifest is identical to the ambient `./slice.toml` already loaded.
-    pub(crate) fn apply_target_path_manifest(&mut self, target_path: &Path) {
+    pub(crate) fn apply_target_path_manifest(&mut self, target_path: &Path) -> Result<()> {
         if self.has_explicit_config {
-            return;
+            return Ok(());
         }
         if let Some(manifest_file) = find_project_manifest_path(target_path) {
             let canon =
                 std::fs::canonicalize(&manifest_file).unwrap_or_else(|_| manifest_file.clone());
             if self.loaded_manifest_path.as_deref() == Some(canon.as_path()) {
-                return;
+                return Ok(());
             }
-            if let Ok(raw) = std::fs::read_to_string(&manifest_file) {
-                self.loaded_manifest_path = Some(canon);
-                self.apply_manifest_toml(&raw, manifest_file.parent());
-            }
+            let raw = std::fs::read_to_string(&manifest_file)
+                .with_context(|| format!("Failed to read manifest {}", manifest_file.display()))?;
+            self.loaded_manifest_path = Some(canon);
+            self.apply_manifest_toml(&raw, manifest_file.parent())?;
         }
+        Ok(())
     }
 }
 
-pub(crate) fn load_manifest_or_default() -> (CapabilityToken, u64, usize) {
+pub(crate) fn load_manifest_or_default() -> Result<(CapabilityToken, u64, usize)> {
     let manifest_path = Path::new("slice.toml");
     if manifest_path.exists() {
-        if let Ok(raw) = std::fs::read_to_string(manifest_path) {
-            let m = SliceManifest::parse_toml(&raw);
-            return (m.capabilities, m.fuel_limit, m.memory_limit_kb * 1024);
-        }
+        let raw = std::fs::read_to_string(manifest_path)
+            .with_context(|| format!("Failed to read manifest {}", manifest_path.display()))?;
+        let m = SliceManifest::parse_toml(&raw);
+        return Ok((m.capabilities, m.fuel_limit, m.memory_limit_kb * 1024));
     }
-    (
+    Ok((
         CapabilityToken::pure_compute(),
         50_000_000,
         16 * 1024 * 1024,
-    )
+    ))
 }
 
 #[cfg(test)]
 pub(crate) fn merge_manifest_toml_into_caps(raw_toml: &str, caps: &mut CapabilityToken) {
     let mut dummy_secrets = Vec::new();
-    merge_manifest_toml_into_caps_and_dlp(raw_toml, None, caps, &mut dummy_secrets);
+    merge_manifest_toml_into_caps_and_dlp(raw_toml, None, caps, &mut dummy_secrets)
+        .expect("in-memory manifest TOML merge should not fail");
 }
 
 #[cfg(test)]
@@ -939,9 +916,9 @@ pub(crate) fn merge_manifest_toml_into_caps_and_dlp(
     base_dir: Option<&Path>,
     caps: &mut CapabilityToken,
     audit_secrets: &mut Vec<String>,
-) {
+) -> Result<()> {
     let m = SliceManifest::parse_toml(raw_toml);
-    merge_parsed_manifest_into_caps_and_dlp(m, base_dir, caps, audit_secrets);
+    merge_parsed_manifest_into_caps_and_dlp(m, base_dir, caps, audit_secrets)
 }
 
 pub(crate) fn merge_parsed_manifest_into_caps_and_dlp(
@@ -949,7 +926,7 @@ pub(crate) fn merge_parsed_manifest_into_caps_and_dlp(
     base_dir: Option<&Path>,
     caps: &mut CapabilityToken,
     audit_secrets: &mut Vec<String>,
-) {
+) -> Result<()> {
     for r in m.capabilities.allowed_read_prefixes {
         if !caps.allowed_read_prefixes.contains(&r) {
             caps.allowed_read_prefixes.push(r);
@@ -982,89 +959,33 @@ pub(crate) fn merge_parsed_manifest_into_caps_and_dlp(
         }
     }
     for (k, v) in m.capabilities.allowed_env_keys {
-        if v.len() >= 6 && slice_sandbox::is_sensitive_env_key(&k) && !audit_secrets.contains(&v) {
-            audit_secrets.push(v.clone());
-        }
+        maybe_register_sensitive_env_dlp(&k, &v, audit_secrets);
         caps.allowed_env_keys.entry(k).or_insert(v);
     }
     for sec in m.audit_egress {
-        register_audit_egress_spec(&sec, base_dir, caps, audit_secrets);
+        register_audit_egress_spec(&sec, base_dir, caps, audit_secrets)?;
     }
     if let (Some(env_file_rel), Some(dir)) = (m.env_file, base_dir) {
         let env_path = dir.join(&env_file_rel);
-        let _ = apply_dotenv_file_to_caps_and_dlp(&env_path, caps, audit_secrets);
+        apply_dotenv_file_to_caps_and_dlp(&env_path, caps, audit_secrets)?;
     }
-}
-
-pub(crate) fn register_audit_egress_spec(
-    spec: &str,
-    base_dir: Option<&Path>,
-    caps: &CapabilityToken,
-    audit_secrets: &mut Vec<String>,
-) {
-    for token in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        if token.eq_ignore_ascii_case("auto") {
-            if let Some(dir) = base_dir {
-                let dotenv_path = dir.join(".env");
-                if dotenv_path.is_file() {
-                    if let Ok(raw) = std::fs::read_to_string(&dotenv_path) {
-                        let (_, secrets) = slice_sandbox::parse_dotenv_content(&raw);
-                        for sec in secrets {
-                            if !audit_secrets.contains(&sec) {
-                                audit_secrets.push(sec);
-                            }
-                        }
-                    }
-                }
-            }
-            for (k, v) in &caps.allowed_env_keys {
-                if v.len() >= 6
-                    && slice_sandbox::is_sensitive_env_key(k)
-                    && !audit_secrets.contains(v)
-                {
-                    audit_secrets.push(v.clone());
-                }
-            }
-        } else if !audit_secrets.contains(&token.to_string()) {
-            audit_secrets.push(token.to_string());
-        }
-    }
-}
-
-pub(crate) fn apply_dotenv_file_to_caps_and_dlp(
-    dotenv_path: &Path,
-    caps: &mut CapabilityToken,
-    audit_secrets: &mut Vec<String>,
-) -> Result<usize> {
-    let raw = std::fs::read_to_string(dotenv_path)
-        .with_context(|| format!("Failed to read --env-file {}", dotenv_path.display()))?;
-    let (pairs, secrets) = slice_sandbox::parse_dotenv_content(&raw);
-    for (k, v) in pairs {
-        caps.allowed_env_keys.insert(k, v);
-    }
-    let count = secrets.len();
-    for sec in secrets {
-        if !audit_secrets.contains(&sec) {
-            audit_secrets.push(sec);
-        }
-    }
-    Ok(count)
+    Ok(())
 }
 
 pub(crate) fn find_project_manifest_path(input_path: &Path) -> Option<PathBuf> {
     if input_path.is_dir() {
         let candidate = input_path.join("slice.toml");
-        if candidate.is_file() {
+        if candidate.exists() {
             return Some(candidate);
         }
     } else if let Some(parent) = input_path.parent() {
         let candidate = parent.join("slice.toml");
-        if candidate.is_file() {
+        if candidate.exists() {
             return Some(candidate);
         }
         if let Some(grandparent) = parent.parent() {
             let candidate2 = grandparent.join("slice.toml");
-            if candidate2.is_file() {
+            if candidate2.exists() {
                 return Some(candidate2);
             }
         }

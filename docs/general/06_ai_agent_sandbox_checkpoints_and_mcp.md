@@ -221,7 +221,7 @@ Slice ships with a built-in **Model Context Protocol (`2024-11-05` JSON-RPC 2.0)
 When your AI assistant connects to `slice mcp`, it discovers 4 tools via `tools/list`:
 
 #### 1. `slice_eval_ts`
-Compiles and executes TypeScript or JavaScript (including top-level `await`) inside a capability-attenuated `SliceIsolate`. Capability arguments (`allowRead`, `allowWrite`, `allowNet`, `allowExec`, `allowEnv`) accept either a string (comma-separated) or an array of strings (`string[]`).
+Compiles and executes TypeScript or JavaScript (including top-level `await`) inside a capability-attenuated `SliceIsolate`. Capability arguments (`allowRead`, `allowWrite`, `allowNet`, `allowExec`, `allowEnv`) accept either a string (comma-separated) or an array of strings (`string[]`), and resource/checkpoint parameters (`fuel`, `memory`, `checkpoints`, `maxCheckpoints`) can only **attenuate** (narrow) the host `slice mcp` session's configured `--fuel`, `--memory`, and `--max-checkpoints` ceilings - never raise or bypass them.
 - **Input Arguments:**
   ```json
   {

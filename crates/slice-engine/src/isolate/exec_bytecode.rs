@@ -101,6 +101,7 @@ impl SliceIsolate {
         self.current_tier = ExecutionTier::Tier0LLIntSnapshot;
         self.pending_tier0_throw = None;
         self.last_exit_code = None;
+        self.last_process_exited = false;
 
         let instantiate_ns = start.elapsed().as_nanos() as u64;
         let mut last_val = JsValue::Undefined;
@@ -374,6 +375,7 @@ impl SliceIsolate {
             restores_performed: self.restores_performed,
             restore_time_ns: self.restore_time_ns,
             exit_code: self.last_exit_code,
+            process_exited: self.last_process_exited,
         })
     }
 

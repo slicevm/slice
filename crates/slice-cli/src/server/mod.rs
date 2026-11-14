@@ -9,7 +9,9 @@ pub(crate) use connection::{
 };
 pub(crate) use tls::load_tls_server_config;
 
-use crate::config::{install_ctrlc_handler, ResolvedExecutionConfig};
+use crate::config::{
+    install_ctrlc_handler, skip_runtime_flag_with_separate_value, ResolvedExecutionConfig,
+};
 use anyhow::{Context, Result};
 use rustc_hash::FxHashMap;
 use slice_cas::MappedCasArchive;
@@ -23,16 +25,37 @@ pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
     let mut smoke_test = false;
     let mut max_requests_opt: Option<usize> = None;
     let mut tenant_dir_opt: Option<PathBuf> = None;
+    let mut bind_host = String::from("0.0.0.0");
     let mut target_opt: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
+        if args[i] == "--" {
+            if let Some(first_rem) = args.get(i + 1) {
+                if target_opt.is_none() {
+                    target_opt = Some(first_rem.clone());
+                }
+            }
+            break;
+        }
+        if skip_runtime_flag_with_separate_value(args, &mut i)? {
+            continue;
+        }
         let arg = &args[i];
-        if arg == "--config" {
+        if arg == "--host" {
+            if let Some(h) = args.get(i + 1) {
+                if !h.trim().is_empty() {
+                    bind_host = h.trim().to_string();
+                }
+            }
             i += 2;
             continue;
         }
-        if let Some(m) = arg.strip_prefix("--max-requests=") {
+        if let Some(h) = arg.strip_prefix("--host=") {
+            if !h.trim().is_empty() {
+                bind_host = h.trim().to_string();
+            }
+        } else if let Some(m) = arg.strip_prefix("--max-requests=") {
             max_requests_opt = m.parse().ok();
         } else if let Some(td) = arg.strip_prefix("--tenant-dir=") {
             tenant_dir_opt = Some(PathBuf::from(td));
@@ -66,7 +89,7 @@ console.log(route_res);
         if target.ends_with(".cas") {
             let archive = MappedCasArchive::open(p)?;
             if let Some(toml_str) = archive.get_manifest_toml() {
-                exec_cfg.apply_manifest_toml(toml_str, None);
+                exec_cfg.apply_manifest_toml(toml_str, None)?;
             }
             static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
             let entry = archive
@@ -74,17 +97,17 @@ console.log(route_res);
                 .context("Missing CAS entrypoint")?;
             archive.get_bytecode_slice(entry).to_vec()
         } else {
-            exec_cfg.apply_target_path_manifest(p);
+            exec_cfg.apply_target_path_manifest(p)?;
             let entry_file = slice_cas::resolve_project_entrypoint(p, None)?;
-            if let Ok(raw_entry) = std::fs::read_to_string(&entry_file) {
-                exec_cfg.apply_inline_directives(&raw_entry, entry_file.parent());
-            }
+            let raw_entry = std::fs::read_to_string(&entry_file)
+                .with_context(|| format!("Failed to read {}", entry_file.display()))?;
+            exec_cfg.apply_inline_directives(&raw_entry, entry_file.parent())?;
             let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
             compile_source_to_bytecode(&bundled)
         }
     } else if let Some(archive) = embedded_archive {
         if let Some(toml_str) = archive.get_manifest_toml() {
-            exec_cfg.apply_manifest_toml(toml_str, None);
+            exec_cfg.apply_manifest_toml(toml_str, None)?;
         }
         static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
         if let Some(entry) = archive.entrypoint_blob() {
@@ -185,17 +208,26 @@ console.log(route_res);
 
     install_ctrlc_handler();
 
-    let addr = format!("0.0.0.0:{}", port);
-    let listener = std::sync::Arc::new(TcpListener::bind(&addr)?);
-    let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+    let listener = std::sync::Arc::new(TcpListener::bind((bind_host.as_str(), port))?);
+    let bound_addr = listener.local_addr()?;
+    let bound_port = bound_addr.port();
+    let wake_ip = if bound_addr.ip().is_unspecified() {
+        if bound_addr.is_ipv6() {
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+        } else {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        }
+    } else {
+        bound_addr.ip()
+    };
     let scheme = if tls_server_cfg.is_some() {
         "https"
     } else {
         "http"
     };
     println!(
-        "[Slice Edge Server] Listening on {}://127.0.0.1:{} (Workers: {}, HTTP/1.1 Keep-Alive + Pre-Warmed __slice_rc)",
-        scheme, bound_port, workers
+        "[Slice Edge Server] Listening on {}://{}:{} (Workers: {}, HTTP/1.1 Keep-Alive + Pre-Warmed __slice_rc)",
+        scheme, wake_ip, bound_port, workers
     );
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
@@ -232,24 +264,38 @@ console.log(route_res);
                     break;
                 }
                 local_slot = local_slot.wrapping_add(1);
-                let _ = serve_connection_with_isolate(
-                    stream,
-                    local_slot,
-                    &mut isolate,
-                    &bc_clone,
-                    td_clone.as_deref().map(|p| p.as_path()),
-                    st_clone.as_deref(),
-                    fuel_limit,
-                    mem_limit,
-                    &mut read_buf,
-                    &mut write_buf,
-                    max_requests_opt.map(|max| (&*counter_clone, max)),
-                    tls_clone.as_ref(),
-                );
+                let conn_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    serve_connection_with_isolate(
+                        stream,
+                        local_slot,
+                        &mut isolate,
+                        &bc_clone,
+                        td_clone.as_deref().map(|p| p.as_path()),
+                        st_clone.as_deref(),
+                        fuel_limit,
+                        mem_limit,
+                        &mut read_buf,
+                        &mut write_buf,
+                        max_requests_opt.map(|max| (&*counter_clone, max)),
+                        tls_clone.as_ref(),
+                    )
+                }));
+                if conn_res.is_err() {
+                    read_buf.fill(0);
+                    write_buf.clear();
+                    isolate = spawn_worker_isolate(
+                        local_slot,
+                        deterministic_seed,
+                        &caps_clone,
+                        &secrets_clone,
+                        fuel_limit,
+                        mem_limit,
+                    );
+                }
                 if let Some(max) = max_requests_opt {
                     if max > 0 && counter_clone.load(std::sync::atomic::Ordering::Acquire) >= max {
                         if !shutdown_clone.swap(true, std::sync::atomic::Ordering::AcqRel) {
-                            wake_accept_workers(bound_port, workers);
+                            wake_accept_workers(wake_ip, bound_port, workers);
                         }
                         break;
                     }
@@ -275,24 +321,38 @@ console.log(route_res);
             break;
         }
         local_slot = local_slot.wrapping_add(1);
-        let _ = serve_connection_with_isolate(
-            stream,
-            local_slot,
-            &mut isolate,
-            &bytecode,
-            tenant_dir_arc.as_deref().map(|p| p.as_path()),
-            static_table_arc.as_deref(),
-            fuel_limit,
-            mem_limit,
-            &mut read_buf,
-            &mut write_buf,
-            max_requests_opt.map(|max| (&*req_counter, max)),
-            tls_server_cfg.as_ref(),
-        );
+        let conn_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            serve_connection_with_isolate(
+                stream,
+                local_slot,
+                &mut isolate,
+                &bytecode,
+                tenant_dir_arc.as_deref().map(|p| p.as_path()),
+                static_table_arc.as_deref(),
+                fuel_limit,
+                mem_limit,
+                &mut read_buf,
+                &mut write_buf,
+                max_requests_opt.map(|max| (&*req_counter, max)),
+                tls_server_cfg.as_ref(),
+            )
+        }));
+        if conn_res.is_err() {
+            read_buf.fill(0);
+            write_buf.clear();
+            isolate = spawn_worker_isolate(
+                local_slot,
+                deterministic_seed,
+                &caps,
+                &audit_secrets,
+                fuel_limit,
+                mem_limit,
+            );
+        }
         if let Some(max) = max_requests_opt {
             if max > 0 && req_counter.load(std::sync::atomic::Ordering::Acquire) >= max {
                 if !shutdown_flag.swap(true, std::sync::atomic::Ordering::AcqRel) {
-                    wake_accept_workers(bound_port, workers);
+                    wake_accept_workers(wake_ip, bound_port, workers);
                 }
                 break;
             }
@@ -304,8 +364,8 @@ console.log(route_res);
     Ok(())
 }
 
-fn wake_accept_workers(port: u16, workers: usize) {
-    let target = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+fn wake_accept_workers(wake_ip: std::net::IpAddr, port: u16, workers: usize) {
+    let target = std::net::SocketAddr::new(wake_ip, port);
     for _ in 0..workers {
         let _ = TcpStream::connect_timeout(&target, std::time::Duration::from_millis(50));
     }

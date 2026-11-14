@@ -7,7 +7,9 @@ use slice_engine::intrinsics::{
     fast_parse_ms, hmac_sha256_hex, make_ring_aead_key, parse_whatwg_url, sha256_hex,
     zlib_compress_bytes, zlib_decompress_bytes, AesExpandedKey,
 };
-use slice_engine::{compile_source_to_bytecode, HttpRequestContext, SliceIsolate};
+use slice_engine::{
+    compile_source_to_bytecode, is_tier0_slicesnp_compatible_ast, HttpRequestContext, SliceIsolate,
+};
 use slice_sandbox::CapabilityToken;
 use std::hint::black_box;
 
@@ -50,6 +52,16 @@ const out = JSON.stringify({ path: url.pathname, len: enc.length, id: digest });
                 .execute_bytecode(black_box(&precompiled_bc), None)
                 .expect("execute_bytecode");
             black_box(res.highest_tier_reached)
+        });
+    });
+
+    group.bench_function("tier0_ast_eligibility_gate", |b| {
+        b.iter(|| {
+            let a = is_tier0_slicesnp_compatible_ast(black_box(
+                "function sum(n) { let acc = 0; for (let i = 0; i < n; i++) { acc += i; } return acc; } sum(32);",
+            ));
+            let b_res = is_tier0_slicesnp_compatible_ast(black_box("process.exitCode = 2;"));
+            black_box((a, b_res))
         });
     });
 
@@ -127,10 +139,10 @@ fib(30);
             .expect("seal");
             let pt = aes_gcm_open_with_key(
                 black_box(&cached_key),
+                black_box(&key_256),
                 black_box(&iv_12),
                 black_box(aad),
                 black_box(&ct),
-                black_box(&key_256),
                 128,
             )
             .expect("open");
@@ -330,7 +342,7 @@ if (n !== 64 || raw.length !== 64 || entries.length !== 2) throw new Error("vfs 
 const { StringDecoder } = require("node:string_decoder");
 const { Readable, Writable } = require("node:stream");
 const sd = new StringDecoder("utf8");
-const chunk = Buffer.from("Café €100 🎉 日本語 — streaming benchmark payload ", "utf8");
+const chunk = Buffer.from("Café €100 🎉 日本語 - streaming benchmark payload ", "utf8");
 let out = "";
 for (let i = 0; i < chunk.length; i += 5) {
     out += sd.write(chunk.subarray(i, Math.min(i + 5, chunk.length)));

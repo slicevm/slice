@@ -146,9 +146,10 @@ You have two ways to enable Slice's **Egress Data Loss Prevention (DLP) Firewall
    # Auto-discover sensitive keys from .env and granted environment variables without treating "auto" as a literal secret
    slice run ./src/agent.ts --audit-egress=auto
 
-   # Load newline-delimited secrets from a dedicated secrets file
+   # Load newline-delimited secrets (or KEY=VALUE entries) from a dedicated secrets file (fails closed if missing/unreadable)
    slice serve ./src/server.ts --audit-egress-file=./secrets.txt
    ```
+   All security and configuration file flags (`--audit-egress-file`, `--env-file`, `--config`, `--trace`, `slice.toml` `env_file`, and trusted `// @slice-env-file`) accept both `--flag=<value>` and `--flag <value>` forms and **fail closed** with an explicit error if the target file is missing, unreadable, invalid UTF-8, or given an empty value.
 
 ### Example: Seeing Egress DLP Catch a Base64 Secret Leak
 ```typescript
