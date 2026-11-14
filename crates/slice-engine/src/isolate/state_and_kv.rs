@@ -2,8 +2,8 @@
 //! Deterministic SplitMix64 PRNG Re-export, and Outbound Egress Secret DLP Guard.
 
 use crate::boa_realm::{
-    BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VFS_MTIMES, BOA_VFS_TOMBSTONES, CHECKPOINT_SLAB,
-    NEXT_CHECKPOINT_ID,
+    BOA_ACTIVE_TENANT, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VFS_MTIMES, BOA_VFS_TOMBSTONES,
+    CHECKPOINT_SLAB, NEXT_CHECKPOINT_ID,
 };
 pub(crate) use crate::intrinsics::splitmix64_next_f64;
 use compact_str::CompactString;
@@ -22,6 +22,16 @@ pub(crate) struct StateCheckpoint {
     pub(crate) vfs_tombstones: FxHashSet<String>,
     pub(crate) vfs_mtimes: FxHashMap<String, f64>,
     pub(crate) tenant_kv: [Option<KvTenantMap>; 16],
+    pub(crate) state_bytes: usize,
+}
+
+#[inline]
+fn current_vfs_state_bytes() -> usize {
+    BOA_VFS_CACHE.with(|c| {
+        c.borrow()
+            .values()
+            .fold(0usize, |acc, data| acc.saturating_add(data.len()))
+    })
 }
 
 pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
@@ -32,6 +42,9 @@ pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
         None
     };
     let vfs_files = BOA_VFS_CACHE.with(|c| c.borrow().clone());
+    let vfs_bytes = vfs_files
+        .values()
+        .fold(0usize, |acc, data| acc.saturating_add(data.len()));
     let vfs_dirs = BOA_VFS_DIRS.with(|d| d.borrow().clone());
     let vfs_tombstones = BOA_VFS_TOMBSTONES.with(|t| {
         let b = t.borrow();
@@ -51,17 +64,26 @@ pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
     });
     let mut tenant_kv: [Option<KvTenantMap>; 16] = std::array::from_fn(|_| None);
     let mut kv_keys_count = 0usize;
+    let mut kv_bytes = 0usize;
     if let Some(shards) = EDGE_KV_SLAB.get() {
+        let now = current_epoch_ms();
         for (idx, shard) in shards.iter().enumerate() {
             let guard = shard.read();
             if let Some(t_map) = guard.get(tenant_id) {
                 if !t_map.is_empty() {
                     kv_keys_count += t_map.len();
+                    for (k, entry) in t_map {
+                        if entry.expires_at_ms.is_none_or(|exp| now < exp) {
+                            kv_bytes =
+                                kv_bytes.saturating_add(edge_kv_entry_bytes(k.as_str(), entry));
+                        }
+                    }
                     tenant_kv[idx] = Some(t_map.clone());
                 }
             }
         }
     }
+    let state_bytes = vfs_bytes.saturating_add(kv_bytes);
     let vfs_files_count = vfs_files.len();
     let id = NEXT_CHECKPOINT_ID.with(|n| {
         let cur = n.get();
@@ -92,6 +114,7 @@ pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
                 vfs_tombstones,
                 vfs_mtimes,
                 tenant_kv,
+                state_bytes,
             },
         );
     });
@@ -112,7 +135,10 @@ pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
     id
 }
 
-pub(crate) fn restore_tenant_state(tenant_id: &str, checkpoint_id: u64) -> bool {
+pub(crate) fn restore_tenant_state_checked(
+    tenant_id: &str,
+    checkpoint_id: u64,
+) -> Result<bool, String> {
     let trace_on = crate::boa_realm::is_trace_recording_enabled();
     let t0 = if trace_on {
         Some(std::time::Instant::now())
@@ -126,8 +152,13 @@ pub(crate) fn restore_tenant_state(tenant_id: &str, checkpoint_id: u64) -> bool 
             .cloned()
     });
     let Some(snap) = snap_opt else {
-        return false;
+        return Ok(false);
     };
+    let pre_restore_bytes =
+        current_vfs_state_bytes().saturating_add(edge_kv_tenant_bytes(tenant_id));
+    let delta = snap.state_bytes as isize - pre_restore_bytes as isize;
+    crate::bindings::helpers::try_adjust_isolate_memory(delta)?;
+
     let vfs_files_count = snap.vfs_files.len();
     BOA_VFS_CACHE.with(|c| *c.borrow_mut() = snap.vfs_files);
     BOA_VFS_DIRS.with(|d| *d.borrow_mut() = snap.vfs_dirs);
@@ -160,7 +191,12 @@ pub(crate) fn restore_tenant_state(tenant_id: &str, checkpoint_id: u64) -> bool 
             }),
         );
     }
-    true
+    Ok(true)
+}
+
+#[inline]
+pub(crate) fn restore_tenant_state(tenant_id: &str, checkpoint_id: u64) -> bool {
+    restore_tenant_state_checked(tenant_id, checkpoint_id).unwrap_or(false)
 }
 
 pub(crate) fn release_tenant_checkpoint(tenant_id: &str, checkpoint_id: u64) -> bool {
@@ -288,42 +324,101 @@ pub(crate) fn edge_kv_get(tenant_id: &str, key: &str) -> Option<String> {
         }
     }
     let mut guard = shard.write();
-    if let Some(t_map) = guard.get_mut(tenant_id) {
+    let mut freed_expired = 0usize;
+    let found = if let Some(t_map) = guard.get_mut(tenant_id) {
         if let Some(entry) = t_map.get(key) {
             if let Some(exp) = entry.expires_at_ms {
                 if current_epoch_ms() >= exp {
-                    t_map.remove(key);
-                    return None;
+                    if let Some(removed) = t_map.remove(key) {
+                        freed_expired = edge_kv_entry_bytes(key, &removed);
+                    }
+                    None
+                } else {
+                    Some(entry.val.to_std_string())
                 }
+            } else {
+                Some(entry.val.to_std_string())
             }
-            return Some(entry.val.to_std_string());
+        } else {
+            None
         }
-    }
-    None
-}
-
-pub(crate) fn edge_kv_set(tenant_id: &str, key: &str, val: &str, ttl_ms: u64) {
-    let expires_at_ms = if ttl_ms > 0 {
-        Some(current_epoch_ms().saturating_add(ttl_ms))
     } else {
         None
     };
+    drop(guard);
+    if freed_expired > 0 && BOA_ACTIVE_TENANT.with(|t| t.borrow().as_str() == tenant_id) {
+        crate::bindings::helpers::release_isolate_memory(freed_expired);
+    }
+    found
+}
+
+pub(crate) fn edge_kv_set(tenant_id: &str, key: &str, val: &str, ttl_ms: u64) {
+    let _ = edge_kv_set_checked(tenant_id, key, val, ttl_ms, 0, usize::MAX);
+}
+
+/// Inserts or overwrites `key` in `tenant_id`'s shard under a single write lock, enforcing
+/// `mem_limit` against the exact signed byte delta (`new_bytes - old_bytes`).
+/// Returns `Ok(net_delta)` on success, or `Err(projected_used)` without mutating the map on OOM.
+pub(crate) fn edge_kv_set_checked(
+    tenant_id: &str,
+    key: &str,
+    val: &str,
+    ttl_ms: u64,
+    current_used: usize,
+    mem_limit: usize,
+) -> Result<isize, usize> {
+    let now = current_epoch_ms();
+    let expires_at_ms = if ttl_ms > 0 {
+        Some(now.saturating_add(ttl_ms))
+    } else {
+        None
+    };
+    let new_bytes = key.len().saturating_add(val.len());
     let shard = edge_kv_shard(tenant_id, key);
     let mut guard = shard.write();
     if let Some(t_map) = guard.get_mut(tenant_id) {
+        let old_bytes = t_map
+            .get(key)
+            .map(|entry| edge_kv_entry_bytes(key, entry))
+            .unwrap_or(0);
+        let mut delta = new_bytes as isize - old_bytes as isize;
+        let mut need_reclaim_expired = false;
+        if delta > 0 && current_used.saturating_add(delta as usize) > mem_limit {
+            let reclaimable: usize = t_map
+                .iter()
+                .filter(|(k, e)| k.as_str() != key && e.expires_at_ms.is_some_and(|exp| now >= exp))
+                .map(|(k, e)| edge_kv_entry_bytes(k.as_str(), e))
+                .sum();
+            let adjusted_delta = delta - reclaimable as isize;
+            if adjusted_delta > 0
+                && current_used.saturating_add(adjusted_delta as usize) > mem_limit
+            {
+                return Err(current_used.saturating_add(adjusted_delta as usize));
+            }
+            delta = adjusted_delta;
+            need_reclaim_expired = reclaimable > 0;
+        }
+        if need_reclaim_expired {
+            t_map.retain(|k, e| k.as_str() == key || e.expires_at_ms.is_none_or(|exp| now < exp));
+        }
         if let Some(entry) = t_map.get_mut(key) {
             entry.val = KvValue::Str(CompactString::new(val));
             entry.expires_at_ms = expires_at_ms;
-            return;
+        } else {
+            t_map.insert(
+                CompactString::new(key),
+                KvEntry {
+                    val: KvValue::Str(CompactString::new(val)),
+                    expires_at_ms,
+                },
+            );
         }
-        t_map.insert(
-            CompactString::new(key),
-            KvEntry {
-                val: KvValue::Str(CompactString::new(val)),
-                expires_at_ms,
-            },
-        );
-        return;
+        return Ok(delta);
+    }
+
+    let projected = current_used.saturating_add(new_bytes);
+    if new_bytes > 0 && projected > mem_limit {
+        return Err(projected);
     }
     let mut t_map = FxHashMap::default();
     t_map.insert(
@@ -334,6 +429,7 @@ pub(crate) fn edge_kv_set(tenant_id: &str, key: &str, val: &str, ttl_ms: u64) {
         },
     );
     guard.insert(CompactString::new(tenant_id), t_map);
+    Ok(new_bytes as isize)
 }
 
 #[inline]
@@ -343,20 +439,6 @@ pub(crate) fn edge_kv_entry_bytes(key: &str, entry: &KvEntry) -> usize {
         KvValue::Int(_) => 24,
     };
     key.len().saturating_add(val_bytes)
-}
-
-#[inline]
-pub(crate) fn edge_kv_contains_live_key(tenant_id: &str, key: &str) -> bool {
-    let shard = edge_kv_shard(tenant_id, key);
-    let guard = shard.read();
-    guard
-        .get(tenant_id)
-        .and_then(|m| m.get(key))
-        .is_some_and(|entry| {
-            entry
-                .expires_at_ms
-                .is_none_or(|exp| current_epoch_ms() < exp)
-        })
 }
 
 pub(crate) fn edge_kv_tenant_bytes(tenant_id: &str) -> usize {
@@ -387,15 +469,44 @@ pub(crate) fn edge_kv_del_bytes(tenant_id: &str, key: &str) -> Option<usize> {
         .map(|entry| edge_kv_entry_bytes(key, &entry))
 }
 
-pub(crate) fn edge_kv_incr(tenant_id: &str, key: &str, delta: i64) -> i64 {
+/// Atomically increments a 64-bit integer counter in `tenant_id`'s shard under a single write lock,
+/// enforcing `mem_limit` against the exact signed byte delta (`(key.len() + 24) - old_bytes`).
+pub(crate) fn edge_kv_incr_checked(
+    tenant_id: &str,
+    key: &str,
+    delta: i64,
+    current_used: usize,
+    mem_limit: usize,
+) -> Result<(i64, isize), usize> {
+    let now = current_epoch_ms();
+    let new_bytes = key.len().saturating_add(24);
     let shard = edge_kv_shard(tenant_id, key);
     let mut guard = shard.write();
     if let Some(t_map) = guard.get_mut(tenant_id) {
+        let old_bytes = t_map
+            .get(key)
+            .map(|entry| edge_kv_entry_bytes(key, entry))
+            .unwrap_or(0);
+        let mut mem_delta = new_bytes as isize - old_bytes as isize;
+        let mut need_reclaim_expired = false;
+        if mem_delta > 0 && current_used.saturating_add(mem_delta as usize) > mem_limit {
+            let reclaimable: usize = t_map
+                .iter()
+                .filter(|(k, e)| k.as_str() != key && e.expires_at_ms.is_some_and(|exp| now >= exp))
+                .map(|(k, e)| edge_kv_entry_bytes(k.as_str(), e))
+                .sum();
+            let adjusted = mem_delta - reclaimable as isize;
+            if adjusted > 0 && current_used.saturating_add(adjusted as usize) > mem_limit {
+                return Err(current_used.saturating_add(adjusted as usize));
+            }
+            mem_delta = adjusted;
+            need_reclaim_expired = reclaimable > 0;
+        }
+        if need_reclaim_expired {
+            t_map.retain(|k, e| k.as_str() == key || e.expires_at_ms.is_none_or(|exp| now < exp));
+        }
         if let Some(entry) = t_map.get_mut(key) {
-            let current = if entry
-                .expires_at_ms
-                .is_some_and(|exp| current_epoch_ms() >= exp)
-            {
+            let current = if entry.expires_at_ms.is_some_and(|exp| now >= exp) {
                 0
             } else {
                 entry.val.as_i64().unwrap_or(0)
@@ -403,27 +514,30 @@ pub(crate) fn edge_kv_incr(tenant_id: &str, key: &str, delta: i64) -> i64 {
             let next = current.wrapping_add(delta);
             entry.val = KvValue::Int(next);
             entry.expires_at_ms = None;
-            return next;
+            return Ok((next, mem_delta));
         }
-        let next = delta;
         t_map.insert(
             CompactString::new(key),
             KvEntry {
-                val: KvValue::Int(next),
+                val: KvValue::Int(delta),
                 expires_at_ms: None,
             },
         );
-        return next;
+        return Ok((delta, mem_delta));
     }
-    let next = delta;
+
+    let projected = current_used.saturating_add(new_bytes);
+    if projected > mem_limit {
+        return Err(projected);
+    }
     let mut t_map = FxHashMap::default();
     t_map.insert(
         CompactString::new(key),
         KvEntry {
-            val: KvValue::Int(next),
+            val: KvValue::Int(delta),
             expires_at_ms: None,
         },
     );
     guard.insert(CompactString::new(tenant_id), t_map);
-    next
+    Ok((delta, new_bytes as isize))
 }

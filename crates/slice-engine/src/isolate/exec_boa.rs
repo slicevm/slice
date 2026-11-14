@@ -73,6 +73,7 @@ pub(crate) struct BoaSessionFlags {
     pub(crate) has_env_keys: bool,
     pub(crate) has_exec_bins: bool,
     pub(crate) is_worker: bool,
+    pub(crate) initial_mem_used: usize,
 }
 
 fn setup_prewarm_caps(caps: &CapabilityToken) -> (bool, bool, bool, bool) {
@@ -323,11 +324,16 @@ impl SliceIsolate {
             b.clear();
             b.push_str(&self.compartment.tenant_id);
         });
-        let remaining_mem = self
+        let baseline_mem_used = self.compartment.memory_used_bytes.min(4096);
+        let initial_net_used = self
+            .compartment
+            .memory_used_bytes
+            .saturating_sub(baseline_mem_used);
+        let net_limit_mem = self
             .compartment
             .memory_limit_bytes
-            .saturating_sub(self.compartment.memory_used_bytes);
-        BOA_KV_MEM_BUDGET.with(|m| m.set((0, remaining_mem)));
+            .saturating_sub(baseline_mem_used);
+        BOA_KV_MEM_BUDGET.with(|m| m.set((initial_net_used, net_limit_mem)));
         crate::boa_realm::BOA_CHECKPOINT_STATS.with(|s| {
             s.set((
                 self.checkpoints_taken,
@@ -429,6 +435,7 @@ impl SliceIsolate {
             has_env_keys,
             has_exec_bins,
             is_worker: crate::workers::is_worker_thread(),
+            initial_mem_used: self.compartment.memory_used_bytes,
         }
     }
 
@@ -614,6 +621,7 @@ impl SliceIsolate {
             .ctx
             .runtime_limits_mut()
             .set_loop_iteration_limit(u64::MAX);
+        realm.ctx.runtime_limits_mut().set_recursion_limit(512);
 
         let mut final_val = match eval_res {
             Ok(mut val) => {
@@ -752,7 +760,15 @@ impl SliceIsolate {
                 intrinsic: ses_mutated_target,
             });
         }
+        let initial_mem_used = flags.initial_mem_used;
+        let baseline_mem_used = initial_mem_used.min(4096);
+        let initial_net_used = initial_mem_used.saturating_sub(baseline_mem_used);
         if let Some(mut violation) = pending_violation {
+            let final_net_used = BOA_KV_MEM_BUDGET.with(|m| m.replace((0, usize::MAX)).0);
+            if final_net_used > initial_net_used {
+                self.compartment.memory_used_bytes =
+                    baseline_mem_used.saturating_add(final_net_used);
+            }
             if let SandboxViolation::CpuFuelExhausted { ref mut limit, .. } = violation {
                 if *limit == 0 {
                     self.compartment.fuel_consumed = self.compartment.fuel_limit;
@@ -776,14 +792,17 @@ impl SliceIsolate {
                 return Err(v);
             }
         }
-        let kv_used = BOA_KV_MEM_BUDGET.with(|m| m.replace((0, usize::MAX)).0);
-        if kv_used > 0 {
-            if let Err(v) = self.compartment.alloc_memory(kv_used) {
+        let final_net_used = BOA_KV_MEM_BUDGET.with(|m| m.replace((0, usize::MAX)).0);
+        if final_net_used > initial_net_used {
+            let added = final_net_used - initial_net_used;
+            if let Err(v) = self.compartment.alloc_memory(added) {
                 self.compartment.memory_used_bytes =
-                    self.compartment.memory_used_bytes.saturating_add(kv_used);
+                    baseline_mem_used.saturating_add(final_net_used);
                 clear_wu_and_release(realm);
                 return Err(v);
             }
+        } else {
+            self.compartment.memory_used_bytes = baseline_mem_used.saturating_add(final_net_used);
         }
 
         self.last_return_json = None;

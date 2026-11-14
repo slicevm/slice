@@ -4,8 +4,8 @@
 use crate::bindings::helpers::{
     bytes_to_js_array_buffer, bytes_to_js_uint8_array, compute_webcrypto_hmac_stack,
     consume_crypto_kdf_fuel, extract_buffer_source_bytes, normalize_webcrypto_hash_name,
-    try_consume_isolate_memory, with_active_tenant, with_buffer_source_bytes,
-    with_optional_buffer_source_bytes, with_two_buffer_source_bytes,
+    trip_isolate_oom_limits, try_consume_isolate_memory_ctx, with_active_tenant,
+    with_buffer_source_bytes, with_optional_buffer_source_bytes, with_two_buffer_source_bytes,
 };
 use crate::bindings::wintertc_and_buffer::register_buffer_host_functions;
 use crate::boa_realm::{BOA_ACTIVE_TENANT, BOA_DET_STATE};
@@ -431,7 +431,7 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                     .with_message("crypto.randomBytes size exceeds 1MB sandbox limit")
                     .into());
             }
-            if let Err(msg) = try_consume_isolate_memory(size) {
+            if let Err(msg) = try_consume_isolate_memory_ctx(size, context) {
                 return Err(JsNativeError::range().with_message(msg).into());
             }
             let mut buf = vec![0u8; size];
@@ -1974,7 +1974,7 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                             JsNativeError::error().with_message(msg)
                         }
                     })?;
-                if let Err(msg) = try_consume_isolate_memory(derived.len()) {
+                if let Err(msg) = try_consume_isolate_memory_ctx(derived.len(), context) {
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
                 return bytes_to_js_array_buffer(&derived, context);
@@ -1982,6 +1982,7 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
 
             if alg.eq_ignore_ascii_case("HKDF") {
                 if let Err(msg) = consume_crypto_kdf_fuel(15) {
+                    trip_isolate_oom_limits(context);
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
                 let derived =
@@ -1994,7 +1995,7 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                             JsNativeError::error().with_message(msg)
                         }
                     })?;
-                if let Err(msg) = try_consume_isolate_memory(derived.len()) {
+                if let Err(msg) = try_consume_isolate_memory_ctx(derived.len(), context) {
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
                 return bytes_to_js_array_buffer(&derived, context);
@@ -2021,6 +2022,7 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                     .saturating_mul(p_val as u64)
                     / 16;
                 if let Err(msg) = consume_crypto_kdf_fuel(fuel_cost.max(50)) {
+                    trip_isolate_oom_limits(context);
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
                 let derived = scrypt_derive_bytes(
@@ -2039,7 +2041,7 @@ pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
                         JsNativeError::error().with_message(msg)
                     }
                 })?;
-                if let Err(msg) = try_consume_isolate_memory(derived.len()) {
+                if let Err(msg) = try_consume_isolate_memory_ctx(derived.len(), context) {
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
                 return bytes_to_js_array_buffer(&derived, context);
