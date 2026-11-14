@@ -634,6 +634,109 @@ if (txt.length !== raw.length || txt.length < 64) throw new Error("host fs misma
     group.finish();
 }
 
+fn bench_wave4_multipart_clone_and_binary_http(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wave4_wintertc_multipart_and_clone");
+
+    let mp_src = r#"
+const rawBin = new Uint8Array(4096);
+for (let i = 0; i < rawBin.length; i++) rawBin[i] = i & 0xff;
+const fd = new FormData();
+fd.append("tenant", "acme-edge");
+fd.append("payload", new File([rawBin], "chunk.bin", { type: "application/octet-stream" }));
+globalThis.__mpBenchBytes = new Response(fd)._borrowBytes();
+globalThis.__mpBenchHdr = "multipart/form-data; boundary=----SliceFormBoundary";
+export default {
+    async fetch() {
+        const parsed = await new Response(globalThis.__mpBenchBytes, {
+            headers: { "content-type": globalThis.__mpBenchHdr }
+        }).formData();
+        const f = parsed.get("payload");
+        return Response.json({ n: f.size });
+    }
+};
+"#;
+    let mp_bc =
+        compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(mp_src, true));
+    group.bench_function("multipart_rfc7578_binary_simd_parse_4kb", |b| {
+        SliceIsolate::prewarm_boa_pool(1);
+        SliceIsolate::prewarm_boa_bundle(&mp_bc);
+        let mut iso = SliceIsolate::spawn(
+            "bench-mp-simd",
+            1,
+            CapabilityToken::pure_compute(),
+            10_000_000,
+            16 * 1024 * 1024,
+        );
+        let req = HttpRequestContext {
+            method: "POST",
+            path: "/mp",
+            query: "",
+            tenant_id: "bench-mp-simd",
+            body: "",
+            body_bytes: None,
+            headers: &[("host", "localhost")],
+        };
+        let mut slot = 1u32;
+        b.iter(|| {
+            slot = slot.wrapping_add(1);
+            iso.reset_for_request("bench-mp-simd", slot, 10_000_000, 16 * 1024 * 1024);
+            let out = iso
+                .execute_http_request_fast(black_box(&mp_bc), None, black_box(&req))
+                .expect("mp simd bench");
+            black_box(out.response_body.len())
+        });
+    });
+
+    let clone_src = r#"
+const ab = new ArrayBuffer(256);
+const v1 = new Uint8Array(ab, 0, 128);
+const v2 = new Uint8Array(ab, 64, 128);
+const dv = new DataView(ab, 128, 128);
+v1[64] = 42;
+globalThis.__cloneSample = { v1, v2, dv, meta: { ok: true, tags: ["a", "b", "c"] } };
+export default {
+    fetch() {
+        const c = structuredClone(globalThis.__cloneSample);
+        if (c.v1.buffer !== c.v2.buffer || c.v2[0] !== 42) throw new Error("clone mismatch");
+        return Response.json({ off: c.v2.byteOffset });
+    }
+};
+"#;
+    let clone_bc =
+        compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(clone_src, true));
+    group.bench_function("structured_clone_shared_buffer_multi_view", |b| {
+        SliceIsolate::prewarm_boa_pool(1);
+        SliceIsolate::prewarm_boa_bundle(&clone_bc);
+        let mut iso = SliceIsolate::spawn(
+            "bench-clone-shared",
+            1,
+            CapabilityToken::pure_compute(),
+            10_000_000,
+            16 * 1024 * 1024,
+        );
+        let req = HttpRequestContext {
+            method: "GET",
+            path: "/clone",
+            query: "",
+            tenant_id: "bench-clone-shared",
+            body: "",
+            body_bytes: None,
+            headers: &[("host", "localhost")],
+        };
+        let mut slot = 1u32;
+        b.iter(|| {
+            slot = slot.wrapping_add(1);
+            iso.reset_for_request("bench-clone-shared", slot, 10_000_000, 16 * 1024 * 1024);
+            let out = iso
+                .execute_http_request_fast(black_box(&clone_bc), None, black_box(&req))
+                .expect("clone bench");
+            black_box(out.response_body.len())
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_boacas_and_automaton,
@@ -641,6 +744,7 @@ criterion_group!(
     bench_json_operations,
     bench_vfs_and_stream_operations,
     bench_wave3_als_intl_crypto_and_buffer,
+    bench_wave4_multipart_clone_and_binary_http,
     bench_http_cli_and_host_fs
 );
 criterion_main!(benches);

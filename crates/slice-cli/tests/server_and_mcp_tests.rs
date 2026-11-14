@@ -1908,3 +1908,237 @@ fn test_issue_99_mcp_monotonic_fuel_memory_and_checkpoint_quotas() {
         eval_ck2_blocked
     );
 }
+
+#[test]
+fn test_wave4_live_slice_serve_binary_multipart_small_large_and_chunked() {
+    use crate::commands::pack_and_compile::cmd_pack;
+    use crate::server::cmd_serve;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "slice_wave4_serve_multipart_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let handler_ts = tmp_dir.join("server.ts");
+    let handler_cas = tmp_dir.join("server.cas");
+    std::fs::write(
+        &handler_ts,
+        r#"
+export default {
+  async fetch(req: Request): Promise<Response> {
+    const fd = await req.formData();
+    const meta = fd.get("meta");
+    const file = fd.get("payload") as File;
+    const u8 = new Uint8Array(await file.arrayBuffer());
+    let xorAcc = 0;
+    for (let i = 0; i < u8.length; i++) {
+      xorAcc ^= u8[i];
+    }
+    const out = {
+      meta,
+      name: file.name,
+      type: file.type,
+      len: u8.length,
+      first: u8.length > 0 ? u8[0] : -1,
+      second: u8.length > 1 ? u8[1] : -1,
+      last: u8.length > 0 ? u8[u8.length - 1] : -1,
+      xorAcc,
+    };
+    const res = Response.json(out);
+    // Mutating `out` after Response.json must NOT leak into serialized response (#115)
+    out.len = -999;
+    return res;
+  }
+};
+"#,
+    )
+    .unwrap();
+
+    cmd_pack(&[
+        handler_ts.to_string_lossy().to_string(),
+        handler_cas.to_string_lossy().to_string(),
+    ])
+    .unwrap();
+
+    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let cas_arg = handler_cas.to_string_lossy().to_string();
+    let server_handle = std::thread::spawn(move || {
+        cmd_serve(&[
+            cas_arg,
+            format!("--port={}", port),
+            "--host=127.0.0.1".to_string(),
+            "--workers=1".to_string(),
+            "--max-requests=3".to_string(),
+        ])
+    });
+
+    let build_multipart_body =
+        |boundary: &str, meta: &str, filename: &str, ct: Option<&str>, bin: &[u8]| -> Vec<u8> {
+            let mut body = Vec::with_capacity(bin.len() + 256);
+            body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+            body.extend_from_slice(b"Content-Disposition: form-data; name=\"meta\"\r\n\r\n");
+            body.extend_from_slice(meta.as_bytes());
+            body.extend_from_slice(format!("\r\n--{}\r\n", boundary).as_bytes());
+            body.extend_from_slice(
+                format!(
+                    "Content-Disposition: form-data; name=\"payload\"; filename=\"{}\"\r\n",
+                    filename
+                )
+                .as_bytes(),
+            );
+            if let Some(mime) = ct {
+                body.extend_from_slice(format!("Content-Type: {}\r\n", mime).as_bytes());
+            }
+            body.extend_from_slice(b"\r\n");
+            body.extend_from_slice(bin);
+            body.extend_from_slice(format!("\r\n--{}--\r\n", boundary).as_bytes());
+            body
+        };
+
+    let mut conn = None;
+    for _ in 0..50 {
+        if let Ok(c) = TcpStream::connect(("127.0.0.1", port)) {
+            c.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            conn = Some(c);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut conn = conn.expect("connect to live Wave 4 slice serve");
+
+    let read_one_http_response = |stream: &mut TcpStream| -> (String, String) {
+        let mut buf = Vec::new();
+        let mut scratch = [0u8; 4096];
+        let hdr_end = loop {
+            let n = stream.read(&mut scratch).unwrap();
+            assert!(n > 0, "unexpected EOF reading HTTP response headers");
+            buf.extend_from_slice(&scratch[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+        let hdr_str = String::from_utf8_lossy(&buf[..hdr_end]).into_owned();
+        let cl = hdr_str
+            .lines()
+            .find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                if k.trim().eq_ignore_ascii_case("content-length") {
+                    v.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .expect("Content-Length header present");
+        while buf.len() < hdr_end + cl {
+            let n = stream.read(&mut scratch).unwrap();
+            assert!(n > 0, "unexpected EOF reading HTTP response body");
+            buf.extend_from_slice(&scratch[..n]);
+        }
+        let body_str = String::from_utf8_lossy(&buf[hdr_end..hdr_end + cl]).into_owned();
+        (hdr_str, body_str)
+    };
+
+    // 1. Small (`<= 64 KiB` stack buffer path) binary multipart upload with invalid UTF-8 + embedded CRLF + omitted Content-Type (RFC 7578 Section 4.4 default "text/plain")
+    let small_bin: [u8; 6] = [0x00, 0x80, 0xff, 0x0d, 0x0a, 0xfe];
+    let small_xor = small_bin.iter().fold(0u8, |acc, &b| acc ^ b);
+    let b1 = "----SliceWave4SmallBoundary";
+    let body1 = build_multipart_body(b1, "small-keepalive", "raw%221.bin", None, &small_bin);
+    let req1_hdr = format!(
+        "POST /upload/1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary={}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        b1,
+        body1.len()
+    );
+    conn.write_all(req1_hdr.as_bytes()).unwrap();
+    conn.write_all(&body1).unwrap();
+    let (h1, resp1) = read_one_http_response(&mut conn);
+    assert!(h1.starts_with("HTTP/1.1 200 OK"), "h1: {}", h1);
+    let j1: serde_json::Value = serde_json::from_str(&resp1).unwrap();
+    assert_eq!(j1["meta"], "small-keepalive");
+    assert_eq!(j1["name"], "raw\"1.bin");
+    assert_eq!(j1["type"], "text/plain");
+    assert_eq!(j1["len"], 6);
+    assert_eq!(j1["first"], 0x00);
+    assert_eq!(j1["second"], 0x80);
+    assert_eq!(j1["last"], 0xfe);
+    assert_eq!(j1["xorAcc"], small_xor);
+
+    // 2. Large (`> 64 KiB` heap spillover path: 80 KiB deterministic binary bytes 0x00..=0xff) over the SAME Keep-Alive socket!
+    let large_len = 80 * 1024;
+    let large_bin: Vec<u8> = (0..large_len)
+        .map(|i| ((i * 73 + 19) & 0xff) as u8)
+        .collect();
+    let large_xor = large_bin.iter().fold(0u8, |acc, &b| acc ^ b);
+    let b2 = "----SliceWave4LargeBoundary";
+    let body2 = build_multipart_body(
+        b2,
+        "large-80k",
+        "model.weights",
+        Some("application/octet-stream"),
+        &large_bin,
+    );
+    let req2_hdr = format!(
+        "POST /upload/2 HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary={}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        b2,
+        body2.len()
+    );
+    conn.write_all(req2_hdr.as_bytes()).unwrap();
+    conn.write_all(&body2).unwrap();
+    let (h2, resp2) = read_one_http_response(&mut conn);
+    assert!(h2.starts_with("HTTP/1.1 200 OK"), "h2: {}", h2);
+    let j2: serde_json::Value = serde_json::from_str(&resp2).unwrap();
+    assert_eq!(j2["meta"], "large-80k");
+    assert_eq!(j2["name"], "model.weights");
+    assert_eq!(j2["type"], "application/octet-stream");
+    assert_eq!(j2["len"], large_len);
+    assert_eq!(j2["first"], large_bin[0]);
+    assert_eq!(j2["second"], large_bin[1]);
+    assert_eq!(j2["last"], large_bin[large_len - 1]);
+    assert_eq!(j2["xorAcc"], large_xor);
+
+    // 3. `Transfer-Encoding: chunked` binary multipart upload over the SAME Keep-Alive socket!
+    let chunked_bin: Vec<u8> = (0..1024).map(|i| (255 - (i & 0xff)) as u8).collect();
+    let chunked_xor = chunked_bin.iter().fold(0u8, |acc, &b| acc ^ b);
+    let b3 = "----SliceWave4ChunkedBoundary";
+    let body3 = build_multipart_body(
+        b3,
+        "chunked-1k",
+        "chunked.wasm",
+        Some("application/wasm"),
+        &chunked_bin,
+    );
+    let req3_hdr = format!(
+        "POST /upload/3 HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary={}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        b3
+    );
+    conn.write_all(req3_hdr.as_bytes()).unwrap();
+    for part in body3.chunks(197) {
+        conn.write_all(format!("{:x}\r\n", part.len()).as_bytes())
+            .unwrap();
+        conn.write_all(part).unwrap();
+        conn.write_all(b"\r\n").unwrap();
+    }
+    conn.write_all(b"0\r\n\r\n").unwrap();
+    let (h3, resp3) = read_one_http_response(&mut conn);
+    assert!(h3.starts_with("HTTP/1.1 200 OK"), "h3: {}", h3);
+    let j3: serde_json::Value = serde_json::from_str(&resp3).unwrap();
+    assert_eq!(j3["meta"], "chunked-1k");
+    assert_eq!(j3["name"], "chunked.wasm");
+    assert_eq!(j3["type"], "application/wasm");
+    assert_eq!(j3["len"], 1024);
+    assert_eq!(j3["first"], 255);
+    assert_eq!(j3["second"], 254);
+    assert_eq!(j3["last"], 0);
+    assert_eq!(j3["xorAcc"], chunked_xor);
+
+    drop(conn);
+    server_handle.join().unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

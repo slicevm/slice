@@ -480,3 +480,650 @@ fn test_sveltekit_whatwg_opaque_url_signal_and_async_stream_response() {
         serde_json::json!(["a=1; Path=/", "b=2; Path=/"])
     );
 }
+
+#[test]
+fn test_wave4_issue_114_structured_clone_shared_arraybuffer_offsets_transfer_and_datacloneerror() {
+    let js = r#"
+(async () => {
+    // 1. Exact #114 repro + multi-view shared ArrayBuffer with nonzero byteOffsets
+    const ab = new ArrayBuffer(16);
+    const full = new Uint8Array(ab);
+    for (let i = 0; i < 16; i++) full[i] = i + 10;
+    const left = new Uint8Array(ab, 0, 8);
+    const right = new Uint8Array(ab, 4, 8);
+    const u16Mid = new Uint16Array(ab, 2, 4);
+    const dvTail = new DataView(ab, 8, 8);
+
+    // Case A: views without direct buffer property (and reverse order)
+    const cViewsOnly = structuredClone({ right, left, u16Mid, dvTail });
+    const sharedBufA =
+        cViewsOnly.left.buffer === cViewsOnly.right.buffer &&
+        cViewsOnly.left.buffer === cViewsOnly.u16Mid.buffer &&
+        cViewsOnly.left.buffer === cViewsOnly.dvTail.buffer &&
+        cViewsOnly.left.buffer !== ab &&
+        cViewsOnly.left.buffer.byteLength === 16;
+    const offsetsPreservedA =
+        cViewsOnly.left.byteOffset === 0 &&
+        cViewsOnly.left.byteLength === 8 &&
+        cViewsOnly.right.byteOffset === 4 &&
+        cViewsOnly.right.byteLength === 8 &&
+        cViewsOnly.u16Mid.byteOffset === 2 &&
+        cViewsOnly.u16Mid.length === 4 &&
+        cViewsOnly.dvTail.byteOffset === 8 &&
+        cViewsOnly.dvTail.byteLength === 8;
+
+    // Mutate overlap in clone and verify sibling view observes it while original does not
+    cViewsOnly.left[4] = 0xee;
+    const overlapSyncA = cViewsOnly.right[0] === 0xee && full[4] === 14;
+
+    // Case B: direct buffer property before and after views
+    const cWithBuf = structuredClone({ buffer: ab, right, left });
+    const sharedBufB =
+        cWithBuf.buffer === cWithBuf.left.buffer &&
+        cWithBuf.buffer === cWithBuf.right.buffer &&
+        cWithBuf.right.byteOffset === 4;
+
+    // 2. Transfer list detachment + atomic rollback on DataCloneError
+    const abTransfer = new ArrayBuffer(12);
+    const viewTransfer = new Uint8Array(abTransfer, 4, 4);
+    viewTransfer.set([91, 92, 93, 94]);
+    const transferred = structuredClone({ v: viewTransfer }, { transfer: [abTransfer] });
+    const transferOk =
+        abTransfer.detached === true &&
+        abTransfer.byteLength === 0 &&
+        transferred.v.byteOffset === 4 &&
+        transferred.v.buffer.byteLength === 12 &&
+        Array.from(transferred.v).join(",") === "91,92,93,94";
+
+    let dupTransferErr = "";
+    const abDup = new ArrayBuffer(4);
+    try {
+        structuredClone(abDup, { transfer: [abDup, abDup] });
+    } catch (e) {
+        dupTransferErr = e && e.name;
+    }
+
+    let detachedTransferErr = "";
+    try {
+        structuredClone({ ok: 1 }, { transfer: [abTransfer] });
+    } catch (e) {
+        detachedTransferErr = e && e.name;
+    }
+
+    // Atomic rollback: if graph serialization throws DataCloneError, transfer list must NOT detach!
+    const abAtomic = new ArrayBuffer(8);
+    let atomicErr = "";
+    try {
+        structuredClone({ buf: abAtomic, bad: () => 1 }, { transfer: [abAtomic] });
+    } catch (e) {
+        atomicErr = e && e.name;
+    }
+    const atomicIntact = abAtomic.detached === false && abAtomic.byteLength === 8;
+
+    // 3. Cyclic Map/Set/Object/Error.cause + diamond Date/RegExp/File identity
+    const d = new Date(1700000000000);
+    const rx = /slice-[0-9]+/gi;
+    rx.lastIndex = 9;
+    const binFile = new File([new Uint8Array([0, 128, 255])], "raw.bin", { type: "application/octet-stream" });
+    const cycMap = new Map();
+    cycMap.set("self", cycMap);
+    const cycSet = new Set();
+    cycSet.add(cycSet);
+    const rootErr = new TypeError("outer", { cause: new RangeError("inner") });
+    const graph = { d1: d, d2: d, r1: rx, r2: rx, f1: binFile, f2: binFile, cycMap, cycSet, rootErr };
+    graph.self = graph;
+    const cg = structuredClone(graph);
+    const cgBytes = Array.from(await cg.f1.bytes());
+    const diamondAndCyclesOk =
+        cg.self === cg &&
+        cg.d1 === cg.d2 &&
+        cg.d1 !== d &&
+        cg.d1.getTime() === 1700000000000 &&
+        cg.r1 === cg.r2 &&
+        cg.r1.lastIndex === 0 &&
+        cg.f1 === cg.f2 &&
+        cg.f1 !== binFile &&
+        cgBytes.join(",") === "0,128,255" &&
+        cg.cycMap.get("self") === cg.cycMap &&
+        cg.cycSet.has(cg.cycSet) &&
+        cg.rootErr instanceof TypeError &&
+        cg.rootErr.cause instanceof RangeError &&
+        cg.rootErr.cause.message === "inner";
+
+    // 4. DataCloneError on non-cloneable platform types
+    const uncloneables = [
+        Promise.resolve(1),
+        new WeakMap(),
+        new WeakSet(),
+        function namedFn() {},
+        Symbol("sym"),
+        new EventTarget(),
+    ];
+    const allRejected = uncloneables.every((item) => {
+        try {
+            structuredClone(item);
+            return false;
+        } catch (e) {
+            return e && e.name === "DataCloneError";
+        }
+    });
+
+    // 5. MessageChannel postMessage uses structuredClone preserving shared buffer offsets
+    const mc = new MessageChannel();
+    const msgProm = new Promise((resolve) => {
+        mc.port2.addEventListener("message", (ev) => {
+            resolve(
+                ev.data.a.buffer === ev.data.b.buffer &&
+                ev.data.b.byteOffset === 4 &&
+                ev.data.b[0] === 14
+            );
+        });
+    });
+    mc.port1.postMessage({ a: left, b: right });
+    const portCloneOk = await msgProm;
+
+    console.log(JSON.stringify({
+        sharedBufA,
+        offsetsPreservedA,
+        overlapSyncA,
+        sharedBufB,
+        transferOk,
+        dupTransferErr,
+        detachedTransferErr,
+        atomicErr,
+        atomicIntact,
+        diamondAndCyclesOk,
+        allRejected,
+        portCloneOk,
+    }));
+})();
+"#;
+    let m = run_source_isolated(
+        "wave4-issue-114-tenant",
+        js,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    let res: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(res["sharedBufA"], true, "res: {}", res);
+    assert_eq!(res["offsetsPreservedA"], true, "res: {}", res);
+    assert_eq!(res["overlapSyncA"], true, "res: {}", res);
+    assert_eq!(res["sharedBufB"], true, "res: {}", res);
+    assert_eq!(res["transferOk"], true, "res: {}", res);
+    assert_eq!(res["dupTransferErr"], "DataCloneError", "res: {}", res);
+    assert_eq!(res["detachedTransferErr"], "DataCloneError", "res: {}", res);
+    assert_eq!(res["atomicErr"], "DataCloneError", "res: {}", res);
+    assert_eq!(res["atomicIntact"], true, "res: {}", res);
+    assert_eq!(res["diamondAndCyclesOk"], true, "res: {}", res);
+    assert_eq!(res["allRejected"], true, "res: {}", res);
+    assert_eq!(res["portCloneOk"], true, "res: {}", res);
+}
+
+#[test]
+fn test_wave4_issues_115_116_121_response_json_binary_formdata_and_content_type_authority() {
+    let js = r#"
+(async () => {
+    // 1. Issue #115: Eager Response.json serialization, mutation isolation, and sync TypeError
+    let toJsonCalls = 0;
+    const payload = {
+        status: "initial",
+        nested: { count: 1 },
+        custom: {
+            toJSON() {
+                toJsonCalls++;
+                return "snap";
+            }
+        }
+    };
+    const rJsonFast = Response.json(payload);
+    const rJsonInit = Response.json(payload, {
+        status: 201,
+        headers: { "x-trace": "t1" }
+    });
+    const toJsonAfterConstruct = toJsonCalls;
+    payload.status = "MUTATED";
+    payload.nested.count = 999;
+
+    const p1 = await rJsonFast.clone().json();
+    p1.nested.count = 777;
+    const p2 = await rJsonFast.json();
+    const txtInit = await rJsonInit.text();
+
+    const unserializable = [undefined, Symbol("s"), () => {}, 42n];
+    const cyc = {};
+    cyc.self = cyc;
+    unserializable.push(cyc);
+    const syncJsonErrors = unserializable.every((bad) => {
+        try {
+            Response.json(bad);
+            return false;
+        } catch (e) {
+            return e instanceof TypeError;
+        }
+    });
+
+    // 2. Issue #116: Lossless binary FormData round-trip (NUL, invalid UTF-8 0x80/0xff, embedded CRLF)
+    const rawBin = new Uint8Array([0x00, 0x80, 0xff, 0x0d, 0x0a, 0x41, 0xfe, 0x00]);
+    const fd = new FormData();
+    fd.append("meta", "alpha\r\nbeta");
+    fd.append("blobFile", new File([rawBin], 'semi;quote"name.bin', { type: "application/x-raw" }));
+    fd.append("emptyFile", new File([], "empty.dat", { type: "application/octet-stream" }));
+
+    const reqFd = new Request("https://edge.slice.dev/upload", { method: "POST", body: fd });
+    // Post-construction mutation of FormData must NOT mutate already-constructed Request (#115/#116)
+    fd.set("meta", "MUTATED_AFTER");
+
+    const parsedReqFd = await reqFd.clone().formData();
+    const gotFile = parsedReqFd.get("blobFile");
+    const gotBytes = Array.from(await gotFile.bytes());
+    const gotEmpty = parsedReqFd.get("emptyFile");
+
+    const resFd = new Response(parsedReqFd);
+    const parsedResFd = await resFd.formData();
+    const gotResBytes = Array.from(await parsedResFd.get("blobFile").bytes());
+
+    // Malformed multipart missing closing boundary must reject with TypeError
+    let truncatedRejected = false;
+    try {
+        await new Response(
+            '--B\r\nContent-Disposition: form-data; name="k"\r\n\r\nval\r\n',
+            { headers: { "content-type": "multipart/form-data; boundary=B" } }
+        ).formData();
+    } catch (e) {
+        truncatedRejected = e instanceof TypeError;
+    }
+
+    // 3. Issue #121: Explicit Content-Type headers never shadowed by string default _ct
+    const mpStr =
+        '--X\r\nContent-Disposition: form-data; name="greeting"\r\n\r\nhello-world\r\n' +
+        '--X\r\nContent-Disposition: form-data; name="doc"; filename="note.txt"\r\n\r\nplain-body\r\n' +
+        '--X--\r\n';
+    const mpFromStrRes = await new Response(mpStr, {
+        headers: { "Content-Type": "multipart/form-data; boundary=X" }
+    }).formData();
+    const noteFile = mpFromStrRes.get("doc");
+
+    const customBlob = await new Response("hello", {
+        headers: { "Content-Type": "application/octet-stream" }
+    }).blob();
+    const emptyRes = new Response();
+    const u8Res = new Response(new Uint8Array([1, 2, 3]));
+
+    const mutHdrRes = new Response("hello");
+    mutHdrRes.headers.set("content-type", "text/x-custom");
+    const mutSetBlob = await mutHdrRes.clone().blob();
+    const delHdrRes = new Response("hello");
+    delHdrRes.headers.delete("content-type");
+    const delBlob = await delHdrRes.blob();
+
+    // URL-encoded body starting with leading '?' preserves '?first' key
+    const urlEncFd = await new Request("https://edge.slice.dev/form", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: "?first=1&second=two"
+    }).formData();
+
+    console.log(JSON.stringify({
+        toJsonAfterConstruct,
+        toJsonTotal: toJsonCalls,
+        p2Status: p2.status,
+        p2Count: p2.nested.count,
+        txtInit,
+        syncJsonErrors,
+        metaVal: parsedReqFd.get("meta"),
+        fileName: gotFile.name,
+        fileType: gotFile.type,
+        bytesMatch: gotBytes.join(",") === Array.from(rawBin).join(","),
+        resBytesMatch: gotResBytes.join(",") === Array.from(rawBin).join(","),
+        emptySize: gotEmpty.size,
+        truncatedRejected,
+        mpGreeting: mpFromStrRes.get("greeting"),
+        noteDefaultType: noteFile.type,
+        noteText: await noteFile.text(),
+        customBlobType: customBlob.type,
+        emptyCt: emptyRes.headers.get("content-type"),
+        emptyBlobType: (await emptyRes.blob()).type,
+        u8Ct: u8Res.headers.get("content-type"),
+        u8BlobType: (await u8Res.blob()).type,
+        mutSetType: mutSetBlob.type,
+        delBlobType: delBlob.type,
+        urlEncFirst: urlEncFd.get("?first"),
+        urlEncSecond: urlEncFd.get("second"),
+    }));
+})();
+"#;
+    let m = run_source_isolated(
+        "wave4-115-116-121-tenant",
+        js,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    let res: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(res["toJsonAfterConstruct"], 2, "res: {}", res);
+    assert_eq!(res["toJsonTotal"], 2, "res: {}", res);
+    assert_eq!(res["p2Status"], "initial", "res: {}", res);
+    assert_eq!(res["p2Count"], 1, "res: {}", res);
+    assert_eq!(
+        res["txtInit"],
+        r#"{"status":"initial","nested":{"count":1},"custom":"snap"}"#
+    );
+    assert_eq!(res["syncJsonErrors"], true, "res: {}", res);
+    assert_eq!(res["metaVal"], "alpha\r\nbeta", "res: {}", res);
+    assert_eq!(res["fileName"], "semi;quote\"name.bin", "res: {}", res);
+    assert_eq!(res["fileType"], "application/x-raw", "res: {}", res);
+    assert_eq!(res["bytesMatch"], true, "res: {}", res);
+    assert_eq!(res["resBytesMatch"], true, "res: {}", res);
+    assert_eq!(res["emptySize"], 0, "res: {}", res);
+    assert_eq!(res["truncatedRejected"], true, "res: {}", res);
+    assert_eq!(res["mpGreeting"], "hello-world", "res: {}", res);
+    assert_eq!(res["noteDefaultType"], "text/plain", "res: {}", res);
+    assert_eq!(res["noteText"], "plain-body", "res: {}", res);
+    assert_eq!(res["customBlobType"], "application/octet-stream");
+    assert!(res["emptyCt"].is_null(), "res: {}", res);
+    assert_eq!(res["emptyBlobType"], "");
+    assert!(res["u8Ct"].is_null(), "res: {}", res);
+    assert_eq!(res["u8BlobType"], "");
+    assert_eq!(res["mutSetType"], "text/x-custom");
+    assert_eq!(res["delBlobType"], "");
+    assert_eq!(res["urlEncFirst"], "1");
+    assert_eq!(res["urlEncSecond"], "two");
+
+    // Also verify live HttpRequestContext binary `body_bytes` ingress (#116)
+    let live_handler_ts = r#"
+export default {
+    async fetch(req: Request): Promise<Response> {
+        const cloned = req.clone();
+        const fd = await req.formData();
+        const f = fd.get("bin") as File;
+        const u8 = await f.bytes();
+        const rawClone = await cloned.bytes();
+        return Response.json({
+            tag: fd.get("tag"),
+            name: f.name,
+            bytes: Array.from(u8),
+            rawLen: rawClone.byteLength,
+        });
+    }
+};
+"#;
+    let bc = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        live_handler_ts,
+        true,
+    ));
+    let mut iso = SliceIsolate::spawn(
+        "wave4-live-bin-req",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    );
+    let mut wire_body = Vec::new();
+    wire_body.extend_from_slice(
+        b"--LiveBound\r\nContent-Disposition: form-data; name=\"tag\"\r\n\r\nok\r\n",
+    );
+    wire_body.extend_from_slice(
+        b"--LiveBound\r\nContent-Disposition: form-data; name=\"bin\"; filename=\"p.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n",
+    );
+    wire_body.extend_from_slice(&[0x00, 0x80, 0xff, 0x0d, 0x0a, 0x7f]);
+    wire_body.extend_from_slice(b"\r\n--LiveBound--\r\n");
+
+    let req_ctx = HttpRequestContext {
+        method: "POST",
+        path: "/upload",
+        query: "",
+        tenant_id: "wave4-live-bin-req",
+        body: "",
+        body_bytes: Some(&wire_body),
+        headers: &[
+            ("host", "edge.slice.local"),
+            ("content-type", "multipart/form-data; boundary=LiveBound"),
+        ],
+    };
+    let out = iso.execute_http_request(&bc, None, &req_ctx).unwrap();
+    assert_eq!(out.status_code, 200);
+    let parsed_live: serde_json::Value = serde_json::from_str(&out.response_body).unwrap();
+    assert_eq!(parsed_live["tag"], "ok");
+    assert_eq!(parsed_live["name"], "p.bin");
+    assert_eq!(
+        parsed_live["bytes"],
+        serde_json::json!([0, 128, 255, 13, 10, 127])
+    );
+    assert_eq!(parsed_live["rawLen"], wire_body.len());
+}
+
+#[test]
+fn test_wave4_issues_117_119_120_async_readablestream_buffer_from_and_event_target() {
+    let js = r#"
+import { EventEmitter } from "node:events";
+
+(async () => {
+    // 1. Issue #117: Async pull() resolving before timer enqueue + reader.closed + tee + pipeThrough
+    let closedResolved = false;
+    let step = 0;
+    const timerStream = new ReadableStream({
+        async start(c) {
+            await Promise.resolve();
+            c.enqueue("from-start");
+        },
+        async pull(c) {
+            step++;
+            if (step === 1) {
+                setTimeout(() => {
+                    c.enqueue("delayed-1");
+                }, 2);
+                return; // resolves BEFORE enqueue!
+            }
+            if (step === 2) {
+                setTimeout(() => {
+                    c.enqueue("delayed-2");
+                    c.close();
+                }, 2);
+            }
+        }
+    });
+    const reader = timerStream.getReader();
+    reader.closed.then(() => { closedResolved = true; });
+    const r0 = await reader.read();
+    const closedMidway = closedResolved;
+    const [r1, r2, r3] = await Promise.all([reader.read(), reader.read(), reader.read()]);
+    await reader.closed;
+
+    // Async tee() + pipeThrough(TransformStream)
+    let teeTick = 0;
+    const baseAsync = new ReadableStream({
+        pull(c) {
+            return new Promise((res) => {
+                setTimeout(() => {
+                    teeTick++;
+                    if (teeTick <= 2) c.enqueue("chunk-" + teeTick);
+                    else c.close();
+                    res();
+                }, 1);
+            });
+        }
+    });
+    const [b1, b2] = baseAsync.tee();
+    const upperB1 = b1.pipeThrough(new TransformStream({
+        transform(ch, ctrl) {
+            ctrl.enqueue(String(ch).toUpperCase());
+        }
+    }));
+    const out1 = [];
+    for await (const x of upperB1) out1.push(x);
+    const out2 = [];
+    for await (const y of b2) out2.push(y);
+
+    // Async pull() rejection transitions stream & reader.closed to errored
+    const errStream = new ReadableStream({
+        async pull() {
+            throw new Error("boom-pull");
+        }
+    });
+    const errReader = errStream.getReader();
+    let readErrMsg = "";
+    let closedErrMsg = "";
+    try { await errReader.read(); } catch (e) { readErrMsg = e.message; }
+    try { await errReader.closed; } catch (e) { closedErrMsg = e.message; }
+
+    // 2. Issue #119: Buffer.from TypedArray element conversion, ArrayBuffer bounds, and unboxing
+    const u16 = new Uint16Array([0x1234, 0x5678, 0x00ff]);
+    const bufElem = Buffer.from(u16);
+    const bufSub = Buffer.from(u16.subarray(1));
+    const bufInt32 = Buffer.from(new Int32Array([-1, 258]));
+    const bufFloat = Buffer.from(new Float64Array([65.9, 66.1]));
+    const bufView = Buffer.from(u16.buffer, 2, 4);
+    u16[1] = 0x1122;
+    const zeroCopyShared = bufView[0] === 0x22 && bufView[1] === 0x11;
+
+    let oobNegErr = "";
+    try { Buffer.from(new ArrayBuffer(4), -1); } catch (e) { oobNegErr = e.name; }
+    let oobLenErr = "";
+    try { Buffer.from(new ArrayBuffer(4), 2, 4); } catch (e) { oobLenErr = e.name; }
+    let dvErr = "";
+    try { Buffer.from(new DataView(new ArrayBuffer(4))); } catch (e) { dvErr = e.name; }
+    let bigErr = "";
+    try { Buffer.from(new BigUint64Array([1n])); } catch (e) { bigErr = e.name; }
+
+    const unboxedStr = Buffer.from(new String("abc")).toString("utf8");
+    const unboxedPrim = Buffer.from({ [Symbol.toPrimitive]() { return "xyz"; } }).toString("utf8");
+    const unboxedValOf = Array.from(Buffer.from({ valueOf() { return new Uint8Array([7, 8]); } }));
+
+    // 3. Issue #120: WHATWG EventTarget removed-listener semantics, AbortSignal, & MessagePort
+    const et = new EventTarget();
+    const log = [];
+    function listenerB() { log.push("B"); }
+    et.addEventListener("go", () => {
+        log.push("A");
+        et.removeEventListener("go", listenerB);
+        et.addEventListener("go", listenerB); // re-add must NOT fire in current dispatch!
+    });
+    et.addEventListener("go", listenerB);
+    et.dispatchEvent(new Event("go"));
+    const afterFirstDispatch = log.join(",");
+    et.dispatchEvent(new Event("go"));
+    const afterSecondDispatch = log.join(",");
+
+    // Capture 3-tuple independence: removing (fn, false) leaves (fn, true) intact
+    const capLog = [];
+    function capFn() { capLog.push("C"); }
+    et.addEventListener("cap", capFn, true);
+    et.addEventListener("cap", capFn, false);
+    et.removeEventListener("cap", capFn, false);
+    et.dispatchEvent(new Event("cap"));
+
+    // AbortSignal instanceof EventTarget + sibling removal during abort
+    const ac = new AbortController();
+    const sigIsEt = ac.signal instanceof EventTarget;
+    const abortLog = [];
+    function secondAbort() { abortLog.push("second"); }
+    ac.signal.addEventListener("abort", () => {
+        abortLog.push("first");
+        ac.signal.removeEventListener("abort", secondAbort);
+    });
+    ac.signal.addEventListener("abort", secondAbort);
+    ac.abort();
+
+    // MessagePort onmessage + addEventListener("message") fire once each
+    const ch = new MessageChannel();
+    const portHits = [];
+    ch.port1.onmessage = (e) => portHits.push("prop:" + e.data);
+    ch.port1.addEventListener("message", (e) => portHits.push("et:" + e.data));
+    ch.port2.postMessage("hi");
+    await new Promise((r) => setTimeout(r, 5));
+
+    // Control: Node EventEmitter preserves snapshot-at-emit behavior
+    const ee = new EventEmitter();
+    const eeHits = [];
+    function eeSecond() { eeHits.push("ee2"); }
+    ee.on("ev", () => {
+        eeHits.push("ee1");
+        ee.off("ev", eeSecond);
+    });
+    ee.on("ev", eeSecond);
+    ee.emit("ev");
+
+    console.log(JSON.stringify({
+        r0,
+        closedMidway,
+        r1,
+        r2,
+        r3,
+        closedResolved,
+        out1,
+        out2,
+        readErrMsg,
+        closedErrMsg,
+        bufElem: Array.from(bufElem),
+        bufSub: Array.from(bufSub),
+        bufInt32: Array.from(bufInt32),
+        bufFloat: Array.from(bufFloat),
+        zeroCopyShared,
+        oobNegErr,
+        oobLenErr,
+        dvErr,
+        bigErr,
+        unboxedStr,
+        unboxedPrim,
+        unboxedValOf,
+        afterFirstDispatch,
+        afterSecondDispatch,
+        capCount: capLog.length,
+        sigIsEt,
+        abortLog,
+        portHits,
+        eeHits,
+    }));
+})();
+"#;
+    let m = run_source_isolated(
+        "wave4-117-119-120-tenant",
+        js,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    let res: serde_json::Value = serde_json::from_str(&m.stdout[0]).unwrap();
+    assert_eq!(
+        res["r0"],
+        serde_json::json!({"value": "from-start", "done": false})
+    );
+    assert_eq!(res["closedMidway"], false);
+    assert_eq!(
+        res["r1"],
+        serde_json::json!({"value": "delayed-1", "done": false})
+    );
+    assert_eq!(
+        res["r2"],
+        serde_json::json!({"value": "delayed-2", "done": false})
+    );
+    assert_eq!(res["r3"]["done"], true);
+    assert_eq!(res["closedResolved"], true);
+    assert_eq!(res["out1"], serde_json::json!(["CHUNK-1", "CHUNK-2"]));
+    assert_eq!(res["out2"], serde_json::json!(["chunk-1", "chunk-2"]));
+    assert_eq!(res["readErrMsg"], "boom-pull");
+    assert_eq!(res["closedErrMsg"], "boom-pull");
+    assert_eq!(res["bufElem"], serde_json::json!([0x34, 0x78, 0xff]));
+    assert_eq!(res["bufSub"], serde_json::json!([0x78, 0xff]));
+    assert_eq!(res["bufInt32"], serde_json::json!([255, 2]));
+    assert_eq!(res["bufFloat"], serde_json::json!([65, 66]));
+    assert_eq!(res["zeroCopyShared"], true);
+    assert_eq!(res["oobNegErr"], "RangeError");
+    assert_eq!(res["oobLenErr"], "RangeError");
+    assert_eq!(res["dvErr"], "TypeError");
+    assert_eq!(res["bigErr"], "TypeError");
+    assert_eq!(res["unboxedStr"], "abc");
+    assert_eq!(res["unboxedPrim"], "xyz");
+    assert_eq!(res["unboxedValOf"], serde_json::json!([7, 8]));
+    assert_eq!(res["afterFirstDispatch"], "A");
+    assert_eq!(res["afterSecondDispatch"], "A,A");
+    assert_eq!(res["capCount"], 1);
+    assert_eq!(res["sigIsEt"], true);
+    assert_eq!(res["abortLog"], serde_json::json!(["first"]));
+    assert_eq!(res["portHits"], serde_json::json!(["prop:hi", "et:hi"]));
+    assert_eq!(res["eeHits"], serde_json::json!(["ee1", "ee2"]));
+}

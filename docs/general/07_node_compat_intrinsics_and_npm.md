@@ -120,7 +120,7 @@ const isAbs = path.isAbsolute(fullPath); // true
 ```
 
 ### 1.4 `node:buffer` / `buffer` (Real `Uint8Array`-Backed `Buffer`)
-In Slice, every `Buffer` is a real **`Uint8Array` instance** (`buf instanceof Uint8Array === true`, `ArrayBuffer.isView(buf) === true`, `Buffer.isBuffer(buf) === true`) with direct zero-copy `buffer.subarray()` views over `ArrayBuffer` memory and full big/little-endian wire-protocol integer readers and writers:
+In Slice, every `Buffer` is a real **`Uint8Array` instance** (`buf instanceof Uint8Array === true`, `ArrayBuffer.isView(buf) === true`, `Buffer.isBuffer(buf) === true`) with Node.js-compliant `Buffer.from` semantics (zero-copy views over `Buffer.from(arrayBuffer, byteOffset?, length?)` with strict `RangeError` bounds checking, element-wise `ToUint8` truncation when copying from non-byte `TypedArray`s such as `Uint16Array`/`Int32Array`, `valueOf()`/`Symbol.toPrimitive` unboxing, and `TypeError` rejection on `DataView`/`BigInt64Array`/`BigUint64Array`), direct zero-copy `buffer.subarray()` views, and full big/little-endian wire-protocol integer readers and writers:
 ```typescript
 import { Buffer } from "node:buffer";
 
@@ -217,7 +217,7 @@ const part2 = decoder.end(Buffer.from([0x9a, 0x80]));         // completes multi
 ```
 
 ### 1.7b `node:stream`, `node:stream/promises`, `node:stream/web`, `node:http`, `node:https`, & `Slice.serve`
-Slice provides a full `EventEmitter`-based `node:stream` hierarchy (`Readable`, `Writable`, `Duplex`, `Transform`, `PassThrough`, `pipeline`, `finished`, `Readable.fromWeb` / `Readable.toWeb`, `Writable.fromWeb` / `Writable.toWeb`) and `node:http` / `node:https` (`IncomingMessage`, `ServerResponse`, `Server`, `createServer`, `ClientRequest`, `request`, `get`, `Agent`, `STATUS_CODES`, `METHODS`), plus `Slice.serve` (`Deno.serve` / `Bun.serve` aliases). Incoming HTTP requests in `slice serve` bridge directly in-memory to `http.createServer` or `Slice.serve` handlers with zero loopback socket overhead:
+Slice provides a full `EventEmitter`-based `node:stream` hierarchy (`Readable`, `Writable`, `Duplex`, `Transform`, `PassThrough`, `pipeline`, `finished`, `Readable.fromWeb` / `Readable.toWeb`, `Writable.fromWeb` / `Writable.toWeb`) and `node:http` / `node:https` (`IncomingMessage`, `ServerResponse`, `Server`, `createServer`, `ClientRequest`, `request`, `get`, `Agent`, `STATUS_CODES`, `METHODS`), plus `Slice.serve` (`Deno.serve` / `Bun.serve` aliases). Incoming HTTP requests in `slice serve` bridge raw binary socket payloads directly in-memory to `http.createServer` or `Slice.serve` handlers with zero loopback socket overhead and zero UTF-8 corruption:
 ```typescript
 import * as http from "node:http";
 import { Readable, Transform } from "node:stream";
