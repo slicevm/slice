@@ -6,7 +6,7 @@ pub(crate) mod watcher;
 #[cfg(test)]
 pub(crate) use cas_packager::build_cas_archive;
 pub(crate) use cas_packager::build_cas_archive_with_static;
-#[cfg(test)]
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) use flags::parse_u64_digits;
 pub(crate) use flags::{
     is_known_slice_runtime_flag, match_non_empty_flag_path, match_non_empty_flag_value,
