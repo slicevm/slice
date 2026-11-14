@@ -1,4 +1,7 @@
-use crate::config::{install_ctrlc_handler, OsNativeFileWatcher, ResolvedExecutionConfig};
+use crate::config::{
+    install_ctrlc_handler, is_known_slice_runtime_flag, skip_runtime_flag_with_separate_value,
+    OsNativeFileWatcher, ResolvedExecutionConfig,
+};
 use anyhow::{bail, Context, Result};
 use slice_cas::MappedCasArchive;
 use slice_engine::{compile_source_to_bytecode, SliceIsolate};
@@ -11,52 +14,6 @@ use std::time::Instant;
 
 pub(crate) static LAST_CLI_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
-#[inline]
-fn is_known_slice_runtime_flag(arg: &str) -> bool {
-    matches!(
-        arg,
-        "--quiet"
-            | "-q"
-            | "--metrics"
-            | "--watch"
-            | "--watch-once"
-            | "--warm"
-            | "--no-warm"
-            | "--boacas"
-            | "--no-boacas"
-            | "--exper-boacas"
-            | "--no-exper-boacas"
-            | "--deterministic"
-            | "--no-deterministic"
-            | "--checkpoints"
-            | "--no-checkpoints"
-            | "--trust-directives"
-            | "--no-trust-directives"
-            | "--no-directives"
-            | "--untrusted"
-    ) || arg.starts_with("--allow-")
-        || arg.starts_with("--config=")
-        || arg.starts_with("--trust-directives=")
-        || arg.starts_with("--fuel=")
-        || arg.starts_with("--memory=")
-        || arg.starts_with("--memory-kb=")
-        || arg.starts_with("--tier=")
-        || arg.starts_with("--boacas=")
-        || arg.starts_with("--exper-boacas=")
-        || arg.starts_with("--deterministic=")
-        || arg.starts_with("--env-file=")
-        || arg.starts_with("--audit-egress=")
-        || arg.starts_with("--audit-egress-file=")
-        || arg.starts_with("--checkpoints=")
-        || arg.starts_with("--max-checkpoints=")
-        || arg.starts_with("--trace=")
-        || arg.starts_with("--port=")
-        || arg.starts_with("--workers=")
-        || arg.starts_with("--static=")
-        || arg.starts_with("--tls-cert=")
-        || arg.starts_with("--tls-key=")
-}
-
 pub(crate) fn cmd_check(args: &[String]) -> Result<()> {
     LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);
     let mut targets: Vec<String> = Vec::new();
@@ -64,6 +21,13 @@ pub(crate) fn cmd_check(args: &[String]) -> Result<()> {
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
+        if arg == "--" {
+            targets.extend(args[i + 1..].iter().cloned());
+            break;
+        }
+        if skip_runtime_flag_with_separate_value(args, &mut i)? {
+            continue;
+        }
         if arg == "--check" || arg == "-c" {
             i += 1;
             continue;
@@ -137,7 +101,7 @@ pub(crate) fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
 
     let mut exec_cfg = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(&args[1..], false)?;
     if let Some(toml_str) = archive.get_manifest_toml() {
-        exec_cfg.apply_manifest_toml(toml_str, None);
+        exec_cfg.apply_manifest_toml(toml_str, None)?;
     }
     let mut isolate = SliceIsolate::spawn(
         "standalone-exe",
@@ -157,8 +121,7 @@ pub(crate) fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
                 standalone_argv.extend(args[ai + 1..].iter().cloned());
                 break;
             }
-            if a == "--config" {
-                ai += 2;
+            if skip_runtime_flag_with_separate_value(&args, &mut ai)? {
                 continue;
             }
             if !is_known_slice_runtime_flag(a) {
@@ -227,13 +190,10 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             }
             break;
         }
-        if arg == "--config" {
-            if i + 1 >= args.len() {
-                bail!("Flag --config requires a manifest file path");
-            }
-            i += 2;
+        if skip_runtime_flag_with_separate_value(args, &mut i)? {
             continue;
         }
+        let arg = &args[i];
         if target_opt.is_none() && eval_opt.is_none() {
             if arg == "--check" || arg == "-c" {
                 return cmd_check(args);
@@ -299,7 +259,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(args, !is_external_cas)?;
 
     if let Some((raw_code, print_result)) = eval_opt {
-        exec_cfg.apply_inline_directives(&raw_code, Some(Path::new(".")));
+        exec_cfg.apply_inline_directives(&raw_code, Some(Path::new(".")))?;
         if let Err(syn_err) = slice_cas::check_syntax_source(&raw_code, None) {
             bail!("{}", syn_err);
         }
@@ -380,7 +340,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     if target == "-" {
         let mut stdin_src = String::new();
         std::io::stdin().read_to_string(&mut stdin_src)?;
-        exec_cfg.apply_inline_directives(&stdin_src, Some(Path::new(".")));
+        exec_cfg.apply_inline_directives(&stdin_src, Some(Path::new(".")))?;
         if let Err(syn_err) = slice_cas::check_syntax_source(&stdin_src, None) {
             bail!("{}", syn_err);
         }
@@ -434,7 +394,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     let metrics = if target.ends_with(".cas") {
         let archive = MappedCasArchive::open(path)?;
         if let Some(toml_str) = archive.get_manifest_toml() {
-            exec_cfg.apply_manifest_toml(toml_str, None);
+            exec_cfg.apply_manifest_toml(toml_str, None)?;
         }
         let prewarm_pool = exec_cfg.warm_pool;
         let deterministic_seed = exec_cfg.deterministic_seed;
@@ -474,18 +434,20 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         if let Some(ref trace_path) = exec_cfg.trace_output_path {
             let trace_json = isolate.export_chrome_trace_json(&m);
             isolate.enable_tracing(false);
-            let _ = std::fs::write(trace_path, trace_json);
+            std::fs::write(trace_path, trace_json).with_context(|| {
+                format!("Failed to write Chrome trace to {}", trace_path.display())
+            })?;
         }
         if m.return_value.starts_with("Uncaught ") {
             bundled_for_sourcemap = archive.reconstruct_annotated_source(entry);
         }
         m
     } else {
-        exec_cfg.apply_target_path_manifest(path);
+        exec_cfg.apply_target_path_manifest(path)?;
         let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
-        if let Ok(raw_entry) = std::fs::read_to_string(&entry_file) {
-            exec_cfg.apply_inline_directives(&raw_entry, entry_file.parent());
-        }
+        let raw_entry = std::fs::read_to_string(&entry_file)
+            .with_context(|| format!("Failed to read {}", entry_file.display()))?;
+        exec_cfg.apply_inline_directives(&raw_entry, entry_file.parent())?;
         let prewarm_pool = exec_cfg.warm_pool;
         let deterministic_seed = exec_cfg.deterministic_seed;
         let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
@@ -529,7 +491,9 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         if let Some(ref trace_path) = exec_cfg.trace_output_path {
             let trace_json = isolate.export_chrome_trace_json(&m);
             isolate.enable_tracing(false);
-            let _ = std::fs::write(trace_path, trace_json);
+            std::fs::write(trace_path, trace_json).with_context(|| {
+                format!("Failed to write Chrome trace to {}", trace_path.display())
+            })?;
         }
         m
     };

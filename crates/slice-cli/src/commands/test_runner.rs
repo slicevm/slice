@@ -1,5 +1,8 @@
-use crate::config::{install_ctrlc_handler, OsNativeFileWatcher, ResolvedExecutionConfig};
-use anyhow::{bail, Result};
+use crate::config::{
+    install_ctrlc_handler, skip_runtime_flag_with_separate_value, OsNativeFileWatcher,
+    ResolvedExecutionConfig,
+};
+use anyhow::{bail, Context, Result};
 use slice_engine::{compile_source_to_bytecode, SliceIsolate};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -72,11 +75,18 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
 
     let mut i = 0;
     while i < args.len() {
-        let arg = &args[i];
-        if arg == "--config" {
-            i += 2;
+        if args[i] == "--" {
+            if let Some(first_rem) = args.get(i + 1) {
+                if target_opt.is_none() {
+                    target_opt = Some(first_rem.clone());
+                }
+            }
+            break;
+        }
+        if skip_runtime_flag_with_separate_value(args, &mut i)? {
             continue;
         }
+        let arg = &args[i];
         if let Some(f) = arg.strip_prefix("--filter=") {
             filter_opt = Some(f.to_string());
         } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
@@ -98,7 +108,7 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
 
     let target_str = target_opt.unwrap_or_else(|| ".".to_string());
     let target_path = Path::new(&target_str);
-    exec_cfg.apply_target_path_manifest(target_path);
+    exec_cfg.apply_target_path_manifest(target_path)?;
 
     let test_files = discover_test_files(target_path)?;
     if test_files.is_empty() {
@@ -117,9 +127,9 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
 
     for test_file in &test_files {
         let mut file_cfg = exec_cfg.clone();
-        if let Ok(raw_test) = std::fs::read_to_string(test_file) {
-            file_cfg.apply_inline_directives(&raw_test, test_file.parent());
-        }
+        let raw_test = std::fs::read_to_string(test_file)
+            .with_context(|| format!("Failed to read test file {}", test_file.display()))?;
+        file_cfg.apply_inline_directives(&raw_test, test_file.parent())?;
         let bundled = slice_cas::bundle_entrypoint_with_deps(test_file)?;
         let filter_js = match &filter_opt {
             Some(flt) => format!(
@@ -228,9 +238,9 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
             let mut rerun_failed = 0usize;
             for test_file in &discover_test_files(target_path)? {
                 let mut file_cfg = exec_cfg.clone();
-                if let Ok(raw_test) = std::fs::read_to_string(test_file) {
-                    file_cfg.apply_inline_directives(&raw_test, test_file.parent());
-                }
+                let raw_test = std::fs::read_to_string(test_file)
+                    .with_context(|| format!("Failed to read test file {}", test_file.display()))?;
+                file_cfg.apply_inline_directives(&raw_test, test_file.parent())?;
                 let bundled = slice_cas::bundle_entrypoint_with_deps(test_file)?;
                 let filter_js = match &filter_opt {
                     Some(flt) => format!(

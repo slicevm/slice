@@ -575,7 +575,7 @@ fn test_incremental_http_header_cursor_and_single_pass_manifest_dedup() {
     std::fs::write(&script_path, "console.log('ok');\n").unwrap();
 
     let mut cfg = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(&[], false).unwrap();
-    cfg.apply_target_path_manifest(&script_path);
+    cfg.apply_target_path_manifest(&script_path).unwrap();
     assert_eq!(cfg.fuel_limit, 1_234_567);
     assert_eq!(
         cfg.caps
@@ -590,7 +590,7 @@ fn test_incremental_http_header_cursor_and_single_pass_manifest_dedup() {
         "[limits]\nfuel = 9999999\n[capabilities]\nallow_env = [\"DEDUP_KEY=v2\"]\n",
     )
     .unwrap();
-    cfg.apply_target_path_manifest(&script_path);
+    cfg.apply_target_path_manifest(&script_path).unwrap();
     assert_eq!(cfg.fuel_limit, 1_234_567);
 
     let _ = std::fs::remove_dir_all(&tmp_dir);

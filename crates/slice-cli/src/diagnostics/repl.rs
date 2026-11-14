@@ -9,7 +9,7 @@ pub(crate) fn cmd_repl() -> Result<()> {
         env!("CARGO_PKG_VERSION")
     );
     println!("Commands: :help, :metrics, :caps, :vars, :reset, :quit");
-    let (caps, fuel_limit, mem_limit) = load_manifest_or_default();
+    let (caps, fuel_limit, mem_limit) = load_manifest_or_default()?;
     let mut isolate = SliceIsolate::spawn("repl-tenant", 1, caps.clone(), fuel_limit, mem_limit);
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();

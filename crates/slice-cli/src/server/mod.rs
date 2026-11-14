@@ -9,7 +9,9 @@ pub(crate) use connection::{
 };
 pub(crate) use tls::load_tls_server_config;
 
-use crate::config::{install_ctrlc_handler, ResolvedExecutionConfig};
+use crate::config::{
+    install_ctrlc_handler, skip_runtime_flag_with_separate_value, ResolvedExecutionConfig,
+};
 use anyhow::{Context, Result};
 use rustc_hash::FxHashMap;
 use slice_cas::MappedCasArchive;
@@ -28,11 +30,18 @@ pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
 
     let mut i = 0;
     while i < args.len() {
-        let arg = &args[i];
-        if arg == "--config" {
-            i += 2;
+        if args[i] == "--" {
+            if let Some(first_rem) = args.get(i + 1) {
+                if target_opt.is_none() {
+                    target_opt = Some(first_rem.clone());
+                }
+            }
+            break;
+        }
+        if skip_runtime_flag_with_separate_value(args, &mut i)? {
             continue;
         }
+        let arg = &args[i];
         if arg == "--host" {
             if let Some(h) = args.get(i + 1) {
                 if !h.trim().is_empty() {
@@ -80,7 +89,7 @@ console.log(route_res);
         if target.ends_with(".cas") {
             let archive = MappedCasArchive::open(p)?;
             if let Some(toml_str) = archive.get_manifest_toml() {
-                exec_cfg.apply_manifest_toml(toml_str, None);
+                exec_cfg.apply_manifest_toml(toml_str, None)?;
             }
             static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
             let entry = archive
@@ -88,17 +97,17 @@ console.log(route_res);
                 .context("Missing CAS entrypoint")?;
             archive.get_bytecode_slice(entry).to_vec()
         } else {
-            exec_cfg.apply_target_path_manifest(p);
+            exec_cfg.apply_target_path_manifest(p)?;
             let entry_file = slice_cas::resolve_project_entrypoint(p, None)?;
-            if let Ok(raw_entry) = std::fs::read_to_string(&entry_file) {
-                exec_cfg.apply_inline_directives(&raw_entry, entry_file.parent());
-            }
+            let raw_entry = std::fs::read_to_string(&entry_file)
+                .with_context(|| format!("Failed to read {}", entry_file.display()))?;
+            exec_cfg.apply_inline_directives(&raw_entry, entry_file.parent())?;
             let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
             compile_source_to_bytecode(&bundled)
         }
     } else if let Some(archive) = embedded_archive {
         if let Some(toml_str) = archive.get_manifest_toml() {
-            exec_cfg.apply_manifest_toml(toml_str, None);
+            exec_cfg.apply_manifest_toml(toml_str, None)?;
         }
         static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
         if let Some(entry) = archive.entrypoint_blob() {

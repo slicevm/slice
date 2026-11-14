@@ -328,7 +328,7 @@ allow_env = ["STRIPE_SECRET_KEY=sk_live_subdir_manifest_998877"]
     // 1. Without CLI `--fuel` / `--memory` overrides, `apply_target_path_manifest` must load
     //    both `[limits]` (`fuel = 250_000_000`, `memory_kb = 65536`) and `[capabilities]` + DLP secrets.
     let mut cfg = ResolvedExecutionConfig::from_cli_args(&[]).unwrap();
-    cfg.apply_target_path_manifest(&entry_path);
+    cfg.apply_target_path_manifest(&entry_path).unwrap();
     assert_eq!(cfg.fuel_limit, 250_000_000);
     assert_eq!(cfg.mem_limit, 65536 * 1024);
     assert!(cfg.caps.allowed_read_prefixes.contains(&"/tmp".to_string()));
@@ -344,7 +344,7 @@ allow_env = ["STRIPE_SECRET_KEY=sk_live_subdir_manifest_998877"]
         "--allow-read=/custom".to_string(),
     ];
     let mut cfg_override = ResolvedExecutionConfig::from_cli_args(&args).unwrap();
-    cfg_override.apply_target_path_manifest(&entry_path);
+    cfg_override.apply_target_path_manifest(&entry_path).unwrap();
     assert_eq!(cfg_override.fuel_limit, 777_000);
     assert_eq!(cfg_override.mem_limit, 8_388_608);
     assert!(cfg_override
@@ -377,8 +377,10 @@ console.log("hi");
         default_iso.current_tier,
         slice_engine::ExecutionTier::Tier1Baseline
     );
-    cfg_inline.apply_target_path_manifest(&entry_path);
-    cfg_inline.apply_inline_directives(inline_source, Some(&src_dir));
+    cfg_inline.apply_target_path_manifest(&entry_path).unwrap();
+    cfg_inline
+        .apply_inline_directives(inline_source, Some(&src_dir))
+        .unwrap();
     assert_eq!(slice_engine::active_tier_override(), Some(1));
     assert!(!slice_engine::is_exper_boacas_build_enabled());
     assert!(cfg_inline.warm_pool);
@@ -398,8 +400,10 @@ console.log("hi");
     // When --trust-directives is explicitly passed, inline capability directives are trusted
     let mut cfg_trusted =
         ResolvedExecutionConfig::from_cli_args(&["--trust-directives".to_string()]).unwrap();
-    cfg_trusted.apply_target_path_manifest(&entry_path);
-    cfg_trusted.apply_inline_directives(inline_source, Some(&src_dir));
+    cfg_trusted.apply_target_path_manifest(&entry_path).unwrap();
+    cfg_trusted
+        .apply_inline_directives(inline_source, Some(&src_dir))
+        .unwrap();
     assert!(cfg_trusted
         .caps
         .allowed_read_prefixes
@@ -412,8 +416,10 @@ console.log("hi");
         "--port=7777".to_string(),
     ];
     let mut cfg_cli_win = ResolvedExecutionConfig::from_cli_args(&cli_win_args).unwrap();
-    cfg_cli_win.apply_target_path_manifest(&entry_path);
-    cfg_cli_win.apply_inline_directives(inline_source, Some(&src_dir));
+    cfg_cli_win.apply_target_path_manifest(&entry_path).unwrap();
+    cfg_cli_win
+        .apply_inline_directives(inline_source, Some(&src_dir))
+        .unwrap();
     assert!(slice_engine::is_exper_boacas_build_enabled());
     assert_eq!(cfg_cli_win.fuel_limit, 99_000_000);
     assert_eq!(cfg_cli_win.server_port, Some(7777));
@@ -457,7 +463,9 @@ console.log("agent script");
     let default_fuel = cfg_default.fuel_limit;
     let default_mem = cfg_default.mem_limit;
     assert!(!cfg_default.trust_directives);
-    cfg_default.apply_inline_directives(malicious_script, None);
+    cfg_default
+        .apply_inline_directives(malicious_script, None)
+        .unwrap();
     assert!(cfg_default.caps.allowed_read_prefixes.is_empty());
     assert!(cfg_default.caps.allowed_write_prefixes.is_empty());
     assert!(cfg_default.caps.allowed_net_hosts.is_empty());
@@ -481,7 +489,9 @@ console.log("attenuated");
         "--allow-net=api.stripe.com,hooks.slack.com".to_string(),
     ])
     .unwrap();
-    cfg_attenuate.apply_inline_directives(attenuating_script, None);
+    cfg_attenuate
+        .apply_inline_directives(attenuating_script, None)
+        .unwrap();
     assert_eq!(cfg_attenuate.fuel_limit, 50_000);
     assert_eq!(cfg_attenuate.mem_limit, 2048 * 1024);
     assert_eq!(
@@ -505,7 +515,9 @@ console.log("attenuated");
     let mut cfg_trusted =
         ResolvedExecutionConfig::from_cli_args(&["--trust-directives".to_string()]).unwrap();
     assert!(cfg_trusted.trust_directives);
-    cfg_trusted.apply_inline_directives(malicious_script, None);
+    cfg_trusted
+        .apply_inline_directives(malicious_script, None)
+        .unwrap();
     assert!(cfg_trusted
         .caps
         .allowed_read_prefixes
@@ -564,7 +576,8 @@ tls_cert = "./certs/server.crt"
 tls_key = "./certs/server.key"
 "#;
     let mut cfg = ResolvedExecutionConfig::from_cli_args(&[]).unwrap();
-    cfg.apply_manifest_toml(toml_raw, Some(Path::new("/app")));
+    cfg.apply_manifest_toml(toml_raw, Some(Path::new("/app")))
+        .unwrap();
     assert_eq!(cfg.server_port, Some(8443));
     assert_eq!(
         cfg.tls_cert,
@@ -577,7 +590,7 @@ tls_key = "./certs/server.key"
 
     // 2. Verify untrusted inline directives CANNOT override tls-cert / tls-key
     let untrusted_src = "// @slice-tls-cert: /etc/evil.crt\n// @slice-tls-key: /etc/evil.key\n";
-    cfg.apply_inline_directives(untrusted_src, None);
+    cfg.apply_inline_directives(untrusted_src, None).unwrap();
     assert_eq!(
         cfg.tls_cert,
         Some(Path::new("/app").join("./certs/server.crt"))
@@ -590,7 +603,9 @@ tls_key = "./certs/server.key"
     // 3. Verify trusted inline directives CAN set tls-cert / tls-key when not overridden by CLI
     let mut cfg_trusted =
         ResolvedExecutionConfig::from_cli_args(&["--trust-directives".to_string()]).unwrap();
-    cfg_trusted.apply_inline_directives(untrusted_src, None);
+    cfg_trusted
+        .apply_inline_directives(untrusted_src, None)
+        .unwrap();
     assert_eq!(cfg_trusted.tls_cert, Some(PathBuf::from("/etc/evil.crt")));
     assert_eq!(cfg_trusted.tls_key, Some(PathBuf::from("/etc/evil.key")));
 
@@ -601,8 +616,12 @@ tls_key = "./certs/server.key"
         "--trust-directives".to_string(),
     ])
     .unwrap();
-    cfg_cli.apply_manifest_toml(toml_raw, Some(Path::new("/app")));
-    cfg_cli.apply_inline_directives(untrusted_src, None);
+    cfg_cli
+        .apply_manifest_toml(toml_raw, Some(Path::new("/app")))
+        .unwrap();
+    cfg_cli
+        .apply_inline_directives(untrusted_src, None)
+        .unwrap();
     assert_eq!(cfg_cli.tls_cert, Some(PathBuf::from("/cli/cert.pem")));
     assert_eq!(cfg_cli.tls_key, Some(PathBuf::from("/cli/key.pem")));
 
