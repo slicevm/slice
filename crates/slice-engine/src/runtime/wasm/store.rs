@@ -138,10 +138,8 @@ impl ResourceLimiter for SliceWasmLimiter {
         maximum: Option<usize>,
     ) -> Result<bool, LimiterError> {
         self.last_charged_delta = 0;
-        if let Some(max) = maximum {
-            if desired > max {
-                return Ok(false);
-            }
+        if maximum.is_some_and(|max| desired > max) {
+            return Ok(false);
         }
         let max_sandbox_bytes = (MAX_WASM_MEMORY_PAGES as usize) * WASM_PAGE_BYTES;
         if desired > max_sandbox_bytes {
@@ -177,15 +175,7 @@ impl ResourceLimiter for SliceWasmLimiter {
         desired: usize,
         maximum: Option<usize>,
     ) -> Result<bool, LimiterError> {
-        if let Some(max) = maximum {
-            if desired > max {
-                return Ok(false);
-            }
-        }
-        if desired > 65_536 {
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(desired <= 65_536 && maximum.is_none_or(|max| desired <= max))
     }
 
     fn table_grow_failed(&mut self, _error: &TableError) -> Result<(), LimiterError> {
