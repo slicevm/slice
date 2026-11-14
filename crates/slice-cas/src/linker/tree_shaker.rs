@@ -358,6 +358,32 @@ pub(crate) fn is_any_require_call(expr: &oxc::ast::ast::Expression<'_>) -> Optio
     Some(str_lit.value.to_string())
 }
 
+fn is_to_esm_wrapped_require_call(expr: &oxc::ast::ast::Expression<'_>) -> Option<String> {
+    use oxc::ast::ast::Expression;
+    let Expression::CallExpression(call) = expr.without_parentheses() else {
+        return None;
+    };
+    if call.arguments.len() != 1 {
+        return None;
+    }
+    let is_to_esm = match call.callee.without_parentheses() {
+        Expression::Identifier(id) => id.name.as_str() == "__slice_to_esm",
+        Expression::StaticMemberExpression(mem) => {
+            mem.property.name.as_str() == "__slice_to_esm"
+                && matches!(
+                    mem.object.without_parentheses(),
+                    Expression::Identifier(obj) if obj.name.as_str() == "globalThis"
+                )
+        }
+        _ => false,
+    };
+    if !is_to_esm {
+        return None;
+    }
+    let inner = call.arguments.first()?.as_expression()?;
+    is_any_require_call(inner)
+}
+
 fn has_ident_outside_span(code: &str, var_name: &str, allowed_span: (usize, usize)) -> bool {
     let bytes = code.as_bytes();
     let vbytes = var_name.as_bytes();
@@ -621,7 +647,11 @@ pub fn extract_module_require_summary(consumer_code: &str) -> ModuleRequireSumma
             let Some(init) = &decl.init else {
                 continue;
             };
-            let Some(target_id) = is_any_require_call(init) else {
+            let (target_id, is_to_esm) = if let Some(id) = is_any_require_call(init) {
+                (id, false)
+            } else if let Some(id) = is_to_esm_wrapped_require_call(init) {
+                (id, true)
+            } else {
                 continue;
             };
             let entry = summary.targets.entry(target_id).or_default();
@@ -632,7 +662,11 @@ pub fn extract_module_require_summary(consumer_code: &str) -> ModuleRequireSumma
                     } else {
                         for prop in &obj_pat.properties {
                             if let Some(key_name) = prop.key.name() {
-                                entry.used_props.insert(key_name.to_string());
+                                if is_to_esm && key_name == "default" {
+                                    entry.forces_all = true;
+                                } else {
+                                    entry.used_props.insert(key_name.to_string());
+                                }
                             } else {
                                 entry.forces_all = true;
                             }
@@ -642,7 +676,7 @@ pub fn extract_module_require_summary(consumer_code: &str) -> ModuleRequireSumma
                 }
                 BindingPattern::BindingIdentifier(ident) => {
                     let var_name = ident.name.as_str();
-                    if var_name.starts_with("__imp_") {
+                    if !is_to_esm && var_name.starts_with("__imp") {
                         if vd.declarations.len() == 1 {
                             if let Some(props) = try_collect_esm_default_interop_props(
                                 &parser_ret.program.body,
@@ -659,15 +693,20 @@ pub fn extract_module_require_summary(consumer_code: &str) -> ModuleRequireSumma
                         } else {
                             entry.forces_all = true;
                         }
-                    } else if collect_member_accesses_on_var(
-                        consumer_code,
-                        var_name,
-                        (decl.span.start as usize, decl.span.end as usize),
-                        &mut entry.used_props,
-                    ) {
-                        entry.accounted += 1;
                     } else {
-                        entry.forces_all = true;
+                        let mut ns_props = FxHashSet::default();
+                        if collect_member_accesses_on_var(
+                            consumer_code,
+                            var_name,
+                            (decl.span.start as usize, decl.span.end as usize),
+                            &mut ns_props,
+                        ) && !(is_to_esm && ns_props.contains("default"))
+                        {
+                            entry.used_props.extend(ns_props);
+                            entry.accounted += 1;
+                        } else {
+                            entry.forces_all = true;
+                        }
                     }
                 }
                 _ => {
@@ -764,9 +803,14 @@ pub fn analyze_module_used_exports(target_mod_id: &str, other_modules: &[&str]) 
                 let Some(init) = &decl.init else {
                     continue;
                 };
-                if !is_require_call_for_target(init, target_mod_id) {
+                let is_to_esm = if is_require_call_for_target(init, target_mod_id) {
+                    false
+                } else if is_to_esm_wrapped_require_call(init).is_some_and(|id| id == target_mod_id)
+                {
+                    true
+                } else {
                     continue;
-                }
+                };
                 match &decl.id {
                     BindingPattern::ObjectPattern(obj_pat) => {
                         if obj_pat.rest.is_some() {
@@ -776,13 +820,16 @@ pub fn analyze_module_used_exports(target_mod_id: &str, other_modules: &[&str]) 
                             let Some(key_name) = prop.key.name() else {
                                 return UsedExports::All;
                             };
+                            if is_to_esm && key_name == "default" {
+                                return UsedExports::All;
+                            }
                             used_set.insert(key_name.to_string());
                         }
                         accounted += 1;
                     }
                     BindingPattern::BindingIdentifier(ident) => {
                         let var_name = ident.name.as_str();
-                        if var_name.starts_with("__imp_") {
+                        if !is_to_esm && var_name.starts_with("__imp") {
                             if vd.declarations.len() != 1 {
                                 return UsedExports::All;
                             }
@@ -798,14 +845,17 @@ pub fn analyze_module_used_exports(target_mod_id: &str, other_modules: &[&str]) 
                             used_set.extend(props);
                             accounted += 1;
                         } else {
+                            let mut ns_props = FxHashSet::default();
                             if !collect_member_accesses_on_var(
                                 consumer_code,
                                 var_name,
                                 (decl.span.start as usize, decl.span.end as usize),
-                                &mut used_set,
-                            ) {
+                                &mut ns_props,
+                            ) || (is_to_esm && ns_props.contains("default"))
+                            {
                                 return UsedExports::All;
                             }
+                            used_set.extend(ns_props);
                             accounted += 1;
                         }
                     }
@@ -944,6 +994,60 @@ fn expr_contains_assignment(expr: &oxc::ast::ast::Expression<'_>) -> bool {
     }
 }
 
+fn match_exports_define_property_stmt(
+    stmt: &oxc::ast::ast::Statement<'_>,
+    src: &str,
+) -> Option<(String, FxHashSet<String>)> {
+    use oxc::ast::ast::{Argument, Expression, Statement};
+    use oxc::span::GetSpan;
+    let Statement::ExpressionStatement(es) = stmt else {
+        return None;
+    };
+    let Expression::CallExpression(call) = es.expression.without_parentheses() else {
+        return None;
+    };
+    if call.arguments.len() != 3 {
+        return None;
+    }
+    let Expression::StaticMemberExpression(mem) = call.callee.without_parentheses() else {
+        return None;
+    };
+    if mem.property.name.as_str() != "defineProperty" {
+        return None;
+    }
+    let Expression::Identifier(obj_id) = mem.object.without_parentheses() else {
+        return None;
+    };
+    if obj_id.name.as_str() != "Object" {
+        return None;
+    }
+    let first_expr = call.arguments[0].as_expression()?;
+    if !matches!(
+        first_expr.without_parentheses(),
+        Expression::Identifier(id) if id.name.as_str() == "exports"
+    ) {
+        return None;
+    }
+    let Argument::StringLiteral(key_lit) = &call.arguments[1] else {
+        return None;
+    };
+    let desc_expr = call.arguments[2].as_expression()?;
+    let desc_sp = desc_expr.span();
+    let desc_src = &src[desc_sp.start as usize..desc_sp.end as usize];
+    Some((
+        key_lit.value.to_string(),
+        extract_referenced_identifiers(desc_src),
+    ))
+}
+
+fn match_cjs_export_stmt(
+    stmt: &oxc::ast::ast::Statement<'_>,
+    src: &str,
+) -> Option<(String, FxHashSet<String>)> {
+    match_exports_assignment_stmt(stmt, src)
+        .or_else(|| match_exports_define_property_stmt(stmt, src))
+}
+
 fn match_exports_assignment_stmt(
     stmt: &oxc::ast::ast::Statement<'_>,
     src: &str,
@@ -1000,7 +1104,7 @@ pub fn prune_and_minify_cjs_module_ast(
 
     if let Some(used_set) = used_exports {
         let has_named_export_stmts = program.body.iter().any(|s| {
-            match_exports_assignment_stmt(s, cjs_code).is_some_and(|(name, _)| name != "__esModule")
+            match_cjs_export_stmt(s, cjs_code).is_some_and(|(name, _)| name != "__esModule")
         });
 
         let mut pruned_module_exports_obj_span: Option<(u32, Vec<String>)> = None;
@@ -1076,10 +1180,10 @@ pub fn prune_and_minify_cjs_module_ast(
         }
 
         if has_named_export_stmts || pruned_module_exports_obj_span.is_some() {
-            // Step 1: Remove unused `exports.<Unused> = ...` and unused `module.exports = __slice_default`
+            // Step 1: Remove unused `exports.<Unused> = ...`, `Object.defineProperty(exports, "<Unused>", ...)`, and legacy `module.exports = __slice_default`
             if has_named_export_stmts {
                 program.body.retain(|stmt| {
-                    if let Some((exp_name, _)) = match_exports_assignment_stmt(stmt, cjs_code) {
+                    if let Some((exp_name, _)) = match_cjs_export_stmt(stmt, cjs_code) {
                         exp_name == "__esModule" || used_set.contains(&exp_name)
                     } else {
                         let sp = stmt.span();
@@ -1287,7 +1391,7 @@ pub fn prune_and_minify_cjs_module_ast(
                     .is_none_or(|id| live_idents.contains(id.name.as_str())),
                 Statement::VariableDeclaration(vd) => !vd.declarations.is_empty(),
                 _ => {
-                    if let Some((exp_name, _)) = match_exports_assignment_stmt(stmt, cjs_code) {
+                    if let Some((exp_name, _)) = match_cjs_export_stmt(stmt, cjs_code) {
                         exp_name == "__esModule" || used_set.contains(&exp_name)
                     } else {
                         let sp = stmt.span();

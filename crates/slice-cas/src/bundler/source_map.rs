@@ -24,13 +24,19 @@ pub fn compute_source_line_map(raw_src: &str, cjs_body: &str) -> String {
         if trimmed.is_empty() || trimmed.starts_with("//") {
             continue;
         }
-        let probe_raw = if let Some(rest) = trimmed.strip_prefix("const __slice_default = ") {
-            rest.trim_end_matches(';').trim()
+        let probe_raw = if let Some(rest) = trimmed.strip_prefix("const __slice") {
+            if let Some((_, rhs)) = rest.split_once("_default = ") {
+                rhs.trim_end_matches(';').trim()
+            } else {
+                trimmed.trim_end_matches(';').trim()
+            }
         } else {
             trimmed.trim_end_matches(';').trim()
         };
 
         if probe_raw.starts_with("exports.")
+            || probe_raw.starts_with("Object.defineProperty(exports,")
+            || probe_raw.starts_with("globalThis.__slice_export_star(exports,")
             || probe_raw.starts_with("module.exports = __slice_default")
             || probe_raw.starts_with("var __filename =")
         {

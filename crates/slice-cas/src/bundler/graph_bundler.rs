@@ -6,8 +6,9 @@ use crate::bundler::{
 use crate::compiler::{rewrite_cjs_require, source_contains_jsx, strip_typescript_raw_with_ext};
 use crate::linker::{
     analyze_module_used_exports_from_summaries, canonical_mod_id, collect_eager_module_indices,
-    extract_module_require_summary, has_top_level_await, inline_cold_method_requires_ast,
-    prune_and_minify_cjs_module_ast, transform_module_to_cjs, ModuleRequireSummary, UsedExports,
+    extract_module_require_summary, has_esm_default_export_marker, has_top_level_await,
+    inline_cold_method_requires_ast, prune_and_minify_cjs_module_ast, transform_module_to_cjs,
+    ModuleRequireSummary, UsedExports,
 };
 use anyhow::{Context, Result};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -178,9 +179,9 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
             "function()"
         };
         let mut bundle = String::with_capacity(direct_body.len() + 384);
-        if direct_body.contains("exports.default = __slice_default;") {
+        if has_esm_default_export_marker(&direct_body) {
             bundle.push_str(&format!(
-                "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{}\"] = {} {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n__h = exports.default || module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n",
+                "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{}\"] = {} {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n__h = exports.__esModule ? exports.default : module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n",
                 rc_key, rc_key, rc_key, fn_kw, direct_body
             ));
         } else if (direct_body.contains("Slice.serve(")
@@ -366,11 +367,11 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         "function()"
     };
     if entry_is_imported {
-        if entry_body.contains("exports.default = __slice_default;") {
+        if has_esm_default_export_marker(&entry_body) {
             bundle.push_str("var __h = null;\n");
             bundle.push_str(&format!("__run = __rc[\"{}\"] = {} {{\n", rc_key, fn_kw));
             bundle.push_str(&format!(
-                "if (!__h) {{ var __ee = __slice_require({}); __h = (__ee && __ee.default !== undefined) ? __ee.default : __ee; }}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n",
+                "if (!__h) {{ var __ee = __slice_require({}); __h = (__ee && __ee.__esModule) ? __ee.default : __ee; }}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n",
                 entry_mod_idx
             ));
         } else if (entry_body.contains("Slice.serve(")
@@ -392,12 +393,12 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
                 entry_mod_idx, entry_mod_idx
             ));
         }
-    } else if entry_body.contains("exports.default = __slice_default;") {
+    } else if has_esm_default_export_marker(&entry_body) {
         bundle.push_str("var __h = null;\n");
         bundle.push_str(&format!("__run = __rc[\"{}\"] = {} {{\n", rc_key, fn_kw));
         bundle.push_str("if (!__h) {\nvar require = __slice_require, exports = {}, module = { exports: exports };\n");
         bundle.push_str(&entry_body);
-        bundle.push_str("\n__h = exports.default || module.exports;\n}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n};\n}\n__run();\n");
+        bundle.push_str("\n__h = exports.__esModule ? exports.default : module.exports;\n}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n};\n}\n__run();\n");
     } else if (entry_body.contains("Slice.serve(")
         || entry_body.contains("Deno.serve(")
         || entry_body.contains("Bun.serve("))

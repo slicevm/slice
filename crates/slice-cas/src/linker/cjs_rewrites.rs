@@ -481,14 +481,23 @@ pub fn collect_require_edits_from_program(
         Expression::ImportExpression(imp_expr) => {
             if let Expression::StringLiteral(str_lit) = imp_expr.source.without_parentheses() {
                 let spec = str_lit.value.as_str();
+                let is_builtin = is_builtin_module(spec) || is_jsx_runtime_builtin(spec);
                 let resolved_id = resolve_spec_and_record(spec, from_dir, deps_out);
+                let replacement = if is_builtin {
+                    format!(
+                        "Promise.resolve().then(function() {{ return require({:?}); }})",
+                        resolved_id
+                    )
+                } else {
+                    format!(
+                        "Promise.resolve().then(function() {{ return globalThis.__slice_to_esm(require({:?})); }})",
+                        resolved_id
+                    )
+                };
                 edits.push((
                     imp_expr.span.start as usize,
                     imp_expr.span.end as usize,
-                    format!(
-                        "Promise.resolve().then(function() {{ var __m = require({:?}); return (__m && __m.__esModule) ? __m : Object.assign({{ default: __m }}, __m); }})",
-                        resolved_id
-                    ),
+                    replacement,
                 ));
             }
         }

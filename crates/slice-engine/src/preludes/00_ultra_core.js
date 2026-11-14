@@ -8,6 +8,38 @@
   globalThis.__toCommonJS = function(m) {
     return m;
   };
+  globalThis.__slice_to_esm = function(mod) {
+    if (mod && mod.__esModule) return mod;
+    var ns = {};
+    Object.defineProperty(ns, "__esModule", { value: true });
+    if (mod != null && (typeof mod === "object" || typeof mod === "function")) {
+      var keys = Object.keys(mod);
+      for (var i = 0; i < keys.length; i++) {
+        var k = keys[i];
+        if (k !== "default" && k !== "__esModule") {
+          Object.defineProperty(ns, k, {
+            enumerable: true,
+            configurable: true,
+            get: (function(key) { return function() { return mod[key]; }; })(k)
+          });
+        }
+      }
+    }
+    ns.default = mod;
+    return ns;
+  };
+  globalThis.__slice_export_star = function(to, from) {
+    if (from != null && (typeof from === "object" || typeof from === "function")) {
+      var keys = Object.keys(from);
+      for (var i = 0; i < keys.length; i++) {
+        var k = keys[i];
+        if (k !== "default" && k !== "__esModule" && !Object.prototype.hasOwnProperty.call(to, k)) {
+          to[k] = from[k];
+        }
+      }
+    }
+    return to;
+  };
   globalThis.__shMask = 0;
   globalThis.__shardProps = {};
   var __lazyInited = false;
