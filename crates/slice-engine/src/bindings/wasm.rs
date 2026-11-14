@@ -1,11 +1,12 @@
-//! Sandboxed WebAssembly (`wasmi`) Compilation, Memory, and Execution Host Bindings (`Shard 9`).
+//! Sandboxed WebAssembly (`wasmi`) Compilation, Memory, Global, Table, and Execution Host Bindings (`Shard 9`).
 
 use crate::bindings::helpers::{bytes_to_js_array_buffer, with_buffer_source_bytes};
 use crate::wasm::{
-    wasm_call_export, wasm_compile_module, wasm_create_memory, wasm_get_global, wasm_grow_memory,
-    wasm_instantiate_module, wasm_materialize_memory_ab, wasm_module_custom_sections,
-    wasm_module_exports_json, wasm_module_imports_json, wasm_set_global,
-    wasm_sync_initial_memory_to_ab, wasm_validate_bytes,
+    wasm_compile_module, wasm_create_global, wasm_create_memory, wasm_create_table,
+    wasm_get_global, wasm_grow_memory, wasm_instantiate_module, wasm_js_error, wasm_memory_buffer,
+    wasm_module_custom_sections, wasm_module_exports_json, wasm_module_imports_json,
+    wasm_set_global, wasm_table_get, wasm_table_grow, wasm_table_length, wasm_table_set,
+    wasm_validate_bytes,
 };
 
 pub(crate) fn register_shard9_wasm_host_functions(ctx: &mut boa_engine::Context) {
@@ -38,13 +39,13 @@ pub(crate) fn register_shard9_wasm_host_functions(ctx: &mut boa_engine::Context)
         NativeFunction::from_fn_ptr(|_this, args, context| {
             let Some(first) = args.first() else {
                 return Err(JsNativeError::typ()
-                    .with_message("TypeError: WebAssembly.Module(): Argument 0 is required")
+                    .with_message("WebAssembly.Module(): Argument 0 is required")
                     .into());
             };
             let compiled = with_buffer_source_bytes(first, context, wasm_compile_module)?;
             match compiled {
                 Ok(mod_id) => Ok(BoaVal::from(mod_id as f64)),
-                Err(msg) => Err(JsNativeError::error().with_message(msg).into()),
+                Err((kind, msg)) => Err(wasm_js_error(kind, msg, context)),
             }
         }),
     );
@@ -60,7 +61,7 @@ pub(crate) fn register_shard9_wasm_host_functions(ctx: &mut boa_engine::Context)
                 .unwrap_or(0);
             match wasm_module_exports_json(mod_id) {
                 Ok(json) => Ok(BoaVal::from(js_string!(json))),
-                Err(msg) => Err(JsNativeError::error().with_message(msg).into()),
+                Err(msg) => Err(JsNativeError::typ().with_message(msg).into()),
             }
         }),
     );
@@ -76,7 +77,7 @@ pub(crate) fn register_shard9_wasm_host_functions(ctx: &mut boa_engine::Context)
                 .unwrap_or(0);
             match wasm_module_imports_json(mod_id) {
                 Ok(json) => Ok(BoaVal::from(js_string!(json))),
-                Err(msg) => Err(JsNativeError::error().with_message(msg).into()),
+                Err(msg) => Err(JsNativeError::typ().with_message(msg).into()),
             }
         }),
     );
@@ -106,7 +107,7 @@ pub(crate) fn register_shard9_wasm_host_functions(ctx: &mut boa_engine::Context)
                     let arr = boa_engine::object::builtins::JsArray::from_iter(items, context);
                     Ok(arr.into())
                 }
-                Err(msg) => Err(JsNativeError::error().with_message(msg).into()),
+                Err(msg) => Err(JsNativeError::typ().with_message(msg).into()),
             }
         }),
     );
@@ -114,47 +115,155 @@ pub(crate) fn register_shard9_wasm_host_functions(ctx: &mut boa_engine::Context)
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_wasm_memory_create"),
         2,
-        NativeFunction::from_fn_ptr(|_this, args, _context| {
-            let init_pages = args
-                .first()
-                .and_then(|v| v.as_number())
-                .map(|n| n.max(0.0) as u32)
-                .unwrap_or(0);
-            let max_pages = args
-                .get(1)
-                .filter(|v| !v.is_undefined() && !v.is_null())
-                .and_then(|v| v.as_number())
-                .map(|n| n.max(0.0) as u32);
-            match wasm_create_memory(init_pages, max_pages) {
-                Ok(mem_id) => Ok(BoaVal::from(mem_id as f64)),
-                Err(msg) => Err(JsNativeError::error().with_message(msg).into()),
-            }
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let desc = args.first().cloned().unwrap_or_else(BoaVal::undefined);
+            let js_this = args.get(1).and_then(|v| v.as_object());
+            let mem_id = wasm_create_memory(&desc, js_this.as_ref(), context)?;
+            Ok(BoaVal::from(mem_id as f64))
         }),
     );
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_wasm_memory_grow"),
-        3,
-        NativeFunction::from_fn_ptr(|_this, args, _context| {
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
             let mem_id = args
                 .first()
                 .and_then(|v| v.as_number())
                 .map(|n| n as u32)
                 .unwrap_or(0);
-            let inst_id = args
-                .get(1)
+            let delta = args.get(1).cloned().unwrap_or_else(BoaVal::undefined);
+            let prev = wasm_grow_memory(mem_id, &delta, context)?;
+            Ok(BoaVal::from(prev as f64))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_wasm_memory_buffer"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let mem_id = args
+                .first()
                 .and_then(|v| v.as_number())
                 .map(|n| n as u32)
                 .unwrap_or(0);
-            let delta = args
-                .get(2)
+            wasm_memory_buffer(mem_id, context)
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_wasm_global_create"),
+        4,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let desc = args.first().cloned().unwrap_or_else(BoaVal::undefined);
+            let has_val = args.get(2).map(|v| v.to_boolean()).unwrap_or(false);
+            let init_val = if has_val { args.get(1) } else { None };
+            let js_this = args.get(3).and_then(|v| v.as_object());
+            let glob_id = wasm_create_global(&desc, init_val, js_this.as_ref(), context)?;
+            Ok(BoaVal::from(glob_id as f64))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_wasm_global_get"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let glob_id = args
+                .first()
                 .and_then(|v| v.as_number())
-                .map(|n| n.max(0.0) as u32)
+                .map(|n| n as u32)
                 .unwrap_or(0);
-            match wasm_grow_memory(mem_id, inst_id, delta) {
-                Ok(prev_pages) => Ok(BoaVal::from(prev_pages as f64)),
-                Err(msg) => Err(JsNativeError::error().with_message(msg).into()),
-            }
+            wasm_get_global(glob_id, context)
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_wasm_global_set"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let glob_id = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
+            let val = args.get(1).cloned().unwrap_or_else(BoaVal::undefined);
+            wasm_set_global(glob_id, &val, context)?;
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_wasm_table_create"),
+        4,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let desc = args.first().cloned().unwrap_or_else(BoaVal::undefined);
+            let has_fill = args.get(2).map(|v| v.to_boolean()).unwrap_or(false);
+            let fill_val = if has_fill { args.get(1) } else { None };
+            let js_this = args.get(3).and_then(|v| v.as_object());
+            let tbl_id = wasm_create_table(&desc, fill_val, js_this.as_ref(), context)?;
+            Ok(BoaVal::from(tbl_id as f64))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_wasm_table_length"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, _context| {
+            let tbl_id = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
+            let len = wasm_table_length(tbl_id)?;
+            Ok(BoaVal::from(len as f64))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_wasm_table_get"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let tbl_id = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
+            let idx = args.get(1).cloned().unwrap_or_else(BoaVal::undefined);
+            wasm_table_get(tbl_id, &idx, context)
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_wasm_table_set"),
+        4,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let tbl_id = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
+            let idx = args.get(1).cloned().unwrap_or_else(BoaVal::undefined);
+            let has_val = args.get(3).map(|v| v.to_boolean()).unwrap_or(false);
+            let val_opt = if has_val { args.get(2) } else { None };
+            wasm_table_set(tbl_id, &idx, val_opt, context)?;
+            Ok(BoaVal::undefined())
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_wasm_table_grow"),
+        4,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let tbl_id = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as u32)
+                .unwrap_or(0);
+            let delta = args.get(1).cloned().unwrap_or_else(BoaVal::undefined);
+            let has_fill = args.get(3).map(|v| v.to_boolean()).unwrap_or(false);
+            let fill_opt = if has_fill { args.get(2) } else { None };
+            let prev = wasm_table_grow(tbl_id, &delta, fill_opt, context)?;
+            Ok(BoaVal::from(prev as f64))
         }),
     );
 
@@ -172,104 +281,6 @@ pub(crate) fn register_shard9_wasm_host_functions(ctx: &mut boa_engine::Context)
                 .filter(|v| !v.is_undefined() && !v.is_null())
                 .and_then(|v| v.as_object());
             wasm_instantiate_module(mod_id, imp_obj.as_ref(), context)
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_wasm_sync_init_mem"),
-        2,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let inst_id = args
-                .first()
-                .and_then(|v| v.as_number())
-                .map(|n| n as u32)
-                .unwrap_or(0);
-            let Some(ab_obj) = args.get(1).and_then(|v| v.as_object()) else {
-                return wasm_materialize_memory_ab(inst_id, context);
-            };
-            match wasm_sync_initial_memory_to_ab(inst_id, &ab_obj) {
-                Ok(()) => Ok(BoaVal::undefined()),
-                Err(msg) => Err(JsNativeError::error().with_message(msg).into()),
-            }
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_wasm_call"),
-        4,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let inst_id = args
-                .first()
-                .and_then(|v| v.as_number())
-                .map(|n| n as u32)
-                .unwrap_or(0);
-            let exp_name = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            let mut call_args = Vec::new();
-            if let Some(arr_obj) = args.get(2).and_then(|v| v.as_object()) {
-                let len = arr_obj
-                    .get(js_string!("length"), context)
-                    .ok()
-                    .and_then(|v| v.as_number())
-                    .map(|n| n.max(0.0) as usize)
-                    .unwrap_or(0);
-                call_args.reserve(len);
-                for i in 0..len {
-                    let elem = arr_obj
-                        .get(i as u32, context)
-                        .unwrap_or_else(|_| BoaVal::undefined());
-                    call_args.push(elem);
-                }
-            }
-            let mem_ab_obj = args
-                .get(3)
-                .filter(|v| !v.is_undefined() && !v.is_null())
-                .and_then(|v| v.as_object());
-            wasm_call_export(inst_id, &exp_name, &call_args, mem_ab_obj.as_ref(), context)
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_wasm_global_get"),
-        2,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let inst_id = args
-                .first()
-                .and_then(|v| v.as_number())
-                .map(|n| n as u32)
-                .unwrap_or(0);
-            let exp_name = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            wasm_get_global(inst_id, &exp_name)
-        }),
-    );
-
-    let _ = ctx.register_global_builtin_callable(
-        js_string!("__slice_wasm_global_set"),
-        3,
-        NativeFunction::from_fn_ptr(|_this, args, context| {
-            let inst_id = args
-                .first()
-                .and_then(|v| v.as_number())
-                .map(|n| n as u32)
-                .unwrap_or(0);
-            let exp_name = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            let val = args.get(2).cloned().unwrap_or_else(BoaVal::undefined);
-            wasm_set_global(inst_id, &exp_name, &val, context)?;
-            Ok(BoaVal::undefined())
         }),
     );
 }
