@@ -1,9 +1,9 @@
 //! Oxc TypeScript & JSX/TSX Ahead-of-Time Transpiler (`strip_typescript_raw_with_ext`)
 //! and Comment/Require Normalizer.
 
-use crate::compiler::fuse_array_pipelines_ast;
 use crate::linker::{
-    rewrite_buffer_fast_paths_ast, rewrite_require_ident_ast, transform_module_to_cjs,
+    has_esm_default_export_marker, rewrite_buffer_fast_paths_ast, rewrite_require_ident_ast,
+    transform_module_to_cjs,
 };
 use std::path::Path;
 
@@ -98,10 +98,6 @@ fn transpile_parsed_oxc_program<'a>(
         if let std::borrow::Cow::Owned(cleaned) = code.cow_replace("export { };", "") {
             code = cleaned;
         }
-    }
-
-    if code.contains(".reduce(") || code.contains(".some(") || code.contains(".every(") {
-        code = fuse_array_pipelines_ast(&code);
     }
 
     if memchr::memmem::find(code.as_bytes(), b"Buffer.").is_some() {
@@ -565,13 +561,13 @@ pub fn strip_typescript_and_normalize_with_ext(
     {
         let mut dummy_deps = Vec::new();
         js_code = transform_module_to_cjs(&js_code, Path::new("."), None, &mut dummy_deps);
-        if js_code.contains("exports.default = __slice_default;") {
+        if has_esm_default_export_marker(&js_code) {
             let digest = blake3::hash(js_code.as_bytes());
             let rc_u64 = u64::from_le_bytes(digest.as_bytes()[0..8].try_into().unwrap());
             let rc_key = format!("{:016x}", rc_u64);
             let direct_body = rewrite_cjs_require(&js_code);
             return format!(
-                "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{}\"] = function() {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n__h = exports.default || module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n",
+                "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{}\"] = function() {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n__h = exports.__esModule ? exports.default : module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n",
                 rc_key, rc_key, rc_key, direct_body
             );
         }

@@ -67,8 +67,20 @@ pub fn rewrite_cjs_requires_in_line(
     result
 }
 
+#[inline]
+fn is_unresolved_global_ident(
+    scoping: &oxc::semantic::Scoping,
+    ident: &oxc::ast::ast::IdentifierReference<'_>,
+) -> bool {
+    ident
+        .reference_id
+        .get()
+        .is_none_or(|ref_id| scoping.get_reference(ref_id).symbol_id().is_none())
+}
+
 /// Rewrites `require("<spec>")` `CallExpression` string literal arguments via Oxc AST span
-/// replacement without modifying `"require(...)"` inside string literals, template literals, or comments.
+/// replacement without modifying `"require(...)"` inside string literals, template literals,
+/// comments, or lexically shadowed `require` bindings.
 pub fn rewrite_cjs_requires_ast(
     snippet: &str,
     from_dir: &Path,
@@ -87,12 +99,19 @@ pub fn rewrite_cjs_requires_ast(
         let wrapped = format!("({});", snippet);
         let retry_ret = oxc::parser::Parser::new(&allocator, &wrapped, source_type).parse();
         if retry_ret.diagnostics.is_empty() {
+            let scoping = oxc::semantic::SemanticBuilder::new()
+                .build(&retry_ret.program)
+                .semantic
+                .into_scoping();
             let mut edits: Vec<(usize, usize, String)> = Vec::new();
             walk_ast_call_expressions(&retry_ret.program, &mut |call| {
                 let Expression::Identifier(callee) = call.callee.without_parentheses() else {
                     return;
                 };
-                if callee.name.as_str() != "require" || call.arguments.len() != 1 {
+                if callee.name.as_str() != "require"
+                    || call.arguments.len() != 1
+                    || !is_unresolved_global_ident(&scoping, callee)
+                {
                     return;
                 }
                 let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
@@ -140,12 +159,22 @@ pub fn rewrite_cjs_requires_ast(
             .join("\n");
     }
 
+    let mut scoping_opt: Option<oxc::semantic::Scoping> = None;
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     walk_ast_call_expressions(&parser_ret.program, &mut |call| {
         let Expression::Identifier(callee) = call.callee.without_parentheses() else {
             return;
         };
         if callee.name.as_str() != "require" || call.arguments.len() != 1 {
+            return;
+        }
+        let scoping = scoping_opt.get_or_insert_with(|| {
+            oxc::semantic::SemanticBuilder::new()
+                .build(&parser_ret.program)
+                .semantic
+                .into_scoping()
+        });
+        if !is_unresolved_global_ident(scoping, callee) {
             return;
         }
         let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
@@ -191,10 +220,15 @@ pub fn rewrite_cjs_requires_ast(
     out
 }
 
-/// Rewrites `require(...)` callee identifiers to `__slice_cjs_require(...)` using Oxc AST
-/// `CallExpression` spans so string literals, template literals, and comments are untouched.
+/// Rewrites unshadowed global `require(...)` callee identifiers to `__slice_cjs_require(...)`
+/// using Oxc AST + `SemanticBuilder` so string literals, comments, and local `require` bindings
+/// are untouched.
 pub fn rewrite_require_ident_ast(source: &str) -> Option<String> {
     use oxc::ast::ast::Expression;
+
+    if memchr::memmem::find(source.as_bytes(), b"require").is_none() {
+        return Some(source.to_string());
+    }
 
     let allocator = oxc::allocator::Allocator::default();
     let source_type = oxc::span::SourceType::ts().with_module(true);
@@ -203,11 +237,20 @@ pub fn rewrite_require_ident_ast(source: &str) -> Option<String> {
         return None;
     }
 
+    let mut scoping_opt: Option<oxc::semantic::Scoping> = None;
     let mut callee_spans: Vec<(usize, usize)> = Vec::new();
     walk_ast_call_expressions(&parser_ret.program, &mut |call| {
         if let Expression::Identifier(callee) = call.callee.without_parentheses() {
             if callee.name.as_str() == "require" {
-                callee_spans.push((callee.span.start as usize, callee.span.end as usize));
+                let scoping = scoping_opt.get_or_insert_with(|| {
+                    oxc::semantic::SemanticBuilder::new()
+                        .build(&parser_ret.program)
+                        .semantic
+                        .into_scoping()
+                });
+                if is_unresolved_global_ident(scoping, callee) {
+                    callee_spans.push((callee.span.start as usize, callee.span.end as usize));
+                }
             }
         }
     });
@@ -231,13 +274,14 @@ pub fn rewrite_require_ident_ast(source: &str) -> Option<String> {
     Some(out)
 }
 
-/// Lowers `Buffer.byteLength(<arg>)` and `Buffer.from(<arg>, <enc>?).toString(<to_enc>?)`
-/// via Oxc AST `CallExpression` span replacement so string literals and comments are never touched.
+/// Lowers unshadowed global `Buffer.byteLength(<arg>)` and `Buffer.from(<arg>, <enc>?).toString(<to_enc>?)`
+/// via Oxc AST + `SemanticBuilder` span replacement so string literals, comments, and lexically
+/// shadowed `Buffer` variables/parameters are never touched.
 pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
     use oxc::ast::ast::{Argument, Expression};
     use oxc::span::GetSpan;
 
-    if !code.contains("Buffer.") {
+    if memchr::memmem::find(code.as_bytes(), b"Buffer.").is_none() {
         return code.to_string();
     }
 
@@ -248,6 +292,7 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
         return code.to_string();
     }
 
+    let mut scoping_opt: Option<oxc::semantic::Scoping> = None;
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     walk_ast_call_expressions(&parser_ret.program, &mut |call| {
         let Expression::StaticMemberExpression(outer_mem) = call.callee.without_parentheses()
@@ -260,14 +305,22 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
         if prop_name == "byteLength" && call.arguments.len() == 1 {
             if let Expression::Identifier(obj_id) = outer_mem.object.without_parentheses() {
                 if obj_id.name.as_str() == "Buffer" {
-                    if let Some(arg_expr) = call.arguments[0].as_expression() {
-                        let sp = arg_expr.span();
-                        let arg_src = &code[sp.start as usize..sp.end as usize];
-                        edits.push((
-                            call.span.start as usize,
-                            call.span.end as usize,
-                            format!("globalThis.__slice_utf8_byte_len({})", arg_src),
-                        ));
+                    let scoping = scoping_opt.get_or_insert_with(|| {
+                        oxc::semantic::SemanticBuilder::new()
+                            .build(&parser_ret.program)
+                            .semantic
+                            .into_scoping()
+                    });
+                    if is_unresolved_global_ident(scoping, obj_id) {
+                        if let Some(arg_expr) = call.arguments[0].as_expression() {
+                            let sp = arg_expr.span();
+                            let arg_src = &code[sp.start as usize..sp.end as usize];
+                            edits.push((
+                                call.span.start as usize,
+                                call.span.end as usize,
+                                format!("globalThis.__slice_utf8_byte_len({})", arg_src),
+                            ));
+                        }
                     }
                 }
             }
@@ -293,6 +346,15 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
                 || inner_call.arguments.is_empty()
                 || inner_call.arguments.len() > 2
             {
+                return;
+            }
+            let scoping = scoping_opt.get_or_insert_with(|| {
+                oxc::semantic::SemanticBuilder::new()
+                    .build(&parser_ret.program)
+                    .semantic
+                    .into_scoping()
+            });
+            if !is_unresolved_global_ident(scoping, obj_id) {
                 return;
             }
             let Some(first_expr) = inner_call.arguments[0].as_expression() else {
@@ -374,13 +436,26 @@ pub fn collect_require_edits_from_program(
     use oxc::ast::ast::{Argument, ChainElement, Expression};
     use oxc::span::GetSpan;
 
-    if !code.contains("require(") && !code.contains("import(") && !code.contains("import.meta") {
+    let has_req = code.contains("require(");
+    if !has_req && !code.contains("import(") && !code.contains("import.meta") {
         return Vec::new();
     }
+
+    let req_scoping = if has_req {
+        Some(
+            oxc::semantic::SemanticBuilder::new()
+                .build(program)
+                .semantic
+                .into_scoping(),
+        )
+    } else {
+        None
+    };
 
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     fn handle_call(
         call: &oxc::ast::ast::CallExpression<'_>,
+        scoping: Option<&oxc::semantic::Scoping>,
         from_dir: &Path,
         deps_out: &mut Vec<PathBuf>,
         edits: &mut Vec<(usize, usize, String)>,
@@ -388,9 +463,12 @@ pub fn collect_require_edits_from_program(
         let Expression::Identifier(callee) = call.callee.without_parentheses() else {
             return;
         };
-        if callee.name.as_str() != "require" || call.arguments.len() != 1 {
+        if callee.name.as_str() != "require"
+            || call.arguments.len() != 1
+            || scoping.is_some_and(|sc| !is_unresolved_global_ident(sc, callee))
+        {
             return;
-        };
+        }
         let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
             return;
         };
@@ -416,23 +494,34 @@ pub fn collect_require_edits_from_program(
     }
 
     walk_ast_expressions(program, &mut |expr| match expr {
-        Expression::CallExpression(call) => handle_call(call, from_dir, deps_out, &mut edits),
+        Expression::CallExpression(call) => {
+            handle_call(call, req_scoping.as_ref(), from_dir, deps_out, &mut edits)
+        }
         Expression::ChainExpression(ch) => {
             if let ChainElement::CallExpression(call) = &ch.expression {
-                handle_call(call, from_dir, deps_out, &mut edits);
+                handle_call(call, req_scoping.as_ref(), from_dir, deps_out, &mut edits);
             }
         }
         Expression::ImportExpression(imp_expr) => {
             if let Expression::StringLiteral(str_lit) = imp_expr.source.without_parentheses() {
                 let spec = str_lit.value.as_str();
+                let is_builtin = is_builtin_module(spec) || is_jsx_runtime_builtin(spec);
                 let resolved_id = resolve_spec_and_record(spec, from_dir, deps_out);
+                let replacement = if is_builtin {
+                    format!(
+                        "Promise.resolve().then(function() {{ return require({:?}); }})",
+                        resolved_id
+                    )
+                } else {
+                    format!(
+                        "Promise.resolve().then(function() {{ return globalThis.__slice_to_esm(require({:?})); }})",
+                        resolved_id
+                    )
+                };
                 edits.push((
                     imp_expr.span.start as usize,
                     imp_expr.span.end as usize,
-                    format!(
-                        "Promise.resolve().then(function() {{ var __m = require({:?}); return (__m && __m.__esModule) ? __m : Object.assign({{ default: __m }}, __m); }})",
-                        resolved_id
-                    ),
+                    replacement,
                 ));
             }
         }

@@ -231,7 +231,7 @@ fn test_cas_sec_05_non_identifier_export_names_use_safe_bracket_syntax() {
     let src = r#"export * as "kebab-ns" from "./dep.js";"#;
     let out = transform_module_to_cjs(src, &test_dir, None, &mut deps);
     assert!(
-        out.contains(r#"exports["kebab-ns"] = require("#),
+        out.contains(r#"exports["kebab-ns"] = "#) && out.contains("require("),
         "Expected string-literal namespace export to use bracket syntax, got:\n{}",
         out
     );

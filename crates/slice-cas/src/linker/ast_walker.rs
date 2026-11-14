@@ -79,6 +79,9 @@ where
                 ClassElement::MethodDefinition(md) => {
                     for p in &md.value.params.items {
                         walk_pat(&p.pattern, visit);
+                        if let Some(init) = &p.initializer {
+                            walk_expr(init, visit);
+                        }
                     }
                     if let Some(body) = &md.value.body {
                         for s in &body.statements {
@@ -178,6 +181,9 @@ where
             Expression::ArrowFunctionExpression(arrow) => {
                 for p in &arrow.params.items {
                     walk_pat(&p.pattern, visit);
+                    if let Some(init) = &p.initializer {
+                        walk_expr(init, visit);
+                    }
                 }
                 if let oxc::ast::ast::ArrowFunctionBody::FunctionBody(fb) = &arrow.body {
                     for s in &fb.statements {
@@ -190,6 +196,9 @@ where
             Expression::FunctionExpression(fe) => {
                 for p in &fe.params.items {
                     walk_pat(&p.pattern, visit);
+                    if let Some(init) = &p.initializer {
+                        walk_expr(init, visit);
+                    }
                 }
                 if let Some(body) = &fe.body {
                     for s in &body.statements {
@@ -276,6 +285,9 @@ where
             Declaration::FunctionDeclaration(fd) => {
                 for p in &fd.params.items {
                     walk_pat(&p.pattern, visit);
+                    if let Some(init) = &p.initializer {
+                        walk_expr(init, visit);
+                    }
                 }
                 if let Some(body) = &fd.body {
                     for s in &body.statements {
@@ -304,6 +316,9 @@ where
             Statement::FunctionDeclaration(fd) => {
                 for p in &fd.params.items {
                     walk_pat(&p.pattern, visit);
+                    if let Some(init) = &p.initializer {
+                        walk_expr(init, visit);
+                    }
                 }
                 if let Some(body) = &fd.body {
                     for s in &body.statements {
@@ -405,6 +420,9 @@ where
                 ExportDefaultDeclarationKind::FunctionDeclaration(fd) => {
                     for p in &fd.params.items {
                         walk_pat(&p.pattern, visit);
+                        if let Some(init) = &p.initializer {
+                            walk_expr(init, visit);
+                        }
                     }
                     if let Some(body) = &fd.body {
                         for s in &body.statements {
@@ -925,6 +943,9 @@ mod ident_edit_walker {
                     }
                     for p in &md.value.params.items {
                         walk_pat(&p.pattern, &fn_shadow, live_map, edits);
+                        if let Some(init) = &p.initializer {
+                            walk_expr(init, &fn_shadow, live_map, edits);
+                        }
                     }
                     if let Some(body) = &md.value.body {
                         for s in &body.statements {
@@ -1083,6 +1104,9 @@ mod ident_edit_walker {
                 }
                 for p in &arrow.params.items {
                     walk_pat(&p.pattern, &fn_shadow, live_map, edits);
+                    if let Some(init) = &p.initializer {
+                        walk_expr(init, &fn_shadow, live_map, edits);
+                    }
                 }
                 if let oxc::ast::ast::ArrowFunctionBody::FunctionBody(fb) = &arrow.body {
                     for s in &fb.statements {
@@ -1108,6 +1132,9 @@ mod ident_edit_walker {
                 }
                 for p in &fe.params.items {
                     walk_pat(&p.pattern, &fn_shadow, live_map, edits);
+                    if let Some(init) = &p.initializer {
+                        walk_expr(init, &fn_shadow, live_map, edits);
+                    }
                 }
                 if let Some(body) = &fe.body {
                     for s in &body.statements {
@@ -1226,6 +1253,9 @@ mod ident_edit_walker {
                 }
                 for p in &fd.params.items {
                     walk_pat(&p.pattern, &fn_shadow, live_map, edits);
+                    if let Some(init) = &p.initializer {
+                        walk_expr(init, &fn_shadow, live_map, edits);
+                    }
                 }
                 if let Some(body) = &fd.body {
                     for s in &body.statements {
@@ -1269,6 +1299,9 @@ mod ident_edit_walker {
                 }
                 for p in &fd.params.items {
                     walk_pat(&p.pattern, &fn_shadow, live_map, edits);
+                    if let Some(init) = &p.initializer {
+                        walk_expr(init, &fn_shadow, live_map, edits);
+                    }
                 }
                 if let Some(body) = &fd.body {
                     for s in &body.statements {
@@ -1425,6 +1458,9 @@ mod ident_edit_walker {
                     }
                     for p in &fd.params.items {
                         walk_pat(&p.pattern, &fn_shadow, live_map, edits);
+                        if let Some(init) = &p.initializer {
+                            walk_expr(init, &fn_shadow, live_map, edits);
+                        }
                     }
                     if let Some(body) = &fd.body {
                         for s in &body.statements {

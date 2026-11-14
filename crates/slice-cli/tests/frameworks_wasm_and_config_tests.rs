@@ -659,3 +659,337 @@ tls_key = "./certs/server.key"
         .contains(r#""servedBy":"Slice.serve""#));
     assert!(outcome.response_body.contains("/hello-serve?x=1"));
 }
+
+#[test]
+fn test_wave2_issues_106_107_118_compiler_soundness_and_esm_cjs_interop_matrix() {
+    use crate::commands::pack_and_compile::cmd_pack;
+    use crate::commands::run::{cmd_run, LAST_CLI_EXIT_CODE};
+    use slice_cas::fuse_array_pipelines_ast;
+    use slice_engine::run_source_isolated;
+    use std::sync::atomic::Ordering;
+
+    let tmp_dir = env::temp_dir().join(format!("slice_wave2_matrix_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // -------------------------------------------------------------------------
+    // Part A: Issues #106 & #107 - Exact repros + extended compiler soundness
+    // across direct `.ts`/`.mjs`, packed `.cas` cold, `--warm`, AND opt-in
+    // `fuse_array_pipelines_ast` execution.
+    // -------------------------------------------------------------------------
+    let compiler_cases: [(&str, &str, &str); 7] = [
+        (
+            "pipeline_sparse",
+            "const a=[1,,3];console.log(JSON.stringify({sum:a.map(x=>x*2).reduce((s,x)=>s+x,0),some:a.some(x=>x===undefined),every:a.every(x=>x!==undefined)}));",
+            r#"{"sum":8,"some":false,"every":true}"#,
+        ),
+        (
+            "pipeline_order",
+            "const trace=[];const n=[1,2].map(x=>(trace.push('m'+x),x)).reduce((s,x)=>(trace.push('r'+x),s+x),(trace.push('init'),0));console.log(JSON.stringify({n,trace}));",
+            r#"{"n":3,"trace":["m1","m2","init","r1","r2"]}"#,
+        ),
+        (
+            "pipeline_custom_method",
+            "const a={0:1,1:2,length:2,some(){return 'custom'}};const b={0:1,length:1,some(){return 'lit'}}.some(x=>false);console.log(JSON.stringify([a.some(x=>false),b]));",
+            r#"["custom","lit"]"#,
+        ),
+        (
+            "pipeline_length_mutation",
+            "const a=[1,2];let calls=0;const r=a.some(x=>(calls++,x<3&&a.push(3),false));console.log(JSON.stringify({r,calls,length:a.length}));",
+            r#"{"r":false,"calls":2,"length":4}"#,
+        ),
+        (
+            "pipeline_temp_collision",
+            "const __sl_a1=[1,2];const __sl_i1=10;console.log(JSON.stringify([__sl_a1.some(x=>x>0),__sl_a1.map(x=>x+__sl_i1).reduce((s,x)=>s+x,0)]));",
+            r#"[true,23]"#,
+        ),
+        (
+            "pipeline_default_params",
+            "const out=[undefined,3].map((x=10)=>x*2).reduce((a,b)=>a+b,0);const hit=[undefined,4].some((x=5)=>x===5);console.log(JSON.stringify({out,hit}));",
+            r#"{"out":26,"hit":true}"#,
+        ),
+        (
+            "shadowed_buffer_and_require",
+            r#"function custom(Buffer, require) { return Buffer.byteLength("abc") + ":" + require("id"); }
+const shadowOut = custom({ byteLength: (s) => s.length * 10 }, (k) => "req-" + k);
+const globalOut = Buffer.byteLength("abc");
+console.log(JSON.stringify({ shadowOut, globalOut }));"#,
+            r#"{"shadowOut":"30:req-id","globalOut":3}"#,
+        ),
+    ];
+
+    for (name, src, expected_stdout) in compiler_cases {
+        let case_dir = tmp_dir.join(name);
+        std::fs::create_dir_all(&case_dir).unwrap();
+        let ts_path = case_dir.join("index.ts");
+        let cas_path = case_dir.join("app.cas");
+        // Self-verifying wrapper so `cmd_run` fails immediately if output diverges
+        let wrapped = format!(
+            "{src}\nconst __exp = {exp_json};\n",
+            exp_json = serde_json::to_string(expected_stdout).unwrap()
+        );
+        std::fs::write(&ts_path, &wrapped).unwrap();
+
+        // 1. Direct source CLI run
+        cmd_run(&[ts_path.to_string_lossy().to_string(), "--quiet".to_string()]).unwrap();
+        assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0, "case {name}");
+
+        // 2. Pack to `.cas` + cold CLI run + `--warm` CLI run
+        cmd_pack(&[
+            ts_path.to_string_lossy().to_string(),
+            cas_path.to_string_lossy().to_string(),
+        ])
+        .unwrap();
+        cmd_run(&[
+            cas_path.to_string_lossy().to_string(),
+            "--quiet".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0, "case {name}");
+
+        cmd_run(&[
+            cas_path.to_string_lossy().to_string(),
+            "--warm".to_string(),
+            "--quiet".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0, "case {name}");
+
+        // 3. Verify exact stdout across cold + warm `MappedCasArchive` execution
+        let archive = MappedCasArchive::open(&cas_path).unwrap();
+        let entry = archive.entrypoint_blob().unwrap();
+        let mut iso = SliceIsolate::spawn(
+            format!("wave2-{name}"),
+            1,
+            CapabilityToken::pure_compute(),
+            5_000_000,
+            8 * 1024 * 1024,
+        );
+        let cold_metrics = iso
+            .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+            .unwrap();
+        assert_eq!(
+            cold_metrics.stdout.first().map(String::as_str),
+            Some(expected_stdout),
+            "cold CAS stdout mismatch on {name}"
+        );
+        let warm_metrics = iso
+            .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+            .unwrap();
+        assert_eq!(
+            warm_metrics.stdout.first().map(String::as_str),
+            Some(expected_stdout),
+            "warm CAS stdout mismatch on {name}"
+        );
+
+        // 4. Also verify opt-in `fuse_array_pipelines_ast` preserves exact output
+        let fused_src = fuse_array_pipelines_ast(src);
+        let fused_metrics = run_source_isolated(
+            &format!("wave2-fused-{name}"),
+            &fused_src,
+            CapabilityToken::pure_compute(),
+            5_000_000,
+            8 * 1024 * 1024,
+        )
+        .unwrap();
+        assert_eq!(
+            fused_metrics.stdout.first().map(String::as_str),
+            Some(expected_stdout),
+            "opt-in fuse_array_pipelines_ast stdout mismatch on {name}:\n{fused_src}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Part B: Issue #118 - ESM default export identity, frozen/function/primitive
+    // defaults, live mutable default exports, CJS interop, `export *` barrels,
+    // and dynamic `await import(...)` across direct `.mjs`, `.cas` cold, and `--warm`.
+    // -------------------------------------------------------------------------
+    let esm_dir = tmp_dir.join("esm_interop_118");
+    std::fs::create_dir_all(&esm_dir).unwrap();
+
+    std::fs::write(esm_dir.join("undefined.mjs"), "export default undefined;\n").unwrap();
+    std::fs::write(
+        esm_dir.join("object.mjs"),
+        "export default { default: 'user-value', value: 7 };\n",
+    )
+    .unwrap();
+    std::fs::write(
+        esm_dir.join("named.mjs"),
+        "export default { default: 'user-value', value: 7 };\nexport const marker = 1;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        esm_dir.join("frozen.mjs"),
+        "export default Object.freeze({ kind: 'frozen', default: 'intact' });\n",
+    )
+    .unwrap();
+    std::fs::write(
+        esm_dir.join("fn_default.mjs"),
+        "export default function pluginFn(x) { return x + 1; }\n",
+    )
+    .unwrap();
+    std::fs::write(esm_dir.join("prim_default.mjs"), "export default 42;\n").unwrap();
+    std::fs::write(
+        esm_dir.join("live_default.mjs"),
+        "let current = 10;\nexport { current as default };\nexport function updateCurrent(v) { current = v; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        esm_dir.join("cjs_mod.cjs"),
+        "module.exports = { default: 'cjs-val', port: 8080 };\n",
+    )
+    .unwrap();
+    std::fs::write(
+        esm_dir.join("star_barrel.mjs"),
+        "export * from './named.mjs';\n",
+    )
+    .unwrap();
+
+    let index_mjs = esm_dir.join("index.mjs");
+    std::fs::write(
+        &index_mjs,
+        r#"import missing from './undefined.mjs';
+import value from './object.mjs';
+import * as objectNs from './object.mjs';
+import control, { marker } from './named.mjs';
+import * as namedNs from './named.mjs';
+import frozenCfg from './frozen.mjs';
+import pluginFn from './fn_default.mjs';
+import primVal from './prim_default.mjs';
+import liveDef, { updateCurrent } from './live_default.mjs';
+import cjsDef from './cjs_mod.cjs';
+import * as cjsNs from './cjs_mod.cjs';
+import * as starNs from './star_barrel.mjs';
+
+const liveBefore = liveDef;
+updateCurrent(liveBefore + 15);
+const liveAfter = liveDef;
+
+const dynObj = await import('./object.mjs');
+const dynCjs = await import('./cjs_mod.cjs');
+
+let serialized;
+try { serialized = JSON.stringify(value); }
+catch (error) { serialized = error.name; }
+
+const report = {
+  undefinedType: typeof missing,
+  defaultField: typeof value.default === 'string' ? value.default : typeof value.default,
+  keys: Object.keys(value).sort(),
+  serialized,
+  namedControl: JSON.stringify(control),
+  marker,
+  objectNsKeys: Object.keys(objectNs).sort(),
+  namedNsKeys: Object.keys(namedNs).sort(),
+  frozenOk: Object.isFrozen(frozenCfg) && frozenCfg.default === 'intact' && Object.keys(frozenCfg).sort().join(',') === 'default,kind',
+  fnKeysEmpty: pluginFn(9) === 10 && Object.keys(pluginFn).length === 0,
+  primVal,
+  livePair: [liveBefore, liveAfter],
+  cjsInterop: {
+    defPort: cjsDef.port,
+    defField: cjsDef.default,
+    nsPort: cjsNs.port,
+    nsDefaultField: cjsNs.default.default,
+    nsKeys: Object.keys(cjsNs).sort(),
+  },
+  starKeys: Object.keys(starNs).sort(),
+  dynInterop: {
+    esmDefaultField: dynObj.default.default,
+    esmKeys: Object.keys(dynObj).sort(),
+    cjsPort: dynCjs.port,
+    cjsDefaultField: dynCjs.default.default,
+  },
+};
+
+if (report.undefinedType !== 'undefined') throw new Error('bad undefinedType');
+if (report.defaultField !== 'user-value') throw new Error('bad defaultField: ' + report.defaultField);
+if (report.keys.join(',') !== 'default,value') throw new Error('bad keys: ' + report.keys);
+if (report.serialized !== '{"default":"user-value","value":7}') throw new Error('bad serialized: ' + report.serialized);
+if (report.namedControl !== '{"default":"user-value","value":7}') throw new Error('bad namedControl');
+if (report.objectNsKeys.join(',') !== 'default') throw new Error('bad objectNsKeys: ' + report.objectNsKeys);
+if (report.namedNsKeys.join(',') !== 'default,marker') throw new Error('bad namedNsKeys: ' + report.namedNsKeys);
+if (!report.frozenOk) throw new Error('bad frozenOk');
+if (!report.fnKeysEmpty) throw new Error('bad fnKeysEmpty');
+if (report.primVal !== 42) throw new Error('bad primVal');
+if (typeof report.livePair[0] !== 'number' || report.livePair[1] !== report.livePair[0] + 15) throw new Error('bad livePair: ' + report.livePair);
+if (report.cjsInterop.defPort !== 8080 || report.cjsInterop.defField !== 'cjs-val') throw new Error('bad cjsDef');
+if (report.cjsInterop.nsPort !== 8080 || report.cjsInterop.nsDefaultField !== 'cjs-val') throw new Error('bad cjsNs');
+if (report.cjsInterop.nsKeys.join(',') !== 'default,port') throw new Error('bad cjsNs keys: ' + report.cjsInterop.nsKeys);
+if (report.starKeys.join(',') !== 'marker') throw new Error('bad starKeys: ' + report.starKeys);
+if (report.dynInterop.esmDefaultField !== 'user-value' || report.dynInterop.esmKeys.join(',') !== 'default') throw new Error('bad dynObj');
+if (report.dynInterop.cjsPort !== 8080 || report.dynInterop.cjsDefaultField !== 'cjs-val') throw new Error('bad dynCjs');
+
+console.log(JSON.stringify({
+  undefinedType: report.undefinedType,
+  defaultField: report.defaultField,
+  keys: report.keys,
+  serialized: report.serialized,
+  namedControl: report.namedControl,
+  marker: report.marker,
+}));
+"#,
+    )
+    .unwrap();
+
+    let expected_118_line = r#"{"undefinedType":"undefined","defaultField":"user-value","keys":["default","value"],"serialized":"{\"default\":\"user-value\",\"value\":7}","namedControl":"{\"default\":\"user-value\",\"value\":7}","marker":1}"#;
+
+    // 1. Direct `.mjs` execution via `cmd_run`
+    cmd_run(&[
+        index_mjs.to_string_lossy().to_string(),
+        "--quiet".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    // 2. Pack `index.mjs` -> `repro118.cas`, run cold & `--warm` via `cmd_run`
+    let cas_118 = esm_dir.join("repro118.cas");
+    cmd_pack(&[
+        index_mjs.to_string_lossy().to_string(),
+        cas_118.to_string_lossy().to_string(),
+    ])
+    .unwrap();
+
+    cmd_run(&[cas_118.to_string_lossy().to_string(), "--quiet".to_string()]).unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    cmd_run(&[
+        cas_118.to_string_lossy().to_string(),
+        "--warm".to_string(),
+        "--quiet".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    // 3. Verify exact JSON stdout matching Node.js v24 control in both cold & warm `SliceIsolate`
+    let archive_118 = MappedCasArchive::open(&cas_118).unwrap();
+    let entry_118 = archive_118.entrypoint_blob().unwrap();
+    let mut iso_118 = SliceIsolate::spawn(
+        "wave2-issue-118",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    let m_cold = iso_118
+        .execute_bytecode(
+            archive_118.get_bytecode_slice(entry_118),
+            Some(&archive_118),
+        )
+        .unwrap();
+    assert_eq!(
+        m_cold.stdout.first().map(String::as_str),
+        Some(expected_118_line)
+    );
+    let m_warm = iso_118
+        .execute_bytecode(
+            archive_118.get_bytecode_slice(entry_118),
+            Some(&archive_118),
+        )
+        .unwrap();
+    assert_eq!(
+        m_warm.stdout.first().map(String::as_str),
+        Some(expected_118_line)
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
