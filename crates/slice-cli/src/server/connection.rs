@@ -48,6 +48,25 @@ pub(crate) fn find_http_header_end_from(buf: &[u8], scan_from: usize) -> Option<
     None
 }
 
+/// Zero-allocation tenant route extractor for `/t/<tenant_id>` and `/t/<tenant_id>/<rest>`.
+///
+/// Slices directly from `rest` (`raw_path.strip_prefix("/t/")`) at `&rest[t_seg.len()..]` so the
+/// returned sub-path always starts at the `'/'` delimiter (`char` boundary) with zero arithmetic
+/// off-by-one risk across ASCII, percent-encoded, and multi-byte UTF-8 segments.
+#[inline]
+pub(crate) fn extract_tenant_route_prefix(raw_path: &str) -> (&str, &str) {
+    if let Some(rest) = raw_path.strip_prefix("/t/") {
+        if let Some((t_seg, _sub)) = rest.split_once('/') {
+            if !t_seg.is_empty() {
+                return (t_seg, &rest[t_seg.len()..]);
+            }
+        } else if !rest.is_empty() {
+            return (rest, "/");
+        }
+    }
+    ("tenant-default", raw_path)
+}
+
 #[inline]
 fn is_chunked_transfer_encoding_only(val: &str) -> bool {
     let mut saw_chunked = false;
@@ -451,7 +470,7 @@ pub(crate) fn serve_connection_with_isolate(
         let raw_target = parts.next().unwrap_or("");
         let version = parts.next().unwrap_or("");
         if method.is_empty()
-            || raw_target.is_empty()
+            || !raw_target.starts_with('/')
             || parts.next().is_some()
             || (version != "HTTP/1.1" && version != "HTTP/1.0")
             || !slice_engine::is_valid_http_header_name(method)
@@ -473,23 +492,7 @@ pub(crate) fn serve_connection_with_isolate(
         let mut is_ws_upgrade = false;
         let mut sec_websocket_key: &str = "";
         let mut if_none_match: &str = "";
-        let mut path = raw_path;
-        let mut raw_tenant_id: &str = "tenant-default";
-        if let Some(rest) = raw_path.strip_prefix("/t/") {
-            if let Some((t_seg, sub)) = rest.split_once('/') {
-                if !t_seg.is_empty() {
-                    raw_tenant_id = t_seg;
-                    path = if sub.is_empty() {
-                        "/"
-                    } else {
-                        &raw_path[2 + t_seg.len()..]
-                    };
-                }
-            } else if !rest.is_empty() {
-                raw_tenant_id = rest;
-                path = "/";
-            }
-        }
+        let (mut raw_tenant_id, path) = extract_tenant_route_prefix(raw_path);
         // N-Sec-6: Support up to 64 request headers on the stack; reject > 64 with 431
         let mut headers_stack: [(&str, &str); 64] = [("", ""); 64];
         let mut headers_len: usize = 0;
