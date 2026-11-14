@@ -349,40 +349,29 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             let parent_tenant_for_trace = scope_guard.saved_tenant.clone();
             let outcome = if cfg!(debug_assertions) {
                 let vfs_owner = crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| o.borrow().clone());
-                let vfs_files = crate::boa_realm::BOA_VFS_CACHE.with(|c| c.borrow().clone());
-                let vfs_dirs = crate::boa_realm::BOA_VFS_DIRS.with(|d| d.borrow().clone());
-                let vfs_tombs = crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| t.borrow().clone());
-                let vfs_mtimes = crate::boa_realm::BOA_VFS_MTIMES.with(|m| m.borrow().clone());
-                let (out, new_owner, new_files, new_dirs, new_tombs, new_mtimes) =
-                    std::thread::Builder::new()
-                        .name("slice-eval-sandbox".to_string())
-                        .stack_size(8 * 1024 * 1024)
-                        .spawn(move || {
-                            crate::boa_realm::BOA_VFS_OWNER_TENANT
-                                .with(|o| *o.borrow_mut() = vfs_owner);
-                            crate::boa_realm::BOA_VFS_CACHE.with(|c| *c.borrow_mut() = vfs_files);
-                            crate::boa_realm::BOA_VFS_DIRS.with(|d| *d.borrow_mut() = vfs_dirs);
-                            crate::boa_realm::BOA_VFS_TOMBSTONES
-                                .with(|t| *t.borrow_mut() = vfs_tombs);
-                            crate::boa_realm::BOA_VFS_MTIMES.with(|m| *m.borrow_mut() = vfs_mtimes);
-                            let res = proxy_parent.eval_sandbox(&code, opts);
-                            let no =
-                                crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| o.borrow().clone());
-                            let nf = crate::boa_realm::BOA_VFS_CACHE.with(|c| c.borrow().clone());
-                            let nd = crate::boa_realm::BOA_VFS_DIRS.with(|d| d.borrow().clone());
-                            let nt =
-                                crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| t.borrow().clone());
-                            let nm = crate::boa_realm::BOA_VFS_MTIMES.with(|m| m.borrow().clone());
-                            (res, no, nf, nd, nt, nm)
-                        })
-                        .expect("failed to spawn slice-eval-sandbox thread")
-                        .join()
-                        .expect("slice-eval-sandbox thread panicked");
+                let vfs_snap =
+                    crate::boa_realm::BOA_VFS_STATE.with(|v| v.borrow().snapshot_with_fds());
+                let (out, new_owner, new_snap) = std::thread::Builder::new()
+                    .name("slice-eval-sandbox".to_string())
+                    .stack_size(8 * 1024 * 1024)
+                    .spawn(move || {
+                        crate::boa_realm::BOA_VFS_OWNER_TENANT
+                            .with(|o| *o.borrow_mut() = vfs_owner);
+                        crate::boa_realm::BOA_VFS_STATE
+                            .with(|v| v.borrow_mut().restore_from_snapshot(vfs_snap));
+                        let res = proxy_parent.eval_sandbox(&code, opts);
+                        let no =
+                            crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| o.borrow().clone());
+                        let ns = crate::boa_realm::BOA_VFS_STATE
+                            .with(|v| v.borrow().snapshot_with_fds());
+                        (res, no, ns)
+                    })
+                    .expect("failed to spawn slice-eval-sandbox thread")
+                    .join()
+                    .expect("slice-eval-sandbox thread panicked");
                 crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| *o.borrow_mut() = new_owner);
-                crate::boa_realm::BOA_VFS_CACHE.with(|c| *c.borrow_mut() = new_files);
-                crate::boa_realm::BOA_VFS_DIRS.with(|d| *d.borrow_mut() = new_dirs);
-                crate::boa_realm::BOA_VFS_TOMBSTONES.with(|t| *t.borrow_mut() = new_tombs);
-                crate::boa_realm::BOA_VFS_MTIMES.with(|m| *m.borrow_mut() = new_mtimes);
+                crate::boa_realm::BOA_VFS_STATE
+                    .with(|v| v.borrow_mut().restore_from_snapshot(new_snap));
                 out
             } else {
                 proxy_parent.eval_sandbox(&code, opts)

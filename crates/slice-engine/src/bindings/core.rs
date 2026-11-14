@@ -729,6 +729,18 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .and_then(|v| v.as_number())
                 .map(|n| n as i32)
                 .unwrap_or(0);
+            if op == 3 {
+                let has_fs = crate::boa_realm::BOA_ACTIVE_CAPS.with(|c| {
+                    let caps = c.borrow();
+                    !caps.read_prefixes.is_empty() || !caps.write_prefixes.is_empty()
+                });
+                let cwd = if has_fs {
+                    slice_sandbox::cached_normalized_cwd()
+                } else {
+                    "/workspace"
+                };
+                return Ok(BoaVal::from(js_string!(cwd)));
+            }
             crate::boa_realm::mark_subsystem_dirty(crate::boa_realm::DIRTY_PROCESS);
             if op == 0 {
                 return Ok(BoaVal::undefined());

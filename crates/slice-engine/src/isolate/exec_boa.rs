@@ -12,13 +12,13 @@ use crate::boa_realm::{
     BOA_ENV_MAP, BOA_EXEC_BINS, BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ,
     BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_LAST_EXIT_CODE,
     BOA_NET_HOSTS, BOA_PROCESS_EXIT, BOA_SES_INTL_SIG_PAIR, BOA_STDOUT, BOA_UNCAUGHT_ERROR,
-    BOA_UNHANDLED_REJECTIONS, BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VFS_MTIMES, BOA_VFS_OWNER_TENANT,
-    BOA_VFS_TOMBSTONES, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, CHECKPOINT_SLAB,
-    DIRTY_FETCH_MOCK, DIRTY_SOCKETS, DIRTY_WASM, DIRTY_WEBSOCKET, DIRTY_WORKERS, EXEC_DIRTY_ARGV,
-    EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS, EXEC_DIRTY_UNCAUGHT,
-    HOST_GROUP_DET, HOST_GROUP_HTTP_BRIDGE, HOST_GROUP_KV_SANDBOX, HOST_GROUP_SEMVER_FAST,
-    REALM_CTL_DISPATCH_HTTP_BRIDGE, REALM_CTL_RESET_MT, REALM_CTL_RESET_WU, REALM_CTL_SET_DET_MODE,
-    REALM_CTL_SET_NEXT_TICK, REALM_CTL_SYNC_ENV,
+    BOA_UNHANDLED_REJECTIONS, BOA_VFS_OWNER_TENANT, BOA_VFS_STATE, BOA_VIOLATION,
+    BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, CHECKPOINT_SLAB, DIRTY_FETCH_MOCK, DIRTY_SOCKETS,
+    DIRTY_VFS, DIRTY_WASM, DIRTY_WEBSOCKET, DIRTY_WORKERS, EXEC_DIRTY_ARGV, EXEC_DIRTY_CHILD_PROC,
+    EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS, EXEC_DIRTY_UNCAUGHT, HOST_GROUP_DET,
+    HOST_GROUP_HTTP_BRIDGE, HOST_GROUP_KV_SANDBOX, HOST_GROUP_SEMVER_FAST,
+    REALM_CTL_DISPATCH_HTTP_BRIDGE, REALM_CTL_RESET_FS_WATCHERS, REALM_CTL_RESET_MT,
+    REALM_CTL_RESET_WU, REALM_CTL_SET_DET_MODE, REALM_CTL_SET_NEXT_TICK, REALM_CTL_SYNC_ENV,
 };
 use crate::boacas::{
     BOACAS_FLAG_HAS_HTTP_BRIDGE, BOACAS_FLAG_HAS_KV_SANDBOX, BOACAS_FLAG_HAS_NEXT_TICK,
@@ -138,10 +138,7 @@ fn scrub_after_prewarm(realm: &mut WarmBoaRealm, prewarm_flags: (bool, bool, boo
     BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = None);
     BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
     BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
-    BOA_VFS_CACHE.with(|c| c.borrow_mut().clear());
-    BOA_VFS_DIRS.with(|d| d.borrow_mut().clear());
-    BOA_VFS_TOMBSTONES.with(|t| t.borrow_mut().clear());
-    BOA_VFS_MTIMES.with(|m| m.borrow_mut().clear());
+    BOA_VFS_STATE.with(|v| v.borrow_mut().clear());
     BOA_VFS_OWNER_TENANT.with(|o| o.borrow_mut().clear());
     if BOA_WAIT_UNTIL_COUNT.with(|c| c.get()) > 0 {
         call_realm_ctl(realm, REALM_CTL_RESET_WU, false);
@@ -532,6 +529,20 @@ impl SliceIsolate {
         }
         if (dirty & DIRTY_WASM) != 0 {
             crate::wasm::clear_thread_wasm_state();
+        }
+        if (dirty & DIRTY_VFS) != 0 {
+            let (freed_fd_bytes, had_watchers) = BOA_VFS_STATE.with(|v| {
+                let mut vfs = v.borrow_mut();
+                let freed = vfs.close_all_open_fds();
+                let hw = std::mem::replace(&mut vfs.has_active_watchers, false);
+                (freed, hw)
+            });
+            if freed_fd_bytes > 0 {
+                crate::bindings::helpers::release_isolate_memory(freed_fd_bytes);
+            }
+            if had_watchers {
+                call_realm_ctl(realm, REALM_CTL_RESET_FS_WATCHERS, false);
+            }
         }
     }
 
