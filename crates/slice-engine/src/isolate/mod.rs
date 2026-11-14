@@ -51,6 +51,8 @@ pub struct ExecutionMetrics {
     pub restore_time_ns: u64,
     #[serde(default)]
     pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub process_exited: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +83,7 @@ pub struct SliceIsolate {
     pub(crate) last_return_json: Option<String>,
     pub(crate) last_exec_check_ses: bool,
     pub(crate) last_exit_code: Option<i32>,
+    pub(crate) last_process_exited: bool,
     pub(crate) pending_tier0_throw: Option<String>,
     pub(crate) process_argv: Vec<String>,
 }
@@ -122,6 +125,7 @@ impl SliceIsolate {
             last_return_json: None,
             last_exec_check_ses: false,
             last_exit_code: None,
+            last_process_exited: false,
             pending_tier0_throw: None,
             process_argv: Vec::new(),
         }
@@ -307,6 +311,7 @@ impl SliceIsolate {
         self.last_return_json = None;
         self.last_exec_check_ses = false;
         self.last_exit_code = None;
+        self.last_process_exited = false;
         if let Some(s) = self.deterministic_seed {
             self.det_prng_state = s ^ 0x9E37_79B9_7F4A_7C15;
             self.det_clock_ms = 1_700_000_000_000;

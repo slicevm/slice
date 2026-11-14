@@ -1,3 +1,4 @@
+use super::run::LAST_CLI_EXIT_CODE;
 use crate::config::{
     install_ctrlc_handler, skip_runtime_flag_with_separate_value, OsNativeFileWatcher,
     ResolvedExecutionConfig,
@@ -5,6 +6,7 @@ use crate::config::{
 use anyhow::{bail, Context, Result};
 use slice_engine::{compile_source_to_bytecode, SliceIsolate};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 /// Maximum directory recursion depth when discovering test files (`CLI-SEC-03`).
@@ -65,6 +67,7 @@ pub(crate) fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>> {
 }
 
 pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
+    LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);
     let mut exec_cfg = ResolvedExecutionConfig::from_cli_args(args)?;
     let mut filter_opt: Option<String> = None;
     let mut deterministic_seed: Option<u64> = Some(20261024);
@@ -156,9 +159,26 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
             isolate.add_egress_audit_secret(sec.clone());
         }
         let metrics = isolate.execute_bytecode(&bytecode, None)?;
+        if let Some(code) = metrics.exit_code {
+            if code != 0 {
+                LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
+            }
+        }
         if metrics.return_value.starts_with("Uncaught ") {
+            if metrics.exit_code.is_none() {
+                LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
+            }
             let mapped = slice_cas::map_bundled_error_location(&bundled, &metrics.return_value);
             bail!("Uncaught error in {}: {}", test_file.display(), mapped);
+        }
+        if let Some(code) = metrics.exit_code {
+            if code != 0 {
+                bail!(
+                    "Test file {} exited with non-zero exit code {}",
+                    test_file.display(),
+                    code
+                );
+            }
         }
 
         for line in &metrics.stdout {
@@ -266,6 +286,11 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
                     isolate.add_egress_audit_secret(sec.clone());
                 }
                 let metrics = isolate.execute_bytecode(&bytecode, None)?;
+                if metrics.return_value.starts_with("Uncaught ")
+                    || metrics.exit_code.is_some_and(|c| c != 0)
+                {
+                    rerun_failed += 1;
+                }
                 for line in &metrics.stdout {
                     if let Some(report_json) = line.strip_prefix("__SLICE_TEST_REPORT__:") {
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(report_json) {

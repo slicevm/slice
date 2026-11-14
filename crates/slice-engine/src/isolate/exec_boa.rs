@@ -695,6 +695,7 @@ impl SliceIsolate {
         let final_exec_dirty = BOA_EXEC_DIRTY.with(|c| c.replace(0));
         let (exit_code_opt, uncaught_err_opt) = if final_exec_dirty == 0 {
             self.last_exit_code = None;
+            self.last_process_exited = false;
             (None, None)
         } else {
             if (final_exec_dirty & EXEC_DIRTY_ARGV) != 0 {
@@ -703,14 +704,20 @@ impl SliceIsolate {
             if (final_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
                 BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
             }
-            let exit_opt = if (final_exec_dirty & EXEC_DIRTY_EXIT) != 0 {
-                BOA_PROCESS_EXIT
-                    .with(|e| e.replace(None))
-                    .or_else(|| BOA_LAST_EXIT_CODE.with(|e| e.replace(None)))
+            let (exit_opt, process_exited) = if (final_exec_dirty & EXEC_DIRTY_EXIT) != 0 {
+                // Drain BOTH cells unconditionally so calling `process.exit(code)` after setting
+                // `process.exitCode = other` never leaves `BOA_LAST_EXIT_CODE` stale on the thread.
+                let abrupt_exit_opt = BOA_PROCESS_EXIT.with(|e| e.replace(None));
+                let graceful_exit_opt = BOA_LAST_EXIT_CODE.with(|e| e.replace(None));
+                (
+                    abrupt_exit_opt.or(graceful_exit_opt),
+                    abrupt_exit_opt.is_some(),
+                )
             } else {
-                None
+                (None, false)
             };
             self.last_exit_code = exit_opt;
+            self.last_process_exited = process_exited;
             let err_opt = if (final_exec_dirty & EXEC_DIRTY_UNCAUGHT) != 0 {
                 BOA_UNCAUGHT_ERROR.with(|e| e.borrow_mut().take())
             } else {

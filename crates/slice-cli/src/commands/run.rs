@@ -146,13 +146,16 @@ pub(crate) fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
         }
     }
 
+    if let Some(code) = metrics.exit_code {
+        LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
+    }
     if metrics.return_value.starts_with("Uncaught ") {
+        if metrics.exit_code.is_none() {
+            LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
+        }
         let annotated = archive.reconstruct_annotated_source(entry);
         let mapped = slice_cas::map_bundled_error_location(&annotated, &metrics.return_value);
         bail!("{}", mapped);
-    }
-    if let Some(code) = metrics.exit_code {
-        LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
     }
     if print_metrics {
         println!(
@@ -307,7 +310,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             let mapped = slice_cas::map_bundled_error_location(&transpiled, &m.return_value);
             bail!("{}", mapped);
         }
-        if print_result && m.exit_code.is_none() && !quiet {
+        if print_result && !m.process_exited && !quiet {
             if m.return_value == "[object Object]" {
                 if let Some(json_str) = isolate.last_return_json() {
                     println!("{}", json_str);
