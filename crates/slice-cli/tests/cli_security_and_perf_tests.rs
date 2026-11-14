@@ -595,3 +595,272 @@ fn test_incremental_http_header_cursor_and_single_pass_manifest_dedup() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn test_issue_100_fail_closed_security_and_config_flags_across_forms() {
+    use crate::commands::run::cmd_run;
+    use crate::config::{load_audit_egress_file, ResolvedExecutionConfig};
+    use slice_engine::{compile_source_to_bytecode, SliceIsolate};
+
+    let tmp_dir = std::env::temp_dir().join(format!("slice_issue_100_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let missing_file = tmp_dir.join("does_not_exist.txt");
+    let missing_str = missing_file.to_string_lossy().to_string();
+    let sub_dir = tmp_dir.join("a_directory");
+    std::fs::create_dir_all(&sub_dir).unwrap();
+    let sub_dir_str = sub_dir.to_string_lossy().to_string();
+
+    let bad_utf8_file = tmp_dir.join("bad_utf8.bin");
+    std::fs::write(&bad_utf8_file, [0xFFu8, 0xFE, 0xFD, 0x80]).unwrap();
+    let bad_utf8_str = bad_utf8_file.to_string_lossy().to_string();
+
+    // 1. Every invalid/unreadable/empty/dangling security & config CLI flag form must fail closed (`Err`)
+    let failing_flag_sets: Vec<Vec<String>> = vec![
+        vec![format!("--audit-egress-file={}", missing_str)],
+        vec!["--audit-egress-file".to_string(), missing_str.clone()],
+        vec![format!("--audit-egress-file={}", sub_dir_str)],
+        vec![format!("--audit-egress-file={}", bad_utf8_str)],
+        vec!["--audit-egress-file=".to_string()],
+        vec!["--audit-egress-file".to_string()],
+        vec!["--audit-egress=".to_string()],
+        vec!["--audit-egress".to_string()],
+        vec![format!("--env-file={}", missing_str)],
+        vec!["--env-file".to_string(), missing_str.clone()],
+        vec![format!("--env-file={}", bad_utf8_str)],
+        vec!["--env-file=".to_string()],
+        vec!["--env-file".to_string()],
+        vec![format!("--config={}", sub_dir_str)],
+        vec!["--config=".to_string()],
+        vec!["--config".to_string()],
+        vec!["--trace=".to_string()],
+        vec!["--trace".to_string()],
+    ];
+
+    for flags in &failing_flag_sets {
+        let res = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(flags, false);
+        assert!(
+            res.is_err(),
+            "expected fail-closed Err for CLI flags {:?}, but succeeded!",
+            flags
+        );
+    }
+
+    // 2. Direct `load_audit_egress_file` fails closed on missing path
+    let mut dummy_secrets = Vec::new();
+    assert!(load_audit_egress_file(&missing_file, &mut dummy_secrets).is_err());
+
+    // 3. Manifest `env_file` and trusted `@slice-env-file` fail closed when missing
+    let mut cfg_manifest =
+        ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(&[], false).unwrap();
+    assert!(cfg_manifest
+        .apply_manifest_toml(
+            "[capabilities]\nenv_file = \"./missing_manifest.env\"\n",
+            Some(&tmp_dir)
+        )
+        .is_err());
+
+    let mut cfg_trusted = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(
+        &["--trust-directives".to_string()],
+        false,
+    )
+    .unwrap();
+    assert!(cfg_trusted
+        .apply_inline_directives(
+            "// @slice-env-file: ./missing_directive.env\n",
+            Some(&tmp_dir)
+        )
+        .is_err());
+
+    // 4. Unreadable `slice.toml` (e.g. a directory named `slice.toml`) fails closed instead of running with defaults
+    let bad_manifest_proj = tmp_dir.join("bad_manifest_proj");
+    std::fs::create_dir_all(bad_manifest_proj.join("slice.toml")).unwrap();
+    let bad_proj_entry = bad_manifest_proj.join("index.ts");
+    std::fs::write(&bad_proj_entry, "console.log('should-not-run');\n").unwrap();
+    assert!(cmd_run(&[bad_proj_entry.to_string_lossy().to_string()]).is_err());
+
+    // 5. `--trace=<directory>` fails closed when writing trace output
+    let ok_script = tmp_dir.join("ok.ts");
+    std::fs::write(&ok_script, "const x = 1 + 1;\n").unwrap();
+    assert!(cmd_run(&[
+        ok_script.to_string_lossy().to_string(),
+        "--quiet".to_string(),
+        "--trace".to_string(),
+        sub_dir_str,
+    ])
+    .is_err());
+
+    // 6. Positive verification: space-separated `--audit-egress-file <path>` registers raw tokens,
+    //    arbitrary `KEY=VALUE` pairs (even without `SECRET` in key name), and Base64 `=` padded secrets!
+    let secrets_file = tmp_dir.join("dlp_secrets.txt");
+    std::fs::write(
+        &secrets_file,
+        "# comment\nsk_live_raw_secret_100\nCUSTOM_DB_CREDS=custom_db_secret_val_100\nZXhmaWwtcGFkZGVkLXNlY3JldA==\n",
+    )
+    .unwrap();
+
+    let cfg_dlp = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(
+        &[
+            "--audit-egress-file".to_string(),
+            secrets_file.to_string_lossy().to_string(),
+        ],
+        false,
+    )
+    .unwrap();
+
+    for expected in [
+        "sk_live_raw_secret_100",
+        "custom_db_secret_val_100",
+        "ZXhmaWwtcGFkZGVkLXNlY3JldA==",
+    ] {
+        assert!(
+            cfg_dlp.audit_secrets.iter().any(|s| s == expected),
+            "expected {:?} in audit_secrets {:?}",
+            expected,
+            cfg_dlp.audit_secrets
+        );
+        let bc = compile_source_to_bytecode(&format!("console.log({:?});", expected));
+        let mut iso = SliceIsolate::spawn(
+            "dlp-verify-100",
+            1,
+            cfg_dlp.caps.clone(),
+            cfg_dlp.fuel_limit,
+            cfg_dlp.mem_limit,
+        );
+        for sec in &cfg_dlp.audit_secrets {
+            iso.add_egress_audit_secret(sec.clone());
+        }
+        let err = iso
+            .execute_bytecode(&bc, None)
+            .expect_err("expected egress DLP trap");
+        assert!(
+            format!("{}", err).contains("EGRESS_SECRET_LEAK_BLOCKED"),
+            "unexpected err: {}",
+            err
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_issue_101_process_exit_code_across_cli_cas_warm_and_test_runner() {
+    use crate::commands::pack_and_compile::cmd_pack;
+    use crate::commands::run::{cmd_run, LAST_CLI_EXIT_CODE};
+    use crate::commands::test_runner::cmd_test;
+    use slice_engine::run_source_isolated;
+    use slice_sandbox::CapabilityToken;
+    use std::sync::atomic::Ordering;
+
+    let tmp_dir = std::env::temp_dir().join(format!("slice_issue_101_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // 1. Direct `.js` and `.ts` files with `process.exitCode = 2` (previously hijacked by Tier-0!)
+    let js_file = tmp_dir.join("exit_code.js");
+    let ts_file = tmp_dir.join("exit_code.ts");
+    std::fs::write(&js_file, "process.exitCode = 2;\n").unwrap();
+    std::fs::write(
+        &ts_file,
+        "const code: number = 3;\nprocess.exitCode = code;\n",
+    )
+    .unwrap();
+
+    cmd_run(&[js_file.to_string_lossy().to_string(), "--quiet".to_string()]).unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 2);
+
+    cmd_run(&[ts_file.to_string_lossy().to_string(), "--quiet".to_string()]).unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 3);
+
+    // 2. `-e` and `-p` modes (`-p "process.exitCode = 4"` prints & exits 4; `-p "process.exit(5)"` marks `process_exited`)
+    cmd_run(&[
+        "--quiet".to_string(),
+        "-e".to_string(),
+        "process.exitCode = 4".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 4);
+
+    cmd_run(&[
+        "--quiet".to_string(),
+        "-p".to_string(),
+        "process.exitCode = 6".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 6);
+
+    let m_graceful = run_source_isolated(
+        "exit-graceful-101",
+        "process.exitCode = 6",
+        CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(m_graceful.exit_code, Some(6));
+    assert!(!m_graceful.process_exited);
+    assert_eq!(m_graceful.return_value, "6");
+
+    let m_abrupt = run_source_isolated(
+        "exit-abrupt-101",
+        "process.exitCode = 9; process.exit(0);",
+        CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(m_abrupt.exit_code, Some(0));
+    assert!(m_abrupt.process_exited);
+
+    // Verify `BOA_LAST_EXIT_CODE` was drained unconditionally when `process.exit(0)` superseded `process.exitCode = 9`!
+    let m_clean_after = run_source_isolated(
+        "exit-clean-after-101",
+        "const clean = 10 + 20; clean",
+        CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(m_clean_after.exit_code, None);
+    assert!(!m_clean_after.process_exited);
+
+    // 3. Packed `.cas` cold AND `--warm` execution propagate `process.exitCode = 7`
+    let cas_src = tmp_dir.join("cas_exit.ts");
+    let cas_out = tmp_dir.join("cas_exit.cas");
+    std::fs::write(&cas_src, "process.exitCode = 7;\n").unwrap();
+    cmd_pack(&[
+        cas_src.to_string_lossy().to_string(),
+        cas_out.to_string_lossy().to_string(),
+    ])
+    .unwrap();
+
+    cmd_run(&[cas_out.to_string_lossy().to_string(), "--quiet".to_string()]).unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 7);
+
+    cmd_run(&[
+        cas_out.to_string_lossy().to_string(),
+        "--warm".to_string(),
+        "--quiet".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 7);
+
+    // 4. `slice test` fails when a test file sets non-zero `process.exitCode`
+    let test_dir = tmp_dir.join("tests_exit");
+    std::fs::create_dir_all(&test_dir).unwrap();
+    std::fs::write(
+        test_dir.join("bad_exit.test.ts"),
+        "import { test, expect } from 'slice:test';\ntest('passes assertion', () => { expect(1).toBe(1); });\nprocess.exitCode = 2;\n",
+    )
+    .unwrap();
+    let test_res = cmd_test(&[test_dir.to_string_lossy().to_string(), "--json".to_string()]);
+    assert!(
+        test_res.is_err(),
+        "expected slice test to fail on non-zero process.exitCode"
+    );
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 2);
+
+    LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

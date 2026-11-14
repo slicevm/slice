@@ -1617,3 +1617,293 @@ if (req.path === "/set") {
 
     let _ = std::fs::remove_dir_all(&tmp_root);
 }
+
+#[test]
+fn test_issue_105_tenant_url_prefix_slicing_non_ascii_wire_guard_and_host_bind() {
+    use crate::commands::pack_and_compile::cmd_pack;
+    use crate::server::cmd_serve;
+    use crate::server::connection::extract_tenant_route_prefix;
+    use slice_engine::{compile_source_to_bytecode, HttpRequestContext, SliceIsolate};
+    use slice_sandbox::CapabilityToken;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    // 1. Direct unit checks on zero-allocation `extract_tenant_route_prefix` (ASCII, percent-encoded, multi-byte UTF-8)
+    assert_eq!(extract_tenant_route_prefix("/t/abc/foo"), ("abc", "/foo"));
+    assert_eq!(extract_tenant_route_prefix("/t/abc/"), ("abc", "/"));
+    assert_eq!(extract_tenant_route_prefix("/t/abc"), ("abc", "/"));
+    assert_eq!(
+        extract_tenant_route_prefix("/t/%C3%A9/v1/items"),
+        ("%C3%A9", "/v1/items")
+    );
+    assert_eq!(extract_tenant_route_prefix("/t/é/x"), ("é", "/x"));
+    assert_eq!(
+        extract_tenant_route_prefix("/t/\u{1F680}/v1/a"),
+        ("\u{1F680}", "/v1/a")
+    );
+    assert_eq!(
+        extract_tenant_route_prefix("/t/"),
+        ("tenant-default", "/t/")
+    );
+    assert_eq!(
+        extract_tenant_route_prefix("/t//foo"),
+        ("tenant-default", "/t//foo")
+    );
+    assert_eq!(
+        extract_tenant_route_prefix("/plain/path"),
+        ("tenant-default", "/plain/path")
+    );
+
+    // 2. Defensive `__slice_http_url` guard when an embedder passes `HttpRequestContext.path` without leading '/'
+    let url_echo_bc = compile_source_to_bytecode(
+        "Slice.serve((req) => new Response(req.url + '|' + Slice.request().path));",
+    );
+    let mut iso = SliceIsolate::spawn(
+        "url-guard-tenant",
+        1,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        8 * 1024 * 1024,
+    );
+    let embedder_req = HttpRequestContext {
+        method: "GET",
+        path: "foo/bar",
+        query: "q=1",
+        tenant_id: "url-guard-tenant",
+        body: "",
+        headers: &[("host", "localhost")],
+    };
+    let embedder_out = iso
+        .execute_http_request(&url_echo_bc, None, &embedder_req)
+        .unwrap();
+    assert_eq!(embedder_out.status_code, 200);
+    assert_eq!(
+        embedder_out.response_body,
+        "http://localhost/foo/bar?q=1|foo/bar"
+    );
+
+    // 3. End-to-end TCP server test with `--tenant-dir` + `--host=127.0.0.1`
+    let tmp_dir = std::env::temp_dir().join(format!("slice_issue_105_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let tenant_dir = tmp_dir.join("tenants");
+    let src_dir = tmp_dir.join("src_alpha");
+    std::fs::create_dir_all(&tenant_dir).unwrap();
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(
+        src_dir.join("index.ts"),
+        "Slice.serve((req) => new Response(JSON.stringify({ url: req.url, path: Slice.request().path })));\n",
+    )
+    .unwrap();
+    let alpha_cas = tenant_dir.join("alpha.cas");
+    cmd_pack(&[
+        src_dir.to_string_lossy().to_string(),
+        alpha_cas.to_string_lossy().to_string(),
+    ])
+    .unwrap();
+
+    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let tenant_dir_str = tenant_dir.to_string_lossy().to_string();
+    let alpha_cas_str = alpha_cas.to_string_lossy().to_string();
+    // 4 valid HTTP requests (`max_requests` counts processed valid requests; malformed 400 wire frames close early without panicking)
+    let server_handle = std::thread::spawn(move || {
+        cmd_serve(&[
+            alpha_cas_str,
+            format!("--tenant-dir={}", tenant_dir_str),
+            format!("--port={}", port),
+            "--host=127.0.0.1".to_string(),
+            "--workers=1".to_string(),
+            "--max-requests=4".to_string(),
+        ])
+    });
+
+    let send_raw = |payload: &[u8]| -> String {
+        let mut s = None;
+        for _ in 0..50 {
+            if let Ok(conn) = TcpStream::connect(("127.0.0.1", port)) {
+                s = Some(conn);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let mut s = s.expect("connect to 127.0.0.1 tenant server");
+        s.write_all(payload).unwrap();
+        let mut resp = Vec::new();
+        s.read_to_end(&mut resp).unwrap();
+        String::from_utf8_lossy(&resp).into_owned()
+    };
+
+    // Valid `/t/alpha/foo?k=1` -> preserves leading `/foo`
+    let r1 =
+        send_raw(b"GET /t/alpha/foo?k=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    assert!(r1.starts_with("HTTP/1.1 200 OK"), "r1: {}", r1);
+    assert!(
+        r1.contains(r#""url":"http://localhost/foo?k=1","path":"/foo""#),
+        "r1: {}",
+        r1
+    );
+
+    // Valid `/t/alpha/` -> `"/"`
+    let r2 = send_raw(b"GET /t/alpha/ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    assert!(r2.starts_with("HTTP/1.1 200 OK"), "r2: {}", r2);
+    assert!(
+        r2.contains(r#""url":"http://localhost/","path":"/""#),
+        "r2: {}",
+        r2
+    );
+
+    // Valid `/t/alpha` -> `"/"`
+    let r3 = send_raw(b"GET /t/alpha HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    assert!(r3.starts_with("HTTP/1.1 200 OK"), "r3: {}", r3);
+    assert!(
+        r3.contains(r#""url":"http://localhost/","path":"/""#),
+        "r3: {}",
+        r3
+    );
+
+    // Malformed raw UTF-8 obs-text `/t/\xc3\xa9/x` -> 400 Bad Request, zero worker panic!
+    let r_bad_utf8 = send_raw(b"GET /t/\xc3\xa9/x HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(
+        r_bad_utf8.starts_with("HTTP/1.1 400 Bad Request"),
+        "expected 400 on raw non-ASCII target, got: {}",
+        r_bad_utf8
+    );
+
+    // Malformed non-origin-form `GET foo/bar` -> 400 Bad Request, zero worker panic!
+    let r_bad_origin = send_raw(b"GET foo/bar HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(
+        r_bad_origin.starts_with("HTTP/1.1 400 Bad Request"),
+        "expected 400 on non-origin-form target, got: {}",
+        r_bad_origin
+    );
+
+    // Subsequent valid request succeeds cleanly on the same single-worker server!
+    let r4 = send_raw(
+        b"GET /t/alpha/after-bad HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert!(r4.starts_with("HTTP/1.1 200 OK"), "r4: {}", r4);
+    assert!(
+        r4.contains(r#""url":"http://localhost/after-bad","path":"/after-bad""#),
+        "r4: {}",
+        r4
+    );
+
+    server_handle.join().unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_issue_99_mcp_monotonic_fuel_memory_and_checkpoint_quotas() {
+    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use slice_engine::SliceIsolate;
+    use slice_sandbox::CapabilityToken;
+
+    // 1. Host isolate spawned with tight fuel (25,000), tight memory (64 KiB), and max_checkpoints = 1
+    let mut caps = CapabilityToken::pure_compute();
+    caps.allow_checkpoints = true;
+    caps.max_checkpoints = Some(1);
+
+    let mut isolate = SliceIsolate::spawn("mcp-tight-host", 199, caps.clone(), 25_000, 65_536);
+
+    // Caller tries to self-escalate fuel to 100,000,000 -> must stay bounded by 25,000!
+    let r_fuel = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"let s = 0; for (let i = 0; i < 500000; i++) { s += (i ^ 3); } s","fuel":100000000}}}"#,
+        &mut isolate,
+    )
+    .unwrap();
+    assert!(r_fuel.contains(r#""isError":true"#), "r_fuel: {}", r_fuel);
+    assert!(
+        r_fuel.contains("Fuel") || r_fuel.contains("fuel"),
+        "expected fuel trap, got: {}",
+        r_fuel
+    );
+    assert_eq!(isolate.compartment.fuel_limit, 25_000);
+
+    // Reset consumed fuel for next check while keeping tight 64 KiB memory ceiling
+    isolate.compartment.fuel_consumed = 0;
+
+    // Caller tries to self-escalate memory to 256 MiB AND 4 GiB (testing 32-bit overflow safety) -> must trap at 64 KiB!
+    for requested_mem in [268_435_456u64, 4_294_967_296u64] {
+        let req_line = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"slice_eval_ts","arguments":{{"code":"const big = 'A'.repeat(200000); big.length","memory":{}}}}}}}"#,
+            requested_mem
+        );
+        isolate.compartment.fuel_consumed = 0;
+        let r_mem = handle_mcp_jsonrpc_line(&req_line, &mut isolate).unwrap();
+        assert!(r_mem.contains(r#""isError":true"#), "r_mem: {}", r_mem);
+        assert!(
+            r_mem.contains("Memory") || r_mem.contains("memory"),
+            "expected memory ceiling trap for requested_mem={}, got: {}",
+            requested_mem,
+            r_mem
+        );
+        assert_eq!(isolate.compartment.memory_limit_bytes, 65_536);
+    }
+
+    // 2. Session-wide monotonic checkpoint quota: `slice_checkpoint` -> `slice_eval_ts`
+    let mut iso_a =
+        SliceIsolate::spawn("mcp-ckpt-a", 200, caps.clone(), 1_000_000, 4 * 1024 * 1024);
+    let ck1 = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"slice_checkpoint","arguments":{"action":"checkpoint"}}}"#,
+        &mut iso_a,
+    )
+    .unwrap();
+    assert!(ck1.contains(r#""isError":false"#), "ck1: {}", ck1);
+    assert_eq!(iso_a.checkpoints_taken, 1);
+
+    // Second checkpoint via `slice_eval_ts` (even requesting `maxCheckpoints: 64`) must fail!
+    let ck_eval_blocked = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"Slice.checkpoint()","maxCheckpoints":64}}}"#,
+        &mut iso_a,
+    )
+    .unwrap();
+    assert!(
+        ck_eval_blocked.contains(r#""isError":true"#),
+        "expected checkpoint quota block in eval, got: {}",
+        ck_eval_blocked
+    );
+
+    // 3. Reverse order: `slice_eval_ts("Slice.checkpoint()")` -> `slice_checkpoint` AND second `slice_eval_ts`
+    let mut iso_b = SliceIsolate::spawn("mcp-ckpt-b", 201, caps, 1_000_000, 4 * 1024 * 1024);
+    let eval_ck1 = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"Slice.checkpoint()"}}}"#,
+        &mut iso_b,
+    )
+    .unwrap();
+    assert!(
+        eval_ck1.contains(r#""isError":false"#),
+        "eval_ck1: {}",
+        eval_ck1
+    );
+    assert!(
+        eval_ck1.contains(r#"\"checkpointsTaken\":1"#),
+        "eval_ck1: {}",
+        eval_ck1
+    );
+    assert_eq!(iso_b.checkpoints_taken, 1);
+
+    let host_ck_blocked = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"slice_checkpoint","arguments":{"action":"checkpoint"}}}"#,
+        &mut iso_b,
+    )
+    .unwrap();
+    assert!(
+        host_ck_blocked.contains(r#""isError":true"#)
+            && host_ck_blocked.contains("exceeded max_checkpoints limit"),
+        "expected host checkpoint block, got: {}",
+        host_ck_blocked
+    );
+
+    let eval_ck2_blocked = handle_mcp_jsonrpc_line(
+        r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"Slice.checkpoint()"}}}"#,
+        &mut iso_b,
+    )
+    .unwrap();
+    assert!(
+        eval_ck2_blocked.contains(r#""isError":true"#),
+        "expected second eval checkpoint block, got: {}",
+        eval_ck2_blocked
+    );
+}

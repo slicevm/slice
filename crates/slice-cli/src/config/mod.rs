@@ -400,8 +400,7 @@ impl ResolvedExecutionConfig {
                 arg_idx += 1;
                 continue;
             }
-            if let Some(sf) =
-                match_non_empty_flag_path(args, &mut arg_idx, "--audit-egress-file")?
+            if let Some(sf) = match_non_empty_flag_path(args, &mut arg_idx, "--audit-egress-file")?
             {
                 audit_egress_files.push(sf);
                 arg_idx += 1;

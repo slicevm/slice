@@ -1524,7 +1524,10 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
     #[inline]
     fn is_tier0_disallowed_target_ident(name: &str) -> bool {
         is_tier0_disallowed_ident(name)
-            || matches!(name, "undefined" | "NaN" | "Infinity" | "print" | "env" | "test")
+            || matches!(
+                name,
+                "undefined" | "NaN" | "Infinity" | "print" | "env" | "test"
+            )
     }
 
     fn is_supported_call(

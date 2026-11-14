@@ -344,7 +344,9 @@ allow_env = ["STRIPE_SECRET_KEY=sk_live_subdir_manifest_998877"]
         "--allow-read=/custom".to_string(),
     ];
     let mut cfg_override = ResolvedExecutionConfig::from_cli_args(&args).unwrap();
-    cfg_override.apply_target_path_manifest(&entry_path).unwrap();
+    cfg_override
+        .apply_target_path_manifest(&entry_path)
+        .unwrap();
     assert_eq!(cfg_override.fuel_limit, 777_000);
     assert_eq!(cfg_override.mem_limit, 8_388_608);
     assert!(cfg_override

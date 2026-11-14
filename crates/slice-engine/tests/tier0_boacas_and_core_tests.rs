@@ -1674,3 +1674,74 @@ setTimeout(() => {
     .unwrap();
     assert_eq!(m_micro.stdout, vec!["471|nt:0|nt:319|qm:0|qm:nested|300"]);
 }
+
+#[test]
+fn test_issue_101_tier0_ast_gate_rejects_globals_and_nested_member_writes_while_preserving_ses() {
+    use crate::{
+        compile_source_to_bytecode, is_tier0_slicesnp_compatible_ast, run_source_isolated,
+        SliceIsolate, SNAPSHOT_MAGIC,
+    };
+    use slice_sandbox::{CapabilityToken, SandboxViolation};
+
+    // 1. Global / prelude / nested member mutations and radix/URI calls must NOT be hijacked by Tier-0 SLICESNP
+    for must_use_tier1 in [
+        "process.exitCode = 2;",
+        "process.foo = 1;",
+        "globalThis.x = 1;",
+        "Buffer.poolSize = 4096;",
+        "process++;",
+        "process[0] = 1;",
+        "NaN = 1;",
+        "undefined = 1;",
+        "Infinity++;",
+        "const a = { b: { c: 1 } }; a.b.c = 42;",
+        "parseInt('ff', 16);",
+        "encodeURIComponent('a b');",
+    ] {
+        assert!(
+            !is_tier0_slicesnp_compatible_ast(must_use_tier1),
+            "expected Tier-0 AST gate to reject {:?} and route to Tier-1 Boa",
+            must_use_tier1
+        );
+    }
+
+    // 2. Nested object mutation `a.b.c = 42` executes accurately on Tier-1 Boa instead of being silently dropped
+    let m_nested = run_source_isolated(
+        "nested-prop-101",
+        "const a = { b: { c: 1 } }; a.b.c = 42; console.log(a.b.c);",
+        CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(m_nested.stdout, vec!["42"]);
+
+    // 3. `parseInt(str, radix)` and `encodeURIComponent` execute on Tier-1 Boa with full ES semantics
+    let m_builtins = run_source_isolated(
+        "builtins-101",
+        "console.log(parseInt('ff', 16) + ':' + encodeURIComponent('a b'));",
+        CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(m_builtins.stdout, vec!["255:a%20b"]);
+
+    // 4. SES frozen intrinsic traps (`Object.prototype.polluted = true`) still compile to Tier-0 SLICESNP and trap immediately
+    let ses_attack = "Object.prototype.polluted = true;";
+    assert!(is_tier0_slicesnp_compatible_ast(ses_attack));
+    let ses_bc = compile_source_to_bytecode(ses_attack);
+    assert_eq!(&ses_bc[0..8], SNAPSHOT_MAGIC);
+    let mut ses_iso = SliceIsolate::spawn(
+        "ses-trap-101",
+        1,
+        CapabilityToken::pure_compute(),
+        100_000,
+        256 * 1024,
+    );
+    let err = ses_iso.execute_bytecode(&ses_bc, None).unwrap_err();
+    assert!(matches!(
+        err,
+        SandboxViolation::IntrinsicMutationBlocked { .. }
+    ));
+}

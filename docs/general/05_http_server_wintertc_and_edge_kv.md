@@ -333,8 +333,9 @@ Start `slice serve` with `--tenant-dir=./tenants`:
 slice serve --port=3000 --workers=8 --tenant-dir=./tenants
 ```
 
-1. **Automatic Tenant Resolution & Namespace Sanitization:**
-   - A request with header `X-Slice-Tenant: tenant-alpha` **or** URL path `/t/tenant-alpha/checkout` automatically executes `./tenants/tenant-alpha.cas` inside `tenant-alpha`'s isolated `SliceIsolate` and `Slice.kv` partition.
+1. **Automatic Tenant Resolution, Prefix Stripping & Namespace Sanitization:**
+   - A request with header `X-Slice-Tenant: tenant-alpha` **or** URL path `/t/tenant-alpha/checkout` automatically executes `./tenants/tenant-alpha.cas` inside `tenant-alpha`'s isolated `SliceIsolate` and `Slice.kv` partition, stripping `/t/tenant-alpha` so the guest handler sees normalized origin-form path `/checkout` (`req.url === "http://<host>/checkout"`, or `"/"` for `/t/tenant-alpha` and `/t/tenant-alpha/`).
+   - Inbound request lines strictly enforce RFC 9112 origin-form visible US-ASCII targets (`0x21..=0x7E`, starting with `'/'`), rejecting malformed or raw non-ASCII wire bytes with `400 Bad Request` (`Connection: close`) while isolating per-connection worker threads behind panic-recovery guards.
    - Tenant identifiers are normalized to `[A-Za-z0-9_-]` and interior `.` (stripping `:`, path separators, and `..` sequences so `Slice.kv` `<tenant>:<key>` namespaces cannot collide and `--tenant-dir` lookups remain confined).
    - Unknown tenants automatically fall back to `./tenants/default.cas` (if present), sharing a single deduplicated bundle inside a bounded `1,024`-entry per-worker cache.
 2. **Zero-Downtime Atomic Hot-Swapping:**

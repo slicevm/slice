@@ -360,8 +360,8 @@ console.log("Running with self-contained inline directives!");
 | **Exec Binaries (`ExecCap`)** | `[]` (Deny-All) | `[capabilities] allow_exec = [...]` | `// @slice-allow-exec: ["/usr/bin/git"]` | `SLICE_ALLOW_EXEC=/usr/bin/git` | `--allow-exec=/usr/bin/git` |
 | **Guest Checkpoints** | `true` (`max = 64`) | `[capabilities] allow_checkpoints` / `max_checkpoints` | `// @slice-checkpoints: false` / `// @slice-max-checkpoints: 8` | `SLICE_CHECKPOINTS=0` / `SLICE_MAX_CHECKPOINTS=8` | `--no-checkpoints` / `--max-checkpoints=8` |
 | **Env Variables** | `{}` (Zero access) | `[capabilities.env] KEY = "VAL"` | `// @slice-allow-env: ["KEY=VAL"]` | `SLICE_ALLOW_ENV=KEY=VAL` | `--allow-env=KEY=VAL` |
-| **Dotenv Vault File** | `None` | `[capabilities] env_file = ".env"` | `// @slice-env-file: .env` | `SLICE_ENV_FILE=.env` | `--env-file=.env` |
-| **Egress DLP Secrets** | Auto from `.env` | `[capabilities] audit_egress = [...]` | `// @slice-audit-egress: ["sec"]` | `SLICE_AUDIT_EGRESS=sec1,sec2` | `--audit-egress=sec1` / `--audit-egress-file=path` |
+| **Dotenv Vault File** | `None` | `[capabilities] env_file = ".env"` | `// @slice-env-file: .env` | `SLICE_ENV_FILE=.env` | `--env-file=.env` / `--env-file .env` |
+| **Egress DLP Secrets** | Auto from `.env` | `[capabilities] audit_egress = [...]` | `// @slice-audit-egress: ["sec"]` | `SLICE_AUDIT_EGRESS=sec1,sec2` / `SLICE_AUDIT_EGRESS_FILE=path` | `--audit-egress=sec1` / `--audit-egress-file=path` |
 | **Trust Inline Directives** | `false` (Attenuate only) | `[capabilities] trust_directives = true` | *(Host-only setting)* | `SLICE_TRUST_DIRECTIVES=1` (`0`) | `--trust-directives` / `--no-directives` |
 | **HTTP Server Port** | `3000` | `[server] port = 3000` | `// @slice-port: 3000` | `SLICE_PORT=3000` | `--port=3000` |
 | **HTTP Worker Threads** | `clamp(cpus, 1, 8)` | `[server] workers = 4` | `// @slice-workers: 4` | `SLICE_WORKERS=4` | `--workers=4` |
@@ -400,7 +400,7 @@ slice init ./my-sveltekit-app --template=sveltekit
 ---
 
 ### 7.2 `slice run [target | -] [flags] [-- <args...>]`
-Executes a `.ts`/`.tsx`/`.js`/`.jsx` file, a project folder (with `package.json`, `slice.toml`, or `src/index.ts` + `node_modules/`), a pre-packed `.cas` archive, piped `stdin` (`slice -` or `slice run -`), or an inline code snippet (`-e` / `-p`). If `[target]` is omitted, executes `entrypoint` from `./slice.toml` (or reads from `stdin` when `stdin` is piped). Top-level shorthands (`slice <file.ts>`, `slice -e <code>`, `slice -p <code>`, `slice -`) route directly to `slice run`.
+Executes a `.ts`/`.tsx`/`.js`/`.jsx` file, a project folder (with `package.json`, `slice.toml`, or `src/index.ts` + `node_modules/`), a pre-packed `.cas` archive, piped `stdin` (`slice -` or `slice run -`), or an inline code snippet (`-e` / `-p`), propagating both `process.exit(code)` and graceful `process.exitCode` to the OS exit status. If `[target]` is omitted, executes `entrypoint` from `./slice.toml` (or reads from `stdin` when `stdin` is piped). Top-level shorthands (`slice <file.ts>`, `slice -e <code>`, `slice -p <code>`, `slice -`) route directly to `slice run`.
 
 | Flag | Description |
 | :--- | :--- |
@@ -499,6 +499,7 @@ Launches the multi-tenant WinterTC HTTP/1.1 `Keep-Alive`, TLS 1.3, SSE, and WebS
 
 | Flag | Description |
 | :--- | :--- |
+| `--host=<addr>` | TCP bind address (default: `0.0.0.0`, e.g. `--host=127.0.0.1` for loopback-only binding). |
 | `--port=<u16>` | TCP listening port (default: `3000`, or `[server] port` in `slice.toml` / `SLICE_PORT`). |
 | `--workers=<usize>` | Number of shared-nothing worker threads (default: `clamp(num_cpus, 1, 8)`, or `[server] workers`). |
 | `--static=<dir>` | Ingest and serve static web assets from `<dir>` out of memory with BLAKE3 `ETag` `304` support (`< 2 us`). |
