@@ -584,7 +584,7 @@
       cancel: function() {
         markClosed();
       }
-    });
+    }, { highWaterMark: 0 });
 
     var writable = new WritableStream({
       write: function(chunk) {
