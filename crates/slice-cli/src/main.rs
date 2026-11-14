@@ -52,10 +52,13 @@ fn main() -> Result<()> {
     let builder = std::thread::Builder::new()
         .name("slice-main".to_string())
         .stack_size(16 * 1024 * 1024);
-    let handle = builder.spawn(cli_entrypoint)?;
+    let handle = builder.spawn(|| {
+        let res = cli_entrypoint();
+        let exit_code = LAST_CLI_EXIT_CODE.load(std::sync::atomic::Ordering::Relaxed);
+        res.map(|()| exit_code)
+    })?;
     match handle.join() {
-        Ok(Ok(())) => {
-            let exit_code = LAST_CLI_EXIT_CODE.load(std::sync::atomic::Ordering::Relaxed);
+        Ok(Ok(exit_code)) => {
             if exit_code != 0 {
                 let _ = std::io::Write::flush(&mut std::io::stdout());
                 let _ = std::io::Write::flush(&mut std::io::stderr());

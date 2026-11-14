@@ -6,13 +6,32 @@ use anyhow::{bail, Context, Result};
 use slice_cas::MappedCasArchive;
 use slice_engine::{compile_source_to_bytecode, SliceIsolate};
 use slice_sandbox::SliceManifest;
+use std::cell::Cell;
 use std::env;
 use std::io::Read;
 use std::path::Path;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-pub(crate) static LAST_CLI_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
+thread_local! {
+    static TLS_LAST_CLI_EXIT_CODE: Cell<i32> = const { Cell::new(0) };
+}
+
+pub(crate) struct ThreadLocalExitCode;
+
+impl ThreadLocalExitCode {
+    #[inline]
+    pub(crate) fn load(&self, _ordering: Ordering) -> i32 {
+        TLS_LAST_CLI_EXIT_CODE.with(Cell::get)
+    }
+
+    #[inline]
+    pub(crate) fn store(&self, val: i32, _ordering: Ordering) {
+        TLS_LAST_CLI_EXIT_CODE.with(|slot| slot.set(val));
+    }
+}
+
+pub(crate) static LAST_CLI_EXIT_CODE: ThreadLocalExitCode = ThreadLocalExitCode;
 
 pub(crate) fn cmd_check(args: &[String]) -> Result<()> {
     LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);

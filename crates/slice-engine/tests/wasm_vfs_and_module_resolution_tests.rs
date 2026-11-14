@@ -1364,3 +1364,315 @@ fn test_wasm_lazy_memory_buffer_materialization_and_sync() {
     .unwrap();
     assert_eq!(metrics.stdout, vec!["77:100:100:525:1:131072:525"]);
 }
+
+#[test]
+fn test_wave3_issues_108_109_110_111_inode_vfs_fd_table_and_cwd_anchoring() {
+    use slice_sandbox::cached_normalized_cwd;
+
+    let host_dir =
+        std::env::temp_dir().join(format!("slice_wave3_host_vfs_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&host_dir);
+    std::fs::create_dir_all(host_dir.join("existing_host_dir")).unwrap();
+    let host_source = host_dir.join("host-source.txt");
+    std::fs::write(&host_source, b"host-payload").unwrap();
+    let host_dir_norm = host_dir.to_string_lossy().replace('\\', "/");
+    let host_source_norm = host_source.to_string_lossy().replace('\\', "/");
+
+    let cwd_norm = cached_normalized_cwd();
+    let rel_subdir = format!("{}/target/wave3_rel_vfs_{}", cwd_norm, std::process::id());
+    let rel_local = format!("target/wave3_rel_vfs_{}", std::process::id());
+
+    let script = format!(
+        r##"
+import fs from "node:fs";
+import path from "node:path";
+import {{ Worker }} from "node:worker_threads";
+
+async function runWave3VfsSuite() {{
+  const root = "/tmp/wave3_vfs";
+  fs.mkdirSync(root, {{ recursive: true }});
+
+  // ---------------------------------------------------------------------------
+  // 1. Issue #108: Magic-prefix binary files are NEVER confused with symlinks,
+  //    lstatSync reports exact symlink target byte length, and Worker inherits
+  //    typed VfsEntryKind entries cleanly.
+  // ---------------------------------------------------------------------------
+  const magicTarget = root + "/real_target.txt";
+  fs.writeFileSync(magicTarget, "REAL_TARGET_BODY_99");
+  const magicPayload = Buffer.concat([
+    Buffer.from("\x00__SLICE_SYMLINK__:" + magicTarget),
+    Buffer.from([0x00, 0xde, 0xad, 0xbe, 0xef]),
+  ]);
+
+  const binWrite = root + "/magic_write.bin";
+  fs.writeFileSync(binWrite, magicPayload);
+  const binAppend = root + "/magic_append.bin";
+  fs.appendFileSync(binAppend, magicPayload.subarray(0, 10));
+  fs.appendFileSync(binAppend, magicPayload.subarray(10));
+  const binCopy = root + "/magic_copy.bin";
+  fs.copyFileSync(binWrite, binCopy);
+  const binRename = root + "/magic_renamed.bin";
+  fs.renameSync(binCopy, binRename);
+
+  for (const p of [binWrite, binAppend, binRename]) {{
+    const ls = fs.lstatSync(p);
+    const st = fs.statSync(p);
+    if (ls.isSymbolicLink() || !ls.isFile() || !st.isFile()) {{
+      throw new Error("#108 magic-prefixed regular file misclassified: " + p);
+    }}
+    const readBack = fs.readFileSync(p);
+    if (Buffer.compare(readBack, magicPayload) !== 0) {{
+      throw new Error("#108 magic-prefixed payload corrupted: " + p);
+    }}
+    let readlinkCode = "";
+    try {{ fs.readlinkSync(p); }} catch (e) {{ readlinkCode = e.code; }}
+    if (readlinkCode !== "EINVAL") {{
+      throw new Error("#108 expected EINVAL on readlinkSync(regular), got: " + readlinkCode);
+    }}
+  }}
+
+  const realSym = root + "/actual_link.txt";
+  fs.symlinkSync(magicTarget, realSym);
+  const symLstat = fs.lstatSync(realSym);
+  const symStat = fs.statSync(realSym);
+  if (!symLstat.isSymbolicLink() || symLstat.isFile()) {{
+    throw new Error("#108 real symlink lstatSync failed");
+  }}
+  if (symLstat.size !== Buffer.byteLength(magicTarget)) {{
+    throw new Error("#108 lstatSync.size mismatch: " + symLstat.size);
+  }}
+  if (symStat.size !== 19 || fs.readFileSync(realSym, "utf8") !== "REAL_TARGET_BODY_99") {{
+    throw new Error("#108 statSync/readFileSync through real symlink failed");
+  }}
+
+  // Verify Worker VFS snapshot preserves typed file vs symlink entries
+  const workerScript = root + "/worker_check.js";
+  fs.writeFileSync(
+    workerScript,
+    `const fs = require("node:fs");
+     const {{ parentPort }} = require("node:worker_threads");
+     const lsBin = fs.lstatSync({bin_write_lit});
+     const lsSym = fs.lstatSync({real_sym_lit});
+     parentPort.postMessage({{
+       binIsSym: lsBin.isSymbolicLink(),
+       binLen: fs.readFileSync({bin_write_lit}).length,
+       symIsSym: lsSym.isSymbolicLink(),
+       symBody: fs.readFileSync({real_sym_lit}, "utf8"),
+     }});`
+  );
+  const workerMsg = await new Promise((resolve, reject) => {{
+    const w = new Worker(workerScript);
+    w.on("message", resolve);
+    w.on("error", reject);
+  }});
+  if (
+    workerMsg.binIsSym !== false ||
+    workerMsg.binLen !== magicPayload.length ||
+    workerMsg.symIsSym !== true ||
+    workerMsg.symBody !== "REAL_TARGET_BODY_99"
+  ) {{
+    throw new Error("#108 worker VFS snapshot mismatch: " + JSON.stringify(workerMsg));
+  }}
+
+  // ---------------------------------------------------------------------------
+  // 2. Issue #109: Unified POSIX preconditions across VFS and host entries
+  // ---------------------------------------------------------------------------
+  const hostSource = {host_src_lit};
+  const hostExistingDir = {host_dir_lit} + "/existing_host_dir";
+  const destDir = root + "/dest_dir";
+  fs.mkdirSync(destDir, {{ recursive: true }});
+  fs.writeFileSync(destDir + "/child", "keep");
+
+  const expectCode = (fn, expected) => {{
+    let got = "NO_THROW";
+    try {{ fn(); }} catch (e) {{ got = e && e.code ? e.code : String(e); }}
+    if (got !== expected) {{
+      throw new Error("#109 expected " + expected + ", got " + got);
+    }}
+  }};
+
+  // Exact #109 repro: host regular file renamed onto VFS directory
+  expectCode(() => fs.renameSync(hostSource, destDir), "EISDIR");
+  if (!fs.statSync(destDir).isDirectory()) throw new Error("#109 destDir lost directory status");
+  if (fs.readdirSync(destDir).join(",") !== "child") throw new Error("#109 destDir children corrupted");
+  if (fs.readFileSync(destDir + "/child", "utf8") !== "keep") throw new Error("#109 child corrupted");
+  if (fs.readFileSync(hostSource, "utf8") !== "host-payload") throw new Error("#109 hostSource lost");
+
+  // Sibling #109 preconditions across VFS & host
+  const vfsFile = root + "/regular.txt";
+  fs.writeFileSync(vfsFile, "abc");
+  expectCode(() => fs.renameSync(vfsFile, destDir), "EISDIR");
+  expectCode(() => fs.renameSync(vfsFile, hostExistingDir), "EISDIR");
+  expectCode(() => fs.renameSync(destDir, vfsFile), "ENOTDIR");
+  expectCode(() => fs.renameSync(destDir, hostSource), "ENOTDIR");
+
+  const otherNonEmpty = root + "/non_empty_target";
+  fs.mkdirSync(otherNonEmpty, {{ recursive: true }});
+  fs.writeFileSync(otherNonEmpty + "/item", "1");
+  expectCode(() => fs.renameSync(destDir, otherNonEmpty), "ENOTEMPTY");
+  expectCode(() => fs.renameSync(destDir, destDir + "/sub"), "EINVAL");
+
+  const emptyTarget = root + "/empty_target";
+  fs.mkdirSync(emptyTarget, {{ recursive: true }});
+  const movableDir = root + "/movable_dir";
+  fs.mkdirSync(movableDir, {{ recursive: true }});
+  fs.writeFileSync(movableDir + "/moved.txt", "ok-moved");
+  fs.renameSync(movableDir, emptyTarget);
+  if (fs.existsSync(movableDir) || fs.readFileSync(emptyTarget + "/moved.txt", "utf8") !== "ok-moved") {{
+    throw new Error("#109 dir -> emptyDir rename failed");
+  }}
+
+  expectCode(() => fs.writeFileSync(destDir, "x"), "EISDIR");
+  expectCode(() => fs.appendFileSync(destDir, "x"), "EISDIR");
+  expectCode(() => fs.copyFileSync(vfsFile, destDir), "EISDIR");
+  expectCode(() => fs.truncateSync(destDir, 0), "EISDIR");
+  expectCode(() => fs.symlinkSync(vfsFile, vfsFile), "EEXIST");
+  expectCode(() => fs.symlinkSync(vfsFile, destDir), "EEXIST");
+
+  // ---------------------------------------------------------------------------
+  // 3. Issue #110: Canonical CWD anchoring across realpathSync, relative VFS
+  //    paths, process.cwd(), and path.resolve()
+  // ---------------------------------------------------------------------------
+  const relDir = {rel_local_lit};
+  const relFile = relDir + "/rel.txt";
+  fs.mkdirSync(relDir, {{ recursive: true }});
+  fs.writeFileSync(relFile, "payload-110");
+  const absResolved = fs.realpathSync(relFile);
+  const pathResolved = path.resolve(relFile);
+  if (absResolved !== pathResolved) {{
+    throw new Error("#110 realpathSync vs path.resolve mismatch: " + absResolved + " !== " + pathResolved);
+  }}
+  if (!fs.existsSync(absResolved) || fs.readFileSync(absResolved, "utf8") !== "payload-110") {{
+    throw new Error("#110 readFileSync(realpathSync(rel)) failed");
+  }}
+  fs.unlinkSync(absResolved);
+  if (fs.existsSync(relFile) || fs.existsSync(absResolved)) {{
+    throw new Error("#110 unlinkSync(abs) did not remove relative VFS entry");
+  }}
+
+  // ---------------------------------------------------------------------------
+  // 4. Issue #111: Rust inode-backed open FD table across renameSync, path
+  //    replacement, and unlinkSync while open
+  // ---------------------------------------------------------------------------
+  const fdA = root + "/fd_a.txt";
+  const fdB = root + "/fd_b.txt";
+  fs.writeFileSync(fdA, "payload");
+  const fd1 = fs.openSync(fdA, "r");
+  fs.renameSync(fdA, fdB);
+  const rbuf1 = Buffer.alloc(7);
+  const n1 = fs.readSync(fd1, rbuf1, 0, 7, 0);
+  // Write a brand-new file at old path fdA while fd1 is still open!
+  fs.writeFileSync(fdA, "REPLACE");
+  const rbuf2 = Buffer.alloc(7);
+  const n2 = fs.readSync(fd1, rbuf2, 0, 7, 0);
+  fs.closeSync(fd1);
+
+  // Atomic rename replacement over open file path
+  const fdAtomic = root + "/fd_atomic.txt";
+  const fdTmp = root + "/fd_atomic.tmp";
+  fs.writeFileSync(fdAtomic, "OLD_INO");
+  const fdOpenOld = fs.openSync(fdAtomic, "r");
+  fs.writeFileSync(fdTmp, "NEW_INO");
+  fs.renameSync(fdTmp, fdAtomic);
+  const oldBuf = Buffer.alloc(7);
+  fs.readSync(fdOpenOld, oldBuf, 0, 7, 0);
+  fs.closeSync(fdOpenOld);
+  const newPathBody = fs.readFileSync(fdAtomic, "utf8");
+
+  // Unlink while FD remains open: read/write/fstat/ftruncate continue until closeSync
+  const fdUnlinkedPath = root + "/fd_unlinked.txt";
+  const fdUnlinked = fs.openSync(fdUnlinkedPath, "w+");
+  fs.writeSync(fdUnlinked, Buffer.from("ephemeral-inode"), 0, 15, 0);
+  fs.unlinkSync(fdUnlinkedPath);
+  const existsWhileOpen = fs.existsSync(fdUnlinkedPath);
+  const sizeBeforeTrunc = fs.fstatSync(fdUnlinked).size;
+  const ubuf = Buffer.alloc(15);
+  fs.readSync(fdUnlinked, ubuf, 0, 15, 0);
+  fs.ftruncateSync(fdUnlinked, 9);
+  const sizeAfterTrunc = fs.fstatSync(fdUnlinked).size;
+  fs.closeSync(fdUnlinked);
+  let closedErr = "";
+  try {{ fs.fstatSync(fdUnlinked); }} catch (e) {{ closedErr = e.code; }}
+
+  console.log(JSON.stringify({{
+    ok108: true,
+    ok109: true,
+    ok110: process.cwd() === {cwd_lit},
+    fdRenameRead: n1 === 7 ? rbuf1.toString("utf8") : "bad",
+    fdReplacementRead: n2 === 7 ? rbuf2.toString("utf8") : "bad",
+    fdAtomicOld: oldBuf.toString("utf8"),
+    fdAtomicNew: newPathBody,
+    unlinked: {{
+      existsWhileOpen,
+      sizeBeforeTrunc,
+      readBody: ubuf.toString("utf8"),
+      sizeAfterTrunc,
+      closedErr,
+    }},
+  }}));
+}}
+
+runWave3VfsSuite().catch((e) => console.log(JSON.stringify({{ __err: String(e && e.stack || e) }})));
+"##,
+        bin_write_lit = serde_json::to_string("/tmp/wave3_vfs/magic_write.bin").unwrap(),
+        real_sym_lit = serde_json::to_string("/tmp/wave3_vfs/actual_link.txt").unwrap(),
+        host_src_lit = serde_json::to_string(&host_source_norm).unwrap(),
+        host_dir_lit = serde_json::to_string(&host_dir_norm).unwrap(),
+        rel_local_lit = serde_json::to_string(&rel_local).unwrap(),
+        cwd_lit = serde_json::to_string(cwd_norm).unwrap(),
+    );
+
+    let test_dir =
+        std::env::temp_dir().join(format!("slice_wave3_vfs_bundle_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&test_dir);
+    std::fs::create_dir_all(&test_dir).unwrap();
+    let entry_path = test_dir.join("index.mjs");
+    std::fs::write(&entry_path, &script).unwrap();
+    let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_path).unwrap();
+    let _ = std::fs::remove_dir_all(&test_dir);
+
+    let caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/tmp/wave3_vfs")
+        .with_write_prefix("/tmp/wave3_vfs")
+        .with_read_prefix(&host_dir_norm)
+        .with_write_prefix(&host_dir_norm)
+        .with_read_prefix(&rel_subdir)
+        .with_write_prefix(&rel_subdir);
+
+    let m = run_source_isolated(
+        "wave3-vfs-suite",
+        &bundled,
+        caps,
+        5_000_000,
+        16 * 1024 * 1024,
+    )
+    .expect("wave3 vfs execution");
+    let _ = std::fs::remove_dir_all(&host_dir);
+
+    let out: serde_json::Value =
+        serde_json::from_str(m.stdout.first().expect("stdout line")).expect("json output");
+    assert!(out.get("__err").is_none(), "wave3 vfs error: {}", out);
+    assert_eq!(out["ok108"], true);
+    assert_eq!(out["ok109"], true);
+    assert_eq!(out["ok110"], true);
+    assert_eq!(out["fdRenameRead"], "payload");
+    assert_eq!(out["fdReplacementRead"], "payload");
+    assert_eq!(out["fdAtomicOld"], "OLD_INO");
+    assert_eq!(out["fdAtomicNew"], "NEW_INO");
+    assert_eq!(out["unlinked"]["existsWhileOpen"], false);
+    assert_eq!(out["unlinked"]["sizeBeforeTrunc"], 15);
+    assert_eq!(out["unlinked"]["readBody"], "ephemeral-inode");
+    assert_eq!(out["unlinked"]["sizeAfterTrunc"], 9);
+    assert_eq!(out["unlinked"]["closedErr"], "EBADF");
+
+    // Also verify zero-disclosure `process.cwd()` in pure_compute() sandboxes
+    let pure_m = run_source_isolated(
+        "wave3-pure-cwd",
+        "console.log(process.cwd());",
+        CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(pure_m.stdout, vec!["/workspace"]);
+}

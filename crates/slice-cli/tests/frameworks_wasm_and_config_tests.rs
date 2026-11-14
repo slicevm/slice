@@ -993,3 +993,174 @@ console.log(JSON.stringify({
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn test_wave3_cli_matrix_direct_cas_cold_and_warm_across_issues_108_to_113() {
+    use crate::commands::pack_and_compile::cmd_pack;
+    use crate::commands::run::{cmd_run, LAST_CLI_EXIT_CODE};
+    use slice_sandbox::cached_normalized_cwd;
+    use std::sync::atomic::Ordering;
+
+    let tmp_dir = env::temp_dir().join(format!("slice_wave3_cli_matrix_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let host_src = tmp_dir.join("host-src.txt");
+    std::fs::write(&host_src, b"host-payload").unwrap();
+    let tmp_dir_norm = tmp_dir.to_string_lossy().replace('\\', "/");
+    let host_src_norm = host_src.to_string_lossy().replace('\\', "/");
+    let cwd_norm = cached_normalized_cwd();
+    let rel_dir_local = format!("target/wave3_cli_rel_{}", std::process::id());
+    let rel_dir_abs = format!("{}/{}", cwd_norm, rel_dir_local);
+
+    let entry_ts = tmp_dir.join("wave3_matrix.ts");
+    let cas_path = tmp_dir.join("wave3_matrix.cas");
+
+    let script = format!(
+        r#"import fs from "node:fs";
+import crypto from "node:crypto";
+
+const root = "/tmp/wave3_cli";
+fs.mkdirSync(root, {{ recursive: true }});
+
+// #108: magic symlink prefix in regular file
+const magicFile = root + "/magic.bin";
+const magicBytes = Buffer.from("\x00__SLICE_SYMLINK__:" + root + "/none");
+fs.writeFileSync(magicFile, magicBytes);
+const magicIsFile = !fs.lstatSync(magicFile).isSymbolicLink() && fs.lstatSync(magicFile).isFile();
+
+// #109: host file -> VFS dir throws EISDIR without mutating dir
+const destDir = root + "/dir109";
+fs.mkdirSync(destDir, {{ recursive: true }});
+fs.writeFileSync(destDir + "/child", "keep");
+let renameErr = "";
+try {{ fs.renameSync({host_src_lit}, destDir); }} catch (e: any) {{ renameErr = e.code; }}
+const dirIntact = fs.statSync(destDir).isDirectory() && fs.readFileSync(destDir + "/child", "utf8") === "keep";
+
+// #110: realpathSync on relative VFS file roundtrips via readFileSync
+const relFile = {rel_dir_lit} + "/item.txt";
+fs.mkdirSync({rel_dir_lit}, {{ recursive: true }});
+fs.writeFileSync(relFile, "rel-ok");
+const absPath = fs.realpathSync(relFile);
+const relRoundtrip = fs.readFileSync(absPath, "utf8") === "rel-ok";
+fs.unlinkSync(absPath);
+
+// #111: open FD survives rename, path replacement, and unlink
+const fdPathA = root + "/fda.txt";
+const fdPathB = root + "/fdb.txt";
+fs.writeFileSync(fdPathA, "payload");
+const fd = fs.openSync(fdPathA, "r");
+fs.renameSync(fdPathA, fdPathB);
+fs.writeFileSync(fdPathA, "REPLACE");
+const rbuf = Buffer.alloc(7);
+fs.readSync(fd, rbuf, 0, 7, 0);
+fs.unlinkSync(fdPathB);
+const fstatAfterUnlink = fs.fstatSync(fd).size;
+fs.closeSync(fd);
+
+// #112: signed-delta Slice.kv.set overwrite inside 32 KiB sandbox
+const kvSub = Slice.evalSandbox(
+  `const value = "x".repeat(8000); for (let i = 0; i < 20; i++) Slice.kv.set("k", value); Slice.kv.get("k").length`,
+  {{ memoryBytes: 32768, fuel: 1000000, tenantId: "cli-112" }}
+);
+
+// #113: 48-bit randomInt above 2^32
+let highBit = false;
+for (let i = 0; i < 128; i++) {{
+  if (crypto.randomInt(0, 2 ** 40) >= 2 ** 32) {{ highBit = true; break; }}
+}}
+
+const summary = {{
+  magicIsFile,
+  renameErr,
+  dirIntact,
+  relRoundtrip,
+  fdRead: rbuf.toString("utf8"),
+  fstatAfterUnlink,
+  kvSub: kvSub.ok ? kvSub.returnValue : "fail",
+  highBit,
+}};
+if (
+  !summary.magicIsFile ||
+  summary.renameErr !== "EISDIR" ||
+  !summary.dirIntact ||
+  !summary.relRoundtrip ||
+  summary.fdRead !== "payload" ||
+  summary.fstatAfterUnlink !== 7 ||
+  summary.kvSub !== "8000" ||
+  !summary.highBit
+) {{
+  throw new Error("Wave 3 CLI matrix failed: " + JSON.stringify(summary));
+}}
+console.log(JSON.stringify(summary));
+"#,
+        host_src_lit = serde_json::to_string(&host_src_norm).unwrap(),
+        rel_dir_lit = serde_json::to_string(&rel_dir_local).unwrap(),
+    );
+    std::fs::write(&entry_ts, &script).unwrap();
+
+    let fs_args = vec![
+        "--allow-read=/tmp/wave3_cli".to_string(),
+        format!("--allow-read={}", tmp_dir_norm),
+        format!("--allow-read={}", rel_dir_abs),
+        "--allow-write=/tmp/wave3_cli".to_string(),
+        format!("--allow-write={}", tmp_dir_norm),
+        format!("--allow-write={}", rel_dir_abs),
+    ];
+
+    // 1. Direct `.ts` CLI run
+    let mut run_ts_args = vec![entry_ts.to_string_lossy().to_string()];
+    run_ts_args.extend(fs_args.iter().cloned());
+    run_ts_args.push("--quiet".to_string());
+    cmd_run(&run_ts_args).unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    // 2. Pack `.ts` -> `.cas` and run both cold and `--warm`
+    cmd_pack(&[
+        entry_ts.to_string_lossy().to_string(),
+        cas_path.to_string_lossy().to_string(),
+    ])
+    .unwrap();
+
+    let mut run_cas_cold_args = vec![cas_path.to_string_lossy().to_string()];
+    run_cas_cold_args.extend(fs_args.iter().cloned());
+    run_cas_cold_args.push("--quiet".to_string());
+    cmd_run(&run_cas_cold_args).unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    let mut run_cas_warm_args = vec![cas_path.to_string_lossy().to_string(), "--warm".to_string()];
+    run_cas_warm_args.extend(fs_args);
+    run_cas_warm_args.push("--quiet".to_string());
+    cmd_run(&run_cas_warm_args).unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    // 3. Verify exact JSON stdout across cold + warm MappedCasArchive turns
+    let expected_json = r#"{"magicIsFile":true,"renameErr":"EISDIR","dirIntact":true,"relRoundtrip":true,"fdRead":"payload","fstatAfterUnlink":7,"kvSub":"8000","highBit":true}"#;
+    let archive = MappedCasArchive::open(&cas_path).unwrap();
+    let entry = archive.entrypoint_blob().unwrap();
+    let caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/tmp/wave3_cli")
+        .with_write_prefix("/tmp/wave3_cli")
+        .with_read_prefix(&tmp_dir_norm)
+        .with_write_prefix(&tmp_dir_norm)
+        .with_read_prefix(&rel_dir_abs)
+        .with_write_prefix(&rel_dir_abs);
+    let mut iso = SliceIsolate::spawn("wave3-cli-iso", 1, caps, 5_000_000, 8 * 1024 * 1024);
+    let cold_m = iso
+        .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+        .unwrap();
+    assert_eq!(
+        cold_m.stdout.first().map(String::as_str),
+        Some(expected_json)
+    );
+
+    iso.reset_for_request("wave3-cli-iso", 2, 5_000_000, 8 * 1024 * 1024);
+    let warm_m = iso
+        .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+        .unwrap();
+    assert_eq!(
+        warm_m.stdout.first().map(String::as_str),
+        Some(expected_json)
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
