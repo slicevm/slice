@@ -737,6 +737,107 @@ export default {
     group.finish();
 }
 
+fn bench_wave5_wasm_numeric_i64_and_shared_store(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wave5_wasm_runtime");
+
+    // 1. Pure numeric i64 Wasm calls (zero-copy fast path without memory.buffer materialization)
+    let wasm_i64_src = r#"
+const idBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 6, 1, 96, 1, 126, 1, 126, 3, 2, 1, 0, 7, 12, 1, 8, 105, 100, 101, 110, 116, 105, 116, 121, 0, 0, 10, 6, 1, 4, 0, 32, 0, 11]);
+const mod = new WebAssembly.Module(idBytes);
+export default {
+    fetch() {
+        const id = new WebAssembly.Instance(mod).exports.identity;
+        let acc = 0n;
+        const hi = 1n << 128n;
+        for (let i = 0n; i < 64n; i++) {
+            acc += id(hi + i);
+        }
+        return new Response(String(acc));
+    }
+};
+"#;
+    let wasm_i64_bundled = slice_cas::strip_typescript_and_normalize(wasm_i64_src, true);
+    let wasm_i64_bc = compile_source_to_bytecode(&wasm_i64_bundled);
+
+    group.bench_function("wasm_i64_numeric_zero_copy_64_calls", |b| {
+        let mut iso = SliceIsolate::spawn(
+            "bench-wasm-i64",
+            1,
+            CapabilityToken::pure_compute(),
+            10_000_000,
+            16 * 1024 * 1024,
+        );
+        let req = HttpRequestContext {
+            method: "GET",
+            path: "/",
+            query: "",
+            tenant_id: "bench-wasm-i64",
+            body: "",
+            body_bytes: None,
+            headers: &[("host", "localhost")],
+        };
+        let mut slot = 1u32;
+        b.iter(|| {
+            slot = slot.wrapping_add(1);
+            iso.reset_for_request("bench-wasm-i64", slot, 10_000_000, 16 * 1024 * 1024);
+            let out = iso
+                .execute_http_request_fast(black_box(&wasm_i64_bc), None, black_box(&req))
+                .expect("wasm i64 bench");
+            black_box(out.response_body.len())
+        });
+    });
+
+    // 2. Shared WebAssembly.Global & Memory synchronization across two instances
+    let wasm_shared_src = r#"
+const globBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 9, 2, 96, 0, 1, 127, 96, 1, 127, 0, 2, 10, 1, 3, 101, 110, 118, 1, 103, 3, 127, 1, 3, 3, 2, 0, 1, 7, 17, 3, 3, 103, 101, 116, 0, 0, 3, 115, 101, 116, 0, 1, 1, 103, 3, 0, 10, 13, 2, 4, 0, 35, 0, 11, 6, 0, 32, 0, 36, 0, 11]);
+const mod = new WebAssembly.Module(globBytes);
+export default {
+    fetch() {
+        const g = new WebAssembly.Global({ value: "i32", mutable: true }, 1);
+        const a = new WebAssembly.Instance(mod, { env: { g } });
+        const b = new WebAssembly.Instance(mod, { env: { g } });
+        for (let i = 0; i < 32; i++) {
+            a.exports.set(b.exports.get() + 2);
+            g.value = g.value + 1;
+        }
+        return new Response(String(b.exports.get()));
+    }
+};
+"#;
+    let wasm_shared_bundled = slice_cas::strip_typescript_and_normalize(wasm_shared_src, true);
+    let wasm_shared_bc = compile_source_to_bytecode(&wasm_shared_bundled);
+
+    group.bench_function("wasm_shared_global_two_instances_32_iters", |b| {
+        let mut iso = SliceIsolate::spawn(
+            "bench-wasm-shared",
+            1,
+            CapabilityToken::pure_compute(),
+            10_000_000,
+            16 * 1024 * 1024,
+        );
+        let req = HttpRequestContext {
+            method: "GET",
+            path: "/",
+            query: "",
+            tenant_id: "bench-wasm-shared",
+            body: "",
+            body_bytes: None,
+            headers: &[("host", "localhost")],
+        };
+        let mut slot = 1u32;
+        b.iter(|| {
+            slot = slot.wrapping_add(1);
+            iso.reset_for_request("bench-wasm-shared", slot, 10_000_000, 16 * 1024 * 1024);
+            let out = iso
+                .execute_http_request_fast(black_box(&wasm_shared_bc), None, black_box(&req))
+                .expect("wasm shared bench");
+            black_box(out.response_body.len())
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_boacas_and_automaton,
@@ -745,6 +846,7 @@ criterion_group!(
     bench_vfs_and_stream_operations,
     bench_wave3_als_intl_crypto_and_buffer,
     bench_wave4_multipart_clone_and_binary_http,
+    bench_wave5_wasm_numeric_i64_and_shared_store,
     bench_http_cli_and_host_fs
 );
 criterion_main!(benches);

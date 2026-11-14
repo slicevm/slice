@@ -1358,3 +1358,124 @@ runWave4();
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn test_wave5_cli_source_packed_cas_cold_and_warm_wasm_parity() {
+    use crate::commands::pack_and_compile::cmd_pack;
+    use crate::commands::run::{cmd_run, LAST_CLI_EXIT_CODE};
+    use std::sync::atomic::Ordering;
+
+    let tmp_dir = env::temp_dir().join(format!("slice_wave5_wasm_cli_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let entry_mjs = tmp_dir.join("repro_wave5.mjs");
+    let cas_path = tmp_dir.join("repro_wave5.cas");
+
+    std::fs::write(
+        &entry_mjs,
+        r#"
+// #122 + #123 module
+const memBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 13, 3, 96, 0, 1, 127, 96, 1, 127, 1, 127, 96, 0, 0, 3, 5, 4, 1, 0, 2, 0, 5, 4, 1, 1, 1, 3, 7, 43, 5, 6, 109, 101, 109, 111, 114, 121, 2, 0, 4, 103, 114, 111, 119, 0, 0, 4, 115, 105, 122, 101, 0, 1, 9, 119, 114, 105, 116, 101, 84, 114, 97, 112, 0, 2, 4, 108, 111, 97, 100, 0, 3, 10, 32, 4, 6, 0, 32, 0, 64, 0, 11, 4, 0, 63, 0, 11, 10, 0, 65, 0, 65, 42, 58, 0, 0, 0, 11, 7, 0, 65, 0, 45, 0, 0, 11]);
+const inst = new WebAssembly.Instance(new WebAssembly.Module(memBytes));
+const oldBuf = inst.exports.memory.buffer;
+new Uint8Array(oldBuf)[0] = 7;
+inst.exports.grow(1);
+const curBuf = inst.exports.memory.buffer;
+
+const trapInst = new WebAssembly.Instance(new WebAssembly.Module(memBytes));
+const trapView = new Uint8Array(trapInst.exports.memory.buffer);
+try { trapInst.exports.writeTrap(); } catch (_) {}
+const postTrap = trapView[0];
+
+// #124 module
+const globBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 9, 2, 96, 0, 1, 127, 96, 1, 127, 0, 2, 10, 1, 3, 101, 110, 118, 1, 103, 3, 127, 1, 3, 3, 2, 0, 1, 7, 17, 3, 3, 103, 101, 116, 0, 0, 3, 115, 101, 116, 0, 1, 1, 103, 3, 0, 10, 13, 2, 4, 0, 35, 0, 11, 6, 0, 32, 0, 36, 0, 11]);
+const g = new WebAssembly.Global({ value: "i32", mutable: true }, 3);
+const gInst = new WebAssembly.Instance(new WebAssembly.Module(globBytes), { env: { g } });
+g.value = 9;
+const gRead = gInst.exports.get();
+gInst.exports.set(11);
+
+// #125 module
+const idBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 6, 1, 96, 1, 126, 1, 126, 3, 2, 1, 0, 7, 12, 1, 8, 105, 100, 101, 110, 116, 105, 116, 121, 0, 0, 10, 6, 1, 4, 0, 32, 0, 11]);
+const id = new WebAssembly.Instance(new WebAssembly.Module(idBytes)).exports.identity;
+let numErr = "";
+try { id(1); } catch (e) { numErr = e.name; }
+
+const out = {
+    curBytes: curBuf.byteLength,
+    oldBytes: oldBuf.byteLength,
+    retained: new Uint8Array(curBuf)[0],
+    postTrap,
+    gRead,
+    gAfter: g.value,
+    sameGlobal: gInst.exports.g === g,
+    bigPos: String(id((1n << 128n) + 7n)),
+    bigNeg: String(id(-(1n << 128n) + 9n)),
+    numErr
+};
+if (out.curBytes !== 131072 || out.oldBytes !== 0 || out.postTrap !== 42 || !out.sameGlobal || out.bigPos !== "7" || out.bigNeg !== "9" || out.numErr !== "TypeError") {
+    throw new Error("Wave 5 parity mismatch: " + JSON.stringify(out));
+}
+console.log(JSON.stringify(out));
+"#,
+    )
+    .unwrap();
+
+    cmd_run(&[
+        entry_mjs.to_string_lossy().to_string(),
+        "--quiet".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    cmd_pack(&[
+        entry_mjs.to_string_lossy().to_string(),
+        cas_path.to_string_lossy().to_string(),
+    ])
+    .unwrap();
+
+    cmd_run(&[
+        cas_path.to_string_lossy().to_string(),
+        "--quiet".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    cmd_run(&[
+        cas_path.to_string_lossy().to_string(),
+        "--warm".to_string(),
+        "--quiet".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 0);
+
+    let expected_json = r#"{"curBytes":131072,"oldBytes":0,"retained":7,"postTrap":42,"gRead":9,"gAfter":11,"sameGlobal":true,"bigPos":"7","bigNeg":"9","numErr":"TypeError"}"#;
+    let archive = MappedCasArchive::open(&cas_path).unwrap();
+    let entry = archive.entrypoint_blob().unwrap();
+    let mut iso = SliceIsolate::spawn(
+        "wave5-cli-iso",
+        1,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    );
+    let cold_m = iso
+        .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+        .unwrap();
+    assert_eq!(
+        cold_m.stdout.first().map(String::as_str),
+        Some(expected_json)
+    );
+
+    iso.reset_for_request("wave5-cli-iso", 2, 5_000_000, 16 * 1024 * 1024);
+    let warm_m = iso
+        .execute_bytecode(archive.get_bytecode_slice(entry), Some(&archive))
+        .unwrap();
+    assert_eq!(
+        warm_m.stdout.first().map(String::as_str),
+        Some(expected_json)
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

@@ -192,18 +192,36 @@
   Buffer.prototype.writeInt32BE = Buffer.prototype.writeUInt32BE;
   Buffer.prototype.writeInt32LE = Buffer.prototype.writeUInt32LE;
   Buffer.prototype.writeBigUInt64BE = function(value, offset) {
-    var o = (offset | 0), v = BigInt(value);
-    this.writeUInt32BE(Number((v >> 32n) & 0xffffffffn), o);
-    this.writeUInt32BE(Number(v & 0xffffffffn), o + 4);
+    if (typeof value !== "bigint") throw new TypeError('The "value" argument must be of type bigint');
+    if (value < 0n || value > 0xffffffffffffffffn) throw new RangeError("The value of \"value\" is out of range");
+    var o = (offset | 0);
+    this.writeUInt32BE(Number((value >> 32n) & 0xffffffffn), o);
+    this.writeUInt32BE(Number(value & 0xffffffffn), o + 4);
     return o + 8;
   };
   Buffer.prototype.writeBigUInt64LE = function(value, offset) {
-    var o = (offset | 0), v = BigInt(value);
-    this.writeUInt32LE(Number(v & 0xffffffffn), o);
-    this.writeUInt32LE(Number((v >> 32n) & 0xffffffffn), o + 4);
+    if (typeof value !== "bigint") throw new TypeError('The "value" argument must be of type bigint');
+    if (value < 0n || value > 0xffffffffffffffffn) throw new RangeError("The value of \"value\" is out of range");
+    var o = (offset | 0);
+    this.writeUInt32LE(Number(value & 0xffffffffn), o);
+    this.writeUInt32LE(Number((value >> 32n) & 0xffffffffn), o + 4);
     return o + 8;
   };
-  Buffer.prototype.writeBigInt64BE = Buffer.prototype.writeBigUInt64BE;
-  Buffer.prototype.writeBigInt64LE = Buffer.prototype.writeBigUInt64LE;
+  Buffer.prototype.writeBigInt64BE = function(value, offset) {
+    if (typeof value !== "bigint") throw new TypeError('The "value" argument must be of type bigint');
+    if (value < -0x8000000000000000n || value > 0x7fffffffffffffffn) throw new RangeError("The value of \"value\" is out of range");
+    var o = (offset | 0);
+    this.writeUInt32BE(Number((value >> 32n) & 0xffffffffn), o);
+    this.writeUInt32BE(Number(value & 0xffffffffn), o + 4);
+    return o + 8;
+  };
+  Buffer.prototype.writeBigInt64LE = function(value, offset) {
+    if (typeof value !== "bigint") throw new TypeError('The "value" argument must be of type bigint');
+    if (value < -0x8000000000000000n || value > 0x7fffffffffffffffn) throw new RangeError("The value of \"value\" is out of range");
+    var o = (offset | 0);
+    this.writeUInt32LE(Number(value & 0xffffffffn), o);
+    this.writeUInt32LE(Number((value >> 32n) & 0xffffffffn), o + 4);
+    return o + 8;
+  };
 })();
 

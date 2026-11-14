@@ -1676,3 +1676,634 @@ runWave3VfsSuite().catch((e) => console.log(JSON.stringify({{ __err: String(e &&
     .unwrap();
     assert_eq!(pure_m.stdout, vec!["/workspace"]);
 }
+
+#[test]
+fn test_wave5_issues_122_123_124_125_wasm_shared_store_memory_globals_tables_and_i64() {
+    let script = r#"
+        const sec = (id, body) => [id, body.length, ...body];
+        const str = (s) => [s.length, ...Array.from(s, (c) => c.charCodeAt(0))];
+        const fnBody = (bytes) => [bytes.length, ...bytes];
+        function errName(fn) {
+            try { fn(); return "OK"; }
+            catch (e) { return e && e.name ? e.name : typeof e; }
+        }
+
+        // =====================================================================
+        // 1. Issue #122: Native Wasm & JS memory.grow buffer refresh & detach
+        // =====================================================================
+        const memTrapBytes = new Uint8Array([
+            0, 97, 115, 109, 1, 0, 0, 0,
+            1, 13, 3, 96, 0, 1, 127, 96, 1, 127, 1, 127, 96, 0, 0,
+            3, 5, 4, 1, 0, 2, 0,
+            5, 4, 1, 1, 1, 3,
+            7, 43, 5,
+              6, 109, 101, 109, 111, 114, 121, 2, 0,
+              4, 103, 114, 111, 119, 0, 0,
+              4, 115, 105, 122, 101, 0, 1,
+              9, 119, 114, 105, 116, 101, 84, 114, 97, 112, 0, 2,
+              4, 108, 111, 97, 100, 0, 3,
+            10, 32, 4,
+              6, 0, 32, 0, 64, 0, 11,
+              4, 0, 63, 0, 11,
+              10, 0, 65, 0, 65, 42, 58, 0, 0, 0, 11,
+              7, 0, 65, 0, 45, 0, 0, 11
+        ]);
+        const memMod = new WebAssembly.Module(memTrapBytes);
+        const inst122 = new WebAssembly.Instance(memMod);
+        const memory = inst122.exports.memory;
+        const oldBuffer = memory.buffer;
+        new Uint8Array(oldBuffer)[0] = 7;
+        const previousPages = inst122.exports.grow(1);
+        const wasmPages = inst122.exports.size();
+        const currentBuffer = memory.buffer;
+        const currentBytes = currentBuffer.byteLength;
+        const retainedByte = new Uint8Array(currentBuffer)[0];
+        // Write into newly grown page 2 from JS and ensure no bounds failure
+        new Uint8Array(currentBuffer)[65536] = 91;
+
+        // Failed native growth beyond declared maximum (3 pages) must return -1 and NOT detach
+        const failedGrow = inst122.exports.grow(10);
+        const afterFailBuffer = memory.buffer;
+        const failKeptBuffer = afterFailBuffer === currentBuffer && !currentBuffer.detached;
+
+        // Follow-up JS memory.grow(1) (2 -> 3 pages) + JS memory.grow(0) detachment
+        const jsPrevPages = memory.grow(1);
+        const currentDetachedAfterJsGrow = currentBuffer.detached === true;
+        const afterJsGrowBuf = memory.buffer;
+        new Uint8Array(afterJsGrowBuf)[131072] = 53;
+        const jsZeroPrev = memory.grow(0);
+        const afterJsZeroBuf = memory.buffer;
+
+        const lazy = new WebAssembly.Instance(memMod);
+        lazy.exports.grow(1);
+
+        const res122 = {
+            previousPages,
+            wasmPages,
+            currentBytes,
+            oldBytes: oldBuffer.byteLength,
+            oldDetached: oldBuffer.detached === true,
+            bufferChanged: currentBuffer !== oldBuffer,
+            retainedByte,
+            lazyBufferBytes: lazy.exports.memory.buffer.byteLength,
+            failedGrow,
+            failKeptBuffer,
+            currentDetachedAfterJsGrow,
+            jsPrevPages,
+            jsZeroPrev,
+            afterJsGrowDetached: afterJsGrowBuf.detached === true,
+            afterJsZeroBytes: afterJsZeroBuf.byteLength,
+            page2Retained: new Uint8Array(afterJsZeroBuf)[65536],
+            page3Retained: new Uint8Array(afterJsZeroBuf)[131072],
+            negGrowErr: errName(() => memory.grow(-1)),
+            maxGrowErr: errName(() => memory.grow(1)),
+            transferErr: errName(() => afterJsZeroBuf.transfer())
+        };
+
+        // Shared imported Memory across two instances where Instance A grows natively and Instance B reads page 2
+        const sharedMem = new WebAssembly.Memory({ initial: 1, maximum: 4 });
+        // Module importing env.mem (min 1, max 4), re-exporting "memory", exporting grow1(), writeAt(off, val), readAt(off)
+        const sharedMemModBytes = new Uint8Array([
+            0, 97, 115, 109, 1, 0, 0, 0,
+            ...sec(1, [2, 0x60, 1, 0x7f, 1, 0x7f, 0x60, 2, 0x7f, 0x7f, 0]),
+            ...sec(2, [1, ...str("env"), ...str("mem"), 2, 1, 1, 4]),
+            ...sec(3, [3, 0, 1, 0]),
+            ...sec(7, [
+                4,
+                ...str("memory"), 2, 0,
+                ...str("grow"), 0, 0,
+                ...str("write"), 0, 1,
+                ...str("read"), 0, 2
+            ]),
+            ...sec(10, [
+                3,
+                ...fnBody([0, 0x20, 0, 0x40, 0, 0x0b]),
+                ...fnBody([0, 0x20, 0, 0x20, 1, 0x3a, 0, 0, 0x0b]),
+                ...fnBody([0, 0x20, 0, 0x2d, 0, 0, 0x0b])
+            ])
+        ]);
+        const sharedMemMod = new WebAssembly.Module(sharedMemModBytes);
+        const sharedA = new WebAssembly.Instance(sharedMemMod, { env: { mem: sharedMem } });
+        const sharedB = new WebAssembly.Instance(sharedMemMod, { env: { mem: sharedMem } });
+        const preSharedBuf = sharedMem.buffer;
+        sharedA.exports.grow(1);
+        sharedB.exports.write(70000, 123);
+        const sharedCrossRead = sharedA.exports.read(70000);
+        const sharedJsRead = new Uint8Array(sharedMem.buffer)[70000];
+        const sameExportedMem = sharedA.exports.memory === sharedMem && sharedB.exports.memory === sharedMem && preSharedBuf.detached;
+
+        // =====================================================================
+        // 2. Issue #123: Post-trap memory visibility, OOB traps, start traps & host callbacks
+        // =====================================================================
+        const inst123 = new WebAssembly.Instance(memMod);
+        const view123 = new Uint8Array(inst123.exports.memory.buffer);
+        const before123 = view123[0];
+        let trapped123 = false;
+        try { inst123.exports.writeTrap(); }
+        catch (err) { trapped123 = err instanceof WebAssembly.RuntimeError; }
+        const immediatelyAfterTrap = view123[0];
+        const wasmRead = inst123.exports.load();
+        const afterSuccessfulCall = view123[0];
+        // Overwrite back to 0 in JS and verify shadow_mem stayed coherent on trap!
+        view123[0] = 0;
+        const afterJsResetToZero = inst123.exports.load();
+
+        // Store-then-OOB-load trap + valueOf() mutation before memory sync + unmangled host throw + re-entrancy
+        const sentinel = { tag: "exact-host-exception", code: 409 };
+        let hostSawPreCallWrite = 0;
+        let reentrantResult = 0;
+        // Module importing env.cb () -> (), importing env.mem (1..4), exporting run(arg: i32) -> i32, oobTrap(), read(off) -> i32
+        const hostMemMod = new WebAssembly.Module(new Uint8Array([
+            0, 97, 115, 109, 1, 0, 0, 0,
+            ...sec(1, [2, 0x60, 0, 0, 0x60, 1, 0x7f, 1, 0x7f]),
+            ...sec(2, [
+                2,
+                ...str("env"), ...str("cb"), 0, 0,
+                ...str("env"), ...str("mem"), 2, 1, 1, 4
+            ]),
+            ...sec(3, [3, 1, 0, 1]),
+            ...sec(7, [
+                3,
+                ...str("run"), 0, 1,
+                ...str("oob"), 0, 2,
+                ...str("rd"), 0, 3
+            ]),
+            ...sec(10, [
+                3,
+                // func 1 `run(arg)`: mem[8] = arg + mem[4]; call cb(); return mem[12]
+                ...fnBody([0, 0x41, 8, 0x20, 0, 0x41, 4, 0x2d, 0, 0, 0x6a, 0x3a, 0, 0, 0x10, 0, 0x41, 12, 0x2d, 0, 0, 0x0b]),
+                // func 2 `oob()`: mem[1] = 88 (0xd8, 0x00 in sleb128); drop(i32.load(0x200000))
+                ...fnBody([0, 0x41, 1, 0x41, 0xd8, 0x00, 0x3a, 0, 0, 0x41, 0x80, 0x80, 0x80, 1, 0x28, 2, 0, 0x1a, 0x0b]),
+                // func 3 `rd(off)`: i32.load8_u(off)
+                ...fnBody([0, 0x20, 0, 0x2d, 0, 0, 0x0b])
+            ])
+        ]));
+        const hostMem = new WebAssembly.Memory({ initial: 1, maximum: 4 });
+        let shouldThrowInHost = false;
+        let hostInst;
+        hostInst = new WebAssembly.Instance(hostMemMod, {
+            env: {
+                mem: hostMem,
+                cb() {
+                    const v = new Uint8Array(hostMem.buffer);
+                    hostSawPreCallWrite = v[8];
+                    reentrantResult = hostInst.exports.rd(8);
+                    v[12] = 99;
+                    if (shouldThrowInHost) {
+                        v[13] = 77;
+                        throw sentinel;
+                    }
+                }
+            }
+        });
+        const hostView = new Uint8Array(hostMem.buffer);
+        // Argument valueOf() mutates mem[4] = 15 right before `run` executes!
+        const runOut = hostInst.exports.run({
+            valueOf() {
+                new Uint8Array(hostMem.buffer)[4] = 15;
+                return 10;
+            }
+        });
+        const firstHostSaw = hostSawPreCallWrite;
+        const firstReentrant = reentrantResult;
+        // OOB trap after writing 88 to mem[1]
+        let oobTrapped = false;
+        try { hostInst.exports.oob(); }
+        catch (e) { oobTrapped = e instanceof WebAssembly.RuntimeError; }
+        const immediateAfterOob = hostView[1];
+
+        // Host callback writes 77 to mem[13] and throws `sentinel` object
+        shouldThrowInHost = true;
+        let caughtExactSentinel = false;
+        try { hostInst.exports.run(5); }
+        catch (e) { caughtExactSentinel = (e === sentinel); }
+        const afterHostThrowJs = hostView[13];
+        const afterHostThrowWasm = hostInst.exports.rd(13);
+
+        // `(start)` function writing 55 to imported memory then hitting unreachable
+        const startTrapMod = new WebAssembly.Module(new Uint8Array([
+            0, 97, 115, 109, 1, 0, 0, 0,
+            ...sec(1, [1, 0x60, 0, 0]),
+            ...sec(2, [1, ...str("env"), ...str("mem"), 2, 1, 1, 2]),
+            ...sec(3, [1, 0]),
+            ...sec(8, [0]),
+            ...sec(10, [1, ...fnBody([0, 0x41, 0, 0x41, 55, 0x3a, 0, 0, 0x00, 0x0b])])
+        ]));
+        const startMem = new WebAssembly.Memory({ initial: 1, maximum: 2 });
+        const startView = new Uint8Array(startMem.buffer);
+        let startTrapped = false;
+        try { new WebAssembly.Instance(startTrapMod, { env: { mem: startMem } }); }
+        catch (e) { startTrapped = e instanceof WebAssembly.RuntimeError; }
+        const afterStartTrapByte = startView[0];
+
+        const res123 = {
+            before: before123,
+            trapped: trapped123,
+            immediatelyAfterTrap,
+            wasmRead,
+            afterSuccessfulCall,
+            afterJsResetToZero,
+            hostSawPreCallWrite: firstHostSaw,
+            reentrantResult: firstReentrant,
+            runOut,
+            oobTrapped,
+            immediateAfterOob,
+            caughtExactSentinel,
+            afterHostThrowJs,
+            afterHostThrowWasm,
+            startTrapped,
+            afterStartTrapByte
+        };
+
+        // =====================================================================
+        // 3. Issue #124: Shared live WebAssembly.Global & Table + canonical identity
+        // =====================================================================
+        const globBytes = new Uint8Array([
+            0, 97, 115, 109, 1, 0, 0, 0,
+            1, 9, 2, 96, 0, 1, 127, 96, 1, 127, 0,
+            2, 10, 1, 3, 101, 110, 118, 1, 103, 3, 127, 1,
+            3, 3, 2, 0, 1,
+            7, 17, 3,
+              3, 103, 101, 116, 0, 0,
+              3, 115, 101, 116, 0, 1,
+              1, 103, 3, 0,
+            10, 13, 2,
+              4, 0, 35, 0, 11,
+              6, 0, 32, 0, 36, 0, 11
+        ]);
+        const globMod = new WebAssembly.Module(globBytes);
+        const sharedGlobal = new WebAssembly.Global({ value: "i32", mutable: true }, 3);
+        const gInst1 = new WebAssembly.Instance(globMod, { env: { g: sharedGlobal } });
+        const gInst2 = new WebAssembly.Instance(globMod, { env: { g: sharedGlobal } });
+        const gInitial = gInst1.exports.get();
+        sharedGlobal.value = 9;
+        const gAfterJsWrite = gInst1.exports.get();
+        gInst1.exports.set(11);
+        const gInst2Sees = gInst2.exports.get();
+        const immGlobal = new WebAssembly.Global({ value: "i32", mutable: false }, 5);
+        const f64Global = new WebAssembly.Global({ value: "f64", mutable: true }, 5);
+
+        // Shared funcref Table with call_indirect
+        const sharedTable = new WebAssembly.Table({ element: "funcref", initial: 2, maximum: 4 });
+        const tblMod = new WebAssembly.Module(new Uint8Array([
+            0, 97, 115, 109, 1, 0, 0, 0,
+            ...sec(1, [2, 0x60, 1, 0x7f, 1, 0x7f, 0x60, 2, 0x7f, 0x7f, 1, 0x7f]),
+            ...sec(2, [1, ...str("env"), ...str("t"), 1, 0x70, 1, 2, 4]),
+            ...sec(3, [2, 0, 1]),
+            ...sec(7, [
+                3,
+                ...str("t"), 1, 0,
+                ...str("triple"), 0, 0,
+                ...str("call"), 0, 1
+            ]),
+            ...sec(10, [
+                2,
+                ...fnBody([0, 0x20, 0, 0x41, 3, 0x6c, 0x0b]),
+                ...fnBody([0, 0x20, 1, 0x20, 0, 0x11, 0, 0, 0x0b])
+            ])
+        ]));
+        const tInst = new WebAssembly.Instance(tblMod, { env: { t: sharedTable } });
+        sharedTable.set(0, tInst.exports.triple);
+        const indirectOut = tInst.exports.call(0, 14);
+        const sameTableFn = sharedTable.get(0) === tInst.exports.triple;
+        const sameExportedTable = tInst.exports.t === sharedTable;
+
+        const res124 = {
+            initial: gInitial,
+            afterJsWrite: gAfterJsWrite,
+            afterWasmWrite: sharedGlobal.value,
+            exportedValue: gInst1.exports.g.value,
+            inst2Sees: gInst2Sees,
+            sameGlobal: gInst1.exports.g === sharedGlobal && gInst2.exports.g === sharedGlobal,
+            mutImportImmErr: errName(() => new WebAssembly.Instance(globMod, { env: { g: immGlobal } })),
+            mutImportNumErr: errName(() => new WebAssembly.Instance(globMod, { env: { g: 3 } })),
+            mutImportTypeErr: errName(() => new WebAssembly.Instance(globMod, { env: { g: f64Global } })),
+            immSetErr: errName(() => { immGlobal.value = 8; }),
+            indirectOut,
+            sameTableFn,
+            sameExportedTable
+        };
+
+        // =====================================================================
+        // 4. Issue #125: Arbitrary-precision ToBigInt64 & BigInt sibling checks
+        // =====================================================================
+        const id64Bytes = new Uint8Array([
+            0, 97, 115, 109, 1, 0, 0, 0,
+            1, 6, 1, 96, 1, 126, 1, 126,
+            3, 2, 1, 0,
+            7, 12, 1, 8, 105, 100, 101, 110, 116, 105, 116, 121, 0, 0,
+            10, 6, 1, 4, 0, 32, 0, 11
+        ]);
+        const identity = new WebAssembly.Instance(new WebAssembly.Module(id64Bytes)).exports.identity;
+        const g64 = new WebAssembly.Global({ value: "i64", mutable: true }, (1n << 200n) + 29n);
+        const g64Init = String(g64.value);
+        g64.value = -(1n << 512n) + 17n;
+        const g64After = String(g64.value);
+
+        // Host return i64 coercion check
+        const hostRet64Mod = new WebAssembly.Module(new Uint8Array([
+            0, 97, 115, 109, 1, 0, 0, 0,
+            ...sec(1, [1, 0x60, 0, 1, 0x7e]),
+            ...sec(2, [1, ...str("env"), ...str("h"), 0, 0]),
+            ...sec(3, [1, 0]),
+            ...sec(7, [1, ...str("r"), 0, 1]),
+            ...sec(10, [1, ...fnBody([0, 0x10, 0, 0x0b])])
+        ]));
+        let hostRetVal = (1n << 256n) + 31n;
+        const hostRet64Inst = new WebAssembly.Instance(hostRet64Mod, { env: { h: () => hostRetVal } });
+        const hostRetLarge = String(hostRet64Inst.exports.r());
+        hostRetVal = 123;
+        const hostRetNumErr = errName(() => hostRet64Inst.exports.r());
+
+        // Sibling Buffer writeBigInt64BE / writeBigUInt64BE checks
+        const buf8 = Buffer.alloc(8);
+        const bufNumErr = errName(() => buf8.writeBigInt64BE(1, 0));
+        const bufRangeErr = errName(() => buf8.writeBigUInt64BE(-1n, 0));
+        buf8.writeBigInt64BE(-42n, 0);
+        const bufSignedRoundtrip = String(buf8.readBigInt64BE(0));
+
+        const res125 = {
+            ordinary: String(identity(42n)),
+            wraps64: String(identity((1n << 64n) + 7n)),
+            largePositive: String(identity((1n << 128n) + 7n)),
+            largeNegative: String(identity(-(1n << 128n) + 9n)),
+            i128BoundaryPos: String(identity((1n << 127n) + 15n)),
+            i128BoundaryNeg: String(identity(-(1n << 127n) - 5n)),
+            bits1024Neg1: String(identity((1n << 1024n) - 1n)),
+            bits1024Zero: String(identity(-(1n << 1024n))),
+            minI64: String(identity(1n << 63n)),
+            maxI64: String(identity((1n << 63n) - 1n)),
+            valueOfBigInt: String(identity({ valueOf() { return (1n << 300n) + 19n; } })),
+            numericArgument: errName(() => identity(1)),
+            undefArgument: errName(() => identity()),
+            g64Init,
+            g64After,
+            g64NumErr: errName(() => { g64.value = 5; }),
+            hostRetLarge,
+            hostRetNumErr,
+            bufNumErr,
+            bufRangeErr,
+            bufSignedRoundtrip
+        };
+
+        console.log(JSON.stringify({ res122, sharedCrossRead, sharedJsRead, sameExportedMem, res123, res124, res125 }));
+    "#;
+
+    let m = run_source_isolated(
+        "wave5-wasm-suite",
+        script,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        32 * 1024 * 1024,
+    )
+    .expect("wave5 wasm suite execution");
+
+    let out: serde_json::Value = serde_json::from_str(
+        m.stdout
+            .first()
+            .unwrap_or_else(|| panic!("no stdout line; metrics={:?}", m)),
+    )
+    .expect("json");
+
+    // #122 assertions
+    assert_eq!(out["res122"]["previousPages"], 1);
+    assert_eq!(out["res122"]["wasmPages"], 2);
+    assert_eq!(out["res122"]["currentBytes"], 131_072);
+    assert_eq!(out["res122"]["oldBytes"], 0);
+    assert_eq!(out["res122"]["oldDetached"], true);
+    assert_eq!(out["res122"]["bufferChanged"], true);
+    assert_eq!(out["res122"]["retainedByte"], 7);
+    assert_eq!(out["res122"]["lazyBufferBytes"], 131_072);
+    assert_eq!(out["res122"]["failedGrow"], -1);
+    assert_eq!(out["res122"]["failKeptBuffer"], true);
+    assert_eq!(out["res122"]["currentDetachedAfterJsGrow"], true);
+    assert_eq!(out["res122"]["jsPrevPages"], 2);
+    assert_eq!(out["res122"]["jsZeroPrev"], 3);
+    assert_eq!(out["res122"]["afterJsGrowDetached"], true);
+    assert_eq!(out["res122"]["afterJsZeroBytes"], 196_608);
+    assert_eq!(out["res122"]["page2Retained"], 91);
+    assert_eq!(out["res122"]["page3Retained"], 53);
+    assert_eq!(out["res122"]["negGrowErr"], "TypeError");
+    assert_eq!(out["res122"]["maxGrowErr"], "RangeError");
+    assert_eq!(out["res122"]["transferErr"], "TypeError");
+    assert_eq!(out["sharedCrossRead"], 123);
+    assert_eq!(out["sharedJsRead"], 123);
+    assert_eq!(out["sameExportedMem"], true);
+
+    // #123 assertions
+    assert_eq!(out["res123"]["before"], 0);
+    assert_eq!(out["res123"]["trapped"], true);
+    assert_eq!(out["res123"]["immediatelyAfterTrap"], 42);
+    assert_eq!(out["res123"]["wasmRead"], 42);
+    assert_eq!(out["res123"]["afterSuccessfulCall"], 42);
+    assert_eq!(out["res123"]["afterJsResetToZero"], 0);
+    assert_eq!(out["res123"]["hostSawPreCallWrite"], 25);
+    assert_eq!(out["res123"]["reentrantResult"], 25);
+    assert_eq!(out["res123"]["runOut"], 99);
+    assert_eq!(out["res123"]["oobTrapped"], true);
+    assert_eq!(out["res123"]["immediateAfterOob"], 88);
+    assert_eq!(out["res123"]["caughtExactSentinel"], true);
+    assert_eq!(out["res123"]["afterHostThrowJs"], 77);
+    assert_eq!(out["res123"]["afterHostThrowWasm"], 77);
+    assert_eq!(out["res123"]["startTrapped"], true);
+    assert_eq!(out["res123"]["afterStartTrapByte"], 55);
+
+    // #124 assertions
+    assert_eq!(out["res124"]["initial"], 3);
+    assert_eq!(out["res124"]["afterJsWrite"], 9);
+    assert_eq!(out["res124"]["afterWasmWrite"], 11);
+    assert_eq!(out["res124"]["exportedValue"], 11);
+    assert_eq!(out["res124"]["inst2Sees"], 11);
+    assert_eq!(out["res124"]["sameGlobal"], true);
+    assert_eq!(out["res124"]["mutImportImmErr"], "LinkError");
+    assert_eq!(out["res124"]["mutImportNumErr"], "LinkError");
+    assert_eq!(out["res124"]["mutImportTypeErr"], "LinkError");
+    assert_eq!(out["res124"]["immSetErr"], "TypeError");
+    assert_eq!(out["res124"]["indirectOut"], 42);
+    assert_eq!(out["res124"]["sameTableFn"], true);
+    assert_eq!(out["res124"]["sameExportedTable"], true);
+
+    // #125 assertions
+    assert_eq!(out["res125"]["ordinary"], "42");
+    assert_eq!(out["res125"]["wraps64"], "7");
+    assert_eq!(out["res125"]["largePositive"], "7");
+    assert_eq!(out["res125"]["largeNegative"], "9");
+    assert_eq!(out["res125"]["i128BoundaryPos"], "15");
+    assert_eq!(out["res125"]["i128BoundaryNeg"], "-5");
+    assert_eq!(out["res125"]["bits1024Neg1"], "-1");
+    assert_eq!(out["res125"]["bits1024Zero"], "0");
+    assert_eq!(out["res125"]["minI64"], "-9223372036854775808");
+    assert_eq!(out["res125"]["maxI64"], "9223372036854775807");
+    assert_eq!(out["res125"]["valueOfBigInt"], "19");
+    assert_eq!(out["res125"]["numericArgument"], "TypeError");
+    assert_eq!(out["res125"]["undefArgument"], "TypeError");
+    assert_eq!(out["res125"]["g64Init"], "29");
+    assert_eq!(out["res125"]["g64After"], "17");
+    assert_eq!(out["res125"]["g64NumErr"], "TypeError");
+    assert_eq!(out["res125"]["hostRetLarge"], "31");
+    assert_eq!(out["res125"]["hostRetNumErr"], "TypeError");
+    assert_eq!(out["res125"]["bufNumErr"], "TypeError");
+    assert_eq!(out["res125"]["bufRangeErr"], "RangeError");
+    assert_eq!(out["res125"]["bufSignedRoundtrip"], "-42");
+}
+
+#[test]
+fn test_wave5_wasm_native_grow_cage_warm_reset_and_nested_eval_sandbox_isolation() {
+    // 1. Native Wasm `(memory.grow 40)` must not bypass the 2 MiB isolate memory ceiling
+    let native_grow_bomb = r#"
+        const mod = new WebAssembly.Module(new Uint8Array([
+            0,97,115,109, 1,0,0,0,
+            1,6,1, 96,1,127,1,127,
+            3,2,1, 0,
+            5,3,1, 0,1,
+            7,8,1, 4,103,114,111,119, 0,0,
+            10,8,1, 6,0, 32,0, 64,0, 11
+        ]));
+        const inst = new WebAssembly.Instance(mod);
+        inst.exports.grow(40);
+    "#;
+    let err = run_source_isolated(
+        "wave5-native-grow-cage",
+        native_grow_bomb,
+        CapabilityToken::pure_compute(),
+        1_000_000,
+        2 * 1024 * 1024,
+    )
+    .expect_err("native Wasm memory.grow(40) must exceed 2 MiB ceiling");
+    assert!(
+        matches!(
+            err.downcast_ref::<SandboxViolation>(),
+            Some(SandboxViolation::MemoryCeilingExceeded { .. })
+        ),
+        "expected MemoryCeilingExceeded, got {:?}",
+        err
+    );
+
+    // 2. Imported Memory must NOT be double-charged on instantiation, and nested `Slice.evalSandbox`
+    //    inside a Wasm host import callback must preserve parent Wasm execution & isolate child state!
+    let nested_script = r#"
+        const sec = (id, body) => [id, body.length, ...body];
+        const str = (s) => [s.length, ...Array.from(s, (c) => c.charCodeAt(0))];
+        const fnBody = (bytes) => [bytes.length, ...bytes];
+        // Allocate 12 pages (768 KiB) inside a 1 MiB ceiling; importing into 3 instances must NOT double-charge!
+        const mem = new WebAssembly.Memory({ initial: 12, maximum: 14 });
+        const g = new WebAssembly.Global({ value: "i32", mutable: true }, 100);
+        const mod = new WebAssembly.Module(new Uint8Array([
+            0, 97, 115, 109, 1, 0, 0, 0,
+            ...sec(1, [1, 0x60, 0, 1, 0x7f]),
+            ...sec(2, [
+                3,
+                ...str("env"), ...str("cb"), 0, 0,
+                ...str("env"), ...str("mem"), 2, 1, 12, 14,
+                ...str("env"), ...str("g"), 3, 0x7f, 1
+            ]),
+            ...sec(3, [1, 0]),
+            ...sec(7, [1, ...str("run"), 0, 1]),
+            ...sec(10, [1, ...fnBody([0, 0x10, 0, 0x23, 0, 0x6a, 0x24, 0, 0x23, 0, 0x0b])])
+        ]));
+        let sandboxOut = "";
+        const imp = {
+            env: {
+                mem,
+                g,
+                cb() {
+                    const sub = Slice.evalSandbox(`
+                        const subG = new WebAssembly.Global({ value: "i32", mutable: true }, 7);
+                        console.log(String(subG.value));
+                    `, { maxFuel: 500000, maxMemoryBytes: 4 * 1024 * 1024 });
+                    sandboxOut = sub.stdout.join("").trim();
+                    return 23;
+                }
+            }
+        };
+        const i1 = new WebAssembly.Instance(mod, imp);
+        const i2 = new WebAssembly.Instance(mod, imp);
+        const i3 = new WebAssembly.Instance(mod, imp);
+        const r = i1.exports.run();
+        console.log(JSON.stringify({ r, g2: i2.exports.run !== undefined ? g.value : -1, sandboxOut, sameMem: i3.exports !== null }));
+    "#;
+    let bundled = slice_cas::strip_typescript_and_normalize(nested_script, true);
+    let bc = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "wave5-tenant-a",
+        1,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        1024 * 1024, // 1 MiB ceiling: 12 pages = 768 KiB fits once, would fail if double-charged!
+    );
+    let m1 = iso.execute_bytecode(&bc, None).expect("turn 1");
+    assert_eq!(
+        m1.stdout
+            .first()
+            .unwrap_or_else(|| panic!("turn 1 no stdout; metrics={:?}", m1)),
+        r#"{"r":123,"g2":123,"sandboxOut":"7","sameMem":true}"#
+    );
+
+    // Warm reset for tenant B: budget and Wasm store reset cleanly so 12 pages fit again
+    iso.reset_for_request("wave5-tenant-b", 2, 2_000_000, 1024 * 1024);
+    let m2 = iso.execute_bytecode(&bc, None).expect("turn 2 warm");
+    assert_eq!(
+        m2.stdout[0],
+        r#"{"r":123,"g2":123,"sandboxOut":"7","sameMem":true}"#
+    );
+
+    // 3. Persistent warm `__slice_rc` HTTP module with top-level `new WebAssembly.Module(...)`
+    //    and 2,500 caught host-callback throws must preserve `mod` and never leak Boa VM stack slots!
+    let warm_http_src = r#"
+const idBytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 6, 1, 96, 1, 126, 1, 126, 3, 2, 1, 0, 7, 12, 1, 8, 105, 100, 101, 110, 116, 105, 116, 121, 0, 0, 10, 6, 1, 4, 0, 32, 0, 11]);
+const throwMod = new WebAssembly.Module(new Uint8Array([
+    0, 97, 115, 109, 1, 0, 0, 0,
+    1, 4, 1, 96, 0, 0,
+    2, 9, 1, 3, 101, 110, 118, 1, 104, 0, 0,
+    3, 2, 1, 0,
+    7, 5, 1, 1, 114, 0, 1,
+    10, 6, 1, 4, 0, 16, 0, 11
+]));
+const topMod = new WebAssembly.Module(idBytes);
+export default {
+    fetch(req) {
+        const u = new URL(req.url);
+        const id = new WebAssembly.Instance(topMod).exports.identity;
+        if (u.pathname === "/throw-loop") {
+            const sentinel = { tag: "loop" };
+            const ti = new WebAssembly.Instance(throwMod, { env: { h() { throw sentinel; } } });
+            let caught = 0;
+            for (let i = 0; i < 2500; i++) {
+                try { ti.exports.r(); } catch (e) { if (e === sentinel) caught++; }
+            }
+            return new Response(String(caught));
+        }
+        return new Response(String(id((1n << 128n) + 13n)));
+    }
+};
+"#;
+    let warm_http_bc = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        warm_http_src,
+        true,
+    ));
+    let mut http_iso = SliceIsolate::spawn(
+        "wave5-http-warm",
+        1,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        16 * 1024 * 1024,
+    );
+    for turn in 0..8u32 {
+        http_iso.reset_for_request("wave5-http-warm", turn + 1, 10_000_000, 16 * 1024 * 1024);
+        let path = if turn == 3 { "/throw-loop" } else { "/" };
+        let req = HttpRequestContext {
+            method: "GET",
+            path,
+            query: "",
+            tenant_id: "wave5-http-warm",
+            body: "",
+            body_bytes: None,
+            headers: &[("host", "localhost")],
+        };
+        let out = http_iso
+            .execute_http_request_fast(&warm_http_bc, None, &req)
+            .expect("warm http wasm turn");
+        assert_eq!(out.status_code, 200);
+        assert_eq!(out.response_body, if turn == 3 { "2500" } else { "13" });
+    }
+}

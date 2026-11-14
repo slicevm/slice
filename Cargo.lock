@@ -2128,6 +2128,7 @@ dependencies = [
  "slice-sandbox",
  "smallvec",
  "wasmi",
+ "wasmi_core",
  "webpki-roots",
  "x25519-dalek",
 ]

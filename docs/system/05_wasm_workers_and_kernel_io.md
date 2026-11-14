@@ -1,25 +1,30 @@
 # Pure-Rust WebAssembly, Capability-Attenuated Web Workers & Direct Kernel I/O
 
-This document covers Slice's Pure-Rust WebAssembly engine ([`wasm.rs`](../../crates/slice-engine/src/runtime/wasm.rs) via `wasmi` `v2.0.0`), capability-attenuated MicroVM Web Workers and `node:worker_threads` ([`workers.rs`](../../crates/slice-engine/src/runtime/workers.rs)), direct kernel completion rings ([`slice-io`](../../crates/slice-io/src/lib.rs): Linux `io_uring` & Windows `IOCP`), and OS-native kernel event file watching ([`OsNativeFileWatcher`](../../crates/slice-cli/src/config/watcher.rs)).
+This document covers Slice's Pure-Rust WebAssembly engine ([`wasm/`](../../crates/slice-engine/src/runtime/wasm/mod.rs) via `wasmi` `v2.0.0`), capability-attenuated MicroVM Web Workers and `node:worker_threads` ([`workers.rs`](../../crates/slice-engine/src/runtime/workers.rs)), direct kernel completion rings ([`slice-io`](../../crates/slice-io/src/lib.rs): Linux `io_uring` & Windows `IOCP`), and OS-native kernel event file watching ([`OsNativeFileWatcher`](../../crates/slice-cli/src/config/watcher.rs)).
 
 ---
 
-## 1. Pure-Rust WebAssembly Engine (`wasmi` `v2.0.0`), `GLOBAL_WASM_MODULE_CACHE` & 5-Ring WASM Cage
+## 1. Pure-Rust WebAssembly Engine (`wasmi` `v2.0.0`), Shared Per-Isolate `Store` & 5-Ring WASM Cage
 
-Implemented in [`crates/slice-engine/src/runtime/wasm.rs`](../../crates/slice-engine/src/runtime/wasm.rs) and [`crates/slice-engine/src/preludes/09_wasm.js`](../../crates/slice-engine/src/preludes/09_wasm.js):
+Implemented across [`crates/slice-engine/src/runtime/wasm/`](../../crates/slice-engine/src/runtime/wasm/mod.rs) ([`mod.rs`](../../crates/slice-engine/src/runtime/wasm/mod.rs), [`store.rs`](../../crates/slice-engine/src/runtime/wasm/store.rs), [`memory.rs`](../../crates/slice-engine/src/runtime/wasm/memory.rs), [`linking.rs`](../../crates/slice-engine/src/runtime/wasm/linking.rs), [`values.rs`](../../crates/slice-engine/src/runtime/wasm/values.rs)) and [`crates/slice-engine/src/preludes/09_wasm.js`](../../crates/slice-engine/src/preludes/09_wasm.js):
 
 1. **Zero Overhead When Unused (`Shard 9`):**
    - `globalThis.WebAssembly` is registered as a self-replacing lazy getter (`__defLazy(["WebAssembly"], 9)` via `LAZY_GETTERS_INIT_PRELUDE`) and gated in `detect_shards_and_boacas_flags` so non-WASM workloads pay `0.00 ns` and `0 B`.
-2. **Speculative `GLOBAL_WASM_MODULE_CACHE`:**
+2. **Speculative `GLOBAL_WASM_MODULE_CACHE` & Shared Per-Isolate `wasmi::Store`:**
    - A process-wide `OnceLock<wasmi::Engine>` (`CompilationMode::LazyTranslation`, `consume_fuel(true)`) + `RwLock<FxHashMap<(u64, usize), wasmi::Module>>` validates and translates each `.wasm` binary at most once per process, enabling `< 15 us` warm module instantiation across isolates and worker threads.
+   - All `WebAssembly.Instance`, `WebAssembly.Memory`, `WebAssembly.Global`, and `WebAssembly.Table` objects within an isolate turn share a single per-isolate `wasmi::Store<WasmStoreData>` (with `SavedIsolateContextGuard` isolation across nested `Slice.evalSandbox` calls and full teardown on `reset_thread_wasm_state()`). Imported and re-exported `Memory`, `Global`, `Table`, and exported Wasm functions share live underlying storage and preserve canonical JS wrapper identity (`instance.exports.g === global`, `instance.exports.memory === memory`, `instance.exports.t === table`).
 3. **Zero-Stat `.wasm` Module Bundling (`slice-cas`):**
    - Static or dynamic `.wasm` imports (`import wasmBytes from "./kernel.wasm"`) are embedded directly into `.cas` archives and standalone `SLICEEXE` binaries as zero-stat `Uint8Array` payloads (`__slice_b64ToU8`).
-4. **5-Ring WebAssembly Security & Resource Cage:**
+4. **W3C WebAssembly JS-API 2.0 Semantics & Zero-Allocation Fast Call Path:**
+   - Exported Wasm functions bind directly to native Rust `NativeFunction::from_copy_closure` closures backed by stack-allocated `SmallVec<[Val; 8]>`, eliminating JS argument arrays and string serialization on numeric (`i32`/`i64`/`f32`/`f64`) calls.
+   - `ValType::I64` parameters, `WebAssembly.Global` `i64` values, and host `i64` returns apply ECMAScript `ToBigInt64` (`val.to_big_int64`) with exact two's-complement modulo-`2^64` wrapping for arbitrary-precision `BigInt`s and strict `TypeError` rejection on `Number`s.
+   - Authentic `WebAssembly.CompileError`, `WebAssembly.LinkError`, and `WebAssembly.RuntimeError` instances are constructed directly against realm prototypes, while JS exceptions thrown inside host import callbacks propagate unmangled (`PENDING_HOST_JS_ERROR`).
+5. **5-Ring WebAssembly Security & Resource Cage:**
    - **Ring 1 (Binary Validation):** Enforces `MAX_WASM_BINARY_BYTES = 8 MB` and WASM magic header (`\0asm\x01\0\0\0`) validation before compilation.
-   - **Ring 2 (Unified CPU Fuel Metering):** Synchronizes `wasmi::Store::set_fuel` / `get_fuel` with the parent `SliceIsolate`'s `BOA_FUEL_BUDGET`, preempting infinite WASM loops deterministically with `SandboxViolation::CpuFuelExhausted`.
-   - **Ring 3 (Unified Linear Memory Cage):** Enforces `MAX_WASM_MEMORY_PAGES = 256` (`16 MB`) and charges every WASM linear memory allocation or `memory.grow()` delta against the tenant's `BOA_KV_MEM_BUDGET` (`SandboxViolation::MemoryCeilingExceeded`).
-   - **Ring 4 (Zero Ambient WASI Authority & Fuel-Metered Host Imports):** Exposes zero ambient OS/filesystem WASI descriptors by default while supporting fuel-metered JavaScript host function imports (`importObject.env.*`).
-   - **Ring 5 (Lazy Linear Memory Mirroring & 8-Byte Word-Aligned `ArrayBuffer` Delta Sync):** Defers `WebAssembly.Memory.prototype.buffer` allocation until JavaScript explicitly accesses `.buffer`, synchronizes modifications between JS `ArrayBuffer` views (`Uint8Array` / `Int32Array`) and `wasmi::Memory` using 8-byte `u64` word-aligned delta scans only after `.buffer` has been materialized, and inspects all outputs through the Outbound Egress Secret DLP Firewall.
+   - **Ring 2 (Unified Re-Entrant CPU Fuel Metering):** Synchronizes `wasmi::Store::set_fuel` / `get_fuel` at every JS-to-Wasm and Wasm-to-JS host callback boundary with the parent `SliceIsolate`'s `BOA_FUEL_BUDGET`, preempting infinite WASM loops deterministically with `SandboxViolation::CpuFuelExhausted`.
+   - **Ring 3 (Unified Linear Memory Cage via `SliceWasmLimiter`):** Implements `wasmi::ResourceLimiter` on the shared `Store` to enforce `MAX_WASM_MEMORY_PAGES = 256` (`16 MiB`) and charge net linear memory growth (`desired - current`) against `BOA_KV_MEM_BUDGET` across both JS `memory.grow()` and native Wasm `(memory.grow ...)` instructions (`SandboxViolation::MemoryCeilingExceeded`), without double-charging imported `Memory` objects.
+   - **Ring 4 (Zero Ambient WASI Authority & Fuel-Metered Host Imports):** Exposes zero ambient OS/filesystem WASI descriptors by default while supporting fuel-metered JavaScript host function imports (`importObject.<module>.*`) and direct native `wasmi::Func` cross-instance linking.
+   - **Ring 5 (Lazy Linear Memory Mirroring, `ResetMemoryBuffer` Detachment & Post-Trap Coherence):** Defers `WebAssembly.Memory.prototype.buffer` allocation (created with `[[ArrayBufferDetachKey]] = "WebAssembly.Memory"`) until JavaScript explicitly accesses `.buffer`, synchronizes modifications between JS `ArrayBuffer` views and `wasmi::Memory` using 8-byte `u64` word-aligned delta scans across pre-call, host-callback, post-call, and post-trap (`unreachable`, out-of-bounds, `(start)` trap) boundaries, detaches stale `ArrayBuffer`s (`detached === true`, `byteLength === 0`) on both native Wasm `memory.grow` and JS `memory.grow(delta)` (including `delta === 0`), and inspects all outputs through the Outbound Egress Secret DLP Firewall.
 
 ---
 

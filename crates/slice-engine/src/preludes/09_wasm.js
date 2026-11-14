@@ -19,132 +19,64 @@
   var LinkError = __makeWasmErrorCtor("LinkError");
   var RuntimeError = __makeWasmErrorCtor("RuntimeError");
 
-  function __rethrowWasmError(e) {
-    var msg = e && e.message ? String(e.message) : String(e);
-    if (msg.indexOf("CompileError:") !== -1) {
-      throw new CompileError(msg.replace(/^.*CompileError:\s*/, ""));
-    }
-    if (msg.indexOf("LinkError:") !== -1) {
-      throw new LinkError(msg.replace(/^.*LinkError:\s*/, ""));
-    }
-    if (msg.indexOf("RuntimeError:") !== -1) {
-      throw new RuntimeError(msg.replace(/^.*RuntimeError:\s*/, ""));
-    }
-    if (msg.indexOf("RangeError:") !== -1) {
-      throw new RangeError(msg.replace(/^.*RangeError:\s*/, ""));
-    }
-    if (msg.indexOf("TypeError:") !== -1) {
-      throw new TypeError(msg.replace(/^.*TypeError:\s*/, ""));
-    }
-    throw e;
-  }
-
   function Memory(descriptor) {
-    if (!descriptor || typeof descriptor !== "object") {
-      throw new TypeError("WebAssembly.Memory(): Descriptor must be an object");
+    if (!(this instanceof Memory)) {
+      throw new TypeError("WebAssembly.Memory must be called with new");
     }
-    var initPages = descriptor.initial !== undefined ? descriptor.initial : descriptor.minimum;
-    if (initPages === undefined || typeof initPages !== "number" || initPages < 0) {
-      throw new TypeError("WebAssembly.Memory(): Property 'initial' is required and must be a non-negative number");
-    }
-    initPages = initPages >>> 0;
-    var maxPages = descriptor.maximum !== undefined ? (descriptor.maximum >>> 0) : undefined;
-    if (descriptor._instId) {
-      this._memId = 0;
-      this._instId = descriptor._instId;
-      this._pages = initPages;
-      this._maxPages = maxPages;
-      this._buf = null;
-      return;
-    }
-    try {
-      this._memId = __slice_wasm_memory_create(initPages, maxPages);
-    } catch (e) {
-      __rethrowWasmError(e);
-    }
-    this._instId = 0;
-    this._pages = initPages;
-    this._maxPages = maxPages;
-    this._buf = new ArrayBuffer(initPages * 65536);
+    this._buf = null;
+    this._memId = __slice_wasm_memory_create(descriptor, this);
   }
 
   Object.defineProperty(Memory.prototype, "buffer", {
     get: function() {
-      if (this._buf === null) {
-        if (this._instId) {
-          try {
-            this._buf = __slice_wasm_sync_init_mem(this._instId);
-            this._pages = (this._buf.byteLength / 65536) >>> 0;
-          } catch (e) {
-            __rethrowWasmError(e);
-          }
-        } else {
-          this._buf = new ArrayBuffer(this._pages * 65536);
-        }
+      if (!this || typeof this._memId !== "number") {
+        throw new TypeError("WebAssembly.Memory.prototype.buffer called on incompatible receiver");
       }
-      return this._buf;
+      var b = this._buf;
+      if (b === null || b === undefined || b.detached === true) {
+        b = __slice_wasm_memory_buffer(this._memId);
+        this._buf = b;
+      }
+      return b;
     },
     enumerable: true,
     configurable: true
   });
 
   Memory.prototype.grow = function(delta) {
-    var d = (delta === undefined ? 0 : Number(delta)) >>> 0;
-    var prevPages = this._pages;
-    try {
-      prevPages = __slice_wasm_memory_grow(this._memId || 0, this._instId || 0, d);
-    } catch (e) {
-      __rethrowWasmError(e);
+    if (!this || typeof this._memId !== "number") {
+      throw new TypeError("WebAssembly.Memory.prototype.grow called on incompatible receiver");
     }
-    if (d > 0) {
-      var newPages = prevPages + d;
-      if (this._buf !== null) {
-        var newBuf = new ArrayBuffer(newPages * 65536);
-        new Uint8Array(newBuf).set(new Uint8Array(this._buf));
-        this._buf = newBuf;
-      }
-      this._pages = newPages;
+    if (arguments.length < 1) {
+      throw new TypeError("WebAssembly.Memory.grow(): Argument 0 is required");
     }
+    var prevPages = __slice_wasm_memory_grow(this._memId, delta);
+    this._buf = null;
     return prevPages;
   };
 
   function Global(descriptor, v) {
-    if (!descriptor || typeof descriptor !== "object") {
-      throw new TypeError("WebAssembly.Global(): Descriptor must be an object");
+    if (!(this instanceof Global)) {
+      throw new TypeError("WebAssembly.Global must be called with new");
     }
-    this._type = String(descriptor.value || "i32");
-    this._mutable = Boolean(descriptor.mutable);
-    this._instId = descriptor._instId || 0;
-    this._exportName = descriptor._exportName || "";
-    if (!this._instId) {
-      if (this._type === "i64") {
-        this._val = v !== undefined ? BigInt(v) : 0n;
-      } else {
-        this._val = v !== undefined ? Number(v) : 0;
-      }
-    }
+    this._globId = __slice_wasm_global_create(descriptor, v, arguments.length >= 2, this);
   }
 
   Object.defineProperty(Global.prototype, "value", {
     get: function() {
-      if (this._instId) {
-        return __slice_wasm_global_get(this._instId, this._exportName);
+      if (!this || typeof this._globId !== "number") {
+        throw new TypeError("WebAssembly.Global.prototype.value called on incompatible receiver");
       }
-      return this._val;
+      return __slice_wasm_global_get(this._globId);
     },
     set: function(nv) {
-      if (!this._mutable) {
-        throw new TypeError("WebAssembly.Global.value: cannot change value of an immutable global");
+      if (!this || typeof this._globId !== "number") {
+        throw new TypeError("WebAssembly.Global.prototype.value called on incompatible receiver");
       }
-      if (this._instId) {
-        try {
-          __slice_wasm_global_set(this._instId, this._exportName, nv);
-        } catch (e) {
-          __rethrowWasmError(e);
-        }
-        return;
+      if (arguments.length < 1) {
+        throw new TypeError("WebAssembly.Global.prototype.value setter requires 1 argument");
       }
-      this._val = this._type === "i64" ? BigInt(nv) : Number(nv);
+      __slice_wasm_global_set(this._globId, nv);
     },
     enumerable: true,
     configurable: true
@@ -155,60 +87,51 @@
   };
 
   function Table(descriptor, fill) {
-    if (!descriptor || typeof descriptor !== "object") {
-      throw new TypeError("WebAssembly.Table(): Descriptor must be an object");
+    if (!(this instanceof Table)) {
+      throw new TypeError("WebAssembly.Table must be called with new");
     }
-    var initLen = descriptor.initial !== undefined ? descriptor.initial : descriptor.minimum;
-    if (initLen === undefined || typeof initLen !== "number" || initLen < 0) {
-      throw new TypeError("WebAssembly.Table(): Property 'initial' is required");
-    }
-    this._element = String(descriptor.element || "funcref");
-    this._max = descriptor.maximum !== undefined ? (descriptor.maximum >>> 0) : undefined;
-    var n = initLen >>> 0;
-    if (this._max !== undefined && n > this._max) {
-      throw new RangeError("WebAssembly.Table(): initial length exceeds maximum");
-    }
-    this._items = new Array(n);
-    var initVal = fill !== undefined ? fill : null;
-    for (var i = 0; i < n; i++) this._items[i] = initVal;
+    this._tblId = __slice_wasm_table_create(descriptor, fill, arguments.length >= 2, this);
   }
 
   Object.defineProperty(Table.prototype, "length", {
     get: function() {
-      return this._items.length;
+      if (!this || typeof this._tblId !== "number") {
+        throw new TypeError("WebAssembly.Table.prototype.length called on incompatible receiver");
+      }
+      return __slice_wasm_table_length(this._tblId);
     },
     enumerable: true,
     configurable: true
   });
 
   Table.prototype.get = function(idx) {
-    var i = idx >>> 0;
-    if (i >= this._items.length) {
-      throw new RangeError("WebAssembly.Table.get(): index out of bounds");
+    if (!this || typeof this._tblId !== "number") {
+      throw new TypeError("WebAssembly.Table.prototype.get called on incompatible receiver");
     }
-    return this._items[i];
+    if (arguments.length < 1) {
+      throw new TypeError("WebAssembly.Table.get(): Argument 0 is required");
+    }
+    return __slice_wasm_table_get(this._tblId, idx);
   };
 
   Table.prototype.set = function(idx, val) {
-    var i = idx >>> 0;
-    if (i >= this._items.length) {
-      throw new RangeError("WebAssembly.Table.set(): index out of bounds");
+    if (!this || typeof this._tblId !== "number") {
+      throw new TypeError("WebAssembly.Table.prototype.set called on incompatible receiver");
     }
-    this._items[i] = val !== undefined ? val : null;
+    if (arguments.length < 1) {
+      throw new TypeError("WebAssembly.Table.set(): Argument 0 is required");
+    }
+    __slice_wasm_table_set(this._tblId, idx, val, arguments.length >= 2);
   };
 
   Table.prototype.grow = function(delta, fill) {
-    var d = (delta === undefined ? 0 : Number(delta)) >>> 0;
-    var oldLen = this._items.length;
-    var newLen = oldLen + d;
-    if (this._max !== undefined && newLen > this._max) {
-      throw new RangeError("WebAssembly.Table.grow(): maximum table length exceeded");
+    if (!this || typeof this._tblId !== "number") {
+      throw new TypeError("WebAssembly.Table.prototype.grow called on incompatible receiver");
     }
-    var fillVal = fill !== undefined ? fill : null;
-    for (var i = 0; i < d; i++) {
-      this._items.push(fillVal);
+    if (arguments.length < 1) {
+      throw new TypeError("WebAssembly.Table.grow(): Argument 0 is required");
     }
-    return oldLen;
+    return __slice_wasm_table_grow(this._tblId, delta, fill, arguments.length >= 2);
   };
 
   function Module(bytes) {
@@ -218,11 +141,7 @@
     if (!bytes || (typeof bytes !== "object" && typeof bytes !== "function")) {
       throw new TypeError("WebAssembly.Module(): Argument 0 must be a buffer source");
     }
-    try {
-      this._modId = __slice_wasm_compile(bytes);
-    } catch (e) {
-      __rethrowWasmError(e);
-    }
+    this._modId = __slice_wasm_compile(bytes);
   }
 
   Module.exports = function(mod) {
@@ -259,101 +178,19 @@
     if (importObject !== undefined && (typeof importObject !== "object" || importObject === null)) {
       throw new TypeError("WebAssembly.Instance(): Argument 1 must be an object or undefined");
     }
-    var importedMemObj = null;
-    var hasFuncImports = false;
-    if (importObject) {
-      var modKeys = Object.keys(importObject);
-      for (var k = 0; k < modKeys.length; k++) {
-        var ns = importObject[modKeys[k]];
-        if (ns && typeof ns === "object") {
-          var fKeys = Object.keys(ns);
-          for (var j = 0; j < fKeys.length; j++) {
-            var impVal = ns[fKeys[j]];
-            if (impVal instanceof Memory) {
-              importedMemObj = impVal;
-            } else if (typeof impVal === "function") {
-              hasFuncImports = true;
-            }
-          }
-        }
-      }
-    }
-    var meta;
-    try {
-      meta = __slice_wasm_instantiate(mod._modId, importObject);
-    } catch (e) {
-      __rethrowWasmError(e);
-    }
-    var instId = meta.instId;
-    this._instId = instId;
-    var activeMemObj = importedMemObj;
-    if (activeMemObj) {
-      activeMemObj._instId = instId;
-    }
-
-    var expList = JSON.parse(meta.exportsJson || "[]");
-    var exportsObj = {};
-
-    for (var i = 0; i < expList.length; i++) {
-      var item = expList[i];
-      if (item.kind === "memory") {
-        if (!activeMemObj) {
-          activeMemObj = new Memory({
-            initial: item.pages,
-            maximum: item.maxPages !== null ? item.maxPages : undefined,
-            _instId: instId
-          });
-          if (hasFuncImports) {
-            void activeMemObj.buffer;
-          }
-        }
-        exportsObj[item.name] = activeMemObj;
-      }
-    }
-
-    for (var idx = 0; idx < expList.length; idx++) {
-      var exp = expList[idx];
-      if (exp.kind === "function") {
-        (function(fnName, arity) {
-          var wrapper = function() {
-            var callArgs = [];
-            for (var a = 0; a < arguments.length; a++) {
-              callArgs.push(arguments[a]);
-            }
-            try {
-              return __slice_wasm_call(
-                instId,
-                fnName,
-                callArgs,
-                activeMemObj ? activeMemObj._buf : null
-              );
-            } catch (e) {
-              __rethrowWasmError(e);
-            }
-          };
-          try {
-            Object.defineProperty(wrapper, "length", { value: arity, configurable: true });
-            Object.defineProperty(wrapper, "name", { value: fnName, configurable: true });
-          } catch (_) {}
-          exportsObj[fnName] = wrapper;
-        })(exp.name, exp.arity || 0);
-      } else if (exp.kind === "global") {
-        exportsObj[exp.name] = new Global({
-          value: exp.isI64 ? "i64" : "f64",
-          mutable: Boolean(exp.mutable),
-          _instId: instId,
-          _exportName: exp.name
-        });
-      } else if (exp.kind === "table") {
-        exportsObj[exp.name] = new Table({
-          element: "funcref",
-          initial: exp.length || 0
-        });
-      }
-    }
-
-    this.exports = Object.freeze(exportsObj);
+    this._exports = Object.freeze(__slice_wasm_instantiate(mod._modId, importObject));
   }
+
+  Object.defineProperty(Instance.prototype, "exports", {
+    get: function() {
+      if (!(this instanceof Instance) || !this._exports) {
+        throw new TypeError("WebAssembly.Instance.prototype.exports called on incompatible receiver");
+      }
+      return this._exports;
+    },
+    enumerable: true,
+    configurable: true
+  });
 
   function validate(bytes) {
     if (!bytes || (typeof bytes !== "object" && typeof bytes !== "function")) {
@@ -434,4 +271,3 @@
     instantiateStreaming: instantiateStreaming
   };
 })();
-

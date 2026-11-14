@@ -34,6 +34,7 @@ x25519-dalek.workspace = true
 webpki-roots.workspace = true
 rustls-pki-types.workspace = true
 wasmi.workspace = true
+wasmi_core.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

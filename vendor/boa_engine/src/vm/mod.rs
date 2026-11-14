@@ -133,6 +133,18 @@ impl Stack {
         }
     }
 
+    /// Returns the current number of values on the stack.
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// Truncates the stack to `len` values.
+    #[inline]
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.stack.truncate(len);
+    }
+
     /// Get a register value by index, relative to the given frame's `rp`.
     pub(crate) fn get_register(&self, frame: &CallFrame, index: usize) -> Option<&JsValue> {
         self.stack.get(frame.rp as usize + index)
