@@ -762,3 +762,301 @@ fn test_multi_tenant_vfs_affinity_checkpoint_mtime_and_nested_sandbox_isolation(
         us_per_req
     );
 }
+
+#[test]
+fn test_wave3_issues_111_112_113_warm_fd_isolation_signed_delta_kv_oom_and_random_int() {
+    // -------------------------------------------------------------------------
+    // 1. Issue #111: Warm-realm multi-turn open FD & watcher teardown
+    // -------------------------------------------------------------------------
+    let fs_caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/tmp")
+        .with_write_prefix("/tmp");
+    let mut warm_iso = SliceIsolate::spawn("wave3-warm-fd", 1, fs_caps, 2_000_000, 512 * 1024);
+
+    let turn1_src = r#"
+        const fs = require("node:fs");
+        globalThis.__leakedWatchHits = 0;
+        const fd = fs.openSync("/tmp/warm_leak.bin", "w+");
+        fs.writeSync(fd, Buffer.alloc(160 * 1024, 0x61));
+        fs.watch("/tmp/warm_leak.bin", () => { globalThis.__leakedWatchHits++; });
+        String(fd);
+    "#;
+    let bc_turn1 = compile_source_to_bytecode(turn1_src);
+    let m1 = warm_iso
+        .execute_bytecode(&bc_turn1, None)
+        .expect("turn 1 should open fd and watcher");
+    let leaked_fd: u32 = m1.return_value.parse().expect("valid fd integer");
+
+    // Turn 2 on same tenant & warm realm: leaked FD from Turn 1 MUST be closed
+    // (`EBADF`), its unlinked/ephemeral budget handled cleanly, and Turn 1's
+    // watcher MUST NOT fire when `/tmp/warm_leak.bin` is modified!
+    warm_iso.reset_for_request("wave3-warm-fd", 2, 2_000_000, 512 * 1024);
+    let turn2_src = format!(
+        r#"
+        const fs = require("node:fs");
+        let oldFdCode = "OPEN";
+        try {{ fs.fstatSync({leaked_fd}); }} catch (e) {{ oldFdCode = e.code; }}
+        fs.writeFileSync("/tmp/warm_leak.bin", "turn2-update");
+        JSON.stringify({{ oldFdCode, watchHits: globalThis.__leakedWatchHits }});
+        "#
+    );
+    let bc_turn2 = compile_source_to_bytecode(&turn2_src);
+    let m2 = warm_iso
+        .execute_bytecode(&bc_turn2, None)
+        .expect("turn 2 should execute cleanly");
+    let turn2_json: serde_json::Value = serde_json::from_str(&m2.return_value).unwrap();
+    assert_eq!(turn2_json["oldFdCode"], "EBADF");
+    assert_eq!(turn2_json["watchHits"], 0);
+
+    // -------------------------------------------------------------------------
+    // 2. Issue #112: Exact evalSandbox repro + signed-delta KV/VFS/checkpoint
+    //    accounting + uncatchable OOM enforcement
+    // -------------------------------------------------------------------------
+    let kv_caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/tmp")
+        .with_write_prefix("/tmp");
+    let mut kv_iso = SliceIsolate::spawn("wave3-kv-budget", 1, kv_caps, 5_000_000, 1024 * 1024);
+
+    let budget_script = r#"
+        const fs = require("node:fs");
+
+        // (a) Exact Issue #112 repro inside 32 KiB evalSandbox
+        const sub = Slice.evalSandbox(
+            `const value = "x".repeat(8000);
+             for (let i = 0; i < 20; i++) { Slice.kv.set("key", value); }
+             Slice.kv.get("key").length`,
+            { memoryBytes: 32768, fuel: 1000000, tenantId: "repro-112-sub" }
+        );
+
+        // (b) 40x overwrite of 50 KiB KV key (2 MiB cumulative writes) under 1 MiB ceiling
+        const val50k = Buffer.alloc(50 * 1024, 0x6b).toString("utf8");
+        for (let i = 0; i < 40; i++) {
+            Slice.kv.set("hot-key", val50k);
+        }
+        // Shrink to 16 bytes & delete to reclaim
+        Slice.kv.set("hot-key", "tiny-after-50k!!");
+        Slice.kv.del("hot-key");
+
+        // (c) 30x overwrite of 64 KiB VFS file + open FD unlink reclamation on closeSync
+        const buf64k = Buffer.alloc(64 * 1024, 0x42);
+        for (let i = 0; i < 30; i++) {
+            fs.writeFileSync("/tmp/hot_file.bin", buf64k);
+        }
+        fs.truncateSync("/tmp/hot_file.bin", 64);
+        fs.unlinkSync("/tmp/hot_file.bin");
+
+        const buf300k = Buffer.alloc(300 * 1024, 0x55);
+        const bigOpen = fs.openSync("/tmp/open_ephemeral.bin", "w+");
+        fs.writeSync(bigOpen, buf300k);
+        fs.unlinkSync("/tmp/open_ephemeral.bin");
+        // Closing the last FD to an unlinked 300 KiB inode must reclaim all 300 KiB!
+        fs.closeSync(bigOpen);
+
+        // (d) Checkpoint + post-checkpoint 900 KiB KV/VFS writes + restore reclaims budget
+        const val300k = buf300k.toString("utf8");
+        const snap = Slice.checkpoint();
+        Slice.kv.set("post-snap-kv-1", val300k);
+        Slice.kv.set("post-snap-kv-2", val300k);
+        fs.writeFileSync("/tmp/post_snap.bin", buf300k);
+        Slice.restore(snap);
+        // Writing 600 KiB now would hit 1.5 MiB > 1 MiB if restore leaked the 900 KiB above!
+        Slice.kv.set("after-restore-1", val300k);
+        Slice.kv.set("after-restore-2", val300k);
+        const afterLen =
+            Slice.kv.get("after-restore-1").length + Slice.kv.get("after-restore-2").length;
+        Slice.kv.del("after-restore-1");
+        Slice.kv.del("after-restore-2");
+
+        JSON.stringify({
+            subOk: sub.ok,
+            subVal: sub.returnValue,
+            afterLen,
+        });
+    "#;
+    let bc_budget = compile_source_to_bytecode(budget_script);
+    let m_budget = kv_iso
+        .execute_bytecode(&bc_budget, None)
+        .expect("signed-delta KV/VFS/checkpoint script must succeed within 1 MiB");
+    let budget_out: serde_json::Value = serde_json::from_str(&m_budget.return_value).unwrap();
+    assert_eq!(budget_out["subOk"], true);
+    assert_eq!(budget_out["subVal"], "8000");
+    assert_eq!(budget_out["afterLen"], 600 * 1024);
+
+    // (e) Uncatchable OOM trap: guest try/catch MUST NOT swallow MemoryCeilingExceeded
+    let oom_swallow_src = r#"
+        for (let i = 0; i < 32; i++) {
+            try {
+                Slice.kv.set("oom:" + i, "z".repeat(24 * 1024));
+            } catch (_) {
+                // Attempt to swallow OOM and keep running
+            }
+        }
+        "escaped-oom"
+    "#;
+    let bc_oom = compile_source_to_bytecode(oom_swallow_src);
+    let mut oom_iso = SliceIsolate::spawn(
+        "wave3-oom-uncatchable",
+        1,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        128 * 1024,
+    );
+    let oom_err = oom_iso
+        .execute_bytecode(&bc_oom, None)
+        .expect_err("guest try/catch around Slice.kv.set OOM must trap with MemoryCeilingExceeded");
+    assert!(
+        matches!(oom_err, SandboxViolation::MemoryCeilingExceeded { .. }),
+        "expected MemoryCeilingExceeded, got: {:?}",
+        oom_err
+    );
+
+    // -------------------------------------------------------------------------
+    // 3. Issue #113: 48-bit unbiased crypto.randomInt, validation, seeded PRNG
+    //    reproducibility, and zero memory-budget growth across 50,000 calls
+    // -------------------------------------------------------------------------
+    let random_int_src = r#"
+        import crypto from "node:crypto";
+
+        async function runRandomIntTests() {
+            const TWO_32 = 2 ** 32;
+            const TWO_40 = 2 ** 40;
+            const MAX_RANGE = 2 ** 48 - 1;
+
+            let sawAbove32 = false;
+            for (let i = 0; i < 256; i++) {
+                const v = crypto.randomInt(0, TWO_40);
+                if (!Number.isSafeInteger(v) || v < 0 || v >= TWO_40) {
+                    throw new Error("out of bounds [0, 2^40): " + v);
+                }
+                if (v >= TWO_32) sawAbove32 = true;
+            }
+
+            // Boundary range 2^32 + 1 and max range 2^48 - 1 and signed span
+            const rBoundary = crypto.randomInt(0, TWO_32 + 1);
+            const rMaxSpan = crypto.randomInt(0, MAX_RANGE);
+            const rSigned = crypto.randomInt(-(2 ** 46), 2 ** 46);
+            if (
+                rBoundary < 0 || rBoundary >= TWO_32 + 1 ||
+                rMaxSpan < 0 || rMaxSpan >= MAX_RANGE ||
+                rSigned < -(2 ** 46) || rSigned >= 2 ** 46
+            ) {
+                throw new Error("boundary randomInt out of range");
+            }
+
+            // Async callback overloads: (max, cb) and (min, max, cb)
+            const cbSingle = await new Promise((res, rej) =>
+                crypto.randomInt(50, (err, n) => (err ? rej(err) : res(n)))
+            );
+            const cbPair = await new Promise((res, rej) =>
+                crypto.randomInt(100, 110, (err, n) => (err ? rej(err) : res(n)))
+            );
+
+            // Error code validation
+            const errCode = (fn) => {
+                try { fn(); return "NONE"; } catch (e) { return e && e.code ? e.code : e.name; }
+            };
+            const codes = {
+                tooWide: errCode(() => crypto.randomInt(0, 2 ** 48)),
+                equalBounds: errCode(() => crypto.randomInt(10, 10)),
+                invertedBounds: errCode(() => crypto.randomInt(20, 10)),
+                floatArg: errCode(() => crypto.randomInt(1.5, 10)),
+                nanArg: errCode(() => crypto.randomInt(NaN, 10)),
+                bigintArg: errCode(() => crypto.randomInt(1n, 10n)),
+                badCallback: errCode(() => crypto.randomInt(0, 10, "not-a-fn")),
+            };
+
+            // Uniformity check on non-power-of-two modulus 3 (6,000 samples)
+            const buckets = [0, 0, 0];
+            for (let i = 0; i < 6000; i++) {
+                buckets[crypto.randomInt(0, 3)]++;
+            }
+            const uniformOk = buckets.every((c) => c >= 1800 && c <= 2200);
+
+            // 50,000 calls with zero heap budget growth
+            let checksum = 0;
+            for (let i = 0; i < 50000; i++) {
+                checksum += crypto.randomInt(0, 1000) & 1;
+            }
+
+            console.log(JSON.stringify({
+                sawAbove32,
+                cbSingleOk: cbSingle >= 0 && cbSingle < 50,
+                cbPairOk: cbPair >= 100 && cbPair < 110,
+                codes,
+                uniformOk,
+                checksumOk: checksum > 0,
+            }));
+        }
+        runRandomIntTests().catch((e) => console.log(JSON.stringify({ __err: String(e && e.stack || e) })));
+    "#;
+    let bc_rand = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        random_int_src,
+        true,
+    ));
+    // Tight 32 KiB memory ceiling proves 50,000+ randomInt calls allocate 0 budget bytes!
+    let mut rand_iso = SliceIsolate::spawn(
+        "wave3-random-int",
+        1,
+        CapabilityToken::pure_compute(),
+        25_000_000,
+        32 * 1024,
+    );
+    let m_rand = rand_iso
+        .execute_bytecode(&bc_rand, None)
+        .expect("randomInt suite must succeed under 32 KiB memory ceiling");
+    let rand_out: serde_json::Value =
+        serde_json::from_str(m_rand.stdout.first().expect("stdout")).unwrap();
+    assert!(
+        rand_out.get("__err").is_none(),
+        "randomInt error: {}",
+        rand_out
+    );
+    assert_eq!(rand_out["sawAbove32"], true);
+    assert_eq!(rand_out["cbSingleOk"], true);
+    assert_eq!(rand_out["cbPairOk"], true);
+    assert_eq!(rand_out["codes"]["tooWide"], "ERR_OUT_OF_RANGE");
+    assert_eq!(rand_out["codes"]["equalBounds"], "ERR_OUT_OF_RANGE");
+    assert_eq!(rand_out["codes"]["invertedBounds"], "ERR_OUT_OF_RANGE");
+    assert_eq!(rand_out["codes"]["floatArg"], "ERR_INVALID_ARG_TYPE");
+    assert_eq!(rand_out["codes"]["nanArg"], "ERR_INVALID_ARG_TYPE");
+    assert_eq!(rand_out["codes"]["bigintArg"], "ERR_INVALID_ARG_TYPE");
+    assert_eq!(rand_out["codes"]["badCallback"], "ERR_INVALID_ARG_TYPE");
+    assert_eq!(rand_out["uniformOk"], true);
+    assert_eq!(rand_out["checksumOk"], true);
+
+    // Deterministic seed reproducibility for 48-bit randomInt
+    let det_src = r#"
+        const crypto = require("node:crypto");
+        const seq = [];
+        for (let i = 0; i < 8; i++) {
+            seq.push(crypto.randomInt(0, 2 ** 47));
+        }
+        seq.join(",");
+    "#;
+    let bc_det = compile_source_to_bytecode(det_src);
+    let mut det_a = SliceIsolate::spawn(
+        "det-a",
+        1,
+        CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    );
+    det_a.set_deterministic_seed(Some(0xCAFE_BABE_1234_5678));
+    let mut det_b = SliceIsolate::spawn(
+        "det-b",
+        2,
+        CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    );
+    det_b.set_deterministic_seed(Some(0xCAFE_BABE_1234_5678));
+    let seq_a = det_a.execute_bytecode(&bc_det, None).unwrap().return_value;
+    let seq_b = det_b.execute_bytecode(&bc_det, None).unwrap().return_value;
+    assert_eq!(seq_a, seq_b);
+    assert!(
+        seq_a
+            .split(',')
+            .any(|v| v.parse::<u64>().unwrap() >= (1u64 << 32)),
+        "deterministic 47-bit sequence should populate upper bits: {seq_a}"
+    );
+}

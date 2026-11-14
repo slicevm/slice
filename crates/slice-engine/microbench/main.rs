@@ -4,8 +4,9 @@ use slice_engine::intrinsics::{
     aes_cbc_decrypt_with_expanded, aes_cbc_encrypt_with_expanded, aes_gcm_encrypt,
     aes_gcm_open_with_key, aes_gcm_seal_with_key, base64_decode, base64_encode, crc32_checksum,
     ed25519_keypair_from_seed, ed25519_sign_bytes, ed25519_verify_bytes, fast_parse_bytes,
-    fast_parse_ms, hmac_sha256_hex, make_ring_aead_key, parse_whatwg_url, sha256_hex,
-    zlib_compress_bytes, zlib_decompress_bytes, AesExpandedKey,
+    fast_parse_ms, hmac_sha256_hex, make_ring_aead_key, parse_whatwg_url,
+    sample_unbiased_u64_below, sha256_hex, zlib_compress_bytes, zlib_decompress_bytes,
+    AesExpandedKey,
 };
 use slice_engine::{
     compile_source_to_bytecode, is_tier0_slicesnp_compatible_ast, HttpRequestContext, SliceIsolate,
@@ -375,11 +376,91 @@ if (out.length < 20) throw new Error("stream decoder mismatch");
         });
     });
 
+    let vfs_inode_snap_src = r#"
+const fs = require("node:fs");
+fs.mkdirSync("/tmp/bench-ino", { recursive: true });
+const fd = fs.openSync("/tmp/bench-ino/live.bin", "w+");
+const buf = Buffer.from("slice-inode-fd-rename-checkpoint-payload-48bytes");
+fs.writeSync(fd, buf, 0, buf.length, 0);
+fs.renameSync("/tmp/bench-ino/live.bin", "/tmp/bench-ino/renamed.bin");
+const snap = Slice.checkpoint();
+fs.writeFileSync("/tmp/bench-ino/renamed.bin", "mutated");
+Slice.restore(snap);
+const out = Buffer.allocUnsafe(48);
+const n = fs.readSync(fd, out, 0, 48, 0);
+fs.unlinkSync("/tmp/bench-ino/renamed.bin");
+const stSize = fs.fstatSync(fd).size;
+fs.closeSync(fd);
+if (n !== 48 || stSize !== 48) throw new Error("vfs inode snap mismatch");
+"#;
+    let vfs_inode_snap_bc = compile_source_to_bytecode(vfs_inode_snap_src);
+    group.bench_function("vfs_fd_rename_unlink_and_checkpoint_restore", |b| {
+        SliceIsolate::prewarm_boa_pool(1);
+        let caps = CapabilityToken::pure_compute()
+            .with_read_prefix("/tmp")
+            .with_write_prefix("/tmp");
+        let mut iso = SliceIsolate::spawn("bench-vfs-ino", 1, caps, 50_000_000, 16 * 1024 * 1024);
+        let mut slot = 1u32;
+        b.iter(|| {
+            slot = slot.wrapping_add(1);
+            iso.reset_for_request("bench-vfs-ino", slot, 50_000_000, 16 * 1024 * 1024);
+            let res = iso
+                .execute_bytecode(black_box(&vfs_inode_snap_bc), None)
+                .expect("vfs inode snap execute");
+            black_box(res.fuel_consumed)
+        });
+    });
+
     group.finish();
 }
 
 fn bench_wave3_als_intl_crypto_and_buffer(c: &mut Criterion) {
     let mut group = c.benchmark_group("slice_engine::wave3");
+
+    group.bench_function("crypto_random_int_48bit_unbiased_native", |b| {
+        b.iter(|| {
+            let v = sample_unbiased_u64_below(black_box((1u64 << 40) + 3), None);
+            black_box(v)
+        });
+    });
+
+    let kv_rand_src = r#"
+const crypto = require("node:crypto");
+const payload = "x".repeat(4096);
+for (let i = 0; i < 64; i++) {
+    Slice.kv.set("bench:overwrite", payload);
+}
+let acc = 0;
+for (let i = 0; i < 256; i++) {
+    acc += crypto.randomInt(0, 2 ** 40) & 3;
+}
+if (Slice.kv.get("bench:overwrite").length !== 4096 || acc < 0) {
+    throw new Error("kv rand bench mismatch");
+}
+"#;
+    let kv_rand_bc = compile_source_to_bytecode(kv_rand_src);
+    group.bench_function(
+        "kv_signed_delta_overwrite_and_crypto_random_int_batch",
+        |b| {
+            SliceIsolate::prewarm_boa_pool(1);
+            let mut iso = SliceIsolate::spawn(
+                "bench-wave3-kv-rand",
+                1,
+                CapabilityToken::pure_compute(),
+                50_000_000,
+                64 * 1024,
+            );
+            let mut slot = 1u32;
+            b.iter(|| {
+                slot = slot.wrapping_add(1);
+                iso.reset_for_request("bench-wave3-kv-rand", slot, 50_000_000, 64 * 1024);
+                let res = iso
+                    .execute_bytecode(black_box(&kv_rand_bc), None)
+                    .expect("kv rand bench execute");
+                black_box(res.fuel_consumed)
+            });
+        },
+    );
 
     let als_intl_src = r#"
 const { AsyncLocalStorage } = require("node:async_hooks");

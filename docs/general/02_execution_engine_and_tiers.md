@@ -182,7 +182,7 @@ When writing applications in Slice, prefer standard `node:crypto`, WebCrypto (`c
 | `Buffer.from(str, "utf8").toString("base64url")`<br>`buf.readUInt32BE(0)` / `buf.writeBigUInt64BE(val, 0)` | Backed by a real `Uint8Array` instance (`Object.setPrototypeOf(u8, Buffer.prototype)`) with native Rust Base64/Base64URL/Hex codecs and full big/little-endian wire-protocol readers/writers. |
 | `semver.valid(v)`, `semver.coerce(v)`, `semver.gt(a, b)`, `semver.satisfies(v, range)` | Executed in `~150 ns` by Slice's zero-regex Rust SemVer engine (`__slice_semver_*`), with automatic fallback for complex ranges. |
 | `ms("15m")`, `ms(60000, { long: true })`<br>`bytes.parse("64KB")`, `bytes.format(4781506)` | Executed by native Rust zero-regex parsers/formatters (`__slice_fast_ms`, `__slice_fast_bytes_*`) + compile-time constant folding for literals like `bytes.parse("64KB")` -> `65536`. |
-| `fs.writeFileSync("/tmp/a.json", data)`<br>`fs.readFileSync("/tmp/a.json", "utf8")` | Served out of Slice's thread-local **In-Memory VFS Slab** (`BOA_VFS_CACHE`) at memory speed, with OCap prefix security and `< 5 us` `Slice.checkpoint()` support. |
+| `fs.writeFileSync("/tmp/a.json", data)`<br>`fs.readFileSync("/tmp/a.json", "utf8")` | Served out of Slice's thread-local **Inode-Backed CoW VFS Slab** (`BOA_VFS_STATE`) at memory speed, with OCap prefix security, Rust open FD tracking, and `< 5 us` `Slice.checkpoint()` support. |
 
 ---
 

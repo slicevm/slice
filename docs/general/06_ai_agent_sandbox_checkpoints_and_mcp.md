@@ -126,9 +126,9 @@ When an AI agent or multi-step workflow modifies files (`node:fs`) or key-value 
 
 Slice provides `< 5 microsecond` copy-on-write state snapshots:
 - **`const snapId: number = Slice.checkpoint()`**: Takes an immediate in-memory snapshot of:
-  1. Every file, directory, deletion tombstone, and custom modification timestamp in the `node:fs` VFS slab (`BOA_VFS_CACHE`, `BOA_VFS_DIRS`, `BOA_VFS_TOMBSTONES`, & `BOA_VFS_MTIMES`), and
-  2. Every key-value pair and counter belonging to the active tenant across all 16 shards of `Slice.kv`.
-- **`const restored: boolean = Slice.restore(snapId)`**: Rewinds both `node:fs` and `Slice.kv` back to the exact state at `snapId` in under 5 microseconds (verifying tenant ownership).
+  1. Every typed file, directory, symlink, open file descriptor cursor, deletion tombstone, and custom modification timestamp in the inode-backed `node:fs` VFS slab (`BOA_VFS_STATE`), and
+  2. Every key-value pair and counter belonging to the active tenant across all 16 shards of `Slice.kv`, together with the tenant's retained VFS + KV byte budget.
+- **`const restored: boolean = Slice.restore(snapId)`**: Rewinds `node:fs`, `Slice.kv`, and the tenant's retained VFS + KV memory budget back to the exact state at `snapId` in under 5 microseconds (verifying tenant ownership).
 - **`const released: boolean = Slice.releaseCheckpoint(snapId)`**: Explicitly frees snapshot `snapId` from the bounded per-thread checkpoint slab (capped at 64 snapshots with FIFO eviction and automatic cleanup on request/sandbox teardown).
 
 ### Recipe: Tree-of-Thought (ToT) AI Code Exploration with Instant Rollback

@@ -2,8 +2,8 @@
 //! `os.platform`/`arch`, Fast SHA-256/HMAC-SHA256, Base64/UTF-8, `process.env`, Event-Loop Timers).
 
 use crate::bindings::helpers::{
-    bytes_to_js_uint8_array, consume_crypto_kdf_fuel, try_consume_isolate_memory,
-    with_buffer_source_bytes, with_two_buffer_source_bytes,
+    bytes_to_js_uint8_array, consume_crypto_kdf_fuel, trip_isolate_oom_limits,
+    try_consume_isolate_memory_ctx, with_buffer_source_bytes, with_two_buffer_source_bytes,
 };
 use crate::boa_realm::{
     BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_ENV_MAP, BOA_HTTP_REQ, BOA_KV_MEM_BUDGET, BOA_STDOUT,
@@ -72,11 +72,12 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 }
                 joined
             };
-            if let Err(msg) = try_consume_isolate_memory(line.len().max(8)) {
+            if let Err(msg) = try_consume_isolate_memory_ctx(line.len().max(8), context) {
                 return Err(JsNativeError::range().with_message(msg).into());
             }
             if let Err(msg) = consume_crypto_kdf_fuel(((line.len() as u64) / 32).saturating_add(2))
             {
+                trip_isolate_oom_limits(context);
                 return Err(JsNativeError::range().with_message(msg).into());
             }
             BOA_STDOUT.with(|out| out.borrow_mut().push(line));
@@ -87,7 +88,7 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_charge_mem"),
         2,
-        NativeFunction::from_fn_ptr(|_this, args, _context| {
+        NativeFunction::from_fn_ptr(|_this, args, context| {
             let bytes = args
                 .first()
                 .and_then(|v| v.as_number())
@@ -98,10 +99,11 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .and_then(|v| v.as_number())
                 .map(|n| n.max(0.0) as u64)
                 .unwrap_or_else(|| ((bytes as u64) / 64).max(1));
-            if let Err(msg) = try_consume_isolate_memory(bytes) {
+            if let Err(msg) = try_consume_isolate_memory_ctx(bytes, context) {
                 return Err(JsNativeError::range().with_message(msg).into());
             }
             if let Err(msg) = consume_crypto_kdf_fuel(fuel) {
+                trip_isolate_oom_limits(context);
                 return Err(JsNativeError::range().with_message(msg).into());
             }
             Ok(BoaVal::undefined())
@@ -653,11 +655,11 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
         0,
         NativeFunction::from_fn_ptr(|_this, args, _context| {
             if let Some(mode) = args.first().and_then(|v| v.as_number()) {
-                let (used, rem) = BOA_KV_MEM_BUDGET.with(|m| m.get());
+                let (used, limit) = BOA_KV_MEM_BUDGET.with(|m| m.get());
                 if mode == 1.0 {
                     return Ok(BoaVal::from(used as f64));
                 } else if mode == 2.0 {
-                    return Ok(BoaVal::from(rem as f64));
+                    return Ok(BoaVal::from(limit.saturating_sub(used) as f64));
                 }
             }
             let active = BOA_HTTP_REQ.with(|r| r.borrow().active);
@@ -727,6 +729,18 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .and_then(|v| v.as_number())
                 .map(|n| n as i32)
                 .unwrap_or(0);
+            if op == 3 {
+                let has_fs = crate::boa_realm::BOA_ACTIVE_CAPS.with(|c| {
+                    let caps = c.borrow();
+                    !caps.read_prefixes.is_empty() || !caps.write_prefixes.is_empty()
+                });
+                let cwd = if has_fs {
+                    slice_sandbox::cached_normalized_cwd()
+                } else {
+                    "/workspace"
+                };
+                return Ok(BoaVal::from(js_string!(cwd)));
+            }
             crate::boa_realm::mark_subsystem_dirty(crate::boa_realm::DIRTY_PROCESS);
             if op == 0 {
                 return Ok(BoaVal::undefined());

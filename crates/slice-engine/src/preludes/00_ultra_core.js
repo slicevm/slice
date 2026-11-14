@@ -163,7 +163,7 @@
   var __proc = Object.create(__ProcProto);
   __proc.pid = 1;
   __proc.env = { NODE_ENV: "production" };
-  __proc.cwd = function() { return "."; };
+  __proc.cwd = function() { return __slice_process_ctl(3); };
   __proc._exited = false;
   __proc._resetExitCode = function() {
     __pExitCode = undefined;
@@ -320,6 +320,10 @@
       var s = globalThis.__slice_active_http_server;
       if (s && typeof s._dispatchActiveHttpBridge === "function") {
         s._dispatchActiveHttpBridge();
+      }
+    } else if (op === 6) {
+      if (typeof globalThis.__slice_reset_fs_watchers === "function") {
+        globalThis.__slice_reset_fs_watchers();
       }
     }
   }

@@ -1,10 +1,10 @@
 //! 5-Ring OCap-Jailed Subprocess Execution (`node:child_process`) Host Bindings.
 
-use crate::bindings::helpers::{active_tenant_id_or_default, consume_crypto_kdf_fuel};
-use crate::boa_realm::{
-    check_boa_fs_read_ocap, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, BOA_KV_MEM_BUDGET,
-    BOA_VIOLATION,
+use crate::bindings::helpers::{
+    active_tenant_id_or_default, consume_crypto_kdf_fuel, trip_isolate_oom_limits,
+    try_consume_isolate_memory_ctx,
 };
+use crate::boa_realm::{check_boa_fs_read_ocap, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS};
 use crate::intrinsics::{base64_decode, base64_encode};
 use crate::state_and_kv::verify_egress_secrets_slice;
 use slice_sandbox::SandboxViolation;
@@ -709,6 +709,7 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
 
             // Ring 5: Base CPU Fuel charge for subprocess invocation
             if let Err(fuel_err) = consume_crypto_kdf_fuel(500) {
+                trip_isolate_oom_limits(context);
                 return Err(JsNativeError::range().with_message(fuel_err).into());
             }
 
@@ -777,25 +778,12 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
             if total_out_bytes > 0 {
                 let extra_fuel = (total_out_bytes as u64 / 64).max(1);
                 if let Err(fuel_err) = consume_crypto_kdf_fuel(extra_fuel) {
+                    trip_isolate_oom_limits(context);
                     return Err(JsNativeError::range().with_message(fuel_err).into());
                 }
-                let (used_mem, limit_mem) = BOA_KV_MEM_BUDGET.with(|m| m.get());
-                let next_mem = used_mem.saturating_add(total_out_bytes);
-                if next_mem > limit_mem {
-                    let violation = SandboxViolation::MemoryCeilingExceeded {
-                        tenant_id: tenant_id.clone(),
-                        requested: next_mem,
-                        limit: limit_mem,
-                    };
-                    let msg = violation.to_string();
-                    BOA_VIOLATION.with(|v| {
-                        if v.borrow().is_none() {
-                            *v.borrow_mut() = Some(violation);
-                        }
-                    });
+                if let Err(msg) = try_consume_isolate_memory_ctx(total_out_bytes, context) {
                     return Err(JsNativeError::range().with_message(msg).into());
                 }
-                BOA_KV_MEM_BUDGET.with(|m| m.set((next_mem, limit_mem)));
             }
 
             let stdout_str = String::from_utf8_lossy(&stdout_bytes).into_owned();

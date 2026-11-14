@@ -8,7 +8,7 @@
 //! - [`http_and_fetch`]: Inbound HTTP request/response bridge (`Slice.serve`, `node:http`) and outbound `fetch` (`Shard 10`).
 //! - [`kv_and_sandbox`]: Multi-tenant Edge KV, transactional state checkpoints, and nested `Slice.evalSandbox` sub-isolates.
 //! - [`wintertc_and_buffer`]: WHATWG `btoa`/`atob`, `TextEncoder`/`TextDecoder`, `zlib` compression, and `Buffer` hex/base64 codecs.
-//! - [`fs`]: OCap-enforced Virtual Filesystem (`BOA_VFS_CACHE`) and host filesystem bindings (`node:fs`).
+//! - [`fs`]: OCap-enforced inode-backed Virtual Filesystem (`VirtualFileSystem`), open FD table (`FsRuntimeState`), and host filesystem bindings (`node:fs`).
 //! - [`crypto`]: WHATWG WebCrypto (`crypto.subtle`) and `node:crypto` ciphers, KDFs, and asymmetric signing (`Ed25519`, `ECDSA`).
 //! - [`websocket`]: RFC 6455 WebSocket client/server host bindings (`Shard 7`).
 //! - [`workers_and_sockets`]: Web `Worker` threads and OCap TCP/TLS/UDP sockets (`Shard 8`).

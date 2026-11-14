@@ -11,7 +11,7 @@ This chapter provides the complete API reference for every built-in `node:*` mod
 All built-in modules can be imported with or without the `node:` prefix (`import * as fs from "node:fs"` or `import * as fs from "fs"`, as well as CommonJS `require("node:fs")` or `require("fs")`). They are loaded lazily on first use (`0.00 ns` cost if unused).
 
 ### 1.1 `node:fs` / `fs` & `node:fs/promises` (OCap-Guarded Copy-on-Write VFS Slab + Read-Only Host Fallback)
-Every `node:fs` and `node:fs/promises` operation checks your `allow_read` / `allow_write` prefixes, blocks `..` traversal, NUL bytes, and device/UNC paths, serves hot files from Slice's in-memory copy-on-write VFS slab (`BOA_VFS_CACHE`), masks unlinked paths with VFS tombstones without deleting host OS files, and snapshots/restores state in `< 5 us` during `Slice.checkpoint()` / `Slice.restore()` and `slice test`.
+Every `node:fs` and `node:fs/promises` operation checks your `allow_read` / `allow_write` prefixes, blocks `..` traversal, NUL bytes, and device/UNC paths, anchors relative paths to the canonical workspace CWD (`process.cwd()` / `realpathSync`), serves hot files and open file descriptors from Slice's inode-backed copy-on-write VFS slab (`BOA_VFS_STATE`), masks unlinked paths with VFS tombstones without deleting host OS files, and snapshots/restores state in `< 5 us` during `Slice.checkpoint()` / `Slice.restore()` and `slice test`.
 
 ```typescript
 import * as fs from "node:fs";

@@ -247,8 +247,91 @@ pub fn normalize_vfs_path_lexical(raw: &str) -> String {
 }
 
 #[inline]
-fn is_abs_normalized_vfs_path(norm: &str) -> bool {
+pub fn is_abs_normalized_vfs_path(norm: &str) -> bool {
     norm.starts_with('/') || (norm.len() >= 3 && norm.as_bytes()[1] == b':')
+}
+
+struct CachedWorkspaceCwd {
+    canonical: String,
+    lexical_alias: Option<String>,
+}
+
+#[inline]
+fn workspace_cwd_info() -> &'static CachedWorkspaceCwd {
+    static CWD_INFO: std::sync::OnceLock<CachedWorkspaceCwd> = std::sync::OnceLock::new();
+    CWD_INFO.get_or_init(|| match std::env::current_dir() {
+        Ok(raw_cwd) => {
+            let lexical = normalize_vfs_path_lexical(&raw_cwd.to_string_lossy());
+            let canonical = std::fs::canonicalize(&raw_cwd)
+                .map(|c| normalize_vfs_path_lexical(&c.to_string_lossy()))
+                .unwrap_or_else(|_| lexical.clone());
+            let lexical_alias = if lexical != canonical {
+                Some(lexical)
+            } else {
+                None
+            };
+            CachedWorkspaceCwd {
+                canonical,
+                lexical_alias,
+            }
+        }
+        Err(_) => CachedWorkspaceCwd {
+            canonical: "/workspace".to_string(),
+            lexical_alias: None,
+        },
+    })
+}
+
+/// Returns the process's canonical forward-slash workspace directory, cached once per process.
+#[inline]
+pub fn cached_normalized_cwd() -> &'static str {
+    workspace_cwd_info().canonical.as_str()
+}
+
+/// Normalizes `raw` lexically and anchors relative paths (`"data/rel.txt"`, `"./a"`, `"."`)
+/// against [`cached_normalized_cwd`] so relative and canonical absolute VFS paths always map
+/// to the exact same canonical VFS key without per-call OS syscalls.
+#[inline]
+pub fn anchor_vfs_path_to_cwd(raw: &str) -> String {
+    let norm = normalize_vfs_path_lexical(raw);
+    let cwd_info = workspace_cwd_info();
+    if is_abs_normalized_vfs_path(&norm) {
+        if let Some(ref lex) = cwd_info.lexical_alias {
+            if norm == *lex {
+                return cwd_info.canonical.clone();
+            }
+            if let Some(rem) = norm.strip_prefix(lex.as_str()) {
+                if rem.starts_with('/') {
+                    let mut mapped = String::with_capacity(cwd_info.canonical.len() + rem.len());
+                    mapped.push_str(&cwd_info.canonical);
+                    mapped.push_str(rem);
+                    return mapped;
+                }
+            }
+        }
+        return norm;
+    }
+    let base = cwd_info.canonical.as_str();
+    if norm == "." {
+        return base.to_string();
+    }
+    if norm == ".." || norm.starts_with("../") || norm.contains("/..") {
+        let mut combined = String::with_capacity(base.len() + 1 + norm.len());
+        combined.push_str(base);
+        if !base.ends_with('/') {
+            combined.push('/');
+        }
+        combined.push_str(&norm);
+        return normalize_vfs_path_lexical(&combined);
+    }
+    let need_sep = !base.ends_with('/');
+    let mut out = String::with_capacity(base.len() + usize::from(need_sep) + norm.len());
+    out.push_str(base);
+    if need_sep {
+        out.push('/');
+    }
+    out.push_str(&norm);
+    out
 }
 
 #[inline]
@@ -303,34 +386,61 @@ pub fn vfs_normalized_candidate_matches_prefix(norm_cand: &str, allowed_prefix: 
         }
     }
 
-    // Relative-vs-absolute workspace resolution against `current_dir()`
+    // Relative-vs-absolute workspace resolution against cached `current_dir()`
     let cand_is_abs = is_abs_normalized_vfs_path(norm_cand);
     let pref_is_abs = is_abs_normalized_vfs_path(&norm_pref);
+    let cwd_info = workspace_cwd_info();
     if cand_is_abs != pref_is_abs {
-        if let Ok(cwd) = std::env::current_dir() {
-            let norm_cwd = normalize_vfs_path_lexical(&cwd.to_string_lossy());
+        let check_against_base = |norm_cwd: &str| -> bool {
             let abs_cand: Cow<'_, str> = if cand_is_abs {
                 Cow::Borrowed(norm_cand)
             } else if norm_cand == "." {
-                Cow::Owned(norm_cwd.clone())
+                Cow::Borrowed(norm_cwd)
             } else {
-                Cow::Owned(normalize_vfs_path_lexical(&format!(
-                    "{}/{}",
-                    norm_cwd, norm_cand
-                )))
+                let sep = if norm_cwd.ends_with('/') { "" } else { "/" };
+                Cow::Owned(format!("{}{}{}", norm_cwd, sep, norm_cand))
             };
             let abs_pref: Cow<'_, str> = if pref_is_abs {
-                norm_pref
+                Cow::Borrowed(norm_pref.as_ref())
             } else if norm_pref == "." {
-                Cow::Owned(norm_cwd)
+                Cow::Borrowed(norm_cwd)
             } else {
-                Cow::Owned(normalize_vfs_path_lexical(&format!(
-                    "{}/{}",
-                    norm_cwd, norm_pref
-                )))
+                let sep = if norm_cwd.ends_with('/') { "" } else { "/" };
+                Cow::Owned(format!("{}{}{}", norm_cwd, sep, norm_pref))
             };
-            if path_starts_with_dir_boundary(&abs_cand, &abs_pref) {
+            path_starts_with_dir_boundary(&abs_cand, &abs_pref)
+        };
+        if check_against_base(&cwd_info.canonical) {
+            return true;
+        }
+        if let Some(ref lex) = cwd_info.lexical_alias {
+            if check_against_base(lex) {
                 return true;
+            }
+        }
+    } else if cand_is_abs && pref_is_abs {
+        if let Some(ref lex) = cwd_info.lexical_alias {
+            let remap = |p: &str| -> Option<String> {
+                if p == lex {
+                    Some(cwd_info.canonical.clone())
+                } else if let Some(rem) = p.strip_prefix(lex.as_str()) {
+                    if rem.starts_with('/') {
+                        Some(format!("{}{}", cwd_info.canonical, rem))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            let mapped_cand = remap(norm_cand);
+            let mapped_pref = remap(&norm_pref);
+            if mapped_cand.is_some() || mapped_pref.is_some() {
+                let c = mapped_cand.as_deref().unwrap_or(norm_cand);
+                let p = mapped_pref.as_deref().unwrap_or(&norm_pref);
+                if path_starts_with_dir_boundary(c, p) {
+                    return true;
+                }
             }
         }
     }

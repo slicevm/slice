@@ -8,12 +8,12 @@
 //! - Bounded CPU instruction fuel (`fuel`) and memory ceiling (`memoryBytes`) per worker
 //! - Lock-free `mpsc` bidirectional message channels integrated directly into `event_loop.rs`
 
+use crate::bindings::fs::VfsSnapshot;
 use crate::boa_realm::{
     check_boa_fs_read_ocap, mark_subsystem_dirty, norm_vfs_path, vfs_owner_namespace, BoaFsCaps,
     BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_ENV_MAP,
     BOA_EXEC_BINS, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
-    BOA_VFS_CACHE, BOA_VFS_DIRS, BOA_VFS_MTIMES, BOA_VFS_OWNER_TENANT, BOA_VFS_TOMBSTONES,
-    BOA_VIOLATION, DIRTY_WORKERS,
+    BOA_VFS_OWNER_TENANT, BOA_VFS_STATE, BOA_VIOLATION, DIRTY_WORKERS,
 };
 use crate::intrinsics::base64_decode;
 use crate::isolate::SliceIsolate;
@@ -62,10 +62,7 @@ struct WorkerJob {
     child_mem: usize,
     parent_det: Option<(u64, u64)>,
     parent_egress_secrets: Vec<String>,
-    parent_vfs_cache: FxHashMap<String, Arc<Vec<u8>>>,
-    parent_vfs_dirs: FxHashSet<String>,
-    parent_vfs_tombstones: FxHashSet<String>,
-    parent_vfs_mtimes: FxHashMap<String, f64>,
+    parent_vfs_snap: VfsSnapshot,
     parent_fetch_mocks: FxHashMap<String, String>,
     parent_ws_mocks: FxHashMap<String, String>,
     parent_sock_mocks: FxHashMap<String, String>,
@@ -357,18 +354,16 @@ fn resolve_worker_script_source(specifier_or_code: &str, is_eval: bool) -> Resul
         ));
     }
 
-    // 1. Check in-memory VFS cache (`BOA_VFS_CACHE`) first (0 disk stat syscalls)
-    if let Some(vfs_src) = BOA_VFS_CACHE.with(|c| {
-        let map = c.borrow();
-        map.get(&norm)
-            .or_else(|| map.get(raw_path))
-            .or_else(|| {
-                let stripped = norm.strip_prefix("./").unwrap_or(&norm);
-                map.get(stripped)
-            })
-            .cloned()
-    }) {
-        return Ok(String::from_utf8_lossy(&vfs_src).into_owned());
+    // 1. Check in-memory `VfsState` first (0 disk stat syscalls, explicit file-kind check)
+    match crate::bindings::fs::read_vfs_file_bytes_resolved(raw_path) {
+        Ok(Some(vfs_src)) => return Ok(String::from_utf8_lossy(&vfs_src).into_owned()),
+        Ok(None) => {}
+        Err(()) => {
+            return Err(format!(
+                "WorkerError: Cannot read worker module '{}': symlink loop or OCap denied",
+                raw_path
+            ));
+        }
     }
 
     if crate::bindings::fs::is_vfs_tombstoned(&norm)
@@ -590,24 +585,7 @@ pub(crate) fn worker_spawn_with_context(
     let parent_net_hosts = BOA_NET_HOSTS.with(|h| h.borrow().clone());
     let parent_env_map = BOA_ENV_MAP.with(|m| m.borrow().clone());
     let parent_egress_secrets = BOA_EGRESS_SECRETS.with(|s| s.borrow().clone());
-    let parent_vfs_cache = BOA_VFS_CACHE.with(|c| c.borrow().clone());
-    let parent_vfs_dirs = BOA_VFS_DIRS.with(|d| d.borrow().clone());
-    let parent_vfs_tombstones = BOA_VFS_TOMBSTONES.with(|t| {
-        let b = t.borrow();
-        if b.is_empty() {
-            FxHashSet::default()
-        } else {
-            b.clone()
-        }
-    });
-    let parent_vfs_mtimes = BOA_VFS_MTIMES.with(|m| {
-        let b = m.borrow();
-        if b.is_empty() {
-            FxHashMap::default()
-        } else {
-            b.clone()
-        }
-    });
+    let parent_vfs_snap = BOA_VFS_STATE.with(|v| v.borrow().snapshot_without_fds());
     let parent_fetch_mocks = BOA_FETCH_MOCKS.with(|m| m.borrow().clone());
     let parent_ws_mocks = BOA_WS_MOCKS.with(|m| m.borrow().clone());
     let parent_sock_mocks = BOA_SOCKET_MOCKS.with(|m| m.borrow().clone());
@@ -682,10 +660,7 @@ pub(crate) fn worker_spawn_with_context(
         child_mem,
         parent_det,
         parent_egress_secrets,
-        parent_vfs_cache,
-        parent_vfs_dirs,
-        parent_vfs_tombstones,
-        parent_vfs_mtimes,
+        parent_vfs_snap,
         parent_fetch_mocks,
         parent_ws_mocks,
         parent_sock_mocks,
@@ -896,10 +871,7 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
         cur.clear();
         cur.push_str(vfs_owner_namespace(&job.child_tenant));
     });
-    BOA_VFS_CACHE.with(|c| *c.borrow_mut() = job.parent_vfs_cache);
-    BOA_VFS_DIRS.with(|d| *d.borrow_mut() = job.parent_vfs_dirs);
-    BOA_VFS_TOMBSTONES.with(|t| *t.borrow_mut() = job.parent_vfs_tombstones);
-    BOA_VFS_MTIMES.with(|m| *m.borrow_mut() = job.parent_vfs_mtimes);
+    BOA_VFS_STATE.with(|v| v.borrow_mut().restore_from_snapshot(job.parent_vfs_snap));
     BOA_FETCH_MOCKS.with(|m| *m.borrow_mut() = job.parent_fetch_mocks);
     BOA_WS_MOCKS.with(|m| *m.borrow_mut() = job.parent_ws_mocks);
     BOA_SOCKET_MOCKS.with(|m| *m.borrow_mut() = job.parent_sock_mocks);
@@ -961,10 +933,7 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
     // immediately reuse this warm thread without a race condition!
     WORKER_SELF_ENV.with(|env| *env.borrow_mut() = WorkerSelfThreadEnv::default());
     BOA_VFS_OWNER_TENANT.with(|o| o.borrow_mut().clear());
-    BOA_VFS_CACHE.with(|c| c.borrow_mut().clear());
-    BOA_VFS_DIRS.with(|d| d.borrow_mut().clear());
-    BOA_VFS_TOMBSTONES.with(|t| t.borrow_mut().clear());
-    BOA_VFS_MTIMES.with(|m| m.borrow_mut().clear());
+    BOA_VFS_STATE.with(|v| v.borrow_mut().clear());
     GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
     if let Ok(mut pool) = idle_worker_pool().lock() {
         if pool.len() < MAX_POOLED_WORKER_THREADS {

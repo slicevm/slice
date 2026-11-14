@@ -32,8 +32,9 @@ pub use net::{
     parse_http_authority_and_path, parse_nonstandard_ipv4, ParsedHttpUrl,
 };
 pub use vfs::{
-    exec_binary_matches, is_rejected_vfs_candidate, normalize_vfs_path_cow,
-    normalize_vfs_path_lexical, vfs_normalized_candidate_matches_prefix, vfs_prefix_matches,
+    anchor_vfs_path_to_cwd, cached_normalized_cwd, exec_binary_matches, is_abs_normalized_vfs_path,
+    is_rejected_vfs_candidate, normalize_vfs_path_cow, normalize_vfs_path_lexical,
+    vfs_normalized_candidate_matches_prefix, vfs_prefix_matches,
 };
 
 #[cfg(test)]

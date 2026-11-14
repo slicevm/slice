@@ -1,8 +1,8 @@
 //! WinterTC Phase N3 (`btoa`, `atob`, `TextEncoder.encodeInto`, `TextDecoder`, `zlib`) and `Buffer` Codec Bindings.
 
 use crate::bindings::helpers::{
-    bytes_to_js_uint8_array, consume_crypto_kdf_fuel, try_consume_isolate_memory,
-    with_buffer_source_bytes,
+    bytes_to_js_uint8_array, consume_crypto_kdf_fuel, trip_isolate_oom_limits,
+    try_consume_isolate_memory_ctx, with_buffer_source_bytes,
 };
 use crate::intrinsics::{
     base64_decode, base64_decode_bytes, base64_encode, bytes_to_hex, hex_decode_bytes,
@@ -296,12 +296,18 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
             };
             match compressed_res {
                 Ok(compressed) => {
-                    if let Err(msg) = try_consume_isolate_memory(compressed.len()) {
+                    if let Err(msg) = try_consume_isolate_memory_ctx(compressed.len(), context) {
                         return Err(JsNativeError::range().with_message(msg).into());
                     }
                     bytes_to_js_uint8_array(&compressed, context)
                 }
-                Err(msg) => Err(JsNativeError::typ().with_message(msg).into()),
+                Err(msg) => {
+                    if msg.contains("CPU fuel budget exhausted") {
+                        trip_isolate_oom_limits(context);
+                        return Err(JsNativeError::range().with_message(msg).into());
+                    }
+                    Err(JsNativeError::typ().with_message(msg).into())
+                }
             }
         }),
     );
@@ -331,22 +337,26 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
                     let out_fuel = (decompressed.len() as u64) / 512;
                     if out_fuel > 0 {
                         if let Err(msg) = consume_crypto_kdf_fuel(out_fuel) {
+                            trip_isolate_oom_limits(context);
                             return Err(JsNativeError::range().with_message(msg).into());
                         }
                     }
-                    if let Err(msg) = try_consume_isolate_memory(decompressed.len()) {
+                    if let Err(msg) = try_consume_isolate_memory_ctx(decompressed.len(), context) {
                         return Err(JsNativeError::range().with_message(msg).into());
                     }
                     bytes_to_js_uint8_array(&decompressed, context)
                 }
                 Err(msg) => {
                     if msg.contains("sandbox memory limit") {
-                        let _ = try_consume_isolate_memory(usize::MAX / 2);
+                        let _ = try_consume_isolate_memory_ctx(usize::MAX / 2, context);
                         return Err(JsNativeError::range().with_message(msg).into());
                     }
                     if msg.contains("CPU fuel budget exhausted")
                         || msg.contains("empty block limit")
                     {
+                        if msg.contains("CPU fuel budget exhausted") {
+                            trip_isolate_oom_limits(context);
+                        }
                         return Err(JsNativeError::range().with_message(msg).into());
                     }
                     Err(JsNativeError::typ().with_message(msg).into())
