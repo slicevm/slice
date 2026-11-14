@@ -172,6 +172,13 @@
   MessagePort.prototype.constructor = MessagePort;
   __attachNodeEmitterProto(MessagePort.prototype);
 
+  MessagePort.prototype.addEventListener = function(type, callback, options) {
+    EventTarget.prototype.addEventListener.call(this, type, callback, options);
+    if (String(type) === "message" && this._et && this._et.message && this._et.message.length > 0) {
+      this.start();
+    }
+  };
+
   Object.defineProperty(MessagePort.prototype, "onmessage", {
     configurable: true,
     enumerable: true,

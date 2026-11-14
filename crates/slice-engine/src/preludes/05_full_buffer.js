@@ -13,8 +13,6 @@
     if (typeof arg === "number") return Buffer.alloc(arg);
     return Buffer.from(arg, encOrOffset, length);
   }
-  Object.setPrototypeOf(Buffer.prototype, __u8Proto);
-  Object.setPrototypeOf(Buffer, __U8);
   Buffer.prototype._isBuffer = true;
   Buffer.poolSize = 8192;
 
@@ -172,38 +170,43 @@
     return a.length === b.length ? 0 : (a.length < b.length ? -1 : 1);
   };
 
-  Buffer.prototype.toString = function(encoding, start, end) {
-    if (start === undefined && end === undefined) {
-      if (!encoding || encoding === "utf8" || encoding === "utf-8") return __slice_buf_to_utf8(this);
-      if (encoding === "base64") return __slice_base64_encode_bytes(this, false);
-      if (encoding === "hex") return __slice_bytes_to_hex(this);
-      if (encoding === "base64url") return __slice_base64_encode_bytes(this, true);
-    }
-    var len = this.length;
-    if (len === 0) return "";
-    var s = start === undefined ? 0 : Math.max(0, Number(start) | 0);
-    var e = end === undefined ? len : Math.min(len, Number(end) | 0);
-    if (s >= e) return "";
-    var view = (s === 0 && e === len) ? this : __u8Proto.subarray.call(this, s, e);
-    var enc = encoding ? String(encoding).toLowerCase() : "utf8";
-    if (enc === "hex") return __slice_bytes_to_hex(view);
-    if (enc === "base64") return __slice_base64_encode_bytes(view, false);
-    if (enc === "base64url") return __slice_base64_encode_bytes(view, true);
-    if (enc === "latin1" || enc === "binary") return __slice_text_decode(view, "latin1", false, true);
-    if (enc === "ascii") {
-      var out = "";
-      for (var i = 0; i < view.length; i++) out += String.fromCharCode(view[i] & 0x7f);
-      return out;
-    }
-    if (enc === "utf16le" || enc === "utf-16le" || enc === "ucs2" || enc === "ucs-2") {
-      var out16 = "", pairLen = view.length - (view.length % 2);
-      for (var j = 0; j < pairLen; j += 2) {
-        out16 += String.fromCharCode(view[j] | (view[j + 1] << 8));
+  Object.defineProperty(Buffer.prototype, "toString", {
+    value: function(encoding, start, end) {
+      if (start === undefined && end === undefined) {
+        if (!encoding || encoding === "utf8" || encoding === "utf-8") return __slice_buf_to_utf8(this);
+        if (encoding === "base64") return __slice_base64_encode_bytes(this, false);
+        if (encoding === "hex") return __slice_bytes_to_hex(this);
+        if (encoding === "base64url") return __slice_base64_encode_bytes(this, true);
       }
-      return out16;
-    }
-    return __slice_text_decode(view, "utf-8", false, true);
-  };
+      var len = this.length;
+      if (len === 0) return "";
+      var s = start === undefined ? 0 : Math.max(0, Number(start) | 0);
+      var e = end === undefined ? len : Math.min(len, Number(end) | 0);
+      if (s >= e) return "";
+      var view = (s === 0 && e === len) ? this : __u8Proto.subarray.call(this, s, e);
+      var enc = encoding ? String(encoding).toLowerCase() : "utf8";
+      if (enc === "hex") return __slice_bytes_to_hex(view);
+      if (enc === "base64") return __slice_base64_encode_bytes(view, false);
+      if (enc === "base64url") return __slice_base64_encode_bytes(view, true);
+      if (enc === "latin1" || enc === "binary") return __slice_text_decode(view, "latin1", false, true);
+      if (enc === "ascii") {
+        var out = "";
+        for (var i = 0; i < view.length; i++) out += String.fromCharCode(view[i] & 0x7f);
+        return out;
+      }
+      if (enc === "utf16le" || enc === "utf-16le" || enc === "ucs2" || enc === "ucs-2") {
+        var out16 = "", pairLen = view.length - (view.length % 2);
+        for (var j = 0; j < pairLen; j += 2) {
+          out16 += String.fromCharCode(view[j] | (view[j + 1] << 8));
+        }
+        return out16;
+      }
+      return __slice_text_decode(view, "utf-8", false, true);
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true
+  });
 
   Buffer.prototype.subarray = function(start, end) {
     return __wrapBuf(__u8Proto.subarray.call(this, start, end));
@@ -313,6 +316,9 @@
       };
     })(__binM[bi]);
   }
+
+  Object.setPrototypeOf(Buffer.prototype, __u8Proto);
+  Object.setPrototypeOf(Buffer, __U8);
 
   globalThis.Buffer = Buffer;
 })();

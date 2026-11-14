@@ -50,6 +50,89 @@ pub(crate) fn with_buffer_source_bytes<R>(
     Ok(f(&fallback))
 }
 
+/// Fast-path helper for `Buffer.from(val, enc?).toString(...)` compile-time lowerings:
+/// borrows `&[u8]` directly for primitive strings, `Uint8Array`/`Buffer`, and `ArrayBuffer`,
+/// and delegates all other inputs (boxed `String`, `Symbol.toPrimitive`, `valueOf()`, non-byte
+/// `TypedArray`s, `DataView`, arrays, invalid primitives) to `Buffer.from(val, enc?)` so exact
+/// Node.js `Buffer.from` element conversion, unboxing, and `TypeError` checks apply (`#119`).
+pub(crate) fn with_buffer_from_bytes<R>(
+    val: &boa_engine::JsValue,
+    enc_opt: Option<&str>,
+    context: &mut boa_engine::Context,
+    mut f: impl FnMut(&[u8]) -> R,
+) -> boa_engine::JsResult<R> {
+    use boa_engine::builtins::typed_array::TypedArray;
+    use boa_engine::js_string;
+    use boa_engine::object::builtins::{JsArrayBuffer, JsUint8Array};
+
+    if enc_opt.is_none() || matches!(enc_opt, Some("utf8" | "utf-8")) {
+        if let Some(s) = val.as_string() {
+            if let boa_engine::string::JsStrVariant::Latin1(bytes) = s.as_str().variant() {
+                if bytes.is_ascii() {
+                    return Ok(f(bytes));
+                }
+            }
+            let owned = s.to_std_string_escaped();
+            return Ok(f(owned.as_bytes()));
+        }
+        if let Some(obj) = val.as_object() {
+            if JsUint8Array::from_object(obj.clone()).is_ok() {
+                if let Some(ta) = obj.downcast_ref::<TypedArray>() {
+                    if let Some(res) = ta.with_bytes(&mut f) {
+                        return Ok(res);
+                    }
+                }
+            }
+            if enc_opt.is_none() {
+                if let Ok(ab) = JsArrayBuffer::from_object(obj.clone()) {
+                    if let Some(data) = ab.data() {
+                        return Ok(f(&data));
+                    }
+                    return Ok(f(&[]));
+                }
+            }
+        }
+    }
+
+    let global = context.global_object();
+    let mut buf_ctor = global.get(js_string!("Buffer"), context)?;
+    if !buf_ctor.is_callable() {
+        if let Ok(ensure_fn) = global.get(js_string!("__slice_ensure_shard"), context) {
+            if let Some(ensure_obj) = ensure_fn.as_callable() {
+                let _ = ensure_obj.call(&boa_engine::JsValue::undefined(), &[5.into()], context)?;
+            }
+        }
+        buf_ctor = global.get(js_string!("Buffer"), context)?;
+    }
+    let Some(buf_obj) = buf_ctor.as_object() else {
+        return Err(boa_engine::JsNativeError::typ()
+            .with_message("Buffer is not available")
+            .into());
+    };
+    let from_val = buf_obj.get(js_string!("from"), context)?;
+    let Some(from_fn) = from_val.as_callable() else {
+        return Err(boa_engine::JsNativeError::typ()
+            .with_message("Buffer.from is not callable")
+            .into());
+    };
+    let constructed = match enc_opt {
+        Some(enc) => from_fn.call(
+            &buf_ctor,
+            &[val.clone(), boa_engine::JsValue::from(js_string!(enc))],
+            context,
+        )?,
+        None => from_fn.call(&buf_ctor, std::slice::from_ref(val), context)?,
+    };
+    if let Some(c_obj) = constructed.as_object() {
+        if let Some(ta) = c_obj.downcast_ref::<TypedArray>() {
+            if let Some(res) = ta.with_bytes(&mut f) {
+                return Ok(res);
+            }
+        }
+    }
+    Ok(f(&[]))
+}
+
 /// Invokes `f` with a zero-copy borrowed `&[u8]` slice when `val` is `Some` and neither
 /// `undefined` nor `null`; otherwise invokes `f(&[])`.
 #[inline]

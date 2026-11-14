@@ -3,7 +3,8 @@
 
 use crate::bindings::helpers::{
     bytes_to_js_uint8_array, consume_crypto_kdf_fuel, trip_isolate_oom_limits,
-    try_consume_isolate_memory_ctx, with_buffer_source_bytes, with_two_buffer_source_bytes,
+    try_consume_isolate_memory_ctx, with_buffer_from_bytes, with_buffer_source_bytes,
+    with_two_buffer_source_bytes,
 };
 use crate::boa_realm::{
     BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_ENV_MAP, BOA_HTTP_REQ, BOA_KV_MEM_BUDGET, BOA_STDOUT,
@@ -337,24 +338,11 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
         js_string!("__slice_base64_encode"),
         2,
         NativeFunction::from_fn_ptr(|_this, args, context| {
-            use boa_engine::string::JsStrVariant;
             let url_safe = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(false);
-            let Some(first) = args.first() else {
-                return Ok(BoaVal::from(js_string!("")));
-            };
-            if first.is_object() {
-                let encoded = with_buffer_source_bytes(first, context, |bytes| {
-                    base64_encode(bytes, url_safe)
-                })?;
-                return Ok(BoaVal::from(boa_engine::JsString::from(
-                    boa_engine::string::JsStr::latin1(encoded.as_bytes()),
-                )));
-            }
-            let js_s = first.to_string(context)?;
-            let encoded = match js_s.as_str().variant() {
-                JsStrVariant::Latin1(bytes) if bytes.is_ascii() => base64_encode(bytes, url_safe),
-                _ => base64_encode(js_s.to_std_string_escaped().as_bytes(), url_safe),
-            };
+            let first = args.first().cloned().unwrap_or_default();
+            let encoded = with_buffer_from_bytes(&first, None, context, |bytes| {
+                base64_encode(bytes, url_safe)
+            })?;
             Ok(BoaVal::from(boa_engine::JsString::from(
                 boa_engine::string::JsStr::latin1(encoded.as_bytes()),
             )))
@@ -366,21 +354,30 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
             use boa_engine::string::JsStrVariant;
-            let Some(first) = args.first() else {
-                return Ok(BoaVal::from(js_string!("")));
-            };
-            let js_s = first.to_string(context)?;
-            let decoded = match js_s.as_str().variant() {
-                JsStrVariant::Latin1(bytes) => base64_decode_bytes(bytes),
-                JsStrVariant::Utf16(_) => base64_decode(&js_s.to_std_string_escaped()),
-            };
-            if decoded.is_ascii() {
-                return Ok(BoaVal::from(boa_engine::JsString::from(
-                    boa_engine::string::JsStr::latin1(&decoded),
-                )));
+            let first = args.first().cloned().unwrap_or_default();
+            if let Some(js_s) = first.as_string() {
+                let decoded = match js_s.as_str().variant() {
+                    JsStrVariant::Latin1(bytes) => base64_decode_bytes(bytes),
+                    JsStrVariant::Utf16(_) => base64_decode(&js_s.to_std_string_escaped()),
+                };
+                if decoded.is_ascii() {
+                    return Ok(BoaVal::from(boa_engine::JsString::from(
+                        boa_engine::string::JsStr::latin1(&decoded),
+                    )));
+                }
+                let utf8 = String::from_utf8_lossy(&decoded);
+                return Ok(BoaVal::from(js_string!(utf8.as_ref())));
             }
-            let utf8 = String::from_utf8_lossy(&decoded);
-            Ok(BoaVal::from(js_string!(utf8.as_ref())))
+            with_buffer_from_bytes(&first, Some("base64"), context, |bytes| {
+                if bytes.is_ascii() {
+                    BoaVal::from(boa_engine::JsString::from(
+                        boa_engine::string::JsStr::latin1(bytes),
+                    ))
+                } else {
+                    let utf8 = String::from_utf8_lossy(bytes);
+                    BoaVal::from(js_string!(utf8.as_ref()))
+                }
+            })
         }),
     );
 
@@ -388,27 +385,20 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
         js_string!("__slice_buf_to_utf8"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {
-            let Some(first) = args.first() else {
-                return Ok(BoaVal::from(js_string!("")));
-            };
+            let first = args.first().cloned().unwrap_or_default();
             if first.is_string() {
-                return Ok(first.clone());
+                return Ok(first);
             }
-            if first.is_object() {
-                let decoded = with_buffer_source_bytes(first, context, |bytes| {
-                    if bytes.is_ascii() {
-                        BoaVal::from(boa_engine::JsString::from(
-                            boa_engine::string::JsStr::latin1(bytes),
-                        ))
-                    } else {
-                        let s = String::from_utf8_lossy(bytes);
-                        BoaVal::from(js_string!(s.as_ref()))
-                    }
-                })?;
-                return Ok(decoded);
-            }
-            let s = first.to_string(context)?.to_std_string_escaped();
-            Ok(BoaVal::from(js_string!(s)))
+            with_buffer_from_bytes(&first, None, context, |bytes| {
+                if bytes.is_ascii() {
+                    BoaVal::from(boa_engine::JsString::from(
+                        boa_engine::string::JsStr::latin1(bytes),
+                    ))
+                } else {
+                    let s = String::from_utf8_lossy(bytes);
+                    BoaVal::from(js_string!(s.as_ref()))
+                }
+            })
         }),
     );
 

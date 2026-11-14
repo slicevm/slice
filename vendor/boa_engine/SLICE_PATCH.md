@@ -21,7 +21,7 @@ By serializing the compiled `Gc<CodeBlock>` tree and global `Scope` bindings int
 
 ## 2. Modified Files
 
-Fifteen files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
+Sixteen files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
 - [`src/script.rs`](./src/script.rs):
   - `Script::compile_to_slicebc(&self, context: &mut Context) -> JsResult<Vec<u8>>`
   - `Script::from_slicebc_bytes(bytes: &[u8], context: &mut Context) -> Option<Self>`
@@ -42,6 +42,8 @@ Fifteen files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
   - Wired `get_by_name` and `set_by_name` to call `ic.get_fast(object_borrowed.shape())`.
 - [`src/vm/runtime_limits.rs`](./src/vm/runtime_limits.rs), [`src/vm/opcode/iteration/loop_ops.rs`](./src/vm/opcode/iteration/loop_ops.rs), [`src/vm/call_frame/mod.rs`](./src/vm/call_frame/mod.rs), & [`src/bytecompiler/statement/loop.rs`](./src/bytecompiler/statement/loop.rs):
   - `RuntimeLimits::loop_iterations_executed()` and `RuntimeLimits::check_and_increment_loop_iteration()`: Inline cumulative loop iteration counter + limit check on `IncrementLoopIteration` (removing `CallFrame::loop_iteration_count` and avoiding `frame_mut()` heap dereferencing on every loop iteration), plus emitting `IncrementLoopIteration` after the loop condition check in `while`, `for..in`, and `for..of` so Tier-1 Boa loop executions report and enforce exact `fuelUsed` telemetry.
+- [`src/builtins/typed_array/mod.rs`](./src/builtins/typed_array/mod.rs):
+  - `TypedArrayKind::to_element_f64`: Replaced Rust's saturating `f64 as u8/i8/u16/i16/i32/u32` casts with ECMAScript modular two's-complement conversion (`f64_to_int32` / `f64_to_uint32`, plus `round_ties_even` + `NaN -> 0` for `Uint8Clamped`) so `new Uint8Array(typedArray)` and `Buffer.from(typedArray)` honor ECMA-262 `ToUint8`/`ToInt8`/`ToUint16`/`ToInt16`/`ToInt32`/`ToUint32`.
 
 ---
 

@@ -538,15 +538,32 @@ impl TypedArrayKind {
     /// assuming the `ContentType` of this kind is `Number`.
     pub(crate) fn to_element_f64(self, value: f64) -> TypedArrayElement {
         match self {
-            TypedArrayKind::Int8 => TypedArrayElement::Int8(value as i8),
-            TypedArrayKind::Uint8 => TypedArrayElement::Uint8(value as u8),
-            TypedArrayKind::Uint8Clamped => {
-                TypedArrayElement::Uint8Clamped(ClampedU8(value.clamp(0.0, 255.0).round() as u8))
+            TypedArrayKind::Int8 => {
+                TypedArrayElement::Int8(crate::builtins::number::f64_to_int32(value) as i8)
             }
-            TypedArrayKind::Int16 => TypedArrayElement::Int16(value as i16),
-            TypedArrayKind::Uint16 => TypedArrayElement::Uint16(value as u16),
-            TypedArrayKind::Int32 => TypedArrayElement::Int32(value as i32),
-            TypedArrayKind::Uint32 => TypedArrayElement::Uint32(value as u32),
+            TypedArrayKind::Uint8 => {
+                TypedArrayElement::Uint8(crate::builtins::number::f64_to_int32(value) as u8)
+            }
+            TypedArrayKind::Uint8Clamped => {
+                let clamped = if value.is_nan() {
+                    0
+                } else {
+                    value.clamp(0.0, 255.0).round_ties_even() as u8
+                };
+                TypedArrayElement::Uint8Clamped(ClampedU8(clamped))
+            }
+            TypedArrayKind::Int16 => {
+                TypedArrayElement::Int16(crate::builtins::number::f64_to_int32(value) as i16)
+            }
+            TypedArrayKind::Uint16 => {
+                TypedArrayElement::Uint16(crate::builtins::number::f64_to_int32(value) as u16)
+            }
+            TypedArrayKind::Int32 => {
+                TypedArrayElement::Int32(crate::builtins::number::f64_to_int32(value))
+            }
+            TypedArrayKind::Uint32 => {
+                TypedArrayElement::Uint32(crate::builtins::number::f64_to_uint32(value))
+            }
             #[cfg(feature = "float16")]
             TypedArrayKind::Float16 => {
                 TypedArrayElement::Float16(Float16(float16::f16::from_f64(value)))
