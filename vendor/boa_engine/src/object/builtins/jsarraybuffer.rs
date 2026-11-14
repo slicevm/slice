@@ -101,6 +101,15 @@ impl JsArrayBuffer {
     /// # }
     /// ```
     pub fn from_byte_block(byte_block: AlignedVec<u8>, context: &mut Context) -> JsResult<Self> {
+        Self::from_byte_block_with_detach_key(byte_block, JsValue::undefined(), context)
+    }
+
+    /// Create a new array buffer from byte block with an explicit `[[ArrayBufferDetachKey]]`.
+    pub fn from_byte_block_with_detach_key(
+        byte_block: AlignedVec<u8>,
+        detach_key: JsValue,
+        context: &mut Context,
+    ) -> JsResult<Self> {
         let constructor = context
             .intrinsics()
             .constructors()
@@ -108,7 +117,7 @@ impl JsArrayBuffer {
             .constructor()
             .into();
 
-        // 1. Let obj be ? OrdinaryCreateFromConstructor(constructor, "%ArrayBuffer.prototype%", « [[ArrayBufferData]], [[ArrayBufferByteLength]], [[ArrayBufferDetachKey]] »).
+        // 1. Let obj be ? OrdinaryCreateFromConstructor(constructor, "%ArrayBuffer.prototype%", << [[ArrayBufferData]], [[ArrayBufferByteLength]], [[ArrayBufferDetachKey]] >>).
         let prototype = get_prototype_from_constructor(
             &constructor,
             StandardConstructors::array_buffer,
@@ -116,9 +125,6 @@ impl JsArrayBuffer {
         )?;
 
         // 2. Let block be ? CreateByteDataBlock(byteLength).
-        //
-        // NOTE: We skip step 2. because we already have the block
-        // that is passed to us as a function argument.
         let block = byte_block;
 
         // 3. Set obj.[[ArrayBufferData]] to block.
@@ -126,7 +132,7 @@ impl JsArrayBuffer {
         let obj = JsObject::new(
             context.root_shape(),
             prototype,
-            ArrayBuffer::from_data(block, JsValue::undefined()),
+            ArrayBuffer::from_data(block, detach_key),
         );
 
         Ok(Self { inner: obj })

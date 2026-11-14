@@ -183,12 +183,16 @@ impl Script {
     ///
     /// [`JobExecutor::run_jobs`]: crate::job::JobExecutor::run_jobs
     pub fn evaluate(&self, context: &mut Context) -> JsResult<JsValue> {
+        let stack_fp = context.vm.stack.len();
         self.prepare_run(context)?;
         let record = context.run();
 
         context.vm.pop_frame();
-
-        record.consume()
+        let res = record.consume();
+        if res.is_err() {
+            context.vm.stack.truncate(stack_fp);
+        }
+        res
     }
 
     /// Evaluates this script and returns its result, periodically yielding to the executor
@@ -215,18 +219,23 @@ impl Script {
         context: &mut Context,
         budget: u32,
     ) -> JsResult<JsValue> {
+        let stack_fp = context.vm.stack.len();
         self.prepare_run(context)?;
 
         let record = context.run_async_with_budget(budget).await;
 
         context.vm.pop_frame();
-
-        record.consume()
+        let res = record.consume();
+        if res.is_err() {
+            context.vm.stack.truncate(stack_fp);
+        }
+        res
     }
 
     fn prepare_run(&self, context: &mut Context) -> JsResult<()> {
         let codeblock = self.codeblock(context)?;
 
+        let stack_fp = context.vm.stack.len();
         let global_env = EnvironmentStack::new();
         context.vm.push_frame_with_stack(
             CallFrame::new(
@@ -247,6 +256,7 @@ impl Script {
             .global_declaration_instantiation(&codeblock)
             .inspect_err(|_| {
                 context.vm.pop_frame();
+                context.vm.stack.truncate(stack_fp);
             })?;
 
         Ok(())
