@@ -67,8 +67,20 @@ pub fn rewrite_cjs_requires_in_line(
     result
 }
 
+#[inline]
+fn is_unresolved_global_ident(
+    scoping: &oxc::semantic::Scoping,
+    ident: &oxc::ast::ast::IdentifierReference<'_>,
+) -> bool {
+    ident
+        .reference_id
+        .get()
+        .is_none_or(|ref_id| scoping.get_reference(ref_id).symbol_id().is_none())
+}
+
 /// Rewrites `require("<spec>")` `CallExpression` string literal arguments via Oxc AST span
-/// replacement without modifying `"require(...)"` inside string literals, template literals, or comments.
+/// replacement without modifying `"require(...)"` inside string literals, template literals,
+/// comments, or lexically shadowed `require` bindings.
 pub fn rewrite_cjs_requires_ast(
     snippet: &str,
     from_dir: &Path,
@@ -87,12 +99,19 @@ pub fn rewrite_cjs_requires_ast(
         let wrapped = format!("({});", snippet);
         let retry_ret = oxc::parser::Parser::new(&allocator, &wrapped, source_type).parse();
         if retry_ret.diagnostics.is_empty() {
+            let scoping = oxc::semantic::SemanticBuilder::new()
+                .build(&retry_ret.program)
+                .semantic
+                .into_scoping();
             let mut edits: Vec<(usize, usize, String)> = Vec::new();
             walk_ast_call_expressions(&retry_ret.program, &mut |call| {
                 let Expression::Identifier(callee) = call.callee.without_parentheses() else {
                     return;
                 };
-                if callee.name.as_str() != "require" || call.arguments.len() != 1 {
+                if callee.name.as_str() != "require"
+                    || call.arguments.len() != 1
+                    || !is_unresolved_global_ident(&scoping, callee)
+                {
                     return;
                 }
                 let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
@@ -140,12 +159,19 @@ pub fn rewrite_cjs_requires_ast(
             .join("\n");
     }
 
+    let scoping = oxc::semantic::SemanticBuilder::new()
+        .build(&parser_ret.program)
+        .semantic
+        .into_scoping();
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     walk_ast_call_expressions(&parser_ret.program, &mut |call| {
         let Expression::Identifier(callee) = call.callee.without_parentheses() else {
             return;
         };
-        if callee.name.as_str() != "require" || call.arguments.len() != 1 {
+        if callee.name.as_str() != "require"
+            || call.arguments.len() != 1
+            || !is_unresolved_global_ident(&scoping, callee)
+        {
             return;
         }
         let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
@@ -191,8 +217,9 @@ pub fn rewrite_cjs_requires_ast(
     out
 }
 
-/// Rewrites `require(...)` callee identifiers to `__slice_cjs_require(...)` using Oxc AST
-/// `CallExpression` spans so string literals, template literals, and comments are untouched.
+/// Rewrites unshadowed global `require(...)` callee identifiers to `__slice_cjs_require(...)`
+/// using Oxc AST + `SemanticBuilder` so string literals, comments, and local `require` bindings
+/// are untouched.
 pub fn rewrite_require_ident_ast(source: &str) -> Option<String> {
     use oxc::ast::ast::Expression;
 
@@ -203,10 +230,14 @@ pub fn rewrite_require_ident_ast(source: &str) -> Option<String> {
         return None;
     }
 
+    let scoping = oxc::semantic::SemanticBuilder::new()
+        .build(&parser_ret.program)
+        .semantic
+        .into_scoping();
     let mut callee_spans: Vec<(usize, usize)> = Vec::new();
     walk_ast_call_expressions(&parser_ret.program, &mut |call| {
         if let Expression::Identifier(callee) = call.callee.without_parentheses() {
-            if callee.name.as_str() == "require" {
+            if callee.name.as_str() == "require" && is_unresolved_global_ident(&scoping, callee) {
                 callee_spans.push((callee.span.start as usize, callee.span.end as usize));
             }
         }
@@ -231,8 +262,9 @@ pub fn rewrite_require_ident_ast(source: &str) -> Option<String> {
     Some(out)
 }
 
-/// Lowers `Buffer.byteLength(<arg>)` and `Buffer.from(<arg>, <enc>?).toString(<to_enc>?)`
-/// via Oxc AST `CallExpression` span replacement so string literals and comments are never touched.
+/// Lowers unshadowed global `Buffer.byteLength(<arg>)` and `Buffer.from(<arg>, <enc>?).toString(<to_enc>?)`
+/// via Oxc AST + `SemanticBuilder` span replacement so string literals, comments, and lexically
+/// shadowed `Buffer` variables/parameters are never touched.
 pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
     use oxc::ast::ast::{Argument, Expression};
     use oxc::span::GetSpan;
@@ -248,6 +280,10 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
         return code.to_string();
     }
 
+    let scoping = oxc::semantic::SemanticBuilder::new()
+        .build(&parser_ret.program)
+        .semantic
+        .into_scoping();
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     walk_ast_call_expressions(&parser_ret.program, &mut |call| {
         let Expression::StaticMemberExpression(outer_mem) = call.callee.without_parentheses()
@@ -259,7 +295,8 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
         // 1. `Buffer.byteLength(<arg>)`
         if prop_name == "byteLength" && call.arguments.len() == 1 {
             if let Expression::Identifier(obj_id) = outer_mem.object.without_parentheses() {
-                if obj_id.name.as_str() == "Buffer" {
+                if obj_id.name.as_str() == "Buffer" && is_unresolved_global_ident(&scoping, obj_id)
+                {
                     if let Some(arg_expr) = call.arguments[0].as_expression() {
                         let sp = arg_expr.span();
                         let arg_src = &code[sp.start as usize..sp.end as usize];
@@ -289,6 +326,7 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
                 return;
             };
             if obj_id.name.as_str() != "Buffer"
+                || !is_unresolved_global_ident(&scoping, obj_id)
                 || inner_mem.property.name.as_str() != "from"
                 || inner_call.arguments.is_empty()
                 || inner_call.arguments.len() > 2
@@ -374,13 +412,26 @@ pub fn collect_require_edits_from_program(
     use oxc::ast::ast::{Argument, ChainElement, Expression};
     use oxc::span::GetSpan;
 
-    if !code.contains("require(") && !code.contains("import(") && !code.contains("import.meta") {
+    let has_req = code.contains("require(");
+    if !has_req && !code.contains("import(") && !code.contains("import.meta") {
         return Vec::new();
     }
+
+    let req_scoping = if has_req {
+        Some(
+            oxc::semantic::SemanticBuilder::new()
+                .build(program)
+                .semantic
+                .into_scoping(),
+        )
+    } else {
+        None
+    };
 
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     fn handle_call(
         call: &oxc::ast::ast::CallExpression<'_>,
+        scoping: Option<&oxc::semantic::Scoping>,
         from_dir: &Path,
         deps_out: &mut Vec<PathBuf>,
         edits: &mut Vec<(usize, usize, String)>,
@@ -388,9 +439,12 @@ pub fn collect_require_edits_from_program(
         let Expression::Identifier(callee) = call.callee.without_parentheses() else {
             return;
         };
-        if callee.name.as_str() != "require" || call.arguments.len() != 1 {
+        if callee.name.as_str() != "require"
+            || call.arguments.len() != 1
+            || scoping.is_some_and(|sc| !is_unresolved_global_ident(sc, callee))
+        {
             return;
-        };
+        }
         let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
             return;
         };
@@ -416,10 +470,12 @@ pub fn collect_require_edits_from_program(
     }
 
     walk_ast_expressions(program, &mut |expr| match expr {
-        Expression::CallExpression(call) => handle_call(call, from_dir, deps_out, &mut edits),
+        Expression::CallExpression(call) => {
+            handle_call(call, req_scoping.as_ref(), from_dir, deps_out, &mut edits)
+        }
         Expression::ChainExpression(ch) => {
             if let ChainElement::CallExpression(call) = &ch.expression {
-                handle_call(call, from_dir, deps_out, &mut edits);
+                handle_call(call, req_scoping.as_ref(), from_dir, deps_out, &mut edits);
             }
         }
         Expression::ImportExpression(imp_expr) => {

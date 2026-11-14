@@ -1,7 +1,6 @@
 //! Oxc TypeScript & JSX/TSX Ahead-of-Time Transpiler (`strip_typescript_raw_with_ext`)
 //! and Comment/Require Normalizer.
 
-use crate::compiler::fuse_array_pipelines_ast;
 use crate::linker::{
     rewrite_buffer_fast_paths_ast, rewrite_require_ident_ast, transform_module_to_cjs,
 };
@@ -98,10 +97,6 @@ fn transpile_parsed_oxc_program<'a>(
         if let std::borrow::Cow::Owned(cleaned) = code.cow_replace("export { };", "") {
             code = cleaned;
         }
-    }
-
-    if code.contains(".reduce(") || code.contains(".some(") || code.contains(".every(") {
-        code = fuse_array_pipelines_ast(&code);
     }
 
     if memchr::memmem::find(code.as_bytes(), b"Buffer.").is_some() {
