@@ -1,6 +1,8 @@
 // Slice (Nexus-JS) Lazy Prelude Shard 10: Outbound Fetch, AbortSignal/AbortController & SSE (`10_outbound_fetch_sse.js`)
 (function() {
-  if (!globalThis.DOMException) __slice_ensure_shard(13);
+  if (!globalThis.EventTarget) __slice_ensure_shard(13);
+  var _EventTarget = globalThis.EventTarget;
+  var _Event = globalThis.Event;
   function __mkAbortErr() {
     return new DOMException("The operation was aborted.", "AbortError");
   }
@@ -9,23 +11,13 @@
   }
 
   function AbortSignal() {
+    _EventTarget.call(this);
     this.aborted = false;
     this.reason = undefined;
     this.onabort = null;
-    this._ls = [];
   }
-  AbortSignal.prototype.addEventListener = function(t, fn) {
-    if (t === "abort" && typeof fn === "function") this._ls.push(fn);
-  };
-  AbortSignal.prototype.removeEventListener = function(t, fn) {
-    if (t === "abort") {
-      var nx = [];
-      for (var i = 0; i < this._ls.length; i++) {
-        if (this._ls[i] !== fn) nx.push(this._ls[i]);
-      }
-      this._ls = nx;
-    }
-  };
+  AbortSignal.prototype = Object.create(_EventTarget.prototype);
+  AbortSignal.prototype.constructor = AbortSignal;
   AbortSignal.prototype.throwIfAborted = function() {
     if (this.aborted) throw this.reason;
   };
@@ -33,26 +25,14 @@
     if (this.aborted) return;
     this.aborted = true;
     this.reason = r !== undefined ? r : __mkAbortErr();
-    var ev = { type: "abort", target: this };
-    if (typeof this.onabort === "function") {
-      try { this.onabort(ev); } catch (_e) {}
+    if (typeof this.onabort === "function" || (this._et && this._et.abort && this._et.abort.length > 0)) {
+      _EventTarget.prototype.dispatchEvent.call(this, new _Event("abort"));
     }
-    var ls = this._ls.slice();
-    this._ls = [];
-    for (var i = 0; i < ls.length; i++) {
-      try { ls[i](ev); } catch (_e2) {}
-    }
-  };
-  AbortSignal.prototype.dispatchEvent = function(ev) {
-    if (ev && ev.type === "abort") {
-      this._fire(this.reason);
-      return true;
-    }
-    return true;
   };
   AbortSignal.abort = function(r) {
     var s = new AbortSignal();
-    s._fire(r !== undefined ? r : __mkAbortErr());
+    s.aborted = true;
+    s.reason = r !== undefined ? r : __mkAbortErr();
     return s;
   };
   AbortSignal.timeout = function(ms) {

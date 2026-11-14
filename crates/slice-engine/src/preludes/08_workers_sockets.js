@@ -134,7 +134,7 @@
     Proto.listenerCount = function(type) {
       var k = String(type);
       var n = (this._nodeEv && this._nodeEv[k]) ? this._nodeEv[k].length : 0;
-      var et = (this._l && this._l[k]) ? this._l[k].length : 0;
+      var et = (this._et && this._et[k]) ? this._et[k].length : 0;
       var onProp = (typeof this["on" + k] === "function") ? 1 : 0;
       return n + et + onProp;
     };
@@ -184,7 +184,7 @@
 
   MessagePort.prototype._hasAsyncListeners = function() {
     var hasNode = Boolean(this._nodeEv && this._nodeEv.message && this._nodeEv.message.length > 0);
-    var hasEt = Boolean(this._started && this._l && this._l.message && this._l.message.length > 0);
+    var hasEt = Boolean(this._started && this._et && this._et.message && this._et.message.length > 0);
     return Boolean(this._onmessage || hasNode || hasEt);
   };
 
@@ -194,11 +194,8 @@
       var snap = this._nodeEv.message.slice();
       for (var i = 0; i < snap.length; i++) snap[i].call(this, cloned);
     }
-    var ev = __makeMsgEvent(cloned);
-    if (typeof this._onmessage === "function") {
-      this._onmessage.call(this, ev);
-    }
-    if (this._l && this._l.message && this._l.message.length > 0) {
+    if (typeof this._onmessage === "function" || (this._et && this._et.message && this._et.message.length > 0)) {
+      var ev = __makeMsgEvent(cloned);
       this.dispatchEvent(ev);
     }
   };

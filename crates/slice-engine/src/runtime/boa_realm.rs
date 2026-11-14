@@ -856,6 +856,7 @@ pub(crate) fn ensure_realm_shards(
     needed_mask: u32,
     init_lazy_getters: bool,
 ) {
+    let needed_mask = crate::js_preludes::expand_shard_prerequisites(needed_mask);
     let missing = needed_mask & !realm.loaded_shards_mask;
     if init_lazy_getters && (realm.loaded_shards_mask & 1) == 0 {
         let _ = crate::js_preludes::eval_lazy_getters_init_prelude(&mut realm.ctx);

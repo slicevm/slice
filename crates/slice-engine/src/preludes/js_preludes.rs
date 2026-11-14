@@ -67,6 +67,26 @@ pub(crate) const SHARD_LOAD_ORDER: [u32; 19] = [
     2, 13, 1, 11, 12, 10, 3, 14, 15, 4, 16, 5, 17, 6, 7, 8, 9, 29, 18,
 ];
 
+/// Expands cross-shard prerequisites so any fused or warm-realm batch load evaluates base classes
+/// (`EventTarget` in Shard 13, `Response` in Shard 11, `ReadableStream` in Shard 3, `TextEncoder`
+/// in Shard 2) before subclasses (`AbortSignal`, `WebSocket`, `MessagePort`/`Worker`, `TransformStream`).
+#[inline]
+pub(crate) const fn expand_shard_prerequisites(mut mask: u32) -> u32 {
+    if (mask & (1 << 10)) != 0 {
+        mask |= (1 << 13) | (1 << 11);
+    }
+    if (mask & (1 << 7)) != 0 {
+        mask |= 1 << 13;
+    }
+    if (mask & (1 << 8)) != 0 {
+        mask |= (1 << 13) | (1 << 2);
+    }
+    if (mask & (1 << 14)) != 0 {
+        mask |= 1 << 3;
+    }
+    mask
+}
+
 /// Returns the compile-time minified JS source bytes for `shard_id` (`1..=18` or `29`).
 #[inline]
 pub(crate) fn shard_prelude_bytes(shard_id: u32) -> &'static [u8] {
@@ -152,6 +172,7 @@ pub(crate) fn build_fused_prelude_prefix(
     init_lazy_getters: bool,
     has_next_tick: bool,
 ) -> Vec<u8> {
+    let shards_mask = expand_shard_prerequisites(shards_mask);
     let mut out = Vec::with_capacity(ULTRA_CORE_PRELUDE.len() + 8192);
     out.extend_from_slice(ULTRA_CORE_PRELUDE);
     let mut active_mask: u32 = 0;
@@ -201,6 +222,7 @@ pub(crate) fn build_fused_prelude_prefix(
 /// traces from precompiled `SLICEBC\x01` `CodeBlock`s subtract the prelude prefix offset accurately.
 #[cold]
 pub(crate) fn count_fused_prelude_newlines(shards_mask: u32, init_lazy_getters: bool) -> usize {
+    let shards_mask = expand_shard_prerequisites(shards_mask);
     let mut nl = ULTRA_CORE_PRELUDE.iter().filter(|&&b| b == b'\n').count();
     for shard_id in SHARD_LOAD_ORDER {
         let bit = 1u32 << shard_id;
@@ -875,7 +897,7 @@ pub(crate) fn detect_shards_and_boacas_flags(
         flags |= crate::boacas::BOACAS_FLAG_NEEDS_LAZY_GETTERS;
     }
 
-    (flags, mask)
+    (flags, expand_shard_prerequisites(mask))
 }
 
 /// Computes a bitmask of lazy prelude shards (`1..=18` and `29`) referenced by `raw_js_code` in a single
