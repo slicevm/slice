@@ -1,6 +1,6 @@
 # `slice-cas`: Zero-Stat Content-Addressed Storage, Oxc Compiler & AST Tree-Shaker
 
-[`crates/slice-cas`](../../crates/slice-cas/src/lib.rs) shifts all module resolution, TypeScript/JSX compilation, dead-export elimination, cold-method `require` deferring, and array pipeline loop fusion from runtime to build/pack time (`slice pack` / `slice compile`).
+[`crates/slice-cas`](../../crates/slice-cas/src/lib.rs) shifts all module resolution, TypeScript/JSX compilation, hygienic ESM/CJS linking, dead-export elimination, and cold-method `require` deferring from runtime to build/pack time (`slice pack` / `slice compile`).
 
 ---
 
@@ -18,15 +18,12 @@
 ### 2.1 Type-Directed Oxc Semantic Lowering ([`analyze_typescript_semantics`](../../crates/slice-cas/src/compiler/semantics.rs))
 - Before Oxc strips TypeScript types, `slice-cas` walks `oxc::parser::Parser` AST nodes (`TSInterfaceDeclaration`, `TSTypeAnnotation`, `BindingPattern`) and `oxc::semantic::SemanticBuilder` symbol tables, performing 100% AST-driven lowering:
   1. Extracts exact `string` / `number` / `boolean` property schemas from `TSInterfaceDeclaration` AST nodes and variable/parameter `TSTypeAnnotation` bindings without fragile line/colon text heuristics.
-  2. Lowers `Buffer.from(<arg>, <enc>?).toString("base64" | "base64url" | "utf8")` and `Buffer.byteLength(<arg>)` via Oxc AST `CallExpression` span replacement ([`rewrite_buffer_fast_paths_ast`](../../crates/slice-cas/src/linker/cjs_rewrites.rs)) directly to `__slice_base64_encode`, `__slice_base64_decode`, `__slice_buf_to_utf8`, and `__slice_utf8_byte_len` native Rust intrinsics without touching string literals or comments.
-  3. Collects all `require("<spec>")` `CallExpression` string literal spans in a single Oxc AST pass per module ([`collect_require_edits_from_program`](../../crates/slice-cas/src/linker/cjs_rewrites.rs) + [`slice_with_edits`](../../crates/slice-cas/src/linker/ast_walker.rs)), eliminating per-statement Oxc parser re-invocations and duplicate CJS parses.
+  2. Lowers unshadowed global `Buffer.from(<arg>, <enc>?).toString("base64" | "base64url" | "utf8")` and `Buffer.byteLength(<arg>)` via Oxc `SemanticBuilder` scope verification + AST `CallExpression` span replacement ([`rewrite_buffer_fast_paths_ast`](../../crates/slice-cas/src/linker/cjs_rewrites.rs)) directly to `__slice_base64_encode`, `__slice_base64_decode`, `__slice_buf_to_utf8`, and `__slice_utf8_byte_len` native Rust intrinsics without touching local/shadowed `Buffer` bindings, string literals, or comments.
+  3. Collects all unshadowed `require("<spec>")` `CallExpression` string literal spans in a single Oxc AST + `SemanticBuilder` pass per module ([`collect_require_edits_from_program`](../../crates/slice-cas/src/linker/cjs_rewrites.rs) + [`slice_with_edits`](../../crates/slice-cas/src/linker/ast_walker.rs)), eliminating per-statement Oxc parser re-invocations and duplicate CJS parses while preserving user-defined `require` parameters or bindings.
 
-### 2.2 General-Purpose Oxc AST Array Pipeline Fusion ([`fuse_array_pipelines_ast`](../../crates/slice-cas/src/compiler/pipeline_fusion.rs))
-- During build/pack time, `slice-cas` parses each module's JavaScript AST via `oxc::parser::Parser` and walks call expressions to fuse chained higher-order array operations on **any** receiver expression `<arr_expr>` into single-pass, zero-allocation `for` loop IIFEs:
-  - `<arr_expr>.map((x) => <map_body>).reduce((acc, curr) => <red_body>, <init>)`
-  - `<arr_expr>.filter((x) => <pred>).map((y) => <map_body>).reduce((acc, curr) => <red_body>, <init>)`
-  - `<arr_expr>.some((x) => <pred>)` and `<arr_expr>.every((x) => <pred>)`
-- Eliminates intermediate array allocations and per-element closure invocations across arbitrary user code while bundling third-party `node_modules/` packages verbatim from disk without any package-specific source replacements.
+### 2.2 Opt-In Hygienic Oxc AST Array Pipeline Fusion ([`fuse_array_pipelines_ast`](../../crates/slice-cas/src/compiler/pipeline_fusion.rs))
+- Standard TypeScript and JavaScript compilation delegates higher-order array and iterator operations (`map`, `filter`, `reduce`, `some`, `every`) directly to `boa_engine`'s ECMAScript-compliant intrinsics, guaranteeing exact sparse-array hole skipping, initial `.length` capture, custom receiver method dispatch, and multi-stage callback ordering.
+- For explicit source-to-source optimization workflows, `slice-cas` provides [`fuse_array_pipelines_ast`](../../crates/slice-cas/src/compiler/pipeline_fusion.rs), which selects collision-free temporary prefixes (`choose_hygienic_fusion_prefix`), rejects default parameter initializers and side-effecting multi-stage callbacks, guards `Array.isArray` + standard `Array.prototype` method identity at runtime, snapshots `.length >>> 0`, and skips sparse array holes (`!(i in arr)`).
 
 ---
 
@@ -48,7 +45,7 @@ Implemented across [`crates/slice-cas/src/bundler/resolver.rs`](../../crates/sli
    - Computes used export sets (`UsedExports::Named(FxHashSet<String>)` vs `UsedExports::All`) in reverse topological order from the entrypoint down to leaf `node_modules` dependencies:
      - Tracks `const { a, b: alias } = require("mod")` (`ObjectPattern`) and `const ns = require("mod"); ns.foo()` (`StaticMemberExpression` property accesses).
    - Inside `prune_and_minify_cjs_module_ast`:
-     - Removes unused `exports.<Unused> = ...` statements and unused `module.exports = __slice_default;` statements.
+     - Removes unused `exports.<Unused> = ...` assignments and unused `Object.defineProperty(exports, "<Unused>", ...)` live-getter exports while preserving non-enumerable `Object.defineProperty(exports, "__esModule", { value: true })` namespace metadata (ESM lowering binds default exports on `exports.default` without ever aliasing or mutating user objects via `module.exports`).
      - Runs an iterative fixed-point pass using **`oxc::semantic::SemanticBuilder`** (`scoping.get_resolved_reference_ids(sym_id).is_empty()`), which uses Oxc's full ECMAScript lexical scope resolver so shadowed single-letter local variables (`e`, `t`, `s`, `n`, `r`) inside live functions never false-keep dead top-level declarators, functions, classes, or destructured `require(...)` properties.
      - Emits the pruned AST with `oxc::codegen::Codegen::new().with_options(CodegenOptions::minify())`.
 4. **Eager-Edge BFS Lazy Module Stringifier ([`collect_eager_module_indices`](../../crates/slice-cas/src/linker/lazy_and_inline.rs)):**

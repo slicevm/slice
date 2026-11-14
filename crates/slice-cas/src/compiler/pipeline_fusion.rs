@@ -7,15 +7,15 @@
 //! explicitly receive hygienic temporary prefixes, sparse-hole guards, frozen loop bounds,
 //! runtime `Array.isArray` + own-method guards, and multi-stage side-effect bailouts.
 
-fn choose_hygienic_fusion_prefix(code: &str) -> String {
-    if !code.contains("__sl_") {
-        return "__sl_".to_string();
+fn choose_hygienic_fusion_prefix(code: &str) -> std::borrow::Cow<'static, str> {
+    if memchr::memmem::find(code.as_bytes(), b"__sl_").is_none() {
+        return std::borrow::Cow::Borrowed("__sl_");
     }
     let mut idx = 0usize;
     loop {
         let candidate = format!("__sl{idx}_");
-        if !code.contains(&candidate) {
-            return candidate;
+        if memchr::memmem::find(code.as_bytes(), candidate.as_bytes()).is_none() {
+            return std::borrow::Cow::Owned(candidate);
         }
         idx += 1;
     }
@@ -30,7 +30,11 @@ fn choose_hygienic_fusion_prefix(code: &str) -> String {
 /// - `<arr_expr>.some((<x>) => <pred>)`
 /// - `<arr_expr>.every((<x>) => <pred>)`
 pub fn fuse_array_pipelines_ast(code: &str) -> String {
-    if !code.contains(".reduce(") && !code.contains(".some(") && !code.contains(".every(") {
+    let bytes = code.as_bytes();
+    if memchr::memmem::find(bytes, b".reduce(").is_none()
+        && memchr::memmem::find(bytes, b".some(").is_none()
+        && memchr::memmem::find(bytes, b".every(").is_none()
+    {
         return code.to_string();
     }
 

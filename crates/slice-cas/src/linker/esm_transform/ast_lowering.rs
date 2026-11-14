@@ -3,8 +3,8 @@
 use super::barrel_and_fallback::apply_cjs_lazy_barrel_getters;
 use super::mutable_exports::get_module_mutable_exports;
 use super::{
-    choose_hygienic_ident, choose_hygienic_prefix, format_default_import_unwrap,
-    format_namespace_import_rhs, ESM_ESMODULE_DEFINE,
+    format_default_import_unwrap, format_namespace_import_rhs, select_esm_hygienic_names,
+    ESM_ESMODULE_DEFINE,
 };
 use crate::bundler::resolve_module_specifier;
 use crate::linker::{
@@ -66,10 +66,7 @@ pub(super) fn try_transform_esm_to_cjs_ast(
         return Some(apply_cjs_lazy_barrel_getters(body_lines).join("\n"));
     }
 
-    let def_var = choose_hygienic_ident(js_code, "__slice_default", "__slice", "_default");
-    let imp_pfx = choose_hygienic_prefix(js_code, "__imp_", "__imp");
-    let reexp_pfx = choose_hygienic_prefix(js_code, "__reexp_", "__reexp");
-    let live_pfx = choose_hygienic_prefix(js_code, "__live_", "__live");
+    let (def_var, imp_pfx, reexp_pfx, live_pfx) = select_esm_hygienic_names(js_code);
 
     // Detect any imported bindings (named or default) that point to mutable ESM live bindings:
     let mut live_import_map: FxHashMap<String, String> = FxHashMap::default();

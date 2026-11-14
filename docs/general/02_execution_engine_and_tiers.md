@@ -158,15 +158,15 @@ console.log(serializeReceipt("ORD-501", "tenant-eu", 19900));
 
 ---
 
-## 6. Developer Optimization #4: Unboxed 64-Bit Numeric Register VM & Oxc AST Array Pipeline Fusion
+## 6. Developer Optimization #4: Unboxed 64-Bit Numeric Register VM & Hygienic Semantic Lowering
 
-Beyond explicit `: number` loop annotations, Slice includes two general-purpose ahead-of-time compiler optimizations that accelerate standard JavaScript and TypeScript functions without requiring any special annotations:
+Beyond explicit `: number` loop annotations, Slice includes ahead-of-time compiler optimizations that accelerate standard JavaScript and TypeScript functions without requiring any special annotations:
 
 1. **Unboxed 64-Bit Numeric Register VM ([`numeric_vm.rs`](../../crates/slice-engine/src/vm/numeric_vm.rs)):**
    - Any pure numeric JS/TS function (`function fn(a, b) { ... }`) using arithmetic (`+`, `-`, `*`, `/`, `%`, `**`), bitwise operators (`|`, `&`, `^`, `<<`, `>>`, `>>>`), `while`/`for` loops, `if`/`else` branches, `Math.*` intrinsics (`Math.abs`, `Math.min`, `Math.max`, `Math.floor`, `Math.ceil`, `Math.round`, `Math.trunc`, `Math.sqrt`, `Math.imul`), or recursive calls is automatically compiled into unboxed 64-bit register instructions (`NumericOp`) on a 32-register stack file (`[f64; 32]`).
    - 2-term linear recurrences (`return f(n - 1) + f(n - 2)`) are automatically recognized and lowered to $O(n)$ register accumulation while charging deterministic CPU fuel per step.
-2. **Oxc AST Array Pipeline Fusion ([`pipeline_fusion.rs`](../../crates/slice-cas/src/compiler/pipeline_fusion.rs)):**
-   - During `slice pack` and `slice compile`, Slice's Oxc AST pass (`fuse_array_pipelines_ast`) detects chained functional array pipelines (such as `arr.filter(...).map(...).reduce(...)`, `arr.map(...).reduce(...)`, `arr.some(...)`, and `arr.every(...)`) on any arbitrary receiver expression and fuses them into a single-pass, zero-allocation `for` loop IIFE - eliminating intermediate array allocations on hot paths.
+2. **Scope-Hygienic Semantic Intrinsic & Module Lowering ([`cjs_rewrites.rs`](../../crates/slice-cas/src/linker/cjs_rewrites.rs) & [`esm_transform/`](../../crates/slice-cas/src/linker/esm_transform/mod.rs)):**
+   - During `slice pack` and `slice compile`, Slice's Oxc `SemanticBuilder` pass lowers unshadowed global `Buffer` codecs directly to native Rust intrinsics while preserving user-shadowed local bindings, and links ESM default/namespace exports onto isolated module `exports` objects (`__slice_to_esm` / `__slice_export_star`) without mutating user-exported values. Higher-order array/iterator pipelines execute directly on `boa_engine`'s ECMAScript-compliant intrinsics, while `slice-cas` also provides opt-in hygienic loop fusion (`fuse_array_pipelines_ast`) for pure array kernels.
 
 ---
 

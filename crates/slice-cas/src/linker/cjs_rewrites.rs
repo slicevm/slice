@@ -159,19 +159,22 @@ pub fn rewrite_cjs_requires_ast(
             .join("\n");
     }
 
-    let scoping = oxc::semantic::SemanticBuilder::new()
-        .build(&parser_ret.program)
-        .semantic
-        .into_scoping();
+    let mut scoping_opt: Option<oxc::semantic::Scoping> = None;
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     walk_ast_call_expressions(&parser_ret.program, &mut |call| {
         let Expression::Identifier(callee) = call.callee.without_parentheses() else {
             return;
         };
-        if callee.name.as_str() != "require"
-            || call.arguments.len() != 1
-            || !is_unresolved_global_ident(&scoping, callee)
-        {
+        if callee.name.as_str() != "require" || call.arguments.len() != 1 {
+            return;
+        }
+        let scoping = scoping_opt.get_or_insert_with(|| {
+            oxc::semantic::SemanticBuilder::new()
+                .build(&parser_ret.program)
+                .semantic
+                .into_scoping()
+        });
+        if !is_unresolved_global_ident(scoping, callee) {
             return;
         }
         let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
@@ -223,6 +226,10 @@ pub fn rewrite_cjs_requires_ast(
 pub fn rewrite_require_ident_ast(source: &str) -> Option<String> {
     use oxc::ast::ast::Expression;
 
+    if memchr::memmem::find(source.as_bytes(), b"require").is_none() {
+        return Some(source.to_string());
+    }
+
     let allocator = oxc::allocator::Allocator::default();
     let source_type = oxc::span::SourceType::ts().with_module(true);
     let parser_ret = oxc::parser::Parser::new(&allocator, source, source_type).parse();
@@ -230,15 +237,20 @@ pub fn rewrite_require_ident_ast(source: &str) -> Option<String> {
         return None;
     }
 
-    let scoping = oxc::semantic::SemanticBuilder::new()
-        .build(&parser_ret.program)
-        .semantic
-        .into_scoping();
+    let mut scoping_opt: Option<oxc::semantic::Scoping> = None;
     let mut callee_spans: Vec<(usize, usize)> = Vec::new();
     walk_ast_call_expressions(&parser_ret.program, &mut |call| {
         if let Expression::Identifier(callee) = call.callee.without_parentheses() {
-            if callee.name.as_str() == "require" && is_unresolved_global_ident(&scoping, callee) {
-                callee_spans.push((callee.span.start as usize, callee.span.end as usize));
+            if callee.name.as_str() == "require" {
+                let scoping = scoping_opt.get_or_insert_with(|| {
+                    oxc::semantic::SemanticBuilder::new()
+                        .build(&parser_ret.program)
+                        .semantic
+                        .into_scoping()
+                });
+                if is_unresolved_global_ident(scoping, callee) {
+                    callee_spans.push((callee.span.start as usize, callee.span.end as usize));
+                }
             }
         }
     });
@@ -269,7 +281,7 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
     use oxc::ast::ast::{Argument, Expression};
     use oxc::span::GetSpan;
 
-    if !code.contains("Buffer.") {
+    if memchr::memmem::find(code.as_bytes(), b"Buffer.").is_none() {
         return code.to_string();
     }
 
@@ -280,10 +292,7 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
         return code.to_string();
     }
 
-    let scoping = oxc::semantic::SemanticBuilder::new()
-        .build(&parser_ret.program)
-        .semantic
-        .into_scoping();
+    let mut scoping_opt: Option<oxc::semantic::Scoping> = None;
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     walk_ast_call_expressions(&parser_ret.program, &mut |call| {
         let Expression::StaticMemberExpression(outer_mem) = call.callee.without_parentheses()
@@ -295,16 +304,23 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
         // 1. `Buffer.byteLength(<arg>)`
         if prop_name == "byteLength" && call.arguments.len() == 1 {
             if let Expression::Identifier(obj_id) = outer_mem.object.without_parentheses() {
-                if obj_id.name.as_str() == "Buffer" && is_unresolved_global_ident(&scoping, obj_id)
-                {
-                    if let Some(arg_expr) = call.arguments[0].as_expression() {
-                        let sp = arg_expr.span();
-                        let arg_src = &code[sp.start as usize..sp.end as usize];
-                        edits.push((
-                            call.span.start as usize,
-                            call.span.end as usize,
-                            format!("globalThis.__slice_utf8_byte_len({})", arg_src),
-                        ));
+                if obj_id.name.as_str() == "Buffer" {
+                    let scoping = scoping_opt.get_or_insert_with(|| {
+                        oxc::semantic::SemanticBuilder::new()
+                            .build(&parser_ret.program)
+                            .semantic
+                            .into_scoping()
+                    });
+                    if is_unresolved_global_ident(scoping, obj_id) {
+                        if let Some(arg_expr) = call.arguments[0].as_expression() {
+                            let sp = arg_expr.span();
+                            let arg_src = &code[sp.start as usize..sp.end as usize];
+                            edits.push((
+                                call.span.start as usize,
+                                call.span.end as usize,
+                                format!("globalThis.__slice_utf8_byte_len({})", arg_src),
+                            ));
+                        }
                     }
                 }
             }
@@ -326,11 +342,19 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
                 return;
             };
             if obj_id.name.as_str() != "Buffer"
-                || !is_unresolved_global_ident(&scoping, obj_id)
                 || inner_mem.property.name.as_str() != "from"
                 || inner_call.arguments.is_empty()
                 || inner_call.arguments.len() > 2
             {
+                return;
+            }
+            let scoping = scoping_opt.get_or_insert_with(|| {
+                oxc::semantic::SemanticBuilder::new()
+                    .build(&parser_ret.program)
+                    .semantic
+                    .into_scoping()
+            });
+            if !is_unresolved_global_ident(scoping, obj_id) {
                 return;
             }
             let Some(first_expr) = inner_call.arguments[0].as_expression() else {

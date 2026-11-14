@@ -11,6 +11,7 @@ mod barrel_and_fallback;
 mod mutable_exports;
 
 use crate::linker::{is_builtin_module, is_jsx_runtime_builtin, rewrite_cjs_requires_ast};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 pub(crate) const ESM_ESMODULE_DEFINE: &str =
@@ -21,43 +22,76 @@ pub(crate) const ESM_ESMODULE_DEFINE: &str =
 /// `Object.defineProperty(exports, "default", ...)`).
 #[inline]
 pub fn has_esm_default_export_marker(cjs_body: &str) -> bool {
-    cjs_body.contains("exports.default = ")
-        || cjs_body.contains("Object.defineProperty(exports, \"default\",")
+    memchr::memmem::find(cjs_body.as_bytes(), b"exports.default = ").is_some()
+        || memchr::memmem::find(
+            cjs_body.as_bytes(),
+            b"Object.defineProperty(exports, \"default\",",
+        )
+        .is_some()
 }
 
 #[inline]
 pub(super) fn choose_hygienic_ident(
     code: &str,
-    default_ident: &str,
+    default_ident: &'static str,
     stem: &str,
     suffix: &str,
-) -> String {
-    if !code.contains(default_ident) {
-        return default_ident.to_string();
+) -> Cow<'static, str> {
+    if memchr::memmem::find(code.as_bytes(), default_ident.as_bytes()).is_none() {
+        return Cow::Borrowed(default_ident);
     }
     let mut idx = 0usize;
     loop {
         let candidate = format!("{stem}{idx}{suffix}");
-        if !code.contains(&candidate) {
-            return candidate;
+        if memchr::memmem::find(code.as_bytes(), candidate.as_bytes()).is_none() {
+            return Cow::Owned(candidate);
         }
         idx += 1;
     }
 }
 
 #[inline]
-pub(super) fn choose_hygienic_prefix(code: &str, default_pfx: &str, stem: &str) -> String {
-    if !code.contains(default_pfx) {
-        return default_pfx.to_string();
+pub(super) fn choose_hygienic_prefix(
+    code: &str,
+    default_pfx: &'static str,
+    stem: &str,
+) -> Cow<'static, str> {
+    if memchr::memmem::find(code.as_bytes(), default_pfx.as_bytes()).is_none() {
+        return Cow::Borrowed(default_pfx);
     }
     let mut idx = 0usize;
     loop {
         let candidate = format!("{stem}{idx}_");
-        if !code.contains(&candidate) {
-            return candidate;
+        if memchr::memmem::find(code.as_bytes(), candidate.as_bytes()).is_none() {
+            return Cow::Owned(candidate);
         }
         idx += 1;
     }
+}
+
+#[inline]
+pub(super) fn select_esm_hygienic_names(
+    code: &str,
+) -> (
+    Cow<'static, str>,
+    Cow<'static, str>,
+    Cow<'static, str>,
+    Cow<'static, str>,
+) {
+    if memchr::memmem::find(code.as_bytes(), b"__").is_none() {
+        return (
+            Cow::Borrowed("__slice_default"),
+            Cow::Borrowed("__imp_"),
+            Cow::Borrowed("__reexp_"),
+            Cow::Borrowed("__live_"),
+        );
+    }
+    (
+        choose_hygienic_ident(code, "__slice_default", "__slice", "_default"),
+        choose_hygienic_prefix(code, "__imp_", "__imp"),
+        choose_hygienic_prefix(code, "__reexp_", "__reexp"),
+        choose_hygienic_prefix(code, "__live_", "__live"),
+    )
 }
 
 /// Formats standard ESM-to-CJS default-import unwrapping:

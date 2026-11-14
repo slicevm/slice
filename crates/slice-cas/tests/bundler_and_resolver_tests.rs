@@ -733,3 +733,70 @@ fn test_esm_default_import_cjs_barrel_tree_shaking_and_eager_modules() {
 
     let _ = std::fs::remove_dir_all(&test_dir);
 }
+
+#[test]
+fn test_wave2_issue_118_bundler_esm_default_cjs_namespace_and_star_reexports() {
+    use crate::bundle_entrypoint_with_deps;
+
+    let test_dir = std::env::temp_dir().join(format!(
+        "slice_wave2_issue_118_bundler_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&test_dir);
+    std::fs::create_dir_all(&test_dir).unwrap();
+
+    std::fs::write(
+        test_dir.join("undefined.mjs"),
+        "export default undefined;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        test_dir.join("object.mjs"),
+        "export default { default: 'user-value', value: 7, deadProp: 'keep-on-object' };\n",
+    )
+    .unwrap();
+    std::fs::write(
+        test_dir.join("cjs_cfg.cjs"),
+        "module.exports = { default: 'cjs-default-field', port: 8080 };\n",
+    )
+    .unwrap();
+    std::fs::write(
+        test_dir.join("with_default.mjs"),
+        "export default { secretDefault: true };\nexport const starExported = 42;\nexport const starDead = 'PRUNE_STAR_DEAD';\n",
+    )
+    .unwrap();
+    std::fs::write(
+        test_dir.join("barrel.mjs"),
+        "export * from './with_default.mjs';\n",
+    )
+    .unwrap();
+    let entry = test_dir.join("index.mjs");
+    std::fs::write(
+        &entry,
+        r#"
+import u from './undefined.mjs';
+import obj from './object.mjs';
+import cjsDef from './cjs_cfg.cjs';
+import * as cjsNs from './cjs_cfg.cjs';
+import { starExported } from './barrel.mjs';
+console.log(u, obj.default, cjsDef.port, cjsNs.default.default, starExported);
+"#,
+    )
+    .unwrap();
+
+    let bundled = bundle_entrypoint_with_deps(&entry).unwrap();
+    assert!(
+        bundled.contains("__slice_to_esm(require("),
+        "Non-builtin namespace import must lower via __slice_to_esm:\n{bundled}"
+    );
+    assert!(
+        bundled.contains("__slice_export_star(exports,"),
+        "Star re-export must lower via __slice_export_star to exclude default/__esModule:\n{bundled}"
+    );
+    assert!(
+        bundled.contains("keep-on-object"),
+        "Properties on default-exported user object literal must remain intact:\n{bundled}"
+    );
+
+    let _ = std::fs::remove_dir_all(&test_dir);
+}

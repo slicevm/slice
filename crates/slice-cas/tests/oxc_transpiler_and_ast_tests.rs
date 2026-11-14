@@ -350,3 +350,145 @@ exports.deadApi = deadFn;
     );
     assert!(!pruned.contains("deadApi"));
 }
+
+#[test]
+fn test_wave2_pipeline_fusion_hygiene_soundness_and_semantic_global_rewrites() {
+    use crate::linker::{
+        rewrite_buffer_fast_paths_ast, rewrite_cjs_requires_ast, rewrite_require_ident_ast,
+    };
+
+    // 1. Issue #107: Collision-free temporary prefix selection when user code uses `__sl_*`
+    let colliding = r#"
+const __sl_a1 = [1, 2];
+const __sl_i1 = 10;
+const __sl_acc1 = 5;
+const ok = __sl_a1.some((x) => x + __sl_i1 > __sl_acc1);
+"#;
+    let fused_colliding = fuse_array_pipelines_ast(colliding);
+    check_syntax_source(&fused_colliding, None)
+        .expect("Hygienic fused code with user __sl_* bindings must parse cleanly");
+    assert!(
+        fused_colliding.contains("const __sl0_a1 = __sl_a1;"),
+        "Expected collision-free __sl0_ prefix when __sl_ appears in user code:\n{fused_colliding}"
+    );
+    assert!(
+        fused_colliding.contains("x + __sl_i1 > __sl_acc1"),
+        "Callback free variables __sl_i1 / __sl_acc1 must not be shadowed:\n{fused_colliding}"
+    );
+
+    // 2. Issue #106 & #107: Default parameter `(x = 10) => x * 2` (`FormalParameter.initializer`),
+    // side-effecting multi-stage callbacks, and non-array object literal receivers must bail out.
+    let bailout_cases = [
+        "const r = [undefined, 3].map((x = 10) => x * 2).reduce((a, b) => a + b, 0);",
+        "const trace = []; const n = [1, 2].map(x => (trace.push('m' + x), x)).reduce((s, x) => (trace.push('r' + x), s + x), 0);",
+        "const custom = { 0: 1, 1: 2, length: 2, some() { return 'custom'; } }.some(x => false);",
+    ];
+    for case in bailout_cases {
+        let out = fuse_array_pipelines_ast(case);
+        assert_eq!(
+            out, case,
+            "Unsafe pipeline case must bail out untouched:\n{out}"
+        );
+    }
+
+    // 3. Issue #106: Valid fused loops guard `Array.isArray`, capture initial length `>>> 0`,
+    // and skip sparse array holes via `in` check.
+    let sparse_and_mutation = "const out = arr.map((x) => x * 2).reduce((s, x) => s + x, 0);";
+    let fused_valid = fuse_array_pipelines_ast(sparse_and_mutation);
+    check_syntax_source(&fused_valid, None).expect("Fused array loop must parse cleanly");
+    assert!(fused_valid.contains("Array.isArray(__sl_a1)"));
+    assert!(fused_valid.contains(".length >>> 0"));
+    assert!(fused_valid.contains("if (!(__sl_i1 in __sl_a1)) continue;"));
+
+    // 4. Issue #107 sibling sweep: `SemanticBuilder` global binding hygiene for `Buffer` & `require`
+    let shadowed_globals = r#"
+function customCodec(Buffer, require) {
+    return Buffer.byteLength("abc") + ":" + Buffer.from("a").toString("base64") + ":" + require("crypto");
+}
+const realLen = Buffer.byteLength("abc");
+"#;
+    let buf_rewritten = rewrite_buffer_fast_paths_ast(shadowed_globals);
+    assert!(
+        buf_rewritten.contains(r#"Buffer.byteLength("abc")"#)
+            && buf_rewritten.contains(r#"Buffer.from("a").toString("base64")"#),
+        "Shadowed parameter `Buffer` must never be rewritten to __slice_* intrinsics:\n{buf_rewritten}"
+    );
+    assert!(
+        buf_rewritten.contains(r#"const realLen = globalThis.__slice_utf8_byte_len("abc");"#),
+        "Unshadowed global `Buffer.byteLength` must still lower to globalThis.__slice_utf8_byte_len:\n{buf_rewritten}"
+    );
+
+    let req_ident_rewritten = rewrite_require_ident_ast(shadowed_globals).unwrap();
+    assert!(
+        !req_ident_rewritten.contains("__slice_cjs_require"),
+        "Shadowed parameter `require` must never be rewritten to __slice_cjs_require:\n{req_ident_rewritten}"
+    );
+    let mut deps = Vec::new();
+    let req_cjs_rewritten =
+        rewrite_cjs_requires_ast(shadowed_globals, std::path::Path::new("."), &mut deps);
+    assert!(
+        deps.is_empty()
+            && req_cjs_rewritten.contains(r#"require("crypto")"#)
+            && !req_cjs_rewritten.contains("node:crypto"),
+        "Shadowed parameter `require` must not normalize `crypto` to `node:crypto`:\n{req_cjs_rewritten}"
+    );
+}
+
+#[test]
+fn test_wave2_esm_transform_non_enumerable_esmodule_and_default_hygiene() {
+    // 1. Issue #118: Default-only ESM object export must never alias `module.exports` or mutate the object
+    let default_only_esm = "export default { default: 'user-value', value: 7 };\n";
+    let mut deps = Vec::new();
+    let lowered =
+        transform_module_to_cjs(default_only_esm, std::path::Path::new("."), None, &mut deps);
+    check_syntax_source(&lowered, None).expect("Lowered default-only ESM must parse cleanly");
+    assert!(
+        lowered.contains(r#"Object.defineProperty(exports, "__esModule", { value: true });"#),
+        "ESM lowering must define non-enumerable __esModule on exports:\n{lowered}"
+    );
+    assert!(
+        !lowered.contains("module.exports ="),
+        "Default-only ESM lowering must never overwrite module.exports with user value:\n{lowered}"
+    );
+    assert!(
+        lowered.contains("exports.default = __slice_default;"),
+        "Default export must bind to exports.default:\n{lowered}"
+    );
+
+    // 2. Collision-free synthetic default holder when user declares `__slice_default`
+    let user_collision_esm =
+        "const __slice_default = 41;\nexport default { answer: __slice_default + 1 };\n";
+    let lowered_hygienic = transform_module_to_cjs(
+        user_collision_esm,
+        std::path::Path::new("."),
+        None,
+        &mut deps,
+    );
+    check_syntax_source(&lowered_hygienic, None)
+        .expect("Hygienic __slice0_default lowering must parse cleanly");
+    assert!(
+        lowered_hygienic.contains("const __slice0_default =")
+            && lowered_hygienic.contains("exports.default = __slice0_default;"),
+        "Expected collision-free __slice0_default when user defines __slice_default:\n{lowered_hygienic}"
+    );
+
+    // 3. Tree-shaker preserves `__esModule` and used `Object.defineProperty(exports, ...)` while pruning dead ones
+    let live_getter_cjs = r#"
+Object.defineProperty(exports, "__esModule", { value: true });
+let liveVal = 1;
+let deadVal = 2;
+Object.defineProperty(exports, "live", { enumerable: true, get: function() { return liveVal; } });
+Object.defineProperty(exports, "dead", { enumerable: true, get: function() { return deadVal; } });
+"#;
+    let mut used = rustc_hash::FxHashSet::default();
+    used.insert("live".to_string());
+    let pruned = prune_and_minify_cjs_module_ast(live_getter_cjs, Some(&used), false);
+    assert!(
+        pruned.contains("__esModule") && pruned.contains(r#""live""#),
+        "Tree-shaker must retain __esModule and live getter export:\n{pruned}"
+    );
+    assert!(
+        !pruned.contains(r#""dead""#) && !pruned.contains("deadVal"),
+        "Tree-shaker must prune unused getter export and its backing binding:\n{pruned}"
+    );
+}
