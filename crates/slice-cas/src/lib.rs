@@ -23,9 +23,9 @@ pub use compiler as oxc_compiler;
 pub use linker as esm_cjs_linker;
 
 pub use archive::{
-    detect_static_mime_type, embed_cas_into_executable, Blake3Hash, CasBlobEntry, CasBuilder,
-    CasIndexHeader, MappedCasArchive, StaticAssetEntry, StaticAssetPayload, StaticAssetTable,
-    CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION,
+    Blake3Hash, CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION, CasBlobEntry, CasBuilder, CasIndexHeader,
+    MappedCasArchive, StaticAssetEntry, StaticAssetPayload, StaticAssetTable,
+    detect_static_mime_type, embed_cas_into_executable,
 };
 pub use bundler::{
     bundle_entrypoint_with_deps, map_bundled_error_location,
@@ -33,9 +33,9 @@ pub use bundler::{
     map_bundled_stack_trace_with_offset, resolve_project_entrypoint,
 };
 pub use compiler::{
-    analyze_typescript_semantics, check_syntax_source, fuse_array_pipelines_ast,
+    TypeDirectedHints, analyze_typescript_semantics, check_syntax_source, fuse_array_pipelines_ast,
     strip_typescript_and_normalize, strip_typescript_and_normalize_with_ext, strip_typescript_raw,
-    strip_typescript_raw_with_ext, TypeDirectedHints,
+    strip_typescript_raw_with_ext,
 };
 pub use linker::{has_top_level_await, wrap_top_level_await_script};
 

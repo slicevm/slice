@@ -211,10 +211,10 @@ where
                 for prop in &obj.properties {
                     match prop {
                         ObjectPropertyKind::ObjectProperty(p) => {
-                            if p.computed {
-                                if let Some(ke) = p.key.as_expression() {
-                                    walk_expr(ke, visit);
-                                }
+                            if p.computed
+                                && let Some(ke) = p.key.as_expression()
+                            {
+                                walk_expr(ke, visit);
                             }
                             walk_expr(&p.value, visit);
                         }
@@ -890,10 +890,10 @@ mod ident_edit_walker {
         match pat {
             BindingPattern::ObjectPattern(obj) => {
                 for p in &obj.properties {
-                    if p.computed {
-                        if let Some(ke) = p.key.as_expression() {
-                            walk_expr(ke, shadowed, live_map, edits);
-                        }
+                    if p.computed
+                        && let Some(ke) = p.key.as_expression()
+                    {
+                        walk_expr(ke, shadowed, live_map, edits);
                     }
                     walk_pat(&p.value, shadowed, live_map, edits);
                 }
@@ -926,10 +926,10 @@ mod ident_edit_walker {
         for el in &cls.body.body {
             match el {
                 ClassElement::MethodDefinition(md) => {
-                    if md.computed {
-                        if let Some(ke) = md.key.as_expression() {
-                            walk_expr(ke, shadowed, live_map, edits);
-                        }
+                    if md.computed
+                        && let Some(ke) = md.key.as_expression()
+                    {
+                        walk_expr(ke, shadowed, live_map, edits);
                     }
                     let mut fn_shadow = shadowed.clone();
                     for p in &md.value.params.items {
@@ -954,10 +954,10 @@ mod ident_edit_walker {
                     }
                 }
                 ClassElement::PropertyDefinition(pd) => {
-                    if pd.computed {
-                        if let Some(ke) = pd.key.as_expression() {
-                            walk_expr(ke, shadowed, live_map, edits);
-                        }
+                    if pd.computed
+                        && let Some(ke) = pd.key.as_expression()
+                    {
+                        walk_expr(ke, shadowed, live_map, edits);
                     }
                     if let Some(v) = &pd.value {
                         walk_expr(v, shadowed, live_map, edits);
@@ -984,10 +984,10 @@ mod ident_edit_walker {
         match expr {
             Expression::Identifier(id) => {
                 let name = id.name.as_str();
-                if !shadowed.contains(name) {
-                    if let Some(rep) = live_map.get(name) {
-                        edits.push((id.span.start as usize, id.span.end as usize, rep.clone()));
-                    }
+                if !shadowed.contains(name)
+                    && let Some(rep) = live_map.get(name)
+                {
+                    edits.push((id.span.start as usize, id.span.end as usize, rep.clone()));
                 }
             }
             Expression::CallExpression(call) => {
@@ -1035,10 +1035,10 @@ mod ident_edit_walker {
                     &u.argument
                 {
                     let name = id.name.as_str();
-                    if !shadowed.contains(name) {
-                        if let Some(rep) = live_map.get(name) {
-                            edits.push((id.span.start as usize, id.span.end as usize, rep.clone()));
-                        }
+                    if !shadowed.contains(name)
+                        && let Some(rep) = live_map.get(name)
+                    {
+                        edits.push((id.span.start as usize, id.span.end as usize, rep.clone()));
                     }
                 }
             }
@@ -1051,14 +1051,10 @@ mod ident_edit_walker {
                 match &a.left {
                     oxc::ast::ast::AssignmentTarget::AssignmentTargetIdentifier(id) => {
                         let name = id.name.as_str();
-                        if !shadowed.contains(name) {
-                            if let Some(rep) = live_map.get(name) {
-                                edits.push((
-                                    id.span.start as usize,
-                                    id.span.end as usize,
-                                    rep.clone(),
-                                ));
-                            }
+                        if !shadowed.contains(name)
+                            && let Some(rep) = live_map.get(name)
+                        {
+                            edits.push((id.span.start as usize, id.span.end as usize, rep.clone()));
                         }
                     }
                     oxc::ast::ast::AssignmentTarget::StaticMemberExpression(m) => {
@@ -1147,25 +1143,25 @@ mod ident_edit_walker {
                 for prop in &obj.properties {
                     match prop {
                         ObjectPropertyKind::ObjectProperty(p) => {
-                            if p.shorthand {
-                                if let Expression::Identifier(id) = &p.value {
-                                    let name = id.name.as_str();
-                                    if !shadowed.contains(name) {
-                                        if let Some(rep) = live_map.get(name) {
-                                            edits.push((
-                                                p.span.start as usize,
-                                                p.span.end as usize,
-                                                format!("{}: {}", name, rep),
-                                            ));
-                                            continue;
-                                        }
-                                    }
+                            if p.shorthand
+                                && let Expression::Identifier(id) = &p.value
+                            {
+                                let name = id.name.as_str();
+                                if !shadowed.contains(name)
+                                    && let Some(rep) = live_map.get(name)
+                                {
+                                    edits.push((
+                                        p.span.start as usize,
+                                        p.span.end as usize,
+                                        format!("{}: {}", name, rep),
+                                    ));
+                                    continue;
                                 }
                             }
-                            if p.computed {
-                                if let Some(ke) = p.key.as_expression() {
-                                    walk_expr(ke, shadowed, live_map, edits);
-                                }
+                            if p.computed
+                                && let Some(ke) = p.key.as_expression()
+                            {
+                                walk_expr(ke, shadowed, live_map, edits);
                             }
                             walk_expr(&p.value, shadowed, live_map, edits);
                         }

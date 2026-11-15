@@ -1,6 +1,6 @@
 use crate::config::build_cas_archive_with_static;
-use anyhow::{bail, Result};
-use slice_cas::{embed_cas_into_executable, MappedCasArchive};
+use anyhow::{Result, bail};
+use slice_cas::{MappedCasArchive, embed_cas_into_executable};
 use slice_engine::{compile_source_to_bytecode, disassemble_bytecode};
 use slice_io::CompletionRingEngine;
 use std::env;
@@ -21,13 +21,13 @@ pub(crate) fn unique_temp_cas_path(prefix: &str) -> Result<PathBuf> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let candidate = env::temp_dir().join(format!("{}_{}_{}_{}.cas", prefix, pid, seq, nanos));
-    if let Ok(meta) = std::fs::symlink_metadata(&candidate) {
-        if meta.file_type().is_symlink() {
-            bail!(
-                "Refusing to write staging CAS archive to pre-existing symlink: {}",
-                candidate.display()
-            );
-        }
+    if let Ok(meta) = std::fs::symlink_metadata(&candidate)
+        && meta.file_type().is_symlink()
+    {
+        bail!(
+            "Refusing to write staging CAS archive to pre-existing symlink: {}",
+            candidate.display()
+        );
     }
     Ok(candidate)
 }
@@ -39,20 +39,48 @@ pub(crate) fn print_usage() {
     );
     println!();
     println!("Core Commands:");
-    println!("  slice init [dir] [--template=sveltekit]        Scaffold a new TypeScript Edge or SvelteKit 3 project");
-    println!("  slice run [target] [--warm] [--watch]          Execute a script, folder app, .cas bundle, or slice.toml");
-    println!("  slice check <target>                           Parse and syntax-check TypeScript/JavaScript without executing");
-    println!("  slice test [target] [--filter=PAT] [--json]    Run Time-Travel Test Suite (< 5us VFS+KV rollback per test)");
-    println!("  slice serve [target] [--port=N] [--smoke-test] Launch multi-tenant WinterTC HTTP MicroVM server");
-    println!("  slice pack <input> <output.cas>                Pack a file or folder app into a Zero-Stat BLAKE3 .cas archive");
-    println!("  slice compile <input> -o <binary>              Compile a script, folder app, or .cas into a standalone binary");
-    println!("  slice inspect <bundle.cas|script.ts|dir>       Disassemble SLICEBC/SLICEBOA/SLICESNP bytecode and inspect CAS Radix table");
-    println!("  slice mcp [--smoke-test] [--audit-egress=SEC]  Start built-in Model Context Protocol (MCP) JSON-RPC 2.0 server");
-    println!("  slice repl                                     Start interactive SES-Locked TypeScript/JS shell");
-    println!("  slice doctor                                   Audit host OS kernel io_uring/IOCP, MPK, Warm Pool, and OCap");
-    println!("  slice microvm-bench [--tenants=1000] [--json]  Run 1,000-tenant MicroVM cold-start & density benchmark");
-    println!("  slice verify-security                          Run 5-vector OCap, SES, and Fuel containment verification");
-    println!("  slice info                                     Display runtime architecture and active kernel rings");
+    println!(
+        "  slice init [dir] [--template=sveltekit]        Scaffold a new TypeScript Edge or SvelteKit 3 project"
+    );
+    println!(
+        "  slice run [target] [--warm] [--watch]          Execute a script, folder app, .cas bundle, or slice.toml"
+    );
+    println!(
+        "  slice check <target>                           Parse and syntax-check TypeScript/JavaScript without executing"
+    );
+    println!(
+        "  slice test [target] [--filter=PAT] [--json]    Run Time-Travel Test Suite (< 5us VFS+KV rollback per test)"
+    );
+    println!(
+        "  slice serve [target] [--port=N] [--smoke-test] Launch multi-tenant WinterTC HTTP MicroVM server"
+    );
+    println!(
+        "  slice pack <input> <output.cas>                Pack a file or folder app into a Zero-Stat BLAKE3 .cas archive"
+    );
+    println!(
+        "  slice compile <input> -o <binary>              Compile a script, folder app, or .cas into a standalone binary"
+    );
+    println!(
+        "  slice inspect <bundle.cas|script.ts|dir>       Disassemble SLICEBC/SLICEBOA/SLICESNP bytecode and inspect CAS Radix table"
+    );
+    println!(
+        "  slice mcp [--smoke-test] [--audit-egress=SEC]  Start built-in Model Context Protocol (MCP) JSON-RPC 2.0 server"
+    );
+    println!(
+        "  slice repl                                     Start interactive SES-Locked TypeScript/JS shell"
+    );
+    println!(
+        "  slice doctor                                   Audit host OS kernel io_uring/IOCP, MPK, Warm Pool, and OCap"
+    );
+    println!(
+        "  slice microvm-bench [--tenants=1000] [--json]  Run 1,000-tenant MicroVM cold-start & density benchmark"
+    );
+    println!(
+        "  slice verify-security                          Run 5-vector OCap, SES, and Fuel containment verification"
+    );
+    println!(
+        "  slice info                                     Display runtime architecture and active kernel rings"
+    );
 }
 
 pub(crate) fn cmd_info() -> Result<()> {
@@ -71,9 +99,15 @@ pub(crate) fn cmd_info() -> Result<()> {
         "  Zero-Stat CAS Format  : SLICE_CAS v{} (64-byte aligned BLAKE3 mmap + SLICEEXE + SLICEBC\\x01)",
         slice_cas::CAS_VERSION
     );
-    println!("  TypeScript & JSX/TSX  : Oxc v0.152.0 AOT Compiler + Built-In SSR (`slice:jsx`) + Tree-Shaking");
-    println!("  Execution Pipeline    : Tier-1 Precompiled Boa CodeBlock (`SLICEBC\\x01` Default) + Tier-2 SIMD + Tier-0 SLICESNP");
-    println!("  Native Fast Intrinsics: FIPS-180-4 SHA-256 / RFC-2104 HMAC / SemVer / In-Memory VFS Slab");
+    println!(
+        "  TypeScript & JSX/TSX  : Oxc v0.152.0 AOT Compiler + Built-In SSR (`slice:jsx`) + Tree-Shaking"
+    );
+    println!(
+        "  Execution Pipeline    : Tier-1 Precompiled Boa CodeBlock (`SLICEBC\\x01` Default) + Tier-2 SIMD + Tier-0 SLICESNP"
+    );
+    println!(
+        "  Native Fast Intrinsics: FIPS-180-4 SHA-256 / RFC-2104 HMAC / SemVer / In-Memory VFS Slab"
+    );
     println!(
         "  Security Architecture : SES Lockdown + TC39 OCap Compartments + Hardware PKEY/Cage"
     );
@@ -82,7 +116,9 @@ pub(crate) fn cmd_info() -> Result<()> {
 
 pub(crate) fn cmd_pack(args: &[String]) -> Result<()> {
     if args.len() < 2 {
-        bail!("Usage: slice pack <input_file_or_dir> <output.cas> [--entry=./index.ts] [--static=./public]");
+        bail!(
+            "Usage: slice pack <input_file_or_dir> <output.cas> [--entry=./index.ts] [--static=./public]"
+        );
     }
     let input_path = Path::new(&args[0]);
     let output_path = Path::new(&args[1]);
@@ -105,10 +141,10 @@ pub(crate) fn cmd_pack(args: &[String]) -> Result<()> {
             .or_else(|| arg.strip_prefix("--exper-boacas="))
         {
             exper_override = slice_sandbox::parse_bool_setting(b_str);
-        } else if let Some(t_str) = arg.strip_prefix("--tier=") {
-            if let Some(t) = slice_sandbox::parse_tier_setting(t_str) {
-                slice_engine::set_tier_override(t);
-            }
+        } else if let Some(t_str) = arg.strip_prefix("--tier=")
+            && let Some(t) = slice_sandbox::parse_tier_setting(t_str)
+        {
+            slice_engine::set_tier_override(t);
         }
     }
     if let Some(ov) = exper_override {
@@ -137,7 +173,9 @@ pub(crate) fn cmd_pack(args: &[String]) -> Result<()> {
 
 pub(crate) fn cmd_compile(args: &[String]) -> Result<()> {
     if args.is_empty() {
-        bail!("Usage: slice compile <input_script_or_dir_or_cas> [-o <output_binary>] [--entry=./index.ts] [--static=./public]");
+        bail!(
+            "Usage: slice compile <input_script_or_dir_or_cas> [-o <output_binary>] [--entry=./index.ts] [--static=./public]"
+        );
     }
     let input_path = Path::new(&args[0]);
     let mut output_bin: Option<PathBuf> = None;
@@ -169,10 +207,10 @@ pub(crate) fn cmd_compile(args: &[String]) -> Result<()> {
             .or_else(|| args[i].strip_prefix("--exper-boacas="))
         {
             exper_override = slice_sandbox::parse_bool_setting(b_str);
-        } else if let Some(t_str) = args[i].strip_prefix("--tier=") {
-            if let Some(t) = slice_sandbox::parse_tier_setting(t_str) {
-                slice_engine::set_tier_override(t);
-            }
+        } else if let Some(t_str) = args[i].strip_prefix("--tier=")
+            && let Some(t) = slice_sandbox::parse_tier_setting(t_str)
+        {
+            slice_engine::set_tier_override(t);
         }
         i += 1;
     }

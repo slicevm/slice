@@ -11,10 +11,10 @@ pub mod ring;
 pub mod slab;
 
 pub use ring::{
-    CompletionRingEngine, IoCompletion, IoSubmission, RingStatus, DEFAULT_RING_ENTRIES,
-    MAX_RING_ENTRIES,
+    CompletionRingEngine, DEFAULT_RING_ENTRIES, IoCompletion, IoSubmission, MAX_RING_ENTRIES,
+    RingStatus,
 };
-pub use slab::{RegisteredBufferPool, FIXED_BUFFER_COUNT, FIXED_BUFFER_SIZE};
+pub use slab::{FIXED_BUFFER_COUNT, FIXED_BUFFER_SIZE, RegisteredBufferPool};
 
 #[cfg(test)]
 #[path = "../tests/mod.rs"]

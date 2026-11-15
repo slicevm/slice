@@ -34,8 +34,8 @@ pub use cjs_rewrites::{
 pub use esm_transform::{has_esm_default_export_marker, transform_module_to_cjs};
 pub use lazy_and_inline::{collect_eager_module_indices, inline_cold_method_requires_ast};
 pub use tree_shaker::{
-    analyze_module_used_exports, analyze_module_used_exports_from_summaries,
-    extract_module_require_summary, extract_referenced_identifiers,
-    extract_referenced_identifiers_with_offsets, is_js_ident_continue, is_js_ident_start,
-    is_js_keyword, prune_and_minify_cjs_module_ast, ModuleRequireSummary, UsedExports,
+    ModuleRequireSummary, UsedExports, analyze_module_used_exports,
+    analyze_module_used_exports_from_summaries, extract_module_require_summary,
+    extract_referenced_identifiers, extract_referenced_identifiers_with_offsets,
+    is_js_ident_continue, is_js_ident_start, is_js_keyword, prune_and_minify_cjs_module_ast,
 };

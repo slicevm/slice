@@ -2,9 +2,9 @@
 
 use crate::boa_realm::SNP_MODULE_CACHE;
 use crate::value_and_ast::{
-    BinOp, BytecodeModule, BytecodeOp, Expr, JsFunction, JsValue, Stmt, UnaryOp, SNAPSHOT_MAGIC,
+    BinOp, BytecodeModule, BytecodeOp, Expr, JsFunction, JsValue, SNAPSHOT_MAGIC, Stmt, UnaryOp,
 };
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 use slice_cas::strip_typescript_and_normalize;
 
@@ -493,11 +493,11 @@ impl Parser {
             if matches!(self.peek(), Token::RBrace) {
                 self.next();
             }
-        } else if let Token::Ident(name) = self.peek().clone() {
-            if name != "from" {
-                self.next();
-                bindings.push(name);
-            }
+        } else if let Token::Ident(name) = self.peek().clone()
+            && name != "from"
+        {
+            self.next();
+            bindings.push(name);
         }
         if matches!(self.peek(), Token::Ident(s) if s == "from") {
             self.next();
@@ -1726,15 +1726,14 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                         if a.operator != AssignmentOperator::Assign {
                             return false;
                         }
-                        if let Some(chain) = static_member_chain(&m.object) {
-                            if slice_sandbox::is_frozen_intrinsic(&chain)
+                        if let Some(chain) = static_member_chain(&m.object)
+                            && (slice_sandbox::is_frozen_intrinsic(&chain)
                                 || slice_sandbox::is_frozen_intrinsic(&format!(
                                     "{}.{}",
                                     chain, m.property.name
-                                ))
-                            {
-                                return true;
-                            }
+                                )))
+                        {
+                            return true;
                         }
                         matches!(
                             &m.object,
@@ -1823,13 +1822,13 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                 if m.optional {
                     return false;
                 }
-                if let Expression::Identifier(obj_id) = &m.object {
-                    if obj_id.name.as_str() == "Math" {
-                        return matches!(
-                            m.property.name.as_str(),
-                            "PI" | "E" | "SQRT2" | "LN2" | "LN10"
-                        );
-                    }
+                if let Expression::Identifier(obj_id) = &m.object
+                    && obj_id.name.as_str() == "Math"
+                {
+                    return matches!(
+                        m.property.name.as_str(),
+                        "PI" | "E" | "SQRT2" | "LN2" | "LN10"
+                    );
                 }
                 is_supported_expr(&m.object, in_function_depth)
             }
@@ -1990,10 +1989,10 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                             scope.push(name);
                         }
                     }
-                    if let Some(init) = &decl.init {
-                        if !check_scope_expr(init) {
-                            return false;
-                        }
+                    if let Some(init) = &decl.init
+                        && !check_scope_expr(init)
+                    {
+                        return false;
                     }
                 }
                 true
@@ -2071,10 +2070,10 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                                 scope.push(name);
                             }
                         }
-                        if let Some(init) = &decl.init {
-                            if !check_scope_expr(init) {
-                                return false;
-                            }
+                        if let Some(init) = &decl.init
+                            && !check_scope_expr(init)
+                        {
+                            return false;
                         }
                     }
                     true
@@ -2324,44 +2323,42 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
                         }
                         _ => false,
                     };
-                    if cond_ident == idx_var && step_is_inc_1 {
-                        if let Stmt::ExprStmt(Expr::Assign {
+                    if cond_ident == idx_var
+                        && step_is_inc_1
+                        && let Stmt::ExprStmt(Expr::Assign {
                             name: acc_var,
                             op: Some(BinOp::Add),
                             value: rhs_val,
                         }) = &body[0]
-                        {
-                            if known_numeric_vars.contains(acc_var)
-                                || known_numeric_vars.contains(idx_var)
-                            {
-                                let scale_opt = match rhs_val.as_ref() {
-                                    Expr::Ident(id) if id == idx_var => Some(1.0),
-                                    Expr::Binary {
-                                        op: BinOp::Mul,
-                                        lhs,
-                                        rhs,
-                                    } => match (lhs.as_ref(), rhs.as_ref()) {
-                                        (Expr::Ident(id), Expr::Literal(JsValue::Number(k)))
-                                        | (Expr::Literal(JsValue::Number(k)), Expr::Ident(id))
-                                            if id == idx_var =>
-                                        {
-                                            Some(*k)
-                                        }
-                                        _ => None,
-                                    },
-                                    _ => None,
-                                };
-                                if let Some(scale) = scale_opt {
-                                    ops.push(BytecodeOp::MonomorphicForLoop {
-                                        acc_var: acc_var.clone(),
-                                        idx_var: idx_var.clone(),
-                                        start: *start_n as i64,
-                                        limit: *limit_n as i64,
-                                        scale,
-                                    });
-                                    continue;
+                        && (known_numeric_vars.contains(acc_var)
+                            || known_numeric_vars.contains(idx_var))
+                    {
+                        let scale_opt = match rhs_val.as_ref() {
+                            Expr::Ident(id) if id == idx_var => Some(1.0),
+                            Expr::Binary {
+                                op: BinOp::Mul,
+                                lhs,
+                                rhs,
+                            } => match (lhs.as_ref(), rhs.as_ref()) {
+                                (Expr::Ident(id), Expr::Literal(JsValue::Number(k)))
+                                | (Expr::Literal(JsValue::Number(k)), Expr::Ident(id))
+                                    if id == idx_var =>
+                                {
+                                    Some(*k)
                                 }
-                            }
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(scale) = scale_opt {
+                            ops.push(BytecodeOp::MonomorphicForLoop {
+                                acc_var: acc_var.clone(),
+                                idx_var: idx_var.clone(),
+                                start: *start_n as i64,
+                                limit: *limit_n as i64,
+                                scale,
+                            });
+                            continue;
                         }
                     }
                 }

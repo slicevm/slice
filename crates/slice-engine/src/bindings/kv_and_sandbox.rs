@@ -5,7 +5,7 @@ use crate::bindings::helpers::{
     try_adjust_isolate_memory_ctx,
 };
 use crate::boa_realm::{
-    SavedIsolateContextGuard, BOA_ACTIVE_TENANT, BOA_KV_MEM_BUDGET, BOA_VIOLATION,
+    BOA_ACTIVE_TENANT, BOA_KV_MEM_BUDGET, BOA_VIOLATION, SavedIsolateContextGuard,
 };
 use crate::event_loop::{clear_event_loop_state, drive_event_loop_to_completion};
 use crate::isolate::{SandboxEvalOptions, SliceIsolate};
@@ -16,7 +16,7 @@ use crate::state_and_kv::{
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
 pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_kv_get"), ctx)

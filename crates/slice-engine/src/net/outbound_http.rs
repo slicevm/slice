@@ -118,10 +118,10 @@ pub(crate) fn get_tls_client_config() -> Arc<rustls::ClientConfig> {
     }
     let hash_key = CUSTOM_ROOT_CERTS.lock().map(|g| g.1).unwrap_or([0u8; 32]);
     let cache = CUSTOM_TLS_CLIENT_CONFIGS.get_or_init(|| Mutex::new(FxHashMap::default()));
-    if let Ok(guard) = cache.lock() {
-        if let Some(existing) = guard.get(&hash_key) {
-            return Arc::clone(existing);
-        }
+    if let Ok(guard) = cache.lock()
+        && let Some(existing) = guard.get(&hash_key)
+    {
+        return Arc::clone(existing);
     }
     let extra = CUSTOM_ROOT_CERTS
         .lock()
@@ -370,15 +370,15 @@ fn take_pooled_stream(
     host_port: &str,
 ) -> Option<OutboundStream> {
     let now = Instant::now();
-    if let Ok(mut map) = shared_conn_pool().lock() {
-        if let Some(vec) = map.get_mut(tenant_id) {
-            vec.retain(|entry| now.duration_since(entry.last_used) < IDLE_CONN_TIMEOUT);
-            if let Some(pos) = vec.iter().rposition(|e| {
-                e.proxy_key == proxy_key && e.is_https == is_https && e.host_port == host_port
-            }) {
-                let entry = vec.swap_remove(pos);
-                return Some(entry.stream);
-            }
+    if let Ok(mut map) = shared_conn_pool().lock()
+        && let Some(vec) = map.get_mut(tenant_id)
+    {
+        vec.retain(|entry| now.duration_since(entry.last_used) < IDLE_CONN_TIMEOUT);
+        if let Some(pos) = vec.iter().rposition(|e| {
+            e.proxy_key == proxy_key && e.is_https == is_https && e.host_port == host_port
+        }) {
+            let entry = vec.swap_remove(pos);
+            return Some(entry.stream);
         }
     }
     None
@@ -398,14 +398,13 @@ fn return_pooled_stream(
                 vec.retain(|entry| now.duration_since(entry.last_used) < IDLE_CONN_TIMEOUT);
                 !vec.is_empty()
             });
-            if map.len() >= MAX_TENANT_CONN_POOLS {
-                if let Some(oldest_tenant) = map
+            if map.len() >= MAX_TENANT_CONN_POOLS
+                && let Some(oldest_tenant) = map
                     .iter()
                     .min_by_key(|(_, vec)| vec.last().map(|e| e.last_used).unwrap_or(now))
                     .map(|(k, _)| k.clone())
-                {
-                    map.remove(&oldest_tenant);
-                }
+            {
+                map.remove(&oldest_tenant);
             }
         }
         let vec = map
@@ -1322,22 +1321,21 @@ fn execute_single_http11_hop(
         proxy_key,
         target_parts.is_https,
         &target_parts.host_port,
-    ) {
-        if let Ok(resp) = send_and_read_framed_http11(&mut pooled_stream, &req_buf, method) {
-            OUTBOUND_POOL_REUSE_COUNT.with(|c| c.set(c.get() + 1));
-            if !resp.peer_closed {
-                return_pooled_stream(
-                    tenant_id,
-                    proxy_key.to_string(),
-                    target_parts.is_https,
-                    target_parts.host_port.clone(),
-                    pooled_stream,
-                );
-            }
-            return Ok(resp);
+    ) && let Ok(resp) = send_and_read_framed_http11(&mut pooled_stream, &req_buf, method)
+    {
+        OUTBOUND_POOL_REUSE_COUNT.with(|c| c.set(c.get() + 1));
+        if !resp.peer_closed {
+            return_pooled_stream(
+                tenant_id,
+                proxy_key.to_string(),
+                target_parts.is_https,
+                target_parts.host_port.clone(),
+                pooled_stream,
+            );
         }
-        // Stale idle connection closed by remote peer; fall through and dial fresh stream
+        return Ok(resp);
     }
+    // Stale idle connection closed by remote peer; fall through and dial fresh stream
 
     // 2. Dial fresh TCP (+ HTTP CONNECT tunnel if HTTPS over proxy + TLS 1.3 if `target_parts.is_https`)
     let mut fresh_stream = match dial_plan {

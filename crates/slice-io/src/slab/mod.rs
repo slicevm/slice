@@ -1,6 +1,6 @@
 //! Pre-Registered, Pinned Fixed-Size Slab Buffer Pool (`RegisteredBufferPool`).
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use std::pin::Pin;
 
 pub const FIXED_BUFFER_SIZE: usize = 65536; // 64 KB per registered slab slot

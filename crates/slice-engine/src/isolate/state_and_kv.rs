@@ -41,17 +41,16 @@ pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
         let now = current_epoch_ms();
         for (idx, shard) in shards.iter().enumerate() {
             let guard = shard.read();
-            if let Some(t_map) = guard.get(tenant_id) {
-                if !t_map.is_empty() {
-                    kv_keys_count += t_map.len();
-                    for (k, entry) in t_map {
-                        if entry.expires_at_ms.is_none_or(|exp| now < exp) {
-                            kv_bytes =
-                                kv_bytes.saturating_add(edge_kv_entry_bytes(k.as_str(), entry));
-                        }
+            if let Some(t_map) = guard.get(tenant_id)
+                && !t_map.is_empty()
+            {
+                kv_keys_count += t_map.len();
+                for (k, entry) in t_map {
+                    if entry.expires_at_ms.is_none_or(|exp| now < exp) {
+                        kv_bytes = kv_bytes.saturating_add(edge_kv_entry_bytes(k.as_str(), entry));
                     }
-                    tenant_kv[idx] = Some(t_map.clone());
                 }
+                tenant_kv[idx] = Some(t_map.clone());
             }
         }
     }

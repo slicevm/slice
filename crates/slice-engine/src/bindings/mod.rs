@@ -1,19 +1,19 @@
 //! Modular Native Rust Host Bindings (`__slice_*`) Registered into `boa_engine::Context`.
 //!
 //! Organized by capability and runtime domain:
-//! - [`helpers`]: Zero-copy `TypedArray`/`ArrayBuffer`/`DataView` extraction, memory & fuel accounting, and WebCrypto digest/HMAC helpers.
-//! - [`core`]: Always-on core bindings (`console`, source-mapped stacks, lazy shard/builtin loaders, `os`, SHA-256/HMAC-SHA256, `env`, timers).
-//! - [`deterministic_and_os`]: Deterministic PRNG/clock (`--deterministic`), `os.tmpdir`, and `AsyncLocalStorage` snapshot bindings.
-//! - [`intrinsics`]: Native `slice:semver`, `ms`, and `bytes` intrinsics.
-//! - [`http_and_fetch`]: Inbound HTTP request/response bridge (`Slice.serve`, `node:http`) and outbound `fetch` (`Shard 10`).
-//! - [`kv_and_sandbox`]: Multi-tenant Edge KV, transactional state checkpoints, and nested `Slice.evalSandbox` sub-isolates.
-//! - [`wintertc_and_buffer`]: WHATWG `btoa`/`atob`, `TextEncoder`/`TextDecoder`, `zlib` compression, and `Buffer` hex/base64 codecs.
-//! - [`fs`]: OCap-enforced inode-backed Virtual Filesystem (`VirtualFileSystem`), open FD table (`FsRuntimeState`), and host filesystem bindings (`node:fs`).
-//! - [`crypto`]: WHATWG WebCrypto (`crypto.subtle`) and `node:crypto` ciphers, KDFs, and asymmetric signing (`Ed25519`, `ECDSA`).
-//! - [`websocket`]: RFC 6455 WebSocket client/server host bindings (`Shard 7`).
-//! - [`workers_and_sockets`]: Web `Worker` threads and OCap TCP/TLS/UDP sockets (`Shard 8`).
-//! - [`wasm`]: Sandboxed WebAssembly (`wasmi`) compilation, memory, and execution (`Shard 9`).
-//! - [`child_process`]: 5-Ring OCap-jailed subprocess execution (`node:child_process`).
+//! - `helpers`: Zero-copy `TypedArray`/`ArrayBuffer`/`DataView` extraction, memory & fuel accounting, and WebCrypto digest/HMAC helpers.
+//! - `core`: Always-on core bindings (`console`, source-mapped stacks, lazy shard/builtin loaders, `os`, SHA-256/HMAC-SHA256, `env`, timers).
+//! - `deterministic_and_os`: Deterministic PRNG/clock (`--deterministic`), `os.tmpdir`, and `AsyncLocalStorage` snapshot bindings.
+//! - `intrinsics`: Native `slice:semver`, `ms`, and `bytes` intrinsics.
+//! - `http_and_fetch`: Inbound HTTP request/response bridge (`Slice.serve`, `node:http`) and outbound `fetch` (`Shard 10`).
+//! - `kv_and_sandbox`: Multi-tenant Edge KV, transactional state checkpoints, and nested `Slice.evalSandbox` sub-isolates.
+//! - `wintertc_and_buffer`: WHATWG `btoa`/`atob`, `TextEncoder`/`TextDecoder`, `zlib` compression, and `Buffer` hex/base64 codecs.
+//! - `fs`: OCap-enforced inode-backed Virtual Filesystem (`VirtualFileSystem`), open FD table (`FsRuntimeState`), and host filesystem bindings (`node:fs`).
+//! - `crypto`: WHATWG WebCrypto (`crypto.subtle`) and `node:crypto` ciphers, KDFs, and asymmetric signing (`Ed25519`, `ECDSA`).
+//! - `websocket`: RFC 6455 WebSocket client/server host bindings (`Shard 7`).
+//! - `workers_and_sockets`: Web `Worker` threads and OCap TCP/TLS/UDP sockets (`Shard 8`).
+//! - `wasm`: Sandboxed WebAssembly (`wasmi`) compilation, memory, and execution (`Shard 9`).
+//! - `child_process`: 5-Ring OCap-jailed subprocess execution (`node:child_process`).
 
 pub(crate) mod child_process;
 pub(crate) mod core;

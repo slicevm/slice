@@ -1,6 +1,6 @@
 use crate::{
-    compile_source_to_bytecode, set_thread_tier_override, ExecutionTier, HttpRequestContext,
-    SandboxEvalOptions, SliceIsolate,
+    ExecutionTier, HttpRequestContext, SandboxEvalOptions, SliceIsolate,
+    compile_source_to_bytecode, set_thread_tier_override,
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 use std::time::Instant;

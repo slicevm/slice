@@ -93,11 +93,7 @@ fn charge_inflate_fuel(ticks: u64) -> Result<(), &'static str> {
         }
         let next = consumed.saturating_add(ticks);
         f.set((next, limit));
-        if next > limit {
-            Some(limit)
-        } else {
-            None
-        }
+        if next > limit { Some(limit) } else { None }
     });
     if let Some(limit) = exceeded {
         let tenant_id = crate::boa_realm::BOA_ACTIVE_TENANT.with(|t| {

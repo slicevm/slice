@@ -11,9 +11,11 @@ fn test_sbx_sec_01_vfs_unc_device_and_null_byte_injection_blocked() {
     let tenant = TenantCompartment::new("tenant-sec01", 1, caps, 10_000, 65536);
 
     // 1. Null-byte injection must be rejected even under matching prefix
-    assert!(tenant
-        .verify_fs_read("/app/data/safe.json\0/../../etc/passwd")
-        .is_err());
+    assert!(
+        tenant
+            .verify_fs_read("/app/data/safe.json\0/../../etc/passwd")
+            .is_err()
+    );
     assert!(!vfs_prefix_matches("/app/data/safe.json\0", "/app/data"));
 
     // 2. Win32 device namespace (`\\.\` and `//./`) must be rejected
@@ -22,15 +24,21 @@ fn test_sbx_sec_01_vfs_unc_device_and_null_byte_injection_blocked() {
 
     // 3. Win32 extended UNC share (`\\?\UNC\server\share`) and raw SMB UNC (`\\server\share`)
     //    must be rejected and never treated as relative to "."
-    assert!(tenant
-        .verify_fs_read(r"\\?\UNC\evil.example.com\share\secret.txt")
-        .is_err());
-    assert!(tenant
-        .verify_fs_read("//?/unc/evil.example.com/share/secret.txt")
-        .is_err());
-    assert!(tenant
-        .verify_fs_read(r"\\evil.example.com\share\secret.txt")
-        .is_err());
+    assert!(
+        tenant
+            .verify_fs_read(r"\\?\UNC\evil.example.com\share\secret.txt")
+            .is_err()
+    );
+    assert!(
+        tenant
+            .verify_fs_read("//?/unc/evil.example.com/share/secret.txt")
+            .is_err()
+    );
+    assert!(
+        tenant
+            .verify_fs_read(r"\\evil.example.com\share\secret.txt")
+            .is_err()
+    );
 
     // 4. Legitimate Win32 extended local drive (`\\?\C:\...`) normalization still works
     assert_eq!(
@@ -47,9 +55,11 @@ fn test_sbx_sec_02_verify_net_connect_strict_port_isolation() {
 
     // Exact port 443 and `https://` URL (default port 443) must succeed
     assert!(tenant.verify_net_connect("api.internal:443").is_ok());
-    assert!(tenant
-        .verify_net_connect("https://api.internal/v1/status")
-        .is_ok());
+    assert!(
+        tenant
+            .verify_net_connect("https://api.internal/v1/status")
+            .is_ok()
+    );
 
     // Different explicit ports (`:6379`, `:22`, `:80`, `:8080`) on the same host MUST be denied
     assert!(
@@ -77,12 +87,16 @@ fn test_sbx_sec_02_verify_net_connect_strict_port_isolation() {
     // Compartment allowlisted with bare hostname (`"service.internal"`) permits any port on that host
     let bare_caps = CapabilityToken::pure_compute().with_net_host("service.internal");
     let bare_tenant = TenantCompartment::new("tenant-bare", 3, bare_caps, 10_000, 65536);
-    assert!(bare_tenant
-        .verify_net_connect("service.internal:443")
-        .is_ok());
-    assert!(bare_tenant
-        .verify_net_connect("service.internal:8080")
-        .is_ok());
+    assert!(
+        bare_tenant
+            .verify_net_connect("service.internal:443")
+            .is_ok()
+    );
+    assert!(
+        bare_tenant
+            .verify_net_connect("service.internal:8080")
+            .is_ok()
+    );
 }
 
 #[test]
@@ -212,13 +226,17 @@ fn test_empty_capability_fast_reject_and_cached_tmp_prefix_equivalence() {
         1_000_000,
         4 * 1024 * 1024,
     );
-    assert!(pure_tenant
-        .verify_fs_read("/app/data/../secret.json")
-        .is_err());
+    assert!(
+        pure_tenant
+            .verify_fs_read("/app/data/../secret.json")
+            .is_err()
+    );
     assert!(pure_tenant.verify_fs_write("/tmp/out.txt").is_err());
-    assert!(pure_tenant
-        .verify_net_connect("https://api.example.com:443/v1")
-        .is_err());
+    assert!(
+        pure_tenant
+            .verify_net_connect("https://api.example.com:443/v1")
+            .is_err()
+    );
     assert!(pure_tenant.verify_exec_binary("git").is_err());
 
     let tmp_sub = std::env::temp_dir()
@@ -227,11 +245,15 @@ fn test_empty_capability_fast_reject_and_cached_tmp_prefix_equivalence() {
     let tmp_caps =
         CapabilityToken::pure_compute().with_write_prefix("/tmp/slice_sbx_tmp_equiv_probe");
     let tmp_tenant = TenantCompartment::new("tmp-tenant", 3, tmp_caps, 1_000_000, 4 * 1024 * 1024);
-    assert!(tmp_tenant
-        .verify_fs_write(&tmp_sub.to_string_lossy())
-        .is_ok());
+    assert!(
+        tmp_tenant
+            .verify_fs_write(&tmp_sub.to_string_lossy())
+            .is_ok()
+    );
     let outside_tmp = std::env::temp_dir().join("slice_sbx_tmp_equiv_probe_sibling.txt");
-    assert!(tmp_tenant
-        .verify_fs_write(&outside_tmp.to_string_lossy())
-        .is_err());
+    assert!(
+        tmp_tenant
+            .verify_fs_write(&outside_tmp.to_string_lossy())
+            .is_err()
+    );
 }

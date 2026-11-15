@@ -1,4 +1,4 @@
-use crate::{compile_source_to_bytecode, HttpRequestContext, SliceIsolate};
+use crate::{HttpRequestContext, SliceIsolate, compile_source_to_bytecode};
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
 fn eval_ts_with_caps(

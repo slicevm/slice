@@ -3,8 +3,8 @@
 use super::barrel_and_fallback::apply_cjs_lazy_barrel_getters;
 use super::mutable_exports::get_module_mutable_exports;
 use super::{
-    format_default_import_unwrap, format_namespace_import_rhs, select_esm_hygienic_names,
-    ESM_ESMODULE_DEFINE,
+    ESM_ESMODULE_DEFINE, format_default_import_unwrap, format_namespace_import_rhs,
+    select_esm_hygienic_names,
 };
 use crate::bundler::resolve_module_specifier;
 use crate::linker::{
@@ -174,10 +174,10 @@ pub(super) fn try_transform_esm_to_cjs_ast(
                 }
             }
             Statement::ExportDeclaration(exp_decl) => {
-                if let Declaration::FunctionDeclaration(fd) = &exp_decl.declaration {
-                    if let Some(id) = &fd.id {
-                        top_level_fn_names.insert(id.name.to_string());
-                    }
+                if let Declaration::FunctionDeclaration(fd) = &exp_decl.declaration
+                    && let Some(id) = &fd.id
+                {
+                    top_level_fn_names.insert(id.name.to_string());
                 }
             }
             _ => {}
@@ -200,31 +200,30 @@ pub(super) fn try_transform_esm_to_cjs_ast(
                     continue;
                 }
                 let spec = imp.source.value.as_str();
-                if matches!(spec, "crypto" | "node:crypto") {
-                    if let (Some(scoping), Some(specs)) = (&crypto_scoping, &imp.specifiers) {
-                        if !specs.is_empty() {
-                            let any_used = specs.iter().any(|s| match s {
-                                ImportDeclarationSpecifier::ImportDefaultSpecifier(d) => {
-                                    d.local.symbol_id.get().is_none_or(|id| {
-                                        !scoping.get_resolved_reference_ids(id).is_empty()
-                                    })
-                                }
-                                ImportDeclarationSpecifier::ImportNamespaceSpecifier(n) => {
-                                    n.local.symbol_id.get().is_none_or(|id| {
-                                        !scoping.get_resolved_reference_ids(id).is_empty()
-                                    })
-                                }
-                                ImportDeclarationSpecifier::ImportSpecifier(n) => {
-                                    !n.import_kind.is_type()
-                                        && n.local.symbol_id.get().is_none_or(|id| {
-                                            !scoping.get_resolved_reference_ids(id).is_empty()
-                                        })
-                                }
-                            });
-                            if !any_used {
-                                continue;
-                            }
+                if matches!(spec, "crypto" | "node:crypto")
+                    && let (Some(scoping), Some(specs)) = (&crypto_scoping, &imp.specifiers)
+                    && !specs.is_empty()
+                {
+                    let any_used = specs.iter().any(|s| match s {
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(d) => d
+                            .local
+                            .symbol_id
+                            .get()
+                            .is_none_or(|id| !scoping.get_resolved_reference_ids(id).is_empty()),
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(n) => n
+                            .local
+                            .symbol_id
+                            .get()
+                            .is_none_or(|id| !scoping.get_resolved_reference_ids(id).is_empty()),
+                        ImportDeclarationSpecifier::ImportSpecifier(n) => {
+                            !n.import_kind.is_type()
+                                && n.local.symbol_id.get().is_none_or(|id| {
+                                    !scoping.get_resolved_reference_ids(id).is_empty()
+                                })
                         }
+                    });
+                    if !any_used {
+                        continue;
                     }
                 }
                 let resolved_id = resolve_spec_and_record(spec, from_dir, deps_out);

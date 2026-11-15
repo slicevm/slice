@@ -4,7 +4,7 @@ use crate::bindings::helpers::{
     active_tenant_id_or_default, consume_crypto_kdf_fuel, trip_isolate_oom_limits,
     try_consume_isolate_memory_ctx,
 };
-use crate::boa_realm::{check_boa_fs_read_ocap, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS};
+use crate::boa_realm::{BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, check_boa_fs_read_ocap};
 use crate::intrinsics::{base64_decode, base64_encode};
 use crate::state_and_kv::verify_egress_secrets_slice;
 use slice_sandbox::SandboxViolation;
@@ -464,10 +464,11 @@ fn execute_sanitized_subprocess_sync(
     // Ring 2: Strictly clear host ambient environment and inject ONLY tenant-attenuated variables
     cmd.env_clear();
     cmd.envs(child_env);
-    if let Some(dir) = cwd {
-        if !dir.is_empty() && std::path::Path::new(dir).is_dir() {
-            cmd.current_dir(dir);
-        }
+    if let Some(dir) = cwd
+        && !dir.is_empty()
+        && std::path::Path::new(dir).is_dir()
+    {
+        cmd.current_dir(dir);
     }
     cmd.stdin(if stdin_input.is_some() {
         Stdio::piped()
@@ -495,10 +496,10 @@ fn execute_sanitized_subprocess_sync(
         }
     };
 
-    if let Some(input_data) = stdin_input {
-        if let Some(mut stdin_pipe) = child.stdin.take() {
-            let _ = stdin_pipe.write_all(input_data);
-        }
+    if let Some(input_data) = stdin_input
+        && let Some(mut stdin_pipe) = child.stdin.take()
+    {
+        let _ = stdin_pipe.write_all(input_data);
     }
 
     let pipe_cap = (max_buffer as u64).saturating_add(1);
@@ -564,7 +565,7 @@ fn execute_sanitized_subprocess_sync(
 }
 
 pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsNativeError, JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_child_process_spawn_sync"), ctx)
@@ -692,19 +693,18 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
             }
 
             // Verify `opts.cwd` against the tenant's `FsRead` capability before entering directory.
-            if let Some(ref cwd_dir) = opts.cwd {
-                if !cwd_dir.trim().is_empty()
-                    && (crate::bindings::fs::is_host_unc_blocked(cwd_dir)
-                        || !check_boa_fs_read_ocap(cwd_dir))
-                {
-                    let violation = SandboxViolation::FsReadDenied {
-                        tenant_id,
-                        path: cwd_dir.clone(),
-                    };
-                    let msg = violation.to_string();
-                    crate::boa_realm::set_child_proc_violation(violation);
-                    return Err(JsNativeError::error().with_message(msg).into());
-                }
+            if let Some(ref cwd_dir) = opts.cwd
+                && !cwd_dir.trim().is_empty()
+                && (crate::bindings::fs::is_host_unc_blocked(cwd_dir)
+                    || !check_boa_fs_read_ocap(cwd_dir))
+            {
+                let violation = SandboxViolation::FsReadDenied {
+                    tenant_id,
+                    path: cwd_dir.clone(),
+                };
+                let msg = violation.to_string();
+                crate::boa_realm::set_child_proc_violation(violation);
+                return Err(JsNativeError::error().with_message(msg).into());
             }
 
             // Ring 5: Base CPU Fuel charge for subprocess invocation
@@ -792,16 +792,15 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
             // Ring 3: Output Egress DLP — scan both `stdout` and `stderr` against the tenant's
             // Egress DLP automaton (`BOA_EGRESS_SECRETS`, including `.env` Auto-DLP secrets).
             let egress_secrets = BOA_EGRESS_SECRETS.with(|s| s.borrow().clone());
-            if !egress_secrets.is_empty() {
-                if let Err(violation) =
+            if !egress_secrets.is_empty()
+                && let Err(violation) =
                     verify_egress_secrets_slice(&tenant_id, &egress_secrets, &stdout_str).and_then(
                         |()| verify_egress_secrets_slice(&tenant_id, &egress_secrets, &stderr_str),
                     )
-                {
-                    let msg = violation.to_string();
-                    crate::boa_realm::set_child_proc_violation(violation);
-                    return Err(JsNativeError::error().with_message(msg).into());
-                }
+            {
+                let msg = violation.to_string();
+                crate::boa_realm::set_child_proc_violation(violation);
+                return Err(JsNativeError::error().with_message(msg).into());
             }
 
             let resp = if let Some((err_code, err_no)) = spawn_err {

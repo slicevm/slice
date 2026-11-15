@@ -2,8 +2,8 @@
 //! and WebIDL descriptor range/type parsers.
 
 use super::linking::ensure_func_js_wrapper;
-use super::store::{with_store_and_entities, WasmStoreData, WASM_STATE};
-use boa_engine::{js_string, Context, JsBigInt, JsNativeError, JsResult, JsValue};
+use super::store::{WASM_STATE, WasmStoreData, with_store_and_entities};
+use boa_engine::{Context, JsBigInt, JsNativeError, JsResult, JsValue, js_string};
 use wasmi::{AsContext, ExternRef, Nullable, Ref, RefType, StoreContext, Val, ValType};
 
 pub(crate) const HIDDEN_FN_ID_PROP: &str = "__slice_wasm_fn_id";
@@ -76,15 +76,14 @@ pub(crate) fn js_val_to_wasm_ref(
             if val.is_null() {
                 return Ok(Ref::Func(Nullable::Null));
             }
-            if let Some(obj) = val.as_object() {
-                if let Ok(id_val) = obj.get(js_string!(HIDDEN_FN_ID_PROP), context) {
-                    if let Some(fn_id) = id_val.as_number().map(|n| n as u32).filter(|&id| id > 0) {
-                        let func_opt = WASM_STATE
-                            .with(|st| st.borrow().entities.funcs.get(&fn_id).map(|f| f.func));
-                        if let Some(func) = func_opt {
-                            return Ok(Ref::Func(Nullable::Val(func)));
-                        }
-                    }
+            if let Some(obj) = val.as_object()
+                && let Ok(id_val) = obj.get(js_string!(HIDDEN_FN_ID_PROP), context)
+                && let Some(fn_id) = id_val.as_number().map(|n| n as u32).filter(|&id| id > 0)
+            {
+                let func_opt =
+                    WASM_STATE.with(|st| st.borrow().entities.funcs.get(&fn_id).map(|f| f.func));
+                if let Some(func) = func_opt {
+                    return Ok(Ref::Func(Nullable::Val(func)));
                 }
             }
             Err(JsNativeError::typ()

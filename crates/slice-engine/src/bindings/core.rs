@@ -24,7 +24,7 @@ use slice_sandbox::SandboxViolation;
 pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context) {
     use boa_engine::builtins::typed_array::TypedArray;
     use boa_engine::object::builtins::JsArrayBuffer;
-    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsNativeError, JsValue as BoaVal, NativeFunction, js_string};
 
     if ctx
         .global_object()
@@ -258,18 +258,18 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                     bytes_to_hex(raw)
                 }
             };
-            if let Some(first) = args.first() {
-                if first.is_object() {
-                    let encoded = with_buffer_source_bytes(first, context, |bytes| {
-                        if enc.eq_ignore_ascii_case("hex") {
-                            sha256_hex(bytes)
-                        } else {
-                            let digest = sha256_bytes(bytes);
-                            encode_digest(&digest)
-                        }
-                    })?;
-                    return Ok(BoaVal::from(js_string!(encoded)));
-                }
+            if let Some(first) = args.first()
+                && first.is_object()
+            {
+                let encoded = with_buffer_source_bytes(first, context, |bytes| {
+                    if enc.eq_ignore_ascii_case("hex") {
+                        sha256_hex(bytes)
+                    } else {
+                        let digest = sha256_bytes(bytes);
+                        encode_digest(&digest)
+                    }
+                })?;
+                return Ok(BoaVal::from(js_string!(encoded)));
             }
             let input = args
                 .first()
@@ -411,29 +411,29 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 return Ok(BoaVal::from(0));
             };
             if let Some(obj) = first.as_object() {
-                if let Some(ta) = obj.downcast_ref::<TypedArray>() {
-                    if let Some(bl) = ta.fast_byte_length() {
-                        return Ok(BoaVal::from(bl as f64));
-                    }
+                if let Some(ta) = obj.downcast_ref::<TypedArray>()
+                    && let Some(bl) = ta.fast_byte_length()
+                {
+                    return Ok(BoaVal::from(bl as f64));
                 }
                 if let Ok(ab) = JsArrayBuffer::from_object(obj.clone()) {
                     let bl = ab.data().map(|d| d.len()).unwrap_or(0);
                     return Ok(BoaVal::from(bl as f64));
                 }
-                if let Some(dv) = obj.downcast_ref::<DataView>() {
-                    if let Some(bl) = dv.with_bytes(|b| b.len()) {
-                        return Ok(BoaVal::from(bl as f64));
-                    }
+                if let Some(dv) = obj.downcast_ref::<DataView>()
+                    && let Some(bl) = dv.with_bytes(|b| b.len())
+                {
+                    return Ok(BoaVal::from(bl as f64));
                 }
-                if let Ok(bl) = obj.get(js_string!("byteLength"), context) {
-                    if let Some(n) = bl.as_number() {
-                        return Ok(BoaVal::from(n));
-                    }
+                if let Ok(bl) = obj.get(js_string!("byteLength"), context)
+                    && let Some(n) = bl.as_number()
+                {
+                    return Ok(BoaVal::from(n));
                 }
-                if let Ok(l) = obj.get(js_string!("length"), context) {
-                    if let Some(n) = l.as_number() {
-                        return Ok(BoaVal::from(n));
-                    }
+                if let Ok(l) = obj.get(js_string!("length"), context)
+                    && let Some(n) = l.as_number()
+                {
+                    return Ok(BoaVal::from(n));
                 }
             }
             let js_s = match first.as_string() {
@@ -573,13 +573,13 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .unwrap_or(0);
             let is_interval = args.get(2).and_then(|v| v.as_boolean()).unwrap_or(false);
             let mut extra_args = Vec::new();
-            if let Some(arr_obj) = args.get(3).and_then(|v| v.as_object()) {
-                if let Ok(len_val) = arr_obj.get(js_string!("length"), context) {
-                    let len = len_val.as_number().unwrap_or(0.0) as u32;
-                    for i in 0..len.min(8) {
-                        if let Ok(elem) = arr_obj.get(i, context) {
-                            extra_args.push(elem);
-                        }
+            if let Some(arr_obj) = args.get(3).and_then(|v| v.as_object())
+                && let Ok(len_val) = arr_obj.get(js_string!("length"), context)
+            {
+                let len = len_val.as_number().unwrap_or(0.0) as u32;
+                for i in 0..len.min(8) {
+                    if let Ok(elem) = arr_obj.get(i, context) {
+                        extra_args.push(elem);
                     }
                 }
             }
@@ -598,13 +598,13 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 return Ok(BoaVal::from(0));
             };
             let mut extra_args = Vec::new();
-            if let Some(arr_obj) = args.get(1).and_then(|v| v.as_object()) {
-                if let Ok(len_val) = arr_obj.get(js_string!("length"), context) {
-                    let len = len_val.as_number().unwrap_or(0.0) as u32;
-                    for i in 0..len.min(8) {
-                        if let Ok(elem) = arr_obj.get(i, context) {
-                            extra_args.push(elem);
-                        }
+            if let Some(arr_obj) = args.get(1).and_then(|v| v.as_object())
+                && let Ok(len_val) = arr_obj.get(js_string!("length"), context)
+            {
+                let len = len_val.as_number().unwrap_or(0.0) as u32;
+                for i in 0..len.min(8) {
+                    if let Ok(elem) = arr_obj.get(i, context) {
+                        extra_args.push(elem);
                     }
                 }
             }
@@ -778,25 +778,24 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                     .unwrap_or(false);
                 if !already_exited {
                     let _ = p.set(js_string!("_exited"), BoaVal::from(true), false, context);
-                    if let Ok(emit_val) = p.get(js_string!("emit"), context) {
-                        if let Some(emit_fn) = emit_val.as_object() {
-                            if emit_fn.is_callable() {
-                                let _ = emit_fn.call(
-                                    &BoaVal::from(p.clone()),
-                                    &[BoaVal::from(js_string!("exit")), BoaVal::from(code)],
-                                    context,
-                                );
-                            }
-                        }
+                    if let Ok(emit_val) = p.get(js_string!("emit"), context)
+                        && let Some(emit_fn) = emit_val.as_object()
+                        && emit_fn.is_callable()
+                    {
+                        let _ = emit_fn.call(
+                            &BoaVal::from(p.clone()),
+                            &[BoaVal::from(js_string!("exit")), BoaVal::from(code)],
+                            context,
+                        );
                     }
                     if let Some(inner_code) = crate::boa_realm::BOA_PROCESS_EXIT.with(|e| e.get()) {
                         code = inner_code;
-                    } else if let Ok(ec_val) = p.get(js_string!("exitCode"), context) {
-                        if !ec_val.is_undefined() && !ec_val.is_null() {
-                            if let Ok(updated) = ec_val.to_i32(context) {
-                                code = updated;
-                            }
-                        }
+                    } else if let Ok(ec_val) = p.get(js_string!("exitCode"), context)
+                        && !ec_val.is_undefined()
+                        && !ec_val.is_null()
+                        && let Ok(updated) = ec_val.to_i32(context)
+                    {
+                        code = updated;
                     }
                 }
             }

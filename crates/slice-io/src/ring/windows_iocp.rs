@@ -10,7 +10,7 @@ pub struct OverlappedEntry {
 }
 
 #[link(name = "kernel32")]
-extern "system" {
+unsafe extern "system" {
     pub fn CreateIoCompletionPort(
         file_handle: isize,
         existing_completion_port: isize,

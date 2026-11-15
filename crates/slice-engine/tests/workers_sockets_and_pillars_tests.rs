@@ -1,11 +1,11 @@
 #![allow(unused_imports)]
 use crate::intrinsics::{
-    digest_to_hex, fast_format_bytes, fast_format_ms, fast_parse_bytes, fast_parse_ms,
-    hmac_sha256_hex, sha256_hex, Sha256State,
+    Sha256State, digest_to_hex, fast_format_bytes, fast_format_ms, fast_parse_bytes, fast_parse_ms,
+    hmac_sha256_hex, sha256_hex,
 };
 use crate::{
-    compile_source_to_bytecode, disassemble_bytecode, run_source_isolated, ExecutionTier,
-    HttpRequestContext, JsValue, SliceIsolate,
+    ExecutionTier, HttpRequestContext, JsValue, SliceIsolate, compile_source_to_bytecode,
+    disassemble_bytecode, run_source_isolated,
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 

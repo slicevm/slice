@@ -28,7 +28,7 @@ pub use hash_and_hmac::*;
 pub use prng_and_uuid::*;
 pub use symmetric_and_kdf::*;
 pub use url_and_usp::{
-    can_parse_whatwg_url, is_uri_unescaped, normalize_url_pathname, parse_whatwg_url,
-    usp_decode_component, usp_encode_component, usp_parse_query, usp_stringify_pairs,
-    ParsedWhatwgUrl,
+    ParsedWhatwgUrl, can_parse_whatwg_url, is_uri_unescaped, normalize_url_pathname,
+    parse_whatwg_url, usp_decode_component, usp_encode_component, usp_parse_query,
+    usp_stringify_pairs,
 };

@@ -1,12 +1,12 @@
 use crate::commands::test_runner::discover_test_files;
 use crate::commands::unique_temp_cas_path;
 use crate::config::{build_cas_archive, collect_watch_fingerprint, parse_u64_digits};
-use crate::diagnostics::{handle_mcp_jsonrpc_line, MAX_MCP_LINE_BYTES};
+use crate::diagnostics::{MAX_MCP_LINE_BYTES, handle_mcp_jsonrpc_line};
 use crate::server::connection::{escape_json_string_into, push_u64_ascii};
 use crate::server::{
     resolve_tenant_bytecode_hotswap, serve_connection_keep_alive_with_tls_and_secrets,
 };
-use slice_engine::{compile_source_to_bytecode, SliceIsolate};
+use slice_engine::{SliceIsolate, compile_source_to_bytecode};
 use slice_sandbox::CapabilityToken;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -103,11 +103,12 @@ fn test_cli_sec_02_unique_temp_cas_staging_paths_never_collide() {
         p1, p2,
         "Concurrent staging CAS paths must be unique per invocation"
     );
-    assert!(p1
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .starts_with("slice_compile_staging_"));
+    assert!(
+        p1.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("slice_compile_staging_")
+    );
 }
 
 #[test]
@@ -202,7 +203,7 @@ fn test_cli_perf_01_02_tenant_hotswap_and_itoa_header_microbench() {
 
 #[test]
 fn test_wave1_cli_eval_print_check_argv_and_exit_codes() {
-    use crate::{cmd_check, cmd_run, LAST_CLI_EXIT_CODE};
+    use crate::{LAST_CLI_EXIT_CODE, cmd_check, cmd_run};
     use std::sync::atomic::Ordering;
 
     let tmp_dir = std::env::temp_dir().join("slice_wave1_cli_ergonomics");
@@ -296,9 +297,11 @@ fn test_wave1_cli_eval_print_check_argv_and_exit_codes() {
         "Promise.reject(new Error('cli-unhandled'))".to_string(),
     ])
     .unwrap_err();
-    assert!(rej_err
-        .to_string()
-        .contains("Uncaught (in promise) Error: cli-unhandled"));
+    assert!(
+        rej_err
+            .to_string()
+            .contains("Uncaught (in promise) Error: cli-unhandled")
+    );
     assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 1);
 
     // Reset LAST_CLI_EXIT_CODE so test harness exits 0
@@ -431,7 +434,7 @@ fn test_default_cli_zero_fs_containment_across_run_cas_and_serve() {
 
 #[test]
 fn test_external_cas_isolates_ambient_cwd_manifest_and_honors_explicit_config() {
-    use crate::commands::run::{cmd_run, LAST_CLI_EXIT_CODE};
+    use crate::commands::run::{LAST_CLI_EXIT_CODE, cmd_run};
     use std::sync::atomic::Ordering;
 
     if let Ok(cas_arg) = std::env::var("SLICE_TEST_ISOLATED_CAS_PATH") {
@@ -599,8 +602,8 @@ fn test_incremental_http_header_cursor_and_single_pass_manifest_dedup() {
 #[test]
 fn test_issue_100_fail_closed_security_and_config_flags_across_forms() {
     use crate::commands::run::cmd_run;
-    use crate::config::{load_audit_egress_file, ResolvedExecutionConfig};
-    use slice_engine::{compile_source_to_bytecode, SliceIsolate};
+    use crate::config::{ResolvedExecutionConfig, load_audit_egress_file};
+    use slice_engine::{SliceIsolate, compile_source_to_bytecode};
 
     let tmp_dir = std::env::temp_dir().join(format!("slice_issue_100_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -654,24 +657,28 @@ fn test_issue_100_fail_closed_security_and_config_flags_across_forms() {
     // 3. Manifest `env_file` and trusted `@slice-env-file` fail closed when missing
     let mut cfg_manifest =
         ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(&[], false).unwrap();
-    assert!(cfg_manifest
-        .apply_manifest_toml(
-            "[capabilities]\nenv_file = \"./missing_manifest.env\"\n",
-            Some(&tmp_dir)
-        )
-        .is_err());
+    assert!(
+        cfg_manifest
+            .apply_manifest_toml(
+                "[capabilities]\nenv_file = \"./missing_manifest.env\"\n",
+                Some(&tmp_dir)
+            )
+            .is_err()
+    );
 
     let mut cfg_trusted = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(
         &["--trust-directives".to_string()],
         false,
     )
     .unwrap();
-    assert!(cfg_trusted
-        .apply_inline_directives(
-            "// @slice-env-file: ./missing_directive.env\n",
-            Some(&tmp_dir)
-        )
-        .is_err());
+    assert!(
+        cfg_trusted
+            .apply_inline_directives(
+                "// @slice-env-file: ./missing_directive.env\n",
+                Some(&tmp_dir)
+            )
+            .is_err()
+    );
 
     // 4. Unreadable `slice.toml` (e.g. a directory named `slice.toml`) fails closed instead of running with defaults
     let bad_manifest_proj = tmp_dir.join("bad_manifest_proj");
@@ -683,13 +690,15 @@ fn test_issue_100_fail_closed_security_and_config_flags_across_forms() {
     // 5. `--trace=<directory>` fails closed when writing trace output
     let ok_script = tmp_dir.join("ok.ts");
     std::fs::write(&ok_script, "const x = 1 + 1;\n").unwrap();
-    assert!(cmd_run(&[
-        ok_script.to_string_lossy().to_string(),
-        "--quiet".to_string(),
-        "--trace".to_string(),
-        sub_dir_str,
-    ])
-    .is_err());
+    assert!(
+        cmd_run(&[
+            ok_script.to_string_lossy().to_string(),
+            "--quiet".to_string(),
+            "--trace".to_string(),
+            sub_dir_str,
+        ])
+        .is_err()
+    );
 
     // 6. Positive verification: space-separated `--audit-egress-file <path>` registers raw tokens,
     //    arbitrary `KEY=VALUE` pairs (even without `SECRET` in key name), and Base64 `=` padded secrets!
@@ -747,7 +756,7 @@ fn test_issue_100_fail_closed_security_and_config_flags_across_forms() {
 #[test]
 fn test_issue_101_process_exit_code_across_cli_cas_warm_and_test_runner() {
     use crate::commands::pack_and_compile::cmd_pack;
-    use crate::commands::run::{cmd_run, LAST_CLI_EXIT_CODE};
+    use crate::commands::run::{LAST_CLI_EXIT_CODE, cmd_run};
     use crate::commands::test_runner::cmd_test;
     use slice_engine::run_source_isolated;
     use slice_sandbox::CapabilityToken;

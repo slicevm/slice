@@ -16,8 +16,8 @@
 //! achieving sub-microsecond execution honestly without ever inspecting function or variable names.
 
 use crate::value_and_ast::{
-    js_math_max, js_math_min, js_math_round, js_to_int32, js_to_uint32, BinOp, Expr, JsFunction,
-    JsValue, Stmt, UnaryOp,
+    BinOp, Expr, JsFunction, JsValue, Stmt, UnaryOp, js_math_max, js_math_min, js_math_round,
+    js_to_int32, js_to_uint32,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -176,14 +176,14 @@ fn prealloc_locals_in_stmts(
             }
             Stmt::For { init, body, .. } => {
                 let mut for_enclosing = child_enclosing.clone();
-                if let Some(init_s) = init {
-                    if let Stmt::VarDecl { name, .. } = init_s.as_ref() {
-                        if for_enclosing.contains(name) {
-                            return None;
-                        }
-                        ctx.get_or_alloc_local(name)?;
-                        for_enclosing.insert(name.clone());
+                if let Some(init_s) = init
+                    && let Stmt::VarDecl { name, .. } = init_s.as_ref()
+                {
+                    if for_enclosing.contains(name) {
+                        return None;
                     }
+                    ctx.get_or_alloc_local(name)?;
+                    for_enclosing.insert(name.clone());
                 }
                 prealloc_locals_in_stmts(ctx, body, &for_enclosing)?;
             }
@@ -530,10 +530,10 @@ fn compile_stmt(ctx: &mut CompilerCtx, stmt: &Stmt) -> Option<()> {
             }
             ctx.ops.push(NumericOp::Jump { target: loop_start });
             let loop_end = ctx.ops.len() as u32;
-            if let Some(jfalse_idx) = jfalse_opt {
-                if let NumericOp::JumpIfFalse { target: t, .. } = &mut ctx.ops[jfalse_idx] {
-                    *t = loop_end;
-                }
+            if let Some(jfalse_idx) = jfalse_opt
+                && let NumericOp::JumpIfFalse { target: t, .. } = &mut ctx.ops[jfalse_idx]
+            {
+                *t = loop_end;
             }
             for b_idx in breaks {
                 if let NumericOp::Jump { target: t } = &mut ctx.ops[b_idx] {
@@ -783,149 +783,150 @@ fn compile_expr_into(ctx: &mut CompilerCtx, expr: &Expr, dst: u8) -> Option<()> 
             Some(())
         }
         Expr::Member { object, property } => {
-            if let Expr::Ident(obj_name) = object.as_ref() {
-                if obj_name == "Math" {
-                    let imm = match property.as_str() {
-                        "PI" => std::f64::consts::PI,
-                        "E" => std::f64::consts::E,
-                        "SQRT2" => std::f64::consts::SQRT_2,
-                        "LN2" => std::f64::consts::LN_2,
-                        "LN10" => std::f64::consts::LN_10,
-                        _ => return None,
-                    };
-                    ctx.ops.push(NumericOp::LoadConst { dst, imm });
-                    return Some(());
-                }
+            if let Expr::Ident(obj_name) = object.as_ref()
+                && obj_name == "Math"
+            {
+                let imm = match property.as_str() {
+                    "PI" => std::f64::consts::PI,
+                    "E" => std::f64::consts::E,
+                    "SQRT2" => std::f64::consts::SQRT_2,
+                    "LN2" => std::f64::consts::LN_2,
+                    "LN10" => std::f64::consts::LN_10,
+                    _ => return None,
+                };
+                ctx.ops.push(NumericOp::LoadConst { dst, imm });
+                return Some(());
             }
             None
         }
         Expr::Call { callee, args } => {
             // 1. Self-recursive call (`fn_name(arg0)` or `fn_name(arg0, arg1)`)
-            if let Expr::Ident(id) = callee.as_ref() {
-                if !ctx.fn_name.is_empty() && id == &ctx.fn_name {
-                    match args.len() {
-                        1 => {
-                            let a0 = ctx.alloc_reg()?;
-                            compile_expr_into(ctx, &args[0], a0)?;
-                            ctx.ops.push(NumericOp::CallSelf1 { dst, arg0: a0 });
-                            return Some(());
-                        }
-                        2 => {
-                            let a0 = ctx.alloc_reg()?;
-                            let a1 = ctx.alloc_reg()?;
-                            compile_expr_into(ctx, &args[0], a0)?;
-                            compile_expr_into(ctx, &args[1], a1)?;
-                            ctx.ops.push(NumericOp::CallSelf2 {
-                                dst,
-                                arg0: a0,
-                                arg1: a1,
-                            });
-                            return Some(());
-                        }
-                        _ => return None,
+            if let Expr::Ident(id) = callee.as_ref()
+                && !ctx.fn_name.is_empty()
+                && id == &ctx.fn_name
+            {
+                match args.len() {
+                    1 => {
+                        let a0 = ctx.alloc_reg()?;
+                        compile_expr_into(ctx, &args[0], a0)?;
+                        ctx.ops.push(NumericOp::CallSelf1 { dst, arg0: a0 });
+                        return Some(());
                     }
+                    2 => {
+                        let a0 = ctx.alloc_reg()?;
+                        let a1 = ctx.alloc_reg()?;
+                        compile_expr_into(ctx, &args[0], a0)?;
+                        compile_expr_into(ctx, &args[1], a1)?;
+                        ctx.ops.push(NumericOp::CallSelf2 {
+                            dst,
+                            arg0: a0,
+                            arg1: a1,
+                        });
+                        return Some(());
+                    }
+                    _ => return None,
                 }
             }
             // 2. `Math.*` intrinsic call
-            if let Expr::Member { object, property } = callee.as_ref() {
-                if matches!(object.as_ref(), Expr::Ident(o) if o == "Math") {
-                    match property.as_str() {
-                        "max" | "min" => {
-                            let is_max = property == "max";
-                            let kind = if is_max {
-                                MathOpKind::Max
-                            } else {
-                                MathOpKind::Min
-                            };
-                            let identity = if is_max {
-                                f64::NEG_INFINITY
-                            } else {
-                                f64::INFINITY
-                            };
-                            if args.is_empty() {
-                                ctx.ops.push(NumericOp::LoadConst { dst, imm: identity });
-                                return Some(());
-                            }
-                            let acc = ctx.alloc_reg()?;
-                            compile_expr_into(ctx, &args[0], acc)?;
-                            if args.len() == 1 {
-                                let id_reg = ctx.alloc_reg()?;
-                                ctx.ops.push(NumericOp::LoadConst {
-                                    dst: id_reg,
-                                    imm: identity,
-                                });
-                                ctx.ops.push(NumericOp::MathIntrinsic {
-                                    dst,
-                                    kind,
-                                    arg0: acc,
-                                    arg1: id_reg,
-                                });
-                                return Some(());
-                            }
-                            let scratch = ctx.alloc_reg()?;
-                            for extra_arg in &args[1..] {
-                                compile_expr_into(ctx, extra_arg, scratch)?;
-                                ctx.ops.push(NumericOp::MathIntrinsic {
-                                    dst: acc,
-                                    kind,
-                                    arg0: acc,
-                                    arg1: scratch,
-                                });
-                            }
-                            if acc != dst {
-                                ctx.ops.push(NumericOp::Move { dst, src: acc });
-                            }
+            if let Expr::Member { object, property } = callee.as_ref()
+                && matches!(object.as_ref(), Expr::Ident(o) if o == "Math")
+            {
+                match property.as_str() {
+                    "max" | "min" => {
+                        let is_max = property == "max";
+                        let kind = if is_max {
+                            MathOpKind::Max
+                        } else {
+                            MathOpKind::Min
+                        };
+                        let identity = if is_max {
+                            f64::NEG_INFINITY
+                        } else {
+                            f64::INFINITY
+                        };
+                        if args.is_empty() {
+                            ctx.ops.push(NumericOp::LoadConst { dst, imm: identity });
                             return Some(());
                         }
-                        "pow" | "imul" => {
-                            if args.len() != 2 {
-                                return None;
-                            }
-                            let kind = if property == "pow" {
-                                MathOpKind::Pow
-                            } else {
-                                MathOpKind::Imul
-                            };
-                            let a0 = ctx.alloc_reg()?;
-                            let a1 = ctx.alloc_reg()?;
-                            compile_expr_into(ctx, &args[0], a0)?;
-                            compile_expr_into(ctx, &args[1], a1)?;
+                        let acc = ctx.alloc_reg()?;
+                        compile_expr_into(ctx, &args[0], acc)?;
+                        if args.len() == 1 {
+                            let id_reg = ctx.alloc_reg()?;
+                            ctx.ops.push(NumericOp::LoadConst {
+                                dst: id_reg,
+                                imm: identity,
+                            });
                             ctx.ops.push(NumericOp::MathIntrinsic {
                                 dst,
                                 kind,
-                                arg0: a0,
-                                arg1: a1,
+                                arg0: acc,
+                                arg1: id_reg,
                             });
                             return Some(());
                         }
-                        _ => {
-                            if args.len() != 1 {
-                                return None;
-                            }
-                            let kind = match property.as_str() {
-                                "abs" => MathOpKind::Abs,
-                                "floor" => MathOpKind::Floor,
-                                "ceil" => MathOpKind::Ceil,
-                                "round" => MathOpKind::Round,
-                                "trunc" => MathOpKind::Trunc,
-                                "sign" => MathOpKind::Sign,
-                                "sqrt" => MathOpKind::Sqrt,
-                                "sin" => MathOpKind::Sin,
-                                "cos" => MathOpKind::Cos,
-                                "clz32" => MathOpKind::Clz32,
-                                "fround" => MathOpKind::Fround,
-                                _ => return None,
-                            };
-                            let a0 = ctx.alloc_reg()?;
-                            compile_expr_into(ctx, &args[0], a0)?;
+                        let scratch = ctx.alloc_reg()?;
+                        for extra_arg in &args[1..] {
+                            compile_expr_into(ctx, extra_arg, scratch)?;
                             ctx.ops.push(NumericOp::MathIntrinsic {
-                                dst,
+                                dst: acc,
                                 kind,
-                                arg0: a0,
-                                arg1: a0,
+                                arg0: acc,
+                                arg1: scratch,
                             });
-                            return Some(());
                         }
+                        if acc != dst {
+                            ctx.ops.push(NumericOp::Move { dst, src: acc });
+                        }
+                        return Some(());
+                    }
+                    "pow" | "imul" => {
+                        if args.len() != 2 {
+                            return None;
+                        }
+                        let kind = if property == "pow" {
+                            MathOpKind::Pow
+                        } else {
+                            MathOpKind::Imul
+                        };
+                        let a0 = ctx.alloc_reg()?;
+                        let a1 = ctx.alloc_reg()?;
+                        compile_expr_into(ctx, &args[0], a0)?;
+                        compile_expr_into(ctx, &args[1], a1)?;
+                        ctx.ops.push(NumericOp::MathIntrinsic {
+                            dst,
+                            kind,
+                            arg0: a0,
+                            arg1: a1,
+                        });
+                        return Some(());
+                    }
+                    _ => {
+                        if args.len() != 1 {
+                            return None;
+                        }
+                        let kind = match property.as_str() {
+                            "abs" => MathOpKind::Abs,
+                            "floor" => MathOpKind::Floor,
+                            "ceil" => MathOpKind::Ceil,
+                            "round" => MathOpKind::Round,
+                            "trunc" => MathOpKind::Trunc,
+                            "sign" => MathOpKind::Sign,
+                            "sqrt" => MathOpKind::Sqrt,
+                            "sin" => MathOpKind::Sin,
+                            "cos" => MathOpKind::Cos,
+                            "clz32" => MathOpKind::Clz32,
+                            "fround" => MathOpKind::Fround,
+                            _ => return None,
+                        };
+                        let a0 = ctx.alloc_reg()?;
+                        compile_expr_into(ctx, &args[0], a0)?;
+                        ctx.ops.push(NumericOp::MathIntrinsic {
+                            dst,
+                            kind,
+                            arg0: a0,
+                            arg1: a0,
+                        });
+                        return Some(());
                     }
                 }
             }

@@ -1,7 +1,8 @@
 use crate::bundler::resolver::resolve_module_specifier;
 use crate::linker::{
-    analyze_module_used_exports_from_summaries, extract_module_require_summary, format_exports_lhs,
-    is_valid_js_identifier, prune_and_minify_cjs_module_ast, transform_module_to_cjs, UsedExports,
+    UsedExports, analyze_module_used_exports_from_summaries, extract_module_require_summary,
+    format_exports_lhs, is_valid_js_identifier, prune_and_minify_cjs_module_ast,
+    transform_module_to_cjs,
 };
 use crate::*;
 use std::time::Instant;

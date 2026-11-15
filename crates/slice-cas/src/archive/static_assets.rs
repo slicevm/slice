@@ -1,7 +1,7 @@
 //! Zero-Stat Static Web Asset Table & Cryptographic BLAKE3 `ETag` Indexer (`--static`).
 
 use crate::archive::MappedCasArchive;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -119,12 +119,12 @@ impl StaticAssetTable {
         };
         if clean_path == "/index.html" {
             self.by_path.insert("/".to_string(), entry.clone());
-        } else if let Some(dir_prefix) = clean_path.strip_suffix("/index.html") {
-            if !dir_prefix.is_empty() {
-                self.by_path.insert(dir_prefix.to_string(), entry.clone());
-                self.by_path
-                    .insert(format!("{}/", dir_prefix), entry.clone());
-            }
+        } else if let Some(dir_prefix) = clean_path.strip_suffix("/index.html")
+            && !dir_prefix.is_empty()
+        {
+            self.by_path.insert(dir_prefix.to_string(), entry.clone());
+            self.by_path
+                .insert(format!("{}/", dir_prefix), entry.clone());
         }
         self.by_path.insert(clean_path, entry);
     }
@@ -179,22 +179,22 @@ impl StaticAssetTable {
     pub fn from_cas_archive(archive: &MappedCasArchive) -> Self {
         let mut table = Self::new();
         for (spec, hash_hex) in &archive.header.radix_resolution_map {
-            if let Some(url_path) = spec.strip_prefix("static:") {
-                if let Some(blob) = archive.header.blobs.get(hash_hex) {
-                    let mime = archive.get_source_slice(blob).to_string();
-                    let etag_prefix = if blob.hash_hex.len() >= 16 {
-                        &blob.hash_hex[..16]
-                    } else {
-                        blob.hash_hex.as_str()
-                    };
-                    if let Some((mmap, start, end)) = archive.get_shared_bytecode_view(blob) {
-                        table.insert_asset_payload(
-                            url_path,
-                            mime,
-                            etag_prefix,
-                            StaticAssetPayload::Mapped { mmap, start, end },
-                        );
-                    }
+            if let Some(url_path) = spec.strip_prefix("static:")
+                && let Some(blob) = archive.header.blobs.get(hash_hex)
+            {
+                let mime = archive.get_source_slice(blob).to_string();
+                let etag_prefix = if blob.hash_hex.len() >= 16 {
+                    &blob.hash_hex[..16]
+                } else {
+                    blob.hash_hex.as_str()
+                };
+                if let Some((mmap, start, end)) = archive.get_shared_bytecode_view(blob) {
+                    table.insert_asset_payload(
+                        url_path,
+                        mime,
+                        etag_prefix,
+                        StaticAssetPayload::Mapped { mmap, start, end },
+                    );
                 }
             }
         }

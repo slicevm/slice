@@ -3,8 +3,8 @@
 #[cfg(target_os = "windows")]
 pub mod windows_iocp;
 
-use crate::slab::{RegisteredBufferPool, FIXED_BUFFER_COUNT, FIXED_BUFFER_SIZE};
-use anyhow::{ensure, Result};
+use crate::slab::{FIXED_BUFFER_COUNT, FIXED_BUFFER_SIZE, RegisteredBufferPool};
+use anyhow::{Result, ensure};
 
 pub const DEFAULT_RING_ENTRIES: u32 = 256;
 pub const MAX_RING_ENTRIES: u32 = 4096;

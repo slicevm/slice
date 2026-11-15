@@ -2,9 +2,8 @@
 //! Task Draining (`drain_wait_until_tasks`), and Server WebSocket Frame Dispatch (`execute_websocket_event`).
 
 use crate::boa_realm::{
-    acquire_warm_boa_realm_for_tenant, call_realm_ctl, ensure_realm_shards, BOA_HTTP_REQ,
-    BOA_HTTP_RES, BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, REALM_CTL_SET_DET_MODE,
-    REALM_CTL_SYNC_ENV,
+    BOA_HTTP_REQ, BOA_HTTP_RES, BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, REALM_CTL_SET_DET_MODE,
+    REALM_CTL_SYNC_ENV, acquire_warm_boa_realm_for_tenant, call_realm_ctl, ensure_realm_shards,
 };
 use crate::isolate::{ExecutionMetrics, SliceIsolate};
 use slice_cas::MappedCasArchive;
@@ -140,10 +139,10 @@ impl SliceIsolate {
 
             let (status_code, content_type, response_body, response_body_bytes, response_headers) =
                 if let Some((st, mut body, body_bytes, ct, hdrs)) = custom_res {
-                    if body.is_empty() {
-                        if let Some(ref raw) = body_bytes {
-                            body = String::from_utf8_lossy(raw).into_owned();
-                        }
+                    if body.is_empty()
+                        && let Some(ref raw) = body_bytes
+                    {
+                        body = String::from_utf8_lossy(raw).into_owned();
                     }
                     (st, Cow::Owned(ct), body, body_bytes, hdrs)
                 } else {

@@ -154,7 +154,9 @@ pub(crate) fn whatwg_btoa_utf16(units: &[u16]) -> Result<String, &'static str> {
     let mut bytes = Vec::with_capacity(units.len());
     for &u in units {
         if u > 0x00FF {
-            return Err("InvalidCharacterError: The string to be encoded contains characters outside of the Latin1 range.");
+            return Err(
+                "InvalidCharacterError: The string to be encoded contains characters outside of the Latin1 range.",
+            );
         }
         bytes.push(u as u8);
     }

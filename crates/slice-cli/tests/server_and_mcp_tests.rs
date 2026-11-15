@@ -9,7 +9,7 @@ use crate::mcp_and_repl::{
 use crate::test_runner::{cmd_test, discover_test_files};
 use crate::{cmd_init, cmd_run};
 use slice_cas::MappedCasArchive;
-use slice_engine::{compile_source_to_bytecode, SliceIsolate};
+use slice_engine::{SliceIsolate, compile_source_to_bytecode};
 use slice_sandbox::CapabilityToken;
 use std::env;
 use std::io::{Read, Write};
@@ -51,8 +51,8 @@ fn test_cli_build_cas_archive_from_folder() {
 
 #[test]
 fn test_tag_n1_keep_alive_pipelining_and_multi_worker_serve() {
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     let script = r#"
 class PipelinedEdge {
@@ -239,8 +239,8 @@ fn test_tag_n3_mcp_jsonrpc_server_and_tools() {
 
 #[test]
 fn test_tag_f1_wintertc_export_default_fetch_http_server() {
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     let tmp_dir = env::temp_dir().join("slice_f1_wintertc_app_test");
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -334,8 +334,8 @@ export default {
 
 #[test]
 fn test_tag_f2_zero_stat_static_asset_etag_and_sse_streaming() {
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     let tmp_dir = env::temp_dir().join("slice_f2_static_sse_test");
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -682,10 +682,12 @@ fn test_issue_7_mcp_and_eval_sandbox_uncaught_exceptions_and_syntax_errors_repor
     let thrown = isolate.eval_sandbox("throw new Error(\"boom\")", SandboxEvalOptions::default());
     assert!(!thrown.ok);
     assert!(thrown.violation.is_none());
-    assert!(thrown
-        .error
-        .as_deref()
-        .is_some_and(|e| e.contains("Uncaught Error: boom")));
+    assert!(
+        thrown
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("Uncaught Error: boom"))
+    );
 
     // 2. MCP slice_eval_ts with uncaught exception -> ok: false, isError: true, error populated
     let mcp_throw = handle_mcp_jsonrpc_line(
@@ -751,9 +753,11 @@ fn test_issue_9_audit_egress_auto_not_treated_as_literal_secret() {
     ];
     let exec_cfg = ResolvedExecutionConfig::from_cli_args(&args).unwrap();
     assert!(!exec_cfg.audit_secrets.contains(&"auto".to_string()));
-    assert!(exec_cfg
-        .audit_secrets
-        .contains(&"sk_live_auto_dlp_secret_99".to_string()));
+    assert!(
+        exec_cfg
+            .audit_secrets
+            .contains(&"sk_live_auto_dlp_secret_99".to_string())
+    );
 
     let mut isolate = SliceIsolate::spawn(
         "mcp-agent-host",
@@ -898,12 +902,16 @@ fn test_issue_15_mcp_honors_audit_egress_env_dotenv_and_deterministic_seed() {
     ];
     let exec_cfg = ResolvedExecutionConfig::from_cli_args(&args).unwrap();
     assert_eq!(exec_cfg.deterministic_seed, Some(777));
-    assert!(exec_cfg
-        .audit_secrets
-        .contains(&"sk_live_topsecret_9".to_string()));
-    assert!(exec_cfg
-        .audit_secrets
-        .contains(&"sk_live_dotenv_secret_15".to_string()));
+    assert!(
+        exec_cfg
+            .audit_secrets
+            .contains(&"sk_live_topsecret_9".to_string())
+    );
+    assert!(
+        exec_cfg
+            .audit_secrets
+            .contains(&"sk_live_dotenv_secret_15".to_string())
+    );
 
     let mut isolate = SliceIsolate::spawn(
         "mcp-agent-host",
@@ -1013,7 +1021,7 @@ fn test_issue_16_mcp_multiple_audit_secrets_deterministic_seed_and_schema_sync()
 
 #[test]
 fn test_mcp_persistent_kv_memory_accounting_checkpoint_caps_and_bounded_lines() {
-    use crate::diagnostics::mcp::{read_bounded_mcp_line, McpLineRead};
+    use crate::diagnostics::mcp::{McpLineRead, read_bounded_mcp_line};
     use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
     use slice_engine::SliceIsolate;
     use slice_sandbox::CapabilityToken;
@@ -1143,8 +1151,8 @@ fn test_mcp_persistent_kv_memory_accounting_checkpoint_caps_and_bounded_lines() 
 
 #[test]
 fn test_http_server_large_chunked_pipelining_binary_responses_and_head_framing() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let script = r#"
 Slice.serve(async (req) => {
@@ -1623,7 +1631,7 @@ fn test_issue_105_tenant_url_prefix_slicing_non_ascii_wire_guard_and_host_bind()
     use crate::commands::pack_and_compile::cmd_pack;
     use crate::server::cmd_serve;
     use crate::server::connection::extract_tenant_route_prefix;
-    use slice_engine::{compile_source_to_bytecode, HttpRequestContext, SliceIsolate};
+    use slice_engine::{HttpRequestContext, SliceIsolate, compile_source_to_bytecode};
     use slice_sandbox::CapabilityToken;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};

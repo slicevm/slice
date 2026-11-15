@@ -2,7 +2,7 @@
 //! and Cycle-Safe `tsconfig.json` `"paths"` Resolver.
 
 use crate::linker::clear_canonical_mod_id_cache;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
@@ -79,18 +79,18 @@ pub fn resolve_project_entrypoint(target: &Path, explicit_entry: Option<&str>) -
 
     // 1. Check `slice.toml`
     let slice_toml = target.join("slice.toml");
-    if slice_toml.is_file() {
-        if let Ok(raw) = std::fs::read_to_string(&slice_toml) {
-            for line in raw.lines() {
-                let trimmed = line.trim();
-                if let Some(rest) = trimmed.strip_prefix("entrypoint") {
-                    if let Some((_, val)) = rest.split_once('=') {
-                        let clean = val.trim().trim_matches('"').trim_matches('\'');
-                        let candidate = target.join(clean);
-                        if candidate.is_file() {
-                            return Ok(candidate);
-                        }
-                    }
+    if slice_toml.is_file()
+        && let Ok(raw) = std::fs::read_to_string(&slice_toml)
+    {
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("entrypoint")
+                && let Some((_, val)) = rest.split_once('=')
+            {
+                let clean = val.trim().trim_matches('"').trim_matches('\'');
+                let candidate = target.join(clean);
+                if candidate.is_file() {
+                    return Ok(candidate);
                 }
             }
         }
@@ -98,16 +98,15 @@ pub fn resolve_project_entrypoint(target: &Path, explicit_entry: Option<&str>) -
 
     // 2. Check `package.json`
     let pkg_json = target.join("package.json");
-    if pkg_json.is_file() {
-        if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                for field in ["module", "main"] {
-                    if let Some(entry_str) = val.get(field).and_then(|v| v.as_str()) {
-                        let candidate = target.join(entry_str);
-                        if candidate.is_file() {
-                            return Ok(candidate);
-                        }
-                    }
+    if pkg_json.is_file()
+        && let Ok(raw) = std::fs::read_to_string(&pkg_json)
+        && let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw)
+    {
+        for field in ["module", "main"] {
+            if let Some(entry_str) = val.get(field).and_then(|v| v.as_str()) {
+                let candidate = target.join(entry_str);
+                if candidate.is_file() {
+                    return Ok(candidate);
                 }
             }
         }
@@ -183,24 +182,22 @@ pub fn try_file_with_extensions(base: &Path) -> Option<PathBuf> {
     if base.is_dir() {
         let pkg_json = base.join("package.json");
         if let Some(val) = load_cached_package_json(&pkg_json) {
-            if let Some(exports) = val.get("exports") {
-                if let Some(found) = resolve_package_exports(base, exports, ".") {
-                    return Some(found);
-                }
+            if let Some(exports) = val.get("exports")
+                && let Some(found) = resolve_package_exports(base, exports, ".")
+            {
+                return Some(found);
             }
-            if let Some(mod_str) = val.get("module").and_then(|v| v.as_str()) {
-                if !has_parent_traversal_segment(mod_str) {
-                    if let Some(found) = try_file_with_extensions(&base.join(mod_str)) {
-                        return Some(found);
-                    }
-                }
+            if let Some(mod_str) = val.get("module").and_then(|v| v.as_str())
+                && !has_parent_traversal_segment(mod_str)
+                && let Some(found) = try_file_with_extensions(&base.join(mod_str))
+            {
+                return Some(found);
             }
-            if let Some(main_str) = val.get("main").and_then(|v| v.as_str()) {
-                if !has_parent_traversal_segment(main_str) {
-                    if let Some(found) = try_file_with_extensions(&base.join(main_str)) {
-                        return Some(found);
-                    }
-                }
+            if let Some(main_str) = val.get("main").and_then(|v| v.as_str())
+                && !has_parent_traversal_segment(main_str)
+                && let Some(found) = try_file_with_extensions(&base.join(main_str))
+            {
+                return Some(found);
             }
         }
         for idx in [
@@ -250,10 +247,10 @@ fn resolve_exports_target(
             if !s.starts_with("./") {
                 return None;
             }
-            if let Some(sub) = wildcard_sub {
-                if has_parent_traversal_segment(sub) {
-                    return None;
-                }
+            if let Some(sub) = wildcard_sub
+                && has_parent_traversal_segment(sub)
+            {
+                return None;
             }
             let expanded = if let Some(sub) = wildcard_sub {
                 s.replace('*', sub)
@@ -287,10 +284,10 @@ fn resolve_exports_target(
                 "default",
             ];
             for &cond in CONDITIONS {
-                if let Some(v) = map.get(cond) {
-                    if let Some(found) = resolve_exports_target(pkg_dir, v, wildcard_sub) {
-                        return Some(found);
-                    }
+                if let Some(v) = map.get(cond)
+                    && let Some(found) = resolve_exports_target(pkg_dir, v, wildcard_sub)
+                {
+                    return Some(found);
                 }
             }
             None
@@ -324,26 +321,24 @@ fn resolve_package_exports(
                 }
                 return None;
             }
-            if let Some(exact) = map.get(subpath) {
-                if let Some(found) = resolve_exports_target(pkg_dir, exact, None) {
-                    return Some(found);
-                }
+            if let Some(exact) = map.get(subpath)
+                && let Some(found) = resolve_exports_target(pkg_dir, exact, None)
+            {
+                return Some(found);
             }
             let mut pattern_keys: Vec<(&String, &serde_json::Value)> =
                 map.iter().filter(|(k, _)| k.contains('*')).collect();
             pattern_keys.sort_by_key(|(b, _)| std::cmp::Reverse(b.len()));
             for (pat_key, target_val) in pattern_keys {
-                if let Some((prefix, suffix)) = pat_key.split_once('*') {
-                    if subpath.starts_with(prefix)
-                        && subpath.ends_with(suffix)
-                        && subpath.len() >= prefix.len() + suffix.len()
+                if let Some((prefix, suffix)) = pat_key.split_once('*')
+                    && subpath.starts_with(prefix)
+                    && subpath.ends_with(suffix)
+                    && subpath.len() >= prefix.len() + suffix.len()
+                {
+                    let matched = &subpath[prefix.len()..subpath.len() - suffix.len()];
+                    if let Some(found) = resolve_exports_target(pkg_dir, target_val, Some(matched))
                     {
-                        let matched = &subpath[prefix.len()..subpath.len() - suffix.len()];
-                        if let Some(found) =
-                            resolve_exports_target(pkg_dir, target_val, Some(matched))
-                        {
-                            return Some(found);
-                        }
+                        return Some(found);
                     }
                 }
             }
@@ -470,24 +465,23 @@ fn resolve_package_imports(
     let serde_json::Value::Object(map) = imports else {
         return None;
     };
-    if let Some(exact) = map.get(spec) {
-        if let Some(found) = resolve_exports_target(pkg_dir, exact, None) {
-            return Some(found);
-        }
+    if let Some(exact) = map.get(spec)
+        && let Some(found) = resolve_exports_target(pkg_dir, exact, None)
+    {
+        return Some(found);
     }
     let mut pattern_keys: Vec<(&String, &serde_json::Value)> =
         map.iter().filter(|(k, _)| k.contains('*')).collect();
     pattern_keys.sort_by_key(|(b, _)| std::cmp::Reverse(b.len()));
     for (pat_key, target_val) in pattern_keys {
-        if let Some((prefix, suffix)) = pat_key.split_once('*') {
-            if spec.starts_with(prefix)
-                && spec.ends_with(suffix)
-                && spec.len() >= prefix.len() + suffix.len()
-            {
-                let matched = &spec[prefix.len()..spec.len() - suffix.len()];
-                if let Some(found) = resolve_exports_target(pkg_dir, target_val, Some(matched)) {
-                    return Some(found);
-                }
+        if let Some((prefix, suffix)) = pat_key.split_once('*')
+            && spec.starts_with(prefix)
+            && spec.ends_with(suffix)
+            && spec.len() >= prefix.len() + suffix.len()
+        {
+            let matched = &spec[prefix.len()..spec.len() - suffix.len()];
+            if let Some(found) = resolve_exports_target(pkg_dir, target_val, Some(matched)) {
+                return Some(found);
             }
         }
     }
@@ -541,16 +535,13 @@ fn resolve_tsconfig_extends_path(parent_dir: &Path, ext_str: &str) -> Option<Pat
             return Some(found);
         }
         let pkg_json = nm_cand.join("package.json");
-        if pkg_json.is_file() {
-            if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
-                if let Ok(pv) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    if let Some(ts_rel) = pv.get("tsconfig").and_then(|v| v.as_str()) {
-                        if let Some(found) = try_with_json(nm_cand.join(ts_rel)) {
-                            return Some(found);
-                        }
-                    }
-                }
-            }
+        if pkg_json.is_file()
+            && let Ok(raw) = std::fs::read_to_string(&pkg_json)
+            && let Ok(pv) = serde_json::from_str::<serde_json::Value>(&raw)
+            && let Some(ts_rel) = pv.get("tsconfig").and_then(|v| v.as_str())
+            && let Some(found) = try_with_json(nm_cand.join(ts_rel))
+        {
+            return Some(found);
         }
         cur = dir.parent();
     }
@@ -576,29 +567,25 @@ fn load_tsconfig_value_uncached(config_path: &Path) -> Option<serde_json::Value>
             .collect(),
         _ => Vec::new(),
     };
-    if !extends_list.is_empty() {
-        if let Some(parent_dir) = config_path.parent() {
-            // TypeScript 5.0+ `extends: [base1, base2]`: later bases override earlier bases,
-            // and the child config overrides all bases. Iterating in reverse with `or_insert` achieves this.
-            for ext_str in extends_list.iter().rev() {
-                if let Some(ext_path) = resolve_tsconfig_extends_path(parent_dir, ext_str) {
-                    if let Some(parent_val) = load_tsconfig_value(&ext_path) {
-                        if let Some(parent_co) = parent_val
-                            .get("compilerOptions")
-                            .and_then(|c| c.as_object())
-                        {
-                            let co_entry = val
-                                .as_object_mut()?
-                                .entry("compilerOptions")
-                                .or_insert_with(|| {
-                                    serde_json::Value::Object(serde_json::Map::new())
-                                });
-                            if let Some(co_map) = co_entry.as_object_mut() {
-                                for (k, v) in parent_co {
-                                    co_map.entry(k.clone()).or_insert_with(|| v.clone());
-                                }
-                            }
-                        }
+    if !extends_list.is_empty()
+        && let Some(parent_dir) = config_path.parent()
+    {
+        // TypeScript 5.0+ `extends: [base1, base2]`: later bases override earlier bases,
+        // and the child config overrides all bases. Iterating in reverse with `or_insert` achieves this.
+        for ext_str in extends_list.iter().rev() {
+            if let Some(ext_path) = resolve_tsconfig_extends_path(parent_dir, ext_str)
+                && let Some(parent_val) = load_tsconfig_value(&ext_path)
+                && let Some(parent_co) = parent_val
+                    .get("compilerOptions")
+                    .and_then(|c| c.as_object())
+            {
+                let co_entry = val
+                    .as_object_mut()?
+                    .entry("compilerOptions")
+                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                if let Some(co_map) = co_entry.as_object_mut() {
+                    for (k, v) in parent_co {
+                        co_map.entry(k.clone()).or_insert_with(|| v.clone());
                     }
                 }
             }
@@ -658,10 +645,10 @@ fn resolve_tsconfig_paths(from_dir: &Path, spec: &str) -> Option<PathBuf> {
                     }
                 }
             }
-            if has_explicit_base_url {
-                if let Some(found) = try_file_with_extensions(&base_url_dir.join(spec)) {
-                    return Some(found);
-                }
+            if has_explicit_base_url
+                && let Some(found) = try_file_with_extensions(&base_url_dir.join(spec))
+            {
+                return Some(found);
             }
         }
         curr = dir.parent();
@@ -679,12 +666,11 @@ pub fn resolve_module_specifier(from_dir: &Path, spec: &str) -> Option<PathBuf> 
         let mut curr = Some(from_dir);
         while let Some(dir) = curr {
             let pkg_json = dir.join("package.json");
-            if let Some(val) = load_cached_package_json(&pkg_json) {
-                if let Some(imports) = val.get("imports") {
-                    if let Some(found) = resolve_package_imports(dir, imports, spec) {
-                        return Some(found);
-                    }
-                }
+            if let Some(val) = load_cached_package_json(&pkg_json)
+                && let Some(imports) = val.get("imports")
+                && let Some(found) = resolve_package_imports(dir, imports, spec)
+            {
+                return Some(found);
             }
             curr = dir.parent();
         }
@@ -695,10 +681,9 @@ pub fn resolve_module_specifier(from_dir: &Path, spec: &str) -> Option<PathBuf> 
     if !from_dir
         .components()
         .any(|c| c.as_os_str() == "node_modules")
+        && let Some(found) = resolve_tsconfig_paths(from_dir, spec)
     {
-        if let Some(found) = resolve_tsconfig_paths(from_dir, spec) {
-            return Some(found);
-        }
+        return Some(found);
     }
 
     // 3. `node_modules` bare package & conditional `"exports"` resolution
@@ -712,12 +697,11 @@ pub fn resolve_module_specifier(from_dir: &Path, spec: &str) -> Option<PathBuf> 
         let pkg_dir = dir.join("node_modules").join(pkg_name);
         if pkg_dir.is_dir() {
             let pkg_json = pkg_dir.join("package.json");
-            if let Some(val) = load_cached_package_json(&pkg_json) {
-                if let Some(exports) = val.get("exports") {
-                    if let Some(found) = resolve_package_exports(&pkg_dir, exports, &subpath) {
-                        return Some(found);
-                    }
-                }
+            if let Some(val) = load_cached_package_json(&pkg_json)
+                && let Some(exports) = val.get("exports")
+                && let Some(found) = resolve_package_exports(&pkg_dir, exports, &subpath)
+            {
+                return Some(found);
             }
         }
         if !has_parent_traversal_segment(spec) {

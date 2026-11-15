@@ -759,7 +759,9 @@ pub fn scrypt_derive_bytes(
         .ok_or("scrypt parallel buffer overflow")?;
     let working_set = v_bytes.saturating_add(total_b);
     if working_set > maxmem {
-        return Err("Invalid scrypt parameters: memory limit exceeded (ERR_CRYPTO_SCRYPT_INVALID_PARAMETER)");
+        return Err(
+            "Invalid scrypt parameters: memory limit exceeded (ERR_CRYPTO_SCRYPT_INVALID_PARAMETER)",
+        );
     }
     check_sandbox_kdf_memory_budget(working_set.saturating_add(dk_len))?;
     let mut b = pbkdf2_derive_bytes("SHA-256", password, salt, 1, total_b)?;

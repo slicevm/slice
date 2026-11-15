@@ -7,9 +7,11 @@ fn test_tag_f3_ssrf_shield_and_wildcard_private_network_blocking() {
     let wildcard_tenant =
         TenantCompartment::new("tenant-wildcard", 4, wildcard_caps, 10_000, 65536);
 
-    assert!(wildcard_tenant
-        .verify_net_connect("api.openai.com:443")
-        .is_ok());
+    assert!(
+        wildcard_tenant
+            .verify_net_connect("api.openai.com:443")
+            .is_ok()
+    );
     assert!(wildcard_tenant.verify_net_connect("api.stripe.com").is_ok());
 
     // Cloud instance metadata endpoints must be unconditionally blocked even under `*`
@@ -61,9 +63,11 @@ fn test_tag_f3_ssrf_shield_and_wildcard_private_network_blocking() {
     let local_tenant = TenantCompartment::new("tenant-local", 5, local_caps, 10_000, 65536);
     assert!(local_tenant.verify_net_connect("127.0.0.1:18091").is_ok());
     assert!(local_tenant.verify_net_connect("127.0.0.1:6379").is_err());
-    assert!(local_tenant
-        .verify_net_connect("169.254.169.254:80")
-        .is_err());
+    assert!(
+        local_tenant
+            .verify_net_connect("169.254.169.254:80")
+            .is_err()
+    );
 }
 
 #[test]
@@ -222,12 +226,16 @@ fn test_http_authority_alignment_percent_decoding_and_extended_ssrf_ranges() {
         65536,
     );
     assert!(wildcard_tenant.verify_net_connect(pct_meta).is_err());
-    assert!(wildcard_tenant
-        .verify_net_connect("http://%31%32%37.%30.%30.%31:8080/")
-        .is_err());
-    assert!(wildcard_tenant
-        .verify_net_connect("http://0.0.0.1/")
-        .is_err());
+    assert!(
+        wildcard_tenant
+            .verify_net_connect("http://%31%32%37.%30.%30.%31:8080/")
+            .is_err()
+    );
+    assert!(
+        wildcard_tenant
+            .verify_net_connect("http://0.0.0.1/")
+            .is_err()
+    );
 
     // 4. Extended non-global IPv4 (`0.0.0.0/8`) and IPv6 (`64:ff9b:1::/48`, SIIT, Teredo) SSRF ranges
     for non_global in [

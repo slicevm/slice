@@ -34,8 +34,8 @@ pub(crate) mod test_runner {
 mod cli_tests;
 
 pub(crate) use commands::{
-    cmd_check, cmd_compile, cmd_info, cmd_init, cmd_inspect, cmd_pack, cmd_run, cmd_test,
-    print_usage, run_embedded_standalone, LAST_CLI_EXIT_CODE,
+    LAST_CLI_EXIT_CODE, cmd_check, cmd_compile, cmd_info, cmd_init, cmd_inspect, cmd_pack, cmd_run,
+    cmd_test, print_usage, run_embedded_standalone,
 };
 #[cfg(test)]
 pub(crate) use config::OsNativeFileWatcher;
@@ -44,7 +44,7 @@ pub(crate) use diagnostics::{
 };
 pub(crate) use server::cmd_serve;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use slice_cas::MappedCasArchive;
 use std::env;
 

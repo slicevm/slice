@@ -1,10 +1,10 @@
 use super::run::LAST_CLI_EXIT_CODE;
 use crate::config::{
-    install_ctrlc_handler, skip_runtime_flag_with_separate_value, OsNativeFileWatcher,
-    ResolvedExecutionConfig,
+    OsNativeFileWatcher, ResolvedExecutionConfig, install_ctrlc_handler,
+    skip_runtime_flag_with_separate_value,
 };
-use anyhow::{bail, Context, Result};
-use slice_engine::{compile_source_to_bytecode, SliceIsolate};
+use anyhow::{Context, Result, bail};
+use slice_engine::{SliceIsolate, compile_source_to_bytecode};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -79,10 +79,10 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--" {
-            if let Some(first_rem) = args.get(i + 1) {
-                if target_opt.is_none() {
-                    target_opt = Some(first_rem.clone());
-                }
+            if let Some(first_rem) = args.get(i + 1)
+                && target_opt.is_none()
+            {
+                target_opt = Some(first_rem.clone());
             }
             break;
         }
@@ -159,10 +159,10 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
             isolate.add_egress_audit_secret(sec.clone());
         }
         let metrics = isolate.execute_bytecode(&bytecode, None)?;
-        if let Some(code) = metrics.exit_code {
-            if code != 0 {
-                LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
-            }
+        if let Some(code) = metrics.exit_code
+            && code != 0
+        {
+            LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
         }
         if metrics.return_value.starts_with("Uncaught ") {
             if metrics.exit_code.is_none() {
@@ -171,14 +171,14 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
             let mapped = slice_cas::map_bundled_error_location(&bundled, &metrics.return_value);
             bail!("Uncaught error in {}: {}", test_file.display(), mapped);
         }
-        if let Some(code) = metrics.exit_code {
-            if code != 0 {
-                bail!(
-                    "Test file {} exited with non-zero exit code {}",
-                    test_file.display(),
-                    code
-                );
-            }
+        if let Some(code) = metrics.exit_code
+            && code != 0
+        {
+            bail!(
+                "Test file {} exited with non-zero exit code {}",
+                test_file.display(),
+                code
+            );
         }
 
         for line in &metrics.stdout {
@@ -239,7 +239,12 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
     } else {
         println!(
             "Slice Time-Travel Test Suite: {} passed, {} failed, {} skipped ({} VFS+KV rollbacks in {:.2} ms, seed={:?})",
-            total_passed, total_failed, total_skipped, total_rollbacks, elapsed_ms, deterministic_seed
+            total_passed,
+            total_failed,
+            total_skipped,
+            total_rollbacks,
+            elapsed_ms,
+            deterministic_seed
         );
     }
 
@@ -292,11 +297,11 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
                     rerun_failed += 1;
                 }
                 for line in &metrics.stdout {
-                    if let Some(report_json) = line.strip_prefix("__SLICE_TEST_REPORT__:") {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(report_json) {
-                            rerun_passed += parsed["passed"].as_u64().unwrap_or(0) as usize;
-                            rerun_failed += parsed["failed"].as_u64().unwrap_or(0) as usize;
-                        }
+                    if let Some(report_json) = line.strip_prefix("__SLICE_TEST_REPORT__:")
+                        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(report_json)
+                    {
+                        rerun_passed += parsed["passed"].as_u64().unwrap_or(0) as usize;
+                        rerun_failed += parsed["failed"].as_u64().unwrap_or(0) as usize;
                     }
                 }
             }

@@ -359,12 +359,11 @@ impl SliceIsolate {
         let exec_res = child_iso.execute_bytecode(&bc, None);
         let exec_time_ns = (exec_start.elapsed().as_nanos() as u64).max(1);
 
-        if has_isolated_sub_tenant || exec_res.is_err() {
-            if let Some((owner, snap)) = saved_vfs {
-                crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| *o.borrow_mut() = owner);
-                crate::boa_realm::BOA_VFS_STATE
-                    .with(|v| v.borrow_mut().restore_from_snapshot(snap));
-            }
+        if (has_isolated_sub_tenant || exec_res.is_err())
+            && let Some((owner, snap)) = saved_vfs
+        {
+            crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| *o.borrow_mut() = owner);
+            crate::boa_realm::BOA_VFS_STATE.with(|v| v.borrow_mut().restore_from_snapshot(snap));
         }
         if child_iso.checkpoints_taken > 0 {
             clear_tenant_checkpoints(&child_iso.compartment.tenant_id);

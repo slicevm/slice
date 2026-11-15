@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use rustc_hash::FxHashSet;
 use slice_cas::linker::{
     extract_module_require_summary, prune_and_minify_cjs_module_ast, transform_module_to_cjs,

@@ -267,15 +267,15 @@ impl VfsState {
 
         let ino_idx = open_fd.inode.0 as usize;
         let mut freed = 0usize;
-        if let Some(ino_slot) = self.inodes.get_mut(ino_idx) {
-            if let Some(ino) = ino_slot.as_mut() {
-                ino.open_fd_count = ino.open_fd_count.saturating_sub(1);
-                if ino.link_count == 0 && ino.open_fd_count == 0 {
-                    freed = ino.accounted_bytes;
-                    self.total_accounted_bytes = self.total_accounted_bytes.saturating_sub(freed);
-                    *ino_slot = None;
-                    self.free_inodes.push(open_fd.inode.0);
-                }
+        if let Some(ino_slot) = self.inodes.get_mut(ino_idx)
+            && let Some(ino) = ino_slot.as_mut()
+        {
+            ino.open_fd_count = ino.open_fd_count.saturating_sub(1);
+            if ino.link_count == 0 && ino.open_fd_count == 0 {
+                freed = ino.accounted_bytes;
+                self.total_accounted_bytes = self.total_accounted_bytes.saturating_sub(freed);
+                *ino_slot = None;
+                self.free_inodes.push(open_fd.inode.0);
             }
         }
         Ok(freed)
@@ -292,17 +292,17 @@ impl VfsState {
         for idx in 0..self.fds.len() {
             if let Some(open_fd) = self.fds[idx].take() {
                 let ino_idx = open_fd.inode.0 as usize;
-                if let Some(ino_slot) = self.inodes.get_mut(ino_idx) {
-                    if let Some(ino) = ino_slot.as_mut() {
-                        ino.open_fd_count = ino.open_fd_count.saturating_sub(1);
-                        if ino.link_count == 0 && ino.open_fd_count == 0 {
-                            let freed = ino.accounted_bytes;
-                            self.total_accounted_bytes =
-                                self.total_accounted_bytes.saturating_sub(freed);
-                            total_freed = total_freed.saturating_add(freed);
-                            *ino_slot = None;
-                            self.free_inodes.push(open_fd.inode.0);
-                        }
+                if let Some(ino_slot) = self.inodes.get_mut(ino_idx)
+                    && let Some(ino) = ino_slot.as_mut()
+                {
+                    ino.open_fd_count = ino.open_fd_count.saturating_sub(1);
+                    if ino.link_count == 0 && ino.open_fd_count == 0 {
+                        let freed = ino.accounted_bytes;
+                        self.total_accounted_bytes =
+                            self.total_accounted_bytes.saturating_sub(freed);
+                        total_freed = total_freed.saturating_add(freed);
+                        *ino_slot = None;
+                        self.free_inodes.push(open_fd.inode.0);
                     }
                 }
             }
@@ -334,10 +334,10 @@ impl VfsState {
             match self.paths.get(anc) {
                 Some(PathEntry::Tombstone) => return true,
                 Some(PathEntry::Present(id)) => {
-                    if let Some(ino) = self.get_inode(*id) {
-                        if matches!(ino.kind, VfsEntryKind::Directory { host_opaque: true }) {
-                            return true;
-                        }
+                    if let Some(ino) = self.get_inode(*id)
+                        && matches!(ino.kind, VfsEntryKind::Directory { host_opaque: true })
+                    {
+                        return true;
                     }
                 }
                 None => {}

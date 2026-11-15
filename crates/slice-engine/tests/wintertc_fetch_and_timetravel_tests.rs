@@ -1,11 +1,11 @@
 #![allow(unused_imports)]
 use crate::intrinsics::{
-    digest_to_hex, fast_format_bytes, fast_format_ms, fast_parse_bytes, fast_parse_ms,
-    hmac_sha256_hex, sha256_hex, Sha256State,
+    Sha256State, digest_to_hex, fast_format_bytes, fast_format_ms, fast_parse_bytes, fast_parse_ms,
+    hmac_sha256_hex, sha256_hex,
 };
 use crate::{
-    compile_source_to_bytecode, disassemble_bytecode, run_source_isolated, ExecutionTier,
-    HttpRequestContext, JsValue, SliceIsolate,
+    ExecutionTier, HttpRequestContext, JsValue, SliceIsolate, compile_source_to_bytecode,
+    disassemble_bytecode, run_source_isolated,
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
@@ -204,15 +204,18 @@ export default {
     let out1 = iso.execute_http_request(&bc, None, &req1).unwrap();
     assert_eq!(out1.status_code, 200);
     assert_eq!(out1.content_type, "text/event-stream; charset=utf-8");
-    assert!(out1
-        .response_body
-        .contains("id: tok-1\nevent: token\nretry: 1500\ndata: {\"delta\":\"Slice \"}\n\n"));
-    assert!(out1
-        .response_body
-        .contains("id: tok-2\nevent: token\ndata: {\"delta\":\"streams \"}\n\n"));
-    assert!(out1
-        .response_body
-        .contains("id: tok-3\nevent: done\ndata: [DONE]\n\n"));
+    assert!(
+        out1.response_body
+            .contains("id: tok-1\nevent: token\nretry: 1500\ndata: {\"delta\":\"Slice \"}\n\n")
+    );
+    assert!(
+        out1.response_body
+            .contains("id: tok-2\nevent: token\ndata: {\"delta\":\"streams \"}\n\n")
+    );
+    assert!(
+        out1.response_body
+            .contains("id: tok-3\nevent: done\ndata: [DONE]\n\n")
+    );
 
     // 2. Test `ReadableStream` passed to `new Response(stream)`
     iso.reset_for_request("f2-sse-tenant", 2, 2_000_000, 8 * 1024 * 1024);
@@ -241,10 +244,12 @@ Slice.streamSSE([
     iso.reset_for_request("f2-sse-tenant", 3, 2_000_000, 8 * 1024 * 1024);
     let leak_res = iso.execute_http_request(&leak_bc, None, &req1);
     assert!(leak_res.is_err());
-    assert!(leak_res
-        .unwrap_err()
-        .to_string()
-        .contains("EGRESS_SECRET_LEAK_BLOCKED"));
+    assert!(
+        leak_res
+            .unwrap_err()
+            .to_string()
+            .contains("EGRESS_SECRET_LEAK_BLOCKED")
+    );
 }
 
 #[test]
@@ -373,10 +378,12 @@ exfil();
     iso_dlp.add_egress_audit_secret("sk_live_TOP_SECRET_777");
     let dlp_res = iso_dlp.execute_bytecode(&bc_dlp, None);
     assert!(dlp_res.is_err());
-    assert!(dlp_res
-        .unwrap_err()
-        .to_string()
-        .contains("EGRESS_SECRET_LEAK_BLOCKED"));
+    assert!(
+        dlp_res
+            .unwrap_err()
+            .to_string()
+            .contains("EGRESS_SECRET_LEAK_BLOCKED")
+    );
 }
 
 #[test]
@@ -499,10 +506,12 @@ console.log("exfil:" + leakedB64);
         compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(ts_leak, true));
     let leak_res = iso_env.execute_bytecode(&bc_leak, None);
     assert!(leak_res.is_err());
-    assert!(leak_res
-        .unwrap_err()
-        .to_string()
-        .contains("EGRESS_SECRET_LEAK_BLOCKED"));
+    assert!(
+        leak_res
+            .unwrap_err()
+            .to_string()
+            .contains("EGRESS_SECRET_LEAK_BLOCKED")
+    );
 }
 
 #[test]

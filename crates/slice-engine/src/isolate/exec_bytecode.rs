@@ -78,11 +78,9 @@ impl SliceIsolate {
                     self.verify_egress_not_leaked(rj)?;
                 }
                 BOA_HTTP_RES.with(|res| -> Result<(), SandboxViolation> {
-                    if let Some((_, ref res_body, ref res_bytes, ref res_ct, ref res_hdrs)) =
-                        *res.borrow()
-                    {
+                    if let Some((_, res_body, res_bytes, res_ct, res_hdrs)) = &*res.borrow() {
                         self.verify_egress_not_leaked(res_body)?;
-                        if let Some(ref raw) = res_bytes {
+                        if let Some(raw) = res_bytes {
                             self.verify_egress_not_leaked(&String::from_utf8_lossy(raw))?;
                         }
                         self.verify_egress_not_leaked(res_ct)?;
@@ -122,23 +120,20 @@ impl SliceIsolate {
                 }
                 BytecodeOp::ImportCas { dst, specifier } => {
                     self.cas_modules_resolved += 1;
-                    if let Some(archive) = cas {
-                        if let Some(entry) = archive.resolve_specifier(specifier) {
-                            let child_bc = archive.get_bytecode_slice(entry);
-                            if child_bc.len() >= 8 && &child_bc[0..8] == SNAPSHOT_MAGIC {
-                                if let Ok(child_mod) =
-                                    serde_json::from_slice::<BytecodeModule>(&child_bc[8..])
-                                {
-                                    for (k, v) in &child_mod.static_exports {
-                                        self.env_vars.insert(k.clone(), JsValue::Number(*v));
-                                    }
-                                    if let Some((_, first_v)) =
-                                        child_mod.static_exports.iter().next()
-                                    {
-                                        self.env_vars
-                                            .insert(dst.clone(), JsValue::Number(*first_v));
-                                    }
-                                }
+                    if let Some(archive) = cas
+                        && let Some(entry) = archive.resolve_specifier(specifier)
+                    {
+                        let child_bc = archive.get_bytecode_slice(entry);
+                        if child_bc.len() >= 8
+                            && &child_bc[0..8] == SNAPSHOT_MAGIC
+                            && let Ok(child_mod) =
+                                serde_json::from_slice::<BytecodeModule>(&child_bc[8..])
+                        {
+                            for (k, v) in &child_mod.static_exports {
+                                self.env_vars.insert(k.clone(), JsValue::Number(*v));
+                            }
+                            if let Some((_, first_v)) = child_mod.static_exports.iter().next() {
+                                self.env_vars.insert(dst.clone(), JsValue::Number(*first_v));
                             }
                         }
                     }

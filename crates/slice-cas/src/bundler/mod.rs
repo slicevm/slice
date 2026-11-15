@@ -12,8 +12,8 @@ pub mod source_map;
 
 pub use graph_bundler::bundle_entrypoint_with_deps;
 pub use resolver::{
-    resolve_module_specifier, resolve_project_entrypoint, strip_jsonc, try_file_with_extensions,
-    ResolverCacheGuard,
+    ResolverCacheGuard, resolve_module_specifier, resolve_project_entrypoint, strip_jsonc,
+    try_file_with_extensions,
 };
 pub use source_map::{
     compute_source_line_map, map_bundled_error_location, map_bundled_error_location_with_offset,

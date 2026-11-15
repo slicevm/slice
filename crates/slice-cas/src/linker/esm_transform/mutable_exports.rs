@@ -76,17 +76,17 @@ pub(super) fn get_module_mutable_exports(path: &Path) -> FxHashSet<String> {
                         }
                     }
                     Declaration::FunctionDeclaration(fd) => {
-                        if let Some(id) = &fd.id {
-                            if mutated_locals.contains(id.name.as_str()) {
-                                mutable_exported_names.insert(id.name.to_string());
-                            }
+                        if let Some(id) = &fd.id
+                            && mutated_locals.contains(id.name.as_str())
+                        {
+                            mutable_exported_names.insert(id.name.to_string());
                         }
                     }
                     Declaration::ClassDeclaration(cd) => {
-                        if let Some(id) = &cd.id {
-                            if mutated_locals.contains(id.name.as_str()) {
-                                mutable_exported_names.insert(id.name.to_string());
-                            }
+                        if let Some(id) = &cd.id
+                            && mutated_locals.contains(id.name.as_str())
+                        {
+                            mutable_exported_names.insert(id.name.to_string());
                         }
                     }
                     _ => {}
@@ -95,17 +95,17 @@ pub(super) fn get_module_mutable_exports(path: &Path) -> FxHashSet<String> {
             Statement::ExportDefaultDeclaration(exp_def) if !mutated_locals.is_empty() => {
                 match &exp_def.declaration {
                     ExportDefaultDeclarationKind::FunctionDeclaration(fd) => {
-                        if let Some(id) = &fd.id {
-                            if mutated_locals.contains(id.name.as_str()) {
-                                mutable_exported_names.insert("default".to_string());
-                            }
+                        if let Some(id) = &fd.id
+                            && mutated_locals.contains(id.name.as_str())
+                        {
+                            mutable_exported_names.insert("default".to_string());
                         }
                     }
                     ExportDefaultDeclarationKind::ClassDeclaration(cd) => {
-                        if let Some(id) = &cd.id {
-                            if mutated_locals.contains(id.name.as_str()) {
-                                mutable_exported_names.insert("default".to_string());
-                            }
+                        if let Some(id) = &cd.id
+                            && mutated_locals.contains(id.name.as_str())
+                        {
+                            mutable_exported_names.insert("default".to_string());
                         }
                     }
                     _ => {}
@@ -126,16 +126,16 @@ pub(super) fn get_module_mutable_exports(path: &Path) -> FxHashSet<String> {
             }
             Statement::ExportFromDeclaration(exp_from) if !exp_from.export_kind.is_type() => {
                 let spec_str = exp_from.source.value.as_str();
-                if !is_builtin_module(spec_str) {
-                    if let Some(inner_path) = resolve_module_specifier(from_dir, spec_str) {
-                        let inner_mut = get_module_mutable_exports(&inner_path);
-                        if !inner_mut.is_empty() {
-                            for spec in &exp_from.specifiers {
-                                if !spec.export_kind.is_type()
-                                    && inner_mut.contains(spec.local.name().as_str())
-                                {
-                                    mutable_exported_names.insert(spec.exported.name().to_string());
-                                }
+                if !is_builtin_module(spec_str)
+                    && let Some(inner_path) = resolve_module_specifier(from_dir, spec_str)
+                {
+                    let inner_mut = get_module_mutable_exports(&inner_path);
+                    if !inner_mut.is_empty() {
+                        for spec in &exp_from.specifiers {
+                            if !spec.export_kind.is_type()
+                                && inner_mut.contains(spec.local.name().as_str())
+                            {
+                                mutable_exported_names.insert(spec.exported.name().to_string());
                             }
                         }
                     }
@@ -145,13 +145,13 @@ pub(super) fn get_module_mutable_exports(path: &Path) -> FxHashSet<String> {
                 if !exp_all.export_kind.is_type() && exp_all.exported.is_none() =>
             {
                 let spec_str = exp_all.source.value.as_str();
-                if !is_builtin_module(spec_str) {
-                    if let Some(inner_path) = resolve_module_specifier(from_dir, spec_str) {
-                        let inner_mut = get_module_mutable_exports(&inner_path);
-                        for name in inner_mut {
-                            if name != "default" {
-                                mutable_exported_names.insert(name);
-                            }
+                if !is_builtin_module(spec_str)
+                    && let Some(inner_path) = resolve_module_specifier(from_dir, spec_str)
+                {
+                    let inner_mut = get_module_mutable_exports(&inner_path);
+                    for name in inner_mut {
+                        if name != "default" {
+                            mutable_exported_names.insert(name);
                         }
                     }
                 }

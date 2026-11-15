@@ -1,11 +1,11 @@
 //! Store-backed `WebAssembly.Memory`, `ResetMemoryBuffer` detachment, and unconditional
 //! word-aligned delta synchronization between `wasmi::Memory` and `JsArrayBuffer`.
 
-use super::store::{construct_wasm_wrapper, with_store_and_entities, WasmEntities, WasmStoreData};
-use super::values::enforce_range_u32;
 use super::WASM_PAGE_BYTES;
+use super::store::{WasmEntities, WasmStoreData, construct_wasm_wrapper, with_store_and_entities};
+use super::values::enforce_range_u32;
 use boa_engine::object::builtins::{AlignedVec, JsArrayBuffer};
-use boa_engine::{js_string, Context, JsNativeError, JsObject, JsResult, JsValue};
+use boa_engine::{Context, JsNativeError, JsObject, JsResult, JsValue, js_string};
 use wasmi::{AsContext, AsContextMut, Memory, MemoryType, StoreContextMut};
 
 const WASM_MEMORY_DETACH_KEY: &str = "WebAssembly.Memory";
@@ -36,12 +36,11 @@ pub(crate) fn register_or_find_memory(
 ) -> u32 {
     let key = format!("{:?}", memory);
     if let Some(&existing_id) = entities.memory_by_key.get(&key) {
-        if let Some(w) = js_wrapper {
-            if let Some(entry) = entities.memories.get_mut(&existing_id) {
-                if entry.js_wrapper.is_none() {
-                    entry.js_wrapper = Some(w);
-                }
-            }
+        if let Some(w) = js_wrapper
+            && let Some(entry) = entities.memories.get_mut(&existing_id)
+            && entry.js_wrapper.is_none()
+        {
+            entry.js_wrapper = Some(w);
         }
         return existing_id;
     }
@@ -309,10 +308,10 @@ pub(crate) fn sync_all_memories_js_to_wasm(
     }
     for i in 0..entities.memory_ids.len() {
         let mem_id = entities.memory_ids[i];
-        if let Some(entry) = entities.memories.get_mut(&mem_id) {
-            if entry.ab_obj.is_some() {
-                sync_single_memory_js_to_wasm(entry, store_ctx.as_context_mut());
-            }
+        if let Some(entry) = entities.memories.get_mut(&mem_id)
+            && entry.ab_obj.is_some()
+        {
+            sync_single_memory_js_to_wasm(entry, store_ctx.as_context_mut());
         }
     }
 }

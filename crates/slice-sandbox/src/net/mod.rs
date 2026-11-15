@@ -226,10 +226,10 @@ pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>
     let without_port = if let Some(rest) = trimmed.strip_prefix('[') {
         if let Some((ipv6, after_bracket)) = rest.split_once(']') {
             is_bracketed_ipv6 = true;
-            if let Some(port_str) = after_bracket.strip_prefix(':') {
-                if let Ok(p) = port_str.parse::<u16>() {
-                    explicit_port = Some(p);
-                }
+            if let Some(port_str) = after_bracket.strip_prefix(':')
+                && let Ok(p) = port_str.parse::<u16>()
+            {
+                explicit_port = Some(p);
             }
             // Strip RFC 6874 / OS IPv6 zone identifier (`%eth0` or `%25eth0`)
             if let Some((v6_clean, _zone)) = ipv6.split_once('%') {
@@ -259,15 +259,16 @@ pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>
         trimmed
     };
 
-    if !is_bracketed_ipv6 && without_port.as_bytes().contains(&b'%') {
-        if let Some(decoded) = percent_decode_host_cow(without_port) {
-            let mut s = decoded.into_owned();
-            while s.ends_with('.') {
-                s.pop();
-            }
-            s.make_ascii_lowercase();
-            return (Cow::Owned(s), explicit_port, scheme_default_port);
+    if !is_bracketed_ipv6
+        && without_port.as_bytes().contains(&b'%')
+        && let Some(decoded) = percent_decode_host_cow(without_port)
+    {
+        let mut s = decoded.into_owned();
+        while s.ends_with('.') {
+            s.pop();
         }
+        s.make_ascii_lowercase();
+        return (Cow::Owned(s), explicit_port, scheme_default_port);
     }
 
     let without_trailing_dot = without_port.trim_end_matches('.');
@@ -418,17 +419,16 @@ pub fn is_cloud_metadata_ssrf_target(host: &str) -> bool {
     {
         return true;
     }
-    if let Some(v4) = parse_nonstandard_ipv4(&h) {
-        if is_cloud_metadata_ip(IpAddr::V4(v4)) {
-            return true;
-        }
+    if let Some(v4) = parse_nonstandard_ipv4(&h)
+        && is_cloud_metadata_ip(IpAddr::V4(v4))
+    {
+        return true;
     }
-    if h.contains(':') {
-        if let Ok(ip) = h.parse::<IpAddr>() {
-            if is_cloud_metadata_ip(ip) {
-                return true;
-            }
-        }
+    if h.contains(':')
+        && let Ok(ip) = h.parse::<IpAddr>()
+        && is_cloud_metadata_ip(ip)
+    {
+        return true;
     }
     false
 }
@@ -484,10 +484,10 @@ pub fn is_cloud_metadata_ip(ip: IpAddr) -> bool {
                 || octs == [100, 100, 100, 200]
         }
         IpAddr::V6(v6) => {
-            if let Some(embedded_v4) = extract_embedded_ipv4(v6) {
-                if is_cloud_metadata_ip(IpAddr::V4(embedded_v4)) {
-                    return true;
-                }
+            if let Some(embedded_v4) = extract_embedded_ipv4(v6)
+                && is_cloud_metadata_ip(IpAddr::V4(embedded_v4))
+            {
+                return true;
             }
             let segs = v6.segments();
             segs == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254]

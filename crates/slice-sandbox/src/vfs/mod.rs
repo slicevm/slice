@@ -200,11 +200,11 @@ pub fn normalize_vfs_path_lexical(raw: &str) -> String {
             continue;
         }
         if seg == ".." {
-            if let Some(&last) = stack.last() {
-                if last != ".." {
-                    stack.pop();
-                    continue;
-                }
+            if let Some(&last) = stack.last()
+                && last != ".."
+            {
+                stack.pop();
+                continue;
             }
             if !is_abs {
                 stack.push("..");
@@ -300,13 +300,13 @@ pub fn anchor_vfs_path_to_cwd(raw: &str) -> String {
             if norm == *lex {
                 return cwd_info.canonical.clone();
             }
-            if let Some(rem) = norm.strip_prefix(lex.as_str()) {
-                if rem.starts_with('/') {
-                    let mut mapped = String::with_capacity(cwd_info.canonical.len() + rem.len());
-                    mapped.push_str(&cwd_info.canonical);
-                    mapped.push_str(rem);
-                    return mapped;
-                }
+            if let Some(rem) = norm.strip_prefix(lex.as_str())
+                && rem.starts_with('/')
+            {
+                let mut mapped = String::with_capacity(cwd_info.canonical.len() + rem.len());
+                mapped.push_str(&cwd_info.canonical);
+                mapped.push_str(rem);
+                return mapped;
             }
         }
         return norm;
@@ -413,34 +413,35 @@ pub fn vfs_normalized_candidate_matches_prefix(norm_cand: &str, allowed_prefix: 
         if check_against_base(&cwd_info.canonical) {
             return true;
         }
-        if let Some(ref lex) = cwd_info.lexical_alias {
-            if check_against_base(lex) {
-                return true;
-            }
+        if let Some(ref lex) = cwd_info.lexical_alias
+            && check_against_base(lex)
+        {
+            return true;
         }
-    } else if cand_is_abs && pref_is_abs {
-        if let Some(ref lex) = cwd_info.lexical_alias {
-            let remap = |p: &str| -> Option<String> {
-                if p == lex {
-                    Some(cwd_info.canonical.clone())
-                } else if let Some(rem) = p.strip_prefix(lex.as_str()) {
-                    if rem.starts_with('/') {
-                        Some(format!("{}{}", cwd_info.canonical, rem))
-                    } else {
-                        None
-                    }
+    } else if cand_is_abs
+        && pref_is_abs
+        && let Some(ref lex) = cwd_info.lexical_alias
+    {
+        let remap = |p: &str| -> Option<String> {
+            if p == lex {
+                Some(cwd_info.canonical.clone())
+            } else if let Some(rem) = p.strip_prefix(lex.as_str()) {
+                if rem.starts_with('/') {
+                    Some(format!("{}{}", cwd_info.canonical, rem))
                 } else {
                     None
                 }
-            };
-            let mapped_cand = remap(norm_cand);
-            let mapped_pref = remap(&norm_pref);
-            if mapped_cand.is_some() || mapped_pref.is_some() {
-                let c = mapped_cand.as_deref().unwrap_or(norm_cand);
-                let p = mapped_pref.as_deref().unwrap_or(&norm_pref);
-                if path_starts_with_dir_boundary(c, p) {
-                    return true;
-                }
+            } else {
+                None
+            }
+        };
+        let mapped_cand = remap(norm_cand);
+        let mapped_pref = remap(&norm_pref);
+        if mapped_cand.is_some() || mapped_pref.is_some() {
+            let c = mapped_cand.as_deref().unwrap_or(norm_cand);
+            let p = mapped_pref.as_deref().unwrap_or(&norm_pref);
+            if path_starts_with_dir_boundary(c, p) {
+                return true;
             }
         }
     }
@@ -531,12 +532,11 @@ pub fn exec_binary_matches(requested: &str, allowed: &str) -> bool {
     if req_norm == allow_norm {
         return true;
     }
-    if !req_norm.contains('/') {
-        if let Some(allow_base) = allow_norm.rsplit('/').next() {
-            if req_norm == allow_base {
-                return true;
-            }
-        }
+    if !req_norm.contains('/')
+        && let Some(allow_base) = allow_norm.rsplit('/').next()
+        && req_norm == allow_base
+    {
+        return true;
     }
     false
 }

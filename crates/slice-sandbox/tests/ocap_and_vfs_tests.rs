@@ -203,20 +203,26 @@ fn test_vfs_drive_relative_device_namespaces_catchall_routes_and_dot_prefix() {
     }
 
     // Extended-length absolute drive root (`\\?\C:\...`) remains valid when `C:/` is granted
-    assert!(tenant_broad
-        .verify_fs_read(r"\\?\C:\allowed\data.json")
-        .is_ok());
+    assert!(
+        tenant_broad
+            .verify_fs_read(r"\\?\C:\allowed\data.json")
+            .is_ok()
+    );
 
     // Catch-all framework route segments (`[...slug]`) and `foo..bar` filenames are allowed,
     // while actual `..` parent traversal segments remain blocked.
     let app_caps = CapabilityToken::pure_compute().with_read_prefix("/app");
     let tenant_app = TenantCompartment::new("vfs-routes", 2, app_caps, 10_000, 65536);
-    assert!(tenant_app
-        .verify_fs_read("/app/blog/[...slug]/page.tsx")
-        .is_ok());
-    assert!(tenant_app
-        .verify_fs_read("/app/docs/[[...catchall]]/route.ts")
-        .is_ok());
+    assert!(
+        tenant_app
+            .verify_fs_read("/app/blog/[...slug]/page.tsx")
+            .is_ok()
+    );
+    assert!(
+        tenant_app
+            .verify_fs_read("/app/docs/[[...catchall]]/route.ts")
+            .is_ok()
+    );
     assert!(tenant_app.verify_fs_read("/app/archive..v2.tar.gz").is_ok());
     assert!(tenant_app.verify_fs_read("/app/../etc/passwd").is_err());
     assert!(tenant_app.verify_fs_read("/app/blog/..").is_err());

@@ -2,16 +2,11 @@
 //! Warm Realm Pool Management, and Shared OCap/DLP/SES Compartment Lifecycle Guards.
 
 use crate::boa_realm::{
-    acquire_warm_boa_realm, acquire_warm_boa_realm_for_tenant, call_realm_ctl,
-    create_bare_boa_realm, create_bare_boa_realm_for_tenant, create_warm_boa_realm,
-    ensure_realm_shards, ensure_vfs_tenant_affinity, eval_or_reuse_cached_script,
-    first_ses_proto_sig_mismatch, has_process_exit, has_uncaught_error, mark_exec_dirty,
-    release_warm_boa_realm, try_acquire_pooled_boa_realm, try_acquire_pooled_boa_realm_for_tenant,
-    vfs_owner_namespace, WarmBoaRealm, BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_CHECKPOINT_STATS,
-    BOA_CONTEXT_POOL, BOA_CUSTOM_ARGV, BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS,
-    BOA_ENV_MAP, BOA_EXEC_BINS, BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ,
-    BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_LAST_EXIT_CODE,
-    BOA_NET_HOSTS, BOA_PROCESS_EXIT, BOA_SES_INTL_SIG_PAIR, BOA_STDOUT, BOA_UNCAUGHT_ERROR,
+    BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_CHECKPOINT_STATS, BOA_CONTEXT_POOL, BOA_CUSTOM_ARGV,
+    BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS,
+    BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES,
+    BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_LAST_EXIT_CODE, BOA_NET_HOSTS,
+    BOA_PROCESS_EXIT, BOA_SES_INTL_SIG_PAIR, BOA_STDOUT, BOA_UNCAUGHT_ERROR,
     BOA_UNHANDLED_REJECTIONS, BOA_VFS_OWNER_TENANT, BOA_VFS_STATE, BOA_VIOLATION,
     BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, CHECKPOINT_SLAB, DIRTY_FETCH_MOCK, DIRTY_SOCKETS,
     DIRTY_VFS, DIRTY_WASM, DIRTY_WEBSOCKET, DIRTY_WORKERS, EXEC_DIRTY_ARGV, EXEC_DIRTY_CHILD_PROC,
@@ -19,6 +14,12 @@ use crate::boa_realm::{
     HOST_GROUP_HTTP_BRIDGE, HOST_GROUP_KV_SANDBOX, HOST_GROUP_SEMVER_FAST,
     REALM_CTL_DISPATCH_HTTP_BRIDGE, REALM_CTL_RESET_FS_WATCHERS, REALM_CTL_RESET_MT,
     REALM_CTL_RESET_WU, REALM_CTL_SET_DET_MODE, REALM_CTL_SET_NEXT_TICK, REALM_CTL_SYNC_ENV,
+    WarmBoaRealm, acquire_warm_boa_realm, acquire_warm_boa_realm_for_tenant, call_realm_ctl,
+    create_bare_boa_realm, create_bare_boa_realm_for_tenant, create_warm_boa_realm,
+    ensure_realm_shards, ensure_vfs_tenant_affinity, eval_or_reuse_cached_script,
+    first_ses_proto_sig_mismatch, has_process_exit, has_uncaught_error, mark_exec_dirty,
+    release_warm_boa_realm, try_acquire_pooled_boa_realm, try_acquire_pooled_boa_realm_for_tenant,
+    vfs_owner_namespace,
 };
 use crate::boacas::{
     BOACAS_FLAG_HAS_HTTP_BRIDGE, BOACAS_FLAG_HAS_KV_SANDBOX, BOACAS_FLAG_HAS_NEXT_TICK,
@@ -177,47 +178,45 @@ impl SliceIsolate {
     pub fn prewarm_boa_bundle_with_caps(bytecode: &[u8], caps: &CapabilityToken) {
         if let Some((hdr, precompiled_slice, fallback_js)) =
             crate::boacas::BoaCasHeader::decode(bytecode)
+            && crate::boacas::is_exper_boacas_runtime_enabled()
         {
-            if crate::boacas::is_exper_boacas_runtime_enabled() {
-                if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_HAS_WORKER) != 0 {
-                    crate::workers::prewarm_worker_pool_sync(1);
-                }
-                if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_IS_RC_BUNDLE) != 0 {
-                    let (mut realm, is_cold_bare_realm) = match try_acquire_pooled_boa_realm() {
-                        Some(r) => (r, false),
-                        None => (create_bare_boa_realm(), true),
-                    };
-                    if !realm.loaded_bundles.contains_key(&hdr.rc_key) {
-                        if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_HAS_SEMVER_FAST) != 0 {
-                            ensure_realm_semver_fast(&mut realm);
-                        }
-                        if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX) != 0 {
-                            ensure_realm_kv_sandbox(&mut realm);
-                        }
-                        let pw_flags = setup_prewarm_caps(caps);
-                        if pw_flags.2 {
-                            call_realm_ctl(&mut realm, REALM_CTL_SYNC_ENV, true);
-                        }
-                        let total_end = crate::boacas::BOACAS_HEADER_LEN
-                            + (hdr.precompiled_len as usize)
-                            + (hdr.fallback_js_len as usize);
-                        let contiguous_payload =
-                            &bytecode[crate::boacas::BOACAS_HEADER_LEN..total_end];
-                        let _ = crate::boacas::eval_boacas_on_realm(
-                            &mut realm,
-                            &hdr,
-                            precompiled_slice,
-                            fallback_js,
-                            contiguous_payload,
-                            false,
-                            is_cold_bare_realm,
-                        );
-                        let _ = realm.ctx.run_jobs();
-                        scrub_after_prewarm(&mut realm, pw_flags);
+            if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_HAS_WORKER) != 0 {
+                crate::workers::prewarm_worker_pool_sync(1);
+            }
+            if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_IS_RC_BUNDLE) != 0 {
+                let (mut realm, is_cold_bare_realm) = match try_acquire_pooled_boa_realm() {
+                    Some(r) => (r, false),
+                    None => (create_bare_boa_realm(), true),
+                };
+                if !realm.loaded_bundles.contains_key(&hdr.rc_key) {
+                    if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_HAS_SEMVER_FAST) != 0 {
+                        ensure_realm_semver_fast(&mut realm);
                     }
-                    release_warm_boa_realm(realm);
-                    return;
+                    if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_HAS_KV_SANDBOX) != 0 {
+                        ensure_realm_kv_sandbox(&mut realm);
+                    }
+                    let pw_flags = setup_prewarm_caps(caps);
+                    if pw_flags.2 {
+                        call_realm_ctl(&mut realm, REALM_CTL_SYNC_ENV, true);
+                    }
+                    let total_end = crate::boacas::BOACAS_HEADER_LEN
+                        + (hdr.precompiled_len as usize)
+                        + (hdr.fallback_js_len as usize);
+                    let contiguous_payload = &bytecode[crate::boacas::BOACAS_HEADER_LEN..total_end];
+                    let _ = crate::boacas::eval_boacas_on_realm(
+                        &mut realm,
+                        &hdr,
+                        precompiled_slice,
+                        fallback_js,
+                        contiguous_payload,
+                        false,
+                        is_cold_bare_realm,
+                    );
+                    let _ = realm.ctx.run_jobs();
+                    scrub_after_prewarm(&mut realm, pw_flags);
                 }
+                release_warm_boa_realm(realm);
+                return;
             }
         }
 
@@ -259,17 +258,13 @@ impl SliceIsolate {
                         let global = realm.ctx.global_object();
                         if let Ok(rc_val) =
                             global.get(boa_engine::js_string!("__slice_rc"), &mut realm.ctx)
+                            && let Some(rc_obj) = rc_val.as_object()
+                            && let Ok(val) =
+                                rc_obj.get(boa_engine::js_string!(hex_str), &mut realm.ctx)
+                            && let Some(obj) = val.as_object()
                         {
-                            if let Some(rc_obj) = rc_val.as_object() {
-                                if let Ok(val) =
-                                    rc_obj.get(boa_engine::js_string!(hex_str), &mut realm.ctx)
-                                {
-                                    if let Some(obj) = val.as_object() {
-                                        realm.loaded_bundles.insert(rc_key_u64, obj.clone());
-                                        realm.loaded_bundle_flags.insert(rc_key_u64, bflags);
-                                    }
-                                }
-                            }
+                            realm.loaded_bundles.insert(rc_key_u64, obj.clone());
+                            realm.loaded_bundle_flags.insert(rc_key_u64, bflags);
                         }
                     }
                     let _ = realm.ctx.run_jobs();
@@ -574,14 +569,15 @@ impl SliceIsolate {
         check_ses: bool,
         mut eval_res: boa_engine::JsResult<boa_engine::JsValue>,
     ) -> Result<JsValue, SandboxViolation> {
-        if eval_res.is_err() && (BOA_EXEC_DIRTY.with(|c| c.get()) & EXEC_DIRTY_CHILD_PROC) != 0 {
-            if let Some(cp_v) = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take()) {
-                BOA_VIOLATION.with(|v| {
-                    if v.borrow().is_none() {
-                        *v.borrow_mut() = Some(cp_v);
-                    }
-                });
-            }
+        if eval_res.is_err()
+            && (BOA_EXEC_DIRTY.with(|c| c.get()) & EXEC_DIRTY_CHILD_PROC) != 0
+            && let Some(cp_v) = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take())
+        {
+            BOA_VIOLATION.with(|v| {
+                if v.borrow().is_none() {
+                    *v.borrow_mut() = Some(cp_v);
+                }
+            });
         }
 
         if has_process_exit() {
@@ -636,37 +632,36 @@ impl SliceIsolate {
 
         let mut final_val = match eval_res {
             Ok(mut val) => {
-                if val.as_promise().is_some() {
-                    if let Ok(st_val) = realm
+                if val.as_promise().is_some()
+                    && let Ok(st_val) = realm
                         .ctx
                         .global_object()
                         .get(boa_engine::js_string!("__slice_tla_st"), &mut realm.ctx)
-                    {
-                        let st = st_val.as_number().unwrap_or(0.0) as i32;
-                        if st == 1 || st == 2 {
-                            let _ = realm.ctx.global_object().set(
-                                boa_engine::js_string!("__slice_tla_st"),
-                                boa_engine::JsValue::from(0),
-                                false,
+                {
+                    let st = st_val.as_number().unwrap_or(0.0) as i32;
+                    if st == 1 || st == 2 {
+                        let _ = realm.ctx.global_object().set(
+                            boa_engine::js_string!("__slice_tla_st"),
+                            boa_engine::JsValue::from(0),
+                            false,
+                            &mut realm.ctx,
+                        );
+                        let tla_v = realm
+                            .ctx
+                            .global_object()
+                            .get(boa_engine::js_string!("__slice_tla_v"), &mut realm.ctx)
+                            .unwrap_or_default();
+                        if st == 1 {
+                            val = tla_v;
+                        } else if !has_process_exit() {
+                            let tla_err = boa_engine::JsError::from_opaque(tla_v);
+                            let _ = crate::event_loop::handle_uncaught_js_error(
+                                tla_err,
                                 &mut realm.ctx,
                             );
-                            let tla_v = realm
-                                .ctx
-                                .global_object()
-                                .get(boa_engine::js_string!("__slice_tla_v"), &mut realm.ctx)
-                                .unwrap_or_default();
-                            if st == 1 {
-                                val = tla_v;
-                            } else if !has_process_exit() {
-                                let tla_err = boa_engine::JsError::from_opaque(tla_v);
-                                let _ = crate::event_loop::handle_uncaught_js_error(
-                                    tla_err,
-                                    &mut realm.ctx,
-                                );
-                                val = boa_engine::JsValue::undefined();
-                            } else {
-                                val = boa_engine::JsValue::undefined();
-                            }
+                            val = boa_engine::JsValue::undefined();
+                        } else {
+                            val = boa_engine::JsValue::undefined();
                         }
                     }
                 }
@@ -697,17 +692,14 @@ impl SliceIsolate {
         let mut ses_mutated_target = String::new();
         if let Some(proto_name) = first_ses_proto_sig_mismatch(&realm) {
             ses_mutated_target.push_str(proto_name);
-        } else if check_ses || pending_violation.is_some() {
-            if let Some(check_fn) = realm.ses_check_fn.clone() {
-                if let Ok(v) = check_fn.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
-                {
-                    if let Some(s) = v.as_string() {
-                        let st = s.to_std_string_escaped();
-                        if !st.is_empty() {
-                            ses_mutated_target = st;
-                        }
-                    }
-                }
+        } else if (check_ses || pending_violation.is_some())
+            && let Some(check_fn) = realm.ses_check_fn.clone()
+            && let Ok(v) = check_fn.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
+            && let Some(s) = v.as_string()
+        {
+            let st = s.to_std_string_escaped();
+            if !st.is_empty() {
+                ses_mutated_target = st;
             }
         }
 
@@ -780,28 +772,28 @@ impl SliceIsolate {
                 self.compartment.memory_used_bytes =
                     baseline_mem_used.saturating_add(final_net_used);
             }
-            if let SandboxViolation::CpuFuelExhausted { ref mut limit, .. } = violation {
-                if *limit == 0 {
-                    self.compartment.fuel_consumed = self.compartment.fuel_limit;
-                    *limit = self.compartment.fuel_limit;
-                }
+            if let SandboxViolation::CpuFuelExhausted { ref mut limit, .. } = violation
+                && *limit == 0
+            {
+                self.compartment.fuel_consumed = self.compartment.fuel_limit;
+                *limit = self.compartment.fuel_limit;
             }
             clear_wu_and_release(realm);
             return Err(violation);
         }
         let wasm_fuel = BOA_FUEL_BUDGET.with(|f| f.replace((0, u64::MAX)).0);
-        if wasm_fuel > 0 {
-            if let Err(v) = self.compartment.consume_fuel(wasm_fuel) {
-                clear_wu_and_release(realm);
-                return Err(v);
-            }
+        if wasm_fuel > 0
+            && let Err(v) = self.compartment.consume_fuel(wasm_fuel)
+        {
+            clear_wu_and_release(realm);
+            return Err(v);
         }
-        if loop_iters > 0 {
-            if let Err(v) = self.compartment.consume_fuel(loop_iters) {
-                self.compartment.fuel_consumed = self.compartment.fuel_limit;
-                clear_wu_and_release(realm);
-                return Err(v);
-            }
+        if loop_iters > 0
+            && let Err(v) = self.compartment.consume_fuel(loop_iters)
+        {
+            self.compartment.fuel_consumed = self.compartment.fuel_limit;
+            clear_wu_and_release(realm);
+            return Err(v);
         }
         let final_net_used = BOA_KV_MEM_BUDGET.with(|m| m.replace((0, usize::MAX)).0);
         if final_net_used > initial_net_used {
@@ -855,14 +847,12 @@ impl SliceIsolate {
             }
             Ok(JsValue::str(st))
         } else {
-            if self.capture_return_json {
-                if let Some(obj) = final_val.as_object() {
-                    if !obj.is_callable() {
-                        if let Ok(Some(json_val)) = final_val.to_json(&mut realm.ctx) {
-                            self.last_return_json = serde_json::to_string(&json_val).ok();
-                        }
-                    }
-                }
+            if self.capture_return_json
+                && let Some(obj) = final_val.as_object()
+                && !obj.is_callable()
+                && let Ok(Some(json_val)) = final_val.to_json(&mut realm.ctx)
+            {
+                self.last_return_json = serde_json::to_string(&json_val).ok();
             }
             if let Ok(s) = final_val.to_string(&mut realm.ctx) {
                 Ok(JsValue::str(s.to_std_string_escaped()))
@@ -986,23 +976,19 @@ impl SliceIsolate {
                 let res = realm
                     .ctx
                     .eval(boa_engine::Source::from_bytes(js_code.as_bytes()));
-                if res.is_ok() && BOA_VIOLATION.with(|v| v.borrow().is_none()) {
-                    if let Ok(hex_str) = std::str::from_utf8(hex_bytes) {
-                        let global = realm.ctx.global_object();
-                        if let Ok(rc_val) =
-                            global.get(boa_engine::js_string!("__slice_rc"), &mut realm.ctx)
-                        {
-                            if let Some(rc_obj) = rc_val.as_object() {
-                                if let Ok(val) =
-                                    rc_obj.get(boa_engine::js_string!(hex_str), &mut realm.ctx)
-                                {
-                                    if let Some(obj) = val.as_object() {
-                                        realm.loaded_bundles.insert(rc_key_u64, obj.clone());
-                                        realm.loaded_bundle_flags.insert(rc_key_u64, bflags);
-                                    }
-                                }
-                            }
-                        }
+                if res.is_ok()
+                    && BOA_VIOLATION.with(|v| v.borrow().is_none())
+                    && let Ok(hex_str) = std::str::from_utf8(hex_bytes)
+                {
+                    let global = realm.ctx.global_object();
+                    if let Ok(rc_val) =
+                        global.get(boa_engine::js_string!("__slice_rc"), &mut realm.ctx)
+                        && let Some(rc_obj) = rc_val.as_object()
+                        && let Ok(val) = rc_obj.get(boa_engine::js_string!(hex_str), &mut realm.ctx)
+                        && let Some(obj) = val.as_object()
+                    {
+                        realm.loaded_bundles.insert(rc_key_u64, obj.clone());
+                        realm.loaded_bundle_flags.insert(rc_key_u64, bflags);
                     }
                 }
                 res

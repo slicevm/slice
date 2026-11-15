@@ -2,7 +2,7 @@
 //! and Path-Based `node:fs` Host Bindings.
 
 use crate::bindings::fs::state::{
-    dir_child_prefix, is_vfs_root_path, PathEntry, VfsEntryKind, VfsState,
+    PathEntry, VfsEntryKind, VfsState, dir_child_prefix, is_vfs_root_path,
 };
 use crate::bindings::helpers::{
     bytes_to_js_uint8_array, extract_buffer_source_bytes, release_isolate_memory,
@@ -10,7 +10,7 @@ use crate::bindings::helpers::{
     try_consume_isolate_memory_ctx,
 };
 use crate::boa_realm::{
-    check_boa_fs_read_ocap, check_boa_fs_write_ocap, norm_vfs_path, BOA_DET_STATE, BOA_VFS_STATE,
+    BOA_DET_STATE, BOA_VFS_STATE, check_boa_fs_read_ocap, check_boa_fs_write_ocap, norm_vfs_path,
 };
 use crate::intrinsics::fill_random_bytes;
 use std::sync::Arc;
@@ -125,21 +125,17 @@ pub(crate) fn try_resolve_vfs_path_symlinks(
                 let is_final = seg_end == bytes.len();
                 if seg_end > 0 && (!is_final || follow_final) {
                     let prefix = &current[..seg_end];
-                    if let Some((_, ino)) = vfs.lookup_present(prefix) {
-                        if let VfsEntryKind::Symlink(ref raw_target) = ino.kind {
-                            let resolved_prefix =
-                                resolve_symlink_target_against_link(prefix, raw_target);
-                            let next_full = if is_final {
-                                resolved_prefix
-                            } else {
-                                anchor_vfs_path(&format!(
-                                    "{}{}",
-                                    resolved_prefix,
-                                    &current[seg_end..]
-                                ))
-                            };
-                            return Some(next_full);
-                        }
+                    if let Some((_, ino)) = vfs.lookup_present(prefix)
+                        && let VfsEntryKind::Symlink(ref raw_target) = ino.kind
+                    {
+                        let resolved_prefix =
+                            resolve_symlink_target_against_link(prefix, raw_target);
+                        let next_full = if is_final {
+                            resolved_prefix
+                        } else {
+                            anchor_vfs_path(&format!("{}{}", resolved_prefix, &current[seg_end..]))
+                        };
+                        return Some(next_full);
                     }
                 }
                 if is_final {
@@ -166,7 +162,7 @@ pub(crate) fn js_eloop_error(
     path: &str,
     context: &mut boa_engine::Context,
 ) -> boa_engine::JsError {
-    use boa_engine::{js_string, JsNativeError};
+    use boa_engine::{JsNativeError, js_string};
     let msg = format!(
         "ELOOP: too many symbolic links encountered, {} '{}'",
         syscall, path
@@ -277,12 +273,12 @@ pub(crate) fn has_file_ancestor(vfs: &VfsState, norm: &str, allow_host: bool) ->
             }
             Some(PathEntry::Tombstone) => {}
             None => {
-                if allow_host && !vfs.is_host_masked(anc) {
-                    if let Ok(m) = std::fs::metadata(anc) {
-                        if !m.is_dir() {
-                            return true;
-                        }
-                    }
+                if allow_host
+                    && !vfs.is_host_masked(anc)
+                    && let Ok(m) = std::fs::metadata(anc)
+                    && !m.is_dir()
+                {
+                    return true;
                 }
             }
         }
@@ -293,10 +289,10 @@ pub(crate) fn has_file_ancestor(vfs: &VfsState, norm: &str, allow_host: bool) ->
 
 #[inline]
 pub(crate) fn default_mtime_ms_for_path(vfs: &VfsState, norm: &str, allow_host: bool) -> f64 {
-    if let Some((_, ino)) = vfs.lookup_present(norm) {
-        if let Some(mt) = ino.mtime_ms {
-            return mt;
-        }
+    if let Some((_, ino)) = vfs.lookup_present(norm)
+        && let Some(mt) = ino.mtime_ms
+    {
+        return mt;
     }
     if BOA_DET_STATE.with(|s| s.get().is_some()) {
         return 1_700_000_000_000.0;
@@ -329,18 +325,20 @@ fn dir_has_any_children(vfs: &VfsState, norm_dir: &str, allow_host: bool) -> boo
         vfs.lookup_present(norm_dir).map(|(_, i)| &i.kind),
         Some(VfsEntryKind::Directory { host_opaque: true })
     );
-    if allow_host && !is_opaque && !vfs.is_host_masked(norm_dir) {
-        if let Ok(rd) = std::fs::read_dir(norm_dir) {
-            for entry in rd.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let child_norm = if norm_dir.ends_with('/') {
-                    format!("{}{}", norm_dir, name)
-                } else {
-                    format!("{}/{}", norm_dir, name)
-                };
-                if !vfs.is_host_masked(&child_norm) {
-                    return true;
-                }
+    if allow_host
+        && !is_opaque
+        && !vfs.is_host_masked(norm_dir)
+        && let Ok(rd) = std::fs::read_dir(norm_dir)
+    {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let child_norm = if norm_dir.ends_with('/') {
+                format!("{}{}", norm_dir, name)
+            } else {
+                format!("{}/{}", norm_dir, name)
+            };
+            if !vfs.is_host_masked(&child_norm) {
+                return true;
             }
         }
     }
@@ -366,13 +364,11 @@ fn materialize_host_dir_into_vfs(vfs: &mut VfsState, host_dir: &str) -> Result<(
             continue;
         };
         if ft.is_symlink() {
-            if !already_present {
-                if let Ok(target_path) = std::fs::read_link(entry.path()) {
-                    let target_str = target_path.to_string_lossy().replace('\\', "/");
-                    try_consume_isolate_memory(target_str.len())?;
-                    let id = vfs.alloc_inode(VfsEntryKind::Symlink(target_str), None, 1, 0);
-                    vfs.paths.insert(child_norm, PathEntry::Present(id));
-                }
+            if !already_present && let Ok(target_path) = std::fs::read_link(entry.path()) {
+                let target_str = target_path.to_string_lossy().replace('\\', "/");
+                try_consume_isolate_memory(target_str.len())?;
+                let id = vfs.alloc_inode(VfsEntryKind::Symlink(target_str), None, 1, 0);
+                vfs.paths.insert(child_norm, PathEntry::Present(id));
             }
         } else if ft.is_dir() {
             if !already_present {
@@ -381,12 +377,13 @@ fn materialize_host_dir_into_vfs(vfs: &mut VfsState, host_dir: &str) -> Result<(
                 vfs.paths.insert(child_norm.clone(), PathEntry::Present(id));
             }
             materialize_host_dir_into_vfs(vfs, &child_norm)?;
-        } else if ft.is_file() && !already_present {
-            if let Ok(bytes) = std::fs::read(entry.path()) {
-                try_consume_isolate_memory(bytes.len())?;
-                let id = vfs.alloc_inode(VfsEntryKind::File(Arc::new(bytes)), None, 1, 0);
-                vfs.paths.insert(child_norm, PathEntry::Present(id));
-            }
+        } else if ft.is_file()
+            && !already_present
+            && let Ok(bytes) = std::fs::read(entry.path())
+        {
+            try_consume_isolate_memory(bytes.len())?;
+            let id = vfs.alloc_inode(VfsEntryKind::File(Arc::new(bytes)), None, 1, 0);
+            vfs.paths.insert(child_norm, PathEntry::Present(id));
         }
     }
     Ok(())
@@ -421,7 +418,7 @@ pub(crate) fn utf8_vec_to_js_val(bytes: Vec<u8>) -> boa_engine::JsValue {
 
 pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
     use boa_engine::object::builtins::JsArray;
-    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsNativeError, JsValue as BoaVal, NativeFunction, js_string};
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_fs_check_write_sync"),
@@ -831,32 +828,33 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                     if !matches!(entry, PathEntry::Present(_)) {
                         continue;
                     }
-                    if let Some(rest) = k.strip_prefix(&prefix) {
-                        if let Some(first_seg) = rest.split('/').next() {
-                            if !first_seg.is_empty() {
-                                entries_set.insert(first_seg.to_string());
-                            }
-                        }
+                    if let Some(rest) = k.strip_prefix(&prefix)
+                        && let Some(first_seg) = rest.split('/').next()
+                        && !first_seg.is_empty()
+                    {
+                        entries_set.insert(first_seg.to_string());
                     }
                 }
                 let is_opaque = matches!(
                     vfs.lookup_present(&norm_dir).map(|(_, i)| &i.kind),
                     Some(VfsEntryKind::Directory { host_opaque: true })
                 );
-                if allow_host && !is_opaque && !vfs.is_host_masked(&norm_dir) {
-                    if let Ok(rd) = std::fs::read_dir(&norm_dir) {
-                        for entry in rd.flatten() {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            let child_norm = if norm_dir.ends_with('/') {
-                                format!("{}{}", norm_dir, name)
-                            } else {
-                                format!("{}/{}", norm_dir, name)
-                            };
-                            if vfs.is_host_masked(&child_norm) {
-                                continue;
-                            }
-                            entries_set.insert(name);
+                if allow_host
+                    && !is_opaque
+                    && !vfs.is_host_masked(&norm_dir)
+                    && let Ok(rd) = std::fs::read_dir(&norm_dir)
+                {
+                    for entry in rd.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let child_norm = if norm_dir.ends_with('/') {
+                            format!("{}{}", norm_dir, name)
+                        } else {
+                            format!("{}/{}", norm_dir, name)
+                        };
+                        if vfs.is_host_masked(&child_norm) {
+                            continue;
                         }
+                        entries_set.insert(name);
                     }
                 }
                 entries_set.into_iter().collect()
@@ -1472,14 +1470,15 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
             if in_vfs {
                 return Ok(BoaVal::from(js_string!(norm)));
             }
-            if allow_host && !host_masked {
-                if let Ok(canon) = std::fs::canonicalize(&norm) {
-                    let s = anchor_vfs_path(&canon.to_string_lossy());
-                    if !check_boa_fs_read_ocap(&s) {
-                        return Ok(BoaVal::from(js_string!("")));
-                    }
-                    return Ok(BoaVal::from(js_string!(s)));
+            if allow_host
+                && !host_masked
+                && let Ok(canon) = std::fs::canonicalize(&norm)
+            {
+                let s = anchor_vfs_path(&canon.to_string_lossy());
+                if !check_boa_fs_read_ocap(&s) {
+                    return Ok(BoaVal::from(js_string!("")));
                 }
+                return Ok(BoaVal::from(js_string!(s)));
             }
             Ok(BoaVal::from(js_string!(norm)))
         }),
@@ -1821,10 +1820,10 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                     BOA_VFS_STATE.with(|v| {
                         let mut vfs = v.borrow_mut();
                         vfs.ensure_dir_with_ancestors(&norm, false);
-                        if let Some((id, _)) = vfs.lookup_present(&norm) {
-                            if let Some(ino) = vfs.get_inode_mut(id) {
-                                ino.mtime_ms = Some(mtime_ms);
-                            }
+                        if let Some((id, _)) = vfs.lookup_present(&norm)
+                            && let Some(ino) = vfs.get_inode_mut(id)
+                        {
+                            ino.mtime_ms = Some(mtime_ms);
                         }
                     });
                 }

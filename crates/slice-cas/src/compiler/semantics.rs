@@ -53,10 +53,10 @@ fn classify_ts_type_ast(ty: &oxc::ast::ast::TSType<'_>) -> Option<&'static str> 
 
 fn extract_ts_type_ref_name<'a>(ty: &'a oxc::ast::ast::TSType<'a>) -> Option<&'a str> {
     use oxc::ast::ast::{TSType, TSTypeName};
-    if let TSType::TSTypeReference(tref) = ty {
-        if let TSTypeName::IdentifierReference(id) = &tref.type_name {
-            return Some(id.name.as_str());
-        }
+    if let TSType::TSTypeReference(tref) = ty
+        && let TSTypeName::IdentifierReference(id) = &tref.type_name
+    {
+        return Some(id.name.as_str());
     }
     None
 }
@@ -82,12 +82,12 @@ fn record_annotated_ident(
             }
             _ => {}
         }
-    } else if let Some(ref_name) = extract_ts_type_ref_name(ty) {
-        if hints.interface_schemas.contains_key(ref_name) {
-            hints
-                .interface_vars
-                .insert(ident.to_string(), ref_name.to_string());
-        }
+    } else if let Some(ref_name) = extract_ts_type_ref_name(ty)
+        && hints.interface_schemas.contains_key(ref_name)
+    {
+        hints
+            .interface_vars
+            .insert(ident.to_string(), ref_name.to_string());
     }
 }
 
@@ -141,14 +141,12 @@ pub fn analyze_typescript_semantics(source: &str) -> TypeDirectedHints {
         let iface_name = iface.id.name.to_string();
         let mut fields = Vec::new();
         for sig in &iface.body.body {
-            if let TSSignature::TSPropertySignature(prop) = sig {
-                if let Some(fname) = prop.key.name() {
-                    if let Some(ta) = &prop.type_annotation {
-                        if let Some(kind) = classify_ts_type_ast(&ta.type_annotation) {
-                            fields.push((fname.to_string(), kind.to_string()));
-                        }
-                    }
-                }
+            if let TSSignature::TSPropertySignature(prop) = sig
+                && let Some(fname) = prop.key.name()
+                && let Some(ta) = &prop.type_annotation
+                && let Some(kind) = classify_ts_type_ast(&ta.type_annotation)
+            {
+                fields.push((fname.to_string(), kind.to_string()));
             }
         }
         if !fields.is_empty() {
@@ -173,10 +171,10 @@ pub fn analyze_typescript_semantics(source: &str) -> TypeDirectedHints {
 
     fn walk_params(params: &FormalParameters<'_>, hints: &mut TypeDirectedHints) {
         for param in &params.items {
-            if let Some(ta) = &param.type_annotation {
-                if let BindingPattern::BindingIdentifier(id) = &param.pattern {
-                    record_annotated_ident(id.name.as_str(), &ta.type_annotation, hints);
-                }
+            if let Some(ta) = &param.type_annotation
+                && let BindingPattern::BindingIdentifier(id) = &param.pattern
+            {
+                record_annotated_ident(id.name.as_str(), &ta.type_annotation, hints);
             }
         }
     }
@@ -219,10 +217,10 @@ pub fn analyze_typescript_semantics(source: &str) -> TypeDirectedHints {
         match stmt {
             Statement::VariableDeclaration(vd) => {
                 for decl in &vd.declarations {
-                    if let Some(ta) = &decl.type_annotation {
-                        if let BindingPattern::BindingIdentifier(id) = &decl.id {
-                            record_annotated_ident(id.name.as_str(), &ta.type_annotation, hints);
-                        }
+                    if let Some(ta) = &decl.type_annotation
+                        && let BindingPattern::BindingIdentifier(id) = &decl.id
+                    {
+                        record_annotated_ident(id.name.as_str(), &ta.type_annotation, hints);
                     }
                     if let Some(init) = &decl.init {
                         walk_expr_types(init, hints);
@@ -252,14 +250,10 @@ pub fn analyze_typescript_semantics(source: &str) -> TypeDirectedHints {
             Statement::ExportDeclaration(exp) => match &exp.declaration {
                 Declaration::VariableDeclaration(vd) => {
                     for d in &vd.declarations {
-                        if let Some(ta) = &d.type_annotation {
-                            if let BindingPattern::BindingIdentifier(id) = &d.id {
-                                record_annotated_ident(
-                                    id.name.as_str(),
-                                    &ta.type_annotation,
-                                    hints,
-                                );
-                            }
+                        if let Some(ta) = &d.type_annotation
+                            && let BindingPattern::BindingIdentifier(id) = &d.id
+                        {
+                            record_annotated_ident(id.name.as_str(), &ta.type_annotation, hints);
                         }
                         if let Some(init) = &d.init {
                             walk_expr_types(init, hints);
@@ -290,14 +284,10 @@ pub fn analyze_typescript_semantics(source: &str) -> TypeDirectedHints {
             Statement::ForStatement(fs) => {
                 if let Some(oxc::ast::ast::ForStatementInit::VariableDeclaration(vd)) = &fs.init {
                     for d in &vd.declarations {
-                        if let Some(ta) = &d.type_annotation {
-                            if let BindingPattern::BindingIdentifier(id) = &d.id {
-                                record_annotated_ident(
-                                    id.name.as_str(),
-                                    &ta.type_annotation,
-                                    hints,
-                                );
-                            }
+                        if let Some(ta) = &d.type_annotation
+                            && let BindingPattern::BindingIdentifier(id) = &d.id
+                        {
+                            record_annotated_ident(id.name.as_str(), &ta.type_annotation, hints);
                         }
                     }
                 }

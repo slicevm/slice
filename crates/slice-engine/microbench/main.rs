@@ -1,15 +1,14 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use slice_engine::boacas::{compute_boacas_metadata, pack_boacas_container};
 use slice_engine::intrinsics::{
-    aes_cbc_decrypt_with_expanded, aes_cbc_encrypt_with_expanded, aes_gcm_encrypt,
+    AesExpandedKey, aes_cbc_decrypt_with_expanded, aes_cbc_encrypt_with_expanded, aes_gcm_encrypt,
     aes_gcm_open_with_key, aes_gcm_seal_with_key, base64_decode, base64_encode, crc32_checksum,
     ed25519_keypair_from_seed, ed25519_sign_bytes, ed25519_verify_bytes, fast_parse_bytes,
     fast_parse_ms, hmac_sha256_hex, make_ring_aead_key, parse_whatwg_url,
     sample_unbiased_u64_below, sha256_hex, zlib_compress_bytes, zlib_decompress_bytes,
-    AesExpandedKey,
 };
 use slice_engine::{
-    compile_source_to_bytecode, is_tier0_slicesnp_compatible_ast, HttpRequestContext, SliceIsolate,
+    HttpRequestContext, SliceIsolate, compile_source_to_bytecode, is_tier0_slicesnp_compatible_ast,
 };
 use slice_sandbox::CapabilityToken;
 use std::hint::black_box;

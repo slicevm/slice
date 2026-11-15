@@ -317,10 +317,10 @@ pub(crate) fn eval_ultra_core_prelude(
 ) -> boa_engine::JsResult<boa_engine::JsValue> {
     let precompiled =
         ULTRA_CORE_SLICEBC.get_or_init(|| compile_static_js_to_slicebc(ULTRA_CORE_PRELUDE));
-    if !precompiled.is_empty() {
-        if let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context) {
-            return script.evaluate(context);
-        }
+    if !precompiled.is_empty()
+        && let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context)
+    {
+        return script.evaluate(context);
     }
     context.eval(boa_engine::Source::from_bytes(ULTRA_CORE_PRELUDE))
 }
@@ -332,10 +332,10 @@ pub(crate) fn eval_lazy_getters_init_prelude(
 ) -> boa_engine::JsResult<boa_engine::JsValue> {
     let precompiled = LAZY_GETTERS_SLICEBC
         .get_or_init(|| compile_static_js_to_slicebc(LAZY_GETTERS_INIT_PRELUDE));
-    if !precompiled.is_empty() {
-        if let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context) {
-            return script.evaluate(context);
-        }
+    if !precompiled.is_empty()
+        && let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context)
+    {
+        return script.evaluate(context);
     }
     context.eval(boa_engine::Source::from_bytes(LAZY_GETTERS_INIT_PRELUDE))
 }
@@ -354,10 +354,10 @@ pub(crate) fn eval_lazy_prelude_shard(
     let bytes = shard_prelude_bytes(shard_id);
     let precompiled =
         SHARD_SLICEBC[shard_id as usize].get_or_init(|| compile_static_js_to_slicebc(bytes));
-    if !precompiled.is_empty() {
-        if let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context) {
-            return script.evaluate(context);
-        }
+    if !precompiled.is_empty()
+        && let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context)
+    {
+        return script.evaluate(context);
     }
     context.eval(boa_engine::Source::from_bytes(bytes))
 }

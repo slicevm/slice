@@ -1,11 +1,11 @@
 #![allow(unused_imports)]
 use crate::intrinsics::{
-    digest_to_hex, fast_format_bytes, fast_format_ms, fast_parse_bytes, fast_parse_ms,
-    hmac_sha256_hex, sha256_hex, Sha256State,
+    Sha256State, digest_to_hex, fast_format_bytes, fast_format_ms, fast_parse_bytes, fast_parse_ms,
+    hmac_sha256_hex, sha256_hex,
 };
 use crate::{
-    compile_source_to_bytecode, disassemble_bytecode, run_source_isolated, ExecutionTier,
-    HttpRequestContext, JsValue, SliceIsolate,
+    ExecutionTier, HttpRequestContext, JsValue, SliceIsolate, compile_source_to_bytecode,
+    disassemble_bytecode, run_source_isolated,
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
@@ -782,7 +782,7 @@ console.log(JSON.stringify({ own: own.returnValue, escaped: escaped.returnValue 
 
 #[test]
 fn test_issue_3_checkpoint_slab_bounded_and_released() {
-    use crate::state_and_kv::{checkpoint_slab_len, MAX_CHECKPOINTS_PER_SLAB};
+    use crate::state_and_kv::{MAX_CHECKPOINTS_PER_SLAB, checkpoint_slab_len};
 
     let src = r#"
 for (let i = 0; i < 200; i++) {
@@ -1679,8 +1679,8 @@ setTimeout(() => {
 #[test]
 fn test_issue_101_tier0_ast_gate_rejects_globals_and_nested_member_writes_while_preserving_ses() {
     use crate::{
-        compile_source_to_bytecode, is_tier0_slicesnp_compatible_ast, run_source_isolated,
-        SliceIsolate, SNAPSHOT_MAGIC,
+        SNAPSHOT_MAGIC, SliceIsolate, compile_source_to_bytecode, is_tier0_slicesnp_compatible_ast,
+        run_source_isolated,
     };
     use slice_sandbox::{CapabilityToken, SandboxViolation};
 

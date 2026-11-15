@@ -154,11 +154,11 @@ pub(crate) fn cmd_mcp(args: &[String]) -> Result<()> {
                         continue;
                     }
                 };
-                if !line_str.is_empty() {
-                    if let Some(resp_json) = handle_mcp_jsonrpc_line(line_str, &mut isolate) {
-                        writeln!(stdout, "{}", resp_json)?;
-                        stdout.flush()?;
-                    }
+                if !line_str.is_empty()
+                    && let Some(resp_json) = handle_mcp_jsonrpc_line(line_str, &mut isolate)
+                {
+                    writeln!(stdout, "{}", resp_json)?;
+                    stdout.flush()?;
                 }
             }
         }

@@ -10,10 +10,10 @@
 
 use crate::bindings::fs::VfsSnapshot;
 use crate::boa_realm::{
-    check_boa_fs_read_ocap, mark_subsystem_dirty, norm_vfs_path, vfs_owner_namespace, BoaFsCaps,
     BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_ENV_MAP,
     BOA_EXEC_BINS, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
-    BOA_VFS_OWNER_TENANT, BOA_VFS_STATE, BOA_VIOLATION, DIRTY_WORKERS,
+    BOA_VFS_OWNER_TENANT, BOA_VFS_STATE, BOA_VIOLATION, BoaFsCaps, DIRTY_WORKERS,
+    check_boa_fs_read_ocap, mark_subsystem_dirty, norm_vfs_path, vfs_owner_namespace,
 };
 use crate::intrinsics::base64_decode;
 use crate::isolate::SliceIsolate;
@@ -262,10 +262,10 @@ pub(crate) fn has_pending_worker_work() -> bool {
         if !e.is_worker_thread || !e.self_listening {
             return false;
         }
-        if let Some(ref term) = e.terminated {
-            if term.load(Ordering::Acquire) {
-                return false;
-            }
+        if let Some(ref term) = e.terminated
+            && term.load(Ordering::Acquire)
+        {
+            return false;
         }
         true
     })
@@ -690,11 +690,11 @@ fn compile_or_get_worker_bytecode(raw_script: &str) -> Arc<Vec<u8>> {
     raw_script.hash(&mut hasher);
     let script_hash = hasher.finish();
 
-    if let Ok(cache) = worker_script_cache().lock() {
-        if let Some(existing) = cache.get(&script_hash) {
-            WORKER_SCRIPT_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-            return Arc::clone(existing);
-        }
+    if let Ok(cache) = worker_script_cache().lock()
+        && let Some(existing) = cache.get(&script_hash)
+    {
+        WORKER_SCRIPT_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        return Arc::clone(existing);
     }
 
     let transpiled_js = slice_cas::strip_typescript_and_normalize(raw_script, true);
@@ -851,10 +851,10 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
     // Fast abort if parent already called `worker.terminate()` before job started
     if terminated_clone.load(Ordering::Acquire) {
         GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
-        if let Ok(mut pool) = idle_worker_pool().lock() {
-            if pool.len() < MAX_POOLED_WORKER_THREADS {
-                pool.push(self_job_tx.clone());
-            }
+        if let Ok(mut pool) = idle_worker_pool().lock()
+            && pool.len() < MAX_POOLED_WORKER_THREADS
+        {
+            pool.push(self_job_tx.clone());
         }
         let _ = event_tx.send(WorkerOutboundEvent {
             worker_id,
@@ -935,10 +935,10 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
     BOA_VFS_OWNER_TENANT.with(|o| o.borrow_mut().clear());
     BOA_VFS_STATE.with(|v| v.borrow_mut().clear());
     GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
-    if let Ok(mut pool) = idle_worker_pool().lock() {
-        if pool.len() < MAX_POOLED_WORKER_THREADS {
-            pool.push(self_job_tx.clone());
-        }
+    if let Ok(mut pool) = idle_worker_pool().lock()
+        && pool.len() < MAX_POOLED_WORKER_THREADS
+    {
+        pool.push(self_job_tx.clone());
     }
 
     if was_terminated {
@@ -1102,11 +1102,11 @@ pub(crate) fn poll_worker_self_inbox_and_dispatch(
 
     WORKER_SELF_ENV.with(|env| {
         let mut e = env.borrow_mut();
-        if let Some(ref term) = e.terminated {
-            if term.load(Ordering::Acquire) {
-                should_terminate = true;
-                return;
-            }
+        if let Some(ref term) = e.terminated
+            && term.load(Ordering::Acquire)
+        {
+            should_terminate = true;
+            return;
         }
         let Some(ref rx) = e.inbound_rx else {
             return;
@@ -1120,15 +1120,17 @@ pub(crate) fn poll_worker_self_inbox_and_dispatch(
                 }
             }
         }
-        if !should_terminate && received_msgs.is_empty() && e.self_listening {
-            if let Some(dur) = wait_timeout {
-                match rx.recv_timeout(dur) {
-                    Ok(WorkerInboundCmd::Message(m)) => received_msgs.push(m),
-                    Ok(WorkerInboundCmd::Terminate) | Err(RecvTimeoutError::Disconnected) => {
-                        should_terminate = true;
-                    }
-                    Err(RecvTimeoutError::Timeout) => {}
+        if !should_terminate
+            && received_msgs.is_empty()
+            && e.self_listening
+            && let Some(dur) = wait_timeout
+        {
+            match rx.recv_timeout(dur) {
+                Ok(WorkerInboundCmd::Message(m)) => received_msgs.push(m),
+                Ok(WorkerInboundCmd::Terminate) | Err(RecvTimeoutError::Disconnected) => {
+                    should_terminate = true;
                 }
+                Err(RecvTimeoutError::Timeout) => {}
             }
         }
         if should_terminate {
@@ -1146,64 +1148,63 @@ pub(crate) fn poll_worker_self_inbox_and_dispatch(
     if let Ok(dispatch_val) = ctx
         .global_object()
         .get(boa_engine::js_string!("__slice_worker_self_deliver"), ctx)
+        && let Some(dispatch_fn) = dispatch_val.as_object()
     {
-        if let Some(dispatch_fn) = dispatch_val.as_object() {
-            for msg_json in received_msgs {
-                let arg = JsValue::from(boa_engine::js_string!(msg_json));
-                let call_res = dispatch_fn.call(&JsValue::undefined(), &[arg], ctx);
-                let _ = ctx.run_jobs();
-                if crate::boa_realm::has_process_exit() {
+        for msg_json in received_msgs {
+            let arg = JsValue::from(boa_engine::js_string!(msg_json));
+            let call_res = dispatch_fn.call(&JsValue::undefined(), &[arg], ctx);
+            let _ = ctx.run_jobs();
+            if crate::boa_realm::has_process_exit() {
+                return true;
+            }
+            if let Err(err) = call_res {
+                let msg = err.to_string();
+                if msg.starts_with("__SLICE_PROCESS_EXIT__:") {
                     return true;
                 }
-                if let Err(err) = call_res {
-                    let msg = err.to_string();
-                    if msg.starts_with("__SLICE_PROCESS_EXIT__:") {
-                        return true;
-                    }
-                    if msg.contains("RuntimeLimitError")
-                        || msg.contains("iteration loops")
-                        || msg.contains("loop iteration limit")
-                        || msg.contains("Maximum call stack")
-                        || msg.contains("recursion limit")
-                    {
-                        let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-                        BOA_VIOLATION.with(|v| {
-                            if v.borrow().is_none() {
-                                *v.borrow_mut() = Some(SandboxViolation::CpuFuelExhausted {
-                                    tenant_id,
-                                    limit: 0,
-                                });
-                            }
-                        });
-                    } else if BOA_VIOLATION.with(|v| v.borrow().is_none()) {
-                        WORKER_SELF_ENV.with(|env| {
-                            let mut e = env.borrow_mut();
-                            e.self_listening = false;
-                            e.explicit_exit_code = Some(1);
-                            if let Some(ref tx) = e.outbound_tx {
-                                let _ = tx.send(WorkerOutboundEvent {
-                                    worker_id: e.thread_id,
-                                    kind: WorkerOutboundEventKind::Error {
-                                        message: format!("Uncaught {}", msg),
-                                        is_violation: false,
-                                    },
-                                });
-                            }
-                        });
-                        return true;
-                    }
-                }
-                if BOA_VIOLATION.with(|v| v.borrow().is_some()) {
+                if msg.contains("RuntimeLimitError")
+                    || msg.contains("iteration loops")
+                    || msg.contains("loop iteration limit")
+                    || msg.contains("Maximum call stack")
+                    || msg.contains("recursion limit")
+                {
+                    let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+                    BOA_VIOLATION.with(|v| {
+                        if v.borrow().is_none() {
+                            *v.borrow_mut() = Some(SandboxViolation::CpuFuelExhausted {
+                                tenant_id,
+                                limit: 0,
+                            });
+                        }
+                    });
+                } else if BOA_VIOLATION.with(|v| v.borrow().is_none()) {
                     WORKER_SELF_ENV.with(|env| {
                         let mut e = env.borrow_mut();
                         e.self_listening = false;
                         e.explicit_exit_code = Some(1);
+                        if let Some(ref tx) = e.outbound_tx {
+                            let _ = tx.send(WorkerOutboundEvent {
+                                worker_id: e.thread_id,
+                                kind: WorkerOutboundEventKind::Error {
+                                    message: format!("Uncaught {}", msg),
+                                    is_violation: false,
+                                },
+                            });
+                        }
                     });
                     return true;
                 }
             }
-            return true;
+            if BOA_VIOLATION.with(|v| v.borrow().is_some()) {
+                WORKER_SELF_ENV.with(|env| {
+                    let mut e = env.borrow_mut();
+                    e.self_listening = false;
+                    e.explicit_exit_code = Some(1);
+                });
+                return true;
+            }
         }
+        return true;
     }
     false
 }
@@ -1223,37 +1224,37 @@ pub(crate) fn poll_parent_worker_events_and_dispatch(
     PARENT_WORKERS.with(|reg| {
         let mut r = reg.borrow_mut();
         while let Ok(ev) = r.event_rx.try_recv() {
-            if let WorkerOutboundEventKind::Exit { fuel_consumed, .. } = ev.kind {
-                if let Some(h) = r.workers.get_mut(&ev.worker_id) {
+            if let WorkerOutboundEventKind::Exit { fuel_consumed, .. } = ev.kind
+                && let Some(h) = r.workers.get_mut(&ev.worker_id)
+            {
+                h.finished = true;
+                h.reconcile_resources(fuel_consumed);
+                reconciled_any = true;
+            }
+            events.push(ev);
+        }
+        if events.is_empty()
+            && r.has_active_refed_workers()
+            && let Some(dur) = wait_timeout
+            && let Ok(ev) = r.event_rx.recv_timeout(dur)
+        {
+            if let WorkerOutboundEventKind::Exit { fuel_consumed, .. } = ev.kind
+                && let Some(h) = r.workers.get_mut(&ev.worker_id)
+            {
+                h.finished = true;
+                h.reconcile_resources(fuel_consumed);
+                reconciled_any = true;
+            }
+            events.push(ev);
+            while let Ok(ev2) = r.event_rx.try_recv() {
+                if let WorkerOutboundEventKind::Exit { fuel_consumed, .. } = ev2.kind
+                    && let Some(h) = r.workers.get_mut(&ev2.worker_id)
+                {
                     h.finished = true;
                     h.reconcile_resources(fuel_consumed);
                     reconciled_any = true;
                 }
-            }
-            events.push(ev);
-        }
-        if events.is_empty() && r.has_active_refed_workers() {
-            if let Some(dur) = wait_timeout {
-                if let Ok(ev) = r.event_rx.recv_timeout(dur) {
-                    if let WorkerOutboundEventKind::Exit { fuel_consumed, .. } = ev.kind {
-                        if let Some(h) = r.workers.get_mut(&ev.worker_id) {
-                            h.finished = true;
-                            h.reconcile_resources(fuel_consumed);
-                            reconciled_any = true;
-                        }
-                    }
-                    events.push(ev);
-                    while let Ok(ev2) = r.event_rx.try_recv() {
-                        if let WorkerOutboundEventKind::Exit { fuel_consumed, .. } = ev2.kind {
-                            if let Some(h) = r.workers.get_mut(&ev2.worker_id) {
-                                h.finished = true;
-                                h.reconcile_resources(fuel_consumed);
-                                reconciled_any = true;
-                            }
-                        }
-                        events.push(ev2);
-                    }
-                }
+                events.push(ev2);
             }
         }
         r.workers.retain(|_, w| !w.finished);
@@ -1276,39 +1277,38 @@ pub(crate) fn poll_parent_worker_events_and_dispatch(
     if let Ok(dispatch_val) = ctx
         .global_object()
         .get(boa_engine::js_string!("__slice_worker_host_deliver"), ctx)
+        && let Some(dispatch_fn) = dispatch_val.as_object()
     {
-        if let Some(dispatch_fn) = dispatch_val.as_object() {
-            for ev in events {
-                let (ev_type, payload_str, code_num) = match ev.kind {
-                    WorkerOutboundEventKind::Online => ("online", String::new(), 0.0),
-                    WorkerOutboundEventKind::Message(m) => ("message", m, 0.0),
-                    WorkerOutboundEventKind::Error {
-                        message,
-                        is_violation,
-                    } => (
-                        "error",
-                        if is_violation && !message.starts_with("SandboxViolation") {
-                            format!("SandboxViolation: {}", message)
-                        } else {
-                            message
-                        },
-                        1.0,
-                    ),
-                    WorkerOutboundEventKind::Exit { exit_code, .. } => {
-                        ("exit", String::new(), exit_code as f64)
-                    }
-                };
-                let args = [
-                    JsValue::from(ev.worker_id as f64),
-                    JsValue::from(boa_engine::js_string!(ev_type)),
-                    JsValue::from(boa_engine::js_string!(payload_str)),
-                    JsValue::from(code_num),
-                ];
-                let _ = dispatch_fn.call(&JsValue::undefined(), &args, ctx);
-                let _ = ctx.run_jobs();
-            }
-            return true;
+        for ev in events {
+            let (ev_type, payload_str, code_num) = match ev.kind {
+                WorkerOutboundEventKind::Online => ("online", String::new(), 0.0),
+                WorkerOutboundEventKind::Message(m) => ("message", m, 0.0),
+                WorkerOutboundEventKind::Error {
+                    message,
+                    is_violation,
+                } => (
+                    "error",
+                    if is_violation && !message.starts_with("SandboxViolation") {
+                        format!("SandboxViolation: {}", message)
+                    } else {
+                        message
+                    },
+                    1.0,
+                ),
+                WorkerOutboundEventKind::Exit { exit_code, .. } => {
+                    ("exit", String::new(), exit_code as f64)
+                }
+            };
+            let args = [
+                JsValue::from(ev.worker_id as f64),
+                JsValue::from(boa_engine::js_string!(ev_type)),
+                JsValue::from(boa_engine::js_string!(payload_str)),
+                JsValue::from(code_num),
+            ];
+            let _ = dispatch_fn.call(&JsValue::undefined(), &args, ctx);
+            let _ = ctx.run_jobs();
         }
+        return true;
     }
     let _ = Source::from_bytes(b"");
     false

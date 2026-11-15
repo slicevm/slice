@@ -10,11 +10,12 @@ use crate::bindings::helpers::{
 use crate::bindings::wintertc_and_buffer::register_buffer_host_functions;
 use crate::boa_realm::{BOA_ACTIVE_TENANT, BOA_DET_STATE};
 use crate::intrinsics::{
-    aes_cbc_decrypt, aes_cbc_decrypt_with_expanded, aes_cbc_encrypt, aes_cbc_encrypt_with_expanded,
-    aes_gcm_decrypt, aes_gcm_encrypt, aes_gcm_open_with_key, aes_gcm_seal_with_key, base64_decode,
-    base64_encode, constant_time_eq, ecdsa_components_to_pkcs8, ecdsa_generate_keypair,
-    ecdsa_pub_to_spki, ecdsa_sign_bytes, ecdsa_verify_bytes, ed25519_keypair_from_seed,
-    ed25519_pub_to_spki, ed25519_seed_to_pkcs8_v1, ed25519_sign_bytes, ed25519_verify_bytes,
+    AesExpandedKey, CachedCryptoKeyMaterial, MAX_CRYPTO_RANDOM_INT_RANGE, aes_cbc_decrypt,
+    aes_cbc_decrypt_with_expanded, aes_cbc_encrypt, aes_cbc_encrypt_with_expanded, aes_gcm_decrypt,
+    aes_gcm_encrypt, aes_gcm_open_with_key, aes_gcm_seal_with_key, base64_decode, base64_encode,
+    constant_time_eq, ecdsa_components_to_pkcs8, ecdsa_generate_keypair, ecdsa_pub_to_spki,
+    ecdsa_sign_bytes, ecdsa_verify_bytes, ed25519_keypair_from_seed, ed25519_pub_to_spki,
+    ed25519_seed_to_pkcs8_v1, ed25519_sign_bytes, ed25519_verify_bytes,
     extract_ecdsa_pkcs8_components, extract_ecdsa_pub, extract_ed25519_pub, extract_ed25519_seed,
     extract_x25519_pub, extract_x25519_seed, fill_random_bytes, generate_uuid_v4,
     hkdf_derive_bytes, insert_cached_crypto_key, inspect_rsa_private_key, inspect_rsa_public_key,
@@ -22,12 +23,11 @@ use crate::intrinsics::{
     rsa_public_components_to_info, rsa_sign_bytes_with_alg, rsa_verify_bytes_with_alg,
     sample_unbiased_u64_below, scrypt_derive_bytes, sha1_bytes, sha256_bytes, sha384_bytes,
     sha512_bytes, with_cached_crypto_key, x25519_diffie_hellman, x25519_keypair_from_seed,
-    x25519_pub_to_spki, x25519_seed_to_pkcs8_v1, AesExpandedKey, CachedCryptoKeyMaterial,
-    MAX_CRYPTO_RANDOM_INT_RANGE,
+    x25519_pub_to_spki, x25519_seed_to_pkcs8_v1,
 };
 
 pub(crate) fn register_node_crypto_bootstrap_host_function(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_init_crypto_ext"), ctx)
@@ -48,7 +48,7 @@ pub(crate) fn register_node_crypto_bootstrap_host_function(ctx: &mut boa_engine:
 pub(crate) fn register_webcrypto_host_functions(ctx: &mut boa_engine::Context) {
     use boa_engine::builtins::typed_array::{TypedArray, TypedArrayKind};
     use boa_engine::object::builtins::JsArrayBuffer;
-    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsNativeError, JsValue as BoaVal, NativeFunction, js_string};
     register_buffer_host_functions(ctx);
     if ctx
         .global_object()
