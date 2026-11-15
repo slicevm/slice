@@ -147,45 +147,45 @@ Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`]
 ### 4.1 Verified Results Across All 33 Production Applications, Frameworks & Case Studies ([`tests/reports/latest.md`](../../tests/reports/latest.md))
 
 <!-- BENCHMARK_SUMMARY_START -->
-> **Latest Verified Benchmark Report:** **[`tests/reports/latest.md`](../../tests/reports/latest.md)** (Archive: [`bench_v0.11.0_20261113_221039Z_1182dae.md`](../../tests/reports/bench_v0.11.0_20261113_221039Z_1182dae.md))  
-> **Provenance:** Slice `v0.11.0` (`1182dae`) | Generated `2026-11-13T22:10:39Z` | Environment: `Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)`  
-> **Scorecard Across All 33 Production Workloads:** Beats **Deno (`v2.9.8`)** on **33/33**, **Node.js (`v27.0.0-alpha.0.0.0`)** on **33/33**, **Bun (`v1.4.4`)** on **28/33** cold one-shot, and **all 3 runtimes on 33/33 workloads in `--warm` pooled execution**.
+> **Latest Verified Benchmark Report:** **[`tests/reports/latest.md`](../../tests/reports/latest.md)** (Archive: [`bench_v0.12.0_20261115_020047Z_79e5c79.md`](../../tests/reports/bench_v0.12.0_20261115_020047Z_79e5c79.md))  
+> **Provenance:** Slice `v0.12.0` (`79e5c79`) | Generated `2026-11-15T02:00:47Z` | Environment: `Linux x86_64 Docker (io_uring SQPOLL + WRPKRU)`  
+> **Scorecard Across All 33 Production Workloads:** Beats **Deno (`v2.9.8`)** on **33/33**, **Node.js (`v27.0.0-alpha.0.0.0`)** on **33/33**, **Bun (`v1.4.4`)** on **29/33** cold one-shot, and **all 3 runtimes on 33/33 workloads in `--warm` pooled execution**.
 
 #### 1. Core Architecture, HTTP Throughput & 1,000-Tenant MicroVM Density
 
-| Metric | Slice (`v0.11.0` `SLICEBC\x01`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha.0.0.0`) | Slice Advantage |
+| Metric | Slice (`v0.12.0` `SLICEBC\x01`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha.0.0.0`) | Slice Advantage |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| **In-Process Isolate Cold Start (`P50` / `P99`)** | **`1.26 us` / `1.74 us`** | N/A (Process/VM) | N/A (Process/VM) | N/A (Process/VM) | **~120,000x faster than 125ms Firecracker VM** |
-| **1,000-Tenant MicroVM Swarm (Boot + Exec)** | **`1.48 ms` (`7.50 MB` RSS)** | > 5,000 ms | > 15,000 ms | > 30,000 ms | **> 3,900x faster / ~32,000x denser** |
-| **500-Module Monorepo Cold Boot (`stat()` Calls)** | **`2.87 ms` (`0 stat()`)** | `12.72 ms` (`500+ stat`) | `41.80 ms` (`500+ stat`) | `70.38 ms` (`1,500+ stat`) | **`4.4x` faster than Bun / `24.5x` Node.js** |
-| **HTTP/1.1 Keep-Alive Throughput (`16k` Reqs)** | **`153,678 req/s`** (Tier-0)<br>**`139,049 req/s`** (Tier-1) | `92,523 req/s` | `89,111 req/s` | `53,925 req/s` | **`1.66x` (`Tier-0`) / `1.50x` (`Tier-1`) vs `Bun.serve`** |
-| **Peak Process Memory (`Max RSS` Across Suite)** | **`13.25 - 22.88 MB`** | `25.88 - 40.88 MB` | `45.96 - 61.86 MB` | `69.40 - 91.75 MB` | **`1.5x-2.4x` less than Bun / `3.9x-6.8x` less than Node** |
+| **In-Process Isolate Cold Start (`P50` / `P99`)** | **`1.25 us` / `1.50 us`** | N/A (Process/VM) | N/A (Process/VM) | N/A (Process/VM) | **~120,000x faster than 125ms Firecracker VM** |
+| **1,000-Tenant MicroVM Swarm (Boot + Exec)** | **`1.46 ms` (`8.00 MB` RSS)** | > 5,000 ms | > 15,000 ms | > 30,000 ms | **> 3,900x faster / ~32,000x denser** |
+| **500-Module Monorepo Cold Boot (`stat()` Calls)** | **`2.72 ms` (`0 stat()`)** | `12.72 ms` (`500+ stat`) | `41.80 ms` (`500+ stat`) | `70.38 ms` (`1,500+ stat`) | **`4.7x` faster than Bun / `25.9x` Node.js** |
+| **HTTP/1.1 Keep-Alive Throughput (`16k` Reqs)** | **`161,024 req/s`** (Tier-0)<br>**`147,175 req/s`** (Tier-1) | `100,687 req/s` | `97,439 req/s` | `55,480 req/s` | **`1.60x` (`Tier-0`) / `1.46x` (`Tier-1`) vs `Bun.serve`** |
+| **Peak Process Memory (`Max RSS` Across Suite)** | **`13.60 - 23.88 MB`** | `25.75 - 40.54 MB` | `45.50 - 61.47 MB` | `69.66 - 93.00 MB` | **`1.5x-2.4x` less than Bun / `3.9x-6.8x` less than Node** |
 | **Multi-Tenant Security Containment** | **`5 / 5 PASS`** (OCap+SES+Fuel+DLP) | `0 / 5` (Ambient) | `2 / 5` (Coarse CLI) | `0 / 5` (Ambient) | **Hardware & Language Zero-Trust Isolation** |
 
 #### 2. Real-Life Workload Summary by Domain (All 33 Workloads Aggregated)
 
 | Workload Domain & Stack Coverage | Suites | Slice Cold `.cas` Avg (Range) | Slice Warm (`--warm`) Avg | Bun `v1.4.4` Avg | Deno `v2.9.8` Avg | Node.js `v27.0.0-alpha.0.0.0` Avg | Category Speedup vs Bun / Node.js |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **Core Edge, Auth & Crypto (`Apps 01, 04, 05, 16`)**<br><sub>Multi-file TS, SHA-256/HMAC, JWT/OAuth2, `.env` Auto-DLP</sub> | `4` | **`8.24 ms`** (`6.43-10.41 ms`) | **`2.17 ms`** | `14.61 ms` | `42.68 ms` | `64.82 ms` | **`1.77x Bun` (`6.73x` Warm) / `7.87x Node`** |
-| **NPM Ecosystem, AST & Disk I/O (`Apps 02, 03, 06, 07, 08, 20`)**<br><sub>`semver`, `flatted`, `dlv`/`dset`, `mitt`, 10-Shard JSONL I/O, `Buffer`</sub> | `6` | **`10.98 ms`** (`7.66-13.58 ms`) | **`3.28 ms`** | `17.76 ms` | `49.05 ms` | `67.72 ms` | **`1.62x Bun` (`5.42x` Warm) / `6.17x Node`** |
-| **WinterTC Web Standards, Fetch Mesh & DLP (`Apps 09-14, 17-19`)**<br><sub>`Request`/`Response`, Static CDN `304`, SSE, Live `fetch`, WebCrypto</sub> | `9` | **`17.00 ms`** (`8.89-31.74 ms`) | **`8.08 ms`** | `18.76 ms` | `53.63 ms` | `96.05 ms` | **`1.10x Bun` (`2.32x` Warm) / `5.65x Node`** |
-| **Realtime WebSockets, Workers & Wasm/TSX (`Apps 15, 21-24`)**<br><sub>RFC 6455 WS, `worker_threads` + TCP/UDP, Pure-Rust `wasmi` Wasm, TSX SSR</sub> | `5` | **`14.88 ms`** (`8.84-22.60 ms`) | **`2.79 ms`** | `30.93 ms` | `64.43 ms` | `87.19 ms` | **`2.08x Bun` (`11.09x` Warm) / `5.86x Node`** |
-| **Full-Stack Edge & Node Frameworks (`FW 01-04`)**<br><sub>`Hono v4.6.20`, `itty-router + UnJS Nitro`, `Express/Polka node:http`, `SvelteKit 3.1.1 + Svelte 5.57.3`</sub> | `4` | **`21.44 ms`** (`15.75-34.71 ms`) | **`8.52 ms`** | `29.78 ms` | `55.78 ms` | `105.37 ms` | **`1.39x Bun` (`3.50x` Warm) / `4.91x Node`** |
-| **AI Agent, Multi-Tenant SaaS & Chaos Case Studies (`CS 01-05`)**<br><sub>Depth-4 ToT Agent, MCP Code Mode, 12-Tenant Mesh, Wasm CDR, 48 Payment Sagas</sub> | `5` | **`21.30 ms`** (`14.44-33.98 ms`) | **`6.49 ms`** | `19.99 ms` | `55.03 ms` | `77.93 ms` | **`0.94x Bun` (`3.08x` Warm) / `3.66x Node`** |
+| **Core Edge, Auth & Crypto (`Apps 01, 04, 05, 16`)**<br><sub>Multi-file TS, SHA-256/HMAC, JWT/OAuth2, `.env` Auto-DLP</sub> | `4` | **`8.20 ms`** (`6.59-10.41 ms`) | **`2.49 ms`** | `14.96 ms` | `45.47 ms` | `65.14 ms` | **`1.82x Bun` (`6.02x` Warm) / `7.94x Node`** |
+| **NPM Ecosystem, AST & Disk I/O (`Apps 02, 03, 06, 07, 08, 20`)**<br><sub>`semver`, `flatted`, `dlv`/`dset`, `mitt`, 10-Shard JSONL I/O, `Buffer`</sub> | `6` | **`11.41 ms`** (`7.73-14.99 ms`) | **`3.47 ms`** | `17.92 ms` | `49.73 ms` | `69.52 ms` | **`1.57x Bun` (`5.16x` Warm) / `6.09x Node`** |
+| **WinterTC Web Standards, Fetch Mesh & DLP (`Apps 09-14, 17-19`)**<br><sub>`Request`/`Response`, Static CDN `304`, SSE, Live `fetch`, WebCrypto</sub> | `9` | **`16.87 ms`** (`9.84-32.22 ms`) | **`8.25 ms`** | `19.82 ms` | `55.08 ms` | `98.41 ms` | **`1.17x Bun` (`2.40x` Warm) / `5.83x Node`** |
+| **Realtime WebSockets, Workers & Wasm/TSX (`Apps 15, 21-24`)**<br><sub>RFC 6455 WS, `worker_threads` + TCP/UDP, Pure-Rust `wasmi` Wasm, TSX SSR</sub> | `5` | **`15.51 ms`** (`9.17-23.02 ms`) | **`2.91 ms`** | `30.14 ms` | `65.68 ms` | `88.72 ms` | **`1.94x Bun` (`10.36x` Warm) / `5.72x Node`** |
+| **Full-Stack Edge & Node Frameworks (`FW 01-04`)**<br><sub>`Hono v4.6.20`, `itty-router + UnJS Nitro`, `Express/Polka node:http`, `SvelteKit 3.1.1 + Svelte 5.57.3`</sub> | `4` | **`22.33 ms`** (`16.50-36.10 ms`) | **`8.12 ms`** | `29.50 ms` | `57.19 ms` | `96.61 ms` | **`1.32x Bun` (`3.63x` Warm) / `4.33x Node`** |
+| **AI Agent, Multi-Tenant SaaS & Chaos Case Studies (`CS 01-05`)**<br><sub>Depth-4 ToT Agent, MCP Code Mode, 12-Tenant Mesh, Wasm CDR, 48 Payment Sagas</sub> | `5` | **`21.90 ms`** (`14.81-35.52 ms`) | **`7.02 ms`** | `20.88 ms` | `56.53 ms` | `83.22 ms` | **`0.95x Bun` (`2.98x` Warm) / `3.80x Node`** |
 
 #### 3. Flagship Real-World Representative Workloads (9 of 33 Highlights)
 
 | # | Flagship Workload | Slice Cold `.cas` | Slice Warm (`--warm`) | Bun `v1.4.4` | Deno `v2.9.8` | Node.js `v27.0.0-alpha.0.0.0` | Speedup vs Bun / Node.js |
 | :- | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| **01** | `01-fintech-checkout` (Multi-File TS + SHA-256) | **`6.43 ms`** | **`1.11 ms`** | `13.29 ms` | `36.85 ms` | `62.68 ms` | **`2.07x Bun` (`11.94x` Warm) / `9.75x Node`** |
-| **03** | `03-disk-io-log-pipeline` (10 JSONL Shards Disk I/O) | **`7.66 ms`** | **`1.29 ms`** | `14.45 ms` | `44.42 ms` | `63.23 ms` | **`1.89x Bun` (`11.23x` Warm) / `8.26x Node`** |
-| **14** | `14-federated-api-mesh-dlp` (`bytes` + `dlv` + `dset` + Live `fetch`) | **`16.17 ms`** | **`8.23 ms`** | `21.85 ms` | `53.89 ms` | `107.69 ms` | **`1.35x Bun` (`2.65x` Warm) / `6.66x Node`** |
-| **20** | `20-node-compat-and-edge-router` (`Uint8Array` `Buffer`/Node Core/AST Bundler) | **`10.80 ms`** | **`0.54 ms`** | `22.84 ms` | `56.28 ms` | `76.17 ms` | **`2.11x Bun` (`41.99x` Warm) / `7.05x Node`** |
-| **22** | `22-worker-threads-and-raw-sockets` (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **`22.60 ms`** | **`4.04 ms`** | `65.10 ms` | `113.76 ms` | `103.45 ms` | **`2.88x Bun` (`16.11x` Warm) / `4.58x Node`** |
-| **FW-01** | `FW-01: frameworks/01-hono-edge-microservice` (`hono@4.6.20` + `hono/cookie` + `ms`) | **`15.75 ms`** | **`6.82 ms`** | `19.76 ms` | `52.28 ms` | `93.37 ms` | **`1.25x Bun` (`2.90x` Warm) / `5.93x Node`** |
-| **FW-04** | `FW-04: frameworks/04-sveltekit-edge-ssr` (`@sveltejs/kit@3.1.1` + `svelte@5.57.3` + `devalue@6.0.3`) | **`34.71 ms`** | **`15.47 ms`** | `44.28 ms` | `71.18 ms` | `112.31 ms` | **`1.28x Bun` (`2.86x` Warm) / `3.24x Node`** |
-| **CS-01** | `CS-01: case_studies/01-tot-autonomous-sre-agent` (20 ToT Sandboxes) | **`33.98 ms`** | **`12.95 ms`** | `28.25 ms` | `74.21 ms` | `88.47 ms` | **`0.83x Bun` (`2.18x` Warm) / `2.60x Node`** |
-| **CS-05** | `CS-05: case_studies/05-time-travel-chaos-fuzzer-payments` (48 Payment Sagas) | **`17.40 ms`** | **`8.31 ms`** | `20.07 ms` | `63.73 ms` | `82.89 ms` | **`1.15x Bun` (`2.42x` Warm) / `4.76x Node`** |
+| **01** | `01-fintech-checkout` (Multi-File TS + SHA-256) | **`6.59 ms`** | **`1.15 ms`** | `13.81 ms` | `37.40 ms` | `61.35 ms` | **`2.09x Bun` (`12.01x` Warm) / `9.30x Node`** |
+| **03** | `03-disk-io-log-pipeline` (10 JSONL Shards Disk I/O) | **`7.73 ms`** | **`1.29 ms`** | `14.72 ms` | `46.13 ms` | `65.09 ms` | **`1.90x Bun` (`11.39x` Warm) / `8.42x Node`** |
+| **14** | `14-federated-api-mesh-dlp` (`bytes` + `dlv` + `dset` + Live `fetch`) | **`15.13 ms`** | **`7.55 ms`** | `21.77 ms` | `55.41 ms` | `117.47 ms` | **`1.44x Bun` (`2.88x` Warm) / `7.77x Node`** |
+| **20** | `20-node-compat-and-edge-router` (`Uint8Array` `Buffer`/Node Core/AST Bundler) | **`11.07 ms`** | **`0.53 ms`** | `22.83 ms` | `57.54 ms` | `77.69 ms` | **`2.06x Bun` (`43.40x` Warm) / `7.02x Node`** |
+| **22** | `22-worker-threads-and-raw-sockets` (3 Worker Threads + TCP/UDP + 5-Ring Sec) | **`23.02 ms`** | **`4.70 ms`** | `63.02 ms` | `117.64 ms` | `103.76 ms` | **`2.74x Bun` (`13.42x` Warm) / `4.51x Node`** |
+| **FW-01** | `FW-01: frameworks/01-hono-edge-microservice` (`hono@4.6.20` + `hono/cookie` + `ms`) | **`16.50 ms`** | **`7.24 ms`** | `20.02 ms` | `54.59 ms` | `96.62 ms` | **`1.21x Bun` (`2.77x` Warm) / `5.85x Node`** |
+| **FW-04** | `FW-04: frameworks/04-sveltekit-edge-ssr` (`@sveltejs/kit@3.1.1` + `svelte@5.57.3` + `devalue@6.0.3`) | **`36.10 ms`** | **`15.19 ms`** | `43.34 ms` | `71.58 ms` | `115.35 ms` | **`1.20x Bun` (`2.85x` Warm) / `3.20x Node`** |
+| **CS-01** | `CS-01: case_studies/01-tot-autonomous-sre-agent` (20 ToT Sandboxes) | **`37.11 ms`** | **`15.04 ms`** | `29.77 ms` | `74.09 ms` | `92.39 ms` | **`0.84x Bun` (`1.98x` Warm) / `2.60x Node`** |
+| **CS-05** | `CS-05: case_studies/05-time-travel-chaos-fuzzer-payments` (48 Payment Sagas) | **`19.39 ms`** | **`9.01 ms`** | `21.42 ms` | `65.32 ms` | `86.49 ms` | **`1.10x Bun` (`2.38x` Warm) / `4.46x Node`** |
 
 *Full 33-workload latency breakdown, standalone binary metrics, peak RSS per app, and historical reports: **[`tests/reports/latest.md`](../../tests/reports/latest.md)**.*
 <!-- BENCHMARK_SUMMARY_END -->

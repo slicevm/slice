@@ -14,6 +14,7 @@ tests/frameworks/04-sveltekit-edge-ssr/package-lock.json
 .vscode
 /archive
 /.archive
+/.skills
 .env
 .env.*
 !.env.example
