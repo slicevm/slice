@@ -1,8 +1,8 @@
 use crate::commands::unique_temp_cas_path;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Serialize;
 use slice_cas::{CasBuilder, MappedCasArchive};
-use slice_engine::{compile_source_to_bytecode, SliceIsolate};
+use slice_engine::{SliceIsolate, compile_source_to_bytecode};
 use slice_io::{CompletionRingEngine, IoSubmission};
 use slice_sandbox::{CapabilityToken, HardwareProtectionDomain, SandboxViolation};
 use std::env;
@@ -62,8 +62,14 @@ pub(crate) fn cmd_doctor() -> Result<()> {
         (io_engine.status.registered_buffers * slice_io::FIXED_BUFFER_SIZE) / (1024 * 1024)
     );
     println!(
-        "  [OK] Memory Protection Domain   : PKEY 0x{:x} (PKRU Mask 0x{:08x}, Hardware MPK: {})",
-        pkey_domain.pkey, pkey_domain.pkru_mask, pkey_domain.hardware_enforced
+        "  [OK] Memory Protection Domain   : PKEY 0x{:x} (PKRU Mask 0x{:08x}, {})",
+        pkey_domain.pkey,
+        pkey_domain.pkru_mask,
+        if pkey_domain.hardware_enforced {
+            "Linux x86_64 PKRU switch active; pkey_mprotect page tagging not wired"
+        } else {
+            "virtual slot tag; safe-Rust + OCap cages active"
+        }
     );
     println!(
         "  [OK] CAS Cache-Line Alignment   : {} bytes (Zero-Copy mmap ready)",
@@ -201,10 +207,9 @@ console.log(status);
                     .arg("run")
                     .arg(&temp_cas)
                     .output()
+                    && out.status.success()
                 {
-                    if out.status.success() {
-                        proc_samples_ms.push(pt0.elapsed().as_secs_f64() * 1_000.0);
-                    }
+                    proc_samples_ms.push(pt0.elapsed().as_secs_f64() * 1_000.0);
                 }
             }
             if proc_samples_ms.is_empty() {
@@ -479,10 +484,10 @@ pub(crate) fn measure_current_process_rss_kb() -> u64 {
     {
         if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
             for line in status.lines() {
-                if let Some(rest) = line.strip_prefix("VmRSS:") {
-                    if let Some(kb) = crate::config::parse_u64_digits(rest) {
-                        return kb;
-                    }
+                if let Some(rest) = line.strip_prefix("VmRSS:")
+                    && let Some(kb) = crate::config::parse_u64_digits(rest)
+                {
+                    return kb;
                 }
             }
         }
@@ -505,7 +510,7 @@ pub(crate) fn measure_current_process_rss_kb() -> u64 {
         }
 
         #[link(name = "psapi")]
-        extern "system" {
+        unsafe extern "system" {
             fn K32GetProcessMemoryInfo(
                 process: isize,
                 ppsmemcounters: *mut ProcessMemoryCounters,
@@ -514,7 +519,7 @@ pub(crate) fn measure_current_process_rss_kb() -> u64 {
         }
 
         #[link(name = "kernel32")]
-        extern "system" {
+        unsafe extern "system" {
             fn GetCurrentProcess() -> isize;
         }
 

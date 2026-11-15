@@ -9,7 +9,7 @@ use crate::mcp_and_repl::{
 use crate::test_runner::{cmd_test, discover_test_files};
 use crate::{cmd_init, cmd_run};
 use slice_cas::MappedCasArchive;
-use slice_engine::{compile_source_to_bytecode, SliceIsolate};
+use slice_engine::{SliceIsolate, compile_source_to_bytecode};
 use slice_sandbox::CapabilityToken;
 use std::env;
 use std::io::{Read, Write};
@@ -333,9 +333,10 @@ allow_env = ["STRIPE_SECRET_KEY=sk_live_subdir_manifest_998877"]
     assert_eq!(cfg.mem_limit, 65536 * 1024);
     assert!(cfg.caps.allowed_read_prefixes.contains(&"/tmp".to_string()));
     assert!(cfg.caps.allowed_net_hosts.contains("api.example.com:443"));
-    assert!(cfg
-        .audit_secrets
-        .contains(&"sk_live_subdir_manifest_998877".to_string()));
+    assert!(
+        cfg.audit_secrets
+            .contains(&"sk_live_subdir_manifest_998877".to_string())
+    );
 
     // 2. With explicit CLI `--fuel=` and `--memory=` flags, CLI overrides must win over `slice.toml` `[limits]`.
     let args = vec![
@@ -349,14 +350,18 @@ allow_env = ["STRIPE_SECRET_KEY=sk_live_subdir_manifest_998877"]
         .unwrap();
     assert_eq!(cfg_override.fuel_limit, 777_000);
     assert_eq!(cfg_override.mem_limit, 8_388_608);
-    assert!(cfg_override
-        .caps
-        .allowed_read_prefixes
-        .contains(&"/custom".to_string()));
-    assert!(cfg_override
-        .caps
-        .allowed_read_prefixes
-        .contains(&"/tmp".to_string()));
+    assert!(
+        cfg_override
+            .caps
+            .allowed_read_prefixes
+            .contains(&"/custom".to_string())
+    );
+    assert!(
+        cfg_override
+            .caps
+            .allowed_read_prefixes
+            .contains(&"/tmp".to_string())
+    );
 
     // 3. Verify 4-layer precedence: Defaults (Tier 1, boacas=true) < slice.toml < Inline Directives < CLI Flags
     let inline_source = r#"// @slice-tier: tier1
@@ -406,10 +411,12 @@ console.log("hi");
     cfg_trusted
         .apply_inline_directives(inline_source, Some(&src_dir))
         .unwrap();
-    assert!(cfg_trusted
-        .caps
-        .allowed_read_prefixes
-        .contains(&"/inline_read".to_string()));
+    assert!(
+        cfg_trusted
+            .caps
+            .allowed_read_prefixes
+            .contains(&"/inline_read".to_string())
+    );
 
     // Explicit CLI flags win over inline directives
     let cli_win_args = vec![
@@ -475,9 +482,11 @@ console.log("agent script");
     assert_eq!(cfg_default.fuel_limit, default_fuel);
     assert_eq!(cfg_default.mem_limit, default_mem);
     // Adding extra DLP secrets is always allowed as a defensive restriction
-    assert!(cfg_default
-        .audit_secrets
-        .contains(&"AGENT_CANARY_TOKEN".to_string()));
+    assert!(
+        cfg_default
+            .audit_secrets
+            .contains(&"AGENT_CANARY_TOKEN".to_string())
+    );
 
     // 2. Monotonic attenuation: script CAN lower its own fuel/memory and narrow an already-granted prefix
     let attenuating_script = r#"// @slice-allow-read: ["/data/public/reports", "/etc"]
@@ -500,18 +509,24 @@ console.log("attenuated");
         cfg_attenuate.caps.allowed_read_prefixes,
         vec!["/data/public/reports".to_string()]
     );
-    assert!(cfg_attenuate
-        .caps
-        .allowed_net_hosts
-        .contains("api.stripe.com"));
-    assert!(!cfg_attenuate
-        .caps
-        .allowed_net_hosts
-        .contains("hooks.slack.com"));
-    assert!(!cfg_attenuate
-        .caps
-        .allowed_net_hosts
-        .contains("evil.example.com"));
+    assert!(
+        cfg_attenuate
+            .caps
+            .allowed_net_hosts
+            .contains("api.stripe.com")
+    );
+    assert!(
+        !cfg_attenuate
+            .caps
+            .allowed_net_hosts
+            .contains("hooks.slack.com")
+    );
+    assert!(
+        !cfg_attenuate
+            .caps
+            .allowed_net_hosts
+            .contains("evil.example.com")
+    );
 
     // 3. Explicit --trust-directives allows inline directives to grant capabilities and raise limits
     let mut cfg_trusted =
@@ -520,18 +535,24 @@ console.log("attenuated");
     cfg_trusted
         .apply_inline_directives(malicious_script, None)
         .unwrap();
-    assert!(cfg_trusted
-        .caps
-        .allowed_read_prefixes
-        .contains(&"/".to_string()));
-    assert!(cfg_trusted
-        .caps
-        .allowed_write_prefixes
-        .contains(&"/tmp".to_string()));
-    assert!(cfg_trusted
-        .caps
-        .allowed_net_hosts
-        .contains("evil.example.com"));
+    assert!(
+        cfg_trusted
+            .caps
+            .allowed_read_prefixes
+            .contains(&"/".to_string())
+    );
+    assert!(
+        cfg_trusted
+            .caps
+            .allowed_write_prefixes
+            .contains(&"/tmp".to_string())
+    );
+    assert!(
+        cfg_trusted
+            .caps
+            .allowed_net_hosts
+            .contains("evil.example.com")
+    );
     assert_eq!(cfg_trusted.fuel_limit, 999_999_999_999);
     assert_eq!(cfg_trusted.mem_limit, 4096 * 1024 * 1024);
 }
@@ -655,16 +676,18 @@ tls_key = "./certs/server.key"
     };
     let outcome = iso.execute_http_request(&bc, None, &req_ctx).unwrap();
     assert_eq!(outcome.status_code, 200);
-    assert!(outcome
-        .response_body
-        .contains(r#""servedBy":"Slice.serve""#));
+    assert!(
+        outcome
+            .response_body
+            .contains(r#""servedBy":"Slice.serve""#)
+    );
     assert!(outcome.response_body.contains("/hello-serve?x=1"));
 }
 
 #[test]
 fn test_wave2_issues_106_107_118_compiler_soundness_and_esm_cjs_interop_matrix() {
     use crate::commands::pack_and_compile::cmd_pack;
-    use crate::commands::run::{cmd_run, LAST_CLI_EXIT_CODE};
+    use crate::commands::run::{LAST_CLI_EXIT_CODE, cmd_run};
     use slice_cas::fuse_array_pipelines_ast;
     use slice_engine::run_source_isolated;
     use std::sync::atomic::Ordering;
@@ -998,7 +1021,7 @@ console.log(JSON.stringify({
 #[test]
 fn test_wave3_cli_matrix_direct_cas_cold_and_warm_across_issues_108_to_113() {
     use crate::commands::pack_and_compile::cmd_pack;
-    use crate::commands::run::{cmd_run, LAST_CLI_EXIT_CODE};
+    use crate::commands::run::{LAST_CLI_EXIT_CODE, cmd_run};
     use slice_sandbox::cached_normalized_cwd;
     use std::sync::atomic::Ordering;
 
@@ -1168,9 +1191,9 @@ console.log(JSON.stringify(summary));
 
 #[test]
 fn test_wave4_issues_114_to_121_cli_direct_cas_cold_and_warm_matrix() {
+    use crate::LAST_CLI_EXIT_CODE;
     use crate::commands::pack_and_compile::cmd_pack;
     use crate::commands::run::cmd_run;
-    use crate::LAST_CLI_EXIT_CODE;
     use slice_cas::MappedCasArchive;
     use slice_engine::SliceIsolate;
     use slice_sandbox::CapabilityToken;
@@ -1362,7 +1385,7 @@ runWave4();
 #[test]
 fn test_wave5_cli_source_packed_cas_cold_and_warm_wasm_parity() {
     use crate::commands::pack_and_compile::cmd_pack;
-    use crate::commands::run::{cmd_run, LAST_CLI_EXIT_CODE};
+    use crate::commands::run::{LAST_CLI_EXIT_CODE, cmd_run};
     use std::sync::atomic::Ordering;
 
     let tmp_dir = env::temp_dir().join(format!("slice_wave5_wasm_cli_{}", std::process::id()));
@@ -1475,6 +1498,180 @@ console.log(JSON.stringify(out));
     assert_eq!(
         warm_m.stdout.first().map(String::as_str),
         Some(expected_json)
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_wave6_issues_102_104_checkpoint_directives_attenuation_and_doctor() {
+    if std::env::var("SLICE_TEST_RUN_DOCTOR_CHILD").is_ok() {
+        crate::diagnostics::cmd_doctor().unwrap();
+        return;
+    }
+
+    use crate::config_and_watch::ResolvedExecutionConfig;
+
+    // 1. Default CLI config leaves allow_checkpoints = true, max_checkpoints = None (unlimited)
+    let cfg_base = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(&[], false).unwrap();
+    assert!(cfg_base.caps.allow_checkpoints);
+    assert_eq!(cfg_base.caps.max_checkpoints, None);
+
+    // 2. Untrusted inline `// @slice-no-checkpoints` disables checkpoints monotonically
+    let mut cfg_no_cp =
+        ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(&[], false).unwrap();
+    cfg_no_cp
+        .apply_inline_directives("// @slice-no-checkpoints\nconsole.log(1);\n", None)
+        .unwrap();
+    assert!(!cfg_no_cp.caps.allow_checkpoints);
+    assert_eq!(cfg_no_cp.caps.max_checkpoints, Some(0));
+
+    // 3. Untrusted inline `// @slice-checkpoints: true` CANNOT re-enable `--no-checkpoints`
+    let mut cfg_cannot_reenable = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(
+        &["--no-checkpoints".to_string()],
+        false,
+    )
+    .unwrap();
+    cfg_cannot_reenable
+        .apply_inline_directives("// @slice-checkpoints: true\nconsole.log(1);\n", None)
+        .unwrap();
+    assert!(!cfg_cannot_reenable.caps.allow_checkpoints);
+    assert_eq!(cfg_cannot_reenable.caps.max_checkpoints, Some(0));
+
+    // 4. Untrusted inline `// @slice-max-checkpoints` clamps via min(...) and cannot raise `--max-checkpoints=1`
+    let mut cfg_clamp_down = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(
+        &["--max-checkpoints=5".to_string()],
+        false,
+    )
+    .unwrap();
+    cfg_clamp_down
+        .apply_inline_directives("// @slice-max-checkpoints: 2\nconsole.log(1);\n", None)
+        .unwrap();
+    assert!(cfg_clamp_down.caps.allow_checkpoints);
+    assert_eq!(cfg_clamp_down.caps.max_checkpoints, Some(2));
+
+    let mut cfg_cannot_raise = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(
+        &["--max-checkpoints=1".to_string()],
+        false,
+    )
+    .unwrap();
+    cfg_cannot_raise
+        .apply_inline_directives("// @slice-max-checkpoints: 10\nconsole.log(1);\n", None)
+        .unwrap();
+    assert_eq!(cfg_cannot_raise.caps.max_checkpoints, Some(1));
+
+    // 5. Untrusted `// @slice-allow-env` narrows already-granted keys while preserving host values
+    let mut cfg_env_narrow = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(
+        &[
+            "--allow-env=STAGE=prod".to_string(),
+            "--allow-env=EXTRA=dropme".to_string(),
+        ],
+        false,
+    )
+    .unwrap();
+    cfg_env_narrow
+        .apply_inline_directives(
+            "// @slice-allow-env: [\"STAGE=spoofed\", \"UNGRANTED=evil\"]\nconsole.log(1);\n",
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        cfg_env_narrow
+            .caps
+            .allowed_env_keys
+            .get("STAGE")
+            .map(String::as_str),
+        Some("prod"),
+        "Host env value must be preserved when untrusted inline directive narrows env keys"
+    );
+    assert!(!cfg_env_narrow.caps.allowed_env_keys.contains_key("EXTRA"));
+    assert!(
+        !cfg_env_narrow
+            .caps
+            .allowed_env_keys
+            .contains_key("UNGRANTED")
+    );
+
+    // 6. Trusted `--trust-directives` vs explicit CLI override precedence over `slice.toml`
+    let mut cfg_trusted = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(
+        &["--trust-directives".to_string()],
+        false,
+    )
+    .unwrap();
+    cfg_trusted
+        .apply_manifest_toml("[capabilities]\nmax_checkpoints = 3\n", None)
+        .unwrap();
+    cfg_trusted
+        .apply_inline_directives("// @slice-max-checkpoints: 6\nconsole.log(1);\n", None)
+        .unwrap();
+    assert_eq!(cfg_trusted.caps.max_checkpoints, Some(6));
+
+    let mut cfg_cli_wins = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(
+        &[
+            "--trust-directives".to_string(),
+            "--max-checkpoints=4".to_string(),
+        ],
+        false,
+    )
+    .unwrap();
+    cfg_cli_wins
+        .apply_manifest_toml("[capabilities]\nmax_checkpoints = 2\n", None)
+        .unwrap();
+    cfg_cli_wins
+        .apply_inline_directives("// @slice-max-checkpoints: 9\nconsole.log(1);\n", None)
+        .unwrap();
+    assert_eq!(cfg_cli_wins.caps.max_checkpoints, Some(4));
+
+    // 7. End-to-end execution of `// @slice-max-checkpoints: 2` + `slice doctor` diagnostic check
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "slice_wave6_cp_doctor_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let script_path = tmp_dir.join("cp_attenuated.mjs");
+    std::fs::write(
+        &script_path,
+        r#"// @slice-max-checkpoints: 2
+const id1 = Slice.checkpoint();
+const id2 = Slice.checkpoint();
+if (!id1 || !id2) throw new Error("first two checkpoints must succeed");
+Slice.checkpoint();
+"#,
+    )
+    .unwrap();
+    let err = cmd_run(&[
+        script_path.to_string_lossy().to_string(),
+        "--quiet".to_string(),
+    ])
+    .expect_err("3rd checkpoint must trap under // @slice-max-checkpoints: 2");
+    assert!(
+        err.to_string().contains("max_checkpoints"),
+        "Unexpected error: {}",
+        err
+    );
+
+    let doctor_out = std::process::Command::new(std::env::current_exe().unwrap())
+        .env("SLICE_TEST_RUN_DOCTOR_CHILD", "1")
+        .arg("--exact")
+        .arg("cli_tests::frameworks_wasm_and_config_tests::test_wave6_issues_102_104_checkpoint_directives_attenuation_and_doctor")
+        .arg("--nocapture")
+        .output()
+        .expect("slice doctor child test");
+    assert!(
+        doctor_out.status.success(),
+        "slice doctor failed: {}",
+        String::from_utf8_lossy(&doctor_out.stderr)
+    );
+    let doctor_stdout = String::from_utf8_lossy(&doctor_out.stdout);
+    assert!(
+        doctor_stdout.contains("Memory Protection Domain   : PKEY 0x")
+            && (doctor_stdout.contains("pkey_mprotect page tagging not wired")
+                || doctor_stdout.contains("virtual slot tag; safe-Rust + OCap cages active")),
+        "Unexpected slice doctor output:\n{}",
+        doctor_stdout
     );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);

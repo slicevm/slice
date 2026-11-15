@@ -10,7 +10,7 @@ In Node.js and Bun, every `npm` package you install and every script you run inh
 | **Ring 2** | **OCap Filesystem & Subprocess Tokens (`FsCap` & `ExecCap`)** | Unauthorized file read/write, `..` traversal, & unlisted subprocess execution | `FsReadDenied` / `FsWriteDenied` / `ExecDenied` |
 | **Ring 3** | **OCap Network & Env Tokens (`NetCap` & `EnvCap`)** | Unauthorized outbound `fetch()` & `process.env` / `env()` credential harvesting | `NetAccessDenied` / `EnvAccessDenied` |
 | **Ring 4** | **Deterministic CPU Fuel, Memory & Checkpoint Cage** | Infinite loop CPU DoS (`while(true){}`), heap/KV exhaustion, & checkpoint abuse | `CpuFuelExhausted` / `MemoryCeilingExceeded` |
-| **Ring 5** | **Cloud Metadata SSRF Shield, Egress Secret DLP & Hardware MPK** | `169.254.169.254` SSRF, Base64/raw secret exfiltration, & cross-tenant memory access | `SSRF_METADATA_BLOCKED` / `EGRESS_SECRET_LEAK_BLOCKED` |
+| **Ring 5** | **Cloud Metadata SSRF Shield, Egress Secret DLP & PKRU Domain Scaffolding** | `169.254.169.254` SSRF, Base64/raw secret exfiltration, & Linux `x86_64` `WRPKRU` register domain switching (`pkey_mprotect` heap tagging not yet wired) | `SSRF_METADATA_BLOCKED` / `EGRESS_SECRET_LEAK_BLOCKED` |
 
 This chapter shows you how to configure and test every security control in your applications.
 
@@ -193,7 +193,7 @@ memory_kb = 4096     # Max 4 MB memory ceiling per tenant isolate
 
 [capabilities]
 allow_checkpoints = true
-max_checkpoints = 8  # Bound guest Slice.checkpoint() snapshots (default max: 64)
+max_checkpoints = 8  # Cap total Slice.checkpoint() calls (default: unlimited; per-thread slab retains 64 newest snapshots)
 ```
 Or on the CLI:
 ```bash
@@ -221,7 +221,7 @@ When running AI-generated scripts, user-submitted plugins, or downloaded snippet
    - **Filesystem, Network & Subprocess Capabilities (`// @slice-allow-read`, `// @slice-allow-write`, `// @slice-allow-net`, `// @slice-allow-exec`):** Strictly intersected against the capabilities already granted by `slice.toml`, `SLICE_*` environment variables, or CLI flags. If the host granted zero read paths or zero exec binaries, inline directives result in zero read paths and zero exec binaries.
    - **Environment Variables & `.env` Files (`// @slice-allow-env`, `// @slice-env-file`):** `// @slice-env-file` is ignored unless `trust_directives` is enabled, and `// @slice-allow-env` only permits keys already granted by the host.
    - **Outbound Egress DLP (`// @slice-audit-egress`):** Always additive - a script can always register *additional* secrets to block from leaking.
-   - **Server Listener Settings (`// @slice-port`, `// @slice-workers`, `// @slice-tls-cert`, `// @slice-tls-key`):** Ignored unless `trust_directives` is enabled.
+   - **TLS Certificate Files (`// @slice-tls-cert`, `// @slice-tls-key`):** Ignored unless `trust_directives` is enabled so untrusted scripts cannot point the server listener at arbitrary PEM files on disk.
 2. **Nested Sub-Sandboxes (`Slice.evalSandbox`) & `slice mcp` (`slice_eval_ts`):**
    - `Slice.evalSandbox(code, opts)` and the MCP `slice_eval_ts` tool **never** apply capability-granting or limit-raising `// @slice-*` directives from `code`; child capabilities are determined exclusively by `parent_caps` intersected with `opts`.
 3. **Explicit Opt-In (`--trust-directives`) & Complete Directive Stripping (`--no-directives`):**
@@ -246,3 +246,27 @@ Output:
   [PASS] Vector 5: Deterministic Fuel Cage preempted while(true) DoS loop
 Result: 5/5 Attack Vectors Deterministically Contained.
 ```
+
+---
+
+## 8. Hardware Memory Isolation (`MPK` / `PKRU`): Architecture, Current Status & Embedder Guidance
+
+Security reviewers and host embedders should understand clearly what Slice's `HardwareProtectionDomain` (`crates/slice-sandbox/src/compartment/pkey.rs`) enforces today versus where language-level and OS/VM boundaries apply:
+
+1. **Threat Model & Relationship to Rings 1-4:**
+   - **Primary isolation today:** Multi-tenant isolation and `--memory` quotas are enforced in **100% safe Rust** across Rings 1-4: SES prototype lockdown (`IntrinsicRegistry::lockdown` + `__slice_check_ses`), OCap capability tokens (`FsCap`, `NetCap`, `EnvCap`, `ExecCap`), deterministic CPU fuel metering, and byte-level memory cages (`BOA_KV_MEM_BUDGET` + `SliceWasmLimiter`). Guest JavaScript (`Boa` bytecode VM) and WebAssembly (`wasmi` pure-Rust interpreter) **never emit or execute guest-controlled native machine instructions**, so guest code cannot synthesize raw pointers or execute `WRPKRU` itself.
+   - **What MPK targets:** Intel/AMD Memory Protection Keys (`MPK` / `PKU`) are hardware defense-in-depth designed to mitigate hypothetical memory-safety bugs in native host code by restricting which tagged virtual memory pages the current CPU thread can read or write, without requiring a full kernel page-table (`CR3`) switch. MPK does **not** enforce `--memory` byte ceilings, prevent logic bugs in OCap rules, or mitigate CPU microarchitectural side channels.
+2. **Which Memory Pages Are Tagged Today (Groundwork Status):**
+   - `HardwareProtectionDomain::allocate` invokes `SYS_pkey_alloc` (syscall `330` on Linux `x86_64`) to acquire a kernel protection key (`1..=15`) and computes a `pkru_mask` that permits read/write (`0b00`) on default kernel key `0` and the active tenant's key while setting `PKEY_DISABLE_ACCESS | PKEY_DISABLE_WRITE` (`0b11`) on the other 14 keys. `enter_domain()` writes that mask into the per-thread `PKRU` register via `WRPKRU` before execution, and `Drop` resets `PKRU` to `0` and frees the key via `SYS_pkey_free` (syscall `331`).
+   - **Current limitation (`SYS_pkey_mprotect` not yet wired):** Slice does **not** yet call `SYS_pkey_mprotect` (syscall `329`) to assign `Boa` GC heap pages, `wasmi` linear memory pages, `EDGE_KV_SLAB`, or VFS slabs to non-zero protection keys. Because those allocations currently remain on default kernel key `0` (which every domain must leave accessible for the Rust call stack, allocator metadata, and shared engine code), the `WRPKRU` switch currently acts as **verified register-switch groundwork** rather than active cross-tenant heap page isolation.
+3. **Platform Support & How to Verify:**
+   - **Active `PKRU` switching:** Linux `x86_64` on a CPU and kernel with `PKU`/`OSPKE` enabled (`grep -E 'pku|ospke' /proc/cpuinfo`).
+   - **All other platforms** (Windows, macOS, Linux `aarch64` - ARM `POE` is not implemented - and VMs/containers where `SYS_pkey_alloc` returns `ENOSYS`/`EPERM`/`ENOSPC`): `HardwareProtectionDomain::allocate` deterministically assigns a virtual slot tag (`1..=15`) with `hardware_enforced = false`; `enter_domain()` and `Drop` become zero-cost no-ops.
+   - **Checking status:** Run `slice doctor` to inspect `PKEY`, `PKRU Mask`, and whether Linux `x86_64` `PKRU` switching or virtual slot tagging is active, or inspect `isolate.compartment.pkey_domain.hardware_enforced` in Rust.
+4. **Hardware Key Limits & Fallback Visibility:**
+   - `x86_64` hardware provides 16 protection keys (`0..=15`); key `0` is reserved for default kernel/process mappings, leaving **at most 15 concurrent hardware keys per OS process**.
+   - `PKRU` is a **per-hardware-thread** CPU register, and `SliceIsolate::reset_for_request` calls `rebind_slot()` so warm HTTP worker threads reuse their owned protection domain across requests without reallocating kernel keys.
+   - If more than 15 `HardwareProtectionDomain` handles are live simultaneously in one process (or if the host lacks PKU), `allocate()` falls back non-fatally to `hardware_enforced = false`. Rust embedders that require hardware key allocation can check `if !isolate.compartment.pkey_domain.hardware_enforced { ... }` at worker startup.
+5. **Embedder Guidance for High-Density Multi-Tenant Hosts:**
+   - Pin one active `SliceIsolate` per worker thread (`slice serve --workers=N`), keep `--fuel` and `--memory` ceilings bounded per request, and let `BOA_CONTEXT_POOL` recycle clean SES-verified realms.
+   - Because in-process `pkey_mprotect` heap tagging is not yet wired (and `x86_64` MPK offers 15 keys per process), deployments defending against hostile native-level kernel/hardware or compiler soundness bugs should pair Slice's in-process 5-Ring OCap sandbox with OS process isolation, `seccomp-bpf` / namespaces, or lightweight MicroVMs (`Firecracker`, `Cloud Hypervisor`, `gVisor`) per trust tier.

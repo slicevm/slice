@@ -16,9 +16,9 @@ pub(crate) use secrets_and_env::{
     apply_dotenv_file_to_caps_and_dlp, load_audit_egress_file, maybe_register_sensitive_env_dlp,
     register_audit_egress_spec,
 };
+pub(crate) use watcher::OsNativeFileWatcher;
 #[cfg(test)]
 pub(crate) use watcher::collect_watch_fingerprint;
-pub(crate) use watcher::OsNativeFileWatcher;
 
 use anyhow::{Context, Result};
 use slice_sandbox::{CapabilityToken, SliceManifest};
@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 mod win_ctrlc {
-    extern "system" {
+    unsafe extern "system" {
         fn SetConsoleCtrlHandler(
             handler: Option<unsafe extern "system" fn(u32) -> i32>,
             add: i32,
@@ -91,6 +91,8 @@ pub(crate) struct ResolvedExecutionConfig {
     pub(crate) cli_tls_cert_override: Option<PathBuf>,
     pub(crate) cli_tls_key_override: Option<PathBuf>,
     pub(crate) cli_trust_directives_override: Option<bool>,
+    pub(crate) cli_checkpoints_override: Option<bool>,
+    pub(crate) cli_max_checkpoints_override: Option<u32>,
 }
 
 fn extract_explicit_config_path(args: &[String]) -> Result<Option<PathBuf>> {
@@ -153,6 +155,8 @@ impl ResolvedExecutionConfig {
         let mut cli_tls_cert_override = None;
         let mut cli_tls_key_override = None;
         let mut cli_trust_directives_override = None;
+        let mut cli_checkpoints_override = None;
+        let mut cli_max_checkpoints_override = None;
 
         // 1. Apply explicit `--config <path>` or `./slice.toml` (fail-closed if present and unreadable)
         let mut loaded_manifest_path: Option<PathBuf> = None;
@@ -229,27 +233,27 @@ impl ResolvedExecutionConfig {
         }
 
         // 2. Apply `SLICE_*` environment variables (override slice.toml, overridden by CLI flags)
-        if let Ok(v) = std::env::var("SLICE_FUEL") {
-            if let Some(parsed) = flags::parse_u64_digits(&v) {
-                fuel_limit = parsed;
-                cli_fuel_override = Some(parsed);
-            }
+        if let Ok(v) = std::env::var("SLICE_FUEL")
+            && let Some(parsed) = flags::parse_u64_digits(&v)
+        {
+            fuel_limit = parsed;
+            cli_fuel_override = Some(parsed);
         }
-        if let Ok(v) = std::env::var("SLICE_MEMORY_KB") {
-            if let Some(parsed) = flags::parse_u64_digits(&v) {
-                let bytes = usize::try_from(parsed)
-                    .unwrap_or(usize::MAX)
-                    .saturating_mul(1024);
-                mem_limit = bytes;
-                cli_mem_override = Some(bytes);
-            }
+        if let Ok(v) = std::env::var("SLICE_MEMORY_KB")
+            && let Some(parsed) = flags::parse_u64_digits(&v)
+        {
+            let bytes = usize::try_from(parsed)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(1024);
+            mem_limit = bytes;
+            cli_mem_override = Some(bytes);
         }
-        if let Ok(v) = std::env::var("SLICE_MEMORY") {
-            if let Some(parsed) = flags::parse_u64_digits(&v) {
-                let bytes = usize::try_from(parsed).unwrap_or(usize::MAX);
-                mem_limit = bytes;
-                cli_mem_override = Some(bytes);
-            }
+        if let Ok(v) = std::env::var("SLICE_MEMORY")
+            && let Some(parsed) = flags::parse_u64_digits(&v)
+        {
+            let bytes = usize::try_from(parsed).unwrap_or(usize::MAX);
+            mem_limit = bytes;
+            cli_mem_override = Some(bytes);
         }
         if let Ok(v) = std::env::var("SLICE_ALLOW_READ") {
             for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -305,40 +309,43 @@ impl ResolvedExecutionConfig {
                 audit_egress_specs.push(trimmed.to_string());
             }
         }
-        if let Ok(v) = std::env::var("SLICE_CHECKPOINTS") {
-            if let Some(b) = slice_sandbox::parse_bool_setting(&v) {
-                caps = caps.with_checkpoints(b);
-            }
+        if let Ok(v) = std::env::var("SLICE_CHECKPOINTS")
+            && let Some(b) = slice_sandbox::parse_bool_setting(&v)
+        {
+            caps = caps.with_checkpoints(b);
+            cli_checkpoints_override = Some(b);
         }
-        if let Ok(v) = std::env::var("SLICE_MAX_CHECKPOINTS") {
-            if let Some(n) = flags::parse_u64_digits(&v) {
-                caps = caps.with_max_checkpoints(Some(u32::try_from(n).unwrap_or(u32::MAX)));
-            }
+        if let Ok(v) = std::env::var("SLICE_MAX_CHECKPOINTS")
+            && let Some(n) = flags::parse_u64_digits(&v)
+        {
+            let max_cp = u32::try_from(n).unwrap_or(u32::MAX);
+            caps = caps.with_max_checkpoints(Some(max_cp));
+            cli_max_checkpoints_override = Some(max_cp);
         }
-        if let Ok(v) = std::env::var("SLICE_WARM") {
-            if let Some(b) = slice_sandbox::parse_bool_setting(&v) {
-                warm_pool = b;
-                cli_warm_override = Some(b);
-            }
+        if let Ok(v) = std::env::var("SLICE_WARM")
+            && let Some(b) = slice_sandbox::parse_bool_setting(&v)
+        {
+            warm_pool = b;
+            cli_warm_override = Some(b);
         }
-        if let Ok(v) = std::env::var("SLICE_DETERMINISTIC_SEED") {
-            if let Some(seed) = flags::parse_u64_digits(&v) {
-                deterministic_seed = Some(seed);
-                cli_det_override = Some(Some(seed));
-            }
+        if let Ok(v) = std::env::var("SLICE_DETERMINISTIC_SEED")
+            && let Some(seed) = flags::parse_u64_digits(&v)
+        {
+            deterministic_seed = Some(seed);
+            cli_det_override = Some(Some(seed));
         }
-        if let Ok(v) = std::env::var("SLICE_PORT") {
-            if let Ok(p) = v.trim().parse::<u16>() {
-                server_port = Some(p);
-                cli_port_override = Some(p);
-            }
+        if let Ok(v) = std::env::var("SLICE_PORT")
+            && let Ok(p) = v.trim().parse::<u16>()
+        {
+            server_port = Some(p);
+            cli_port_override = Some(p);
         }
-        if let Ok(v) = std::env::var("SLICE_WORKERS") {
-            if let Ok(w) = v.trim().parse::<usize>() {
-                let wk = w.max(1);
-                server_workers = Some(wk);
-                cli_workers_override = Some(wk);
-            }
+        if let Ok(v) = std::env::var("SLICE_WORKERS")
+            && let Ok(w) = v.trim().parse::<usize>()
+        {
+            let wk = w.max(1);
+            server_workers = Some(wk);
+            cli_workers_override = Some(wk);
         }
         if let Ok(v) = std::env::var("SLICE_STATIC_DIR") {
             let trimmed = v.trim();
@@ -366,23 +373,22 @@ impl ResolvedExecutionConfig {
         }
         if let Ok(v) =
             std::env::var("SLICE_BOACAS").or_else(|_| std::env::var("SLICE_EXPER_BOACAS"))
+            && let Some(b) = slice_sandbox::parse_bool_setting(&v)
         {
-            if let Some(b) = slice_sandbox::parse_bool_setting(&v) {
-                cli_boacas_override = Some(b);
-                apply_boacas_override(Some(b));
-            }
+            cli_boacas_override = Some(b);
+            apply_boacas_override(Some(b));
         }
-        if let Ok(v) = std::env::var("SLICE_TIER") {
-            if let Some(t) = slice_sandbox::parse_tier_setting(&v) {
-                cli_tier_override = Some(t);
-                apply_tier_override(t);
-            }
+        if let Ok(v) = std::env::var("SLICE_TIER")
+            && let Some(t) = slice_sandbox::parse_tier_setting(&v)
+        {
+            cli_tier_override = Some(t);
+            apply_tier_override(t);
         }
-        if let Ok(v) = std::env::var("SLICE_TRUST_DIRECTIVES") {
-            if let Some(b) = slice_sandbox::parse_bool_setting(&v) {
-                trust_directives = b;
-                cli_trust_directives_override = Some(b);
-            }
+        if let Ok(v) = std::env::var("SLICE_TRUST_DIRECTIVES")
+            && let Some(b) = slice_sandbox::parse_bool_setting(&v)
+        {
+            trust_directives = b;
+            cli_trust_directives_override = Some(b);
         }
 
         // 3. Apply explicit CLI inline flags (highest precedence, fail-closed on empty/missing file paths)
@@ -445,15 +451,20 @@ impl ResolvedExecutionConfig {
                 }
             } else if arg == "--no-checkpoints" {
                 caps = caps.with_checkpoints(false);
+                cli_checkpoints_override = Some(false);
             } else if arg == "--checkpoints" {
                 caps = caps.with_checkpoints(true);
+                cli_checkpoints_override = Some(true);
             } else if let Some(cp_str) = arg.strip_prefix("--checkpoints=") {
                 if let Some(b) = slice_sandbox::parse_bool_setting(cp_str) {
                     caps = caps.with_checkpoints(b);
+                    cli_checkpoints_override = Some(b);
                 }
             } else if let Some(mcp_str) = arg.strip_prefix("--max-checkpoints=") {
                 if let Some(n) = flags::parse_u64_digits(mcp_str) {
-                    caps = caps.with_max_checkpoints(Some(u32::try_from(n).unwrap_or(u32::MAX)));
+                    let max_cp = u32::try_from(n).unwrap_or(u32::MAX);
+                    caps = caps.with_max_checkpoints(Some(max_cp));
+                    cli_max_checkpoints_override = Some(max_cp);
                 }
             } else if let Some(f) = arg.strip_prefix("--fuel=") {
                 if let Some(parsed) = flags::parse_u64_digits(f) {
@@ -541,11 +552,11 @@ impl ResolvedExecutionConfig {
             {
                 trust_directives = false;
                 cli_trust_directives_override = Some(false);
-            } else if let Some(td_str) = arg.strip_prefix("--trust-directives=") {
-                if let Some(b) = slice_sandbox::parse_bool_setting(td_str) {
-                    trust_directives = b;
-                    cli_trust_directives_override = Some(b);
-                }
+            } else if let Some(td_str) = arg.strip_prefix("--trust-directives=")
+                && let Some(b) = slice_sandbox::parse_bool_setting(td_str)
+            {
+                trust_directives = b;
+                cli_trust_directives_override = Some(b);
             }
             arg_idx += 1;
         }
@@ -598,6 +609,8 @@ impl ResolvedExecutionConfig {
             cli_tls_cert_override,
             cli_tls_key_override,
             cli_trust_directives_override,
+            cli_checkpoints_override,
+            cli_max_checkpoints_override,
         })
     }
 
@@ -608,7 +621,13 @@ impl ResolvedExecutionConfig {
         raw_toml: &str,
         base_dir: Option<&Path>,
     ) -> Result<()> {
-        let m = SliceManifest::parse_toml(raw_toml);
+        let mut m = SliceManifest::parse_toml(raw_toml);
+        if self.cli_checkpoints_override.is_some() {
+            m.capabilities.allow_checkpoints = self.caps.allow_checkpoints;
+        }
+        if self.cli_max_checkpoints_override.is_some() {
+            m.capabilities.max_checkpoints = self.caps.max_checkpoints;
+        }
         if !self.has_explicit_config {
             if self.cli_fuel_override.is_none() {
                 self.fuel_limit = m.fuel_limit;
@@ -616,57 +635,57 @@ impl ResolvedExecutionConfig {
             if self.cli_mem_override.is_none() {
                 self.mem_limit = m.memory_limit_kb * 1024;
             }
-            if self.cli_boacas_override.is_none() {
-                if let Some(b) = m.exper_boacas {
-                    apply_boacas_override(Some(b));
-                }
+            if self.cli_boacas_override.is_none()
+                && let Some(b) = m.exper_boacas
+            {
+                apply_boacas_override(Some(b));
             }
-            if self.cli_tier_override.is_none() {
-                if let Some(t) = m.tier {
-                    apply_tier_override(Some(t));
-                }
+            if self.cli_tier_override.is_none()
+                && let Some(t) = m.tier
+            {
+                apply_tier_override(Some(t));
             }
-            if self.cli_warm_override.is_none() {
-                if let Some(w) = m.warm_pool {
-                    self.warm_pool = w;
-                }
+            if self.cli_warm_override.is_none()
+                && let Some(w) = m.warm_pool
+            {
+                self.warm_pool = w;
             }
-            if self.cli_det_override.is_none() {
-                if let Some(s) = m.deterministic_seed {
-                    self.deterministic_seed = Some(s);
-                }
+            if self.cli_det_override.is_none()
+                && let Some(s) = m.deterministic_seed
+            {
+                self.deterministic_seed = Some(s);
             }
-            if self.cli_port_override.is_none() {
-                if let Some(p) = m.server_port {
-                    self.server_port = Some(p);
-                }
+            if self.cli_port_override.is_none()
+                && let Some(p) = m.server_port
+            {
+                self.server_port = Some(p);
             }
-            if self.cli_workers_override.is_none() {
-                if let Some(w) = m.server_workers {
-                    self.server_workers = Some(w);
-                }
+            if self.cli_workers_override.is_none()
+                && let Some(w) = m.server_workers
+            {
+                self.server_workers = Some(w);
             }
             if let Some(dir) = base_dir {
-                if self.cli_static_override.is_none() {
-                    if let Some(ref sd) = m.static_dir {
-                        self.static_dir = Some(dir.join(sd));
-                    }
+                if self.cli_static_override.is_none()
+                    && let Some(ref sd) = m.static_dir
+                {
+                    self.static_dir = Some(dir.join(sd));
                 }
-                if self.cli_tls_cert_override.is_none() {
-                    if let Some(ref tc) = m.tls_cert {
-                        self.tls_cert = Some(dir.join(tc));
-                    }
+                if self.cli_tls_cert_override.is_none()
+                    && let Some(ref tc) = m.tls_cert
+                {
+                    self.tls_cert = Some(dir.join(tc));
                 }
-                if self.cli_tls_key_override.is_none() {
-                    if let Some(ref tk) = m.tls_key {
-                        self.tls_key = Some(dir.join(tk));
-                    }
+                if self.cli_tls_key_override.is_none()
+                    && let Some(ref tk) = m.tls_key
+                {
+                    self.tls_key = Some(dir.join(tk));
                 }
             }
-            if self.cli_trust_directives_override.is_none() {
-                if let Some(td) = m.trust_directives {
-                    self.trust_directives = td;
-                }
+            if self.cli_trust_directives_override.is_none()
+                && let Some(td) = m.trust_directives
+            {
+                self.trust_directives = td;
             }
         }
         merge_parsed_manifest_into_caps_and_dlp(
@@ -694,53 +713,53 @@ impl ResolvedExecutionConfig {
             return Ok(());
         }
         let dirs = slice_sandbox::parse_inline_directives(source);
-        if self.cli_fuel_override.is_none() {
-            if let Some(f) = dirs.fuel_limit {
-                if self.trust_directives {
-                    self.fuel_limit = f;
-                } else {
-                    self.fuel_limit = self.fuel_limit.min(f);
-                }
+        if self.cli_fuel_override.is_none()
+            && let Some(f) = dirs.fuel_limit
+        {
+            if self.trust_directives {
+                self.fuel_limit = f;
+            } else {
+                self.fuel_limit = self.fuel_limit.min(f);
             }
         }
-        if self.cli_mem_override.is_none() {
-            if let Some(m) = dirs.memory_limit_bytes {
-                if self.trust_directives {
-                    self.mem_limit = m;
-                } else {
-                    self.mem_limit = self.mem_limit.min(m);
-                }
+        if self.cli_mem_override.is_none()
+            && let Some(m) = dirs.memory_limit_bytes
+        {
+            if self.trust_directives {
+                self.mem_limit = m;
+            } else {
+                self.mem_limit = self.mem_limit.min(m);
             }
         }
-        if self.cli_boacas_override.is_none() {
-            if let Some(b) = dirs.boacas {
-                apply_boacas_override(Some(b));
-            }
+        if self.cli_boacas_override.is_none()
+            && let Some(b) = dirs.boacas
+        {
+            apply_boacas_override(Some(b));
         }
-        if self.cli_tier_override.is_none() {
-            if let Some(t) = dirs.tier {
-                apply_tier_override(t);
-            }
+        if self.cli_tier_override.is_none()
+            && let Some(t) = dirs.tier
+        {
+            apply_tier_override(t);
         }
-        if self.cli_warm_override.is_none() {
-            if let Some(w) = dirs.warm {
-                self.warm_pool = w;
-            }
+        if self.cli_warm_override.is_none()
+            && let Some(w) = dirs.warm
+        {
+            self.warm_pool = w;
         }
-        if self.cli_det_override.is_none() {
-            if let Some(s) = dirs.deterministic_seed {
-                self.deterministic_seed = Some(s);
-            }
+        if self.cli_det_override.is_none()
+            && let Some(s) = dirs.deterministic_seed
+        {
+            self.deterministic_seed = Some(s);
         }
-        if self.cli_port_override.is_none() {
-            if let Some(p) = dirs.port {
-                self.server_port = Some(p);
-            }
+        if self.cli_port_override.is_none()
+            && let Some(p) = dirs.port
+        {
+            self.server_port = Some(p);
         }
-        if self.cli_workers_override.is_none() {
-            if let Some(w) = dirs.workers {
-                self.server_workers = Some(w);
-            }
+        if self.cli_workers_override.is_none()
+            && let Some(w) = dirs.workers
+        {
+            self.server_workers = Some(w);
         }
         for sec in dirs.audit_egress {
             register_audit_egress_spec(&sec, base_dir, &self.caps, &mut self.audit_secrets)?;
@@ -765,6 +784,17 @@ impl ResolvedExecutionConfig {
                     self.caps.allowed_exec_binaries.push(eb);
                 }
             }
+            if self.cli_checkpoints_override.is_none()
+                && let Some(b) = dirs.allow_checkpoints
+            {
+                self.caps.set_checkpoints(b);
+            }
+            if self.cli_max_checkpoints_override.is_none()
+                && self.cli_checkpoints_override != Some(false)
+                && let Some(max_cp) = dirs.max_checkpoints
+            {
+                self.caps.set_max_checkpoints(Some(max_cp));
+            }
             for (k, v) in dirs.allow_env {
                 maybe_register_sensitive_env_dlp(&k, &v, &mut self.audit_secrets);
                 self.caps.allowed_env_keys.entry(k).or_insert(v);
@@ -780,23 +810,23 @@ impl ResolvedExecutionConfig {
                     &mut self.audit_secrets,
                 )?;
             }
-            if self.cli_tls_cert_override.is_none() {
-                if let Some(tc) = dirs.tls_cert {
-                    let p = match base_dir {
-                        Some(dir) => dir.join(&tc),
-                        None => PathBuf::from(&tc),
-                    };
-                    self.tls_cert = Some(p);
-                }
+            if self.cli_tls_cert_override.is_none()
+                && let Some(tc) = dirs.tls_cert
+            {
+                let p = match base_dir {
+                    Some(dir) => dir.join(&tc),
+                    None => PathBuf::from(&tc),
+                };
+                self.tls_cert = Some(p);
             }
-            if self.cli_tls_key_override.is_none() {
-                if let Some(tk) = dirs.tls_key {
-                    let p = match base_dir {
-                        Some(dir) => dir.join(&tk),
-                        None => PathBuf::from(&tk),
-                    };
-                    self.tls_key = Some(p);
-                }
+            if self.cli_tls_key_override.is_none()
+                && let Some(tk) = dirs.tls_key
+            {
+                let p = match base_dir {
+                    Some(dir) => dir.join(&tk),
+                    None => PathBuf::from(&tk),
+                };
+                self.tls_key = Some(p);
             }
         } else {
             // Untrusted mode (default): monotonic capability attenuation only (never widens host caps)
@@ -861,6 +891,31 @@ impl ResolvedExecutionConfig {
                 if !narrowed.is_empty() {
                     self.caps.allowed_exec_binaries = narrowed;
                 }
+            }
+            if !dirs.allow_env.is_empty() && !self.caps.allowed_env_keys.is_empty() {
+                let narrowed: rustc_hash::FxHashMap<String, String> = dirs
+                    .allow_env
+                    .into_iter()
+                    .filter_map(|(k, _)| {
+                        self.caps
+                            .allowed_env_keys
+                            .get(&k)
+                            .map(|host_val| (k, host_val.clone()))
+                    })
+                    .collect();
+                if !narrowed.is_empty() {
+                    self.caps.allowed_env_keys = narrowed;
+                }
+            }
+            if dirs.allow_checkpoints == Some(false) {
+                self.caps.set_checkpoints(false);
+            }
+            if let Some(max_cp) = dirs.max_checkpoints {
+                let clamped = match self.caps.max_checkpoints {
+                    Some(existing) => existing.min(max_cp),
+                    None => max_cp,
+                };
+                self.caps.set_max_checkpoints(Some(clamped));
             }
         }
         Ok(())

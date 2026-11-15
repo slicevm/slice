@@ -2,12 +2,12 @@
 //! Nested Sandbox Attenuator (`SandboxEvalOptions`), and Execution Telemetry (`ExecutionMetrics`).
 //!
 //! Organized into focused domain submodules:
-//! - [`kv_and_sandbox`]: Tenant-isolated `Slice.kv` operations, `< 5 us` state checkpoints (`checkpoint`/`restore`),
+//! - `kv_and_sandbox`: Tenant-isolated `Slice.kv` operations, `< 5 us` state checkpoints (`checkpoint`/`restore`),
 //!   and nested OCap child sandbox attenuation (`eval_sandbox`).
-//! - [`exec_bytecode`]: Top-level bytecode dispatcher (`SLICEBC\x01`, `SLICEBOA`, `SLICESNP`) and Tier-2 SIMD/native kernels.
-//! - [`exec_ast`]: Tier-0 recursive-descent AST & Function VM with unboxed 64-bit `NumericOp` fast-path and recursion/memory guards.
-//! - [`exec_boa`]: Full ES2024+ `boa_engine` and `BoaCAS` execution, warm realm pooling, and shared OCap/DLP/SES lifecycle guards.
-//! - [`http_and_ws`]: WinterTC HTTP request execution (`execute_http_request`), post-response `Slice.waitUntil` draining,
+//! - `exec_bytecode`: Top-level bytecode dispatcher (`SLICEBC\x01`, `SLICEBOA`, `SLICESNP`) and Tier-2 SIMD/native kernels.
+//! - `exec_ast`: Tier-0 recursive-descent AST & Function VM with unboxed 64-bit `NumericOp` fast-path and recursion/memory guards.
+//! - `exec_boa`: Full ES2024+ `boa_engine` and `BoaCAS` execution, warm realm pooling, and shared OCap/DLP/SES lifecycle guards.
+//! - `http_and_ws`: WinterTC HTTP request execution (`execute_http_request`), post-response `Slice.waitUntil` draining,
 //!   and server WebSocket frame dispatch (`execute_websocket_event`).
 
 pub(crate) mod exec_ast;
@@ -23,7 +23,7 @@ pub use self::kv_and_sandbox::{SandboxEvalOptions, SandboxEvalOutcome};
 use crate::parser_and_compiler::compile_source_to_bytecode;
 use crate::state_and_kv::verify_egress_secrets_slice;
 use crate::value_and_ast::{ExecutionTier, JsValue};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use slice_sandbox::{CapabilityToken, SandboxViolation, TenantCompartment};
@@ -277,8 +277,9 @@ impl SliceIsolate {
     }
 
     /// Resets this `SliceIsolate` in place for a new HTTP request with zero heap allocations
-    /// for `CapabilityToken` or `tenant_id`, while enforcing fresh MPK/PKU hardware protection
-    /// domain entry, CPU fuel quota reset, and memory arena reset.
+    /// for `CapabilityToken` or `tenant_id`, rebinding its `HardwareProtectionDomain` (`PKRU`
+    /// register switch on PKU-capable Linux `x86_64` hosts; virtual slot tag elsewhere) and
+    /// resetting CPU fuel and memory counters.
     #[inline]
     pub fn reset_for_request(
         &mut self,

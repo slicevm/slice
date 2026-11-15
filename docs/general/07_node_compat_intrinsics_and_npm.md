@@ -371,7 +371,7 @@ slice run . --warm --metrics
 ```
 
 ### 2.2 Why `.node` C++ Addons Are Excluded - and How to Use `.wasm` Instead
-Traditional Node.js C/C++ native addons (`.node` shared libraries loaded via `process.dlopen` / N-API) execute arbitrary native machine code with full ambient OS authority, bypassing CPU fuel metering, per-tenant memory ceilings, and hardware `WRPKRU` Memory Protection Keys.
+Traditional Node.js C/C++ native addons (`.node` shared libraries loaded via `process.dlopen` / N-API) execute arbitrary native machine code with full ambient OS authority, bypassing CPU fuel metering, per-tenant memory ceilings, OCap capability checks, and `PKRU` protection domains.
 
 In Slice, native performance extensions are written as **WebAssembly (`.wasm`)** modules and executed inside Slice's **5-Ring Pure-Rust `wasmi` (`v2.0.0`) Cage**:
 - Import `.wasm` files directly (`import wasmBytes from "./kernel.wasm"`), which `slice-cas` embeds as zero-stat `Uint8Array` slices inside `.cas` archives and compiled binaries.

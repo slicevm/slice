@@ -22,10 +22,10 @@ Every `SliceIsolate` executes inside a [`TenantCompartment`](../../crates/slice-
    - [`verify_env_read`](../../crates/slice-sandbox/src/compartment/mod.rs) isolates tenant secrets in an explicit per-compartment key-value map (`SandboxViolation::EnvAccessDenied`).
    - When `--env-file=.env` is loaded via [`config/mod.rs`](../../crates/slice-cli/src/config/mod.rs), [`is_sensitive_env_key`](../../crates/slice-sandbox/src/manifest/dotenv.rs) automatically classifies high-entropy tokens and keys matching `SECRET`, `TOKEN`, `KEY`, `PASSWORD`, or `CREDENTIAL` as egress-protected secrets.
    - [`verify_egress_secrets_slice`](../../crates/slice-engine/src/isolate/state_and_kv.rs) inspects `stdout`, `returnValue`, HTTP response bodies, SSE chunks, outbound `fetch()` URLs/headers/bodies, WebSocket frames, and raw TCP/UDP payloads for raw, standard Base64, and URL-safe Base64 encodings of registered secrets, trapping with `SandboxViolation::EnvAccessDenied { key: "EGRESS_SECRET_LEAK_BLOCKED" }` (`0.00 ns` cost when no secrets are registered).
-5. **Ring 5 - Deterministic CPU Fuel & Memory Cage + Linux `WRPKRU` Hardware MPK:**
+5. **Ring 5 - Deterministic CPU Fuel & Memory Cage + Linux `x86_64` `WRPKRU` Protection-Key Scaffolding:**
    - Every operation deducts instruction fuel (`consume_fuel`) and tracks heap bytes (`alloc_memory`), preempting infinite `while (true) {}` loops in `< 10 us` (`SandboxViolation::CpuFuelExhausted`).
    - Before evaluating code in [`SliceIsolate::exec_boa_full_es_vm`](../../crates/slice-engine/src/isolate/exec_boa.rs), Slice configures `realm.ctx.runtime_limits_mut().set_loop_iteration_limit(remaining_fuel)` and `set_recursion_limit(512)`, translating loop or call-stack exhaustion inside `Boa` directly into `SandboxViolation::CpuFuelExhausted`.
-   - On Linux `x86_64`, [`HardwareProtectionDomain`](../../crates/slice-sandbox/src/compartment/pkey.rs) allocates hardware memory protection keys via `SYS_pkey_alloc` (syscall 330) and switches page permissions in `< 20` CPU cycles using the unprivileged `WRPKRU` instruction.
+   - On PKU-capable Linux `x86_64` hosts, [`HardwareProtectionDomain`](../../crates/slice-sandbox/src/compartment/pkey.rs) allocates kernel protection keys (`1..=15`) via `SYS_pkey_alloc` (syscall 330) and switches the per-thread `PKRU` register in `< 20` CPU cycles using `WRPKRU` (note: `SYS_pkey_mprotect` page tagging is not yet wired to tenant heap slabs; see Section 3 below).
 
 ---
 
@@ -33,8 +33,24 @@ Every `SliceIsolate` executes inside a [`TenantCompartment`](../../crates/slice-
 
 Implemented in [`ResolvedExecutionConfig::apply_inline_directives`](../../crates/slice-cli/src/config/mod.rs) and [`SliceManifest`](../../crates/slice-sandbox/src/manifest/mod.rs):
 - **Default Monotonic Attenuation (`trust_directives == false`):** By default, top-of-file `// @slice-*` source directives parsed by [`parse_inline_directives`](../../crates/slice-sandbox/src/manifest/directives.rs) cannot escalate privileges when executing untrusted or AI-generated entrypoints (`slice run agent_script.ts`):
-  - `fuel` and `memory_bytes` are clamped via `self.fuel_limit.min(f)` and `self.memory_limit_bytes.min(mb)` (cannot exceed host limits).
-  - `allow_read`, `allow_write`, `allow_net`, and `allow_env` are strictly intersected against existing host-granted capabilities in `self.caps` (`slice_sandbox::vfs_prefix_matches` for VFS prefixes, wildcard/exact host matching for `allowed_net_hosts`, and existing key membership for `allowed_env_keys`).
-  - `env_file`, `port`, and `workers` inline directives are ignored unless `trust_directives` is `true`, while `audit_egress` remains always-additive.
+  - `fuel`, `memory_bytes`, and `max_checkpoints` are clamped via `.min(...)`, and `allow_checkpoints` can only disable (`false`) guest checkpoints, never re-enable them once disabled by host configuration.
+  - `allow_read`, `allow_write`, `allow_net`, `allow_exec`, and `allow_env` are strictly intersected against existing host-granted capabilities in `self.caps` (`slice_sandbox::vfs_prefix_matches` for VFS prefixes, `slice_sandbox::exec_binary_matches` for subprocess binaries, wildcard/exact host matching for `allowed_net_hosts`, and existing key membership preserving host values for `allowed_env_keys`).
+  - `env_file`, `tls_cert`, and `tls_key` inline directives are ignored unless `trust_directives` is `true`, while `audit_egress` remains always-additive.
 - **Explicit Host Opt-In (`--trust-directives` / `SLICE_TRUST_DIRECTIVES=1` / `trust_directives = true`):** Only when the host explicitly enables `trust_directives` (via `[capabilities] trust_directives = true` in `slice.toml`, `SLICE_TRUST_DIRECTIVES=1`, or `--trust-directives`) do inline directives apply additively. Passing `--no-directives` or `--untrusted` bypasses `apply_inline_directives` altogether.
 - **In-Process `Slice.evalSandbox` & `slice mcp` Immunity:** [`SliceIsolate::eval_sandbox`](../../crates/slice-engine/src/isolate/kv_and_sandbox.rs) and `slice_eval_ts` never call `apply_inline_directives`, guaranteeing that embedded `// @slice-allow-*` or `// @slice-fuel` comments inside sandboxed code snippets have zero effect on child `CapabilityToken` or resource budgets.
+
+---
+
+## 3. `HardwareProtectionDomain` (`compartment/pkey.rs`) Implementation & Scope
+
+[`HardwareProtectionDomain`](../../crates/slice-sandbox/src/compartment/pkey.rs) is a 12-byte `#[repr(C)]` RAII handle (`pkey: i32`, `pkru_mask: u32`, `hardware_enforced: bool`) embedded in every [`TenantCompartment`](../../crates/slice-sandbox/src/compartment/mod.rs):
+
+- **Key Allocation & `PKRU` Bitmask (`HardwareProtectionDomain::allocate`):**
+  - On `#[cfg(all(target_os = "linux", target_arch = "x86_64"))]`, invokes `libc::syscall(330, 0usize, 0usize)` (`SYS_pkey_alloc`). When the kernel returns `pkey` in `1..=15`, computes `pkru_mask = !(0b11u32 | (0b11u32 << (pkey * 2)))` (leaving default kernel key `0` and `pkey` set to `0b00` read/write while setting all other keys `1..=15` to `0b11` `PKEY_DISABLE_ACCESS | PKEY_DISABLE_WRITE`) and sets `hardware_enforced = true`.
+  - When `SYS_pkey_alloc` is unsupported (`ENOSYS`/`EPERM`), all 15 process-wide keys are occupied (`ENOSPC`), or on non-Linux-`x86_64` targets (Windows, macOS, Linux `aarch64` - ARM `POE` is not implemented), assigns a deterministic virtual slot `((tenant_slot % 15) + 1)` with `hardware_enforced = false`.
+- **Per-Thread Domain Switch, Warm Rebind & Cleanup:**
+  - `enter_domain()` executes inline `wrpkru` (`xor ecx, ecx; xor edx, edx; wrpkru`, omitting `nomem` so LLVM treats the register update as a memory barrier) when `hardware_enforced` is `true` (`isolate/mod.rs`, `isolate/exec_bytecode.rs`).
+  - `rebind_slot(slot_id)` preserves an already-allocated hardware key across warm `SliceIsolate::reset_for_request` cycles without `SYS_pkey_free` / `SYS_pkey_alloc` syscall churn.
+  - `Clone` allocates a fresh independent key when `hardware_enforced` is `true`; `Drop` resets `PKRU` to `0` (`wrpkru` with `eax = 0`) before calling `libc::syscall(331, pkey)` (`SYS_pkey_free`).
+- **Current Page-Tagging Boundary (`SYS_pkey_mprotect` Not Yet Wired):**
+  - No call sites in `crates/` currently invoke `SYS_pkey_mprotect` (syscall `329`) to move `Boa` GC arenas, `wasmi` linear memories, `EDGE_KV_SLAB`, or VFS buffers off default key `0`. All runtime memory isolation and `--memory` ceiling enforcement today is provided by safe-Rust bounds checking, SES realm lockdown, OCap capability verification, and byte-level budget tracking (`BOA_KV_MEM_BUDGET` + `SliceWasmLimiter`), with `HardwareProtectionDomain` serving as verified `PKRU` register-switch groundwork and exposing `hardware_enforced` in `slice doctor` and to Rust embedders.
