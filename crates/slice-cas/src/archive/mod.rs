@@ -10,9 +10,9 @@ pub mod reader;
 pub mod static_assets;
 
 pub use builder::CasBuilder;
-pub use reader::{embed_cas_into_executable, MappedCasArchive};
+pub use reader::{MappedCasArchive, embed_cas_into_executable};
 pub use static_assets::{
-    detect_static_mime_type, StaticAssetEntry, StaticAssetPayload, StaticAssetTable,
+    StaticAssetEntry, StaticAssetPayload, StaticAssetTable, detect_static_mime_type,
 };
 
 use rustc_hash::FxHashMap;

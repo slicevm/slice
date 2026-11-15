@@ -44,10 +44,10 @@ fn eval_cached_builtin_slot(
 ) -> boa_engine::JsResult<BoaVal> {
     let slicebc = BUILTIN_SLICEBC_SLOTS[slot_idx]
         .get_or_init(|| crate::js_preludes::compile_static_js_to_slicebc(snippet));
-    if !slicebc.is_empty() {
-        if let Some(script) = boa_engine::Script::from_slicebc_bytes(slicebc, context) {
-            return script.evaluate(context);
-        }
+    if !slicebc.is_empty()
+        && let Some(script) = boa_engine::Script::from_slicebc_bytes(slicebc, context)
+    {
+        return script.evaluate(context);
     }
     context.eval(boa_engine::Source::from_bytes(snippet))
 }

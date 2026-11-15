@@ -6,7 +6,7 @@ use crate::intrinsics::{
 };
 
 pub(crate) fn register_semver_and_fast_intrinsics_host_functions(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_semver_valid"), ctx)

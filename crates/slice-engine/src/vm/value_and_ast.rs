@@ -171,20 +171,12 @@ pub fn js_math_round(x: f64) -> f64 {
     }
     if x > 0.0 {
         let fl = x.floor();
-        if x - fl >= 0.5 {
-            fl + 1.0
-        } else {
-            fl
-        }
+        if x - fl >= 0.5 { fl + 1.0 } else { fl }
     } else if x >= -0.5 {
         -0.0
     } else {
         let cl = x.ceil();
-        if cl - x > 0.5 {
-            cl - 1.0
-        } else {
-            cl
-        }
+        if cl - x > 0.5 { cl - 1.0 } else { cl }
     }
 }
 
@@ -194,11 +186,7 @@ pub fn js_math_max(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         f64::NAN
     } else if a == 0.0 && b == 0.0 {
-        if a.is_sign_positive() {
-            a
-        } else {
-            b
-        }
+        if a.is_sign_positive() { a } else { b }
     } else if a >= b {
         a
     } else {
@@ -212,11 +200,7 @@ pub fn js_math_min(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         f64::NAN
     } else if a == 0.0 && b == 0.0 {
-        if a.is_sign_negative() {
-            a
-        } else {
-            b
-        }
+        if a.is_sign_negative() { a } else { b }
     } else if a <= b {
         a
     } else {

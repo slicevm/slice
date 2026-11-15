@@ -1,11 +1,11 @@
 #![allow(unused_imports)]
 use crate::intrinsics::{
-    digest_to_hex, fast_format_bytes, fast_format_ms, fast_parse_bytes, fast_parse_ms,
-    hmac_sha256_hex, sha256_hex, Sha256State,
+    Sha256State, digest_to_hex, fast_format_bytes, fast_format_ms, fast_parse_bytes, fast_parse_ms,
+    hmac_sha256_hex, sha256_hex,
 };
 use crate::{
-    compile_source_to_bytecode, disassemble_bytecode, run_source_isolated, ExecutionTier,
-    HttpRequestContext, JsValue, SliceIsolate,
+    ExecutionTier, HttpRequestContext, JsValue, SliceIsolate, compile_source_to_bytecode,
+    disassemble_bytecode, run_source_isolated,
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
@@ -742,10 +742,12 @@ runSuite();
     );
     assert_eq!(out_order["delayedVal"], "warped-250ms");
     assert_eq!(out_order["immVal"], "imm-resolved");
-    assert!(out_order["abortCaught"]
-        .as_str()
-        .unwrap_or("")
-        .contains("TimersPromiseAborted"));
+    assert!(
+        out_order["abortCaught"]
+            .as_str()
+            .unwrap_or("")
+            .contains("TimersPromiseAborted")
+    );
 
     // 2. Verify full WHATWG `console.*` (`table`, `time`, `timeLog`, `timeEnd`, `group`, `groupEnd`, `count`, `countReset`, `dir`, `assert`)
     //    and verify that Outbound Egress Secret DLP traps a secret leaked inside `console.table()`!
@@ -1194,10 +1196,10 @@ queueMicrotask(() => {
 #[test]
 fn test_phase1_boacas_single_pass_automaton() {
     use crate::boacas::{
-        compute_boacas_metadata, BOACAS_FLAG_HAS_HTTP_BRIDGE, BOACAS_FLAG_HAS_KV_SANDBOX,
-        BOACAS_FLAG_HAS_NEXT_TICK, BOACAS_FLAG_HAS_SEMVER_FAST, BOACAS_FLAG_HAS_WORKER,
-        BOACAS_FLAG_IS_RC_BUNDLE, BOACAS_FLAG_NEEDS_LAZY_GETTERS, BOACAS_FLAG_NEEDS_SES_CHECK,
-        BOACAS_FLAG_STARTS_WITH_BRACE,
+        BOACAS_FLAG_HAS_HTTP_BRIDGE, BOACAS_FLAG_HAS_KV_SANDBOX, BOACAS_FLAG_HAS_NEXT_TICK,
+        BOACAS_FLAG_HAS_SEMVER_FAST, BOACAS_FLAG_HAS_WORKER, BOACAS_FLAG_IS_RC_BUNDLE,
+        BOACAS_FLAG_NEEDS_LAZY_GETTERS, BOACAS_FLAG_NEEDS_SES_CHECK, BOACAS_FLAG_STARTS_WITH_BRACE,
+        compute_boacas_metadata,
     };
 
     let sample = "{\nvar __slice_modules = {};//__SLICE_RC:0123456789abcdef\nconst u = new URL(\"https://example.com\");\nconst fmt = new Intl.NumberFormat(\"en-US\");\nconst fs = require(\"node:fs\");\nconst util = require(\"node:util\");\nprocess.nextTick(() => {});\nconst w = new Worker(\"w.js\");\nconst req = Slice.request();\nconst kvVal = Slice.kv.get(\"k\");\nconst sem = __slice_semver_valid(\"1.2.3\");\nconst desc = Object.getOwnPropertyDescriptor(Object.prototype, \"toString\");\n}";
@@ -1924,10 +1926,12 @@ run();
     let outcome = iso.execute_http_request(&bc, None, &req_ctx).unwrap();
     assert_eq!(outcome.status_code, 202);
     assert_eq!(outcome.content_type, "application/json");
-    assert!(outcome
-        .response_headers
-        .iter()
-        .any(|(k, v)| k.eq_ignore_ascii_case("x-node-server") && v == "active"));
+    assert!(
+        outcome
+            .response_headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("x-node-server") && v == "active")
+    );
     let bridge_json: serde_json::Value = serde_json::from_str(&outcome.response_body).unwrap();
     assert_eq!(bridge_json["bridged"], true);
     assert_eq!(bridge_json["method"], "POST");
@@ -1968,7 +1972,11 @@ execFileSync("/bin/echo", ["hello"]);
 
 #[test]
 fn test_phase4_child_process_allowlist_and_env_sanitization() {
-    std::env::set_var("SLICE_HOST_SECRET_UNLISTED", "TOP_SECRET_HOST_VAL_999");
+    assert_eq!(
+        std::env::var("CARGO_PKG_NAME").as_deref(),
+        Ok("slice-engine"),
+        "Host test process must carry CARGO_PKG_NAME so we can verify child env_clear() sanitization without mutating global env"
+    );
 
     let script = r#"
 import { execFileSync, spawnSync } from "node:child_process";
@@ -1998,8 +2006,8 @@ const subEscalation = Slice.evalSandbox(
 console.log(JSON.stringify({
     echoOut,
     hasTenantAllowedEnv: envOut.includes("TENANT_ALLOWED_KEY=safe-tenant-val"),
-    leakedHostSecretKey: envOut.includes("SLICE_HOST_SECRET_UNLISTED"),
-    leakedHostSecretVal: envOut.includes("TOP_SECRET_HOST_VAL_999"),
+    leakedHostSecretKey: envOut.includes("CARGO_PKG_NAME="),
+    leakedHostSecretVal: envOut.includes("CARGO_MANIFEST_DIR="),
     unlistedBinBlocked,
     pathSpoofBlocked,
     subEscalationBlocked: !subEscalation.ok && String(subEscalation.violation || "").includes("Subprocess execution denied")
@@ -2087,8 +2095,8 @@ fn test_phase4_bounded_fetch_reactor_slab_reuse() {
                 workers.push(std::thread::spawn(move || {
                     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
                     let mut buf = [0u8; 2048];
-                    if let Ok(n) = stream.read(&mut buf) {
-                        if n > 0 {
+                    if let Ok(n) = stream.read(&mut buf)
+                        && n > 0 {
                             let req_s = String::from_utf8_lossy(&buf[..n]);
                             let path = req_s
                                 .lines()
@@ -2104,7 +2112,6 @@ fn test_phase4_bounded_fetch_reactor_slab_reuse() {
                             let _ = stream.write_all(resp.as_bytes());
                             let _ = stream.flush();
                         }
-                    }
                 }));
             }
         }

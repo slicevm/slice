@@ -1,8 +1,8 @@
 //! Zero-Stat Memory-Mapped Content-Addressed Storage Reader (`MappedCasArchive`)
 //! and `SLICEEXE` Standalone Executable Packer.
 
-use crate::archive::{CasBlobEntry, CasIndexHeader, CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION};
-use anyhow::{bail, Context, Result};
+use crate::archive::{CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION, CasBlobEntry, CasIndexHeader};
+use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::Path;

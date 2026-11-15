@@ -1,10 +1,10 @@
 use crate::config::{
-    install_ctrlc_handler, is_known_slice_runtime_flag, skip_runtime_flag_with_separate_value,
-    OsNativeFileWatcher, ResolvedExecutionConfig,
+    OsNativeFileWatcher, ResolvedExecutionConfig, install_ctrlc_handler,
+    is_known_slice_runtime_flag, skip_runtime_flag_with_separate_value,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use slice_cas::MappedCasArchive;
-use slice_engine::{compile_source_to_bytecode, SliceIsolate};
+use slice_engine::{SliceIsolate, compile_source_to_bytecode};
 use slice_sandbox::SliceManifest;
 use std::cell::Cell;
 use std::env;
@@ -354,7 +354,9 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             } else if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                 "-".to_string()
             } else {
-                bail!("Missing target script/archive path (and no slice.toml found in current directory)");
+                bail!(
+                    "Missing target script/archive path (and no slice.toml found in current directory)"
+                );
             }
         }
     };

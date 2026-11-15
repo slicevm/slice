@@ -1,12 +1,12 @@
 //! Deterministic Replay (`__slice_det_random`, `__slice_det_now`), `os.tmpdir`, and `AsyncLocalStorage` Host Bindings.
 
 use crate::boa_realm::{
-    mark_subsystem_dirty, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, DIRTY_ALS,
+    BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, DIRTY_ALS, mark_subsystem_dirty,
 };
 use crate::state_and_kv::splitmix64_next_f64;
 
 pub(crate) fn register_deterministic_host_functions(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_det_random"), ctx)
@@ -51,7 +51,7 @@ pub(crate) fn register_deterministic_host_functions(ctx: &mut boa_engine::Contex
 }
 
 pub(crate) fn register_os_host_functions(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_os_tmpdir"), ctx)
@@ -70,7 +70,7 @@ pub(crate) fn register_os_host_functions(ctx: &mut boa_engine::Context) {
 }
 
 pub(crate) fn register_async_hooks_host_functions(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_als_get"), ctx)

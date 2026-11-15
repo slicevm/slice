@@ -28,7 +28,7 @@ impl Sha256State {
     }
 
     #[inline]
-    pub(crate) fn compress_block(h: &mut [u32; 8], chunk: &[u8]) {
+    pub(crate) fn compress_block(h: &mut [u32; 8], chunk: &[u8; 64]) {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             static SHA_NI_STATUS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -48,6 +48,7 @@ impl Sha256State {
                 detected
             };
             if use_sha_ni {
+                // SAFETY: `sha`, `sse4.1`, and `ssse3` CPU features were verified via `is_x86_feature_detected!`.
                 unsafe {
                     Self::compress_block_sha_ni(h, chunk);
                 }
@@ -57,9 +58,13 @@ impl Sha256State {
         Self::compress_block_soft(h, chunk);
     }
 
+    /// Compresses a single 64-byte SHA-256 block using x86 SHA-NI instructions.
+    ///
+    /// # Safety
+    /// Caller must guarantee that the host CPU supports `sha`, `sse4.1`, and `ssse3`.
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[target_feature(enable = "sha,sse4.1,ssse3")]
-    pub(crate) unsafe fn compress_block_sha_ni(h: &mut [u32; 8], chunk: &[u8]) {
+    pub(crate) unsafe fn compress_block_sha_ni(h: &mut [u32; 8], chunk: &[u8; 64]) {
         #[cfg(target_arch = "x86")]
         use std::arch::x86::*;
         #[cfg(target_arch = "x86_64")]
@@ -67,8 +72,13 @@ impl Sha256State {
 
         let shuf_mask = _mm_set_epi64x(0x0c0d0e0f08090a0b, 0x0405060700010203);
 
-        let state0_in = _mm_loadu_si128(h.as_ptr() as *const __m128i);
-        let state1_in = _mm_loadu_si128(h.as_ptr().add(4) as *const __m128i);
+        // SAFETY: `h` is `&mut [u32; 8]` (32 contiguous bytes = two 128-bit lanes), unaligned load is valid.
+        let (state0_in, state1_in) = unsafe {
+            (
+                _mm_loadu_si128(h.as_ptr() as *const __m128i),
+                _mm_loadu_si128(h.as_ptr().add(4) as *const __m128i),
+            )
+        };
 
         let tmp = _mm_shuffle_epi32(state0_in, 0xB1);
         let state1_shuf = _mm_shuffle_epi32(state1_in, 0x1B);
@@ -79,10 +89,15 @@ impl Sha256State {
         let cdgh_save = state1;
 
         let ptr = chunk.as_ptr() as *const __m128i;
-        let mut msg0 = _mm_shuffle_epi8(_mm_loadu_si128(ptr), shuf_mask);
-        let mut msg1 = _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(1)), shuf_mask);
-        let mut msg2 = _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(2)), shuf_mask);
-        let mut msg3 = _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(3)), shuf_mask);
+        // SAFETY: `chunk` is `&[u8; 64]` (four 16-byte `__m128i` lanes), unaligned loads are in-bounds.
+        let (mut msg0, mut msg1, mut msg2, mut msg3) = unsafe {
+            (
+                _mm_shuffle_epi8(_mm_loadu_si128(ptr), shuf_mask),
+                _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(1)), shuf_mask),
+                _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(2)), shuf_mask),
+                _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(3)), shuf_mask),
+            )
+        };
 
         macro_rules! sha256_4rounds {
             ($msg:expr, $k3:expr, $k2:expr, $k1:expr, $k0:expr) => {{
@@ -259,12 +274,15 @@ impl Sha256State {
         let out0 = _mm_blend_epi16(out_tmp, out_s1, 0xF0);
         let out1 = _mm_alignr_epi8(out_s1, out_tmp, 8);
 
-        _mm_storeu_si128(h.as_mut_ptr() as *mut __m128i, out0);
-        _mm_storeu_si128(h.as_mut_ptr().add(4) as *mut __m128i, out1);
+        // SAFETY: `h` is `&mut [u32; 8]` (32 contiguous writable bytes = two 128-bit lanes).
+        unsafe {
+            _mm_storeu_si128(h.as_mut_ptr() as *mut __m128i, out0);
+            _mm_storeu_si128(h.as_mut_ptr().add(4) as *mut __m128i, out1);
+        }
     }
 
     #[inline]
-    pub(crate) fn compress_block_soft(h: &mut [u32; 8], chunk: &[u8]) {
+    pub(crate) fn compress_block_soft(h: &mut [u32; 8], chunk: &[u8; 64]) {
         const K: [u32; 64] = [
             0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
             0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,

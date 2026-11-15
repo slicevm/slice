@@ -4,13 +4,13 @@
 use super::linking::{ManagedWasmFunc, ManagedWasmGlobal, ManagedWasmTable};
 use super::memory::ManagedWasmMemory;
 use super::{
-    global_wasm_engine, MAX_WASM_INSTANCES_PER_THREAD, MAX_WASM_MEMORY_PAGES, WASM_PAGE_BYTES,
+    MAX_WASM_INSTANCES_PER_THREAD, MAX_WASM_MEMORY_PAGES, WASM_PAGE_BYTES, global_wasm_engine,
 };
 use crate::boa_realm::{
-    mark_subsystem_dirty, BOA_ACTIVE_TENANT, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_VIOLATION,
-    DIRTY_WASM,
+    BOA_ACTIVE_TENANT, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_VIOLATION, DIRTY_WASM,
+    mark_subsystem_dirty,
 };
-use boa_engine::{js_string, Context, JsError, JsNativeError, JsObject, JsResult, JsValue};
+use boa_engine::{Context, JsError, JsNativeError, JsObject, JsResult, JsValue, js_string};
 use rustc_hash::FxHashMap;
 use slice_sandbox::SandboxViolation;
 use std::cell::{Cell, RefCell};
@@ -51,18 +51,12 @@ pub fn wasm_js_error(
     if let Ok(wasm_ns) = context
         .global_object()
         .get(js_string!("WebAssembly"), context)
+        && let Some(ns_obj) = wasm_ns.as_object()
+        && let Ok(ctor_val) = ns_obj.get(js_string!(kind.ctor_name()), context)
+        && let Some(ctor_obj) = ctor_val.as_object()
+        && let Ok(err_obj) = ctor_obj.construct(&[JsValue::from(js_string!(msg))], None, context)
     {
-        if let Some(ns_obj) = wasm_ns.as_object() {
-            if let Ok(ctor_val) = ns_obj.get(js_string!(kind.ctor_name()), context) {
-                if let Some(ctor_obj) = ctor_val.as_object() {
-                    if let Ok(err_obj) =
-                        ctor_obj.construct(&[JsValue::from(js_string!(msg))], None, context)
-                    {
-                        return JsError::from_opaque(err_obj.into());
-                    }
-                }
-            }
-        }
+        return JsError::from_opaque(err_obj.into());
     }
     JsNativeError::error()
         .with_message(format!("{}: {}", kind.ctor_name(), msg))
@@ -82,16 +76,12 @@ pub(crate) fn construct_wasm_wrapper(
     if let Ok(wasm_ns) = context
         .global_object()
         .get(js_string!("WebAssembly"), context)
+        && let Some(ns_obj) = wasm_ns.as_object()
+        && let Ok(ctor_val) = ns_obj.get(js_string!(ctor_name), context)
+        && let Some(ctor_obj) = ctor_val.as_object()
+        && let Ok(proto_val) = ctor_obj.get(js_string!("prototype"), context)
     {
-        if let Some(ns_obj) = wasm_ns.as_object() {
-            if let Ok(ctor_val) = ns_obj.get(js_string!(ctor_name), context) {
-                if let Some(ctor_obj) = ctor_val.as_object() {
-                    if let Ok(proto_val) = ctor_obj.get(js_string!("prototype"), context) {
-                        proto_opt = proto_val.as_object();
-                    }
-                }
-            }
-        }
+        proto_opt = proto_val.as_object();
     }
     let obj = JsObject::with_object_proto(context.intrinsics());
     if let Some(proto) = proto_opt {

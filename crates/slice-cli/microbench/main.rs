@@ -1,5 +1,5 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use slice_sandbox::{parse_inline_directives, SliceManifest};
+use criterion::{Criterion, criterion_group, criterion_main};
+use slice_sandbox::{SliceManifest, parse_inline_directives};
 use std::hint::black_box;
 
 fn bench_cli_config_layers(c: &mut Criterion) {

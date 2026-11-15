@@ -2,8 +2,8 @@
 
 use crate::bindings::helpers::active_tenant_id_or_default;
 use crate::boa_realm::{
-    mark_subsystem_dirty, BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_FETCH_MOCKS,
-    BOA_HTTP_REQ, BOA_HTTP_RES, BOA_VIOLATION, BOA_WS_UPGRADED, DIRTY_FETCH_MOCK,
+    BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_FETCH_MOCKS, BOA_HTTP_REQ,
+    BOA_HTTP_RES, BOA_VIOLATION, BOA_WS_UPGRADED, DIRTY_FETCH_MOCK, mark_subsystem_dirty,
 };
 use crate::event_loop::enqueue_async_fetch;
 use crate::outbound_http::{
@@ -13,7 +13,7 @@ use crate::outbound_http::{
 use crate::state_and_kv::{edge_kv_get, edge_kv_set, verify_egress_secrets_slice};
 
 pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsNativeError, JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_http_method"), ctx)
@@ -300,7 +300,7 @@ fn extract_fetch_body_bytes(
 }
 
 pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_fetch_try_fast"), ctx)

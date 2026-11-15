@@ -4,8 +4,9 @@
 //! 1. SES `lockdown()` freezing intrinsic prototypes (`Object.prototype`, `Array.prototype`).
 //! 2. Per-Tenant `Compartment` with attenuated capability tokens (`FsCap`, `NetCap`, `EnvCap`, `ExecCap`).
 //! 3. Deterministic CPU instruction fuel limits & hard byte-level heap ceilings.
-//! 4. Hardware Memory Protection Keys (`pkey_alloc` / `WRPKRU` on Linux x86_64) switching page
-//!    permissions in < 20 CPU clock cycles.
+//! 4. Linux `x86_64` `PKRU` domain-switch scaffolding (`SYS_pkey_alloc` / `WRPKRU` in < 20 CPU
+//!    cycles; `SYS_pkey_mprotect` heap slab page tagging is not yet wired, so tenant memory
+//!    isolation today relies on safe-Rust bounds checking, SES lockdown, and byte-level cages).
 //!
 //! ## Domain Subsystems
 //! - [`compartment`]: [`TenantCompartment`], [`CapabilityToken`], [`SandboxViolation`], SES [`is_frozen_intrinsic`], and [`HardwareProtectionDomain`].
@@ -19,17 +20,17 @@ pub mod net;
 pub mod vfs;
 
 pub use compartment::{
-    is_frozen_intrinsic, CapabilityToken, HardwareProtectionDomain, SandboxViolation,
-    TenantCompartment,
+    CapabilityToken, HardwareProtectionDomain, SandboxViolation, TenantCompartment,
+    is_frozen_intrinsic,
 };
 pub use manifest::{
-    is_sensitive_env_key, parse_bool_setting, parse_dotenv_content, parse_inline_directives,
-    parse_tier_setting, InlineDirectives, SliceManifest,
+    InlineDirectives, SliceManifest, is_sensitive_env_key, parse_bool_setting,
+    parse_dotenv_content, parse_inline_directives, parse_tier_setting,
 };
 pub use net::{
-    extract_clean_hostname, extract_clean_hostname_and_port, is_cloud_metadata_ip,
+    ParsedHttpUrl, extract_clean_hostname, extract_clean_hostname_and_port, is_cloud_metadata_ip,
     is_cloud_metadata_ssrf_target, is_private_or_loopback_ip, is_private_or_loopback_ssrf_target,
-    parse_http_authority_and_path, parse_nonstandard_ipv4, ParsedHttpUrl,
+    parse_http_authority_and_path, parse_nonstandard_ipv4,
 };
 pub use vfs::{
     anchor_vfs_path_to_cwd, cached_normalized_cwd, exec_binary_matches, is_abs_normalized_vfs_path,

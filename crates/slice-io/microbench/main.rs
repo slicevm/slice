@@ -1,5 +1,5 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use slice_io::{CompletionRingEngine, IoSubmission, RegisteredBufferPool, FIXED_BUFFER_SIZE};
+use criterion::{Criterion, criterion_group, criterion_main};
+use slice_io::{CompletionRingEngine, FIXED_BUFFER_SIZE, IoSubmission, RegisteredBufferPool};
 use std::hint::black_box;
 
 fn bench_slab_pool(c: &mut Criterion) {

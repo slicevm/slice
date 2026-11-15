@@ -9,7 +9,7 @@ use crate::mcp_and_repl::{
 use crate::test_runner::{cmd_test, discover_test_files};
 use crate::{cmd_init, cmd_run};
 use slice_cas::MappedCasArchive;
-use slice_engine::{compile_source_to_bytecode, SliceIsolate};
+use slice_engine::{SliceIsolate, compile_source_to_bytecode};
 use slice_sandbox::CapabilityToken;
 use std::env;
 use std::io::{Read, Write};
@@ -20,7 +20,7 @@ use std::path::Path;
 fn test_wave_b_http_server_security_hardening_and_websocket_upgrade_roundtrip() {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::{atomic::AtomicUsize, Arc};
+    use std::sync::{Arc, atomic::AtomicUsize};
 
     let handler_ts = r#"
 export default {
@@ -223,7 +223,7 @@ ws.onclose = (ev) => {{
 fn test_wave_b_inbound_spillover_body_crlf_headers_and_server_ws_dlp() {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::{atomic::AtomicUsize, Arc};
+    use std::sync::{Arc, atomic::AtomicUsize};
 
     let handler_ts = r#"
 export default {
@@ -368,7 +368,7 @@ ws.onclose = (ev) => {{
 fn test_wave_b_app21_websocket_realtime_and_security_guard_roundtrip() {
     use std::net::TcpListener;
     use std::path::Path;
-    use std::sync::{atomic::AtomicUsize, Arc};
+    use std::sync::{Arc, atomic::AtomicUsize};
 
     let upstream_ts = r#"
 export default {

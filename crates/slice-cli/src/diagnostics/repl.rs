@@ -1,6 +1,6 @@
 use crate::config::load_manifest_or_default;
 use anyhow::Result;
-use slice_engine::{compile_source_to_bytecode, SliceIsolate};
+use slice_engine::{SliceIsolate, compile_source_to_bytecode};
 use std::io::Write;
 
 pub(crate) fn cmd_repl() -> Result<()> {
@@ -30,14 +30,22 @@ pub(crate) fn cmd_repl() -> Result<()> {
             ":help" | ":h" | ".help" | "help" => {
                 println!("Slice (Nexus-JS) Interactive SES Shell Help:");
                 println!("  :help / .help  - Show this help message");
-                println!("  :metrics       - Show current Execution Tier, CPU Fuel, Memory, and Hardware PKEY");
-                println!("  :caps          - Show active Object-Capability (OCap) permissions for this compartment");
+                println!(
+                    "  :metrics       - Show current Execution Tier, CPU Fuel, Memory, and Hardware PKEY"
+                );
+                println!(
+                    "  :caps          - Show active Object-Capability (OCap) permissions for this compartment"
+                );
                 println!(
                     "  :reset         - Reset compartment state, SES intrinsics, and fuel counter"
                 );
                 println!("  :quit / :q     - Exit the shell");
-                println!("  JavaScript/TS  - Supports var/let/const, arithmetic (t * 4), functions, arrays,");
-                println!("                   objects, loops, console.log(), print(), Math.*, JSON.*, fib(n)");
+                println!(
+                    "  JavaScript/TS  - Supports var/let/const, arithmetic (t * 4), functions, arrays,"
+                );
+                println!(
+                    "                   objects, loops, console.log(), print(), Math.*, JSON.*, fib(n)"
+                );
                 continue;
             }
             ":reset" | ".clear" => {

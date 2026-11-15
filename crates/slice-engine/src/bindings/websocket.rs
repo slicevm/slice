@@ -1,13 +1,13 @@
 //! RFC 6455 WebSocket Client and Server Host Bindings (`Shard 7`).
 
-use crate::boa_realm::{mark_subsystem_dirty, DIRTY_WEBSOCKET};
+use crate::boa_realm::{DIRTY_WEBSOCKET, mark_subsystem_dirty};
 use crate::websocket::{
-    ws_client_close, ws_client_connect, ws_client_poll, ws_client_send, ws_server_queue_close,
-    ws_server_queue_send, BOA_WS_MOCKS,
+    BOA_WS_MOCKS, ws_client_close, ws_client_connect, ws_client_poll, ws_client_send,
+    ws_server_queue_close, ws_server_queue_send,
 };
 
 pub(crate) fn register_shard7_websocket_host_functions(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsNativeError, JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_ws_connect"), ctx)

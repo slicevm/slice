@@ -3,9 +3,9 @@
 use crate::isolate::{ControlFlow, SliceIsolate};
 use crate::parser_and_compiler::expr_to_dotted_chain;
 use crate::value_and_ast::{
+    BinOp, ExecutionTier, Expr, JsFunction, JsValue, Stmt, TIER1_PROMOTION_THRESHOLD, UnaryOp,
     js_math_max, js_math_min, js_math_round, js_to_int32, js_to_uint32, js_value_to_json_string,
-    serde_json_to_js_value, BinOp, ExecutionTier, Expr, JsFunction, JsValue, Stmt, UnaryOp,
-    TIER1_PROMOTION_THRESHOLD,
+    serde_json_to_js_value,
 };
 use rustc_hash::FxHashMap;
 use slice_sandbox::SandboxViolation;
@@ -151,10 +151,10 @@ impl SliceIsolate {
                     let mut last = JsValue::Undefined;
                     let mut iters: u64 = 0;
                     loop {
-                        if let Some(c) = cond {
-                            if !self.eval_expr(c)?.is_truthy() {
-                                break;
-                            }
+                        if let Some(c) = cond
+                            && !self.eval_expr(c)?.is_truthy()
+                        {
+                            break;
                         }
                         iters += 1;
                         self.compartment.consume_fuel(1)?;
@@ -205,10 +205,10 @@ impl SliceIsolate {
     pub(crate) fn eval_block(&mut self, stmts: &[Stmt]) -> Result<ControlFlow, SandboxViolation> {
         let mut saved_outer: Vec<(String, Option<JsValue>)> = Vec::new();
         for s in stmts {
-            if let Stmt::VarDecl { name, .. } = s {
-                if !saved_outer.iter().any(|(k, _)| k == name) {
-                    saved_outer.push((name.clone(), self.env_vars.get(name).cloned()));
-                }
+            if let Stmt::VarDecl { name, .. } = s
+                && !saved_outer.iter().any(|(k, _)| k == name)
+            {
+                saved_outer.push((name.clone(), self.env_vars.get(name).cloned()));
             }
         }
         let mut last = JsValue::Undefined;
@@ -380,17 +380,17 @@ impl SliceIsolate {
                 Ok(JsValue::Function(Box::new(js_fn)))
             }
             Expr::Member { object, property } => {
-                if let Expr::Ident(obj_name) = &**object {
-                    if obj_name == "Math" {
-                        return Ok(match property.as_str() {
-                            "PI" => JsValue::Number(std::f64::consts::PI),
-                            "E" => JsValue::Number(std::f64::consts::E),
-                            "SQRT2" => JsValue::Number(std::f64::consts::SQRT_2),
-                            "LN2" => JsValue::Number(std::f64::consts::LN_2),
-                            "LN10" => JsValue::Number(std::f64::consts::LN_10),
-                            _ => JsValue::Undefined,
-                        });
-                    }
+                if let Expr::Ident(obj_name) = &**object
+                    && obj_name == "Math"
+                {
+                    return Ok(match property.as_str() {
+                        "PI" => JsValue::Number(std::f64::consts::PI),
+                        "E" => JsValue::Number(std::f64::consts::E),
+                        "SQRT2" => JsValue::Number(std::f64::consts::SQRT_2),
+                        "LN2" => JsValue::Number(std::f64::consts::LN_2),
+                        "LN10" => JsValue::Number(std::f64::consts::LN_10),
+                        _ => JsValue::Undefined,
+                    });
                 }
                 let target = self.eval_expr(object)?;
                 match target {
@@ -572,10 +572,10 @@ impl SliceIsolate {
             eval_args.push(self.eval_expr(a)?);
         }
 
-        if let Expr::Member { object, property } = callee {
-            if let Some(res) = self.eval_member_call(object, property, &eval_args)? {
-                return Ok(res);
-            }
+        if let Expr::Member { object, property } = callee
+            && let Some(res) = self.eval_member_call(object, property, &eval_args)?
+        {
+            return Ok(res);
         }
 
         if let Expr::Ident(fn_name) = callee {
@@ -752,10 +752,10 @@ impl SliceIsolate {
                     }
                     return Ok(Some(JsValue::Number(vec.len() as f64)));
                 }
-            } else if property == "pop" {
-                if let Some(JsValue::Array(vec)) = self.env_vars.get_mut(var_name) {
-                    return Ok(Some(vec.pop().unwrap_or(JsValue::Undefined)));
-                }
+            } else if property == "pop"
+                && let Some(JsValue::Array(vec)) = self.env_vars.get_mut(var_name)
+            {
+                return Ok(Some(vec.pop().unwrap_or(JsValue::Undefined)));
             }
         }
 
@@ -927,41 +927,40 @@ impl SliceIsolate {
         if let JsValue::Function(func) = func_val {
             // Innovation 1: If this function is a pure numeric kernel compiled into `NumericOp`
             // and all arguments are numbers/booleans, execute directly on the unboxed 64-bit register VM!
-            if let Some(ref num_ir) = func.compiled_numeric {
-                if args.len() >= func.params.len()
-                    && args
-                        .iter()
-                        .all(|a| matches!(a, JsValue::Number(_) | JsValue::Bool(_)))
-                {
-                    let mut unboxed_args = [0.0f64; 6];
-                    for (idx, a) in args.iter().take(6).enumerate() {
-                        unboxed_args[idx] = a.to_number();
+            if let Some(ref num_ir) = func.compiled_numeric
+                && args.len() >= func.params.len()
+                && args
+                    .iter()
+                    .all(|a| matches!(a, JsValue::Number(_) | JsValue::Bool(_)))
+            {
+                let mut unboxed_args = [0.0f64; 6];
+                for (idx, a) in args.iter().take(6).enumerate() {
+                    unboxed_args[idx] = a.to_number();
+                }
+                let remaining_fuel = self
+                    .compartment
+                    .fuel_limit
+                    .saturating_sub(self.compartment.fuel_consumed);
+                let mut steps: u64 = 0;
+                match num_ir.execute(
+                    &unboxed_args[..args.len().min(6)],
+                    &mut steps,
+                    remaining_fuel,
+                    0,
+                    &self.compartment.tenant_id,
+                ) {
+                    Ok(Some(val)) => {
+                        let fuel_cost = (steps / 64).max(1);
+                        self.compartment.consume_fuel(fuel_cost)?;
+                        self.current_tier = ExecutionTier::Tier2PeakNative;
+                        return Ok(JsValue::Number(val));
                     }
-                    let remaining_fuel = self
-                        .compartment
-                        .fuel_limit
-                        .saturating_sub(self.compartment.fuel_consumed);
-                    let mut steps: u64 = 0;
-                    match num_ir.execute(
-                        &unboxed_args[..args.len().min(6)],
-                        &mut steps,
-                        remaining_fuel,
-                        0,
-                        &self.compartment.tenant_id,
-                    ) {
-                        Ok(Some(val)) => {
-                            let fuel_cost = (steps / 64).max(1);
-                            self.compartment.consume_fuel(fuel_cost)?;
-                            self.current_tier = ExecutionTier::Tier2PeakNative;
-                            return Ok(JsValue::Number(val));
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            let _ = self
-                                .compartment
-                                .consume_fuel(remaining_fuel.saturating_add(1));
-                            return Err(err);
-                        }
+                    Ok(None) => {}
+                    Err(err) => {
+                        let _ = self
+                            .compartment
+                            .consume_fuel(remaining_fuel.saturating_add(1));
+                        return Err(err);
                     }
                 }
             }

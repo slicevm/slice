@@ -61,7 +61,7 @@ fn encode_js_string_utf8_into(
 pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Context) {
     use boa_engine::builtins::typed_array::TypedArray;
     use boa_engine::object::builtins::JsArrayBuffer;
-    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsNativeError, JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_btoa"), ctx)
@@ -143,17 +143,16 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
             let mut written_utf8 = 0usize;
 
             let mut handled_fast = false;
-            if let Some(ta) = dest_obj.downcast_ref::<TypedArray>() {
-                if ta
+            if let Some(ta) = dest_obj.downcast_ref::<TypedArray>()
+                && ta
                     .with_bytes_mut(|dest_slice| {
                         let (r, w) = encode_js_string_utf8_into(&js_s, dest_slice);
                         read_utf16 = r;
                         written_utf8 = w;
                     })
                     .is_some()
-                {
-                    handled_fast = true;
-                }
+            {
+                handled_fast = true;
             }
 
             if !handled_fast {
@@ -335,11 +334,11 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
             match decompressed_res {
                 Ok(decompressed) => {
                     let out_fuel = (decompressed.len() as u64) / 512;
-                    if out_fuel > 0 {
-                        if let Err(msg) = consume_crypto_kdf_fuel(out_fuel) {
-                            trip_isolate_oom_limits(context);
-                            return Err(JsNativeError::range().with_message(msg).into());
-                        }
+                    if out_fuel > 0
+                        && let Err(msg) = consume_crypto_kdf_fuel(out_fuel)
+                    {
+                        trip_isolate_oom_limits(context);
+                        return Err(JsNativeError::range().with_message(msg).into());
                     }
                     if let Err(msg) = try_consume_isolate_memory_ctx(decompressed.len(), context) {
                         return Err(JsNativeError::range().with_message(msg).into());
@@ -403,12 +402,11 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
             let mut out_items = Vec::with_capacity(parts.len());
             for part in parts {
                 let entry = if let Some(filename) = part.filename {
-                    if !part.payload.is_empty() {
-                        if let Err(msg) =
+                    if !part.payload.is_empty()
+                        && let Err(msg) =
                             try_consume_isolate_memory_ctx(part.payload.len(), context)
-                        {
-                            return Err(JsNativeError::range().with_message(msg).into());
-                        }
+                    {
+                        return Err(JsNativeError::range().with_message(msg).into());
                     }
                     let u8_val = bytes_to_js_uint8_array(&part.payload, context)?;
                     JsArray::from_iter(
@@ -637,16 +635,15 @@ fn parse_rfc7578_multipart(
         };
         let pos = search_pos + rel;
         let valid_line_start = pos == 0 || bytes[pos - 1] == b'\n';
-        if valid_line_start {
-            if let Some((is_closing, next_pos)) =
+        if valid_line_start
+            && let Some((is_closing, next_pos)) =
                 classify_multipart_boundary_suffix(bytes, pos + dash_boundary.len())
-            {
-                if is_closing {
-                    return Ok(Vec::new());
-                }
-                part_start_opt = Some(next_pos);
-                break;
+        {
+            if is_closing {
+                return Ok(Vec::new());
             }
+            part_start_opt = Some(next_pos);
+            break;
         }
         search_pos = pos + 1;
     }
@@ -726,20 +723,18 @@ fn parse_rfc7578_multipart(
             };
             let delim_pos = next_search + rel;
             let preceded_by_nl = delim_pos > body_start && bytes[delim_pos - 1] == b'\n';
-            if preceded_by_nl {
-                if let Some((is_closing, after_next)) =
+            if preceded_by_nl
+                && let Some((is_closing, after_next)) =
                     classify_multipart_boundary_suffix(bytes, delim_pos + dash_boundary.len())
-                {
-                    let payload_end = if delim_pos >= body_start + 2
-                        && &bytes[delim_pos - 2..delim_pos] == b"\r\n"
-                    {
+            {
+                let payload_end =
+                    if delim_pos >= body_start + 2 && &bytes[delim_pos - 2..delim_pos] == b"\r\n" {
                         delim_pos - 2
                     } else {
                         delim_pos - 1
                     };
-                    found_next = Some((payload_end, is_closing, after_next));
-                    break;
-                }
+                found_next = Some((payload_end, is_closing, after_next));
+                break;
             }
             next_search = delim_pos + 1;
         }
@@ -766,7 +761,7 @@ fn parse_rfc7578_multipart(
 }
 
 pub(crate) fn register_buffer_host_functions(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_bytes_to_hex"), ctx)
@@ -843,7 +838,7 @@ pub(crate) fn register_buffer_host_functions(ctx: &mut boa_engine::Context) {
 /// Registers native Rust `URL` and `URLSearchParams` host intrinsics into `ctx` when Shard 1 loads.
 pub(crate) fn register_url_and_usp_host_functions(ctx: &mut boa_engine::Context) {
     use crate::intrinsics::{can_parse_whatwg_url, usp_decode_component, usp_encode_component};
-    use boa_engine::{js_string, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_url_can_parse"), ctx)

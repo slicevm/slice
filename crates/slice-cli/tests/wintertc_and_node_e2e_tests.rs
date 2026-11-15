@@ -9,7 +9,7 @@ use crate::mcp_and_repl::{
 use crate::test_runner::{cmd_test, discover_test_files};
 use crate::{cmd_init, cmd_run};
 use slice_cas::MappedCasArchive;
-use slice_engine::{compile_source_to_bytecode, SliceIsolate};
+use slice_engine::{SliceIsolate, compile_source_to_bytecode};
 use slice_sandbox::CapabilityToken;
 use std::env;
 use std::io::{Read, Write};
@@ -583,8 +583,8 @@ module.exports = fn;"#,
 
 #[test]
 fn test_wave_a_cli_tsx_ssr_and_test_runner() {
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     let tmp_dir = env::temp_dir().join("slice_wave_a_tsx_cli_test");
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -831,8 +831,8 @@ fn test_multiframe_caught_and_uncaught_stack_traces_across_project_file_and_cas(
 
 #[test]
 fn test_wintertc_fast_url_search_params_and_lazy_response_headers_keep_alive() {
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     let handler_src = r#"
 export default {

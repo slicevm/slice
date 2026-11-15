@@ -480,141 +480,129 @@ pub fn fuse_array_pipelines_ast(code: &str) -> String {
             let init_src = &src[init_sp.start as usize..init_sp.end as usize];
 
             // Check if `<inner>` is `<arr>.map((x) => <map_body>)`
-            if let Expression::CallExpression(inner_call) = outer_mem.object.without_parentheses() {
-                if let Expression::StaticMemberExpression(inner_mem) =
+            if let Expression::CallExpression(inner_call) = outer_mem.object.without_parentheses()
+                && let Expression::StaticMemberExpression(inner_mem) =
                     inner_call.callee.without_parentheses()
-                {
-                    if inner_mem.property.name.as_str() == "map" && inner_call.arguments.len() == 1
-                    {
-                        let (map_param, map_expr, map_cb_src) =
-                            extract_single_param_arrow(&inner_call.arguments[0], src)?;
-                        if expr_has_observable_side_effect(map_expr) {
-                            return None;
-                        }
-
-                        // Check if `<arr>` is `<base>.filter((f) => <filt_body>)`
-                        if let Expression::CallExpression(filt_call) =
-                            inner_mem.object.without_parentheses()
-                        {
-                            if let Expression::StaticMemberExpression(filt_mem) =
-                                filt_call.callee.without_parentheses()
-                            {
-                                if filt_mem.property.name.as_str() == "filter"
-                                    && filt_call.arguments.len() == 1
-                                {
-                                    if let Some((filt_param, filt_expr, filt_cb_src)) =
-                                        extract_single_param_arrow(&filt_call.arguments[0], src)
-                                    {
-                                        if is_definitely_non_array_receiver(&filt_mem.object)
-                                            || expr_contains_fusion_hazard(&filt_mem.object, src)
-                                            || expr_has_observable_side_effect(filt_expr)
-                                        {
-                                            return None;
-                                        }
-                                        let base_sp = filt_mem.object.span();
-                                        let base_src =
-                                            &src[base_sp.start as usize..base_sp.end as usize];
-                                        *counter += 1;
-                                        let id = *counter;
-                                        let a_tmp = format!("{pfx}a{id}");
-                                        let len_tmp = format!("{pfx}len{id}");
-                                        let i_tmp = format!("{pfx}i{id}");
-                                        let acc_tmp = format!("{pfx}acc{id}");
-                                        let fp_tmp = format!("{pfx}f{id}");
-                                        let mp_tmp = format!("{pfx}m{id}");
-                                        let cp_tmp = format!("{pfx}c{id}");
-
-                                        let mut fmap = FxHashMap::default();
-                                        fmap.insert(filt_param.to_string(), fp_tmp.clone());
-                                        let filt_body =
-                                            rewrite_arrow_expr_body(filt_expr, src, &fmap);
-
-                                        let mut mmap = FxHashMap::default();
-                                        mmap.insert(map_param.to_string(), mp_tmp.clone());
-                                        let map_body =
-                                            rewrite_arrow_expr_body(map_expr, src, &mmap);
-
-                                        let mut rmap = FxHashMap::default();
-                                        rmap.insert(acc_param.to_string(), acc_tmp.clone());
-                                        rmap.insert(curr_param.to_string(), cp_tmp.clone());
-                                        let red_body =
-                                            rewrite_arrow_expr_body(red_expr, src, &rmap);
-
-                                        let fused = format!(
-                                            "(() => {{ const {a} = {base}; if (!Array.isArray({a}) || {a}[\"filter\"] !== Array.prototype[\"filter\"] || {a}[\"map\"] !== Array.prototype[\"map\"] || {a}[\"reduce\"] !== Array.prototype[\"reduce\"]) return {a}[\"filter\"]({fcb})[\"map\"]({mcb})[\"reduce\"]({rcb}, {init}); let {acc} = {init}; const {len} = {a}.length >>> 0; for (let {i} = 0; {i} < {len}; {i}++) {{ if (!({i} in {a})) continue; let {fp} = {a}[{i}]; if (!({fb})) continue; let {mp} = {fp}; let {cp} = ({mb}); {acc} = ({rb}); }} return {acc}; }})()",
-                                            a = a_tmp,
-                                            base = base_src,
-                                            fcb = filt_cb_src,
-                                            mcb = map_cb_src,
-                                            rcb = red_cb_src,
-                                            acc = acc_tmp,
-                                            init = init_src,
-                                            len = len_tmp,
-                                            i = i_tmp,
-                                            fp = fp_tmp,
-                                            fb = filt_body,
-                                            mp = mp_tmp,
-                                            cp = cp_tmp,
-                                            mb = map_body,
-                                            rb = red_body
-                                        );
-                                        return Some(Replacement {
-                                            start: call.span.start as usize,
-                                            end: call.span.end as usize,
-                                            text: fused,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-
-                        if is_definitely_non_array_receiver(&inner_mem.object)
-                            || expr_contains_fusion_hazard(&inner_mem.object, src)
-                        {
-                            return None;
-                        }
-                        let arr_sp = inner_mem.object.span();
-                        let arr_src = &src[arr_sp.start as usize..arr_sp.end as usize];
-                        *counter += 1;
-                        let id = *counter;
-                        let a_tmp = format!("{pfx}a{id}");
-                        let len_tmp = format!("{pfx}len{id}");
-                        let i_tmp = format!("{pfx}i{id}");
-                        let acc_tmp = format!("{pfx}acc{id}");
-                        let mp_tmp = format!("{pfx}m{id}");
-                        let cp_tmp = format!("{pfx}c{id}");
-
-                        let mut mmap = FxHashMap::default();
-                        mmap.insert(map_param.to_string(), mp_tmp.clone());
-                        let map_body = rewrite_arrow_expr_body(map_expr, src, &mmap);
-
-                        let mut rmap = FxHashMap::default();
-                        rmap.insert(acc_param.to_string(), acc_tmp.clone());
-                        rmap.insert(curr_param.to_string(), cp_tmp.clone());
-                        let red_body = rewrite_arrow_expr_body(red_expr, src, &rmap);
-
-                        let fused = format!(
-                            "(() => {{ const {a} = {arr}; if (!Array.isArray({a}) || {a}[\"map\"] !== Array.prototype[\"map\"] || {a}[\"reduce\"] !== Array.prototype[\"reduce\"]) return {a}[\"map\"]({mcb})[\"reduce\"]({rcb}, {init}); let {acc} = {init}; const {len} = {a}.length >>> 0; for (let {i} = 0; {i} < {len}; {i}++) {{ if (!({i} in {a})) continue; let {mp} = {a}[{i}]; let {cp} = ({mb}); {acc} = ({rb}); }} return {acc}; }})()",
-                            a = a_tmp,
-                            arr = arr_src,
-                            mcb = map_cb_src,
-                            rcb = red_cb_src,
-                            acc = acc_tmp,
-                            init = init_src,
-                            len = len_tmp,
-                            i = i_tmp,
-                            mp = mp_tmp,
-                            cp = cp_tmp,
-                            mb = map_body,
-                            rb = red_body
-                        );
-                        return Some(Replacement {
-                            start: call.span.start as usize,
-                            end: call.span.end as usize,
-                            text: fused,
-                        });
-                    }
+                && inner_mem.property.name.as_str() == "map"
+                && inner_call.arguments.len() == 1
+            {
+                let (map_param, map_expr, map_cb_src) =
+                    extract_single_param_arrow(&inner_call.arguments[0], src)?;
+                if expr_has_observable_side_effect(map_expr) {
+                    return None;
                 }
+
+                // Check if `<arr>` is `<base>.filter((f) => <filt_body>)`
+                if let Expression::CallExpression(filt_call) =
+                    inner_mem.object.without_parentheses()
+                    && let Expression::StaticMemberExpression(filt_mem) =
+                        filt_call.callee.without_parentheses()
+                    && filt_mem.property.name.as_str() == "filter"
+                    && filt_call.arguments.len() == 1
+                    && let Some((filt_param, filt_expr, filt_cb_src)) =
+                        extract_single_param_arrow(&filt_call.arguments[0], src)
+                {
+                    if is_definitely_non_array_receiver(&filt_mem.object)
+                        || expr_contains_fusion_hazard(&filt_mem.object, src)
+                        || expr_has_observable_side_effect(filt_expr)
+                    {
+                        return None;
+                    }
+                    let base_sp = filt_mem.object.span();
+                    let base_src = &src[base_sp.start as usize..base_sp.end as usize];
+                    *counter += 1;
+                    let id = *counter;
+                    let a_tmp = format!("{pfx}a{id}");
+                    let len_tmp = format!("{pfx}len{id}");
+                    let i_tmp = format!("{pfx}i{id}");
+                    let acc_tmp = format!("{pfx}acc{id}");
+                    let fp_tmp = format!("{pfx}f{id}");
+                    let mp_tmp = format!("{pfx}m{id}");
+                    let cp_tmp = format!("{pfx}c{id}");
+
+                    let mut fmap = FxHashMap::default();
+                    fmap.insert(filt_param.to_string(), fp_tmp.clone());
+                    let filt_body = rewrite_arrow_expr_body(filt_expr, src, &fmap);
+
+                    let mut mmap = FxHashMap::default();
+                    mmap.insert(map_param.to_string(), mp_tmp.clone());
+                    let map_body = rewrite_arrow_expr_body(map_expr, src, &mmap);
+
+                    let mut rmap = FxHashMap::default();
+                    rmap.insert(acc_param.to_string(), acc_tmp.clone());
+                    rmap.insert(curr_param.to_string(), cp_tmp.clone());
+                    let red_body = rewrite_arrow_expr_body(red_expr, src, &rmap);
+
+                    let fused = format!(
+                        "(() => {{ const {a} = {base}; if (!Array.isArray({a}) || {a}[\"filter\"] !== Array.prototype[\"filter\"] || {a}[\"map\"] !== Array.prototype[\"map\"] || {a}[\"reduce\"] !== Array.prototype[\"reduce\"]) return {a}[\"filter\"]({fcb})[\"map\"]({mcb})[\"reduce\"]({rcb}, {init}); let {acc} = {init}; const {len} = {a}.length >>> 0; for (let {i} = 0; {i} < {len}; {i}++) {{ if (!({i} in {a})) continue; let {fp} = {a}[{i}]; if (!({fb})) continue; let {mp} = {fp}; let {cp} = ({mb}); {acc} = ({rb}); }} return {acc}; }})()",
+                        a = a_tmp,
+                        base = base_src,
+                        fcb = filt_cb_src,
+                        mcb = map_cb_src,
+                        rcb = red_cb_src,
+                        acc = acc_tmp,
+                        init = init_src,
+                        len = len_tmp,
+                        i = i_tmp,
+                        fp = fp_tmp,
+                        fb = filt_body,
+                        mp = mp_tmp,
+                        cp = cp_tmp,
+                        mb = map_body,
+                        rb = red_body
+                    );
+                    return Some(Replacement {
+                        start: call.span.start as usize,
+                        end: call.span.end as usize,
+                        text: fused,
+                    });
+                }
+
+                if is_definitely_non_array_receiver(&inner_mem.object)
+                    || expr_contains_fusion_hazard(&inner_mem.object, src)
+                {
+                    return None;
+                }
+                let arr_sp = inner_mem.object.span();
+                let arr_src = &src[arr_sp.start as usize..arr_sp.end as usize];
+                *counter += 1;
+                let id = *counter;
+                let a_tmp = format!("{pfx}a{id}");
+                let len_tmp = format!("{pfx}len{id}");
+                let i_tmp = format!("{pfx}i{id}");
+                let acc_tmp = format!("{pfx}acc{id}");
+                let mp_tmp = format!("{pfx}m{id}");
+                let cp_tmp = format!("{pfx}c{id}");
+
+                let mut mmap = FxHashMap::default();
+                mmap.insert(map_param.to_string(), mp_tmp.clone());
+                let map_body = rewrite_arrow_expr_body(map_expr, src, &mmap);
+
+                let mut rmap = FxHashMap::default();
+                rmap.insert(acc_param.to_string(), acc_tmp.clone());
+                rmap.insert(curr_param.to_string(), cp_tmp.clone());
+                let red_body = rewrite_arrow_expr_body(red_expr, src, &rmap);
+
+                let fused = format!(
+                    "(() => {{ const {a} = {arr}; if (!Array.isArray({a}) || {a}[\"map\"] !== Array.prototype[\"map\"] || {a}[\"reduce\"] !== Array.prototype[\"reduce\"]) return {a}[\"map\"]({mcb})[\"reduce\"]({rcb}, {init}); let {acc} = {init}; const {len} = {a}.length >>> 0; for (let {i} = 0; {i} < {len}; {i}++) {{ if (!({i} in {a})) continue; let {mp} = {a}[{i}]; let {cp} = ({mb}); {acc} = ({rb}); }} return {acc}; }})()",
+                    a = a_tmp,
+                    arr = arr_src,
+                    mcb = map_cb_src,
+                    rcb = red_cb_src,
+                    acc = acc_tmp,
+                    init = init_src,
+                    len = len_tmp,
+                    i = i_tmp,
+                    mp = mp_tmp,
+                    cp = cp_tmp,
+                    mb = map_body,
+                    rb = red_body
+                );
+                return Some(Replacement {
+                    start: call.span.start as usize,
+                    end: call.span.end as usize,
+                    text: fused,
+                });
             }
         }
         None
@@ -737,11 +725,11 @@ pub fn fuse_array_pipelines_ast(code: &str) -> String {
             }
             Statement::ClassDeclaration(cd) => {
                 for el in &cd.body.body {
-                    if let oxc::ast::ast::ClassElement::MethodDefinition(md) = el {
-                        if let Some(body) = &md.value.body {
-                            for s in &body.statements {
-                                walk_stmt(s, src, pfx, counter, out);
-                            }
+                    if let oxc::ast::ast::ClassElement::MethodDefinition(md) = el
+                        && let Some(body) = &md.value.body
+                    {
+                        for s in &body.statements {
+                            walk_stmt(s, src, pfx, counter, out);
                         }
                     }
                 }

@@ -438,23 +438,23 @@ fn try_collect_esm_default_interop_props(
     let mut group_end = def_vd.span.end as usize;
     let mut props = FxHashSet::default();
 
-    if let Some(Statement::VariableDeclaration(destr_vd)) = stmts.get(stmt_idx + 2) {
-        if destr_vd.declarations.len() == 1 {
-            let destr_decl = &destr_vd.declarations[0];
-            if let Some(Expression::Identifier(id_expr)) = &destr_decl.init {
-                if id_expr.name.as_str() == imp_var {
-                    group_end = destr_vd.span.end as usize;
-                    let BindingPattern::ObjectPattern(obj_pat) = &destr_decl.id else {
-                        return None;
-                    };
-                    if obj_pat.rest.is_some() {
-                        return None;
-                    }
-                    for prop in &obj_pat.properties {
-                        let key_name = prop.key.name()?;
-                        props.insert(key_name.to_string());
-                    }
-                }
+    if let Some(Statement::VariableDeclaration(destr_vd)) = stmts.get(stmt_idx + 2)
+        && destr_vd.declarations.len() == 1
+    {
+        let destr_decl = &destr_vd.declarations[0];
+        if let Some(Expression::Identifier(id_expr)) = &destr_decl.init
+            && id_expr.name.as_str() == imp_var
+        {
+            group_end = destr_vd.span.end as usize;
+            let BindingPattern::ObjectPattern(obj_pat) = &destr_decl.id else {
+                return None;
+            };
+            if obj_pat.rest.is_some() {
+                return None;
+            }
+            for prop in &obj_pat.properties {
+                let key_name = prop.key.name()?;
+                props.insert(key_name.to_string());
             }
         }
     }
@@ -620,17 +620,17 @@ pub fn extract_module_require_summary(consumer_code: &str) -> ModuleRequireSumma
 
     // 1. Count all `require("<str>")` calls across the entire AST
     crate::linker::walk_ast_call_expressions(&parser_ret.program, &mut |call| {
-        if let Expression::Identifier(callee) = call.callee.without_parentheses() {
-            if callee.name.as_str() == "require" && call.arguments.len() == 1 {
-                if let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() {
-                    let target = str_lit.value.as_str();
-                    summary
-                        .targets
-                        .entry(target.to_string())
-                        .or_default()
-                        .occurrences += 1;
-                }
-            }
+        if let Expression::Identifier(callee) = call.callee.without_parentheses()
+            && callee.name.as_str() == "require"
+            && call.arguments.len() == 1
+            && let Some(Argument::StringLiteral(str_lit)) = call.arguments.first()
+        {
+            let target = str_lit.value.as_str();
+            summary
+                .targets
+                .entry(target.to_string())
+                .or_default()
+                .occurrences += 1;
         }
     });
 
@@ -718,15 +718,14 @@ pub fn extract_module_require_summary(consumer_code: &str) -> ModuleRequireSumma
 
     // 3. Also check direct `require("<target>").Prop` inline member accesses
     crate::linker::walk_ast_expressions(&parser_ret.program, &mut |expr| {
-        if let Expression::StaticMemberExpression(mem) = expr {
-            if let Some(target_id) = is_any_require_call(&mem.object) {
-                if let Some(entry) = summary.targets.get_mut(&target_id) {
-                    entry
-                        .used_props
-                        .insert(mem.property.name.as_str().to_string());
-                    entry.accounted += 1;
-                }
-            }
+        if let Expression::StaticMemberExpression(mem) = expr
+            && let Some(target_id) = is_any_require_call(&mem.object)
+            && let Some(entry) = summary.targets.get_mut(&target_id)
+        {
+            entry
+                .used_props
+                .insert(mem.property.name.as_str().to_string());
+            entry.accounted += 1;
         }
     });
 
@@ -1218,17 +1217,16 @@ pub fn prune_and_minify_cjs_module_ast(
                                 .init
                                 .as_ref()
                                 .is_some_and(|e| is_any_require_call(e).is_some());
-                            if is_req {
-                                if let BindingPattern::ObjectPattern(obj_pat) = &mut decl.id {
-                                    if obj_pat.rest.is_none() {
-                                        let before_len = obj_pat.properties.len();
-                                        obj_pat.properties.retain(|prop| {
-                                            pattern_has_live(&prop.value, &referenced_root_syms)
-                                        });
-                                        if obj_pat.properties.len() != before_len {
-                                            changed = true;
-                                        }
-                                    }
+                            if is_req
+                                && let BindingPattern::ObjectPattern(obj_pat) = &mut decl.id
+                                && obj_pat.rest.is_none()
+                            {
+                                let before_len = obj_pat.properties.len();
+                                obj_pat.properties.retain(|prop| {
+                                    pattern_has_live(&prop.value, &referenced_root_syms)
+                                });
+                                if obj_pat.properties.len() != before_len {
+                                    changed = true;
                                 }
                             }
                         }
@@ -1331,11 +1329,10 @@ pub fn prune_and_minify_cjs_module_ast(
                         let sp = stmt.span();
                         if let Some((obj_stmt_start, ref kept_refs)) =
                             pruned_module_exports_obj_span
+                            && sp.start == obj_stmt_start
                         {
-                            if sp.start == obj_stmt_start {
-                                worklist.extend(kept_refs.iter().cloned());
-                                continue;
-                            }
+                            worklist.extend(kept_refs.iter().cloned());
+                            continue;
                         }
                         let text = cjs_code[sp.start as usize..sp.end as usize].trim();
                         worklist.extend(extract_referenced_identifiers(text));
@@ -1345,12 +1342,12 @@ pub fn prune_and_minify_cjs_module_ast(
 
             let mut live_idents: FxHashSet<String> = FxHashSet::default();
             while let Some(ident) = worklist.pop() {
-                if live_idents.insert(ident.clone()) {
-                    if let Some(deps) = decl_dep_map.get(&ident) {
-                        for d in deps {
-                            if !live_idents.contains(d) {
-                                worklist.push(d.clone());
-                            }
+                if live_idents.insert(ident.clone())
+                    && let Some(deps) = decl_dep_map.get(&ident)
+                {
+                    for d in deps {
+                        if !live_idents.contains(d) {
+                            worklist.push(d.clone());
                         }
                     }
                 }
@@ -1363,14 +1360,13 @@ pub fn prune_and_minify_cjs_module_ast(
                             .init
                             .as_ref()
                             .is_some_and(|e| is_any_require_call(e).is_some());
-                        if is_req {
-                            if let BindingPattern::ObjectPattern(obj_pat) = &mut decl.id {
-                                if obj_pat.rest.is_none() {
-                                    obj_pat
-                                        .properties
-                                        .retain(|prop| pattern_has_live(&prop.value, &live_idents));
-                                }
-                            }
+                        if is_req
+                            && let BindingPattern::ObjectPattern(obj_pat) = &mut decl.id
+                            && obj_pat.rest.is_none()
+                        {
+                            obj_pat
+                                .properties
+                                .retain(|prop| pattern_has_live(&prop.value, &live_idents));
                         }
                     }
                     vd.declarations.retain(|decl| {

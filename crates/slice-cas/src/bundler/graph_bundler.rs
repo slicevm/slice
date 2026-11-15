@@ -1,14 +1,14 @@
 //! Multi-Pass Module Graph Bundler (`bundle_entrypoint_with_deps`).
 
 use crate::bundler::{
-    compute_source_line_map, short_source_label, strip_jsonc, ResolverCacheGuard,
+    ResolverCacheGuard, compute_source_line_map, short_source_label, strip_jsonc,
 };
 use crate::compiler::{rewrite_cjs_require, source_contains_jsx, strip_typescript_raw_with_ext};
 use crate::linker::{
-    analyze_module_used_exports_from_summaries, canonical_mod_id, collect_eager_module_indices,
-    extract_module_require_summary, has_esm_default_export_marker, has_top_level_await,
-    inline_cold_method_requires_ast, prune_and_minify_cjs_module_ast, transform_module_to_cjs,
-    ModuleRequireSummary, UsedExports,
+    ModuleRequireSummary, UsedExports, analyze_module_used_exports_from_summaries,
+    canonical_mod_id, collect_eager_module_indices, extract_module_require_summary,
+    has_esm_default_export_marker, has_top_level_await, inline_cold_method_requires_ast,
+    prune_and_minify_cjs_module_ast, transform_module_to_cjs,
 };
 use anyhow::{Context, Result};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -319,11 +319,12 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         } else {
             body.clone()
         };
-        if !eager_indices.contains(&idx) && id.contains("/node_modules/") {
-            if let Ok(escaped) = serde_json::to_string(&final_body) {
-                modules_code.push_str(&format!("__slice_modules[{}] = {};\n", idx, escaped));
-                continue;
-            }
+        if !eager_indices.contains(&idx)
+            && id.contains("/node_modules/")
+            && let Ok(escaped) = serde_json::to_string(&final_body)
+        {
+            modules_code.push_str(&format!("__slice_modules[{}] = {};\n", idx, escaped));
+            continue;
         }
         modules_code.push_str(&format!(
             "__slice_modules[{}] = function(exports, require, module) {{\n{}\n}};\n",

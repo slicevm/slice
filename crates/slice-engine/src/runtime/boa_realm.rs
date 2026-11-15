@@ -965,27 +965,15 @@ impl SavedIsolateContextGuard {
         };
         let saved_fetch_mocks = BOA_FETCH_MOCKS.with(|m| {
             let b = m.borrow();
-            if b.is_empty() {
-                None
-            } else {
-                Some(b.clone())
-            }
+            if b.is_empty() { None } else { Some(b.clone()) }
         });
         let saved_ws_mocks = crate::websocket::BOA_WS_MOCKS.with(|m| {
             let b = m.borrow();
-            if b.is_empty() {
-                None
-            } else {
-                Some(b.clone())
-            }
+            if b.is_empty() { None } else { Some(b.clone()) }
         });
         let saved_sock_mocks = crate::sockets::BOA_SOCKET_MOCKS.with(|m| {
             let b = m.borrow();
-            if b.is_empty() {
-                None
-            } else {
-                Some(b.clone())
-            }
+            if b.is_empty() { None } else { Some(b.clone()) }
         });
         let saved_kv_budget = BOA_KV_MEM_BUDGET.with(|m| m.get());
         let saved_fuel_budget = BOA_FUEL_BUDGET.with(|f| f.get());

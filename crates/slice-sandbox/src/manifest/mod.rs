@@ -4,7 +4,7 @@
 pub mod directives;
 pub mod dotenv;
 
-pub use directives::{parse_inline_directives, InlineDirectives};
+pub use directives::{InlineDirectives, parse_inline_directives};
 pub use dotenv::{is_sensitive_env_key, parse_dotenv_content};
 
 use crate::compartment::CapabilityToken;
@@ -398,10 +398,10 @@ impl SliceManifest {
                         }
                     }
                     ("server", "port") => {
-                        if let Some(n) = parse_u64_ignoring_underscores(val) {
-                            if let Ok(p) = u16::try_from(n) {
-                                manifest.server_port = Some(p);
-                            }
+                        if let Some(n) = parse_u64_ignoring_underscores(val)
+                            && let Ok(p) = u16::try_from(n)
+                        {
+                            manifest.server_port = Some(p);
                         }
                     }
                     ("server", "workers") => {
@@ -501,10 +501,11 @@ allow_env = ["NODE_ENV", "HOOK_URL=https://example.com/#frag", "PAIR=a,b"] # tra
         assert_eq!(m.static_dir.as_deref(), Some("./build/client"));
         assert_eq!(m.fuel_limit, 50_000_000);
         assert_eq!(m.memory_limit_kb, 64 * 1024);
-        assert!(m
-            .capabilities
-            .allowed_net_hosts
-            .contains("api.internal:443"));
+        assert!(
+            m.capabilities
+                .allowed_net_hosts
+                .contains("api.internal:443")
+        );
         assert!(m.capabilities.allowed_net_hosts.contains("127.0.0.1:8080"));
         assert_eq!(
             m.capabilities

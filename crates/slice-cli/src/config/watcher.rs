@@ -17,10 +17,10 @@ pub(crate) fn collect_watch_fingerprint(target: &Path) -> u64 {
             }
             file_path.to_string_lossy().hash(hasher);
             meta.len().hash(hasher);
-            if let Ok(m) = meta.modified() {
-                if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
-                    d.as_nanos().hash(hasher);
-                }
+            if let Ok(m) = meta.modified()
+                && let Ok(d) = m.duration_since(std::time::UNIX_EPOCH)
+            {
+                d.as_nanos().hash(hasher);
             }
         }
     }

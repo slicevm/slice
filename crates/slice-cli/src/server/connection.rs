@@ -581,15 +581,15 @@ pub(crate) fn serve_connection_with_isolate(
                         r#"{"error":"INVALID_CONTENT_LENGTH"}"#,
                     );
                 };
-                if let Some(prev_len) = seen_content_length {
-                    if prev_len != parsed_len {
-                        let _ = flush_pending_write_buf(&mut stream, write_buf);
-                        return write_http_error_and_close(
-                            &mut stream,
-                            400,
-                            r#"{"error":"SMUGGLING_DUPLICATE_CONTENT_LENGTH_BLOCKED"}"#,
-                        );
-                    }
+                if let Some(prev_len) = seen_content_length
+                    && prev_len != parsed_len
+                {
+                    let _ = flush_pending_write_buf(&mut stream, write_buf);
+                    return write_http_error_and_close(
+                        &mut stream,
+                        400,
+                        r#"{"error":"SMUGGLING_DUPLICATE_CONTENT_LENGTH_BLOCKED"}"#,
+                    );
                 }
                 if parsed_len > MAX_INBOUND_BODY_BYTES {
                     let _ = flush_pending_write_buf(&mut stream, write_buf);
@@ -818,99 +818,86 @@ pub(crate) fn serve_connection_with_isolate(
                 || find_http_header_end(&carry_buf).is_some());
 
         // Phase F2: Zero-Stat CAS / In-Memory Static Asset Fast-Path (`< 2 us`, 0 JS VM spinup, 0 disk syscalls)
-        if !is_ws_upgrade {
-            if let Some(static_table) = static_assets_opt {
-                if method == "GET" || method == "HEAD" {
-                    if let Some(asset) = static_table.resolve(path) {
-                        let is_304 = !if_none_match.is_empty()
-                            && (if_none_match == "*"
-                                || if_none_match.contains(&asset.etag_quoted)
-                                || if_none_match.trim_matches('"')
-                                    == asset.etag_quoted.trim_matches('"'));
-                        let total_us = (req_start.elapsed().as_nanos() / 1_000) as u64;
-                        if is_304 {
-                            write_buf.extend_from_slice(b"HTTP/1.1 304 Not Modified\r\nETag: ");
-                            write_buf.extend_from_slice(asset.etag_quoted.as_bytes());
-                            write_buf.extend_from_slice(
-                                b"\r\nCache-Control: public, max-age=3600\r\nConnection: ",
-                            );
-                            write_buf.extend_from_slice(conn_hdr.as_bytes());
-                            write_buf.extend_from_slice(
-                                b"\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: ",
-                            );
-                            write_buf.extend_from_slice(tenant_id.as_bytes());
-                            write_buf.extend_from_slice(
-                                b"\r\nX-Slice-Static: HIT-304\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: ",
-                            );
-                            push_u64_ascii(write_buf, total_us);
-                            write_buf.extend_from_slice(b"\r\nX-Slice-Fuel-Used: 0\r\n\r\n");
-                        } else {
-                            write_buf.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Type: ");
-                            write_buf.extend_from_slice(asset.content_type.as_bytes());
-                            write_buf.extend_from_slice(b"\r\nContent-Length: ");
-                            push_u64_ascii(write_buf, asset.payload.len() as u64);
-                            write_buf.extend_from_slice(b"\r\nETag: ");
-                            write_buf.extend_from_slice(asset.etag_quoted.as_bytes());
-                            write_buf.extend_from_slice(
-                                b"\r\nCache-Control: public, max-age=3600\r\nConnection: ",
-                            );
-                            write_buf.extend_from_slice(conn_hdr.as_bytes());
-                            write_buf.extend_from_slice(
-                                b"\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: ",
-                            );
-                            write_buf.extend_from_slice(tenant_id.as_bytes());
-                            write_buf.extend_from_slice(
-                                b"\r\nX-Slice-Static: HIT-200\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: ",
-                            );
-                            push_u64_ascii(write_buf, total_us);
-                            write_buf.extend_from_slice(b"\r\nX-Slice-Fuel-Used: 0\r\n\r\n");
-                            if method != "HEAD" {
-                                if !has_more_pipelined
-                                    || asset.payload.len() > STATIC_COALESCE_MAX_BYTES
-                                    || !keep_alive
-                                {
-                                    stream.write_all(write_buf)?;
-                                    clear_and_trim_write_buf(write_buf);
-                                    for chunk in asset.payload.chunks(65536) {
-                                        stream.write_all(chunk)?;
-                                    }
-                                } else {
-                                    write_buf.extend_from_slice(&asset.payload);
-                                }
-                            }
+        if !is_ws_upgrade
+            && let Some(static_table) = static_assets_opt
+            && (method == "GET" || method == "HEAD")
+            && let Some(asset) = static_table.resolve(path)
+        {
+            let is_304 = !if_none_match.is_empty()
+                && (if_none_match == "*"
+                    || if_none_match.contains(&asset.etag_quoted)
+                    || if_none_match.trim_matches('"') == asset.etag_quoted.trim_matches('"'));
+            let total_us = (req_start.elapsed().as_nanos() / 1_000) as u64;
+            if is_304 {
+                write_buf.extend_from_slice(b"HTTP/1.1 304 Not Modified\r\nETag: ");
+                write_buf.extend_from_slice(asset.etag_quoted.as_bytes());
+                write_buf
+                    .extend_from_slice(b"\r\nCache-Control: public, max-age=3600\r\nConnection: ");
+                write_buf.extend_from_slice(conn_hdr.as_bytes());
+                write_buf.extend_from_slice(b"\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: ");
+                write_buf.extend_from_slice(tenant_id.as_bytes());
+                write_buf.extend_from_slice(
+                    b"\r\nX-Slice-Static: HIT-304\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: ",
+                );
+                push_u64_ascii(write_buf, total_us);
+                write_buf.extend_from_slice(b"\r\nX-Slice-Fuel-Used: 0\r\n\r\n");
+            } else {
+                write_buf.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Type: ");
+                write_buf.extend_from_slice(asset.content_type.as_bytes());
+                write_buf.extend_from_slice(b"\r\nContent-Length: ");
+                push_u64_ascii(write_buf, asset.payload.len() as u64);
+                write_buf.extend_from_slice(b"\r\nETag: ");
+                write_buf.extend_from_slice(asset.etag_quoted.as_bytes());
+                write_buf
+                    .extend_from_slice(b"\r\nCache-Control: public, max-age=3600\r\nConnection: ");
+                write_buf.extend_from_slice(conn_hdr.as_bytes());
+                write_buf.extend_from_slice(b"\r\nServer: Slice-NexusJS/0.2\r\nX-Slice-Tenant: ");
+                write_buf.extend_from_slice(tenant_id.as_bytes());
+                write_buf.extend_from_slice(
+                    b"\r\nX-Slice-Static: HIT-200\r\nX-Slice-Isolate-Us: 0\r\nX-Slice-Total-Us: ",
+                );
+                push_u64_ascii(write_buf, total_us);
+                write_buf.extend_from_slice(b"\r\nX-Slice-Fuel-Used: 0\r\n\r\n");
+                if method != "HEAD" {
+                    if !has_more_pipelined
+                        || asset.payload.len() > STATIC_COALESCE_MAX_BYTES
+                        || !keep_alive
+                    {
+                        stream.write_all(write_buf)?;
+                        clear_and_trim_write_buf(write_buf);
+                        for chunk in asset.payload.chunks(65536) {
+                            stream.write_all(chunk)?;
                         }
-                        let reached_max = if let Some((counter, max_reqs)) = max_requests_tracker {
-                            let prev = counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                            max_reqs > 0 && prev + 1 >= max_reqs
-                        } else {
-                            false
-                        };
-                        if !has_more_pipelined
-                            || write_buf.len() >= 32768
-                            || !keep_alive
-                            || reached_max
-                        {
-                            if !write_buf.is_empty() {
-                                stream.write_all(write_buf)?;
-                                clear_and_trim_write_buf(write_buf);
-                            }
-                            if !keep_alive || reached_max {
-                                stream.flush()?;
-                            }
-                        }
-                        if !keep_alive || reached_max {
-                            break;
-                        }
-                        if filled > body_end {
-                            read_buf.copy_within(body_end..filled, 0);
-                            filled -= body_end;
-                        } else {
-                            filled = 0;
-                        }
-                        continue;
+                    } else {
+                        write_buf.extend_from_slice(&asset.payload);
                     }
                 }
             }
+            let reached_max = if let Some((counter, max_reqs)) = max_requests_tracker {
+                let prev = counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                max_reqs > 0 && prev + 1 >= max_reqs
+            } else {
+                false
+            };
+            if !has_more_pipelined || write_buf.len() >= 32768 || !keep_alive || reached_max {
+                if !write_buf.is_empty() {
+                    stream.write_all(write_buf)?;
+                    clear_and_trim_write_buf(write_buf);
+                }
+                if !keep_alive || reached_max {
+                    stream.flush()?;
+                }
+            }
+            if !keep_alive || reached_max {
+                break;
+            }
+            if filled > body_end {
+                read_buf.copy_within(body_end..filled, 0);
+                filled -= body_end;
+            } else {
+                filled = 0;
+            }
+            continue;
         }
 
         let raw_body_bytes: &[u8] = if let Some(ref owned) = owned_body_bytes_opt {
@@ -962,13 +949,12 @@ pub(crate) fn serve_connection_with_isolate(
 
                     if let Ok(open_frames) =
                         isolate.execute_websocket_event("open", false, &[], 0, "")
+                        && flush_server_ws_frames(&mut stream, open_frames)?
                     {
-                        if flush_server_ws_frames(&mut stream, open_frames)? {
-                            if let Some((counter, _)) = max_requests_tracker {
-                                counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                            }
-                            return Ok(());
+                        if let Some((counter, _)) = max_requests_tracker {
+                            counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                         }
+                        return Ok(());
                     }
 
                     let mut ws_pending = Vec::new();

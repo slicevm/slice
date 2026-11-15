@@ -1,10 +1,10 @@
 //! Zero-Stat Content-Addressed Storage (`.cas`) Builder (`CasBuilder`).
 
 use crate::archive::{
-    detect_static_mime_type, CasBlobEntry, CasIndexHeader, CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION,
+    CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION, CasBlobEntry, CasIndexHeader, detect_static_mime_type,
 };
 use crate::compiler::strip_typescript_and_normalize_with_ext;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::Write;
@@ -49,42 +49,42 @@ impl CasBuilder {
                     "bun.lockb",
                 ] {
                     let lock_path = dir.join(lock_name);
-                    if lock_path.is_file() {
-                        if let Ok(bytes) = std::fs::read(&lock_path) {
-                            self.lockfile_blake3 = Some(blake3::hash(&bytes).to_hex().to_string());
-                            break;
-                        }
+                    if lock_path.is_file()
+                        && let Ok(bytes) = std::fs::read(&lock_path)
+                    {
+                        self.lockfile_blake3 = Some(blake3::hash(&bytes).to_hex().to_string());
+                        break;
                     }
                 }
-                if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                        let mut deps = Vec::new();
-                        for section in ["dependencies", "devDependencies"] {
-                            if let Some(obj) = val.get(section).and_then(|v| v.as_object()) {
-                                for (name, spec_val) in obj {
-                                    let declared = spec_val.as_str().unwrap_or("*").to_string();
-                                    let resolved_pkg =
-                                        dir.join("node_modules").join(name).join("package.json");
-                                    let version = std::fs::read_to_string(&resolved_pkg)
-                                        .ok()
-                                        .and_then(|s| {
-                                            serde_json::from_str::<serde_json::Value>(&s).ok()
-                                        })
-                                        .and_then(|v| {
-                                            v.get("version")
-                                                .and_then(|ver| ver.as_str())
-                                                .map(|s| s.to_string())
-                                        })
-                                        .unwrap_or(declared);
-                                    if !deps.iter().any(|(n, _)| n == name) {
-                                        deps.push((name.clone(), version));
-                                    }
+                if let Ok(raw) = std::fs::read_to_string(&pkg_json)
+                    && let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw)
+                {
+                    let mut deps = Vec::new();
+                    for section in ["dependencies", "devDependencies"] {
+                        if let Some(obj) = val.get(section).and_then(|v| v.as_object()) {
+                            for (name, spec_val) in obj {
+                                let declared = spec_val.as_str().unwrap_or("*").to_string();
+                                let resolved_pkg =
+                                    dir.join("node_modules").join(name).join("package.json");
+                                let version = std::fs::read_to_string(&resolved_pkg)
+                                    .ok()
+                                    .and_then(|s| {
+                                        serde_json::from_str::<serde_json::Value>(&s).ok()
+                                    })
+                                    .and_then(|v| {
+                                        v.get("version")
+                                            .and_then(|ver| ver.as_str())
+                                            .map(|s| s.to_string())
+                                    })
+                                    .unwrap_or(declared);
+                                if !deps.iter().any(|(n, _)| n == name) {
+                                    deps.push((name.clone(), version));
                                 }
                             }
                         }
-                        deps.sort_by(|a, b| a.0.cmp(&b.0));
-                        self.resolved_dependencies = deps;
                     }
+                    deps.sort_by(|a, b| a.0.cmp(&b.0));
+                    self.resolved_dependencies = deps;
                 }
                 break;
             }
@@ -140,28 +140,27 @@ impl CasBuilder {
                         continue;
                     }
                     stack.push(path);
-                } else if ft.is_file() {
-                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                        if matches!(
-                            ext,
-                            "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts"
-                        ) {
-                            let rel = path
-                                .strip_prefix(root_dir)
-                                .unwrap_or(&path)
-                                .to_string_lossy()
-                                .replace('\\', "/");
-                            let specifier = format!("./{}", rel);
-                            let raw = std::fs::read_to_string(&path)?;
-                            let is_jsx_ext = matches!(ext, "tsx" | "jsx");
-                            let is_ts = is_jsx_ext || matches!(ext, "ts" | "mts" | "cts");
-                            let normalized =
-                                strip_typescript_and_normalize_with_ext(&raw, is_ts, is_jsx_ext);
-                            let bytecode = bytecode_compiler_fn(&normalized);
-                            self.modules.push((specifier, path, normalized, bytecode));
-                            count += 1;
-                        }
-                    }
+                } else if ft.is_file()
+                    && let Some(ext) = path.extension().and_then(|e| e.to_str())
+                    && matches!(
+                        ext,
+                        "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts"
+                    )
+                {
+                    let rel = path
+                        .strip_prefix(root_dir)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let specifier = format!("./{}", rel);
+                    let raw = std::fs::read_to_string(&path)?;
+                    let is_jsx_ext = matches!(ext, "tsx" | "jsx");
+                    let is_ts = is_jsx_ext || matches!(ext, "ts" | "mts" | "cts");
+                    let normalized =
+                        strip_typescript_and_normalize_with_ext(&raw, is_ts, is_jsx_ext);
+                    let bytecode = bytecode_compiler_fn(&normalized);
+                    self.modules.push((specifier, path, normalized, bytecode));
+                    count += 1;
                 }
             }
         }
@@ -402,10 +401,10 @@ impl CasBuilder {
             }
         }
 
-        if entry_hash.is_empty() {
-            if let Some((_, first_hash)) = radix_map.iter().next() {
-                entry_hash = first_hash.clone();
-            }
+        if entry_hash.is_empty()
+            && let Some((_, first_hash)) = radix_map.iter().next()
+        {
+            entry_hash = first_hash.clone();
         }
 
         let header = CasIndexHeader {

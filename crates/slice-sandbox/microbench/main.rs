@@ -1,7 +1,7 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use slice_sandbox::{
-    is_cloud_metadata_ssrf_target, is_private_or_loopback_ssrf_target, parse_dotenv_content,
-    parse_inline_directives, CapabilityToken, TenantCompartment,
+    CapabilityToken, TenantCompartment, is_cloud_metadata_ssrf_target,
+    is_private_or_loopback_ssrf_target, parse_dotenv_content, parse_inline_directives,
 };
 use std::hint::black_box;
 

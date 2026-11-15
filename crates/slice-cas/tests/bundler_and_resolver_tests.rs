@@ -450,7 +450,7 @@ console.log(APP_TITLE, INTERNAL_TAG, metaUrl, metaDir, cjsDir, dynMod.lazyBanner
 
 #[test]
 fn test_issues_33_and_34_class_method_source_mapping_and_cas_lockfile_provenance() {
-    use crate::{map_bundled_stack_trace, CasBuilder, MappedCasArchive};
+    use crate::{CasBuilder, MappedCasArchive, map_bundled_stack_trace};
 
     let test_dir =
         std::env::temp_dir().join(format!("slice_issues_33_34_test_{}", std::process::id()));

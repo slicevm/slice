@@ -3,18 +3,18 @@
 //! Outbound `fetch()` Multiplexer (`Promise.all([fetch(...), ...])`).
 
 use crate::boa_realm::{
-    has_process_exit, has_uncaught_error, mark_subsystem_dirty, set_last_exit_code,
-    set_uncaught_error, BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE,
-    BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_EXEC_DIRTY, BOA_KV_MEM_BUDGET,
-    BOA_LAST_EXIT_CODE, BOA_NET_HOSTS, BOA_PROCESS_EXIT, BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION,
-    DIRTY_ALS, DIRTY_EVENT_LOOP, DIRTY_SOCKETS, DIRTY_WORKERS, EXEC_DIRTY_REJECTIONS,
+    BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS,
+    BOA_EGRESS_SECRETS, BOA_EXEC_DIRTY, BOA_KV_MEM_BUDGET, BOA_LAST_EXIT_CODE, BOA_NET_HOSTS,
+    BOA_PROCESS_EXIT, BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION, DIRTY_ALS, DIRTY_EVENT_LOOP,
+    DIRTY_SOCKETS, DIRTY_WORKERS, EXEC_DIRTY_REJECTIONS, has_process_exit, has_uncaught_error,
+    mark_subsystem_dirty, set_last_exit_code, set_uncaught_error,
 };
 use crate::outbound_http::{
     execute_outbound_fetch_with_redirects, outbound_pool_reuse_count, record_outbound_pool_reuses,
     reset_fetch_slab_telemetry,
 };
 use crate::state_and_kv::edge_kv_set;
-use boa_engine::{js_string, Context, JsObject, JsValue};
+use boa_engine::{Context, JsObject, JsValue, js_string};
 use rustc_hash::{FxHashMap, FxHashSet};
 use slice_sandbox::SandboxViolation;
 use std::cell::{Cell, RefCell};
@@ -560,41 +560,38 @@ pub(crate) fn format_uncaught_js_error(err: &boa_engine::JsError, ctx: &mut Cont
     let raw_err = format!("Uncaught {}", err);
     let mut mapped = crate::boa_realm::map_error_with_active_source(&raw_err);
     if mapped == raw_err {
-        if let Some((first_line, rest)) = mapped.split_once('\n') {
-            if let Some(open) = first_line.rfind(" (unknown at ") {
-                let loc_paren = &first_line[open + 1..];
-                if rest.contains(loc_paren) {
-                    mapped = format!("{}\n{}", &first_line[..open], rest);
-                }
+        if let Some((first_line, rest)) = mapped.split_once('\n')
+            && let Some(open) = first_line.rfind(" (unknown at ")
+        {
+            let loc_paren = &first_line[open + 1..];
+            if rest.contains(loc_paren) {
+                mapped = format!("{}\n{}", &first_line[..open], rest);
             }
         }
-        if let Some(opaque) = err.as_opaque() {
-            if let Some(obj) = opaque.as_object() {
-                if let Ok(stack_val) = obj.get(js_string!("stack"), ctx) {
-                    if let Some(s) = stack_val.as_string() {
-                        let st = s.to_std_string_escaped();
-                        for line in st.lines() {
-                            let trimmed = line.trim();
-                            if trimmed.starts_with("at ") && !trimmed.contains("<anonymous>") {
-                                if let Some(open) = trimmed.rfind('(') {
-                                    if let Some(close) = trimmed[open + 1..].find(')') {
-                                        let loc = &trimmed[open + 1..open + 1 + close];
-                                        if loc.contains(':') && !raw_err.contains(loc) {
-                                            mapped = format!("{} ({})", raw_err, loc);
-                                            break;
-                                        }
-                                    }
-                                } else if let Some(loc) = trimmed.strip_prefix("at ") {
-                                    if loc.contains(':')
-                                        && !loc.contains(' ')
-                                        && !raw_err.contains(loc)
-                                    {
-                                        mapped = format!("{} ({})", raw_err, loc);
-                                        break;
-                                    }
-                                }
+        if let Some(opaque) = err.as_opaque()
+            && let Some(obj) = opaque.as_object()
+            && let Ok(stack_val) = obj.get(js_string!("stack"), ctx)
+            && let Some(s) = stack_val.as_string()
+        {
+            let st = s.to_std_string_escaped();
+            for line in st.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("at ") && !trimmed.contains("<anonymous>") {
+                    if let Some(open) = trimmed.rfind('(') {
+                        if let Some(close) = trimmed[open + 1..].find(')') {
+                            let loc = &trimmed[open + 1..open + 1 + close];
+                            if loc.contains(':') && !raw_err.contains(loc) {
+                                mapped = format!("{} ({})", raw_err, loc);
+                                break;
                             }
                         }
+                    } else if let Some(loc) = trimmed.strip_prefix("at ")
+                        && loc.contains(':')
+                        && !loc.contains(' ')
+                        && !raw_err.contains(loc)
+                    {
+                        mapped = format!("{} ({})", raw_err, loc);
+                        break;
                     }
                 }
             }
@@ -634,70 +631,67 @@ pub(crate) fn handle_uncaught_js_error(err: boa_engine::JsError, ctx: &mut Conte
         .into_opaque(ctx)
         .unwrap_or_else(|e| JsValue::from(js_string!(e.to_string())));
 
-    if (BOA_DIRTY_SUBSYSTEMS.with(|d| d.get()) & crate::boa_realm::DIRTY_PROCESS) != 0 {
-        if let Some(proc_obj) = ctx
+    if (BOA_DIRTY_SUBSYSTEMS.with(|d| d.get()) & crate::boa_realm::DIRTY_PROCESS) != 0
+        && let Some(proc_obj) = ctx
             .global_object()
             .get(js_string!("process"), ctx)
             .ok()
             .and_then(|v| v.as_object())
-        {
-            let has_listeners = proc_obj
-                .get(js_string!("_hasListeners"), ctx)
+    {
+        let has_listeners = proc_obj
+            .get(js_string!("_hasListeners"), ctx)
+            .ok()
+            .and_then(|v| v.as_object())
+            .filter(|f| f.is_callable())
+            .and_then(|f| {
+                f.call(&JsValue::from(proc_obj.clone()), &[], ctx)
+                    .ok()
+                    .map(|v| v.to_boolean())
+            })
+            .unwrap_or(false);
+
+        if has_listeners
+            && let Some(emit_fn) = proc_obj
+                .get(js_string!("emit"), ctx)
                 .ok()
                 .and_then(|v| v.as_object())
                 .filter(|f| f.is_callable())
-                .and_then(|f| {
-                    f.call(&JsValue::from(proc_obj.clone()), &[], ctx)
-                        .ok()
-                        .map(|v| v.to_boolean())
-                })
-                .unwrap_or(false);
-
-            if has_listeners {
-                if let Some(emit_fn) = proc_obj
-                    .get(js_string!("emit"), ctx)
-                    .ok()
-                    .and_then(|v| v.as_object())
-                    .filter(|f| f.is_callable())
-                {
-                    let _ = emit_fn.call(
-                        &JsValue::from(proc_obj.clone()),
-                        &[
-                            JsValue::from(js_string!("uncaughtExceptionMonitor")),
-                            err_val.clone(),
-                            JsValue::from(js_string!("uncaughtException")),
-                        ],
-                        ctx,
-                    );
+        {
+            let _ = emit_fn.call(
+                &JsValue::from(proc_obj.clone()),
+                &[
+                    JsValue::from(js_string!("uncaughtExceptionMonitor")),
+                    err_val.clone(),
+                    JsValue::from(js_string!("uncaughtException")),
+                ],
+                ctx,
+            );
+            if has_process_exit() {
+                return true;
+            }
+            match emit_fn.call(
+                &JsValue::from(proc_obj),
+                &[
+                    JsValue::from(js_string!("uncaughtException")),
+                    err_val,
+                    JsValue::from(js_string!("uncaughtException")),
+                ],
+                ctx,
+            ) {
+                Ok(v) if v.to_boolean() => {
+                    let _ = run_jobs_and_check_rejections(ctx);
+                    return !has_uncaught_error() && BOA_VIOLATION.with(|v| v.borrow().is_none());
+                }
+                Err(handler_err) => {
                     if has_process_exit() {
                         return true;
                     }
-                    match emit_fn.call(
-                        &JsValue::from(proc_obj),
-                        &[
-                            JsValue::from(js_string!("uncaughtException")),
-                            err_val,
-                            JsValue::from(js_string!("uncaughtException")),
-                        ],
-                        ctx,
-                    ) {
-                        Ok(v) if v.to_boolean() => {
-                            let _ = run_jobs_and_check_rejections(ctx);
-                            return !has_uncaught_error()
-                                && BOA_VIOLATION.with(|v| v.borrow().is_none());
-                        }
-                        Err(handler_err) => {
-                            if has_process_exit() {
-                                return true;
-                            }
-                            let h_formatted = format_uncaught_js_error(&handler_err, ctx);
-                            set_uncaught_error(h_formatted);
-                            set_last_exit_code(1);
-                            return false;
-                        }
-                        Ok(_) => {}
-                    }
+                    let h_formatted = format_uncaught_js_error(&handler_err, ctx);
+                    set_uncaught_error(h_formatted);
+                    set_last_exit_code(1);
+                    return false;
                 }
+                Ok(_) => {}
             }
         }
     }
@@ -761,46 +755,44 @@ pub(crate) fn drain_unhandled_rejections(ctx: &mut Context) -> bool {
                 continue;
             };
 
-            if has_ur_listener {
-                if let Some(ref p) = proc_obj {
-                    if let Some(emit_fn) = p
-                        .get(js_string!("emit"), ctx)
-                        .ok()
-                        .and_then(|v| v.as_object())
-                        .filter(|f| f.is_callable())
-                    {
-                        match emit_fn.call(
-                            &JsValue::from(p.clone()),
-                            &[
-                                JsValue::from(js_string!("unhandledRejection")),
-                                reason.clone(),
-                                JsValue::from(promise_obj.clone()),
-                            ],
-                            ctx,
-                        ) {
-                            Ok(v) if v.to_boolean() => {
-                                if let Err(e) = ctx.run_jobs() {
-                                    if !handle_uncaught_js_error(e, ctx) {
-                                        return false;
-                                    }
-                                }
-                                if has_process_exit() {
-                                    return false;
-                                }
-                                continue;
-                            }
-                            Err(handler_err) => {
-                                if !handle_uncaught_js_error(handler_err, ctx) {
-                                    return false;
-                                }
-                                if has_process_exit() {
-                                    return false;
-                                }
-                                continue;
-                            }
-                            Ok(_) => {}
+            if has_ur_listener
+                && let Some(ref p) = proc_obj
+                && let Some(emit_fn) = p
+                    .get(js_string!("emit"), ctx)
+                    .ok()
+                    .and_then(|v| v.as_object())
+                    .filter(|f| f.is_callable())
+            {
+                match emit_fn.call(
+                    &JsValue::from(p.clone()),
+                    &[
+                        JsValue::from(js_string!("unhandledRejection")),
+                        reason.clone(),
+                        JsValue::from(promise_obj.clone()),
+                    ],
+                    ctx,
+                ) {
+                    Ok(v) if v.to_boolean() => {
+                        if let Err(e) = ctx.run_jobs()
+                            && !handle_uncaught_js_error(e, ctx)
+                        {
+                            return false;
                         }
+                        if has_process_exit() {
+                            return false;
+                        }
+                        continue;
                     }
+                    Err(handler_err) => {
+                        if !handle_uncaught_js_error(handler_err, ctx) {
+                            return false;
+                        }
+                        if has_process_exit() {
+                            return false;
+                        }
+                        continue;
+                    }
+                    Ok(_) => {}
                 }
             }
 
@@ -819,10 +811,10 @@ pub(crate) fn drain_unhandled_rejections(ctx: &mut Context) -> bool {
 
 #[inline]
 pub(crate) fn run_jobs_and_check_rejections(ctx: &mut Context) -> bool {
-    if let Err(err) = ctx.run_jobs() {
-        if !handle_uncaught_js_error(err, ctx) {
-            return false;
-        }
+    if let Err(err) = ctx.run_jobs()
+        && !handle_uncaught_js_error(err, ctx)
+    {
+        return false;
     }
     if has_process_exit() {
         return false;
@@ -877,16 +869,14 @@ fn try_emit_before_exit(ctx: &mut Context, before_exit_count: &mut usize) -> boo
         .ok()
         .and_then(|v| v.as_object())
         .filter(|f| f.is_callable())
-    {
-        if let Err(err) = emit_fn.call(
+        && let Err(err) = emit_fn.call(
             &JsValue::from(proc_obj),
             &[JsValue::from(js_string!("beforeExit")), JsValue::from(code)],
             ctx,
-        ) {
-            if !handle_uncaught_js_error(err, ctx) {
-                return false;
-            }
-        }
+        )
+        && !handle_uncaught_js_error(err, ctx)
+    {
+        return false;
     }
     if !run_jobs_and_check_rejections(ctx) {
         return false;
@@ -931,12 +921,12 @@ pub(crate) fn finalize_and_reset_process_state(ctx: &mut Context) {
         }
         if let Some(inner_code) = BOA_PROCESS_EXIT.with(|e| e.get()) {
             code = inner_code;
-        } else if let Ok(ec_val) = proc_obj.get(js_string!("exitCode"), ctx) {
-            if !ec_val.is_undefined() && !ec_val.is_null() {
-                if let Ok(updated) = ec_val.to_i32(ctx) {
-                    code = updated;
-                }
-            }
+        } else if let Ok(ec_val) = proc_obj.get(js_string!("exitCode"), ctx)
+            && !ec_val.is_undefined()
+            && !ec_val.is_null()
+            && let Ok(updated) = ec_val.to_i32(ctx)
+        {
+            code = updated;
         }
         if code != 0 || BOA_LAST_EXIT_CODE.with(|e| e.get().is_some()) {
             set_last_exit_code(code);
@@ -1035,10 +1025,10 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                         .in_flight_fetches
                         .get(&fid)
                         .and_then(|h| is_signal_aborted(&h.signal_obj, ctx));
-                    if let Some(reason) = abort_opt {
-                        if let Some(removed) = loop_st.in_flight_fetches.remove(&fid) {
-                            aborted_callbacks.push((removed.reject_fn, reason));
-                        }
+                    if let Some(reason) = abort_opt
+                        && let Some(removed) = loop_st.in_flight_fetches.remove(&fid)
+                    {
+                        aborted_callbacks.push((removed.reject_fn, reason));
                     }
                 }
             }
@@ -1154,10 +1144,10 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
             let mut loop_st = st.borrow_mut();
             while let Ok(done) = loop_st.fetch_rx.try_recv() {
                 record_outbound_pool_reuses(done.reused_conns);
-                if let Some(v) = done.violation {
-                    if worker_violation.is_none() {
-                        worker_violation = Some(v);
-                    }
+                if let Some(v) = done.violation
+                    && worker_violation.is_none()
+                {
+                    worker_violation = Some(v);
                 }
                 if let Some(handle) = loop_st.in_flight_fetches.remove(&done.id) {
                     completed_list.push((handle, done.result));
@@ -1245,11 +1235,11 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                 if let Some(prev) = prev_als {
                     BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
                 }
-                if let Err(err) = call_res {
-                    if !handle_uncaught_js_error(err, ctx) {
-                        clear_event_loop_state();
-                        return;
-                    }
+                if let Err(err) = call_res
+                    && !handle_uncaught_js_error(err, ctx)
+                {
+                    clear_event_loop_state();
+                    return;
                 }
                 if !run_jobs_and_check_rejections(ctx) {
                     clear_event_loop_state();
@@ -1369,12 +1359,12 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                 Err(RecvTimeoutError::Timeout) => {
                     if let Some(target_ms) = next_timer_deadline {
                         BOA_DET_STATE.with(|s| {
-                            if let Some((prng, clk)) = s.get() {
-                                if target_ms > clk {
-                                    let step = (target_ms - clk).min(5);
-                                    VIRTUAL_TIME_WARP_ADD(step);
-                                    s.set(Some((prng, clk + step)));
-                                }
+                            if let Some((prng, clk)) = s.get()
+                                && target_ms > clk
+                            {
+                                let step = (target_ms - clk).min(5);
+                                VIRTUAL_TIME_WARP_ADD(step);
+                                s.set(Some((prng, clk + step)));
                             }
                         });
                     }

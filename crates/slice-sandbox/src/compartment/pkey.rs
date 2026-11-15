@@ -1,11 +1,22 @@
-//! Hardware Memory Protection Key (`pkey_alloc` / `WRPKRU` on Linux x86_64) Domain Isolation.
+//! Linux `x86_64` Protection Key (`SYS_pkey_alloc` / `WRPKRU`) Domain Switch Scaffolding.
+//!
+//! Allocates up to 15 kernel protection keys (`1..=15`) per OS process via `SYS_pkey_alloc` on
+//! PKU-capable Linux `x86_64` hosts and switches the per-thread `PKRU` register via `WRPKRU`
+//! on isolate entry and drop. Note that `SYS_pkey_mprotect` page tagging is not yet wired to
+//! `Boa` JS heaps, `wasmi` linear memories, or KV/VFS slabs (which currently reside on default
+//! kernel key `0`), and non-Linux-`x86_64` platforms (including `aarch64`) use a deterministic
+//! virtual slot tag (`hardware_enforced = false`). Primary multi-tenant memory isolation today
+//! is enforced by safe-Rust bounds checking, SES realm lockdown, OCap tokens, and byte cages.
 
-/// Hardware Memory Protection Key (Intel MPK / ARM POE) domain descriptor.
+/// Linux `x86_64` Memory Protection Key (`MPK` / `PKU`) domain descriptor.
 ///
-/// Acts as a 12-byte RAII handle: when `hardware_enforced` is active on Linux `x86_64`,
-/// dropping or overwriting a `HardwareProtectionDomain` resets PKRU and frees the owned
-/// kernel protection key once, while cloning allocates an independent key (or degrades
-/// cleanly to virtualized slot tracking if all 15 kernel keys are occupied).
+/// Acts as a 12-byte RAII handle: when `hardware_enforced` is active on a PKU-capable Linux
+/// `x86_64` host, dropping or overwriting a `HardwareProtectionDomain` resets `PKRU` to `0` and
+/// frees the owned kernel protection key once, while cloning allocates an independent key (or
+/// degrades cleanly to virtualized slot tracking `1..=15` with `hardware_enforced = false` if all
+/// 15 kernel keys are occupied or on platforms/CPUs without PKU). `SYS_pkey_mprotect` page tagging
+/// is not yet wired to tenant heap slabs, so `PKRU` domain switching currently serves as
+/// defense-in-depth register scaffolding alongside safe-Rust memory bounds and OCap cages.
 #[repr(C)]
 #[derive(Debug)]
 pub struct HardwareProtectionDomain {

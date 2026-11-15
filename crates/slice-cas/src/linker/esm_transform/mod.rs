@@ -2,9 +2,9 @@
 //! and Barrel Lazy-Getter Optimizer.
 //!
 //! Decomposed into focused submodules sharing unified ESM/CJS namespace interop rules:
-//! - [`mutable_exports`]: Transitive live-binding static analysis (`get_module_mutable_exports`).
-//! - [`ast_lowering`]: Primary Oxc AST ESM-to-CJS module lowering (`try_transform_esm_to_cjs_ast`).
-//! - [`barrel_and_fallback`]: CommonJS lazy barrel getter pass and line-oriented fallback.
+//! - `mutable_exports`: Transitive live-binding static analysis (`get_module_mutable_exports`).
+//! - `ast_lowering`: Primary Oxc AST ESM-to-CJS module lowering (`try_transform_esm_to_cjs_ast`).
+//! - `barrel_and_fallback`: CommonJS lazy barrel getter pass and line-oriented fallback.
 
 mod ast_lowering;
 mod barrel_and_fallback;

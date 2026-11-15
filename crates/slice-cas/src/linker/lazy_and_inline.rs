@@ -262,11 +262,10 @@ pub fn collect_eager_module_indices(
                 for el in &cls.body.body {
                     match el {
                         ClassElement::MethodDefinition(md) => {
-                            if md.kind != MethodDefinitionKind::Constructor {
-                                if let Some(b) = &md.value.body {
-                                    deferred_spans
-                                        .push((b.span.start as usize, b.span.end as usize));
-                                }
+                            if md.kind != MethodDefinitionKind::Constructor
+                                && let Some(b) = &md.value.body
+                            {
+                                deferred_spans.push((b.span.start as usize, b.span.end as usize));
                             }
                         }
                         ClassElement::PropertyDefinition(pd) => {
@@ -308,18 +307,16 @@ pub fn collect_eager_module_indices(
                                     Expression::FunctionExpression(_)
                                         | Expression::ArrowFunctionExpression(_)
                                 )
-                            ) {
-                                if let oxc::ast::ast::BindingPattern::BindingIdentifier(id) =
-                                    &decl.id
+                            ) && let oxc::ast::ast::BindingPattern::BindingIdentifier(id) =
+                                &decl.id
+                            {
+                                let call_pat = format!("{}(", id.name);
+                                let start = decl.span.start as usize;
+                                let end = decl.span.end as usize;
+                                if !code[..start].contains(&call_pat)
+                                    && !code[end..].contains(&call_pat)
                                 {
-                                    let call_pat = format!("{}(", id.name);
-                                    let start = decl.span.start as usize;
-                                    let end = decl.span.end as usize;
-                                    if !code[..start].contains(&call_pat)
-                                        && !code[end..].contains(&call_pat)
-                                    {
-                                        deferred_spans.push((start, end));
-                                    }
+                                    deferred_spans.push((start, end));
                                 }
                             }
                         }
@@ -327,18 +324,15 @@ pub fn collect_eager_module_indices(
                     Statement::ExpressionStatement(es) if !keep_export_getters_eager => {
                         if let Expression::AssignmentExpression(assign) =
                             es.expression.without_parentheses()
-                        {
-                            if let Expression::ObjectExpression(obj) =
+                            && let Expression::ObjectExpression(obj) =
                                 assign.right.without_parentheses()
-                            {
-                                for prop in &obj.properties {
-                                    if let ObjectPropertyKind::ObjectProperty(p) = prop {
-                                        if p.kind == PropertyKind::Get {
-                                            let sp = p.value.span();
-                                            deferred_spans
-                                                .push((sp.start as usize, sp.end as usize));
-                                        }
-                                    }
+                        {
+                            for prop in &obj.properties {
+                                if let ObjectPropertyKind::ObjectProperty(p) = prop
+                                    && p.kind == PropertyKind::Get
+                                {
+                                    let sp = p.value.span();
+                                    deferred_spans.push((sp.start as usize, sp.end as usize));
                                 }
                             }
                         }
@@ -365,12 +359,12 @@ pub fn collect_eager_module_indices(
                 .iter()
                 .take_while(|&&b| b.is_ascii_digit())
                 .count();
-            if digit_len > 0 && after_bytes.get(digit_len) == Some(&b')') {
-                if let Ok(id) = code[after_start..after_start + digit_len].parse::<usize>() {
-                    if id < max_id {
-                        out.push(id);
-                    }
-                }
+            if digit_len > 0
+                && after_bytes.get(digit_len) == Some(&b')')
+                && let Ok(id) = code[after_start..after_start + digit_len].parse::<usize>()
+                && id < max_id
+            {
+                out.push(id);
             }
         }
         out

@@ -14,13 +14,13 @@
 //! 5. **Deterministic Mock Socket Support (`Slice.mockSocket`)**: Supports zero-network deterministic testing and replay.
 
 use crate::boa_realm::{
-    mark_subsystem_dirty, BOA_ACTIVE_TENANT, BOA_EGRESS_SECRETS, BOA_FUEL_BUDGET,
-    BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VIOLATION, DIRTY_SOCKETS,
+    BOA_ACTIVE_TENANT, BOA_EGRESS_SECRETS, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
+    BOA_VIOLATION, DIRTY_SOCKETS, mark_subsystem_dirty,
 };
 use crate::intrinsics::{base64_decode, base64_encode};
 use crate::outbound_http::{
-    dial_fresh_outbound_stream, resolve_and_verify_ssrf_socket_addrs, OutboundStream,
-    OutboundUrlParts,
+    OutboundStream, OutboundUrlParts, dial_fresh_outbound_stream,
+    resolve_and_verify_ssrf_socket_addrs,
 };
 use crate::state_and_kv::verify_egress_secrets_slice;
 use rustc_hash::FxHashMap;
@@ -162,11 +162,7 @@ fn verify_transient_socket_io_budget_and_fuel(bytes: usize) -> Result<(), String
         }
         let next = consumed.saturating_add(fuel_ticks);
         f.set((next, limit));
-        if next > limit {
-            Some(limit)
-        } else {
-            None
-        }
+        if next > limit { Some(limit) } else { None }
     });
     if let Some(limit) = fuel_exceeded {
         let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
@@ -773,33 +769,33 @@ pub fn tcp_socket_close(id: u32, half_close_write: bool) -> Result<String, Strin
     TCP_SOCKET_TABLE.with(|t| {
         let mut table = t.borrow_mut();
         if half_close_write {
-            if let Some(sock) = table.get_mut(&id) {
-                if let TcpConnectionBackend::Live(OutboundStream::Plain(tcp)) = &mut sock.backend {
-                    let _ = tcp.shutdown(Shutdown::Write);
-                }
+            if let Some(sock) = table.get_mut(&id)
+                && let TcpConnectionBackend::Live(OutboundStream::Plain(tcp)) = &mut sock.backend
+            {
+                let _ = tcp.shutdown(Shutdown::Write);
             }
             return Ok(serde_json::json!({ "closed": false, "halfClosed": true }).to_string());
         }
-        if let Some(mut sock) = table.remove(&id) {
-            if let TcpConnectionBackend::Live(stream) = std::mem::replace(
+        if let Some(mut sock) = table.remove(&id)
+            && let TcpConnectionBackend::Live(stream) = std::mem::replace(
                 &mut sock.backend,
                 TcpConnectionBackend::Mock {
                     rx_queue: Vec::new(),
                     spec: String::new(),
                 },
-            ) {
-                match stream {
-                    OutboundStream::Plain(tcp) => {
-                        let _ = tcp.shutdown(Shutdown::Both);
-                    }
-                    OutboundStream::Tls(mut tls) => {
-                        let _ = tls.flush();
-                        let _ = tls.get_ref().shutdown(Shutdown::Both);
-                    }
-                    OutboundStream::TunneledTls(mut tls) => {
-                        let _ = tls.flush();
-                        let _ = tls.get_ref().get_ref().shutdown(Shutdown::Both);
-                    }
+            )
+        {
+            match stream {
+                OutboundStream::Plain(tcp) => {
+                    let _ = tcp.shutdown(Shutdown::Both);
+                }
+                OutboundStream::Tls(mut tls) => {
+                    let _ = tls.flush();
+                    let _ = tls.get_ref().shutdown(Shutdown::Both);
+                }
+                OutboundStream::TunneledTls(mut tls) => {
+                    let _ = tls.flush();
+                    let _ = tls.get_ref().get_ref().shutdown(Shutdown::Both);
                 }
             }
         }
@@ -811,11 +807,7 @@ pub fn tcp_socket_close(id: u32, half_close_write: bool) -> Result<String, Strin
 pub fn udp_socket_bind(family: &str, address: &str, port: u16) -> Result<String, String> {
     let is_v6 = family.eq_ignore_ascii_case("udp6") || address.contains(':');
     let bind_host = if address.is_empty() {
-        if is_v6 {
-            "::1"
-        } else {
-            "127.0.0.1"
-        }
+        if is_v6 { "::1" } else { "127.0.0.1" }
     } else {
         address.trim()
     };

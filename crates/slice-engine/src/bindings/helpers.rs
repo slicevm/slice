@@ -19,10 +19,10 @@ pub(crate) fn with_buffer_source_bytes<R>(
     use boa_engine::object::builtins::JsArrayBuffer;
 
     if let Some(s) = val.as_string() {
-        if let boa_engine::string::JsStrVariant::Latin1(bytes) = s.as_str().variant() {
-            if bytes.is_ascii() {
-                return Ok(f(bytes));
-            }
+        if let boa_engine::string::JsStrVariant::Latin1(bytes) = s.as_str().variant()
+            && bytes.is_ascii()
+        {
+            return Ok(f(bytes));
         }
         let owned = s.to_std_string_escaped();
         return Ok(f(owned.as_bytes()));
@@ -30,10 +30,10 @@ pub(crate) fn with_buffer_source_bytes<R>(
     let Some(obj) = val.as_object() else {
         return Ok(f(&[]));
     };
-    if let Some(ta) = obj.downcast_ref::<TypedArray>() {
-        if let Some(res) = ta.with_bytes(&mut f) {
-            return Ok(res);
-        }
+    if let Some(ta) = obj.downcast_ref::<TypedArray>()
+        && let Some(res) = ta.with_bytes(&mut f)
+    {
+        return Ok(res);
     }
     if let Ok(ab) = JsArrayBuffer::from_object(obj.clone()) {
         if let Some(data) = ab.data() {
@@ -41,10 +41,10 @@ pub(crate) fn with_buffer_source_bytes<R>(
         }
         return Ok(f(&[]));
     }
-    if let Some(dv) = obj.downcast_ref::<DataView>() {
-        if let Some(res) = dv.with_bytes(&mut f) {
-            return Ok(res);
-        }
+    if let Some(dv) = obj.downcast_ref::<DataView>()
+        && let Some(res) = dv.with_bytes(&mut f)
+    {
+        return Ok(res);
     }
     let fallback = extract_buffer_source_bytes(val, context)?;
     Ok(f(&fallback))
@@ -67,29 +67,28 @@ pub(crate) fn with_buffer_from_bytes<R>(
 
     if enc_opt.is_none() || matches!(enc_opt, Some("utf8" | "utf-8")) {
         if let Some(s) = val.as_string() {
-            if let boa_engine::string::JsStrVariant::Latin1(bytes) = s.as_str().variant() {
-                if bytes.is_ascii() {
-                    return Ok(f(bytes));
-                }
+            if let boa_engine::string::JsStrVariant::Latin1(bytes) = s.as_str().variant()
+                && bytes.is_ascii()
+            {
+                return Ok(f(bytes));
             }
             let owned = s.to_std_string_escaped();
             return Ok(f(owned.as_bytes()));
         }
         if let Some(obj) = val.as_object() {
-            if JsUint8Array::from_object(obj.clone()).is_ok() {
-                if let Some(ta) = obj.downcast_ref::<TypedArray>() {
-                    if let Some(res) = ta.with_bytes(&mut f) {
-                        return Ok(res);
-                    }
-                }
+            if JsUint8Array::from_object(obj.clone()).is_ok()
+                && let Some(ta) = obj.downcast_ref::<TypedArray>()
+                && let Some(res) = ta.with_bytes(&mut f)
+            {
+                return Ok(res);
             }
-            if enc_opt.is_none() {
-                if let Ok(ab) = JsArrayBuffer::from_object(obj.clone()) {
-                    if let Some(data) = ab.data() {
-                        return Ok(f(&data));
-                    }
-                    return Ok(f(&[]));
+            if enc_opt.is_none()
+                && let Ok(ab) = JsArrayBuffer::from_object(obj.clone())
+            {
+                if let Some(data) = ab.data() {
+                    return Ok(f(&data));
                 }
+                return Ok(f(&[]));
             }
         }
     }
@@ -97,10 +96,10 @@ pub(crate) fn with_buffer_from_bytes<R>(
     let global = context.global_object();
     let mut buf_ctor = global.get(js_string!("Buffer"), context)?;
     if !buf_ctor.is_callable() {
-        if let Ok(ensure_fn) = global.get(js_string!("__slice_ensure_shard"), context) {
-            if let Some(ensure_obj) = ensure_fn.as_callable() {
-                let _ = ensure_obj.call(&boa_engine::JsValue::undefined(), &[5.into()], context)?;
-            }
+        if let Ok(ensure_fn) = global.get(js_string!("__slice_ensure_shard"), context)
+            && let Some(ensure_obj) = ensure_fn.as_callable()
+        {
+            let _ = ensure_obj.call(&boa_engine::JsValue::undefined(), &[5.into()], context)?;
         }
         buf_ctor = global.get(js_string!("Buffer"), context)?;
     }
@@ -123,12 +122,11 @@ pub(crate) fn with_buffer_from_bytes<R>(
         )?,
         None => from_fn.call(&buf_ctor, std::slice::from_ref(val), context)?,
     };
-    if let Some(c_obj) = constructed.as_object() {
-        if let Some(ta) = c_obj.downcast_ref::<TypedArray>() {
-            if let Some(res) = ta.with_bytes(&mut f) {
-                return Ok(res);
-            }
-        }
+    if let Some(c_obj) = constructed.as_object()
+        && let Some(ta) = c_obj.downcast_ref::<TypedArray>()
+        && let Some(res) = ta.with_bytes(&mut f)
+    {
+        return Ok(res);
     }
     Ok(f(&[]))
 }
@@ -158,17 +156,15 @@ pub(crate) fn with_two_buffer_source_bytes<R>(
 ) -> boa_engine::JsResult<R> {
     use boa_engine::builtins::typed_array::TypedArray;
 
-    if let (Some(obj_a), Some(obj_b)) = (a.as_object(), b.as_object()) {
-        if let (Some(ta_a), Some(ta_b)) = (
+    if let (Some(obj_a), Some(obj_b)) = (a.as_object(), b.as_object())
+        && let (Some(ta_a), Some(ta_b)) = (
             obj_a.downcast_ref::<TypedArray>(),
             obj_b.downcast_ref::<TypedArray>(),
-        ) {
-            if let Some(Some(res)) =
-                ta_a.with_bytes(|bytes_a| ta_b.with_bytes(|bytes_b| f(bytes_a, bytes_b)))
-            {
-                return Ok(res);
-            }
-        }
+        )
+        && let Some(Some(res)) =
+            ta_a.with_bytes(|bytes_a| ta_b.with_bytes(|bytes_b| f(bytes_a, bytes_b)))
+    {
+        return Ok(res);
     }
     let bytes_a = extract_buffer_source_bytes(a, context)?;
     with_buffer_source_bytes(b, context, |bytes_b| f(&bytes_a, bytes_b))
@@ -190,10 +186,10 @@ pub(crate) fn extract_buffer_source_bytes(
     let Some(obj) = val.as_object() else {
         return Ok(Vec::new());
     };
-    if let Some(ta) = obj.downcast_ref::<TypedArray>() {
-        if let Some(bytes) = ta.with_bytes(|slice| slice.to_vec()) {
-            return Ok(bytes);
-        }
+    if let Some(ta) = obj.downcast_ref::<TypedArray>()
+        && let Some(bytes) = ta.with_bytes(|slice| slice.to_vec())
+    {
+        return Ok(bytes);
     }
     if let Ok(ab) = JsArrayBuffer::from_object(obj.clone()) {
         if let Some(data) = ab.data() {
@@ -201,48 +197,47 @@ pub(crate) fn extract_buffer_source_bytes(
         }
         return Ok(Vec::new());
     }
-    if let Some(dv) = obj.downcast_ref::<DataView>() {
-        if let Some(bytes) = dv.with_bytes(|slice| slice.to_vec()) {
-            return Ok(bytes);
+    if let Some(dv) = obj.downcast_ref::<DataView>()
+        && let Some(bytes) = dv.with_bytes(|slice| slice.to_vec())
+    {
+        return Ok(bytes);
+    }
+    if let Ok(buf_val) = obj.get(js_string!("buffer"), context)
+        && let Some(buf_obj) = buf_val.as_object()
+        && let Ok(ab) = JsArrayBuffer::from_object(buf_obj)
+    {
+        let offset = obj
+            .get(js_string!("byteOffset"), context)
+            .ok()
+            .and_then(|v| v.as_number())
+            .map(|n| n.max(0.0) as usize)
+            .unwrap_or(0);
+        let len = obj
+            .get(js_string!("byteLength"), context)
+            .ok()
+            .and_then(|v| v.as_number())
+            .map(|n| n.max(0.0) as usize);
+        if let Some(data) = ab.data() {
+            let start = offset.min(data.len());
+            let end = len
+                .map(|l| (start + l).min(data.len()))
+                .unwrap_or(data.len());
+            return Ok(data[start..end].to_vec());
         }
     }
-    if let Ok(buf_val) = obj.get(js_string!("buffer"), context) {
-        if let Some(buf_obj) = buf_val.as_object() {
-            if let Ok(ab) = JsArrayBuffer::from_object(buf_obj) {
-                let offset = obj
-                    .get(js_string!("byteOffset"), context)
-                    .ok()
-                    .and_then(|v| v.as_number())
-                    .map(|n| n.max(0.0) as usize)
-                    .unwrap_or(0);
-                let len = obj
-                    .get(js_string!("byteLength"), context)
-                    .ok()
-                    .and_then(|v| v.as_number())
-                    .map(|n| n.max(0.0) as usize);
-                if let Some(data) = ab.data() {
-                    let start = offset.min(data.len());
-                    let end = len
-                        .map(|l| (start + l).min(data.len()))
-                        .unwrap_or(data.len());
-                    return Ok(data[start..end].to_vec());
-                }
-            }
+    if let Ok(len_val) = obj.get(js_string!("length"), context)
+        && let Some(len) = len_val.as_number().map(|n| n.max(0.0) as usize)
+    {
+        let mut out = Vec::with_capacity(len.min(1_048_576));
+        for i in 0..len.min(1_048_576) {
+            let b = obj
+                .get(i as u32, context)?
+                .as_number()
+                .map(|n| (n as i64 & 0xff) as u8)
+                .unwrap_or(0);
+            out.push(b);
         }
-    }
-    if let Ok(len_val) = obj.get(js_string!("length"), context) {
-        if let Some(len) = len_val.as_number().map(|n| n.max(0.0) as usize) {
-            let mut out = Vec::with_capacity(len.min(1_048_576));
-            for i in 0..len.min(1_048_576) {
-                let b = obj
-                    .get(i as u32, context)?
-                    .as_number()
-                    .map(|n| (n as i64 & 0xff) as u8)
-                    .unwrap_or(0);
-                out.push(b);
-            }
-            return Ok(out);
-        }
+        return Ok(out);
     }
     Ok(Vec::new())
 }

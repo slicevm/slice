@@ -1,10 +1,10 @@
 use crate::boa_realm::BOA_KV_MEM_BUDGET;
 use crate::intrinsics::{
-    aes_cbc_decrypt_with_expanded, aes_cbc_encrypt_with_expanded, base64_decode, base64_encode,
-    crc32_checksum, ed25519_keypair_from_seed, ed25519_seed_and_pub_to_pkcs8_v2,
+    AesExpandedKey, aes_cbc_decrypt_with_expanded, aes_cbc_encrypt_with_expanded, base64_decode,
+    base64_encode, crc32_checksum, ed25519_keypair_from_seed, ed25519_seed_and_pub_to_pkcs8_v2,
     ed25519_seed_to_pkcs8_v1, extract_ed25519_seed, fill_random_bytes, generate_uuid_v4,
     hkdf_derive_bytes, parse_whatwg_url, pbkdf2_derive_bytes, scrypt_derive_bytes,
-    splitmix64_next_u64, zlib_compress_bytes, zlib_decompress_bytes, AesExpandedKey,
+    splitmix64_next_u64, zlib_compress_bytes, zlib_decompress_bytes,
 };
 
 #[test]

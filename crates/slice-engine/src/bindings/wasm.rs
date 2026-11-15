@@ -10,7 +10,7 @@ use crate::wasm::{
 };
 
 pub(crate) fn register_shard9_wasm_host_functions(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsNativeError, JsValue as BoaVal, NativeFunction, js_string};
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_wasm_compile"), ctx)

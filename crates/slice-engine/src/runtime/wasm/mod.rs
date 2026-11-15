@@ -40,10 +40,10 @@ pub use self::linking::{
     wasm_set_global, wasm_table_get, wasm_table_grow, wasm_table_length, wasm_table_set,
 };
 pub use self::memory::{wasm_create_memory, wasm_grow_memory, wasm_memory_buffer};
-pub use self::store::{clear_thread_wasm_state, wasm_js_error};
 pub(crate) use self::store::{
-    restore_thread_wasm_state, take_thread_wasm_state_if_nonempty, WasmErrorKind, WasmThreadState,
+    WasmErrorKind, WasmThreadState, restore_thread_wasm_state, take_thread_wasm_state_if_nonempty,
 };
+pub use self::store::{clear_thread_wasm_state, wasm_js_error};
 
 use self::store::{record_wasm_fuel_violation, record_wasm_memory_violation};
 
@@ -140,13 +140,12 @@ fn compile_or_get_cached_module_entry(
         ));
     }
     let key = compute_wasm_key(bytes);
-    if let Ok(cache) = global_wasm_module_cache().read() {
-        if let Some(entry) = cache.by_key.get(&key) {
-            if entry.raw_bytes.as_ref() == bytes {
-                WASM_MODULE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-                return Ok(Arc::clone(entry));
-            }
-        }
+    if let Ok(cache) = global_wasm_module_cache().read()
+        && let Some(entry) = cache.by_key.get(&key)
+        && entry.raw_bytes.as_ref() == bytes
+    {
+        WASM_MODULE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        return Ok(Arc::clone(entry));
     }
     let engine = global_wasm_engine();
     let module = Module::new(engine, bytes).map_err(|e| {
@@ -161,11 +160,11 @@ fn compile_or_get_cached_module_entry(
     let mut cache = global_wasm_module_cache()
         .write()
         .unwrap_or_else(|e| e.into_inner());
-    if let Some(existing) = cache.by_key.get(&key) {
-        if existing.raw_bytes.as_ref() == bytes {
-            WASM_MODULE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-            return Ok(Arc::clone(existing));
-        }
+    if let Some(existing) = cache.by_key.get(&key)
+        && existing.raw_bytes.as_ref() == bytes
+    {
+        WASM_MODULE_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+        return Ok(Arc::clone(existing));
     }
     if cache.by_id.len() >= MAX_CACHED_WASM_MODULES {
         cache.by_key.clear();
@@ -194,12 +193,11 @@ pub fn wasm_validate_bytes(bytes: &[u8]) -> bool {
         return false;
     }
     let key = compute_wasm_key(bytes);
-    if let Ok(cache) = global_wasm_module_cache().read() {
-        if let Some(entry) = cache.by_key.get(&key) {
-            if entry.raw_bytes.as_ref() == bytes {
-                return true;
-            }
-        }
+    if let Ok(cache) = global_wasm_module_cache().read()
+        && let Some(entry) = cache.by_key.get(&key)
+        && entry.raw_bytes.as_ref() == bytes
+    {
+        return true;
     }
     Module::validate(global_wasm_engine(), bytes).is_ok()
 }
@@ -284,12 +282,11 @@ pub fn wasm_module_custom_sections(
             if let Some((name_len, name_hdr_len)) = decode_leb128_u32(sec_slice) {
                 let name_start = name_hdr_len;
                 let name_end = name_start.saturating_add(name_len as usize);
-                if name_end <= sec_slice.len() {
-                    if let Ok(name_str) = std::str::from_utf8(&sec_slice[name_start..name_end]) {
-                        if name_str == section_name {
-                            out.push(sec_slice[name_end..].to_vec());
-                        }
-                    }
+                if name_end <= sec_slice.len()
+                    && let Ok(name_str) = std::str::from_utf8(&sec_slice[name_start..name_end])
+                    && name_str == section_name
+                {
+                    out.push(sec_slice[name_end..].to_vec());
                 }
             }
         }

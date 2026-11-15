@@ -18,6 +18,8 @@ pub struct InlineDirectives {
     pub allow_net: Vec<String>,
     pub allow_env: Vec<(String, String)>,
     pub allow_exec: Vec<String>,
+    pub allow_checkpoints: Option<bool>,
+    pub max_checkpoints: Option<u32>,
     pub env_file: Option<String>,
     pub audit_egress: Vec<String>,
     pub port: Option<u16>,
@@ -31,20 +33,24 @@ fn apply_directive_body(dirs: &mut InlineDirectives, comment_body: &str) {
     let Some(rest) = body.strip_prefix("@slice-") else {
         return;
     };
-    if rest == "no-boacas" || rest == "no-exper-boacas" {
-        dirs.boacas = Some(false);
-        return;
-    } else if rest == "boacas" || rest == "exper-boacas" {
-        dirs.boacas = Some(true);
-        return;
-    } else if rest == "warm" {
-        dirs.warm = Some(true);
-        return;
-    } else if rest == "no-warm" {
-        dirs.warm = Some(false);
-        return;
-    }
     let Some((raw_k, raw_v)) = rest.split_once(':').or_else(|| rest.split_once('=')) else {
+        match rest {
+            "no-boacas" | "no-exper-boacas" => dirs.boacas = Some(false),
+            "boacas" | "exper-boacas" => dirs.boacas = Some(true),
+            "warm" => dirs.warm = Some(true),
+            "no-warm" => dirs.warm = Some(false),
+            "checkpoints" | "allow-checkpoints" => {
+                dirs.allow_checkpoints = Some(true);
+                if dirs.max_checkpoints == Some(0) {
+                    dirs.max_checkpoints = None;
+                }
+            }
+            "no-checkpoints" => {
+                dirs.allow_checkpoints = Some(false);
+                dirs.max_checkpoints = Some(0);
+            }
+            _ => {}
+        }
         return;
     };
     let key = raw_k.trim();
@@ -110,6 +116,25 @@ fn apply_directive_body(dirs: &mut InlineDirectives, comment_body: &str) {
                 dirs.allow_exec.push(item);
             }
         }
+        "checkpoints" | "allow-checkpoints" | "allow_checkpoints" => {
+            if let Some(b) = parse_bool_setting(val) {
+                dirs.allow_checkpoints = Some(b);
+                if !b {
+                    dirs.max_checkpoints = Some(0);
+                } else if dirs.max_checkpoints == Some(0) {
+                    dirs.max_checkpoints = None;
+                }
+            }
+        }
+        "max-checkpoints" | "max_checkpoints" => {
+            if let Some(n) = parse_u64_ignoring_underscores(val) {
+                let max_cp = u32::try_from(n).unwrap_or(u32::MAX);
+                dirs.max_checkpoints = Some(max_cp);
+                if max_cp == 0 {
+                    dirs.allow_checkpoints = Some(false);
+                }
+            }
+        }
         "allow-env" | "allow_env" => {
             for item in parse_toml_string_array(val) {
                 if let Some((ek, ev)) = item.split_once('=') {
@@ -133,10 +158,10 @@ fn apply_directive_body(dirs: &mut InlineDirectives, comment_body: &str) {
             }
         }
         "port" => {
-            if let Some(n) = parse_u64_ignoring_underscores(val) {
-                if let Ok(p) = u16::try_from(n) {
-                    dirs.port = Some(p);
-                }
+            if let Some(n) = parse_u64_ignoring_underscores(val)
+                && let Ok(p) = u16::try_from(n)
+            {
+                dirs.port = Some(p);
             }
         }
         "workers" => {

@@ -174,25 +174,24 @@ fn warn_if_declared_in_package_json_but_uninstalled(spec: &str, from_dir: &Path)
     let mut cur = Some(from_dir);
     while let Some(dir) = cur {
         let pkg_json = dir.join("package.json");
-        if pkg_json.is_file() {
-            if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                    let declared = ["dependencies", "devDependencies", "peerDependencies"]
-                        .iter()
-                        .any(|sec| {
-                            val.get(*sec)
-                                .and_then(|v| v.as_object())
-                                .is_some_and(|obj| obj.contains_key(pkg_name))
-                        });
-                    if declared && !dir.join("node_modules").join(pkg_name).exists() {
-                        eprintln!(
-                            "Hint: package '{}' is declared in {} but missing from node_modules/ — run 'npm install' (or pnpm/bun install) before packing or running.",
-                            pkg_name,
-                            pkg_json.display()
-                        );
-                        return;
-                    }
-                }
+        if pkg_json.is_file()
+            && let Ok(raw) = std::fs::read_to_string(&pkg_json)
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw)
+        {
+            let declared = ["dependencies", "devDependencies", "peerDependencies"]
+                .iter()
+                .any(|sec| {
+                    val.get(*sec)
+                        .and_then(|v| v.as_object())
+                        .is_some_and(|obj| obj.contains_key(pkg_name))
+                });
+            if declared && !dir.join("node_modules").join(pkg_name).exists() {
+                eprintln!(
+                    "Hint: package '{}' is declared in {} but missing from node_modules/ — run 'npm install' (or pnpm/bun install) before packing or running.",
+                    pkg_name,
+                    pkg_json.display()
+                );
+                return;
             }
         }
         cur = dir.parent();

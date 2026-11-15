@@ -96,10 +96,9 @@ pub fn short_source_label(path: &Path) -> String {
         .parent()
         .and_then(|p| p.file_name())
         .and_then(|s| s.to_str())
+        && matches!(parent_name, "src" | "tests" | "test" | "lib" | "app")
     {
-        if matches!(parent_name, "src" | "tests" | "test" | "lib" | "app") {
-            return format!("{}/{}", parent_name, fname);
-        }
+        return format!("{}/{}", parent_name, fname);
     }
     fname.to_string()
 }
@@ -184,18 +183,15 @@ pub fn map_bundled_error_location_with_offset(
                     mapped
                 } else {
                     let mut guess = rel_idx_0 + 1;
-                    if let Some(stmt_text) = lines.get(b_line - 1).map(|s| s.trim()) {
-                        if !stmt_text.is_empty() {
-                            if let Some(orig_src) = read_bounded_source_file(active_full) {
-                                if let Some((orig_idx, _)) = orig_src
-                                    .lines()
-                                    .enumerate()
-                                    .find(|(_, ol)| ol.contains(stmt_text))
-                                {
-                                    guess = orig_idx + 1;
-                                }
-                            }
-                        }
+                    if let Some(stmt_text) = lines.get(b_line - 1).map(|s| s.trim())
+                        && !stmt_text.is_empty()
+                        && let Some(orig_src) = read_bounded_source_file(active_full)
+                        && let Some((orig_idx, _)) = orig_src
+                            .lines()
+                            .enumerate()
+                            .find(|(_, ol)| ol.contains(stmt_text))
+                    {
+                        guess = orig_idx + 1;
                     }
                     guess
                 };
@@ -248,16 +244,16 @@ pub fn map_bundled_error_location_with_offset(
                     mapped
                 } else {
                     let mut guess = rel_idx_0 + 1;
-                    if let Some(orig_src) = read_bounded_source_file(active_full) {
-                        if let Some((orig_idx, _)) = orig_src.lines().enumerate().find(|(_, ol)| {
+                    if let Some(orig_src) = read_bounded_source_file(active_full)
+                        && let Some((orig_idx, _)) = orig_src.lines().enumerate().find(|(_, ol)| {
                             ol.contains(core_msg)
                                 || prefix_probe.is_some_and(|pp| {
                                     (ol.contains("throw ") || ol.contains("Error("))
                                         && ol.contains(pp)
                                 })
-                        }) {
-                            guess = orig_idx + 1;
-                        }
+                        })
+                    {
+                        guess = orig_idx + 1;
                     }
                     guess
                 };
@@ -357,16 +353,15 @@ fn resolve_section_line(
             .unwrap_or(stmt_text)
             .trim_end_matches(';')
             .trim();
-        if !probe.is_empty() && probe.len() >= 4 {
-            if let Some(orig_src) = read_bounded_source_file(sec.full_path) {
-                if let Some((orig_idx, _)) = orig_src
-                    .lines()
-                    .enumerate()
-                    .find(|(_, ol)| ol.contains(probe))
-                {
-                    resolved_line = orig_idx + 1;
-                }
-            }
+        if !probe.is_empty()
+            && probe.len() >= 4
+            && let Some(orig_src) = read_bounded_source_file(sec.full_path)
+            && let Some((orig_idx, _)) = orig_src
+                .lines()
+                .enumerate()
+                .find(|(_, ol)| ol.contains(probe))
+        {
+            resolved_line = orig_idx + 1;
         }
     }
     resolved_line
@@ -407,13 +402,13 @@ fn parse_raw_stack_frame(trimmed: &str) -> Option<ParsedRawStackFrame<'_>> {
 
     let mut line_col = None;
     let mut rsplit = loc_str.rsplitn(3, ':');
-    if let (Some(col_s), Some(line_s)) = (rsplit.next(), rsplit.next()) {
-        if let (Ok(l), Ok(c)) = (
+    if let (Some(col_s), Some(line_s)) = (rsplit.next(), rsplit.next())
+        && let (Ok(l), Ok(c)) = (
             line_s.trim().parse::<usize>(),
             col_s.trim().parse::<usize>(),
-        ) {
-            line_col = Some((l, c));
-        }
+        )
+    {
+        line_col = Some((l, c));
     }
     Some(ParsedRawStackFrame {
         raw_fn_name,
@@ -456,10 +451,11 @@ fn strip_header_unknown_location(header: &str) -> &str {
     for marker in [" (unknown at :", " (<anonymous>:"] {
         if let Some(open_idx) = header.rfind(marker) {
             let tail = &header[open_idx + marker.len()..];
-            if let Some(body) = tail.strip_suffix(')') {
-                if !body.is_empty() && body.bytes().all(|b| b.is_ascii_digit() || b == b':') {
-                    return &header[..open_idx];
-                }
+            if let Some(body) = tail.strip_suffix(')')
+                && !body.is_empty()
+                && body.bytes().all(|b| b.is_ascii_digit() || b == b':')
+            {
+                return &header[..open_idx];
             }
         }
     }
@@ -496,20 +492,21 @@ fn take_trailing_lhs_name(lhs: &str) -> Option<&str> {
     if cand.is_empty() || cand.as_bytes()[0].is_ascii_digit() {
         return None;
     }
-    if let Some(stripped) = cand.strip_prefix("exports.") {
-        if !stripped.is_empty() {
-            return Some(stripped);
-        }
+    if let Some(stripped) = cand.strip_prefix("exports.")
+        && !stripped.is_empty()
+    {
+        return Some(stripped);
     }
-    if let Some(stripped) = cand.strip_prefix("module.exports.") {
-        if !stripped.is_empty() {
-            return Some(stripped);
-        }
+    if let Some(stripped) = cand.strip_prefix("module.exports.")
+        && !stripped.is_empty()
+    {
+        return Some(stripped);
     }
-    if let Some((cls, method)) = cand.split_once(".prototype.") {
-        if !cls.is_empty() && !method.is_empty() {
-            return Some(cand);
-        }
+    if let Some((cls, method)) = cand.split_once(".prototype.")
+        && !cls.is_empty()
+        && !method.is_empty()
+    {
+        return Some(cand);
     }
     Some(cand)
 }
@@ -534,10 +531,10 @@ fn classify_brace_header(header: &str, enclosing_class: Option<&str>) -> Lexical
         .or_else(|| h.strip_prefix("export class "))
         .or_else(|| h.strip_prefix("export default class "))
     {
-        if let Some(cls_name) = take_first_ident(after_cls) {
-            if cls_name != "extends" {
-                return LexicalScope::Class(cls_name.to_string());
-            }
+        if let Some(cls_name) = take_first_ident(after_cls)
+            && cls_name != "extends"
+        {
+            return LexicalScope::Class(cls_name.to_string());
         }
         return LexicalScope::Class("<anonymous>".to_string());
     }
@@ -560,8 +557,8 @@ fn classify_brace_header(header: &str, enclosing_class: Option<&str>) -> Lexical
     }
 
     // 2. Control-flow blocks and object literals (`if (...)`, `try`, `catch (e)`, `const x =`, `foo(`)
-    if let Some(kw) = take_first_ident(h) {
-        if matches!(
+    if let Some(kw) = take_first_ident(h)
+        && matches!(
             kw,
             "if" | "else"
                 | "for"
@@ -574,9 +571,9 @@ fn classify_brace_header(header: &str, enclosing_class: Option<&str>) -> Lexical
                 | "with"
                 | "return"
                 | "throw"
-        ) {
-            return LexicalScope::Block;
-        }
+        )
+    {
+        return LexicalScope::Block;
     }
     if h.ends_with('=')
         || h.ends_with('(')
@@ -595,10 +592,9 @@ fn classify_brace_header(header: &str, enclosing_class: Option<&str>) -> Lexical
                 && !lhs_trim.ends_with('!')
                 && !lhs_trim.ends_with('<')
                 && !lhs_trim.ends_with('>')
+                && let Some(name) = take_trailing_lhs_name(lhs_trim)
             {
-                if let Some(name) = take_trailing_lhs_name(lhs_trim) {
-                    return LexicalScope::Callable(name.replace(".prototype.", "."));
-                }
+                return LexicalScope::Callable(name.replace(".prototype.", "."));
             }
         }
         return LexicalScope::AnonymousCallable;
@@ -618,10 +614,10 @@ fn classify_brace_header(header: &str, enclosing_class: Option<&str>) -> Lexical
                 return LexicalScope::Callable(explicit_fn.to_string());
             }
             let prefix = h[..fn_pos].trim_end().trim_end_matches("async").trim_end();
-            if let Some(lhs) = prefix.strip_suffix('=') {
-                if let Some(name) = take_trailing_lhs_name(lhs) {
-                    return LexicalScope::Callable(name.replace(".prototype.", "."));
-                }
+            if let Some(lhs) = prefix.strip_suffix('=')
+                && let Some(name) = take_trailing_lhs_name(lhs)
+            {
+                return LexicalScope::Callable(name.replace(".prototype.", "."));
             }
             return LexicalScope::AnonymousCallable;
         }
@@ -651,13 +647,13 @@ fn classify_brace_header(header: &str, enclosing_class: Option<&str>) -> Lexical
         if let Some(method_name) = take_first_ident(rest) {
             let after_name = rest[method_name.len()..].trim_start();
             if after_name.starts_with('(') {
-                if let Some(cls) = enclosing_class {
-                    if cls != "<anonymous>" {
-                        if method_name == "constructor" {
-                            return LexicalScope::Callable(format!("new {}", cls));
-                        }
-                        return LexicalScope::Callable(format!("{}.{}", cls, method_name));
+                if let Some(cls) = enclosing_class
+                    && cls != "<anonymous>"
+                {
+                    if method_name == "constructor" {
+                        return LexicalScope::Callable(format!("new {}", cls));
                     }
+                    return LexicalScope::Callable(format!("{}.{}", cls, method_name));
                 }
                 return LexicalScope::Callable(method_name.to_string());
             }
@@ -862,10 +858,10 @@ pub fn map_bundled_stack_trace_with_offset(
         };
 
         // Omit internal Slice bundler/loader wrapper frames (`__run`, `__slice_require`, etc.).
-        if let Some(raw_fn) = frame.raw_fn_name {
-            if raw_fn == "__run" || raw_fn.starts_with("__slice_") {
-                continue;
-            }
+        if let Some(raw_fn) = frame.raw_fn_name
+            && (raw_fn == "__run" || raw_fn.starts_with("__slice_"))
+        {
+            continue;
         }
 
         let is_boa_bundle_loc = frame.loc_str.starts_with("unknown at :");
@@ -894,38 +890,34 @@ pub fn map_bundled_stack_trace_with_offset(
         let mut display_fn: Option<String> = frame.fn_name.map(str::to_string);
 
         // Primary exact path: Boa bundle line coordinates (`unknown at :<line>:<col>`).
-        if is_boa_bundle_loc {
-            if let Some(adj_line) = adj_line_opt {
-                if let Some(sec) = sections
-                    .iter()
-                    .rev()
-                    .find(|s| adj_line > s.marker_line_1 && adj_line <= s.end_line_1)
-                {
-                    let orig_line = resolve_section_line(&lines, sec, adj_line);
-                    resolved = Some((sec.short_label, orig_line));
-                    match &display_fn {
-                        None => {
-                            display_fn = recover_enclosing_symbol_name(&lines, sec, adj_line, col);
-                        }
-                        Some(existing) if !existing.contains('.') => {
-                            if let Some(enc) =
-                                recover_enclosing_symbol_name(&lines, sec, adj_line, col)
-                            {
-                                if enc.ends_with(&format!(".{}", existing)) {
-                                    display_fn = Some(enc);
-                                }
-                            }
-                        }
-                        _ => {}
+        if is_boa_bundle_loc && let Some(adj_line) = adj_line_opt {
+            if let Some(sec) = sections
+                .iter()
+                .rev()
+                .find(|s| adj_line > s.marker_line_1 && adj_line <= s.end_line_1)
+            {
+                let orig_line = resolve_section_line(&lines, sec, adj_line);
+                resolved = Some((sec.short_label, orig_line));
+                match &display_fn {
+                    None => {
+                        display_fn = recover_enclosing_symbol_name(&lines, sec, adj_line, col);
                     }
-                } else if display_fn.is_none() {
-                    let is_wrapper = adj_line > last_section_end
-                        || lines.get(adj_line - 1).is_some_and(|l| {
-                            is_bundler_scaffolding_line(l) || is_closing_wrapper_brace(l)
-                        });
-                    if is_wrapper {
-                        continue;
+                    Some(existing) if !existing.contains('.') => {
+                        if let Some(enc) = recover_enclosing_symbol_name(&lines, sec, adj_line, col)
+                            && enc.ends_with(&format!(".{}", existing))
+                        {
+                            display_fn = Some(enc);
+                        }
                     }
+                    _ => {}
+                }
+            } else if display_fn.is_none() {
+                let is_wrapper = adj_line > last_section_end
+                    || lines.get(adj_line - 1).is_some_and(|l| {
+                        is_bundler_scaffolding_line(l) || is_closing_wrapper_brace(l)
+                    });
+                if is_wrapper {
+                    continue;
                 }
             }
         }
@@ -979,10 +971,11 @@ pub fn map_bundled_stack_trace_with_offset(
                         }
 
                         let mut target_line_1 = d_line_1;
-                        if let Some(adj_line) = adj_line_opt {
-                            if adj_line >= d_line_1 && adj_line <= fn_end_1 {
-                                target_line_1 = adj_line;
-                            }
+                        if let Some(adj_line) = adj_line_opt
+                            && adj_line >= d_line_1
+                            && adj_line <= fn_end_1
+                        {
+                            target_line_1 = adj_line;
                         }
                         if target_line_1 == d_line_1 {
                             if frame_ordinal == 0 {
@@ -1008,14 +1001,12 @@ pub fn map_bundled_stack_trace_with_offset(
                             }
                         }
 
-                        if !fn_name.contains('.') {
-                            if let Some(enc) =
+                        if !fn_name.contains('.')
+                            && let Some(enc) =
                                 recover_enclosing_symbol_name(&lines, sec, target_line_1, col)
-                            {
-                                if enc.ends_with(&format!(".{}", fn_name)) {
-                                    display_fn = Some(enc);
-                                }
-                            }
+                            && enc.ends_with(&format!(".{}", fn_name))
+                        {
+                            display_fn = Some(enc);
                         }
 
                         let orig_line = resolve_section_line(&lines, sec, target_line_1);
@@ -1024,46 +1015,44 @@ pub fn map_bundled_stack_trace_with_offset(
                     }
                 }
             }
-            if resolved.is_none() {
-                if let Some(adj_line) = adj_line_opt {
-                    if let Some(sec) = sections
-                        .iter()
-                        .rev()
-                        .find(|s| adj_line > s.marker_line_1 && adj_line <= s.end_line_1)
-                    {
-                        let orig_line = resolve_section_line(&lines, sec, adj_line);
-                        resolved = Some((sec.short_label, orig_line));
-                        if display_fn.is_none() {
-                            display_fn = recover_enclosing_symbol_name(&lines, sec, adj_line, col);
-                        }
-                    }
+            if resolved.is_none()
+                && let Some(adj_line) = adj_line_opt
+                && let Some(sec) = sections
+                    .iter()
+                    .rev()
+                    .find(|s| adj_line > s.marker_line_1 && adj_line <= s.end_line_1)
+            {
+                let orig_line = resolve_section_line(&lines, sec, adj_line);
+                resolved = Some((sec.short_label, orig_line));
+                if display_fn.is_none() {
+                    display_fn = recover_enclosing_symbol_name(&lines, sec, adj_line, col);
                 }
             }
-            if resolved.is_none() {
-                if let Some(ref callee) = prev_callee_fn {
-                    let bare_callee = callee
-                        .rsplit_once('.')
-                        .map(|(_, m)| m)
-                        .unwrap_or(callee.as_str());
-                    let call_pat = format!("{}(", bare_callee);
-                    for sec in sections.iter().rev() {
-                        for l_1 in (sec.marker_line_1 + 1)..=sec.end_line_1.min(lines.len()) {
-                            let t = lines[l_1 - 1].trim();
-                            if t.contains(&call_pat)
-                                && !t.starts_with("function ")
-                                && !(t.starts_with(&call_pat) && t.ends_with('{'))
-                            {
-                                let orig_line = resolve_section_line(&lines, sec, l_1);
-                                resolved = Some((sec.short_label, orig_line));
-                                if display_fn.is_none() {
-                                    display_fn = recover_enclosing_symbol_name(&lines, sec, l_1, 1);
-                                }
-                                break;
+            if resolved.is_none()
+                && let Some(ref callee) = prev_callee_fn
+            {
+                let bare_callee = callee
+                    .rsplit_once('.')
+                    .map(|(_, m)| m)
+                    .unwrap_or(callee.as_str());
+                let call_pat = format!("{}(", bare_callee);
+                for sec in sections.iter().rev() {
+                    for l_1 in (sec.marker_line_1 + 1)..=sec.end_line_1.min(lines.len()) {
+                        let t = lines[l_1 - 1].trim();
+                        if t.contains(&call_pat)
+                            && !t.starts_with("function ")
+                            && !(t.starts_with(&call_pat) && t.ends_with('{'))
+                        {
+                            let orig_line = resolve_section_line(&lines, sec, l_1);
+                            resolved = Some((sec.short_label, orig_line));
+                            if display_fn.is_none() {
+                                display_fn = recover_enclosing_symbol_name(&lines, sec, l_1, 1);
                             }
-                        }
-                        if resolved.is_some() {
                             break;
                         }
+                    }
+                    if resolved.is_some() {
+                        break;
                     }
                 }
             }

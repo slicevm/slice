@@ -1,6 +1,6 @@
 //! Shared CLI flag classification, separate-argument consumption, and zero-allocation numeric parsers.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::path::PathBuf;
 
 /// Zero-allocation parser that extracts ASCII digits from `raw` (ignoring underscores, spaces, or
@@ -15,11 +15,7 @@ pub(crate) fn parse_u64_digits(raw: &str) -> Option<u64> {
             acc = acc.checked_mul(10)?.checked_add((b - b'0') as u64)?;
         }
     }
-    if saw_digit {
-        Some(acc)
-    } else {
-        None
-    }
+    if saw_digit { Some(acc) } else { None }
 }
 
 /// Returns `true` when `arg` is a Slice runtime flag that accepts a space-separated value token
@@ -71,14 +67,14 @@ pub(crate) fn match_non_empty_flag_value<'a>(
         *arg_idx += 1;
         return Ok(Some(trimmed));
     }
-    if let Some(rest) = arg.strip_prefix(flag) {
-        if let Some(val) = rest.strip_prefix('=') {
-            let trimmed = val.trim();
-            if trimmed.is_empty() {
-                bail!("Flag {}= requires a non-empty value", flag);
-            }
-            return Ok(Some(trimmed));
+    if let Some(rest) = arg.strip_prefix(flag)
+        && let Some(val) = rest.strip_prefix('=')
+    {
+        let trimmed = val.trim();
+        if trimmed.is_empty() {
+            bail!("Flag {}= requires a non-empty value", flag);
         }
+        return Ok(Some(trimmed));
     }
     Ok(None)
 }

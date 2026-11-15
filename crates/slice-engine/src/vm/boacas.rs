@@ -4,11 +4,11 @@
 //! runtime experiment flag controls (`--exper-boacas` / `--no-exper-boacas` / `SLICE_EXPER_BOACAS`),
 //! and execution hooks for the `EXPER_BOACAS` architecture.
 
-use crate::boa_realm::{ensure_realm_shards, WarmBoaRealm, BOA_VIOLATION};
+use crate::boa_realm::{BOA_VIOLATION, WarmBoaRealm, ensure_realm_shards};
 use crate::js_preludes::detect_shards_and_boacas_flags;
 use crate::parser_and_compiler::extract_slice_rc_key;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// 8-byte magic header identifying an experimental `SLICEBC\x01` precompiled Boa container.
 pub const BOACAS_MAGIC: &[u8; 8] = b"SLICEBC\x01";
@@ -356,19 +356,14 @@ pub(crate) fn eval_boacas_on_realm(
                     let global = realm.ctx.global_object();
                     if let Ok(rc_val) =
                         global.get(boa_engine::js_string!("__slice_rc"), &mut realm.ctx)
+                        && let Some(rc_obj) = rc_val.as_object()
+                        && let Ok(val) = rc_obj.get(boa_engine::js_string!(hex_str), &mut realm.ctx)
+                        && let Some(obj) = val.as_object()
                     {
-                        if let Some(rc_obj) = rc_val.as_object() {
-                            if let Ok(val) =
-                                rc_obj.get(boa_engine::js_string!(hex_str), &mut realm.ctx)
-                            {
-                                if let Some(obj) = val.as_object() {
-                                    realm.loaded_bundles.insert(header.rc_key, obj.clone());
-                                    realm
-                                        .loaded_bundle_fused_specs
-                                        .insert(header.rc_key, fused_spec);
-                                }
-                            }
-                        }
+                        realm.loaded_bundles.insert(header.rc_key, obj.clone());
+                        realm
+                            .loaded_bundle_fused_specs
+                            .insert(header.rc_key, fused_spec);
                     }
                 }
             }
@@ -407,15 +402,11 @@ pub(crate) fn eval_boacas_on_realm(
             if let Ok(hex_str) = std::str::from_utf8(&hex_buf) {
                 let global = realm.ctx.global_object();
                 if let Ok(rc_val) = global.get(boa_engine::js_string!("__slice_rc"), &mut realm.ctx)
+                    && let Some(rc_obj) = rc_val.as_object()
+                    && let Ok(val) = rc_obj.get(boa_engine::js_string!(hex_str), &mut realm.ctx)
+                    && let Some(obj) = val.as_object()
                 {
-                    if let Some(rc_obj) = rc_val.as_object() {
-                        if let Ok(val) = rc_obj.get(boa_engine::js_string!(hex_str), &mut realm.ctx)
-                        {
-                            if let Some(obj) = val.as_object() {
-                                realm.loaded_bundles.insert(header.rc_key, obj.clone());
-                            }
-                        }
-                    }
+                    realm.loaded_bundles.insert(header.rc_key, obj.clone());
                 }
             }
         }
@@ -435,8 +426,8 @@ pub(crate) fn eval_boacas_on_realm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser_and_compiler::compile_source_to_bytecode;
     use crate::SliceIsolate;
+    use crate::parser_and_compiler::compile_source_to_bytecode;
     use slice_sandbox::CapabilityToken;
 
     #[test]

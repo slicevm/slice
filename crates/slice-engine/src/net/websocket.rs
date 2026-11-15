@@ -11,14 +11,14 @@
 //! - Deterministic `Slice.mockWebSocket` support for offline replay and unit testing
 
 use crate::boa_realm::{
-    mark_subsystem_dirty, BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET,
-    BOA_VIOLATION, DIRTY_WEBSOCKET,
+    BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET, BOA_VIOLATION,
+    DIRTY_WEBSOCKET, mark_subsystem_dirty,
 };
 use crate::intrinsics::{base64_decode, base64_encode, fill_random_bytes, sha1_bytes};
 use crate::outbound_http::{
-    check_boa_outbound_fetch_ocap_and_dlp, dial_fresh_outbound_stream, is_valid_http_header_value,
-    is_valid_request_target, parse_outbound_http_url, resolve_and_verify_ssrf_socket_addrs,
-    OutboundStream, MAX_OUTBOUND_HEADER_BYTES,
+    MAX_OUTBOUND_HEADER_BYTES, OutboundStream, check_boa_outbound_fetch_ocap_and_dlp,
+    dial_fresh_outbound_stream, is_valid_http_header_value, is_valid_request_target,
+    parse_outbound_http_url, resolve_and_verify_ssrf_socket_addrs,
 };
 use crate::state_and_kv::verify_egress_secrets_slice;
 use rustc_hash::FxHashMap;

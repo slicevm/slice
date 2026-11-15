@@ -28,35 +28,32 @@ pub fn rewrite_cjs_requires_in_line(
         if valid_boundary {
             let trimmed_after = after_req.trim_start();
             let ws_len = after_req.len() - trimmed_after.len();
-            if let Some(quote) = trimmed_after.chars().next() {
-                if quote == '\'' || quote == '"' {
-                    if let Some(end_q) = trimmed_after[1..].find(quote) {
-                        let after_quote = trimmed_after[1 + end_q + 1..].trim_start();
-                        if after_quote.starts_with(')') {
-                            let spec = &trimmed_after[1..1 + end_q];
-                            if is_builtin_module(spec) {
-                                let norm = normalize_builtin_specifier(spec);
-                                result.push_str(&format!("{:?}", norm));
-                                let consumed = ws_len + 1 + end_q + 1;
-                                rest = &after_req[consumed..];
-                                continue;
-                            } else if let Some(resolved_path) =
-                                resolve_module_specifier(from_dir, spec)
-                            {
-                                let id = canonical_mod_id(&resolved_path);
-                                deps_out.push(resolved_path);
-                                result.push_str(&format!("{:?}", id));
-                                let consumed = ws_len + 1 + end_q + 1;
-                                rest = &after_req[consumed..];
-                                continue;
-                            } else if is_jsx_runtime_builtin(spec) {
-                                let norm = normalize_builtin_specifier(spec);
-                                result.push_str(&format!("{:?}", norm));
-                                let consumed = ws_len + 1 + end_q + 1;
-                                rest = &after_req[consumed..];
-                                continue;
-                            }
-                        }
+            if let Some(quote) = trimmed_after.chars().next()
+                && (quote == '\'' || quote == '"')
+                && let Some(end_q) = trimmed_after[1..].find(quote)
+            {
+                let after_quote = trimmed_after[1 + end_q + 1..].trim_start();
+                if after_quote.starts_with(')') {
+                    let spec = &trimmed_after[1..1 + end_q];
+                    if is_builtin_module(spec) {
+                        let norm = normalize_builtin_specifier(spec);
+                        result.push_str(&format!("{:?}", norm));
+                        let consumed = ws_len + 1 + end_q + 1;
+                        rest = &after_req[consumed..];
+                        continue;
+                    } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
+                        let id = canonical_mod_id(&resolved_path);
+                        deps_out.push(resolved_path);
+                        result.push_str(&format!("{:?}", id));
+                        let consumed = ws_len + 1 + end_q + 1;
+                        rest = &after_req[consumed..];
+                        continue;
+                    } else if is_jsx_runtime_builtin(spec) {
+                        let norm = normalize_builtin_specifier(spec);
+                        result.push_str(&format!("{:?}", norm));
+                        let consumed = ws_len + 1 + end_q + 1;
+                        rest = &after_req[consumed..];
+                        continue;
                     }
                 }
             }
@@ -240,17 +237,17 @@ pub fn rewrite_require_ident_ast(source: &str) -> Option<String> {
     let mut scoping_opt: Option<oxc::semantic::Scoping> = None;
     let mut callee_spans: Vec<(usize, usize)> = Vec::new();
     walk_ast_call_expressions(&parser_ret.program, &mut |call| {
-        if let Expression::Identifier(callee) = call.callee.without_parentheses() {
-            if callee.name.as_str() == "require" {
-                let scoping = scoping_opt.get_or_insert_with(|| {
-                    oxc::semantic::SemanticBuilder::new()
-                        .build(&parser_ret.program)
-                        .semantic
-                        .into_scoping()
-                });
-                if is_unresolved_global_ident(scoping, callee) {
-                    callee_spans.push((callee.span.start as usize, callee.span.end as usize));
-                }
+        if let Expression::Identifier(callee) = call.callee.without_parentheses()
+            && callee.name.as_str() == "require"
+        {
+            let scoping = scoping_opt.get_or_insert_with(|| {
+                oxc::semantic::SemanticBuilder::new()
+                    .build(&parser_ret.program)
+                    .semantic
+                    .into_scoping()
+            });
+            if is_unresolved_global_ident(scoping, callee) {
+                callee_spans.push((callee.span.start as usize, callee.span.end as usize));
             }
         }
     });
@@ -303,25 +300,25 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
 
         // 1. `Buffer.byteLength(<arg>)`
         if prop_name == "byteLength" && call.arguments.len() == 1 {
-            if let Expression::Identifier(obj_id) = outer_mem.object.without_parentheses() {
-                if obj_id.name.as_str() == "Buffer" {
-                    let scoping = scoping_opt.get_or_insert_with(|| {
-                        oxc::semantic::SemanticBuilder::new()
-                            .build(&parser_ret.program)
-                            .semantic
-                            .into_scoping()
-                    });
-                    if is_unresolved_global_ident(scoping, obj_id) {
-                        if let Some(arg_expr) = call.arguments[0].as_expression() {
-                            let sp = arg_expr.span();
-                            let arg_src = &code[sp.start as usize..sp.end as usize];
-                            edits.push((
-                                call.span.start as usize,
-                                call.span.end as usize,
-                                format!("globalThis.__slice_utf8_byte_len({})", arg_src),
-                            ));
-                        }
-                    }
+            if let Expression::Identifier(obj_id) = outer_mem.object.without_parentheses()
+                && obj_id.name.as_str() == "Buffer"
+            {
+                let scoping = scoping_opt.get_or_insert_with(|| {
+                    oxc::semantic::SemanticBuilder::new()
+                        .build(&parser_ret.program)
+                        .semantic
+                        .into_scoping()
+                });
+                if is_unresolved_global_ident(scoping, obj_id)
+                    && let Some(arg_expr) = call.arguments[0].as_expression()
+                {
+                    let sp = arg_expr.span();
+                    let arg_src = &code[sp.start as usize..sp.end as usize];
+                    edits.push((
+                        call.span.start as usize,
+                        call.span.end as usize,
+                        format!("globalThis.__slice_utf8_byte_len({})", arg_src),
+                    ));
                 }
             }
             return;

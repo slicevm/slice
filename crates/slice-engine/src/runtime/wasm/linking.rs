@@ -6,21 +6,21 @@ use super::memory::{
     sync_all_memories_wasm_to_js,
 };
 use super::store::{
-    active_boa_ctx_ptr, construct_wasm_wrapper, exec_wasm_with_store, record_wasm_fuel_violation,
-    set_pending_host_js_error, take_pending_host_js_error, wasm_js_error, with_store_and_entities,
-    ActiveBoaCtxGuard, ActiveCallerGuard, WasmEntities, WasmErrorKind, WasmHostExceptionMarker,
-    WasmStoreData, WASM_STATE,
+    ActiveBoaCtxGuard, ActiveCallerGuard, WASM_STATE, WasmEntities, WasmErrorKind,
+    WasmHostExceptionMarker, WasmStoreData, active_boa_ctx_ptr, construct_wasm_wrapper,
+    exec_wasm_with_store, record_wasm_fuel_violation, set_pending_host_js_error,
+    take_pending_host_js_error, wasm_js_error, with_store_and_entities,
 };
 use super::values::{
-    default_val_for_type, enforce_range_u32, js_val_to_wasm_ref, js_val_to_wasm_val,
-    parse_ref_type, parse_val_type, wasm_ref_to_js_val, wasm_val_to_js_val, HIDDEN_FN_ID_PROP,
+    HIDDEN_FN_ID_PROP, default_val_for_type, enforce_range_u32, js_val_to_wasm_ref,
+    js_val_to_wasm_val, parse_ref_type, parse_val_type, wasm_ref_to_js_val, wasm_val_to_js_val,
 };
 use super::{get_compiled_module, global_wasm_engine};
 use crate::boa_realm::BOA_FUEL_BUDGET;
-use boa_engine::object::builtins::JsArray;
 use boa_engine::object::FunctionObjectBuilder;
+use boa_engine::object::builtins::JsArray;
 use boa_engine::property::PropertyDescriptor;
-use boa_engine::{js_string, Context, JsNativeError, JsObject, JsResult, JsValue, NativeFunction};
+use boa_engine::{Context, JsNativeError, JsObject, JsResult, JsValue, NativeFunction, js_string};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use wasmi::{
@@ -78,12 +78,11 @@ pub(crate) fn register_or_find_global(
 ) -> u32 {
     let key = format!("{:?}", global);
     if let Some(&existing_id) = entities.global_by_key.get(&key) {
-        if let Some(w) = js_wrapper {
-            if let Some(entry) = entities.globals.get_mut(&existing_id) {
-                if entry.js_wrapper.is_none() {
-                    entry.js_wrapper = Some(w);
-                }
-            }
+        if let Some(w) = js_wrapper
+            && let Some(entry) = entities.globals.get_mut(&existing_id)
+            && entry.js_wrapper.is_none()
+        {
+            entry.js_wrapper = Some(w);
         }
         return existing_id;
     }
@@ -122,12 +121,11 @@ pub(crate) fn register_or_find_table(
 ) -> u32 {
     let key = format!("{:?}", table);
     if let Some(&existing_id) = entities.table_by_key.get(&key) {
-        if let Some(w) = js_wrapper {
-            if let Some(entry) = entities.tables.get_mut(&existing_id) {
-                if entry.js_wrapper.is_none() {
-                    entry.js_wrapper = Some(w);
-                }
-            }
+        if let Some(w) = js_wrapper
+            && let Some(entry) = entities.tables.get_mut(&existing_id)
+            && entry.js_wrapper.is_none()
+        {
+            entry.js_wrapper = Some(w);
         }
         return existing_id;
     }
@@ -373,12 +371,12 @@ pub fn wasm_create_table(
     } else {
         Some(enforce_range_u32(&max_raw, "Table maximum", context)?)
     };
-    if let Some(m) = max_len {
-        if initial_len > m {
-            return Err(JsNativeError::range()
-                .with_message("WebAssembly.Table(): initial length exceeds maximum")
-                .into());
-        }
+    if let Some(m) = max_len
+        && initial_len > m
+    {
+        return Err(JsNativeError::range()
+            .with_message("WebAssembly.Table(): initial length exceeds maximum")
+            .into());
     }
 
     let init_ref = match fill_val {

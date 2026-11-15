@@ -9,5 +9,5 @@ pub(crate) use doctor_and_bench::{
 };
 pub(crate) use mcp::cmd_mcp;
 #[cfg(test)]
-pub(crate) use mcp::{handle_mcp_jsonrpc_line, MAX_MCP_LINE_BYTES};
+pub(crate) use mcp::{MAX_MCP_LINE_BYTES, handle_mcp_jsonrpc_line};
 pub(crate) use repl::cmd_repl;

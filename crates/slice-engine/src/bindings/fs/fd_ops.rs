@@ -2,9 +2,9 @@
 //! `fstatSync`, `ftruncateSync`, `futimesSync`, and FD-overloaded `readFileSync`/`writeFileSync`).
 
 use crate::bindings::fs::path_ops::{
-    anchor_vfs_path, classify_path_lstat, classify_path_stat, default_mtime_ms_for_path,
-    has_file_ancestor, is_host_unc_blocked, js_eloop_error, try_resolve_vfs_path_symlinks,
-    utf8_slice_to_js_val, ResolvedPathKind,
+    ResolvedPathKind, anchor_vfs_path, classify_path_lstat, classify_path_stat,
+    default_mtime_ms_for_path, has_file_ancestor, is_host_unc_blocked, js_eloop_error,
+    try_resolve_vfs_path_symlinks, utf8_slice_to_js_val,
 };
 use crate::bindings::fs::state::{OpenFd, PathEntry, VfsEntryKind};
 use crate::bindings::helpers::{
@@ -12,8 +12,8 @@ use crate::bindings::helpers::{
     try_adjust_isolate_memory_ctx, try_consume_isolate_memory_ctx, with_buffer_source_bytes,
 };
 use crate::boa_realm::{
-    check_boa_fs_read_ocap, check_boa_fs_write_ocap, mark_subsystem_dirty, BOA_DET_STATE,
-    BOA_VFS_STATE, DIRTY_VFS,
+    BOA_DET_STATE, BOA_VFS_STATE, DIRTY_VFS, check_boa_fs_read_ocap, check_boa_fs_write_ocap,
+    mark_subsystem_dirty,
 };
 use std::sync::Arc;
 
@@ -196,56 +196,55 @@ fn copy_into_js_buffer_view(
     let Some(obj) = dest_val.as_object() else {
         return Ok(0);
     };
-    if let Some(ta) = obj.downcast_ref::<TypedArray>() {
-        if let Some(copied) = ta.with_bytes_mut(|dest_slice| {
+    if let Some(ta) = obj.downcast_ref::<TypedArray>()
+        && let Some(copied) = ta.with_bytes_mut(|dest_slice| {
             if dest_offset >= dest_slice.len() {
                 return 0;
             }
             let avail = src.len().min(dest_slice.len() - dest_offset);
             dest_slice[dest_offset..dest_offset + avail].copy_from_slice(&src[..avail]);
             avail
-        }) {
-            return Ok(copied);
-        }
+        })
+    {
+        return Ok(copied);
     }
-    if let Ok(ab) = JsArrayBuffer::from_object(obj.clone()) {
+    if let Ok(ab) = JsArrayBuffer::from_object(obj.clone())
+        && let Some(mut data_mut) = ab.data_mut()
+    {
+        if dest_offset >= data_mut.len() {
+            return Ok(0);
+        }
+        let avail = src.len().min(data_mut.len() - dest_offset);
+        data_mut[dest_offset..dest_offset + avail].copy_from_slice(&src[..avail]);
+        return Ok(avail);
+    }
+    if let Ok(buf_val) = obj.get(js_string!("buffer"), context)
+        && let Some(buf_obj) = buf_val.as_object()
+        && let Ok(ab) = JsArrayBuffer::from_object(buf_obj)
+    {
+        let view_off = obj
+            .get(js_string!("byteOffset"), context)
+            .ok()
+            .and_then(|v| v.as_number())
+            .map(|n| n.max(0.0) as usize)
+            .unwrap_or(0);
+        let view_len = obj
+            .get(js_string!("byteLength"), context)
+            .ok()
+            .and_then(|v| v.as_number())
+            .map(|n| n.max(0.0) as usize);
         if let Some(mut data_mut) = ab.data_mut() {
-            if dest_offset >= data_mut.len() {
+            let base = view_off.min(data_mut.len());
+            let max_end = view_len
+                .map(|l| (base + l).min(data_mut.len()))
+                .unwrap_or(data_mut.len());
+            let start = base.saturating_add(dest_offset);
+            if start >= max_end {
                 return Ok(0);
             }
-            let avail = src.len().min(data_mut.len() - dest_offset);
-            data_mut[dest_offset..dest_offset + avail].copy_from_slice(&src[..avail]);
+            let avail = src.len().min(max_end - start);
+            data_mut[start..start + avail].copy_from_slice(&src[..avail]);
             return Ok(avail);
-        }
-    }
-    if let Ok(buf_val) = obj.get(js_string!("buffer"), context) {
-        if let Some(buf_obj) = buf_val.as_object() {
-            if let Ok(ab) = JsArrayBuffer::from_object(buf_obj) {
-                let view_off = obj
-                    .get(js_string!("byteOffset"), context)
-                    .ok()
-                    .and_then(|v| v.as_number())
-                    .map(|n| n.max(0.0) as usize)
-                    .unwrap_or(0);
-                let view_len = obj
-                    .get(js_string!("byteLength"), context)
-                    .ok()
-                    .and_then(|v| v.as_number())
-                    .map(|n| n.max(0.0) as usize);
-                if let Some(mut data_mut) = ab.data_mut() {
-                    let base = view_off.min(data_mut.len());
-                    let max_end = view_len
-                        .map(|l| (base + l).min(data_mut.len()))
-                        .unwrap_or(data_mut.len());
-                    let start = base.saturating_add(dest_offset);
-                    if start >= max_end {
-                        return Ok(0);
-                    }
-                    let avail = src.len().min(max_end - start);
-                    data_mut[start..start + avail].copy_from_slice(&src[..avail]);
-                    return Ok(avail);
-                }
-            }
         }
     }
     Ok(0)
@@ -253,7 +252,7 @@ fn copy_into_js_buffer_view(
 
 pub(crate) fn register_fs_fd_host_functions(ctx: &mut boa_engine::Context) {
     use boa_engine::object::builtins::JsArray;
-    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsNativeError, JsValue as BoaVal, NativeFunction, js_string};
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_fs_mark_watch_sync"),
@@ -704,10 +703,10 @@ pub(crate) fn register_fs_fd_host_functions(ctx: &mut boa_engine::Context) {
                                 .copy_from_slice(src_bytes);
                         }
                         vfs.update_inode_kind(inode_id, VfsEntryKind::File(arc_buf));
-                        if is_append || explicit_pos.is_none() {
-                            if let Some(open_fd) = vfs.get_fd_mut(fd) {
-                                open_fd.position = (write_pos + src_bytes.len()) as u64;
-                            }
+                        if (is_append || explicit_pos.is_none())
+                            && let Some(open_fd) = vfs.get_fd_mut(fd)
+                        {
+                            open_fd.position = (write_pos + src_bytes.len()) as u64;
                         }
                     });
                     Ok(src_bytes.len())

@@ -37,9 +37,11 @@ NODE_ENV = "production"
     assert!(tenant.verify_fs_read("/data/read/items.json").is_ok());
     assert!(tenant.verify_fs_write("/tmp/shards/shard_00.jsonl").is_ok());
     assert!(tenant.verify_fs_write("/etc/crontab").is_err());
-    assert!(tenant
-        .verify_fs_write("/tmp/shards/../../etc/passwd")
-        .is_err());
+    assert!(
+        tenant
+            .verify_fs_write("/tmp/shards/../../etc/passwd")
+            .is_err()
+    );
     assert_eq!(tenant.verify_env_read("NODE_ENV"), Ok("production"));
 }
 
@@ -159,10 +161,11 @@ static_dir = "./public"
         m.capabilities.allowed_write_prefixes,
         vec!["/tmp".to_string()]
     );
-    assert!(m
-        .capabilities
-        .allowed_net_hosts
-        .contains("api.example.com:443"));
+    assert!(
+        m.capabilities
+            .allowed_net_hosts
+            .contains("api.example.com:443")
+    );
     assert_eq!(
         m.capabilities
             .allowed_env_keys
@@ -251,4 +254,36 @@ const msg = `
         dirs_strict.allow_net,
         vec!["api.example.com:443".to_string()]
     );
+}
+
+#[test]
+fn test_wave6_issue_102_checkpoint_inline_directives_and_unlimited_default() {
+    let default_caps = crate::CapabilityToken::default();
+    assert!(default_caps.allow_checkpoints);
+    assert_eq!(
+        default_caps.max_checkpoints, None,
+        "Default CapabilityToken must allow unlimited checkpoints while slab FIFO-evicts at 64"
+    );
+
+    let bare_disable = parse_inline_directives("// @slice-no-checkpoints\nconsole.log(1);\n");
+    assert_eq!(bare_disable.allow_checkpoints, Some(false));
+    assert_eq!(bare_disable.max_checkpoints, Some(0));
+
+    let bare_enable = parse_inline_directives("// @slice-checkpoints\nconsole.log(1);\n");
+    assert_eq!(bare_enable.allow_checkpoints, Some(true));
+    assert_eq!(bare_enable.max_checkpoints, None);
+
+    let kv_disable = parse_inline_directives("// @slice-checkpoints: false\nconsole.log(1);\n");
+    assert_eq!(kv_disable.allow_checkpoints, Some(false));
+    assert_eq!(kv_disable.max_checkpoints, Some(0));
+
+    let kv_max = parse_inline_directives(
+        "// @slice-allow-checkpoints: true\n// @slice-max-checkpoints: 8\nconsole.log(1);\n",
+    );
+    assert_eq!(kv_max.allow_checkpoints, Some(true));
+    assert_eq!(kv_max.max_checkpoints, Some(8));
+
+    let kv_zero = parse_inline_directives("// @slice-max_checkpoints = 0\nconsole.log(1);\n");
+    assert_eq!(kv_zero.allow_checkpoints, Some(false));
+    assert_eq!(kv_zero.max_checkpoints, Some(0));
 }

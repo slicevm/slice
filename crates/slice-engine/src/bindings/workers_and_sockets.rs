@@ -13,7 +13,7 @@ use crate::workers::{
 };
 
 pub(crate) fn register_shard8_workers_sockets_host_functions(ctx: &mut boa_engine::Context) {
-    use boa_engine::{js_string, JsNativeError, JsValue as BoaVal, NativeFunction};
+    use boa_engine::{JsNativeError, JsValue as BoaVal, NativeFunction, js_string};
     crate::bindings::wintertc_and_buffer::register_buffer_host_functions(ctx);
     if ctx
         .global_object()

@@ -1,11 +1,11 @@
 #![allow(unused_imports)]
 use crate::intrinsics::{
-    digest_to_hex, fast_format_bytes, fast_format_ms, fast_parse_bytes, fast_parse_ms,
-    hmac_sha256_hex, sha256_hex, Sha256State,
+    Sha256State, digest_to_hex, fast_format_bytes, fast_format_ms, fast_parse_bytes, fast_parse_ms,
+    hmac_sha256_hex, sha256_hex,
 };
 use crate::{
-    compile_source_to_bytecode, disassemble_bytecode, run_source_isolated, ExecutionTier,
-    HttpRequestContext, JsValue, SliceIsolate,
+    ExecutionTier, HttpRequestContext, JsValue, SliceIsolate, compile_source_to_bytecode,
+    disassemble_bytecode, run_source_isolated,
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 
@@ -41,9 +41,11 @@ fn test_wave_b_network_security_hardening_and_rfc6455_websocket_engine() {
     assert!(crate::decode_websocket_frame(&bad_rsv, 1024).is_err());
     let oversized_hdr =
         crate::encode_websocket_frame(true, crate::WS_OPCODE_TEXT, None, &[b'a'; 200]);
-    assert!(crate::decode_websocket_frame(&oversized_hdr, 64)
-        .unwrap_err()
-        .contains("MemoryCeilingExceeded"));
+    assert!(
+        crate::decode_websocket_frame(&oversized_hdr, 64)
+            .unwrap_err()
+            .contains("MemoryCeilingExceeded")
+    );
 
     // 3. Verify N-Sec-2 (CRLF / tchar header validators) and N-Sec-5 (checked chunked body parser)
     assert!(crate::is_valid_http_header_name("X-Custom-Token"));
@@ -256,8 +258,8 @@ fn test_wave_b_nsec7_cross_tenant_outbound_connection_pool_isolation_and_nsec2_h
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     // 1. N-Sec-7: Verify that two tenants hitting the exact same upstream origin NEVER share
@@ -429,20 +431,26 @@ fn test_wave_b_rfc6455_fragmented_continuation_interleaved_ping_and_frame_limits
     // 2. Verify RFC 6455 protocol violation checks:
     //    - Non-zero RSV bits (`0x40` RSV1 set) -> Err
     let bad_rsv = [0x81 | 0x40, 0x01, b'a'];
-    assert!(crate::decode_websocket_frame(&bad_rsv, 1024)
-        .unwrap_err()
-        .contains("non-zero RSV bits"));
+    assert!(
+        crate::decode_websocket_frame(&bad_rsv, 1024)
+            .unwrap_err()
+            .contains("non-zero RSV bits")
+    );
     //    - Fragmented control frame (`FIN=0` with opcode `0x9` PING) -> Err
     let frag_ping = [0x09, 0x02, b'h', b'i'];
-    assert!(crate::decode_websocket_frame(&frag_ping, 1024)
-        .unwrap_err()
-        .contains("fragmented control frame"));
+    assert!(
+        crate::decode_websocket_frame(&frag_ping, 1024)
+            .unwrap_err()
+            .contains("fragmented control frame")
+    );
     //    - Control frame > 125 bytes -> Err
     let mut huge_ping = vec![0x89, 126, 0x00, 126];
     huge_ping.extend_from_slice(&[b'x'; 126]);
-    assert!(crate::decode_websocket_frame(&huge_ping, 1024)
-        .unwrap_err()
-        .contains("exceeds 125 bytes"));
+    assert!(
+        crate::decode_websocket_frame(&huge_ping, 1024)
+            .unwrap_err()
+            .contains("exceeds 125 bytes")
+    );
 
     // 3. Verify live Client WebSocket reassembling multi-frame fragmented messages (`FIN=0` + interleaved `PING` + `0x0` continuation + `FIN=1`)
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -558,9 +566,9 @@ fn test_compile_time_prelude_minifier_and_lazy_sharded_globals() {
         STREAMS_FORMDATA_PRELUDE_SRC, STRUCTURED_CLONE_PRELUDE, STRUCTURED_CLONE_PRELUDE_SRC,
         TRANSFORM_COMPRESSION_STREAMS_PRELUDE, TRANSFORM_COMPRESSION_STREAMS_PRELUDE_SRC,
         ULTRA_CORE_PRELUDE, ULTRA_CORE_PRELUDE_SRC, URL_PATTERN_PRELUDE, URL_PATTERN_PRELUDE_SRC,
-        WASM_PRELUDE, WASM_PRELUDE_SRC, WEBCRYPTO_CLONE_PRELUDE, WEBCRYPTO_CLONE_PRELUDE_SRC,
-        WEBSOCKET_PRELUDE, WEBSOCKET_PRELUDE_SRC, WEB_FETCH_URL_PRELUDE, WEB_FETCH_URL_PRELUDE_SRC,
-        WORKERS_SOCKETS_PRELUDE, WORKERS_SOCKETS_PRELUDE_SRC,
+        WASM_PRELUDE, WASM_PRELUDE_SRC, WEB_FETCH_URL_PRELUDE, WEB_FETCH_URL_PRELUDE_SRC,
+        WEBCRYPTO_CLONE_PRELUDE, WEBCRYPTO_CLONE_PRELUDE_SRC, WEBSOCKET_PRELUDE,
+        WEBSOCKET_PRELUDE_SRC, WORKERS_SOCKETS_PRELUDE, WORKERS_SOCKETS_PRELUDE_SRC,
     };
 
     // 1. Verify all 9 readable `.js` prelude sources are preserved and compile-time minified
@@ -721,7 +729,7 @@ console.log(JSON.stringify({
 
 #[test]
 fn test_process_argv_defaults_custom_cli_args_and_pooled_isolation() {
-    use crate::{compile_source_to_bytecode, SliceIsolate};
+    use crate::{SliceIsolate, compile_source_to_bytecode};
     use slice_sandbox::CapabilityToken;
 
     let check_argv_bc = compile_source_to_bytecode(r#"console.log(JSON.stringify(process.argv));"#);
@@ -1076,7 +1084,7 @@ fn test_shard_isolation_for_node_crypto_process_cli_intl_dom_exception_and_strea
 
 #[test]
 fn test_http_fast_outcome_and_server_websocket_dispatch() {
-    use crate::{compile_source_to_bytecode, HttpRequestContext, ServerWsOutFrame, SliceIsolate};
+    use crate::{HttpRequestContext, ServerWsOutFrame, SliceIsolate, compile_source_to_bytecode};
     use slice_sandbox::CapabilityToken;
 
     // 1. Tier-0 SLICESNP fast HTTP dispatch + pointer-cached `decode_slicesnp_cached`
