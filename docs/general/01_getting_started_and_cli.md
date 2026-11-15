@@ -92,7 +92,7 @@ If you are running `slice serve --tenant-dir=./tenants`, overwriting `./tenants/
 
 ## 3. Verifying Your Host Environment (`slice info` & `slice doctor`)
 
-After installing or upgrading, run `slice info` and `slice doctor` to inspect your OS completion rings (`io_uring` on Linux, `IOCP` on Windows), hardware Memory Protection Keys (`MPK/PKU`), pre-warmed `Boa` ES2024 realm pool, and 5-vector security containment:
+After installing or upgrading, run `slice info` and `slice doctor` to inspect your OS completion rings (`io_uring` on Linux, `IOCP` on Windows), protection-key domain status (`MPK/PKRU` scaffolding on Linux `x86_64`), pre-warmed `Boa` ES2024 realm pool, and 5-vector security containment:
 
 ```bash
 slice info
@@ -108,7 +108,7 @@ Example `slice doctor` output:
   [OK] Direct Completion Ring     : Windows NT I/O Completion Port (IOCP Direct Kernel Ring)
   [OK] Kernel SQPOLL Ring Mode    : Standard Completion Ring (IOCP / Direct Ring)
   [OK] Registered Fixed Slab Bufs : 128 x 64 KB (8 MB Pre-Registered)
-  [OK] Memory Protection Domain   : PKEY 0x2 (PKRU Mask 0xffffffcf, Hardware MPK: false)
+  [OK] Memory Protection Domain   : PKEY 0x2 (PKRU Mask 0xffffffcf, virtual slot tag; safe-Rust + OCap cages active)
   [OK] CAS Cache-Line Alignment   : 64 bytes (Zero-Copy mmap ready)
   [OK] Pre-Warmed Boa ES2024 Pool : 2 Ready Realms (Zero-Init SLICEBOA Fast Path)
   [OK] Current Host Process RSS   : 15812 KB (15.44 MB)
@@ -281,7 +281,8 @@ allow_net = ["api.stripe.com:443", "127.0.0.1:18095"]
 # Child processes receive ONLY tenant-attenuated environment variables and their stdout/stderr are scanned by Egress DLP.
 allow_exec = ["/usr/bin/git", "/bin/echo"]
 
-# Optional guest checkpoint controls (default: allow_checkpoints = true, max_checkpoints = 64).
+# Optional guest checkpoint controls (default: allow_checkpoints = true, max_checkpoints = unlimited;
+# the per-thread checkpoint slab retains up to 64 snapshots via FIFO eviction).
 # allow_checkpoints = true
 # max_checkpoints = 16
 
@@ -333,6 +334,7 @@ For single-file scripts, benchmarks, or self-contained tests where you do not wa
 // @slice-allow-write: ["/tmp"]
 // @slice-allow-net: ["api.example.com:443"]
 // @slice-allow-exec: ["/usr/bin/git"]
+// @slice-max-checkpoints: 8
 // @slice-allow-env: ["NODE_ENV=production"]
 // @slice-env-file: .env
 // @slice-audit-egress: ["sk_live_inline_secret"]
@@ -358,7 +360,7 @@ console.log("Running with self-contained inline directives!");
 | **VFS Write Prefixes** | `[]` (Zero access) | `[capabilities] allow_write = [...]` | `// @slice-allow-write: ["/tmp"]` | `SLICE_ALLOW_WRITE=/tmp` | `--allow-write=/tmp` |
 | **Network Hosts** | `[]` (Zero access) | `[capabilities] allow_net = [...]` | `// @slice-allow-net: ["host:443"]` | `SLICE_ALLOW_NET=host:443` | `--allow-net=host:443` |
 | **Exec Binaries (`ExecCap`)** | `[]` (Deny-All) | `[capabilities] allow_exec = [...]` | `// @slice-allow-exec: ["/usr/bin/git"]` | `SLICE_ALLOW_EXEC=/usr/bin/git` | `--allow-exec=/usr/bin/git` |
-| **Guest Checkpoints** | `true` (`max = 64`) | `[capabilities] allow_checkpoints` / `max_checkpoints` | `// @slice-checkpoints: false` / `// @slice-max-checkpoints: 8` | `SLICE_CHECKPOINTS=0` / `SLICE_MAX_CHECKPOINTS=8` | `--no-checkpoints` / `--max-checkpoints=8` |
+| **Guest Checkpoints** | `true` (`max = unlimited`; 64-slot FIFO slab) | `[capabilities] allow_checkpoints` / `max_checkpoints` | `// @slice-checkpoints: false` / `// @slice-max-checkpoints: 8` | `SLICE_CHECKPOINTS=0` / `SLICE_MAX_CHECKPOINTS=8` | `--no-checkpoints` / `--max-checkpoints=8` |
 | **Env Variables** | `{}` (Zero access) | `[capabilities.env] KEY = "VAL"` | `// @slice-allow-env: ["KEY=VAL"]` | `SLICE_ALLOW_ENV=KEY=VAL` | `--allow-env=KEY=VAL` |
 | **Dotenv Vault File** | `None` | `[capabilities] env_file = ".env"` | `// @slice-env-file: .env` | `SLICE_ENV_FILE=.env` | `--env-file=.env` / `--env-file .env` |
 | **Egress DLP Secrets** | Auto from `.env` | `[capabilities] audit_egress = [...]` | `// @slice-audit-egress: ["sec"]` | `SLICE_AUDIT_EGRESS=sec1,sec2` / `SLICE_AUDIT_EGRESS_FILE=path` | `--audit-egress=sec1` / `--audit-egress-file=path` |
@@ -627,7 +629,7 @@ Starts the built-in **JSON-RPC 2.0 Model Context Protocol (`2024-11-05`)** serve
 ---
 
 ### 7.11 `slice doctor`
-Runs a comprehensive diagnostic check of your OS kernel completion ring (`io_uring` / `IOCP`), registered fixed slab buffers, hardware `MPK/PKU` status, CAS 64-byte cache-line alignment, pre-warmed `Boa` pool, process RSS, and 5-vector OCap/SES security containment.
+Runs a comprehensive diagnostic check of your OS kernel completion ring (`io_uring` / `IOCP`), registered fixed slab buffers, protection-key domain status (`PKRU` register switch on PKU-capable Linux `x86_64` vs virtual slot tag), CAS 64-byte cache-line alignment, pre-warmed `Boa` pool, process RSS, and 5-vector OCap/SES security containment.
 
 ---
 

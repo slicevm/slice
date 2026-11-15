@@ -18,44 +18,66 @@ use thiserror::Error;
 
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum SandboxViolation {
-    #[error("OCap Violation: Compartment '{tenant_id}' lacks filesystem read authority for path '{path}'")]
+    #[error(
+        "OCap Violation: Compartment '{tenant_id}' lacks filesystem read authority for path '{path}'"
+    )]
     FsReadDenied { tenant_id: String, path: String },
 
-    #[error("OCap Violation: Compartment '{tenant_id}' lacks filesystem write authority for path '{path}'")]
+    #[error(
+        "OCap Violation: Compartment '{tenant_id}' lacks filesystem write authority for path '{path}'"
+    )]
     FsWriteDenied { tenant_id: String, path: String },
 
-    #[error("OCap Violation: Compartment '{tenant_id}' lacks outbound network authority for host '{host}'")]
+    #[error(
+        "OCap Violation: Compartment '{tenant_id}' lacks outbound network authority for host '{host}'"
+    )]
     NetAccessDenied { tenant_id: String, host: String },
 
-    #[error("OCap Violation: Compartment '{tenant_id}' lacks environment variable authority for key '{key}'")]
+    #[error(
+        "OCap Violation: Compartment '{tenant_id}' lacks environment variable authority for key '{key}'"
+    )]
     EnvAccessDenied { tenant_id: String, key: String },
 
-    #[error("[Slice Sandbox Violation] Subprocess execution denied: Compartment '{tenant_id}' lacks exec authority for binary '{binary}'")]
+    #[error(
+        "[Slice Sandbox Violation] Subprocess execution denied: Compartment '{tenant_id}' lacks exec authority for binary '{binary}'"
+    )]
     ExecDenied { tenant_id: String, binary: String },
 
-    #[error("SES Lockdown Violation: Compartment '{tenant_id}' attempted to mutate frozen intrinsic '{intrinsic}'")]
+    #[error(
+        "SES Lockdown Violation: Compartment '{tenant_id}' attempted to mutate frozen intrinsic '{intrinsic}'"
+    )]
     IntrinsicMutationBlocked {
         tenant_id: String,
         intrinsic: String,
     },
 
-    #[error("Resource Cage Exhausted: Compartment '{tenant_id}' exceeded deterministic CPU instruction fuel limit ({limit} ops)")]
+    #[error(
+        "Resource Cage Exhausted: Compartment '{tenant_id}' exceeded deterministic CPU instruction fuel limit ({limit} ops)"
+    )]
     CpuFuelExhausted { tenant_id: String, limit: u64 },
 
-    #[error("Resource Cage Exhausted: Compartment '{tenant_id}' exceeded memory ceiling ({requested} > {limit} bytes)")]
+    #[error(
+        "Resource Cage Exhausted: Compartment '{tenant_id}' exceeded memory ceiling ({requested} > {limit} bytes)"
+    )]
     MemoryCeilingExceeded {
         tenant_id: String,
         requested: usize,
         limit: usize,
     },
 
-    #[error("Hardware PKEY Trap: Compartment '{tenant_id}' attempted unauthorized cross-domain memory access (PKEY 0x{pkey:x})")]
+    #[error(
+        "Hardware PKEY Trap: Compartment '{tenant_id}' attempted unauthorized cross-domain memory access (PKEY 0x{pkey:x})"
+    )]
     HardwareMemoryDomainTrap { tenant_id: String, pkey: u32 },
 
-    #[error("OCap Violation (CapabilityDenied: checkpoints): Compartment '{tenant_id}' checkpoint denied: {reason}")]
+    #[error(
+        "OCap Violation (CapabilityDenied: checkpoints): Compartment '{tenant_id}' checkpoint denied: {reason}"
+    )]
     CheckpointDenied { tenant_id: String, reason: String },
 
-    #[error("Egress DLP Violation (EGRESS_SECRET_LEAK_BLOCKED): Compartment '{tenant_id}' blocked from exfiltrating a registered audit secret")]
+    #[error(
+        "Egress DLP Violation (EGRESS_SECRET_LEAK_BLOCKED): Compartment '{tenant_id}' blocked from exfiltrating a registered audit secret"
+    )]
     EgressSecretLeakBlocked { tenant_id: String },
 }
 
@@ -144,21 +166,33 @@ impl CapabilityToken {
         self
     }
 
-    pub fn with_checkpoints(mut self, enabled: bool) -> Self {
+    #[inline]
+    pub fn set_checkpoints(&mut self, enabled: bool) {
         self.allow_checkpoints = enabled;
         if !enabled {
             self.max_checkpoints = Some(0);
         } else if self.max_checkpoints == Some(0) {
             self.max_checkpoints = None;
         }
-        self
     }
 
-    pub fn with_max_checkpoints(mut self, max: Option<u32>) -> Self {
+    #[inline]
+    pub fn set_max_checkpoints(&mut self, max: Option<u32>) {
         self.max_checkpoints = max;
         if max == Some(0) {
             self.allow_checkpoints = false;
         }
+    }
+
+    #[inline]
+    pub fn with_checkpoints(mut self, enabled: bool) -> Self {
+        self.set_checkpoints(enabled);
+        self
+    }
+
+    #[inline]
+    pub fn with_max_checkpoints(mut self, max: Option<u32>) -> Self {
+        self.set_max_checkpoints(max);
         self
     }
 }
@@ -380,17 +414,17 @@ impl TenantCompartment {
                 reason: "guest checkpoints are disabled for this compartment".to_string(),
             });
         }
-        if let Some(max) = self.capabilities.max_checkpoints {
-            if current_taken >= max {
-                return Err(SandboxViolation::CheckpointDenied {
-                    tenant_id: self.tenant_id.clone(),
-                    reason: format!(
-                        "exceeded max_checkpoints limit ({} > {})",
-                        current_taken.saturating_add(1),
-                        max
-                    ),
-                });
-            }
+        if let Some(max) = self.capabilities.max_checkpoints
+            && current_taken >= max
+        {
+            return Err(SandboxViolation::CheckpointDenied {
+                tenant_id: self.tenant_id.clone(),
+                reason: format!(
+                    "exceeded max_checkpoints limit ({} > {})",
+                    current_taken.saturating_add(1),
+                    max
+                ),
+            });
         }
         Ok(())
     }
