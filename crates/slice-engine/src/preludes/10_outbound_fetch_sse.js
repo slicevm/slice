@@ -147,7 +147,7 @@
 
   function __reqHeadersJson(req) {
     if (req._h === null && req._hm === null && !req._ct) return "[]";
-    return JSON.stringify(req.headers.entries());
+    return JSON.stringify(req.headers._toPairs());
   }
 
   function __doFetch(input, init) {
@@ -243,7 +243,7 @@
       var wireObj = {
         status: o.status || 200,
         statusText: o.statusText || "OK",
-        headers: h.entries(),
+        headers: h._toPairs(),
         body: ""
       };
       if (isBin) {
@@ -252,7 +252,7 @@
         wireObj.body = o.body === undefined || o.body === null ? "" : (typeof o.body === "string" ? o.body : JSON.stringify(o.body));
         if (typeof o.body === "object" && o.body !== null && !h._m["content-type"]) {
           h._m["content-type"] = "application/json";
-          wireObj.headers = h.entries();
+          wireObj.headers = h._toPairs();
         }
       }
       __slice_mock_fetch(

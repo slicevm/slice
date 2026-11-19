@@ -112,11 +112,32 @@
       this._m = Object.create(null);
       this._sc = null;
       for (var j = 0; j < init.length; j++) {
-        if (init[j] && init[j].length >= 2) this.append(init[j][0], init[j][1]);
+        var pair = init[j];
+        if (!pair || typeof pair !== "object" || pair.length !== 2) {
+          throw new TypeError("Headers: sequence item must contain exactly 2 elements");
+        }
+        this.append(pair[0], pair[1]);
       }
       return;
     }
     if (typeof init === "object") {
+      if (!init._isHeaders && typeof Symbol !== "undefined" && Symbol.iterator && typeof init[Symbol.iterator] === "function") {
+        this._m = Object.create(null);
+        this._sc = null;
+        var hIter = init[Symbol.iterator](), hStep;
+        while (!(hStep = hIter.next()).done) {
+          var hItem = hStep.value;
+          if (!hItem || typeof hItem !== "object") {
+            throw new TypeError("Headers: sequence item must be a 2-element pair");
+          }
+          var hPair = Array.isArray(hItem) ? hItem : Array.from(hItem);
+          if (hPair.length !== 2) {
+            throw new TypeError("Headers: sequence item must contain exactly 2 elements");
+          }
+          this.append(hPair[0], hPair[1]);
+        }
+        return;
+      }
       __assignHeadersMap(this, "_m", "_sc", init);
       return;
     }
@@ -175,33 +196,61 @@
     this._ensure();
     return this._sc ? this._sc.slice() : [];
   };
-  Headers.prototype.entries = function() {
-    this._ensure();
-    var ks = Object.keys(this._m).sort(), r = [];
-    for (var i = 0; i < ks.length; i++) r.push([ks[i], this._m[ks[i]]]);
-    return r;
+  var __hdrIterProto = Object.create(Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())));
+  __hdrIterProto.next = function() {
+    var ps = this._t._toPairs();
+    if (this._i >= ps.length) return { value: undefined, done: true };
+    var pair = ps[this._i++];
+    var k = this._k;
+    return {
+      value: k === 0 ? pair[0] : (k === 1 ? pair[1] : [pair[0], pair[1]]),
+      done: false
+    };
   };
-  Headers.prototype.keys = function() {
+  if (typeof Symbol !== "undefined" && Symbol.toStringTag) {
+    Object.defineProperty(__hdrIterProto, Symbol.toStringTag, {
+      value: "Headers Iterator",
+      configurable: true
+    });
+  }
+  function __mkHdrIter(hdrs, kind) {
+    var it = Object.create(__hdrIterProto);
+    it._t = hdrs;
+    it._i = 0;
+    it._k = kind;
+    return it;
+  }
+
+  Headers.prototype._toPairs = function() {
     this._ensure();
-    return Object.keys(this._m).sort();
-  };
-  Headers.prototype.values = function() {
-    var es = this.entries(), r = [];
-    for (var i = 0; i < es.length; i++) r.push(es[i][1]);
-    return r;
-  };
-  Headers.prototype.forEach = function(cb, ta) {
-    this._ensure();
-    var m = this._m, ks = Object.keys(m);
+    var m = this._m, sc = this._sc, ks = Object.keys(m).sort(), r = [];
     for (var i = 0; i < ks.length; i++) {
       var k = ks[i];
-      cb.call(ta, m[k], k, this);
+      if (k === "set-cookie" && sc && sc.length > 0) {
+        for (var j = 0; j < sc.length; j++) r.push(["set-cookie", sc[j]]);
+      } else {
+        r.push([k, m[k]]);
+      }
+    }
+    return r;
+  };
+  Headers.prototype.entries = function() {
+    return __mkHdrIter(this, 2);
+  };
+  Headers.prototype.keys = function() {
+    return __mkHdrIter(this, 0);
+  };
+  Headers.prototype.values = function() {
+    return __mkHdrIter(this, 1);
+  };
+  Headers.prototype.forEach = function(cb, ta) {
+    var ps = this._toPairs();
+    for (var i = 0; i < ps.length; i++) {
+      cb.call(ta, ps[i][1], ps[i][0], this);
     }
   };
   if (typeof Symbol !== "undefined" && Symbol.iterator) {
-    Headers.prototype[Symbol.iterator] = function() {
-      return this.entries()[Symbol.iterator]();
-    };
+    Headers.prototype[Symbol.iterator] = Headers.prototype.entries;
   }
 
   function __borrowBodyBytes(obj) {

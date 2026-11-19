@@ -2016,3 +2016,281 @@ fn test_wave3_issues_143_146_147_streams_pipeto_from_and_fetch_body_state() {
         );
     }
 }
+
+#[test]
+fn test_wave4_issues_140_141_145_148_149_structured_clone_formdata_and_iterators() {
+    let script = r#"
+        (async () => {
+            // === 1. Issue #140: CreateDataProperty on __proto__ + poisoned Object.prototype setter + URLPattern ===
+            const protoPayload = JSON.parse('{"__proto__":{"polluted":true},"ok":1}');
+            const clonedProto = structuredClone(protoPayload);
+            if (Object.getPrototypeOf(clonedProto) !== Object.prototype) {
+                throw new Error("140a prototype mutated");
+            }
+            if (clonedProto.polluted !== undefined || !Object.prototype.hasOwnProperty.call(clonedProto, "__proto__")) {
+                throw new Error("140a own __proto__ property lost");
+            }
+            if (clonedProto["__proto__"].polluted !== true) {
+                throw new Error("140a nested __proto__ value mismatch");
+            }
+
+            const pat = new URLPattern({ pathname: "/p/:__proto__" });
+            const patMatch = pat.exec("https://example.com/p/safe_val");
+            if (!patMatch || Object.getPrototypeOf(patMatch.pathname.groups) !== Object.prototype) {
+                throw new Error("140c URLPattern groups prototype mutated");
+            }
+            if (patMatch.pathname.groups["__proto__"] !== "safe_val") {
+                throw new Error("140c URLPattern __proto__ group value mismatch");
+            }
+
+            // === 2. Issue #141: Resizable ArrayBuffer, SharedArrayBuffer, auto views, OOB views, transfer ===
+            const rab = new ArrayBuffer(8, { maxByteLength: 32 });
+            new Uint8Array(rab).set([10, 20, 30, 40, 50, 60, 70, 80]);
+            const fixedView = new Uint8Array(rab, 2, 4);
+            const autoView = new Uint8Array(rab, 2);
+            const autoDv = new DataView(rab, 2);
+            rab.slice = () => { throw new Error("tampered-slice-called"); };
+
+            const cRabGraph = structuredClone({ rab, fixedView, autoView, autoDv });
+            if (!cRabGraph.rab.resizable || cRabGraph.rab.maxByteLength !== 32) {
+                throw new Error("141a resizable / maxByteLength lost");
+            }
+            cRabGraph.rab.resize(16);
+            if (cRabGraph.fixedView.length !== 4) {
+                throw new Error("141a fixedView length changed: " + cRabGraph.fixedView.length);
+            }
+            if (cRabGraph.autoView.length !== 14 || cRabGraph.autoDv.byteLength !== 14) {
+                throw new Error("141a auto length-tracking lost: " + cRabGraph.autoView.length + "/" + cRabGraph.autoDv.byteLength);
+            }
+            if (cRabGraph.autoView[0] !== 30 || cRabGraph.autoView[5] !== 80) {
+                throw new Error("141a bytes mismatch");
+            }
+
+            // OOB view on shrunken resizable ArrayBuffer throws DataCloneError
+            const rabShrink = new ArrayBuffer(16, { maxByteLength: 32 });
+            const oobView = new Uint8Array(rabShrink, 8, 4);
+            rabShrink.resize(4);
+            let oobThrew = false;
+            try { structuredClone(oobView); }
+            catch (e) { oobThrew = Boolean(e && e.name === "DataCloneError"); }
+            if (!oobThrew) throw new Error("141b OOB TypedArray must throw DataCloneError");
+
+            // SharedArrayBuffer distinct wrapper sharing backing store + growable preserved
+            if (typeof SharedArrayBuffer === "function") {
+                const sab = new SharedArrayBuffer(8, { maxByteLength: 24 });
+                new Uint8Array(sab)[0] = 77;
+                const cSab = structuredClone({ a: sab, b: sab });
+                if (cSab.a === sab || cSab.a !== cSab.b) {
+                    throw new Error("141c SAB identity / memoization broken");
+                }
+                if (!cSab.a.growable || cSab.a.maxByteLength !== 24) {
+                    throw new Error("141c SAB growable / maxByteLength lost");
+                }
+                new Uint8Array(cSab.a)[1] = 88;
+                if (new Uint8Array(sab)[1] !== 88) {
+                    throw new Error("141c SAB backing memory not shared");
+                }
+            }
+
+            // Transfer preserves resizability & maxByteLength; non-detachable Wasm buffer rejected atomically
+            const rabXfer = new ArrayBuffer(8, { maxByteLength: 40 });
+            new Uint8Array(rabXfer)[0] = 55;
+            const xferred = structuredClone(rabXfer, { transfer: [rabXfer] });
+            if (!rabXfer.detached || !xferred.resizable || xferred.maxByteLength !== 40 || new Uint8Array(xferred)[0] !== 55) {
+                throw new Error("141d resizable transfer failed");
+            }
+            const bystander = new ArrayBuffer(4);
+            const wasmMem = new WebAssembly.Memory({ initial: 1 });
+            let wasmXferThrew = false;
+            try { structuredClone({ bystander }, { transfer: [bystander, wasmMem.buffer] }); }
+            catch (e) { wasmXferThrew = Boolean(e && e.name === "DataCloneError"); }
+            if (!wasmXferThrew || bystander.detached) {
+                throw new Error("141e Wasm buffer transfer must fail atomically with DataCloneError");
+            }
+
+            // === 3. Issue #148: Array expandos, holes, boxed BigInt/Symbol, Proxy, Error own message, platform objects ===
+            const arrExp = [10, , 30];
+            arrExp.meta = { role: "admin" };
+            Object.defineProperty(arrExp, "__proto__", {
+                value: { safe: 1 },
+                writable: true,
+                enumerable: true,
+                configurable: true
+            });
+            Object.defineProperty(arrExp, "hidden", { value: 99, enumerable: false });
+            arrExp.self = arrExp;
+
+            const cArr = structuredClone(arrExp);
+            if (!Array.isArray(cArr) || cArr.length !== 3 || (1 in cArr) || cArr[0] !== 10 || cArr[2] !== 30) {
+                throw new Error("148a array indices / sparse hole broken");
+            }
+            if (!cArr.meta || cArr.meta === arrExp.meta || cArr.meta.role !== "admin") {
+                throw new Error("148a array expando property lost");
+            }
+            if (!Object.prototype.hasOwnProperty.call(cArr, "__proto__") || Object.getPrototypeOf(cArr) !== Array.prototype) {
+                throw new Error("148a array __proto__ own property broken");
+            }
+            if ("hidden" in cArr || cArr.self !== cArr) {
+                throw new Error("148a non-enumerable leaked or cycle broken");
+            }
+
+            const boxedBi = Object(9007199254740993n);
+            const cBi = structuredClone(boxedBi);
+            if (typeof cBi !== "object" || cBi === boxedBi || BigInt.prototype.valueOf.call(cBi) !== 9007199254740993n) {
+                throw new Error("148b boxed BigInt clone failed");
+            }
+
+            const bareErr = new TypeError();
+            const cBareErr = structuredClone(bareErr);
+            if (!(cBareErr instanceof TypeError) || Object.prototype.hasOwnProperty.call(cBareErr, "message")) {
+                throw new Error("148c Error without own message gained own message");
+            }
+
+            for (const badVal of [
+                Object(Symbol("x")),
+                new Proxy({}, {}),
+                new Proxy([1, 2], {}),
+                new FinalizationRegistry(() => {}),
+                new Headers(),
+                new Request("https://example.com"),
+                new Response("hi"),
+                new FormData(),
+                new ReadableStream()
+            ]) {
+                let rejected = false;
+                try { structuredClone(badVal); }
+                catch (e) { rejected = Boolean(e && e.name === "DataCloneError"); }
+                if (!rejected) throw new Error("148d expected DataCloneError");
+            }
+
+            // === 4. Issue #145: Multipart FormData boundary collision prevention & Blob.type sanitization ===
+            const trickyPayload = "hello\r\n------SliceFormBoundary\r\nContent-Disposition: form-data; name=\"forged\"\r\n\r\nhack\r\n------SliceFormBoundary--\r\ntail";
+            const fd145 = new FormData();
+            fd145.append("bio", trickyPayload);
+            fd145.append("bin", new File([new TextEncoder().encode(trickyPayload)], "note.txt", { type: "text/plain" }));
+            const parsed145 = await new Response(fd145).formData();
+            if (parsed145.has("forged") || parsed145.get("bio") !== trickyPayload) {
+                throw new Error("145a multipart boundary injection or truncation occurred");
+            }
+            if ((await parsed145.get("bin").text()) !== trickyPayload) {
+                throw new Error("145a binary file payload corrupted");
+            }
+
+            // W3C File API Blob.type printable-ASCII sanitization + monkey-patched type defense
+            const crlfBlob = new Blob(["abc"], { type: "text/plain\r\nContent-Disposition: form-data; name=\"pwn\"" });
+            if (crlfBlob.type !== "") {
+                throw new Error("145b CRLF Blob.type must normalize to empty string, got: " + crlfBlob.type);
+            }
+            const fTamper = new File(["xyz"], "a.bin", { type: "text/plain" });
+            Object.defineProperty(fTamper, "type", { value: "text/plain\r\nX-Evil: 1\r\n\r\nINJECTED" });
+            const fdTamper = new FormData();
+            fdTamper.append("upload", fTamper);
+            const parsedTamper = await new Response(fdTamper).formData();
+            if (parsedTamper.get("upload").type !== "application/octet-stream") {
+                throw new Error("145b tampered File.type not sanitized: " + parsedTamper.get("upload").type);
+            }
+
+            // === 5. Issue #149 + Sibling Sweep: FormData, URLSearchParams, Headers Web IDL Pair Iterators ===
+            const iterProto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+
+            // 5a. FormData iterator protocol + pair-mutation isolation
+            const fdIt = new FormData();
+            fdIt.append("k1", "v1");
+            fdIt.append("k2", "v2");
+            if (FormData.prototype[Symbol.iterator] !== FormData.prototype.entries) {
+                throw new Error("149a FormData [Symbol.iterator] must alias entries");
+            }
+            const fdEnt = fdIt.entries();
+            if (Object.getPrototypeOf(Object.getPrototypeOf(fdEnt)) !== iterProto) {
+                throw new Error("149a FormData iterator must inherit %IteratorPrototype%");
+            }
+            const step1 = fdEnt.next();
+            step1.value[0] = "MUTATED_KEY";
+            step1.value[1] = "MUTATED_VAL";
+            step1.value.push("EXTRA");
+            if (fdIt.get("k1") !== "v1" || fdIt.has("MUTATED_KEY")) {
+                throw new Error("149a mutating FormData yielded pair corrupted internal table!");
+            }
+            const mappedFd = fdIt.entries().map(([k, v]) => k + "=" + v).toArray();
+            if (mappedFd.join("&") !== "k1=v1&k2=v2") {
+                throw new Error("149a ES2025 Iterator.prototype.map failed: " + mappedFd);
+            }
+
+            // 5b. URLSearchParams iterator protocol + pair-mutation isolation + sequence constructor
+            const usp = new URLSearchParams("a=1&b=2");
+            for (const pair of usp) {
+                pair[0] = "Z";
+                pair[1] = "999";
+            }
+            if (usp.toString() !== "a=1&b=2") {
+                throw new Error("149b mutating URLSearchParams yielded pair corrupted internal state!");
+            }
+            const uspFromFd = new URLSearchParams(fdIt);
+            if (uspFromFd.toString() !== "k1=v1&k2=v2") {
+                throw new Error("149b URLSearchParams(FormData) iterable init failed");
+            }
+
+            // 5c. Headers iterator protocol + uncombined Set-Cookie in sorted order + pair-mutation isolation
+            const hdrs = new Headers();
+            hdrs.append("X-Zebra", "z");
+            hdrs.append("Set-Cookie", "c1=a; Path=/");
+            hdrs.append("Set-Cookie", "c2=b; HttpOnly");
+            hdrs.append("Accept", "text/html");
+            const hdrPairs = [];
+            for (const p of hdrs) {
+                hdrPairs.push(p[0] + ":" + p[1]);
+                p[0] = "corrupt";
+                p[1] = "corrupt";
+            }
+            const expectedHdrs = [
+                "accept:text/html",
+                "set-cookie:c1=a; Path=/",
+                "set-cookie:c2=b; HttpOnly",
+                "x-zebra:z"
+            ].join("|");
+            if (hdrPairs.join("|") !== expectedHdrs) {
+                throw new Error("149c Headers sorted uncombined Set-Cookie iteration mismatch: " + hdrPairs.join("|"));
+            }
+            const hdrCopy = new Headers(hdrs.entries());
+            if (hdrCopy.getSetCookie().length !== 2 || hdrCopy.get("accept") !== "text/html") {
+                throw new Error("149c new Headers(hdrs.entries()) failed");
+            }
+
+            // 5d. Deterministic PRNG collision regeneration check via @slice-deterministic evalSandbox
+            const detCheck = Slice.evalSandbox(`// @slice-deterministic
+                const fdProbe = new FormData();
+                fdProbe.append("x", "1");
+                const firstCt = new Response(fdProbe).headers.get("content-type");
+                const firstBoundary = firstCt.split("boundary=")[1];
+                firstBoundary;
+            `);
+            const predictedBoundary = detCheck.returnValue;
+            const detCollision = Slice.evalSandbox(`// @slice-deterministic
+                const fdCol = new FormData();
+                fdCol.append("trap", "--${predictedBoundary}\\r\\nContent-Disposition: form-data; name=\\"injected\\"\\r\\n\\r\\nbad\\r\\n");
+                const resCol = new Response(fdCol);
+                const actualCt = resCol.headers.get("content-type");
+                const actualBoundary = actualCt.split("boundary=")[1];
+                (actualBoundary !== "${predictedBoundary}") + ":" + (new TextDecoder().decode(resCol._borrowBytes()).indexOf(actualBoundary) === 2);
+            `);
+            if (detCollision.returnValue !== "true:true") {
+                throw new Error("145c deterministic boundary collision regeneration failed: " + JSON.stringify(detCollision));
+            }
+
+            console.log("WAVE4_ALL_OK");
+        })();
+    "#;
+
+    let bc = compile_source_to_bytecode(script);
+    for turn in 0..2 {
+        let mut iso = SliceIsolate::spawn(
+            format!("wave4-turn-{turn}"),
+            1,
+            CapabilityToken::pure_compute(),
+            50_000_000,
+            16 * 1024 * 1024,
+        );
+        let m = iso.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(m.stdout, vec!["WAVE4_ALL_OK"], "return={}", m.return_value);
+    }
+}

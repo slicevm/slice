@@ -53,12 +53,28 @@
     if (Array.isArray(init)) {
       for (var j = 0; j < init.length; j++) {
         var pr = init[j];
-        if (pr && pr.length >= 2) this._p.push([String(pr[0]), String(pr[1])]);
+        if (!pr || typeof pr !== "object" || pr.length !== 2) {
+          throw new TypeError("URLSearchParams: each sequence item must be a 2-element pair");
+        }
+        this._p.push([String(pr[0]), String(pr[1])]);
       }
     } else if (typeof init === "object") {
       if (init._isUSP) {
         var sp = init._ensureP();
         for (var m = 0; m < sp.length; m++) this._p.push([sp[m][0], sp[m][1]]);
+      } else if (typeof Symbol !== "undefined" && Symbol.iterator && typeof init[Symbol.iterator] === "function") {
+        var iter = init[Symbol.iterator](), step;
+        while (!(step = iter.next()).done) {
+          var item = step.value;
+          if (!item || typeof item !== "object") {
+            throw new TypeError("URLSearchParams: sequence item must be an object pair");
+          }
+          var pairArr = Array.isArray(item) ? item : Array.from(item);
+          if (pairArr.length !== 2) {
+            throw new TypeError("URLSearchParams: sequence item must contain exactly 2 elements");
+          }
+          this._p.push([String(pairArr[0]), String(pairArr[1])]);
+        }
       } else {
         var ks = Object.keys(init);
         for (var k = 0; k < ks.length; k++) this._p.push([ks[k], String(init[ks[k]])]);
@@ -178,18 +194,39 @@
       cb.call(ta, p[i][1], p[i][0], this);
     }
   };
+  var __uspIterProto = Object.create(Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())));
+  __uspIterProto.next = function() {
+    var p = this._t._ensureP();
+    if (this._i >= p.length) return { value: undefined, done: true };
+    var pair = p[this._i++];
+    var k = this._k;
+    return {
+      value: k === 0 ? pair[0] : (k === 1 ? pair[1] : [pair[0], pair[1]]),
+      done: false
+    };
+  };
+  if (typeof Symbol !== "undefined" && Symbol.toStringTag) {
+    Object.defineProperty(__uspIterProto, Symbol.toStringTag, {
+      value: "URLSearchParams Iterator",
+      configurable: true
+    });
+  }
+  function __mkUspIter(usp, kind) {
+    var it = Object.create(__uspIterProto);
+    it._t = usp;
+    it._i = 0;
+    it._k = kind;
+    return it;
+  }
+
   URLSearchParams.prototype.entries = function() {
-    return this._ensureP().slice();
+    return __mkUspIter(this, 2);
   };
   URLSearchParams.prototype.keys = function() {
-    var p = this._ensureP(), r = [];
-    for (var i = 0; i < p.length; i++) r.push(p[i][0]);
-    return r;
+    return __mkUspIter(this, 0);
   };
   URLSearchParams.prototype.values = function() {
-    var p = this._ensureP(), r = [];
-    for (var i = 0; i < p.length; i++) r.push(p[i][1]);
-    return r;
+    return __mkUspIter(this, 1);
   };
   URLSearchParams.prototype.toString = function() {
     var p = this._ensureP(), len = p.length;
@@ -202,9 +239,7 @@
     return s;
   };
   if (typeof Symbol !== "undefined" && Symbol.iterator) {
-    URLSearchParams.prototype[Symbol.iterator] = function() {
-      return this._ensureP()[Symbol.iterator]();
-    };
+    URLSearchParams.prototype[Symbol.iterator] = URLSearchParams.prototype.entries;
   }
   Object.defineProperty(URLSearchParams.prototype, "size", {
     get: function() { return this._ensureP().length; }

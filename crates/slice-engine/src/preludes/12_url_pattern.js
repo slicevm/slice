@@ -344,7 +344,12 @@
       if (!m) return null;
       var groups = {};
       for (var j = 0; j < comp.keys.length; j++) {
-        groups[comp.keys[j]] = m[j + 1];
+        Object.defineProperty(groups, comp.keys[j], {
+          value: m[j + 1],
+          writable: true,
+          enumerable: true,
+          configurable: true
+        });
       }
       res[k] = { input: val, groups: groups };
     }

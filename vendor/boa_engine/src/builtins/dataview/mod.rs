@@ -43,6 +43,28 @@ pub struct DataView {
 }
 
 impl DataView {
+    /// Returns `true` if the `DataView` has an automatic (`auto`) byte length.
+    #[must_use]
+    pub const fn is_auto_byte_length(&self) -> bool {
+        self.byte_length.is_none()
+    }
+
+    /// Returns the raw `[[ByteOffset]]` internal slot of the `DataView`.
+    #[must_use]
+    pub const fn raw_byte_offset(&self) -> u64 {
+        self.byte_offset
+    }
+
+    /// Returns `true` if the `DataView` is backed by a detached buffer or is currently out-of-bounds.
+    #[must_use]
+    pub fn is_out_of_bounds_now(&self) -> bool {
+        let buf_ref = self.viewed_array_buffer.as_buffer();
+        let Some(slice) = buf_ref.bytes(Ordering::SeqCst) else {
+            return true;
+        };
+        self.is_out_of_bounds(slice.len())
+    }
+
     /// Zero-lookup fast path: calls `f` with the borrowed byte slice `[byte_offset .. byte_offset + byte_length]`
     /// of this `DataView`'s underlying `ArrayBuffer` if backed by a non-detached `ArrayBuffer`.
     #[inline]
