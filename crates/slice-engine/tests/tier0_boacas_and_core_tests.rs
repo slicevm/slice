@@ -1746,3 +1746,166 @@ fn test_issue_101_tier0_ast_gate_rejects_globals_and_nested_member_writes_while_
         SandboxViolation::IntrinsicMutationBlocked { .. }
     ));
 }
+
+#[test]
+fn test_issue_139_syntax_error_positions_across_bytecode_evalsandbox_ts_and_vm() {
+    let cases = [
+        ("const x = ;", "line 1, col 11"),
+        ("let a = 1;\nconst x = ;", "line 2, col 11"),
+        ("// c\n// c\nconst x = ;", "line 3, col 11"),
+        ("let a = 1;\nlet b = 2;\nconst x = ;", "line 3, col 11"),
+        ("    const x = ;", "line 1, col 15"),
+        ("/* a\n * b\n */\nconst x = ;", "line 4, col 11"),
+        ("let a = 1;\r\n// crlf\r\nconst x = ;", "line 3, col 11"),
+        ("#!/usr/bin/env slice\nconst x = ;", "line 2, col 11"),
+        ("const x = 1; }", "line 1, col 14"),
+        ("const caf\u{00e9} = ;", "line 1, col 14"),
+        (
+            "interface Item {\n  id: number;\n  name: string;\n}\nconst y: number = ;",
+            "line 5, col 19",
+        ),
+    ];
+
+    // 1. Embedding API (`compile_source_to_bytecode` + `execute_bytecode`, both default SLICEBC and SLICEBOA)
+    for (idx, (src, expected_loc)) in cases.iter().enumerate() {
+        let bc = compile_source_to_bytecode(src);
+        let mut iso = SliceIsolate::spawn(
+            "issue-139-embed",
+            (idx + 1) as u32,
+            CapabilityToken::pure_compute(),
+            100_000,
+            1024 * 1024,
+        );
+        let rec = iso.execute_bytecode(&bc, None).unwrap();
+        assert!(
+            rec.return_value.starts_with("Uncaught SyntaxError:")
+                && rec.return_value.contains(expected_loc),
+            "embedding API mismatch for {:?}: expected {}, got {}",
+            src,
+            expected_loc,
+            rec.return_value
+        );
+        assert_eq!(rec.exit_code, Some(1));
+
+        // `slice_cas::check_syntax_source` also reports exact line & col
+        let chk_err = slice_cas::check_syntax_source(src, Some(std::path::Path::new("repro.ts")))
+            .expect_err("check_syntax_source must fail on invalid syntax");
+        assert!(
+            chk_err.contains("SyntaxError in repro.ts:") && chk_err.contains(expected_loc),
+            "check_syntax_source mismatch for {:?}: expected {}, got {}",
+            src,
+            expected_loc,
+            chk_err
+        );
+    }
+
+    // 2. `Slice.evalSandbox` (cold + cached second call) & `node:vm` (`new vm.Script` + `runInNewContext`)
+    let sandbox_probe = r##"
+    import * as vm from "node:vm";
+    const cases = [
+        ["const x = ;", "line 1, col 11"],
+        ["let a = 1;\nconst x = ;", "line 2, col 11"],
+        ["// c\n// c\nconst x = ;", "line 3, col 11"],
+        ["let a = 1;\nlet b = 2;\nconst x = ;", "line 3, col 11"]
+    ];
+    for (const [src, loc] of cases) {
+        for (let pass = 0; pass < 2; pass++) {
+            const out = Slice.evalSandbox(src);
+            if (out.ok || !String(out.error).includes(loc)) {
+                throw new Error("evalSandbox mismatch on pass " + pass + " for " + JSON.stringify(src) + ": " + out.error);
+            }
+        }
+        let scriptThrew = "";
+        try {
+            new vm.Script(src, { filename: "unit.js" });
+        } catch (e: any) {
+            scriptThrew = e.name + ":" + e.message;
+        }
+        if (!scriptThrew.startsWith("SyntaxError:") || !scriptThrew.includes(loc)) {
+            throw new Error("vm.Script mismatch for " + JSON.stringify(src) + ": " + scriptThrew);
+        }
+        let ctxThrew = "";
+        try {
+            vm.runInNewContext(src, { a: 42 });
+        } catch (e: any) {
+            ctxThrew = e.name + ":" + e.message;
+        }
+        if (!ctxThrew.startsWith("SyntaxError:") || !ctxThrew.includes(loc)) {
+            throw new Error("vm.runInNewContext mismatch for " + JSON.stringify(src) + ": " + ctxThrew);
+        }
+    }
+
+    // Valid shebang + Boa semantic early SyntaxError (`let` redeclaration) after comments
+    const shebangOk = Slice.evalSandbox("#!/usr/bin/env slice\nconst v = 7 * 6;\nconsole.log(v);");
+    if (!shebangOk.ok || shebangOk.stdout[0] !== "42") {
+        throw new Error("valid shebang failed: " + JSON.stringify(shebangOk));
+    }
+    const dupLet = Slice.evalSandbox("// c1\n// c2\nlet dupVar = 1;\nlet dupVar = 2;");
+    if (dupLet.ok || !String(dupLet.error).includes("line 3, col 1")) {
+        throw new Error("semantic duplicate let line mismatch: " + JSON.stringify(dupLet));
+    }
+    console.log("ISSUE_139_OK");
+    "##;
+    let m_probe = run_source_isolated(
+        "issue-139-sandbox-vm",
+        sandbox_probe,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        m_probe.stdout,
+        vec!["ISSUE_139_OK"],
+        "return_value = {}",
+        m_probe.return_value
+    );
+
+    // 3. Ring-5 DLP secret guard and 0-fuel guard still apply to deferred `SLICEERR` containers
+    let secret_bc = compile_source_to_bytecode("const SUPER_SECRET_TOKEN_99 = ;");
+    let mut dlp_iso = SliceIsolate::spawn(
+        "issue-139-dlp",
+        1,
+        CapabilityToken::pure_compute(),
+        100_000,
+        512 * 1024,
+    );
+    dlp_iso.add_egress_audit_secret("SUPER_SECRET_TOKEN_99".to_string());
+    // Oxc never echoes identifier names in syntax messages (`SUPER_SECRET_TOKEN_99` stays unexposed),
+    // and any `SLICEERR` payload containing a registered secret is blocked by Ring-5 DLP:
+    let non_leaking_res = dlp_iso.execute_bytecode(&secret_bc, None).unwrap();
+    assert!(
+        !non_leaking_res
+            .return_value
+            .contains("SUPER_SECRET_TOKEN_99")
+    );
+    let crafted_secret_bc =
+        b"SLICEERRUncaught SyntaxError: Unexpected token 'SECRET_TOK_139' at line 1, col 1";
+    let dlp_iso2_res = {
+        let mut iso2 = SliceIsolate::spawn(
+            "issue-139-dlp2",
+            2,
+            CapabilityToken::pure_compute(),
+            100_000,
+            512 * 1024,
+        );
+        iso2.add_egress_audit_secret("SECRET_TOK_139".to_string());
+        iso2.execute_bytecode(crafted_secret_bc, None)
+    };
+    assert!(matches!(
+        dlp_iso2_res,
+        Err(SandboxViolation::EgressSecretLeakBlocked { .. })
+    ));
+
+    let mut zero_fuel_iso = SliceIsolate::spawn(
+        "issue-139-zero-fuel",
+        3,
+        CapabilityToken::pure_compute(),
+        0,
+        512 * 1024,
+    );
+    assert!(matches!(
+        zero_fuel_iso.execute_bytecode(&secret_bc, None),
+        Err(SandboxViolation::CpuFuelExhausted { .. })
+    ));
+}

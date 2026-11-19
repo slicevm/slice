@@ -23,6 +23,25 @@ impl SliceIsolate {
         let start = Instant::now();
         self.compartment.pkey_domain.enter_domain();
 
+        // Deferred compile-time SyntaxError container (`SLICEERR` + exact 1-based line/col message)
+        if bytecode.len() >= 8 && &bytecode[0..8] == crate::parser_and_compiler::SLICEERR_MAGIC {
+            let instantiate_ns = start.elapsed().as_nanos() as u64;
+            let initial_charge = 10u64.min(self.compartment.fuel_limit.max(1));
+            self.compartment.consume_fuel(initial_charge)?;
+            self.current_tier = ExecutionTier::Tier1Baseline;
+            self.last_exit_code = Some(1);
+            self.last_process_exited = false;
+            self.last_return_json = None;
+            let ret_str = std::str::from_utf8(&bytecode[8..])
+                .unwrap_or("Uncaught SyntaxError")
+                .to_string();
+            if !self.egress_audit_secrets.is_empty() {
+                self.verify_egress_not_leaked(&ret_str)?;
+            }
+            let total_ns = start.elapsed().as_nanos() as u64;
+            return Ok((instantiate_ns, total_ns, ret_str));
+        }
+
         // Zero-copy fast path for SLICEBC\x01 precompiled Boa containers and SLICEBOA raw ECMAScript bundles
         if bytecode.len() >= 8
             && (&bytecode[0..8] == b"SLICEBOA" || &bytecode[0..8] == crate::boacas::BOACAS_MAGIC)

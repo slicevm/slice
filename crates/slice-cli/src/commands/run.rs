@@ -283,13 +283,13 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     if let Some((raw_code, print_result)) = eval_opt {
         exec_cfg.apply_inline_directives(&raw_code, Some(Path::new(".")))?;
         if let Err(syn_err) = slice_cas::check_syntax_source(&raw_code, None) {
+            LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
             bail!("{}", syn_err);
         }
-        let transpiled = slice_cas::strip_typescript_and_normalize(&raw_code, true);
         if !exec_cfg.warm_pool && exec_cfg.cli_boacas_override.is_none() {
             slice_engine::set_thread_exper_boacas_override(Some(false));
         }
-        let bytecode = compile_source_to_bytecode(&transpiled);
+        let bytecode = compile_source_to_bytecode(&raw_code);
         if !exec_cfg.warm_pool && exec_cfg.cli_boacas_override.is_none() {
             slice_engine::set_thread_exper_boacas_override(None);
         }
@@ -326,7 +326,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             if m.exit_code.is_none() {
                 LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
             }
-            let mapped = slice_cas::map_bundled_error_location(&transpiled, &m.return_value);
+            let mapped = slice_cas::map_bundled_error_location(&raw_code, &m.return_value);
             bail!("{}", mapped);
         }
         if print_result && !m.process_exited && !quiet {
@@ -366,13 +366,13 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         std::io::stdin().read_to_string(&mut stdin_src)?;
         exec_cfg.apply_inline_directives(&stdin_src, Some(Path::new(".")))?;
         if let Err(syn_err) = slice_cas::check_syntax_source(&stdin_src, None) {
+            LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
             bail!("{}", syn_err);
         }
-        let transpiled = slice_cas::strip_typescript_and_normalize(&stdin_src, true);
         if !exec_cfg.warm_pool && exec_cfg.cli_boacas_override.is_none() {
             slice_engine::set_thread_exper_boacas_override(Some(false));
         }
-        let bytecode = compile_source_to_bytecode(&transpiled);
+        let bytecode = compile_source_to_bytecode(&stdin_src);
         if !exec_cfg.warm_pool && exec_cfg.cli_boacas_override.is_none() {
             slice_engine::set_thread_exper_boacas_override(None);
         }
@@ -407,7 +407,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             if m.exit_code.is_none() {
                 LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
             }
-            let mapped = slice_cas::map_bundled_error_location(&transpiled, &m.return_value);
+            let mapped = slice_cas::map_bundled_error_location(&stdin_src, &m.return_value);
             bail!("{}", mapped);
         }
         return Ok(());
@@ -474,7 +474,13 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         exec_cfg.apply_inline_directives(&raw_entry, entry_file.parent())?;
         let prewarm_pool = exec_cfg.warm_pool;
         let deterministic_seed = exec_cfg.deterministic_seed;
-        let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
+        let bundled_source = match slice_cas::bundle_entrypoint_with_deps(&entry_file) {
+            Ok(s) => s,
+            Err(e) => {
+                LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
+                return Err(e);
+            }
+        };
         if !prewarm_pool && exec_cfg.cli_boacas_override.is_none() {
             slice_engine::set_thread_exper_boacas_override(Some(false));
         }
@@ -561,7 +567,13 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         while watcher.wait_for_change(watch_once) {
             let reload_start = Instant::now();
             let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
-            let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
+            let bundled_source = match slice_cas::bundle_entrypoint_with_deps(&entry_file) {
+                Ok(s) => s,
+                Err(e) => {
+                    LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
+                    return Err(e);
+                }
+            };
             let bytecode = compile_source_to_bytecode(&bundled_source);
             let mut isolate = SliceIsolate::spawn(
                 "tenant-cli-watch",

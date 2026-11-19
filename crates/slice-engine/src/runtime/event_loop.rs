@@ -559,40 +559,39 @@ fn settle_completed_fetch(
 pub(crate) fn format_uncaught_js_error(err: &boa_engine::JsError, ctx: &mut Context) -> String {
     let raw_err = format!("Uncaught {}", err);
     let mut mapped = crate::boa_realm::map_error_with_active_source(&raw_err);
-    if mapped == raw_err {
-        if let Some((first_line, rest)) = mapped.split_once('\n')
-            && let Some(open) = first_line.rfind(" (unknown at ")
-        {
-            let loc_paren = &first_line[open + 1..];
-            if rest.contains(loc_paren) {
-                mapped = format!("{}\n{}", &first_line[..open], rest);
-            }
+    if let Some((first_line, rest)) = mapped.split_once('\n')
+        && let Some(open) = first_line.rfind(" (unknown at ")
+    {
+        let loc_paren = &first_line[open + 1..];
+        if rest.contains(loc_paren) {
+            mapped = format!("{}\n{}", &first_line[..open], rest);
         }
-        if let Some(opaque) = err.as_opaque()
-            && let Some(obj) = opaque.as_object()
-            && let Ok(stack_val) = obj.get(js_string!("stack"), ctx)
-            && let Some(s) = stack_val.as_string()
-        {
-            let st = s.to_std_string_escaped();
-            for line in st.lines() {
-                let trimmed = line.trim();
-                if trimmed.starts_with("at ") && !trimmed.contains("<anonymous>") {
-                    if let Some(open) = trimmed.rfind('(') {
-                        if let Some(close) = trimmed[open + 1..].find(')') {
-                            let loc = &trimmed[open + 1..open + 1 + close];
-                            if loc.contains(':') && !raw_err.contains(loc) {
-                                mapped = format!("{} ({})", raw_err, loc);
-                                break;
-                            }
+    }
+    if mapped == raw_err
+        && let Some(opaque) = err.as_opaque()
+        && let Some(obj) = opaque.as_object()
+        && let Ok(stack_val) = obj.get(js_string!("stack"), ctx)
+        && let Some(s) = stack_val.as_string()
+    {
+        let st = s.to_std_string_escaped();
+        for line in st.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("at ") && !trimmed.contains("<anonymous>") {
+                if let Some(open) = trimmed.rfind('(') {
+                    if let Some(close) = trimmed[open + 1..].find(')') {
+                        let loc = &trimmed[open + 1..open + 1 + close];
+                        if loc.contains(':') && !raw_err.contains(loc) {
+                            mapped = format!("{} ({})", raw_err, loc);
+                            break;
                         }
-                    } else if let Some(loc) = trimmed.strip_prefix("at ")
-                        && loc.contains(':')
-                        && !loc.contains(' ')
-                        && !raw_err.contains(loc)
-                    {
-                        mapped = format!("{} ({})", raw_err, loc);
-                        break;
                     }
+                } else if let Some(loc) = trimmed.strip_prefix("at ")
+                    && loc.contains(':')
+                    && !loc.contains(' ')
+                    && !raw_err.contains(loc)
+                {
+                    mapped = format!("{} ({})", raw_err, loc);
+                    break;
                 }
             }
         }

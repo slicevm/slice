@@ -33,9 +33,10 @@ pub use bundler::{
     map_bundled_stack_trace_with_offset, resolve_project_entrypoint,
 };
 pub use compiler::{
-    TypeDirectedHints, analyze_typescript_semantics, check_syntax_source, fuse_array_pipelines_ast,
-    strip_typescript_and_normalize, strip_typescript_and_normalize_with_ext, strip_typescript_raw,
-    strip_typescript_raw_with_ext,
+    SyntaxErrorDiagnostic, TypeDirectedHints, analyze_typescript_semantics,
+    byte_offset_to_line_col, check_syntax_source, check_syntax_source_detailed,
+    compile_ts_or_js_checked, fuse_array_pipelines_ast, strip_typescript_and_normalize,
+    strip_typescript_and_normalize_with_ext, strip_typescript_raw, strip_typescript_raw_with_ext,
 };
 pub use linker::{has_top_level_await, wrap_top_level_await_script};
 

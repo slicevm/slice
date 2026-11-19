@@ -6,7 +6,6 @@ use crate::value_and_ast::{
 };
 use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
-use slice_cas::strip_typescript_and_normalize;
 
 // ============================================================================
 // Lexer & Recursive-Descent JS/TS Parser
@@ -2121,6 +2120,9 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
             .all(|stmt| check_scope_stmt(stmt, &mut top_scope, 0))
 }
 
+/// Magic header for deferred compile-time syntax errors (`SLICEERR` + UTF-8 error text).
+pub const SLICEERR_MAGIC: &[u8; 8] = b"SLICEERR";
+
 /// Compiles JavaScript/TypeScript source into a compact binary `SLICEBC\x01`, `SLICEBOA`, or `SLICESNP` bytecode buffer.
 /// Combines **Oxc** production TypeScript transpilation, **Tier-1 `SLICEBC\x01` Precompiled Boa `CodeBlock`**
 /// as the default optimal execution path, and **Tier-0/Tier-2** fast-path SIMD intrinsics
@@ -2210,7 +2212,16 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
         bytes.extend_from_slice(b"\n}");
         return bytes;
     }
-    let source = strip_typescript_and_normalize(raw_source, true);
+    let source = match slice_cas::compile_ts_or_js_checked(raw_source, true, false) {
+        Ok(src) => src,
+        Err(diag) => {
+            let err_str = diag.to_uncaught_error_string();
+            let mut out = Vec::with_capacity(8 + err_str.len());
+            out.extend_from_slice(SLICEERR_MAGIC);
+            out.extend_from_slice(err_str.as_bytes());
+            return out;
+        }
+    };
     let src_bytes = source.as_bytes();
 
     let has_while_true = memchr::memmem::find(src_bytes, b"while (true)").is_some()
@@ -2244,17 +2255,12 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
 
     if route_to_tier1_boa || (tokens_opt.is_none() && !has_direct_intrinsic_attack) {
         let boa_source = slice_cas::wrap_top_level_await_script(&source).unwrap_or(source);
-        let compacted = compact_js_for_boa_bytecode(&boa_source);
         if use_boacas {
-            return crate::boacas::pack_boacas_container(&compacted);
+            return crate::boacas::pack_boacas_container(&boa_source);
         }
-        let mut bytes = Vec::with_capacity(12 + compacted.len());
-        if compacted.starts_with("//") {
-            bytes.extend_from_slice(b"SLICEBOA{\n");
-        } else {
-            bytes.extend_from_slice(b"SLICEBOA{");
-        }
-        bytes.extend_from_slice(compacted.trim_end().as_bytes());
+        let mut bytes = Vec::with_capacity(12 + boa_source.len());
+        bytes.extend_from_slice(b"SLICEBOA{\n");
+        bytes.extend_from_slice(boa_source.as_bytes());
         bytes.extend_from_slice(b"\n}");
         return bytes;
     }
@@ -2489,6 +2495,10 @@ pub fn disassemble_bytecode(bytecode: &[u8]) -> Result<Vec<String>> {
             hdr.precompiled_len,
             hdr.fallback_js_len
         )]);
+    }
+    if bytecode.len() >= 8 && &bytecode[0..8] == SLICEERR_MAGIC {
+        let msg = std::str::from_utf8(&bytecode[8..]).unwrap_or("Uncaught SyntaxError");
+        return Ok(vec![format!("0000  SYNTAX_ERR      [{}]", msg)]);
     }
     if bytecode.len() >= 8 && &bytecode[0..8] == b"SLICEBOA" {
         return Ok(vec![format!(
