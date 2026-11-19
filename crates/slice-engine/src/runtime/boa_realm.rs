@@ -547,6 +547,18 @@ fn current_boa_tenant_or_default() -> String {
     })
 }
 
+/// Returns `true` when the active compartment has at least one `--allow-read` prefix configured.
+#[inline]
+pub(crate) fn has_any_boa_fs_read_ocap() -> bool {
+    BOA_ACTIVE_CAPS.with(|c| !c.borrow().read_prefixes.is_empty())
+}
+
+/// Returns `true` when the active compartment has at least one `--allow-write` prefix configured.
+#[inline]
+pub(crate) fn has_any_boa_fs_write_ocap() -> bool {
+    BOA_ACTIVE_CAPS.with(|c| !c.borrow().write_prefixes.is_empty())
+}
+
 /// Side-effect-free predicate checking whether the active compartment currently holds OCap read
 /// authority for `path` without recording a `SandboxViolation` when denied.
 #[inline]
@@ -566,6 +578,25 @@ pub(crate) fn has_boa_fs_read_ocap(path: &str) -> bool {
     })
 }
 
+/// Side-effect-free predicate checking whether the active compartment currently holds OCap write
+/// authority for `path` without recording a `SandboxViolation` when denied.
+#[inline]
+pub(crate) fn has_boa_fs_write_ocap(path: &str) -> bool {
+    if slice_sandbox::is_rejected_vfs_candidate(path) {
+        return false;
+    }
+    BOA_ACTIVE_CAPS.with(|c| {
+        let caps = c.borrow();
+        if caps.write_prefixes.is_empty() {
+            return false;
+        }
+        let norm = slice_sandbox::normalize_vfs_path_cow(path);
+        caps.write_prefixes
+            .iter()
+            .any(|prefix| slice_sandbox::vfs_normalized_candidate_matches_prefix(&norm, prefix))
+    })
+}
+
 #[inline]
 pub(crate) fn check_boa_fs_read_ocap(path: &str) -> bool {
     if !has_boa_fs_read_ocap(path) {
@@ -577,21 +608,7 @@ pub(crate) fn check_boa_fs_read_ocap(path: &str) -> bool {
 
 #[inline]
 pub(crate) fn check_boa_fs_write_ocap(path: &str) -> bool {
-    if slice_sandbox::is_rejected_vfs_candidate(path) {
-        let tenant = current_boa_tenant_or_default();
-        return record_boa_fs_write_violation(&tenant, path);
-    }
-    let allowed = BOA_ACTIVE_CAPS.with(|c| {
-        let caps = c.borrow();
-        if caps.write_prefixes.is_empty() {
-            return false;
-        }
-        let norm = slice_sandbox::normalize_vfs_path_cow(path);
-        caps.write_prefixes
-            .iter()
-            .any(|prefix| slice_sandbox::vfs_normalized_candidate_matches_prefix(&norm, prefix))
-    });
-    if !allowed {
+    if !has_boa_fs_write_ocap(path) {
         let tenant = current_boa_tenant_or_default();
         return record_boa_fs_write_violation(&tenant, path);
     }

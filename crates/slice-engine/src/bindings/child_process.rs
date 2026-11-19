@@ -692,20 +692,57 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                 return Err(JsNativeError::error().with_message(msg).into());
             }
 
-            // Verify `opts.cwd` against the tenant's `FsRead` capability before entering directory.
-            if let Some(ref cwd_dir) = opts.cwd
+            // Verify `opts.cwd` (and any VFS/host symlink hops) against the tenant's `FsRead`
+            // capability before entering directory.
+            let resolved_cwd: Option<String> = if let Some(ref cwd_dir) = opts.cwd
                 && !cwd_dir.trim().is_empty()
-                && (crate::bindings::fs::is_host_unc_blocked(cwd_dir)
-                    || !check_boa_fs_read_ocap(cwd_dir))
             {
-                let violation = SandboxViolation::FsReadDenied {
-                    tenant_id,
-                    path: cwd_dir.clone(),
-                };
-                let msg = violation.to_string();
-                crate::boa_realm::set_child_proc_violation(violation);
-                return Err(JsNativeError::error().with_message(msg).into());
-            }
+                if crate::bindings::fs::is_host_unc_blocked(cwd_dir)
+                    || !check_boa_fs_read_ocap(cwd_dir)
+                {
+                    let violation = SandboxViolation::FsReadDenied {
+                        tenant_id,
+                        path: cwd_dir.clone(),
+                    };
+                    let msg = violation.to_string();
+                    crate::boa_realm::set_child_proc_violation(violation);
+                    return Err(JsNativeError::error().with_message(msg).into());
+                }
+                match crate::bindings::fs::resolve_effective_vfs_path(cwd_dir, true, true) {
+                    Ok(res) => {
+                        if !check_boa_fs_read_ocap(&res.norm) {
+                            let violation = SandboxViolation::FsReadDenied {
+                                tenant_id,
+                                path: res.norm,
+                            };
+                            let msg = violation.to_string();
+                            crate::boa_realm::set_child_proc_violation(violation);
+                            return Err(JsNativeError::error().with_message(msg).into());
+                        }
+                        Some(res.norm)
+                    }
+                    Err(crate::bindings::fs::SymlinkResolveError::ReadOcapDenied(denied)) => {
+                        let _ = check_boa_fs_read_ocap(&denied);
+                        let violation = SandboxViolation::FsReadDenied {
+                            tenant_id,
+                            path: denied,
+                        };
+                        let msg = violation.to_string();
+                        crate::boa_realm::set_child_proc_violation(violation);
+                        return Err(JsNativeError::error().with_message(msg).into());
+                    }
+                    Err(crate::bindings::fs::SymlinkResolveError::Loop) => {
+                        return Err(JsNativeError::error()
+                            .with_message(format!(
+                                "ELOOP: too many symbolic links encountered, chdir '{}'",
+                                cwd_dir
+                            ))
+                            .into());
+                    }
+                }
+            } else {
+                None
+            };
 
             // Ring 5: Base CPU Fuel charge for subprocess invocation
             if let Err(fuel_err) = consume_crypto_kdf_fuel(500) {
@@ -762,7 +799,7 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                     &exec_file,
                     &exec_args,
                     &child_env,
-                    opts.cwd.as_deref(),
+                    resolved_cwd.as_deref(),
                     stdin_bytes.as_deref(),
                     timeout_ms,
                     max_buffer,
