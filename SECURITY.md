@@ -10,8 +10,8 @@ Security updates are applied to the latest release series on `main`:
 
 | Version | Supported |
 | :--- | :--- |
-| `0.12.x` (Current) | Yes |
-| `< 0.12.0` | No (Upgrade to `>= 0.12.0`) |
+| `0.13.x` (Current) | Yes |
+| `< 0.13.0` | No (Upgrade to `>= 0.13.0`) |
 
 ---
 
