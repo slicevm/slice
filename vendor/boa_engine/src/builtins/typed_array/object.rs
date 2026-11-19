@@ -73,8 +73,19 @@ impl TypedArray {
     }
 
     /// Returns `true` if the typed array has an automatic array length.
-    pub(crate) fn is_auto_length(&self) -> bool {
+    #[must_use]
+    pub const fn is_auto_length(&self) -> bool {
         self.array_length.is_none()
+    }
+
+    /// Returns `true` if the `TypedArray` is backed by a detached buffer or is currently out-of-bounds.
+    #[must_use]
+    pub fn is_out_of_bounds_now(&self) -> bool {
+        let buf_ref = self.viewed_array_buffer.as_buffer();
+        let Some(slice) = buf_ref.bytes(Ordering::SeqCst) else {
+            return true;
+        };
+        self.is_out_of_bounds(slice.len())
     }
 
     /// Abstract operation [`IsTypedArrayOutOfBounds ( taRecord )`][spec].

@@ -168,7 +168,11 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
             if metrics.exit_code.is_none() {
                 LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
             }
-            let mapped = slice_cas::map_bundled_error_location(&bundled, &metrics.return_value);
+            let mapped = slice_cas::map_bundled_error_location_with_offset(
+                &bundled,
+                &metrics.return_value,
+                2,
+            );
             bail!("Uncaught error in {}: {}", test_file.display(), mapped);
         }
         if let Some(code) = metrics.exit_code
@@ -208,8 +212,9 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
                                 status, full_name, dur_us, snap_id
                             );
                             if let Some(err_str) = r["error"].as_str() {
-                                let mapped_err =
-                                    slice_cas::map_bundled_error_location(&bundled, err_str);
+                                let mapped_err = slice_cas::map_bundled_error_location_with_offset(
+                                    &bundled, err_str, 2,
+                                );
                                 println!("         -> {}", mapped_err);
                             }
                         }

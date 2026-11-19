@@ -413,4 +413,36 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             Ok(BoaVal::from(js_string!(json)))
         }),
     );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_vm_check_syntax"),
+        2,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let code = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let filename = args
+                .get(1)
+                .filter(|v| !v.is_undefined() && !v.is_null())
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            let path_opt = if filename.is_empty() {
+                None
+            } else {
+                Some(std::path::Path::new(filename.as_str()))
+            };
+            match slice_cas::check_syntax_source_detailed(&code, path_opt) {
+                Ok(()) => Ok(BoaVal::null()),
+                Err(diag) => {
+                    let msg = format!("{} at line {}, col {}", diag.message, diag.line, diag.col);
+                    Ok(BoaVal::from(js_string!(msg)))
+                }
+            }
+        }),
+    );
 }

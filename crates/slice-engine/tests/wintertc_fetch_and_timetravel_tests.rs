@@ -1662,3 +1662,635 @@ export default {
     assert_eq!(ws_outcome.status_code, 101);
     assert!(ws_outcome.ws_upgraded);
 }
+
+#[test]
+fn test_wave3_issues_143_146_147_streams_pipeto_from_and_fetch_body_state() {
+    let script = r#"
+        (async () => {
+            // === 1. Issue #143: pipeTo / pipeThrough / WritableStream / TransformStream / values ===
+            // 1a. Destination write failure cancels source with reason and releases both locks
+            let cancelReason143 = null;
+            const src1 = new ReadableStream({
+                pull(c) { c.enqueue("chunk-1"); },
+                cancel(r) { cancelReason143 = r; }
+            });
+            const writeBoom = new Error("sink-write-boom");
+            const dest1 = new WritableStream({
+                write() { throw writeBoom; }
+            });
+            let caught1 = null;
+            try {
+                await src1.pipeTo(dest1);
+            } catch (e) {
+                caught1 = e;
+            }
+            if (caught1 !== writeBoom) throw new Error("1a caught: " + caught1);
+            if (cancelReason143 !== writeBoom) throw new Error("1a cancelReason: " + cancelReason143);
+            if (src1.locked || dest1.locked) throw new Error("1a locks leaked");
+
+            // 1b. Destination close() failure rejects pipeTo and releases locks
+            const closeBoom = new Error("sink-close-boom");
+            const srcClose = ReadableStream.from(["only"]);
+            const destClose = new WritableStream({
+                close() { return Promise.reject(closeBoom); }
+            });
+            let caughtClose = null;
+            try { await srcClose.pipeTo(destClose); } catch (e) { caughtClose = e; }
+            if (caughtClose !== closeBoom || srcClose.locked || destClose.locked) {
+                throw new Error("1b close failure failed");
+            }
+
+            // 1c. Pre-errored WritableStream (including falsy error `0`) cancels source without pulling
+            let pulledPreErr = false;
+            let cancelPreErr = "unset";
+            const srcPre = new ReadableStream({
+                pull(c) { pulledPreErr = true; c.enqueue("never"); },
+                cancel(r) { cancelPreErr = r; }
+            }, { highWaterMark: 0 });
+            let wsCtrl;
+            const destPre = new WritableStream({ start(c) { wsCtrl = c; } });
+            wsCtrl.error(0);
+            let caughtPre = "unset";
+            try { await srcPre.pipeTo(destPre); } catch (e) { caughtPre = e; }
+            if (caughtPre !== 0 || cancelPreErr !== 0 || pulledPreErr || srcPre.locked || destPre.locked) {
+                throw new Error("1c pre-errored failed: " + caughtPre + " / " + cancelPreErr + " / " + pulledPreErr);
+            }
+
+            // 1d. AbortSignal pre-aborted & mid-pipe abort + invalid signal rejection
+            let invalidSigRejected = false;
+            try { await ReadableStream.from([1]).pipeTo(new WritableStream(), { signal: {} }); }
+            catch (e) { invalidSigRejected = e instanceof TypeError; }
+            if (!invalidSigRejected) throw new Error("1d invalid signal must reject TypeError");
+
+            let midCanceled = null, midAborted = null;
+            const ac = new AbortController();
+            const slowSrc = new ReadableStream({
+                pull() { return new Promise(() => {}); },
+                cancel(r) { midCanceled = r; }
+            });
+            const slowDest = new WritableStream({
+                abort(r) { midAborted = r; }
+            });
+            const pipeMidP = slowSrc.pipeTo(slowDest, { signal: ac.signal });
+            queueMicrotask(() => ac.abort("stop-mid"));
+            let caughtMid = null;
+            try { await pipeMidP; } catch (e) { caughtMid = e; }
+            if (caughtMid !== "stop-mid" || midCanceled !== "stop-mid" || midAborted !== "stop-mid") {
+                throw new Error("1d mid-abort failed: " + caughtMid);
+            }
+            if (slowSrc.locked || slowDest.locked) throw new Error("1d mid-abort leaked locks");
+
+            // 1e. preventCancel, preventAbort, preventClose
+            let pcCanceled = false;
+            const srcPC = new ReadableStream({
+                pull(c) { c.enqueue("x"); },
+                cancel() { pcCanceled = true; }
+            });
+            const destPC = new WritableStream({ write() { throw new Error("stop"); } });
+            try { await srcPC.pipeTo(destPC, { preventCancel: true }); } catch (_e) {}
+            if (pcCanceled || srcPC.locked) throw new Error("1e preventCancel failed");
+
+            let closedFlag = false;
+            const destKeepOpen = new WritableStream({ close() { closedFlag = true; } });
+            await ReadableStream.from(["a"]).pipeTo(destKeepOpen, { preventClose: true });
+            if (closedFlag || destKeepOpen.locked) throw new Error("1e preventClose failed");
+
+            // 1f. pipeThrough synchronous lock checks + TransformStream error propagation + TextDecoderStream split UTF-8
+            const lockedSrc = ReadableStream.from([1]);
+            const lr = lockedSrc.getReader();
+            let syncPipeThrow = false;
+            try { lockedSrc.pipeThrough(new TransformStream()); }
+            catch (e) { syncPipeThrow = e instanceof TypeError; }
+            lr.releaseLock();
+            if (!syncPipeThrow) throw new Error("1f pipeThrough must throw synchronously on locked readable");
+
+            const failTs = new TransformStream({
+                transform() { throw new Error("ts-boom"); }
+            });
+            const outRs = ReadableStream.from(["in"]).pipeThrough(failTs);
+            let tsCaught = null;
+            try { await outRs.getReader().read(); } catch (e) { tsCaught = e.message; }
+            if (tsCaught !== "ts-boom") throw new Error("1f TransformStream error did not propagate: " + tsCaught);
+
+            const utf8Out = ReadableStream.from([new Uint8Array([0xF0, 0x9F]), new Uint8Array([0x9A, 0x80])])
+                .pipeThrough(new TextDecoderStream());
+            const decChunks = [];
+            for await (const ch of utf8Out) decChunks.push(ch);
+            if (decChunks.join("") !== "\u{1F680}") throw new Error("1f TextDecoderStream split failed");
+
+            // 1g. WritableStream.abort() / close() reject when locked, values() releases lock even when cancel() throws
+            const wsLocked = new WritableStream();
+            const wLock = wsLocked.getWriter();
+            let wsAbortRej = false, wsCloseRej = false;
+            try { await wsLocked.abort(); } catch (e) { wsAbortRej = e instanceof TypeError; }
+            try { await wsLocked.close(); } catch (e) { wsCloseRej = e instanceof TypeError; }
+            wLock.releaseLock();
+            if (!wsAbortRej || !wsCloseRej) throw new Error("1g locked WritableStream abort/close must reject");
+
+            const badCancelRs = new ReadableStream({
+                pull(c) { c.enqueue(1); },
+                cancel() { throw new Error("cancel-err"); }
+            });
+            const vit = badCancelRs.values();
+            await vit.next();
+            let vitErr = null;
+            try { await vit.return("bye"); } catch (e) { vitErr = e.message; }
+            if (vitErr !== "cancel-err" || badCancelRs.locked) throw new Error("1g values() leaked lock on cancel throw");
+
+            // === 2. Issue #147: ReadableStream.from iterator closing, async awaiting, Promises, and >4096 items ===
+            let syncGenClosed = false;
+            function* syncGen() {
+                try { yield 10; yield 20; yield 30; }
+                finally { syncGenClosed = true; }
+            }
+            for await (const x of ReadableStream.from(syncGen())) {
+                if (x === 10) break;
+            }
+            if (!syncGenClosed) throw new Error("2a sync generator finally did not run on break");
+
+            let asyncCleanupDone = false;
+            let returnReasonSeen = null;
+            const customAsyncIt = {
+                [Symbol.asyncIterator]() {
+                    let i = 0;
+                    return {
+                        next() { return Promise.resolve({ value: ++i, done: false }); },
+                        return(reason) {
+                            returnReasonSeen = reason;
+                            return Promise.resolve().then(() => {
+                                asyncCleanupDone = true;
+                                return { value: undefined, done: true };
+                            });
+                        }
+                    };
+                }
+            };
+            const rsCustom = ReadableStream.from(customAsyncIt);
+            const rdrCustom = rsCustom.getReader();
+            await rdrCustom.read();
+            await rdrCustom.cancel("custom-stop");
+            if (!asyncCleanupDone || returnReasonSeen !== "custom-stop") {
+                throw new Error("2b async return() not awaited or missing reason");
+            }
+
+            // Promise unwrapping in sync iterable + >4096 element pull-on-demand array
+            const promItems = [];
+            for await (const v of ReadableStream.from([Promise.resolve("p1"), Promise.resolve("p2")])) {
+                promItems.push(v);
+            }
+            if (promItems.join(",") !== "p1,p2") throw new Error("2c Promise unwrap failed: " + promItems);
+
+            const bigArr = new Array(5000);
+            for (let i = 0; i < 5000; i++) bigArr[i] = i;
+            let bigSum = 0;
+            for await (const n of ReadableStream.from(bigArr)) bigSum += n;
+            if (bigSum !== (4999 * 5000) / 2) throw new Error("2d >4096 array failed: " + bigSum);
+
+            // === 3. Issue #146: WinterTC Request/Response Body disturbance, single-use, locks, and null body ===
+            // 3a. Non-null bodies (string, empty string, Uint8Array, ReadableStream) reject on second consume
+            for (const makeRes of [
+                () => new Response("hello"),
+                () => new Response(""),
+                () => new Response(new Uint8Array([65, 66])),
+                () => new Response(ReadableStream.from(["streamed"]))
+            ]) {
+                const r = makeRes();
+                if (r.bodyUsed !== false) throw new Error("3a initial bodyUsed must be false");
+                await r.text();
+                if (r.bodyUsed !== true) throw new Error("3a bodyUsed must be true after text()");
+                let secondRej = false;
+                try { await r.bytes(); } catch (e) { secondRej = e instanceof TypeError; }
+                if (!secondRej) throw new Error("3a second consume must reject TypeError");
+                let cloneThrows = false;
+                try { r.clone(); } catch (e) { cloneThrows = e instanceof TypeError; }
+                if (!cloneThrows) throw new Error("3a clone after consume must throw TypeError");
+                if (r.body === null || r.body.locked !== true) {
+                    throw new Error("3a consumed r.body must be non-null and locked");
+                }
+            }
+
+            // 3b. Null-body Response keeps bodyUsed === false and permits repeated consumption & clone
+            const nullRes = new Response(null);
+            if (nullRes.body !== null || nullRes.bodyUsed !== false) throw new Error("3b initial null body");
+            if ((await nullRes.text()) !== "" || nullRes.bodyUsed !== false) throw new Error("3b first text()");
+            if ((await nullRes.bytes()).byteLength !== 0 || nullRes.bodyUsed !== false) throw new Error("3b bytes()");
+            const nullClone = nullRes.clone();
+            if (nullClone.body !== null) throw new Error("3b nullClone.body must remain null");
+
+            // 3c. Reader lock before read blocks consume/clone, releaseLock restores usability, read() disturbs
+            const lockRes = new Response("lock-check");
+            const bodyReader = lockRes.body.getReader();
+            if (lockRes.bodyUsed !== false) throw new Error("3c getReader alone must not set bodyUsed");
+            let whileLockedRej = false;
+            try { await lockRes.text(); } catch (e) { whileLockedRej = e instanceof TypeError; }
+            if (!whileLockedRej) throw new Error("3c text() while locked must reject");
+            bodyReader.releaseLock();
+            const clonedBeforeRead = lockRes.clone();
+            if ((await lockRes.text()) !== "lock-check" || (await clonedBeforeRead.text()) !== "lock-check") {
+                throw new Error("3c consume/clone after undisturbed releaseLock failed");
+            }
+
+            // 3d. Disturbed/locked stream rejected by Response/Request constructors + GET/HEAD body rejected + Request transfer
+            const usedStream = ReadableStream.from(["a"]);
+            const ur = usedStream.getReader();
+            await ur.read();
+            ur.releaseLock();
+            let disturbedCtorThrows = false;
+            try { new Response(usedStream); } catch (e) { disturbedCtorThrows = e instanceof TypeError; }
+            if (!disturbedCtorThrows) throw new Error("3d disturbed stream in new Response must throw");
+
+            let getWithBodyThrows = false;
+            try { new Request("https://example.com", { method: "GET", body: "nope" }); }
+            catch (e) { getWithBodyThrows = e instanceof TypeError; }
+            if (!getWithBodyThrows) throw new Error("3d GET Request with body must throw");
+
+            const reqOrig = new Request("https://example.com/p", { method: "POST", body: "transferred" });
+            const reqMoved = new Request(reqOrig);
+            if (reqOrig.bodyUsed !== true || reqMoved.bodyUsed !== false) {
+                throw new Error("3d new Request(reqOrig) must mark reqOrig.bodyUsed = true");
+            }
+            let reuseOrigThrows = false;
+            try { new Request(reqOrig); } catch (e) { reuseOrigThrows = e instanceof TypeError; }
+            if (!reuseOrigThrows) throw new Error("3d second new Request(reqOrig) must throw");
+            if ((await reqMoved.text()) !== "transferred") throw new Error("3d reqMoved body mismatch");
+            const reqOverride = new Request(reqOrig, { body: "fresh" });
+            if ((await reqOverride.text()) !== "fresh") throw new Error("3d explicit body override failed");
+
+            // Nested evalSandbox verification
+            const sbOut = Slice.evalSandbox(`
+                const r = new Response("sb");
+                r.textSync();
+                let threw = false;
+                try { r.textSync(); } catch (e) { threw = e instanceof TypeError; }
+                r.bodyUsed + ":" + threw;
+            `);
+            if (sbOut.returnValue !== "true:true") throw new Error("3e evalSandbox failed: " + JSON.stringify(sbOut));
+
+            console.log("WAVE3_ALL_OK");
+        })();
+    "#;
+
+    let bc = compile_source_to_bytecode(script);
+    let mut iso = SliceIsolate::spawn(
+        "wave3-streams-body",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        16 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(m.stdout, vec!["WAVE3_ALL_OK"], "return={}", m.return_value);
+
+    // Pooled warm HTTP fast-path verification (`LiveReq` GET null-body vs POST single-use across turns)
+    let server_bc = compile_source_to_bytecode(
+        r#"
+        export default {
+            async fetch(req) {
+                if (req.method === "GET") {
+                    const a = await req.text();
+                    const b = await req.text();
+                    const c = req.clone();
+                    return Response.json({ a, b, used: req.bodyUsed, nullBody: req.body === null && c.body === null });
+                }
+                const first = await req.text();
+                let secondFailed = false;
+                try { await req.text(); } catch (e) { secondFailed = e instanceof TypeError; }
+                return Response.json({ first, used: req.bodyUsed, secondFailed });
+            }
+        };
+        "#,
+    );
+    for turn in 0..2 {
+        let mut srv_iso = SliceIsolate::spawn(
+            format!("wave3-http-get-{turn}"),
+            1,
+            CapabilityToken::pure_compute(),
+            5_000_000,
+            8 * 1024 * 1024,
+        );
+        let get_out = srv_iso
+            .execute_http_request_fast(
+                &server_bc,
+                None,
+                &HttpRequestContext {
+                    method: "GET",
+                    path: "/check",
+                    query: "",
+                    tenant_id: "wave3-http",
+                    body: "",
+                    body_bytes: None,
+                    headers: &[],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            get_out.response_body,
+            r#"{"a":"","b":"","used":false,"nullBody":true}"#
+        );
+
+        let mut post_iso = SliceIsolate::spawn(
+            format!("wave3-http-post-{turn}"),
+            1,
+            CapabilityToken::pure_compute(),
+            5_000_000,
+            8 * 1024 * 1024,
+        );
+        let post_out = post_iso
+            .execute_http_request_fast(
+                &server_bc,
+                None,
+                &HttpRequestContext {
+                    method: "POST",
+                    path: "/check",
+                    query: "",
+                    tenant_id: "wave3-http",
+                    body: "payload",
+                    body_bytes: Some(b"payload"),
+                    headers: &[("content-type", "text/plain")],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            post_out.response_body,
+            r#"{"first":"payload","used":true,"secondFailed":true}"#
+        );
+    }
+}
+
+#[test]
+fn test_wave4_issues_140_141_145_148_149_structured_clone_formdata_and_iterators() {
+    let script = r#"
+        (async () => {
+            // === 1. Issue #140: CreateDataProperty on __proto__ + poisoned Object.prototype setter + URLPattern ===
+            const protoPayload = JSON.parse('{"__proto__":{"polluted":true},"ok":1}');
+            const clonedProto = structuredClone(protoPayload);
+            if (Object.getPrototypeOf(clonedProto) !== Object.prototype) {
+                throw new Error("140a prototype mutated");
+            }
+            if (clonedProto.polluted !== undefined || !Object.prototype.hasOwnProperty.call(clonedProto, "__proto__")) {
+                throw new Error("140a own __proto__ property lost");
+            }
+            if (clonedProto["__proto__"].polluted !== true) {
+                throw new Error("140a nested __proto__ value mismatch");
+            }
+
+            const pat = new URLPattern({ pathname: "/p/:__proto__" });
+            const patMatch = pat.exec("https://example.com/p/safe_val");
+            if (!patMatch || Object.getPrototypeOf(patMatch.pathname.groups) !== Object.prototype) {
+                throw new Error("140c URLPattern groups prototype mutated");
+            }
+            if (patMatch.pathname.groups["__proto__"] !== "safe_val") {
+                throw new Error("140c URLPattern __proto__ group value mismatch");
+            }
+
+            // === 2. Issue #141: Resizable ArrayBuffer, SharedArrayBuffer, auto views, OOB views, transfer ===
+            const rab = new ArrayBuffer(8, { maxByteLength: 32 });
+            new Uint8Array(rab).set([10, 20, 30, 40, 50, 60, 70, 80]);
+            const fixedView = new Uint8Array(rab, 2, 4);
+            const autoView = new Uint8Array(rab, 2);
+            const autoDv = new DataView(rab, 2);
+            rab.slice = () => { throw new Error("tampered-slice-called"); };
+
+            const cRabGraph = structuredClone({ rab, fixedView, autoView, autoDv });
+            if (!cRabGraph.rab.resizable || cRabGraph.rab.maxByteLength !== 32) {
+                throw new Error("141a resizable / maxByteLength lost");
+            }
+            cRabGraph.rab.resize(16);
+            if (cRabGraph.fixedView.length !== 4) {
+                throw new Error("141a fixedView length changed: " + cRabGraph.fixedView.length);
+            }
+            if (cRabGraph.autoView.length !== 14 || cRabGraph.autoDv.byteLength !== 14) {
+                throw new Error("141a auto length-tracking lost: " + cRabGraph.autoView.length + "/" + cRabGraph.autoDv.byteLength);
+            }
+            if (cRabGraph.autoView[0] !== 30 || cRabGraph.autoView[5] !== 80) {
+                throw new Error("141a bytes mismatch");
+            }
+
+            // OOB view on shrunken resizable ArrayBuffer throws DataCloneError
+            const rabShrink = new ArrayBuffer(16, { maxByteLength: 32 });
+            const oobView = new Uint8Array(rabShrink, 8, 4);
+            rabShrink.resize(4);
+            let oobThrew = false;
+            try { structuredClone(oobView); }
+            catch (e) { oobThrew = Boolean(e && e.name === "DataCloneError"); }
+            if (!oobThrew) throw new Error("141b OOB TypedArray must throw DataCloneError");
+
+            // SharedArrayBuffer distinct wrapper sharing backing store + growable preserved
+            if (typeof SharedArrayBuffer === "function") {
+                const sab = new SharedArrayBuffer(8, { maxByteLength: 24 });
+                new Uint8Array(sab)[0] = 77;
+                const cSab = structuredClone({ a: sab, b: sab });
+                if (cSab.a === sab || cSab.a !== cSab.b) {
+                    throw new Error("141c SAB identity / memoization broken");
+                }
+                if (!cSab.a.growable || cSab.a.maxByteLength !== 24) {
+                    throw new Error("141c SAB growable / maxByteLength lost");
+                }
+                new Uint8Array(cSab.a)[1] = 88;
+                if (new Uint8Array(sab)[1] !== 88) {
+                    throw new Error("141c SAB backing memory not shared");
+                }
+            }
+
+            // Transfer preserves resizability & maxByteLength; non-detachable Wasm buffer rejected atomically
+            const rabXfer = new ArrayBuffer(8, { maxByteLength: 40 });
+            new Uint8Array(rabXfer)[0] = 55;
+            const xferred = structuredClone(rabXfer, { transfer: [rabXfer] });
+            if (!rabXfer.detached || !xferred.resizable || xferred.maxByteLength !== 40 || new Uint8Array(xferred)[0] !== 55) {
+                throw new Error("141d resizable transfer failed");
+            }
+            const bystander = new ArrayBuffer(4);
+            const wasmMem = new WebAssembly.Memory({ initial: 1 });
+            let wasmXferThrew = false;
+            try { structuredClone({ bystander }, { transfer: [bystander, wasmMem.buffer] }); }
+            catch (e) { wasmXferThrew = Boolean(e && e.name === "DataCloneError"); }
+            if (!wasmXferThrew || bystander.detached) {
+                throw new Error("141e Wasm buffer transfer must fail atomically with DataCloneError");
+            }
+
+            // === 3. Issue #148: Array expandos, holes, boxed BigInt/Symbol, Proxy, Error own message, platform objects ===
+            const arrExp = [10, , 30];
+            arrExp.meta = { role: "admin" };
+            Object.defineProperty(arrExp, "__proto__", {
+                value: { safe: 1 },
+                writable: true,
+                enumerable: true,
+                configurable: true
+            });
+            Object.defineProperty(arrExp, "hidden", { value: 99, enumerable: false });
+            arrExp.self = arrExp;
+
+            const cArr = structuredClone(arrExp);
+            if (!Array.isArray(cArr) || cArr.length !== 3 || (1 in cArr) || cArr[0] !== 10 || cArr[2] !== 30) {
+                throw new Error("148a array indices / sparse hole broken");
+            }
+            if (!cArr.meta || cArr.meta === arrExp.meta || cArr.meta.role !== "admin") {
+                throw new Error("148a array expando property lost");
+            }
+            if (!Object.prototype.hasOwnProperty.call(cArr, "__proto__") || Object.getPrototypeOf(cArr) !== Array.prototype) {
+                throw new Error("148a array __proto__ own property broken");
+            }
+            if ("hidden" in cArr || cArr.self !== cArr) {
+                throw new Error("148a non-enumerable leaked or cycle broken");
+            }
+
+            const boxedBi = Object(9007199254740993n);
+            const cBi = structuredClone(boxedBi);
+            if (typeof cBi !== "object" || cBi === boxedBi || BigInt.prototype.valueOf.call(cBi) !== 9007199254740993n) {
+                throw new Error("148b boxed BigInt clone failed");
+            }
+
+            const bareErr = new TypeError();
+            const cBareErr = structuredClone(bareErr);
+            if (!(cBareErr instanceof TypeError) || Object.prototype.hasOwnProperty.call(cBareErr, "message")) {
+                throw new Error("148c Error without own message gained own message");
+            }
+
+            for (const badVal of [
+                Object(Symbol("x")),
+                new Proxy({}, {}),
+                new Proxy([1, 2], {}),
+                new FinalizationRegistry(() => {}),
+                new Headers(),
+                new Request("https://example.com"),
+                new Response("hi"),
+                new FormData(),
+                new ReadableStream()
+            ]) {
+                let rejected = false;
+                try { structuredClone(badVal); }
+                catch (e) { rejected = Boolean(e && e.name === "DataCloneError"); }
+                if (!rejected) throw new Error("148d expected DataCloneError");
+            }
+
+            // === 4. Issue #145: Multipart FormData boundary collision prevention & Blob.type sanitization ===
+            const trickyPayload = "hello\r\n------SliceFormBoundary\r\nContent-Disposition: form-data; name=\"forged\"\r\n\r\nhack\r\n------SliceFormBoundary--\r\ntail";
+            const fd145 = new FormData();
+            fd145.append("bio", trickyPayload);
+            fd145.append("bin", new File([new TextEncoder().encode(trickyPayload)], "note.txt", { type: "text/plain" }));
+            const parsed145 = await new Response(fd145).formData();
+            if (parsed145.has("forged") || parsed145.get("bio") !== trickyPayload) {
+                throw new Error("145a multipart boundary injection or truncation occurred");
+            }
+            if ((await parsed145.get("bin").text()) !== trickyPayload) {
+                throw new Error("145a binary file payload corrupted");
+            }
+
+            // W3C File API Blob.type printable-ASCII sanitization + monkey-patched type defense
+            const crlfBlob = new Blob(["abc"], { type: "text/plain\r\nContent-Disposition: form-data; name=\"pwn\"" });
+            if (crlfBlob.type !== "") {
+                throw new Error("145b CRLF Blob.type must normalize to empty string, got: " + crlfBlob.type);
+            }
+            const fTamper = new File(["xyz"], "a.bin", { type: "text/plain" });
+            Object.defineProperty(fTamper, "type", { value: "text/plain\r\nX-Evil: 1\r\n\r\nINJECTED" });
+            const fdTamper = new FormData();
+            fdTamper.append("upload", fTamper);
+            const parsedTamper = await new Response(fdTamper).formData();
+            if (parsedTamper.get("upload").type !== "application/octet-stream") {
+                throw new Error("145b tampered File.type not sanitized: " + parsedTamper.get("upload").type);
+            }
+
+            // === 5. Issue #149 + Sibling Sweep: FormData, URLSearchParams, Headers Web IDL Pair Iterators ===
+            const iterProto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+
+            // 5a. FormData iterator protocol + pair-mutation isolation
+            const fdIt = new FormData();
+            fdIt.append("k1", "v1");
+            fdIt.append("k2", "v2");
+            if (FormData.prototype[Symbol.iterator] !== FormData.prototype.entries) {
+                throw new Error("149a FormData [Symbol.iterator] must alias entries");
+            }
+            const fdEnt = fdIt.entries();
+            if (Object.getPrototypeOf(Object.getPrototypeOf(fdEnt)) !== iterProto) {
+                throw new Error("149a FormData iterator must inherit %IteratorPrototype%");
+            }
+            const step1 = fdEnt.next();
+            step1.value[0] = "MUTATED_KEY";
+            step1.value[1] = "MUTATED_VAL";
+            step1.value.push("EXTRA");
+            if (fdIt.get("k1") !== "v1" || fdIt.has("MUTATED_KEY")) {
+                throw new Error("149a mutating FormData yielded pair corrupted internal table!");
+            }
+            const mappedFd = fdIt.entries().map(([k, v]) => k + "=" + v).toArray();
+            if (mappedFd.join("&") !== "k1=v1&k2=v2") {
+                throw new Error("149a ES2025 Iterator.prototype.map failed: " + mappedFd);
+            }
+
+            // 5b. URLSearchParams iterator protocol + pair-mutation isolation + sequence constructor
+            const usp = new URLSearchParams("a=1&b=2");
+            for (const pair of usp) {
+                pair[0] = "Z";
+                pair[1] = "999";
+            }
+            if (usp.toString() !== "a=1&b=2") {
+                throw new Error("149b mutating URLSearchParams yielded pair corrupted internal state!");
+            }
+            const uspFromFd = new URLSearchParams(fdIt);
+            if (uspFromFd.toString() !== "k1=v1&k2=v2") {
+                throw new Error("149b URLSearchParams(FormData) iterable init failed");
+            }
+
+            // 5c. Headers iterator protocol + uncombined Set-Cookie in sorted order + pair-mutation isolation
+            const hdrs = new Headers();
+            hdrs.append("X-Zebra", "z");
+            hdrs.append("Set-Cookie", "c1=a; Path=/");
+            hdrs.append("Set-Cookie", "c2=b; HttpOnly");
+            hdrs.append("Accept", "text/html");
+            const hdrPairs = [];
+            for (const p of hdrs) {
+                hdrPairs.push(p[0] + ":" + p[1]);
+                p[0] = "corrupt";
+                p[1] = "corrupt";
+            }
+            const expectedHdrs = [
+                "accept:text/html",
+                "set-cookie:c1=a; Path=/",
+                "set-cookie:c2=b; HttpOnly",
+                "x-zebra:z"
+            ].join("|");
+            if (hdrPairs.join("|") !== expectedHdrs) {
+                throw new Error("149c Headers sorted uncombined Set-Cookie iteration mismatch: " + hdrPairs.join("|"));
+            }
+            const hdrCopy = new Headers(hdrs.entries());
+            if (hdrCopy.getSetCookie().length !== 2 || hdrCopy.get("accept") !== "text/html") {
+                throw new Error("149c new Headers(hdrs.entries()) failed");
+            }
+
+            // 5d. Deterministic PRNG collision regeneration check via @slice-deterministic evalSandbox
+            const detCheck = Slice.evalSandbox(`// @slice-deterministic
+                const fdProbe = new FormData();
+                fdProbe.append("x", "1");
+                const firstCt = new Response(fdProbe).headers.get("content-type");
+                const firstBoundary = firstCt.split("boundary=")[1];
+                firstBoundary;
+            `);
+            const predictedBoundary = detCheck.returnValue;
+            const detCollision = Slice.evalSandbox(`// @slice-deterministic
+                const fdCol = new FormData();
+                fdCol.append("trap", "--${predictedBoundary}\\r\\nContent-Disposition: form-data; name=\\"injected\\"\\r\\n\\r\\nbad\\r\\n");
+                const resCol = new Response(fdCol);
+                const actualCt = resCol.headers.get("content-type");
+                const actualBoundary = actualCt.split("boundary=")[1];
+                (actualBoundary !== "${predictedBoundary}") + ":" + (new TextDecoder().decode(resCol._borrowBytes()).indexOf(actualBoundary) === 2);
+            `);
+            if (detCollision.returnValue !== "true:true") {
+                throw new Error("145c deterministic boundary collision regeneration failed: " + JSON.stringify(detCollision));
+            }
+
+            console.log("WAVE4_ALL_OK");
+        })();
+    "#;
+
+    let bc = compile_source_to_bytecode(script);
+    for turn in 0..2 {
+        let mut iso = SliceIsolate::spawn(
+            format!("wave4-turn-{turn}"),
+            1,
+            CapabilityToken::pure_compute(),
+            50_000_000,
+            16 * 1024 * 1024,
+        );
+        let m = iso.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(m.stdout, vec!["WAVE4_ALL_OK"], "return={}", m.return_value);
+    }
+}

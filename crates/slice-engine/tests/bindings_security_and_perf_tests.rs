@@ -833,3 +833,330 @@ fn test_vfs_root_readdir_symlink_eloop_relative_symlinks_and_directory_rename() 
     assert_eq!(parsed["leakedSentinel"], false);
     assert_eq!(parsed["loopExists"], false);
 }
+
+#[cfg(unix)]
+fn try_create_host_file_symlink(target: &str, link: &std::path::Path) -> bool {
+    std::os::unix::fs::symlink(target, link).is_ok()
+}
+
+#[cfg(windows)]
+fn try_create_host_file_symlink(target: &str, link: &std::path::Path) -> bool {
+    std::os::windows::fs::symlink_file(target, link).is_ok()
+}
+
+#[cfg(unix)]
+fn create_host_dir_link(target_dir: &std::path::Path, link_dir: &std::path::Path) -> bool {
+    std::os::unix::fs::symlink(target_dir, link_dir).is_ok()
+}
+
+#[cfg(windows)]
+fn create_host_dir_link(target_dir: &std::path::Path, link_dir: &std::path::Path) -> bool {
+    if std::os::windows::fs::symlink_dir(target_dir, link_dir).is_ok() {
+        return true;
+    }
+    // Fallback to unprivileged NTFS directory junction when Developer Mode is off
+    std::process::Command::new("cmd")
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            &link_dir.to_string_lossy(),
+            &target_dir.to_string_lossy(),
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn test_issue_142_host_symlink_vfs_cow_coherence_and_ocap_containment() {
+    let base_dir = std::env::temp_dir().join(format!(
+        "slice_issue_142_host_sym_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let sandbox_dir = base_dir.join("sandbox");
+    let ro_dir = base_dir.join("ro_zone");
+    let outside_dir = base_dir.join("outside_secret");
+    let real_sub_dir = sandbox_dir.join("real_sub");
+    std::fs::create_dir_all(&real_sub_dir).unwrap();
+    std::fs::create_dir_all(&ro_dir).unwrap();
+    std::fs::create_dir_all(&outside_dir).unwrap();
+
+    let host_target = sandbox_dir.join("host-target");
+    std::fs::write(&host_target, b"original").unwrap();
+    std::fs::write(real_sub_dir.join("item.txt"), b"sub-orig").unwrap();
+    std::fs::write(ro_dir.join("readonly.cfg"), b"ro-immutable").unwrap();
+    std::fs::write(outside_dir.join("secret.txt"), b"TOP_SECRET_HOST_BYTES").unwrap();
+
+    // 1. Directory link / junction tests (runs on all Unix + Windows hosts including unprivileged NTFS junctions)
+    let dir_link = sandbox_dir.join("dir-link");
+    let dir_escape = sandbox_dir.join("dir-escape");
+    assert!(
+        create_host_dir_link(&real_sub_dir, &dir_link),
+        "failed to create host directory link/junction"
+    );
+    assert!(
+        create_host_dir_link(&outside_dir, &dir_escape),
+        "failed to create outside host directory link/junction"
+    );
+
+    let sandbox_norm = sandbox_dir.to_string_lossy().replace('\\', "/");
+    let ro_norm = ro_dir.to_string_lossy().replace('\\', "/");
+
+    let rw_caps = CapabilityToken::pure_compute()
+        .with_read_prefix(&sandbox_norm)
+        .with_write_prefix(&sandbox_norm)
+        .with_read_prefix(&ro_norm);
+
+    // 1a. Host directory symlink / junction CoW write, VFS-only realpath, readdir, and tombstone coherence
+    let dir_coherence_src = format!(
+        r#"
+        import * as fs from "node:fs";
+        const root = {root:?};
+        const beforeViaLink = fs.readFileSync(root + "/dir-link/item.txt", "utf8");
+        fs.writeFileSync(root + "/real_sub/item.txt", "sub-updated");
+        const afterViaLink = fs.readFileSync(root + "/dir-link/item.txt", "utf8");
+
+        fs.writeFileSync(root + "/dir-link/created-via-link.txt", "from-link");
+        const readDirect = fs.readFileSync(root + "/real_sub/created-via-link.txt", "utf8");
+        const realVfsFile = fs.realpathSync(root + "/dir-link/created-via-link.txt");
+        const listed = fs.readdirSync(root + "/dir-link");
+
+        fs.unlinkSync(root + "/real_sub/item.txt");
+        const existsViaLinkAfterUnlink = fs.existsSync(root + "/dir-link/item.txt");
+        let readAfterUnlinkCode = "";
+        try {{
+            fs.readFileSync(root + "/dir-link/item.txt", "utf8");
+        }} catch (e: any) {{
+            readAfterUnlinkCode = String(e.code || "");
+        }}
+
+        // Unlinking a VFS symlink pointing into ro_zone or an ELOOP symlink in rw_zone must succeed on the link itself
+        fs.symlinkSync({ro:?} + "/readonly.cfg", root + "/temp_ro_sym");
+        fs.unlinkSync(root + "/temp_ro_sym");
+        fs.symlinkSync(root + "/loop_2", root + "/loop_1");
+        fs.symlinkSync(root + "/loop_1", root + "/loop_2");
+        fs.unlinkSync(root + "/loop_1");
+        fs.unlinkSync(root + "/loop_2");
+
+        console.log(JSON.stringify({{
+            beforeViaLink,
+            afterViaLink,
+            readDirect,
+            realEndsWithRealSub: realVfsFile.endsWith("/real_sub/created-via-link.txt"),
+            listedHasCreated: listed.includes("created-via-link.txt"),
+            existsViaLinkAfterUnlink,
+            readAfterUnlinkCode
+        }}));
+        "#,
+        root = sandbox_norm,
+        ro = ro_norm,
+    );
+
+    // Verify across direct source, precompiled bytecode, and warm pooled reset
+    let dir_js = slice_cas::strip_typescript_and_normalize(&dir_coherence_src, true);
+    let dir_bc = compile_source_to_bytecode(&dir_js);
+    let mut pooled_iso = SliceIsolate::spawn(
+        "host-dir-sym-pool-init",
+        1,
+        rw_caps.clone(),
+        20_000_000,
+        16 * 1024 * 1024,
+    );
+    for turn in 1..=2u32 {
+        let tid = format!("host-dir-sym-pool-{}", turn);
+        pooled_iso.reset_for_request(&tid, turn, 20_000_000, 16 * 1024 * 1024);
+        let rec = pooled_iso.execute_bytecode(&dir_bc, None).unwrap();
+        let out_str = rec.stdout.join("\n");
+        assert!(
+            !out_str.trim().is_empty(),
+            "unexpected JS error in dir_coherence_src: return_value={:?}",
+            rec.return_value
+        );
+        let p: serde_json::Value = serde_json::from_str(out_str.trim()).unwrap();
+        assert_eq!(p["beforeViaLink"], "sub-orig");
+        assert_eq!(p["afterViaLink"], "sub-updated");
+        assert_eq!(p["readDirect"], "from-link");
+        assert_eq!(p["realEndsWithRealSub"], true);
+        assert_eq!(p["listedHasCreated"], true);
+        assert_eq!(p["existsViaLinkAfterUnlink"], false);
+        assert_eq!(p["readAfterUnlinkCode"], "ENOENT");
+    }
+    // Host file on disk must remain untouched
+    assert_eq!(
+        std::fs::read_to_string(real_sub_dir.join("item.txt")).unwrap(),
+        "sub-orig"
+    );
+
+    // 1b. P0 OCap Escape Guard: host directory link pointing outside `--allow-read` MUST trap FsReadDenied
+    for bad_op in [
+        format!("fs.readdirSync({:?} + '/dir-escape');", sandbox_norm),
+        format!(
+            "fs.readFileSync({:?} + '/dir-escape/secret.txt', 'utf8');",
+            sandbox_norm
+        ),
+        format!(
+            "fs.lstatSync({:?} + '/dir-escape/secret.txt');",
+            sandbox_norm
+        ),
+        format!(
+            "fs.existsSync({:?} + '/dir-escape/secret.txt');",
+            sandbox_norm
+        ),
+    ] {
+        let script = format!("import * as fs from 'node:fs';\n{}", bad_op);
+        let err = eval_ts_with_caps("host-dir-sym-escape", &script, rw_caps.clone())
+            .expect_err("host dir symlink escaping allow-read must trap FsReadDenied");
+        assert!(
+            matches!(err, SandboxViolation::FsReadDenied { .. }),
+            "expected FsReadDenied for `{}`, got: {:?}",
+            bad_op,
+            err
+        );
+    }
+
+    // 1c. Write-only compartment cannot read existing host file bytes via appendFileSync or openSync("a")
+    let write_only_caps = CapabilityToken::pure_compute().with_write_prefix(&sandbox_norm);
+    let append_new_ok = eval_ts_with_caps(
+        "write-only-new-file",
+        &format!(
+            "import * as fs from 'node:fs'; fs.appendFileSync({:?} + '/brand-new.log', 'ok'); console.log('PASS');",
+            sandbox_norm
+        ),
+        write_only_caps.clone(),
+    )
+    .unwrap();
+    assert_eq!(append_new_ok.trim(), "PASS");
+
+    let append_host_err = eval_ts_with_caps(
+        "write-only-existing-host",
+        &format!(
+            "import * as fs from 'node:fs'; fs.appendFileSync({:?} + '/host-target', 'leak');",
+            sandbox_norm
+        ),
+        write_only_caps,
+    )
+    .expect_err("write-only compartment appending existing host file must require read OCap");
+    assert!(matches!(
+        append_host_err,
+        SandboxViolation::FsReadDenied { .. }
+    ));
+
+    // 2. Host file symlinks (exact Issue #142 repro + write-through + FD sharing + OCap file escape)
+    let host_link = sandbox_dir.join("host-link");
+    let escape_link = sandbox_dir.join("escape-link");
+    let ro_link = sandbox_dir.join("ro-link");
+    let file_sym_supported = try_create_host_file_symlink("host-target", &host_link)
+        && try_create_host_file_symlink("../outside_secret/secret.txt", &escape_link)
+        && try_create_host_file_symlink("../ro_zone/readonly.cfg", &ro_link);
+
+    if file_sym_supported {
+        let file_sym_src = format!(
+            r#"
+            import * as fs from "node:fs";
+            const root = {root:?};
+            const before = fs.readFileSync(root + "/host-link", "utf8");
+            fs.symlinkSync("host-target", root + "/guest-link");
+            fs.writeFileSync(root + "/host-target", "updated");
+            const target = fs.readFileSync(root + "/host-target", "utf8");
+            const viaLink = fs.readFileSync(root + "/host-link", "utf8");
+            const viaGuestLink = fs.readFileSync(root + "/guest-link", "utf8");
+
+            // Write THROUGH host-link updates target without clobbering host-link's symlink status
+            fs.appendFileSync(root + "/host-link", "-more");
+            const linkStillSym = fs.lstatSync(root + "/host-link").isSymbolicLink();
+            const targetAfterAppend = fs.readFileSync(root + "/host-target", "utf8");
+
+            // Open FDs via host-link and host-target share the exact same live inode
+            const fdLink = fs.openSync(root + "/host-link", "r+");
+            const fdTarget = fs.openSync(root + "/host-target", "r");
+            fs.writeSync(fdLink, Buffer.from("FD!"), 0, 3, 0);
+            const rbuf = Buffer.alloc(12);
+            const n = fs.readSync(fdTarget, rbuf, 0, 12, 0);
+            fs.closeSync(fdLink);
+            fs.closeSync(fdTarget);
+            const fdShared = rbuf.subarray(0, n).toString("utf8");
+
+            // Deleting target makes host-link dangling (ENOENT on read/realpath, true on lstat)
+            fs.unlinkSync(root + "/host-target");
+            const danglingExists = fs.existsSync(root + "/host-link");
+            const danglingLstatSym = fs.lstatSync(root + "/host-link").isSymbolicLink();
+            let danglingRealpathErr = "";
+            try {{
+                fs.realpathSync(root + "/host-link");
+            }} catch (e: any) {{
+                danglingRealpathErr = String(e.code || "");
+            }}
+
+            console.log(JSON.stringify({{
+                before,
+                target,
+                viaLink,
+                viaGuestLink,
+                linkStillSym,
+                targetAfterAppend,
+                fdShared,
+                danglingExists,
+                danglingLstatSym,
+                danglingRealpathErr
+            }}));
+            "#,
+            root = sandbox_norm,
+        );
+        let out = eval_ts_with_caps("issue-142-file-sym", &file_sym_src, rw_caps.clone()).unwrap();
+        let p: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(p["before"], "original");
+        assert_eq!(p["target"], "updated");
+        assert_eq!(p["viaLink"], "updated");
+        assert_eq!(p["viaGuestLink"], "updated");
+        assert_eq!(p["linkStillSym"], true);
+        assert_eq!(p["targetAfterAppend"], "updated-more");
+        assert_eq!(p["fdShared"], "FD!ated-more");
+        assert_eq!(p["danglingExists"], false);
+        assert_eq!(p["danglingLstatSym"], true);
+        assert_eq!(p["danglingRealpathErr"], "ENOENT");
+        assert_eq!(std::fs::read_to_string(&host_target).unwrap(), "original");
+
+        // Host file symlink escaping `--allow-read` traps FsReadDenied
+        for esc_op in [
+            format!(
+                "fs.readFileSync({:?} + '/escape-link', 'utf8');",
+                sandbox_norm
+            ),
+            format!("fs.openSync({:?} + '/escape-link', 'r');", sandbox_norm),
+            format!(
+                "fs.copyFileSync({:?} + '/escape-link', {:?} + '/stolen.txt');",
+                sandbox_norm, sandbox_norm
+            ),
+        ] {
+            let script = format!("import * as fs from 'node:fs';\n{}", esc_op);
+            let err = eval_ts_with_caps("host-file-sym-escape", &script, rw_caps.clone())
+                .expect_err("host file symlink escaping allow-read must trap FsReadDenied");
+            assert!(matches!(err, SandboxViolation::FsReadDenied { .. }));
+        }
+
+        // Host file symlink pointing into read-only `/ro_zone` traps FsWriteDenied on mutation
+        for wr_op in [
+            format!("fs.writeFileSync({:?} + '/ro-link', 'pwn');", sandbox_norm),
+            format!("fs.appendFileSync({:?} + '/ro-link', 'pwn');", sandbox_norm),
+            format!("fs.truncateSync({:?} + '/ro-link', 0);", sandbox_norm),
+            format!("fs.openSync({:?} + '/ro-link', 'w');", sandbox_norm),
+        ] {
+            let script = format!("import * as fs from 'node:fs';\n{}", wr_op);
+            let err = eval_ts_with_caps("host-file-sym-ro-write", &script, rw_caps.clone())
+                .expect_err(
+                    "writing through host symlink into read-only zone must trap FsWriteDenied",
+                );
+            assert!(matches!(err, SandboxViolation::FsWriteDenied { .. }));
+        }
+    } else {
+        #[cfg(unix)]
+        panic!("creating Unix symlinks in temp_dir must never fail");
+    }
+
+    let _ = std::fs::remove_dir_all(&base_dir);
+}

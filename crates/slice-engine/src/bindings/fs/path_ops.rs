@@ -1,8 +1,13 @@
-//! Canonical VFS Path Resolution, Symlink Traversal, Copy-on-Write Host Materialization,
+//! Canonical VFS Path Classification, Copy-on-Write Host Materialization,
 //! and Path-Based `node:fs` Host Bindings.
 
 use crate::bindings::fs::state::{
     PathEntry, VfsEntryKind, VfsState, dir_child_prefix, is_vfs_root_path,
+};
+pub(crate) use crate::bindings::fs::symlink_resolver::{
+    ResolvedVfsPath, SymlinkResolveError, anchor_vfs_path, is_host_symlink_or_reparse,
+    is_host_unc_blocked, normalize_host_readlink_target, resolve_effective_vfs_path,
+    resolve_symlink_target_against_link,
 };
 use crate::bindings::helpers::{
     bytes_to_js_uint8_array, extract_buffer_source_bytes, release_isolate_memory,
@@ -10,40 +15,11 @@ use crate::bindings::helpers::{
     try_consume_isolate_memory_ctx,
 };
 use crate::boa_realm::{
-    BOA_DET_STATE, BOA_VFS_STATE, check_boa_fs_read_ocap, check_boa_fs_write_ocap, norm_vfs_path,
+    BOA_DET_STATE, BOA_VFS_STATE, check_boa_fs_read_ocap, check_boa_fs_write_ocap,
+    has_boa_fs_read_ocap, has_boa_fs_write_ocap, norm_vfs_path,
 };
 use crate::intrinsics::fill_random_bytes;
 use std::sync::Arc;
-
-/// Blocks raw forward-slash Windows SMB UNC paths (`//server/share`) from reaching host `std::fs`
-/// on Windows while keeping POSIX/in-memory VFS root paths (`//file.txt` -> `/file.txt`) intact.
-#[inline]
-pub(crate) fn is_host_unc_blocked(raw_path: &str) -> bool {
-    #[cfg(windows)]
-    {
-        let tb = raw_path.trim_start().as_bytes();
-        if tb.len() >= 2 && tb[0] == b'/' && tb[1] == b'/' {
-            let is_ext_drive = tb.len() >= 7
-                && tb[2] == b'?'
-                && (tb[3] == b'/' || tb[3] == b'\\')
-                && tb[4].is_ascii_alphabetic()
-                && tb[5] == b':'
-                && (tb[6] == b'/' || tb[6] == b'\\');
-            if !is_ext_drive && tb.get(2) != Some(&b'/') && tb[2..].contains(&b'/') {
-                return true;
-            }
-        }
-    }
-    let _ = raw_path;
-    false
-}
-
-/// Anchors `raw` into a canonical forward-slash VFS key, resolving relative paths against the
-/// cached workspace directory (`cached_normalized_cwd()`) with zero OS syscalls.
-#[inline]
-pub(crate) fn anchor_vfs_path(raw: &str) -> String {
-    slice_sandbox::anchor_vfs_path_to_cwd(raw)
-}
 
 #[inline]
 pub(crate) fn is_vfs_tombstoned(norm: &str) -> bool {
@@ -51,109 +27,28 @@ pub(crate) fn is_vfs_tombstoned(norm: &str) -> bool {
     BOA_VFS_STATE.with(|v| v.borrow().is_host_masked(&anchored))
 }
 
-/// Resolves `raw_path` (including VFS symlinks) and returns `Ok(Some(bytes))` if a regular file
-/// exists in [`VfsState`], `Ok(None)` if not in VFS, or `Err(())` on `ELOOP` or OCap denial on a
-/// symlink target.
-pub(crate) fn read_vfs_file_bytes_resolved(raw_path: &str) -> Result<Option<Arc<Vec<u8>>>, ()> {
-    let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(raw_path), true)?;
-    if traversed && !check_boa_fs_read_ocap(&norm) {
-        return Err(());
+pub(crate) type ResolvedScriptOutcome = (String, Option<Arc<Vec<u8>>>);
+
+/// Resolves `raw_path` (including both VFS and host symlinks under per-hop OCap checks) and
+/// returns `Ok((resolved_norm, Some(bytes)))` if backed by an in-memory [`VfsState`] file,
+/// `Ok((resolved_norm, None))` if not materialized in VFS, or `Err(SymlinkResolveError)` on
+/// `ELOOP` or OCap denial.
+pub(crate) fn resolve_vfs_or_host_script(
+    raw_path: &str,
+) -> Result<ResolvedScriptOutcome, SymlinkResolveError> {
+    let allow_host = !is_host_unc_blocked(raw_path);
+    let resolved = resolve_effective_vfs_path(raw_path, true, allow_host)?;
+    if resolved.has_file_ancestor {
+        return Ok((resolved.norm, None));
     }
-    Ok(BOA_VFS_STATE.with(|v| {
+    let bytes = BOA_VFS_STATE.with(|v| {
         let vfs = v.borrow();
-        match vfs.lookup_present(&norm).map(|(_, i)| &i.kind) {
+        match vfs.lookup_present(&resolved.norm).map(|(_, i)| &i.kind) {
             Some(VfsEntryKind::File(b)) => Some(Arc::clone(b)),
             _ => None,
         }
-    }))
-}
-
-#[inline]
-pub(crate) fn resolve_symlink_target_against_link(norm_link: &str, raw_target: &str) -> String {
-    let trimmed = raw_target.trim();
-    let tb = trimmed.as_bytes();
-    let is_abs = trimmed.starts_with('/')
-        || trimmed.starts_with('\\')
-        || (tb.len() >= 2 && tb[0].is_ascii_alphabetic() && tb[1] == b':');
-    if is_abs {
-        return anchor_vfs_path(trimmed);
-    }
-    let parent = match norm_link.rfind('/') {
-        Some(0) => "/",
-        Some(idx) => &norm_link[..idx],
-        None => slice_sandbox::cached_normalized_cwd(),
-    };
-    if parent == "/" {
-        norm_vfs_path(&format!("/{}", trimmed))
-    } else if parent.ends_with('/') {
-        anchor_vfs_path(&format!("{}{}", parent, trimmed))
-    } else {
-        anchor_vfs_path(&format!("{}/{}", parent, trimmed))
-    }
-}
-
-/// Resolves VFS symlinks along `current` (up to 8 hops) using explicit [`VfsEntryKind::Symlink`]
-/// tags without ever inspecting regular file bytes.
-///
-/// Returns `Ok((resolved_path, traversed_any_symlink))` or `Err(())` (`ELOOP`).
-pub(crate) fn try_resolve_vfs_path_symlinks(
-    mut current: String,
-    follow_final: bool,
-) -> Result<(String, bool), ()> {
-    let has_vfs = BOA_VFS_STATE.with(|v| !v.borrow().paths.is_empty());
-    if !has_vfs {
-        return Ok((current, false));
-    }
-    let mut traversed_any = false;
-    for _ in 0..=8 {
-        let rewritten = BOA_VFS_STATE.with(|v| {
-            let vfs = v.borrow();
-            let bytes = current.as_bytes();
-            let root_end = if bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/' {
-                3
-            } else if bytes.first() == Some(&b'/') {
-                1
-            } else {
-                0
-            };
-            let mut scan = root_end;
-            while scan <= bytes.len() {
-                let seg_end = match memchr::memchr(b'/', &bytes[scan..]) {
-                    Some(rel) => scan + rel,
-                    None => bytes.len(),
-                };
-                let is_final = seg_end == bytes.len();
-                if seg_end > 0 && (!is_final || follow_final) {
-                    let prefix = &current[..seg_end];
-                    if let Some((_, ino)) = vfs.lookup_present(prefix)
-                        && let VfsEntryKind::Symlink(ref raw_target) = ino.kind
-                    {
-                        let resolved_prefix =
-                            resolve_symlink_target_against_link(prefix, raw_target);
-                        let next_full = if is_final {
-                            resolved_prefix
-                        } else {
-                            anchor_vfs_path(&format!("{}{}", resolved_prefix, &current[seg_end..]))
-                        };
-                        return Some(next_full);
-                    }
-                }
-                if is_final {
-                    break;
-                }
-                scan = seg_end + 1;
-            }
-            None
-        });
-        match rewritten {
-            Some(next) => {
-                current = next;
-                traversed_any = true;
-            }
-            None => return Ok((current, traversed_any)),
-        }
-    }
-    Err(())
+    });
+    Ok((resolved.norm, bytes))
 }
 
 #[cold]
@@ -182,6 +77,26 @@ pub(crate) fn js_eloop_error(
         .into()
 }
 
+/// Helper mapping [`SymlinkResolveError`] into either a recorded OCap read violation (`Ok(None)`)
+/// or a thrown `ELOOP` `JsError` (`Err(...)`).
+#[inline]
+pub(crate) fn resolve_or_js_err(
+    raw_path: &str,
+    follow_final: bool,
+    allow_host: bool,
+    syscall: &str,
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsResult<Option<ResolvedVfsPath>> {
+    match resolve_effective_vfs_path(raw_path, follow_final, allow_host) {
+        Ok(res) => Ok(Some(res)),
+        Err(SymlinkResolveError::ReadOcapDenied(denied)) => {
+            let _ = check_boa_fs_read_ocap(&denied);
+            Ok(None)
+        }
+        Err(SymlinkResolveError::Loop) => Err(js_eloop_error(syscall, raw_path, context)),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResolvedPathKind {
     Missing,
@@ -208,11 +123,21 @@ pub(crate) fn classify_path_lstat(
             if is_vfs_root_path(norm) {
                 return ResolvedPathKind::Directory;
             }
-            if !allow_host || vfs.is_host_masked(norm) {
+            if !allow_host
+                || vfs.is_host_masked(norm)
+                || !(has_boa_fs_read_ocap(norm) || has_boa_fs_write_ocap(norm))
+            {
                 return ResolvedPathKind::Missing;
             }
+            if norm == "/tmp" {
+                return match std::fs::metadata(norm) {
+                    Ok(m) if m.is_dir() => ResolvedPathKind::Directory,
+                    Ok(_) => ResolvedPathKind::File,
+                    Err(_) => ResolvedPathKind::Missing,
+                };
+            }
             match std::fs::symlink_metadata(norm) {
-                Ok(m) if m.file_type().is_symlink() => ResolvedPathKind::Symlink,
+                Ok(m) if is_host_symlink_or_reparse(&m) => ResolvedPathKind::Symlink,
                 Ok(m) if m.is_dir() => ResolvedPathKind::Directory,
                 Ok(_) => ResolvedPathKind::File,
                 Err(_) => ResolvedPathKind::Missing,
@@ -221,7 +146,8 @@ pub(crate) fn classify_path_lstat(
     }
 }
 
-/// Classifies `norm` after VFS symlink expansion (`stat` semantics, following host symlinks too).
+/// Classifies `norm` after [`resolve_effective_vfs_path`] with `follow_final = true`.
+/// Uses `symlink_metadata` as defense-in-depth so OS `stat` never follows an unverified symlink.
 pub(crate) fn classify_path_stat(
     vfs: &VfsState,
     norm: &str,
@@ -239,52 +165,27 @@ pub(crate) fn classify_path_stat(
             if is_vfs_root_path(norm) {
                 return (ResolvedPathKind::Directory, 0);
             }
-            if !allow_host || vfs.is_host_masked(norm) {
+            if !allow_host
+                || vfs.is_host_masked(norm)
+                || !(has_boa_fs_read_ocap(norm) || has_boa_fs_write_ocap(norm))
+            {
                 return (ResolvedPathKind::Missing, 0);
             }
-            match std::fs::metadata(norm) {
+            if norm == "/tmp" {
+                return match std::fs::metadata(norm) {
+                    Ok(m) if m.is_dir() => (ResolvedPathKind::Directory, 0),
+                    Ok(m) => (ResolvedPathKind::File, m.len()),
+                    Err(_) => (ResolvedPathKind::Missing, 0),
+                };
+            }
+            match std::fs::symlink_metadata(norm) {
+                Ok(m) if is_host_symlink_or_reparse(&m) => (ResolvedPathKind::Missing, 0),
                 Ok(m) if m.is_dir() => (ResolvedPathKind::Directory, 0),
                 Ok(m) => (ResolvedPathKind::File, m.len()),
                 Err(_) => (ResolvedPathKind::Missing, 0),
             }
         }
     }
-}
-
-/// Returns `true` if any ancestor component of `norm` is a regular file (`ENOTDIR`).
-pub(crate) fn has_file_ancestor(vfs: &VfsState, norm: &str, allow_host: bool) -> bool {
-    let mut cur = norm;
-    while let Some(idx) = cur.rfind('/') {
-        if idx == 0 {
-            break;
-        }
-        let anc = &cur[..idx];
-        if is_vfs_root_path(anc) {
-            break;
-        }
-        match vfs.paths.get(anc) {
-            Some(PathEntry::Present(id)) => {
-                if matches!(
-                    vfs.get_inode(*id).map(|i| &i.kind),
-                    Some(VfsEntryKind::File(_))
-                ) {
-                    return true;
-                }
-            }
-            Some(PathEntry::Tombstone) => {}
-            None => {
-                if allow_host
-                    && !vfs.is_host_masked(anc)
-                    && let Ok(m) = std::fs::metadata(anc)
-                    && !m.is_dir()
-                {
-                    return true;
-                }
-            }
-        }
-        cur = anc;
-    }
-    false
 }
 
 #[inline]
@@ -297,11 +198,12 @@ pub(crate) fn default_mtime_ms_for_path(vfs: &VfsState, norm: &str, allow_host: 
     if BOA_DET_STATE.with(|s| s.get().is_some()) {
         return 1_700_000_000_000.0;
     }
-    let host_mt = if !allow_host || vfs.is_host_masked(norm) {
+    let host_mt = if !allow_host || vfs.is_host_masked(norm) || !has_boa_fs_read_ocap(norm) {
         None
     } else {
-        std::fs::metadata(norm)
+        std::fs::symlink_metadata(norm)
             .ok()
+            .filter(|m| !is_host_symlink_or_reparse(m))
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as f64)
@@ -328,6 +230,7 @@ fn dir_has_any_children(vfs: &VfsState, norm_dir: &str, allow_host: bool) -> boo
     if allow_host
         && !is_opaque
         && !vfs.is_host_masked(norm_dir)
+        && has_boa_fs_read_ocap(norm_dir)
         && let Ok(rd) = std::fs::read_dir(norm_dir)
     {
         for entry in rd.flatten() {
@@ -346,6 +249,9 @@ fn dir_has_any_children(vfs: &VfsState, norm_dir: &str, allow_host: bool) -> boo
 }
 
 fn materialize_host_dir_into_vfs(vfs: &mut VfsState, host_dir: &str) -> Result<(), String> {
+    if !has_boa_fs_read_ocap(host_dir) {
+        return Ok(());
+    }
     let Ok(rd) = std::fs::read_dir(host_dir) else {
         return Ok(());
     };
@@ -365,7 +271,11 @@ fn materialize_host_dir_into_vfs(vfs: &mut VfsState, host_dir: &str) -> Result<(
         };
         if ft.is_symlink() {
             if !already_present && let Ok(target_path) = std::fs::read_link(entry.path()) {
-                let target_str = target_path.to_string_lossy().replace('\\', "/");
+                let target_str = normalize_host_readlink_target(&target_path);
+                let resolved_target = resolve_symlink_target_against_link(&child_norm, &target_str);
+                if !has_boa_fs_read_ocap(&resolved_target) {
+                    continue;
+                }
                 try_consume_isolate_memory(target_str.len())?;
                 let id = vfs.alloc_inode(VfsEntryKind::Symlink(target_str), None, 1, 0);
                 vfs.paths.insert(child_norm, PathEntry::Present(id));
@@ -422,7 +332,7 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_fs_check_write_sync"),
-        1,
+        2,
         NativeFunction::from_fn_ptr(|_this, args, context| {
             let path = args
                 .first()
@@ -430,12 +340,17 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            let follow_final = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(true);
             if !check_boa_fs_write_ocap(&path) {
                 return Ok(BoaVal::from(false));
             }
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-                .map_err(|()| js_eloop_error("open", &path, context))?;
-            if traversed && !check_boa_fs_write_ocap(&norm) {
+            let allow_host = !is_host_unc_blocked(&path);
+            let Some(resolved) =
+                resolve_or_js_err(&path, follow_final, allow_host, "open", context)?
+            else {
+                return Ok(BoaVal::from(false));
+            };
+            if resolved.traversed_symlink && !check_boa_fs_write_ocap(&resolved.norm) {
                 return Ok(BoaVal::from(false));
             }
             Ok(BoaVal::from(true))
@@ -456,23 +371,25 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(js_string!("")));
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-                .map_err(|()| js_eloop_error("open", &path, context))?;
-            if traversed && !check_boa_fs_read_ocap(&norm) {
+            let Some(resolved) = resolve_or_js_err(&path, true, allow_host, "open", context)?
+            else {
+                return Ok(BoaVal::from(js_string!("")));
+            };
+            if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
                 return Ok(BoaVal::from(js_string!("")));
             }
+            if resolved.has_file_ancestor {
+                return Ok(BoaVal::from(-20));
+            }
+            let norm = resolved.norm;
             enum ReadOutcome {
                 VfsFile(Arc<Vec<u8>>),
                 IsDir,
-                NotDir,
                 HostCandidate,
                 Missing,
             }
             let outcome = BOA_VFS_STATE.with(|v| {
                 let vfs = v.borrow();
-                if has_file_ancestor(&vfs, &norm, allow_host) {
-                    return ReadOutcome::NotDir;
-                }
                 match vfs.paths.get(&norm) {
                     Some(PathEntry::Tombstone) => ReadOutcome::Missing,
                     Some(PathEntry::Present(id)) => match vfs.get_inode(*id).map(|i| &i.kind) {
@@ -494,17 +411,20 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
             match outcome {
                 ReadOutcome::VfsFile(b) => Ok(utf8_slice_to_js_val(&b)),
                 ReadOutcome::IsDir => Ok(BoaVal::from(-21)),
-                ReadOutcome::NotDir => Ok(BoaVal::from(-20)),
-                ReadOutcome::HostCandidate => match std::fs::read(&norm) {
-                    Ok(bytes) => Ok(utf8_vec_to_js_val(bytes)),
-                    Err(_) => {
-                        if std::path::Path::new(&norm).is_dir() {
-                            Ok(BoaVal::from(-21))
-                        } else {
-                            Ok(BoaVal::null())
+                ReadOutcome::HostCandidate => {
+                    if let Ok(meta) = std::fs::symlink_metadata(&norm) {
+                        if is_host_symlink_or_reparse(&meta) {
+                            return Ok(BoaVal::null());
+                        }
+                        if meta.is_dir() {
+                            return Ok(BoaVal::from(-21));
                         }
                     }
-                },
+                    match std::fs::read(&norm) {
+                        Ok(bytes) => Ok(utf8_vec_to_js_val(bytes)),
+                        Err(_) => Ok(BoaVal::null()),
+                    }
+                }
                 ReadOutcome::Missing => Ok(BoaVal::null()),
             }
         }),
@@ -524,23 +444,25 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return bytes_to_js_uint8_array(&[], context);
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-                .map_err(|()| js_eloop_error("open", &path, context))?;
-            if traversed && !check_boa_fs_read_ocap(&norm) {
+            let Some(resolved) = resolve_or_js_err(&path, true, allow_host, "open", context)?
+            else {
+                return bytes_to_js_uint8_array(&[], context);
+            };
+            if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
                 return bytes_to_js_uint8_array(&[], context);
             }
+            if resolved.has_file_ancestor {
+                return Ok(BoaVal::from(-20));
+            }
+            let norm = resolved.norm;
             enum ReadOutcome {
                 VfsFile(Arc<Vec<u8>>),
                 IsDir,
-                NotDir,
                 HostCandidate,
                 Missing,
             }
             let outcome = BOA_VFS_STATE.with(|v| {
                 let vfs = v.borrow();
-                if has_file_ancestor(&vfs, &norm, allow_host) {
-                    return ReadOutcome::NotDir;
-                }
                 match vfs.paths.get(&norm) {
                     Some(PathEntry::Tombstone) => ReadOutcome::Missing,
                     Some(PathEntry::Present(id)) => match vfs.get_inode(*id).map(|i| &i.kind) {
@@ -562,17 +484,20 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
             match outcome {
                 ReadOutcome::VfsFile(b) => bytes_to_js_uint8_array(&b, context),
                 ReadOutcome::IsDir => Ok(BoaVal::from(-21)),
-                ReadOutcome::NotDir => Ok(BoaVal::from(-20)),
-                ReadOutcome::HostCandidate => match std::fs::read(&norm) {
-                    Ok(bytes) => bytes_to_js_uint8_array(&bytes, context),
-                    Err(_) => {
-                        if std::path::Path::new(&norm).is_dir() {
-                            Ok(BoaVal::from(-21))
-                        } else {
-                            Ok(BoaVal::null())
+                ReadOutcome::HostCandidate => {
+                    if let Ok(meta) = std::fs::symlink_metadata(&norm) {
+                        if is_host_symlink_or_reparse(&meta) {
+                            return Ok(BoaVal::null());
+                        }
+                        if meta.is_dir() {
+                            return Ok(BoaVal::from(-21));
                         }
                     }
-                },
+                    match std::fs::read(&norm) {
+                        Ok(bytes) => bytes_to_js_uint8_array(&bytes, context),
+                        Err(_) => Ok(BoaVal::null()),
+                    }
+                }
                 ReadOutcome::Missing => Ok(BoaVal::null()),
             }
         }),
@@ -592,23 +517,22 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::undefined());
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-                .map_err(|()| js_eloop_error("open", &path, context))?;
-            if traversed && !check_boa_fs_write_ocap(&norm) {
+            let Some(resolved) = resolve_or_js_err(&path, true, allow_host, "open", context)?
+            else {
+                return Ok(BoaVal::undefined());
+            };
+            if resolved.traversed_symlink && !check_boa_fs_write_ocap(&resolved.norm) {
                 return Ok(BoaVal::undefined());
             }
-            let pre_err = BOA_VFS_STATE.with(|v| {
-                let vfs = v.borrow();
-                if has_file_ancestor(&vfs, &norm, allow_host) {
-                    return Some(-20);
-                }
-                if classify_path_stat(&vfs, &norm, allow_host).0 == ResolvedPathKind::Directory {
-                    return Some(-21);
-                }
-                None
+            if resolved.has_file_ancestor {
+                return Ok(BoaVal::from(-20));
+            }
+            let norm = resolved.norm;
+            let is_dir = BOA_VFS_STATE.with(|v| {
+                classify_path_stat(&v.borrow(), &norm, allow_host).0 == ResolvedPathKind::Directory
             });
-            if let Some(code) = pre_err {
-                return Ok(BoaVal::from(code));
+            if is_dir {
+                return Ok(BoaVal::from(-21));
             }
             let data_bytes = if let Some(val) = args.get(1) {
                 if val.is_object() {
@@ -662,23 +586,21 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::undefined());
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-                .map_err(|()| js_eloop_error("open", &path, context))?;
-            if traversed && !check_boa_fs_write_ocap(&norm) {
+            let Some(resolved) = resolve_or_js_err(&path, true, allow_host, "open", context)?
+            else {
+                return Ok(BoaVal::undefined());
+            };
+            if resolved.traversed_symlink && !check_boa_fs_write_ocap(&resolved.norm) {
                 return Ok(BoaVal::undefined());
             }
-            let pre_err = BOA_VFS_STATE.with(|v| {
-                let vfs = v.borrow();
-                if has_file_ancestor(&vfs, &norm, allow_host) {
-                    return Some(-20);
-                }
-                if classify_path_stat(&vfs, &norm, allow_host).0 == ResolvedPathKind::Directory {
-                    return Some(-21);
-                }
-                None
-            });
-            if let Some(code) = pre_err {
-                return Ok(BoaVal::from(code));
+            if resolved.has_file_ancestor {
+                return Ok(BoaVal::from(-20));
+            }
+            let norm = resolved.norm;
+            let host_stat_kind =
+                BOA_VFS_STATE.with(|v| classify_path_stat(&v.borrow(), &norm, allow_host).0);
+            if host_stat_kind == ResolvedPathKind::Directory {
+                return Ok(BoaVal::from(-21));
             }
             let data_bytes = if let Some(val) = args.get(1) {
                 if val.is_object() {
@@ -707,14 +629,14 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                     vfs.update_inode_kind(id, VfsEntryKind::File(arc_buf));
                 });
             } else {
-                let host_prefix = BOA_VFS_STATE.with(|v| {
-                    let vfs = v.borrow();
-                    if allow_host && !vfs.is_host_masked(&norm) {
-                        std::fs::read(&norm).ok()
-                    } else {
-                        None
+                let host_prefix = if host_stat_kind == ResolvedPathKind::File {
+                    if !check_boa_fs_read_ocap(&norm) {
+                        return Ok(BoaVal::undefined());
                     }
-                });
+                    std::fs::read(&norm).ok()
+                } else {
+                    None
+                };
                 let mut combined = match host_prefix {
                     Some(mut h) => {
                         h.reserve(data_bytes.len());
@@ -752,16 +674,23 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(false));
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let Ok((norm, traversed)) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-            else {
-                return Ok(BoaVal::from(false));
+            let resolved = match resolve_effective_vfs_path(&path, true, allow_host) {
+                Ok(res) => res,
+                Err(SymlinkResolveError::ReadOcapDenied(denied)) => {
+                    let _ = check_boa_fs_read_ocap(&denied);
+                    return Ok(BoaVal::from(false));
+                }
+                Err(SymlinkResolveError::Loop) => return Ok(BoaVal::from(false)),
             };
-            if traversed && !check_boa_fs_read_ocap(&norm) {
+            if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
+                return Ok(BoaVal::from(false));
+            }
+            if resolved.has_file_ancestor {
                 return Ok(BoaVal::from(false));
             }
             let exists = BOA_VFS_STATE.with(|v| {
                 let vfs = v.borrow();
-                classify_path_stat(&vfs, &norm, allow_host).0 != ResolvedPathKind::Missing
+                classify_path_stat(&vfs, &resolved.norm, allow_host).0 != ResolvedPathKind::Missing
             });
             Ok(BoaVal::from(exists))
         }),
@@ -769,7 +698,7 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_fs_mkdir_sync"),
-        1,
+        2,
         NativeFunction::from_fn_ptr(|_this, args, context| {
             let path = args
                 .first()
@@ -777,19 +706,28 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            let recursive = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(false);
             if !check_boa_fs_write_ocap(&path) {
                 return Ok(BoaVal::undefined());
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-                .map_err(|()| js_eloop_error("mkdir", &path, context))?;
-            if traversed && !check_boa_fs_write_ocap(&norm) {
+            let Some(resolved) = resolve_or_js_err(&path, recursive, allow_host, "mkdir", context)?
+            else {
+                return Ok(BoaVal::undefined());
+            };
+            if resolved.traversed_symlink && !check_boa_fs_write_ocap(&resolved.norm) {
                 return Ok(BoaVal::undefined());
             }
+            if resolved.has_file_ancestor {
+                return Ok(BoaVal::from(-20));
+            }
+            let norm = resolved.norm;
             let err_code = BOA_VFS_STATE.with(|v| {
                 let mut vfs = v.borrow_mut();
-                if has_file_ancestor(&vfs, &norm, allow_host) {
-                    return Some(-20);
+                if !recursive
+                    && classify_path_lstat(&vfs, &norm, allow_host) != ResolvedPathKind::Missing
+                {
+                    return Some(-17);
                 }
                 vfs.ensure_dir_with_ancestors(&norm, false);
                 None
@@ -815,11 +753,14 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(js_string!("[]")));
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let (norm_dir, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-                .map_err(|()| js_eloop_error("scandir", &path, context))?;
-            if traversed && !check_boa_fs_read_ocap(&norm_dir) {
+            let Some(resolved) = resolve_or_js_err(&path, true, allow_host, "scandir", context)?
+            else {
+                return Ok(BoaVal::from(js_string!("[]")));
+            };
+            if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
                 return Ok(BoaVal::from(js_string!("[]")));
             }
+            let norm_dir = resolved.norm;
             let prefix = dir_child_prefix(&norm_dir);
             let entries: Vec<String> = BOA_VFS_STATE.with(|v| {
                 let vfs = v.borrow();
@@ -842,6 +783,7 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 if allow_host
                     && !is_opaque
                     && !vfs.is_host_masked(&norm_dir)
+                    && has_boa_fs_read_ocap(&norm_dir)
                     && let Ok(rd) = std::fs::read_dir(&norm_dir)
                 {
                     for entry in rd.flatten() {
@@ -882,17 +824,20 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
             }
             let allow_host = !is_host_unc_blocked(&path);
             let syscall = if follow_final { "stat" } else { "lstat" };
-            let (norm, traversed) =
-                try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), follow_final)
-                    .map_err(|()| js_eloop_error(syscall, &path, context))?;
-            if traversed && !check_boa_fs_read_ocap(&norm) {
+            let Some(resolved) =
+                resolve_or_js_err(&path, follow_final, allow_host, syscall, context)?
+            else {
+                return Ok(BoaVal::undefined());
+            };
+            if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
                 return Ok(BoaVal::undefined());
             }
+            if resolved.has_file_ancestor {
+                return Ok(BoaVal::null());
+            }
+            let norm = resolved.norm;
             let info_opt: Option<(f64, f64, i32)> = BOA_VFS_STATE.with(|v| {
                 let vfs = v.borrow();
-                if has_file_ancestor(&vfs, &norm, allow_host) {
-                    return None;
-                }
                 if follow_final {
                     let (kind, sz) = classify_path_stat(&vfs, &norm, allow_host);
                     match kind {
@@ -923,7 +868,10 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                                 let mt = default_mtime_ms_for_path(&vfs, &norm, allow_host);
                                 return Some((0.0, mt, 1));
                             }
-                            if !allow_host || vfs.is_host_masked(&norm) {
+                            if !allow_host
+                                || vfs.is_host_masked(&norm)
+                                || !has_boa_fs_read_ocap(&norm)
+                            {
                                 return None;
                             }
                             let meta = std::fs::symlink_metadata(&norm).ok()?;
@@ -936,9 +884,9 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                                     .map(|d| d.as_millis() as f64)
                                     .unwrap_or(1_700_000_000_000.0)
                             };
-                            if meta.file_type().is_symlink() {
+                            if is_host_symlink_or_reparse(&meta) {
                                 let sym_len = std::fs::read_link(&norm)
-                                    .map(|p| p.to_string_lossy().len() as f64)
+                                    .map(|p| normalize_host_readlink_target(&p).len() as f64)
                                     .unwrap_or_else(|_| meta.len() as f64);
                                 Some((sym_len, mt, 2))
                             } else if meta.is_dir() {
@@ -977,14 +925,19 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(0));
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-                .map_err(|()| js_eloop_error("stat", &path, context))?;
-            if traversed && !check_boa_fs_read_ocap(&norm) {
+            let Some(resolved) = resolve_or_js_err(&path, true, allow_host, "stat", context)?
+            else {
                 return Ok(BoaVal::from(0));
+            };
+            if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
+                return Ok(BoaVal::from(0));
+            }
+            if resolved.has_file_ancestor {
+                return Ok(BoaVal::from(-1.0));
             }
             let res = BOA_VFS_STATE.with(|v| {
                 let vfs = v.borrow();
-                let (kind, sz) = classify_path_stat(&vfs, &norm, allow_host);
+                let (kind, sz) = classify_path_stat(&vfs, &resolved.norm, allow_host);
                 match kind {
                     ResolvedPathKind::File => sz as f64,
                     ResolvedPathKind::Directory => 0.0,
@@ -1009,15 +962,19 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(1_700_000_000_000.0));
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let Ok((norm, traversed)) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-            else {
-                return Ok(BoaVal::from(1_700_000_000_000.0));
+            let resolved = match resolve_effective_vfs_path(&path, true, allow_host) {
+                Ok(res) => res,
+                Err(SymlinkResolveError::ReadOcapDenied(denied)) => {
+                    let _ = check_boa_fs_read_ocap(&denied);
+                    return Ok(BoaVal::from(1_700_000_000_000.0));
+                }
+                Err(SymlinkResolveError::Loop) => return Ok(BoaVal::from(1_700_000_000_000.0)),
             };
-            if traversed && !check_boa_fs_read_ocap(&norm) {
+            if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
                 return Ok(BoaVal::from(1_700_000_000_000.0));
             }
-            let mt =
-                BOA_VFS_STATE.with(|v| default_mtime_ms_for_path(&v.borrow(), &norm, allow_host));
+            let mt = BOA_VFS_STATE
+                .with(|v| default_mtime_ms_for_path(&v.borrow(), &resolved.norm, allow_host));
             Ok(BoaVal::from(mt))
         }),
     );
@@ -1036,15 +993,23 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(false));
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let Ok((norm, traversed)) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-            else {
-                return Ok(BoaVal::from(false));
+            let resolved = match resolve_effective_vfs_path(&path, true, allow_host) {
+                Ok(res) => res,
+                Err(SymlinkResolveError::ReadOcapDenied(denied)) => {
+                    let _ = check_boa_fs_read_ocap(&denied);
+                    return Ok(BoaVal::from(false));
+                }
+                Err(SymlinkResolveError::Loop) => return Ok(BoaVal::from(false)),
             };
-            if traversed && !check_boa_fs_read_ocap(&norm) {
+            if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
+                return Ok(BoaVal::from(false));
+            }
+            if resolved.has_file_ancestor {
                 return Ok(BoaVal::from(false));
             }
             let is_dir = BOA_VFS_STATE.with(|v| {
-                classify_path_stat(&v.borrow(), &norm, allow_host).0 == ResolvedPathKind::Directory
+                classify_path_stat(&v.borrow(), &resolved.norm, allow_host).0
+                    == ResolvedPathKind::Directory
             });
             Ok(BoaVal::from(is_dir))
         }),
@@ -1071,16 +1036,25 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
             }
             let allow_host_src = !is_host_unc_blocked(&src);
             let allow_host_dest = !is_host_unc_blocked(&dest);
-            let (norm_src, trav_src) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&src), true)
-                .map_err(|()| js_eloop_error("copyfile", &src, context))?;
-            let (norm_dest, trav_dest) =
-                try_resolve_vfs_path_symlinks(anchor_vfs_path(&dest), true)
-                    .map_err(|()| js_eloop_error("copyfile", &dest, context))?;
-            if (trav_src && !check_boa_fs_read_ocap(&norm_src))
-                || (trav_dest && !check_boa_fs_write_ocap(&norm_dest))
+            let Some(res_src) = resolve_or_js_err(&src, true, allow_host_src, "copyfile", context)?
+            else {
+                return Ok(BoaVal::undefined());
+            };
+            let Some(res_dest) =
+                resolve_or_js_err(&dest, true, allow_host_dest, "copyfile", context)?
+            else {
+                return Ok(BoaVal::undefined());
+            };
+            if (res_src.traversed_symlink && !check_boa_fs_read_ocap(&res_src.norm))
+                || (res_dest.traversed_symlink && !check_boa_fs_write_ocap(&res_dest.norm))
             {
                 return Ok(BoaVal::undefined());
             }
+            if res_src.has_file_ancestor || res_dest.has_file_ancestor {
+                return Ok(BoaVal::from(-20));
+            }
+            let norm_src = res_src.norm;
+            let norm_dest = res_dest.norm;
             let pre_check = BOA_VFS_STATE.with(|v| {
                 let vfs = v.borrow();
                 let src_kind = classify_path_stat(&vfs, &norm_src, allow_host_src).0;
@@ -1089,9 +1063,6 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 }
                 if src_kind == ResolvedPathKind::Directory {
                     return Err(-21);
-                }
-                if has_file_ancestor(&vfs, &norm_dest, allow_host_dest) {
-                    return Err(-20);
                 }
                 let dst_kind = classify_path_stat(&vfs, &norm_dest, allow_host_dest).0;
                 if dst_kind == ResolvedPathKind::Directory {
@@ -1116,6 +1087,9 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
             let content_arc = match vfs_src_arc {
                 Some(arc) => arc,
                 None => {
+                    if !check_boa_fs_read_ocap(&norm_src) {
+                        return Ok(BoaVal::undefined());
+                    }
                     let Ok(bytes) = std::fs::read(&norm_src) else {
                         return Ok(BoaVal::from(-2));
                     };
@@ -1170,33 +1144,39 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
             }
             let allow_host_old = !is_host_unc_blocked(&old_p);
             let allow_host_new = !is_host_unc_blocked(&new_p);
-            // Resolve parent directory symlinks ONLY (`follow_final = false`) so renaming a
-            // symlink moves the directory entry itself rather than its target (#77).
-            let (norm_old, trav_old) =
-                try_resolve_vfs_path_symlinks(anchor_vfs_path(&old_p), false)
-                    .map_err(|()| js_eloop_error("rename", &old_p, context))?;
-            let (norm_new, trav_new) =
-                try_resolve_vfs_path_symlinks(anchor_vfs_path(&new_p), false)
-                    .map_err(|()| js_eloop_error("rename", &new_p, context))?;
-            if (trav_old
-                && (!check_boa_fs_read_ocap(&norm_old) || !check_boa_fs_write_ocap(&norm_old)))
-                || (trav_new && !check_boa_fs_write_ocap(&norm_new))
+            // Resolve intermediate parent directory symlinks ONLY (`follow_final = false`) so
+            // renaming a symlink moves the directory entry itself rather than its target (#77).
+            let Some(res_old) =
+                resolve_or_js_err(&old_p, false, allow_host_old, "rename", context)?
+            else {
+                return Ok(BoaVal::undefined());
+            };
+            let Some(res_new) =
+                resolve_or_js_err(&new_p, false, allow_host_new, "rename", context)?
+            else {
+                return Ok(BoaVal::undefined());
+            };
+            if (res_old.traversed_symlink
+                && (!check_boa_fs_read_ocap(&res_old.norm)
+                    || !check_boa_fs_write_ocap(&res_old.norm)))
+                || (res_new.traversed_symlink && !check_boa_fs_write_ocap(&res_new.norm))
             {
                 return Ok(BoaVal::undefined());
             }
-            let (src_kind, dst_kind, dst_has_file_anc) = BOA_VFS_STATE.with(|v| {
+            if res_old.has_file_ancestor || res_new.has_file_ancestor {
+                return Ok(BoaVal::from(-20)); // ENOTDIR
+            }
+            let norm_old = res_old.norm;
+            let norm_new = res_new.norm;
+            let (src_kind, dst_kind) = BOA_VFS_STATE.with(|v| {
                 let vfs = v.borrow();
                 (
                     classify_path_lstat(&vfs, &norm_old, allow_host_old),
                     classify_path_lstat(&vfs, &norm_new, allow_host_new),
-                    has_file_ancestor(&vfs, &norm_new, allow_host_new),
                 )
             });
             if src_kind == ResolvedPathKind::Missing {
                 return Ok(BoaVal::from(-2)); // ENOENT
-            }
-            if dst_has_file_anc {
-                return Ok(BoaVal::from(-20)); // ENOTDIR
             }
             if norm_old == norm_new {
                 return Ok(BoaVal::from(0));
@@ -1207,7 +1187,6 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 if dst_kind == ResolvedPathKind::Directory {
                     return Ok(BoaVal::from(-21)); // EISDIR (#109)
                 }
-                // Check if source is already in VFS
                 let vfs_src = BOA_VFS_STATE.with(|v| {
                     let vfs = v.borrow();
                     vfs.lookup_present(&norm_old).map(|(id, ino)| {
@@ -1254,10 +1233,14 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                     let Ok(target_path) = std::fs::read_link(&norm_old) else {
                         return Ok(BoaVal::from(-2));
                     };
-                    let target_str = target_path.to_string_lossy().replace('\\', "/");
+                    let target_str = normalize_host_readlink_target(&target_path);
+                    let resolved_orig_target =
+                        resolve_symlink_target_against_link(&norm_old, &target_str);
                     let resolved_new_target =
                         resolve_symlink_target_against_link(&norm_new, &target_str);
-                    if !check_boa_fs_read_ocap(&resolved_new_target) {
+                    if !check_boa_fs_read_ocap(&resolved_orig_target)
+                        || !check_boa_fs_read_ocap(&resolved_new_target)
+                    {
                         return Ok(BoaVal::undefined());
                     }
                     let existing_dst_acc = BOA_VFS_STATE.with(|v| {
@@ -1327,17 +1310,17 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 let mut vfs = v.borrow_mut();
                 let host_old_is_dir = allow_host_old
                     && !vfs.is_host_masked(&norm_old)
-                    && std::path::Path::new(&norm_old).is_dir();
+                    && std::fs::symlink_metadata(&norm_old)
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false);
                 if host_old_is_dir {
                     materialize_host_dir_into_vfs(&mut vfs, &norm_old)?;
                 }
 
-                // Remove empty destination directory entry if present
                 if let Some(PathEntry::Present(old_dst_id)) = vfs.paths.remove(&norm_new) {
                     let _ = vfs.unlink_inode_ref(old_dst_id);
                 }
 
-                // Collect subtree entries under `norm_old`
                 let moved_children: Vec<(String, PathEntry)> = vfs
                     .paths
                     .keys()
@@ -1349,7 +1332,9 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                     .collect();
 
                 let old_dir_entry = vfs.paths.remove(&norm_old);
-                if host_old_is_dir || (allow_host_old && std::path::Path::new(&norm_old).exists()) {
+                if host_old_is_dir
+                    || (allow_host_old && std::fs::symlink_metadata(&norm_old).is_ok())
+                {
                     vfs.paths.insert(norm_old.clone(), PathEntry::Tombstone);
                 }
 
@@ -1406,11 +1391,13 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::undefined());
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), false)
-                .map_err(|()| js_eloop_error("rm", &path, context))?;
-            if traversed && !check_boa_fs_write_ocap(&norm) {
+            let Some(resolved) = resolve_or_js_err(&path, false, allow_host, "rm", context)? else {
+                return Ok(BoaVal::undefined());
+            };
+            if resolved.traversed_symlink && !check_boa_fs_write_ocap(&resolved.norm) {
                 return Ok(BoaVal::undefined());
             }
+            let norm = resolved.norm;
             let prefix = dir_child_prefix(&norm);
             let freed_total = BOA_VFS_STATE.with(|v| {
                 let mut vfs = v.borrow_mut();
@@ -1455,32 +1442,24 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(js_string!("")));
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-                .map_err(|()| js_eloop_error("realpath", &path, context))?;
-            if traversed && !check_boa_fs_read_ocap(&norm) {
+            let Some(resolved) = resolve_or_js_err(&path, true, allow_host, "realpath", context)?
+            else {
+                return Ok(BoaVal::from(js_string!("")));
+            };
+            if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
                 return Ok(BoaVal::from(js_string!("")));
             }
-            let (in_vfs, host_masked) = BOA_VFS_STATE.with(|v| {
-                let vfs = v.borrow();
-                (
-                    matches!(vfs.paths.get(&norm), Some(PathEntry::Present(_))),
-                    vfs.is_host_masked(&norm),
-                )
+            if resolved.has_file_ancestor {
+                return Ok(BoaVal::from(js_string!("")));
+            }
+            let exists = BOA_VFS_STATE.with(|v| {
+                classify_path_stat(&v.borrow(), &resolved.norm, allow_host).0
+                    != ResolvedPathKind::Missing
             });
-            if in_vfs {
-                return Ok(BoaVal::from(js_string!(norm)));
+            if !exists {
+                return Ok(BoaVal::from(js_string!("")));
             }
-            if allow_host
-                && !host_masked
-                && let Ok(canon) = std::fs::canonicalize(&norm)
-            {
-                let s = anchor_vfs_path(&canon.to_string_lossy());
-                if !check_boa_fs_read_ocap(&s) {
-                    return Ok(BoaVal::from(js_string!("")));
-                }
-                return Ok(BoaVal::from(js_string!(s)));
-            }
-            Ok(BoaVal::from(js_string!(norm)))
+            Ok(BoaVal::from(js_string!(resolved.norm)))
         }),
     );
 
@@ -1512,10 +1491,23 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_write_ocap(&full_path) {
                 return Ok(BoaVal::from(js_string!("")));
             }
-            let anchored = anchor_vfs_path(&full_path);
-            let ret_path = norm_vfs_path(&full_path);
+            let allow_host = !is_host_unc_blocked(&full_path);
+            let Some(resolved) =
+                resolve_or_js_err(&full_path, false, allow_host, "mkdtemp", context)?
+            else {
+                return Ok(BoaVal::from(js_string!("")));
+            };
+            if resolved.traversed_symlink && !check_boa_fs_write_ocap(&resolved.norm) {
+                return Ok(BoaVal::from(js_string!("")));
+            }
+            let ret_path = if resolved.traversed_symlink {
+                resolved.norm.clone()
+            } else {
+                norm_vfs_path(&full_path)
+            };
             BOA_VFS_STATE.with(|v| {
-                v.borrow_mut().ensure_dir_with_ancestors(&anchored, true);
+                v.borrow_mut()
+                    .ensure_dir_with_ancestors(&resolved.norm, true);
             });
             Ok(BoaVal::from(js_string!(ret_path)))
         }),
@@ -1534,9 +1526,12 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_write_ocap(&path) {
                 return Ok(BoaVal::undefined());
             }
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-                .map_err(|()| js_eloop_error("chmod", &path, context))?;
-            if traversed && !check_boa_fs_write_ocap(&norm) {
+            let allow_host = !is_host_unc_blocked(&path);
+            let Some(resolved) = resolve_or_js_err(&path, true, allow_host, "chmod", context)?
+            else {
+                return Ok(BoaVal::undefined());
+            };
+            if resolved.traversed_symlink && !check_boa_fs_write_ocap(&resolved.norm) {
                 return Ok(BoaVal::undefined());
             }
             Ok(BoaVal::undefined())
@@ -1563,12 +1558,15 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::undefined());
             }
             let allow_host = !is_host_unc_blocked(&link_path);
-            let (norm_link, traversed) =
-                try_resolve_vfs_path_symlinks(anchor_vfs_path(&link_path), false)
-                    .map_err(|()| js_eloop_error("symlink", &link_path, context))?;
-            if traversed && !check_boa_fs_write_ocap(&norm_link) {
+            let Some(resolved_link) =
+                resolve_or_js_err(&link_path, false, allow_host, "symlink", context)?
+            else {
+                return Ok(BoaVal::undefined());
+            };
+            if resolved_link.traversed_symlink && !check_boa_fs_write_ocap(&resolved_link.norm) {
                 return Ok(BoaVal::undefined());
             }
+            let norm_link = resolved_link.norm;
             if target.as_bytes().contains(&0) || is_host_unc_blocked(&target) {
                 let _ = check_boa_fs_read_ocap(&target);
                 return Ok(BoaVal::undefined());
@@ -1577,18 +1575,15 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
             if !check_boa_fs_read_ocap(&resolved_target) {
                 return Ok(BoaVal::undefined());
             }
-            let pre_err = BOA_VFS_STATE.with(|v| {
-                let vfs = v.borrow();
-                if has_file_ancestor(&vfs, &norm_link, allow_host) {
-                    return Some(-20);
-                }
-                if classify_path_lstat(&vfs, &norm_link, allow_host) != ResolvedPathKind::Missing {
-                    return Some(-17);
-                }
-                None
+            if resolved_link.has_file_ancestor {
+                return Ok(BoaVal::from(-20));
+            }
+            let exists_lstat = BOA_VFS_STATE.with(|v| {
+                classify_path_lstat(&v.borrow(), &norm_link, allow_host)
+                    != ResolvedPathKind::Missing
             });
-            if let Some(code) = pre_err {
-                return Ok(BoaVal::from(code));
+            if exists_lstat {
+                return Ok(BoaVal::from(-17));
             }
             let stored_target = target.trim().to_string();
             if let Err(msg) = try_consume_isolate_memory_ctx(stored_target.len(), context) {
@@ -1618,16 +1613,23 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(false));
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let Ok((norm, traversed)) =
-                try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), false)
-            else {
-                return Ok(BoaVal::from(false));
+            let resolved = match resolve_effective_vfs_path(&path, false, allow_host) {
+                Ok(res) => res,
+                Err(SymlinkResolveError::ReadOcapDenied(denied)) => {
+                    let _ = check_boa_fs_read_ocap(&denied);
+                    return Ok(BoaVal::from(false));
+                }
+                Err(SymlinkResolveError::Loop) => return Ok(BoaVal::from(false)),
             };
-            if traversed && !check_boa_fs_read_ocap(&norm) {
+            if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
+                return Ok(BoaVal::from(false));
+            }
+            if resolved.has_file_ancestor {
                 return Ok(BoaVal::from(false));
             }
             let is_sym = BOA_VFS_STATE.with(|v| {
-                classify_path_lstat(&v.borrow(), &norm, allow_host) == ResolvedPathKind::Symlink
+                classify_path_lstat(&v.borrow(), &resolved.norm, allow_host)
+                    == ResolvedPathKind::Symlink
             });
             Ok(BoaVal::from(is_sym))
         }),
@@ -1647,11 +1649,17 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::from(js_string!("")));
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), false)
-                .map_err(|()| js_eloop_error("readlink", &path, context))?;
-            if traversed && !check_boa_fs_read_ocap(&norm) {
+            let Some(resolved) = resolve_or_js_err(&path, false, allow_host, "readlink", context)?
+            else {
+                return Ok(BoaVal::from(js_string!("")));
+            };
+            if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
                 return Ok(BoaVal::from(js_string!("")));
             }
+            if resolved.has_file_ancestor {
+                return Ok(BoaVal::from(-20));
+            }
+            let norm = resolved.norm;
             enum ReadlinkState {
                 Target(String),
                 NotSymlink,
@@ -1667,14 +1675,13 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                         None => ReadlinkState::Missing,
                     },
                     None => {
-                        if !allow_host || vfs.is_host_masked(&norm) {
+                        if !allow_host || vfs.is_host_masked(&norm) || !has_boa_fs_read_ocap(&norm)
+                        {
                             return ReadlinkState::Missing;
                         }
                         match std::fs::symlink_metadata(&norm) {
-                            Ok(m) if m.file_type().is_symlink() => std::fs::read_link(&norm)
-                                .map(|p| {
-                                    ReadlinkState::Target(p.to_string_lossy().replace('\\', "/"))
-                                })
+                            Ok(m) if is_host_symlink_or_reparse(&m) => std::fs::read_link(&norm)
+                                .map(|p| ReadlinkState::Target(normalize_host_readlink_target(&p)))
                                 .unwrap_or(ReadlinkState::Missing),
                             Ok(_) => ReadlinkState::NotSymlink,
                             Err(_) => ReadlinkState::Missing,
@@ -1715,11 +1722,20 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 return Ok(BoaVal::undefined());
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-                .map_err(|()| js_eloop_error("truncate", &path, context))?;
-            if traversed && (!check_boa_fs_read_ocap(&norm) || !check_boa_fs_write_ocap(&norm)) {
+            let Some(resolved) = resolve_or_js_err(&path, true, allow_host, "truncate", context)?
+            else {
+                return Ok(BoaVal::undefined());
+            };
+            if resolved.traversed_symlink
+                && (!check_boa_fs_read_ocap(&resolved.norm)
+                    || !check_boa_fs_write_ocap(&resolved.norm))
+            {
                 return Ok(BoaVal::undefined());
             }
+            if resolved.has_file_ancestor {
+                return Ok(BoaVal::from(-20));
+            }
+            let norm = resolved.norm;
             let existing = BOA_VFS_STATE.with(|v| {
                 let vfs = v.borrow();
                 let (kind, _) = classify_path_stat(&vfs, &norm, allow_host);
@@ -1750,6 +1766,9 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                     vfs.update_inode_kind(id, VfsEntryKind::File(arc_buf));
                 });
             } else {
+                if !check_boa_fs_read_ocap(&norm) {
+                    return Ok(BoaVal::undefined());
+                }
                 let Ok(mut data) = std::fs::read(&norm) else {
                     return Ok(BoaVal::from(-2));
                 };
@@ -1770,7 +1789,7 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_fs_utimes_sync"),
-        3,
+        4,
         NativeFunction::from_fn_ptr(|_this, args, context| {
             let path = args
                 .first()
@@ -1778,15 +1797,23 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
+            let follow_final = args.get(3).and_then(|v| v.as_boolean()).unwrap_or(true);
             if !check_boa_fs_write_ocap(&path) {
                 return Ok(BoaVal::undefined());
             }
             let allow_host = !is_host_unc_blocked(&path);
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchor_vfs_path(&path), true)
-                .map_err(|()| js_eloop_error("utime", &path, context))?;
-            if traversed && !check_boa_fs_write_ocap(&norm) {
+            let Some(resolved) =
+                resolve_or_js_err(&path, follow_final, allow_host, "utime", context)?
+            else {
+                return Ok(BoaVal::undefined());
+            };
+            if resolved.traversed_symlink && !check_boa_fs_write_ocap(&resolved.norm) {
                 return Ok(BoaVal::undefined());
             }
+            if resolved.has_file_ancestor {
+                return Ok(BoaVal::from(-20));
+            }
+            let norm = resolved.norm;
             let mtime_ms = args
                 .get(2)
                 .and_then(|v| v.as_number())
@@ -1795,6 +1822,7 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 Present(crate::bindings::fs::state::InodeId),
                 HostDir,
                 HostFile,
+                HostSymlink,
                 Missing,
             }
             let st = BOA_VFS_STATE.with(|v| {
@@ -1802,10 +1830,16 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                 if let Some((id, _)) = vfs.lookup_present(&norm) {
                     return UtimeState::Present(id);
                 }
-                match classify_path_stat(&vfs, &norm, allow_host).0 {
+                let kind = if follow_final {
+                    classify_path_stat(&vfs, &norm, allow_host).0
+                } else {
+                    classify_path_lstat(&vfs, &norm, allow_host)
+                };
+                match kind {
                     ResolvedPathKind::Directory => UtimeState::HostDir,
                     ResolvedPathKind::File => UtimeState::HostFile,
-                    _ => UtimeState::Missing,
+                    ResolvedPathKind::Symlink => UtimeState::HostSymlink,
+                    ResolvedPathKind::Missing => UtimeState::Missing,
                 }
             });
             match st {
@@ -1827,7 +1861,37 @@ pub(crate) fn register_fs_path_host_functions(ctx: &mut boa_engine::Context) {
                         }
                     });
                 }
+                UtimeState::HostSymlink => {
+                    if !check_boa_fs_read_ocap(&norm) {
+                        return Ok(BoaVal::undefined());
+                    }
+                    let Ok(target_path) = std::fs::read_link(&norm) else {
+                        return Ok(BoaVal::from(-2));
+                    };
+                    let target_str = normalize_host_readlink_target(&target_path);
+                    let resolved_target = resolve_symlink_target_against_link(&norm, &target_str);
+                    if !check_boa_fs_read_ocap(&resolved_target) {
+                        return Ok(BoaVal::undefined());
+                    }
+                    if let Err(msg) = try_consume_isolate_memory_ctx(target_str.len(), context) {
+                        return Err(JsNativeError::range().with_message(msg).into());
+                    }
+                    BOA_VFS_STATE.with(|v| {
+                        let mut vfs = v.borrow_mut();
+                        vfs.ensure_parent_dirs(&norm);
+                        let id = vfs.alloc_inode(
+                            VfsEntryKind::Symlink(target_str),
+                            Some(mtime_ms),
+                            1,
+                            0,
+                        );
+                        vfs.paths.insert(norm, PathEntry::Present(id));
+                    });
+                }
                 UtimeState::HostFile => {
+                    if !check_boa_fs_read_ocap(&norm) {
+                        return Ok(BoaVal::undefined());
+                    }
                     let Ok(bytes) = std::fs::read(&norm) else {
                         return Ok(BoaVal::from(-2));
                     };

@@ -267,6 +267,12 @@ impl ArrayBuffer {
         self.data.as_deref()
     }
 
+    /// Returns `true` if `[[ArrayBufferDetachKey]]` is non-`undefined` (e.g. `WebAssembly.Memory`).
+    #[must_use]
+    pub fn has_detach_key(&self) -> bool {
+        !self.detach_key.is_undefined()
+    }
+
     /// Resizes the buffer to the new size, clamped to the maximum byte length if present.
     pub fn resize(&mut self, new_byte_length: u64) -> JsResult<()> {
         let Some(max_byte_len) = self.max_byte_len else {

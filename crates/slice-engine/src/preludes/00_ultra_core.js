@@ -34,7 +34,12 @@
       for (var i = 0; i < keys.length; i++) {
         var k = keys[i];
         if (k !== "default" && k !== "__esModule" && !Object.prototype.hasOwnProperty.call(to, k)) {
-          to[k] = from[k];
+          Object.defineProperty(to, k, {
+            value: from[k],
+            writable: true,
+            enumerable: true,
+            configurable: true
+          });
         }
       }
     }

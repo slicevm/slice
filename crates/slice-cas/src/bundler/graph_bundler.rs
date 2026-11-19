@@ -61,15 +61,11 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
     let is_jsx_entry = matches!(entry_ext, "tsx" | "jsx") || source_contains_jsx(&raw);
     let is_ts_entry = matches!(entry_ext, "ts" | "tsx" | "mts" | "cts");
 
-    // Fast path for single-file scripts with no imports/exports/requires/classes/JSX/WinterTC bridge
+    // Fast path for single-file scripts with no imports/exports/requires/classes/JSX/WinterTC bridge:
+    // return `raw` verbatim so `compile_source_to_bytecode` parses once and preserves exact `(line, col)`.
     if !is_jsx_entry && !entrypoint_needs_bundler_ac().is_match(&raw) {
-        if !is_ts_entry {
-            return Ok(raw);
-        }
-        let stripped = strip_typescript_raw_with_ext(&raw, true, false);
-        if !entrypoint_needs_bundler_ac().is_match(&stripped) {
-            return Ok(stripped);
-        }
+        let _ = is_ts_entry;
+        return Ok(raw);
     }
 
     let _cache_guard = ResolverCacheGuard::new();
@@ -117,6 +113,11 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
             let cjs_body = format!("module.exports = {};", canonical_json);
             visited_order.push((mod_id.clone(), cjs_body));
             return Ok(mod_id);
+        }
+
+        if !mod_id.contains("/node_modules/") {
+            crate::compiler::check_syntax_source(&raw_src, Some(path))
+                .map_err(anyhow::Error::msg)?;
         }
 
         let is_ts = matches!(ext, "ts" | "tsx" | "jsx" | "mts" | "cts");

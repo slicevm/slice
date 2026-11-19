@@ -373,7 +373,8 @@ impl VfsState {
                     let host_opaque = was_tombstoned
                         || (is_leaf && leaf_opaque_if_new)
                         || (dir_path.starts_with("/tmp/")
-                            && !std::path::Path::new(dir_path).exists());
+                            && (!crate::boa_realm::has_any_boa_fs_read_ocap()
+                                || !std::path::Path::new(dir_path).exists()));
                     let id = self.alloc_inode(VfsEntryKind::Directory { host_opaque }, None, 1, 0);
                     self.paths
                         .insert(dir_path.to_string(), PathEntry::Present(id));

@@ -21,7 +21,7 @@ By serializing the compiled `Gc<CodeBlock>` tree and global `Scope` bindings int
 
 ## 2. Modified Files
 
-Nineteen files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
+Twenty-two files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
 - [`src/script.rs`](./src/script.rs):
   - `Script::compile_to_slicebc(&self, context: &mut Context) -> JsResult<Vec<u8>>`
   - `Script::from_slicebc_bytes(bytes: &[u8], context: &mut Context) -> Option<Self>`
@@ -42,8 +42,9 @@ Nineteen files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
   - Wired `get_by_name` and `set_by_name` to call `ic.get_fast(object_borrowed.shape())`.
 - [`src/vm/runtime_limits.rs`](./src/vm/runtime_limits.rs), [`src/vm/opcode/iteration/loop_ops.rs`](./src/vm/opcode/iteration/loop_ops.rs), [`src/vm/call_frame/mod.rs`](./src/vm/call_frame/mod.rs), & [`src/bytecompiler/statement/loop.rs`](./src/bytecompiler/statement/loop.rs):
   - `RuntimeLimits::loop_iterations_executed()` and `RuntimeLimits::check_and_increment_loop_iteration()`: Inline cumulative loop iteration counter + limit check on `IncrementLoopIteration` (removing `CallFrame::loop_iteration_count` and avoiding `frame_mut()` heap dereferencing on every loop iteration), plus emitting `IncrementLoopIteration` after the loop condition check in `while`, `for..in`, and `for..of` so Tier-1 Boa loop executions report and enforce exact `fuelUsed` telemetry.
-- [`src/builtins/typed_array/mod.rs`](./src/builtins/typed_array/mod.rs):
+- [`src/builtins/typed_array/mod.rs`](./src/builtins/typed_array/mod.rs), [`src/builtins/typed_array/object.rs`](./src/builtins/typed_array/object.rs), [`src/builtins/dataview/mod.rs`](./src/builtins/dataview/mod.rs), & [`src/builtins/array_buffer/mod.rs`](./src/builtins/array_buffer/mod.rs):
   - `TypedArrayKind::to_element_f64`: Replaced Rust's saturating `f64 as u8/i8/u16/i16/i32/u32` casts with ECMAScript modular two's-complement conversion (`f64_to_int32` / `f64_to_uint32`, plus `round_ties_even` + `NaN -> 0` for `Uint8Clamped`) so `new Uint8Array(typedArray)` and `Buffer.from(typedArray)` honor ECMA-262 `ToUint8`/`ToInt8`/`ToUint16`/`ToInt16`/`ToInt32`/`ToUint32`.
+  - `TypedArray::{is_auto_length, is_out_of_bounds_now}`, `DataView::{is_auto_byte_length, raw_byte_offset, is_out_of_bounds_now}`, and `ArrayBuffer::has_detach_key`: Public zero-allocation inspection getters so `structuredClone` preserves `auto` length-tracking views across resizable `ArrayBuffer` / growable `SharedArrayBuffer` clones and rejects out-of-bounds views and non-detachable `WebAssembly.Memory` buffers with `DataCloneError`.
 - [`src/object/builtins/jsarraybuffer.rs`](./src/object/builtins/jsarraybuffer.rs), [`src/object/operations.rs`](./src/object/operations.rs), & [`src/vm/mod.rs`](./src/vm/mod.rs):
   - `JsArrayBuffer::from_byte_block_with_detach_key`: Exposes `[[ArrayBufferDetachKey]]` initialization on `JsArrayBuffer` so `WebAssembly.Memory.prototype.buffer` sets `"WebAssembly.Memory"` as its detach key per W3C WebAssembly JS-API `CreateMemoryBuffer` / `ResetMemoryBuffer`.
   - `JsObject::call`, `JsObject::construct`, `Script::evaluate`, `Script::evaluate_async_with_budget`, `Script::prepare_run`, and `Stack::len` / `Stack::truncate`: Restores `context.vm.stack` back to its pre-invocation stack pointer when an early-exiting host call/script unwinds with `Err`, preventing unpopped register/argument slots from accumulating across repeated caught host-callback exceptions or warm pooled realm turns.

@@ -1,11 +1,45 @@
 //! Oxc TypeScript & JSX/TSX Ahead-of-Time Transpiler (`strip_typescript_raw_with_ext`)
 //! and Comment/Require Normalizer.
 
+use crate::compiler::diagnostics::{
+    SyntaxErrorDiagnostic, blank_leading_shebang, check_syntax_source_detailed,
+    extract_oxc_syntax_diagnostic,
+};
 use crate::linker::{
     has_esm_default_export_marker, rewrite_buffer_fast_paths_ast, rewrite_require_ident_ast,
     transform_module_to_cjs,
 };
 use std::path::Path;
+
+#[inline]
+fn may_contain_ts_or_jsx(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    if memchr::memchr3(b':', b'<', b'!', bytes).is_some() {
+        return true;
+    }
+    for kw in [
+        &b"interface "[..],
+        &b"interface{"[..],
+        &b"type "[..],
+        &b"enum "[..],
+        &b"namespace "[..],
+        &b"declare "[..],
+        &b" as "[..],
+        &b" satisfies "[..],
+        &b" implements "[..],
+        &b" abstract "[..],
+        &b" readonly "[..],
+        &b"public "[..],
+        &b"private "[..],
+        &b"protected "[..],
+        &b"override "[..],
+    ] {
+        if memchr::memmem::find(bytes, kw).is_some() {
+            return true;
+        }
+    }
+    false
+}
 
 /// Extracts any top-level `return <expr>;` spans directly from an already-parsed Oxc `Program`
 /// (`allow_return_outside_function: true`). Returns an empty `SmallVec` for the 99.9%+ common case
@@ -132,10 +166,17 @@ pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool
     if source.starts_with("var __slice_modules =") {
         return source.to_string();
     }
+    let clean_cow = blank_leading_shebang(source);
+    let clean = clean_cow.as_ref();
+
     let has_jsx_hint =
-        is_jsx_ext || (is_ts && memchr::memmem::find(source.as_bytes(), b"@jsx").is_some());
-    if !is_ts && !has_jsx_hint && memchr::memmem::find(source.as_bytes(), b"interface ").is_none() {
-        return strip_js_comments(source);
+        is_jsx_ext || (is_ts && memchr::memmem::find(clean.as_bytes(), b"@jsx").is_some());
+    if !is_ts && !has_jsx_hint && !may_contain_ts_or_jsx(clean) {
+        return if memchr::memmem::find(clean.as_bytes(), b"Buffer.").is_some() {
+            rewrite_buffer_fast_paths_ast(clean)
+        } else {
+            clean_cow.into_owned()
+        };
     }
 
     let allocator = oxc::allocator::Allocator::default();
@@ -148,7 +189,7 @@ pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool
     } else {
         oxc::span::SourceType::ts().with_module(true)
     };
-    let mut parser_ret = oxc::parser::Parser::new(&allocator, source, active_source_type)
+    let mut parser_ret = oxc::parser::Parser::new(&allocator, clean, active_source_type)
         .with_options(parse_opts)
         .parse();
     let mut active_path = if has_jsx_hint {
@@ -157,10 +198,10 @@ pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool
         "module.ts"
     };
 
-    // If `.ts` parsing had diagnostics, retry with `.tsx` in case JSX syntax was used
+    // If `.ts` parsing had diagnostics, retry with `.tsx` or sloppy script mode
     if !parser_ret.diagnostics.is_empty() && !has_jsx_hint {
         let tsx_type = oxc::span::SourceType::tsx().with_module(true);
-        let retry_ret = oxc::parser::Parser::new(&allocator, source, tsx_type)
+        let retry_ret = oxc::parser::Parser::new(&allocator, clean, tsx_type)
             .with_options(parse_opts)
             .parse();
         if retry_ret.diagnostics.is_empty() {
@@ -169,31 +210,50 @@ pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool
             active_path = "module.tsx";
         }
     }
-
     if !parser_ret.diagnostics.is_empty() {
-        return strip_js_comments(source);
+        let script_ts = oxc::span::SourceType::ts().with_module(false);
+        let retry_script = oxc::parser::Parser::new(&allocator, clean, script_ts)
+            .with_options(parse_opts)
+            .parse();
+        if retry_script.diagnostics.is_empty() {
+            parser_ret = retry_script;
+            active_source_type = script_ts;
+        }
     }
 
-    let top_ret_spans = extract_top_level_return_spans(&parser_ret.program, source);
+    // Preserve original lines verbatim when syntax diagnostics exist so downstream error
+    // reporting never suffers shifted line numbers.
+    if !parser_ret.diagnostics.is_empty() {
+        return source.to_string();
+    }
+
+    let top_ret_spans = extract_top_level_return_spans(&parser_ret.program, clean);
     if top_ret_spans.is_empty() {
+        if !has_jsx_hint && !may_contain_ts_or_jsx(clean) {
+            return if memchr::memmem::find(clean.as_bytes(), b"Buffer.").is_some() {
+                rewrite_buffer_fast_paths_ast(clean)
+            } else {
+                clean_cow.into_owned()
+            };
+        }
         return transpile_parsed_oxc_program(
             &allocator,
             parser_ret.program,
             active_path,
             false,
-            source,
+            clean,
         );
     }
 
-    let masked_source = build_masked_top_level_returns(source, &top_ret_spans);
+    let masked_source = build_masked_top_level_returns(clean, &top_ret_spans);
     let masked_alloc = oxc::allocator::Allocator::default();
     let masked_ret = oxc::parser::Parser::new(&masked_alloc, &masked_source, active_source_type)
         .with_options(parse_opts)
         .parse();
     if !masked_ret.diagnostics.is_empty() {
-        return strip_js_comments(source);
+        return source.to_string();
     }
-    transpile_parsed_oxc_program(&masked_alloc, masked_ret.program, active_path, true, source)
+    transpile_parsed_oxc_program(&masked_alloc, masked_ret.program, active_path, true, clean)
 }
 
 /// Strips JSDoc/license block comments (`/* ... */`), `//` line comments, and blank lines
@@ -539,12 +599,7 @@ pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
     strip_typescript_and_normalize_with_ext(source, is_ts, false)
 }
 
-pub fn strip_typescript_and_normalize_with_ext(
-    source: &str,
-    is_ts: bool,
-    is_jsx_ext: bool,
-) -> String {
-    let mut js_code = strip_typescript_raw_with_ext(source, is_ts, is_jsx_ext);
+fn normalize_transpiled_module_js(mut js_code: String) -> String {
     if ((js_code.contains("import ")
         && (js_code.contains("node:")
             || js_code.contains("slice:")
@@ -579,6 +634,150 @@ pub fn strip_typescript_and_normalize_with_ext(
     }
 }
 
+pub fn strip_typescript_and_normalize_with_ext(
+    source: &str,
+    is_ts: bool,
+    is_jsx_ext: bool,
+) -> String {
+    let js_code = strip_typescript_raw_with_ext(source, is_ts, is_jsx_ext);
+    normalize_transpiled_module_js(js_code)
+}
+
+/// Single-pass syntax-checked TypeScript/JSX/ECMAScript compiler for `compile_source_to_bytecode`:
+/// - Returns `Err(SyntaxErrorDiagnostic)` with exact 1-based `(line, col)` in `source` when invalid.
+/// - Preserves pure-ECMAScript source lines and columns verbatim without running `Codegen`.
+/// - Attaches an inline `//@sm:||<line_map>` header when TypeScript lowering alters line counts so
+///   semantic early errors and runtime stack frames map back to original lines.
+pub fn compile_ts_or_js_checked(
+    source: &str,
+    is_ts: bool,
+    is_jsx_ext: bool,
+) -> Result<String, SyntaxErrorDiagnostic> {
+    if source.starts_with("var __slice_modules =") {
+        return Ok(source.to_string());
+    }
+    let clean_cow = blank_leading_shebang(source);
+    let clean = clean_cow.as_ref();
+    let allocator = oxc::allocator::Allocator::default();
+    let parse_opts = oxc::parser::ParseOptions {
+        allow_return_outside_function: true,
+        ..Default::default()
+    };
+
+    let has_jsx_hint =
+        is_jsx_ext || (is_ts && memchr::memmem::find(clean.as_bytes(), b"@jsx").is_some());
+
+    // Fast path for pure JS inputs without TypeScript/JSX markers: single parse, zero Codegen!
+    if !has_jsx_hint && !may_contain_ts_or_jsx(clean) {
+        let mjs_ret = oxc::parser::Parser::new(&allocator, clean, oxc::span::SourceType::mjs())
+            .with_options(parse_opts)
+            .parse();
+        if mjs_ret.diagnostics.is_empty()
+            && extract_top_level_return_spans(&mjs_ret.program, clean).is_empty()
+        {
+            let fast_js = if memchr::memmem::find(clean.as_bytes(), b"Buffer.").is_some() {
+                rewrite_buffer_fast_paths_ast(clean)
+            } else {
+                clean_cow.into_owned()
+            };
+            return Ok(normalize_transpiled_module_js(fast_js));
+        }
+    }
+
+    let mut active_source_type = if has_jsx_hint {
+        oxc::span::SourceType::tsx().with_module(true)
+    } else {
+        oxc::span::SourceType::ts().with_module(true)
+    };
+    let mut parser_ret = oxc::parser::Parser::new(&allocator, clean, active_source_type)
+        .with_options(parse_opts)
+        .parse();
+    let mut active_path = if has_jsx_hint {
+        "module.tsx"
+    } else {
+        "module.ts"
+    };
+
+    if !parser_ret.diagnostics.is_empty() && !has_jsx_hint {
+        let tsx_type = oxc::span::SourceType::tsx().with_module(true);
+        let retry_ret = oxc::parser::Parser::new(&allocator, clean, tsx_type)
+            .with_options(parse_opts)
+            .parse();
+        if retry_ret.diagnostics.is_empty() {
+            parser_ret = retry_ret;
+            active_source_type = tsx_type;
+            active_path = "module.tsx";
+        }
+    }
+
+    if !parser_ret.diagnostics.is_empty() {
+        let script_ts = oxc::span::SourceType::ts().with_module(false);
+        let retry_script = oxc::parser::Parser::new(&allocator, clean, script_ts)
+            .with_options(parse_opts)
+            .parse();
+        if retry_script.diagnostics.is_empty() {
+            parser_ret = retry_script;
+            active_source_type = script_ts;
+        } else {
+            for sloppy_js in [
+                oxc::span::SourceType::cjs(),
+                oxc::span::SourceType::default(),
+            ] {
+                let retry_js = oxc::parser::Parser::new(&allocator, clean, sloppy_js)
+                    .with_options(parse_opts)
+                    .parse();
+                if retry_js.diagnostics.is_empty() {
+                    let fast_js = if memchr::memmem::find(clean.as_bytes(), b"Buffer.").is_some() {
+                        rewrite_buffer_fast_paths_ast(clean)
+                    } else {
+                        clean_cow.into_owned()
+                    };
+                    return Ok(normalize_transpiled_module_js(fast_js));
+                }
+            }
+            return Err(extract_oxc_syntax_diagnostic(
+                clean,
+                &parser_ret.diagnostics[0],
+            ));
+        }
+    }
+
+    let top_ret_spans = extract_top_level_return_spans(&parser_ret.program, clean);
+    let raw_transpiled = if top_ret_spans.is_empty() {
+        transpile_parsed_oxc_program(&allocator, parser_ret.program, active_path, false, clean)
+    } else {
+        let masked_source = build_masked_top_level_returns(clean, &top_ret_spans);
+        let masked_alloc = oxc::allocator::Allocator::default();
+        let masked_ret =
+            oxc::parser::Parser::new(&masked_alloc, &masked_source, active_source_type)
+                .with_options(parse_opts)
+                .parse();
+        if !masked_ret.diagnostics.is_empty() {
+            return Err(extract_oxc_syntax_diagnostic(
+                clean,
+                &masked_ret.diagnostics[0],
+            ));
+        }
+        transpile_parsed_oxc_program(&masked_alloc, masked_ret.program, active_path, true, clean)
+    };
+
+    let normalized = normalize_transpiled_module_js(raw_transpiled);
+    if !normalized.starts_with("var __slice_modules =")
+        && !normalized.starts_with("// #slice-source: ")
+        && !normalized.starts_with("//@sm:")
+    {
+        let orig_nl = clean.bytes().filter(|&b| b == b'\n').count();
+        let out_nl = normalized.bytes().filter(|&b| b == b'\n').count();
+        if orig_nl != out_nl {
+            let line_map = crate::bundler::source_map::compute_source_line_map(clean, &normalized);
+            if !line_map.is_empty() {
+                return Ok(format!("//@sm:||{}\n{}", line_map, normalized));
+            }
+        }
+    }
+    Ok(normalized)
+}
+
 /// Rewrites legacy CommonJS `const x = require("mod")` into synthetic deterministic ESM/CAS lookup
 /// using Oxc AST `CallExpression` span replacement so `"require(...)"` inside string or template
 /// literals is never modified.
@@ -596,43 +795,12 @@ pub fn rewrite_cjs_require(source: &str) -> String {
 }
 
 /// Validates JS/TS/JSX/TSX syntax using Oxc's parser (`oxc::parser::Parser`).
-/// Returns `Ok(())` if the source has no syntax errors, or `Err(SyntaxError message)` if invalid.
+/// Returns `Ok(())` if the source has no syntax errors, or `Err(SyntaxError message)` with exact
+/// 1-based `(line, col)` coordinates if invalid.
 pub fn check_syntax_source(source: &str, path_hint: Option<&Path>) -> Result<(), String> {
-    let allocator = oxc::allocator::Allocator::default();
-    let parse_opts = oxc::parser::ParseOptions {
-        allow_return_outside_function: true,
-        ..Default::default()
-    };
-    let is_jsx_ext = path_hint
-        .and_then(|p| p.extension())
-        .and_then(|e| e.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("tsx") || ext.eq_ignore_ascii_case("jsx"));
-    let src_type = if is_jsx_ext {
-        oxc::span::SourceType::tsx().with_module(true)
-    } else {
-        oxc::span::SourceType::ts().with_module(true)
-    };
-    let parsed = oxc::parser::Parser::new(&allocator, source, src_type)
-        .with_options(parse_opts)
-        .parse();
-    if parsed.diagnostics.is_empty() {
-        return Ok(());
-    }
-    if !is_jsx_ext {
-        let retry_tsx = oxc::parser::Parser::new(
-            &allocator,
-            source,
-            oxc::span::SourceType::tsx().with_module(true),
-        )
-        .with_options(parse_opts)
-        .parse();
-        if retry_tsx.diagnostics.is_empty() {
-            return Ok(());
-        }
-    }
-    let first_err = &parsed.diagnostics[0];
     let file_label = path_hint
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "<eval>".to_string());
-    Err(format!("SyntaxError in {}: {}", file_label, first_err))
+    check_syntax_source_detailed(source, path_hint)
+        .map_err(|diag| diag.to_labeled_error_string(&file_label))
 }

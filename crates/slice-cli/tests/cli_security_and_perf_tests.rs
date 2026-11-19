@@ -240,6 +240,11 @@ fn test_wave1_cli_eval_print_check_argv_and_exit_codes() {
     std::fs::write(&invalid_script, "const x = (\n").unwrap();
     let err1 = cmd_check(&[invalid_script.to_string_lossy().to_string()]).unwrap_err();
     assert!(err1.to_string().contains("SyntaxError"));
+    assert!(
+        err1.to_string().contains("line ") && err1.to_string().contains("col "),
+        "slice check must include line and col, got: {}",
+        err1
+    );
     assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 1);
 
     let err2 = cmd_run(&[
@@ -248,6 +253,17 @@ fn test_wave1_cli_eval_print_check_argv_and_exit_codes() {
     ])
     .unwrap_err();
     assert!(err2.to_string().contains("SyntaxError"));
+    assert!(err2.to_string().contains("line ") && err2.to_string().contains("col "));
+    assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 1);
+
+    let comment_invalid = tmp_dir.join("comment_invalid.ts");
+    std::fs::write(&comment_invalid, "// c1\n// c2\nconst x = ;").unwrap();
+    let err3 = cmd_run(&[comment_invalid.to_string_lossy().to_string()]).unwrap_err();
+    assert!(
+        err3.to_string().contains("line 3, col 11"),
+        "slice run on comment-prefixed TS file must report line 3, col 11, got: {}",
+        err3
+    );
     assert_eq!(LAST_CLI_EXIT_CODE.load(Ordering::Relaxed), 1);
 
     // 2. `-e` / `--eval` with `process.argv` and exit code propagation

@@ -2,9 +2,21 @@
 (function() {
   if (!globalThis.TextDecoder) __slice_ensure_shard(2);
 
+  var __IterProto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+
+  function __sanitizeMimeType(raw) {
+    if (!raw) return "";
+    var s = String(raw);
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c < 0x20 || c > 0x7E) return "";
+    }
+    return s.toLowerCase();
+  }
+
   function Blob(blobParts, options) {
     var o = options || {};
-    this.type = o.type ? String(o.type).toLowerCase() : "";
+    this.type = o.type !== undefined ? __sanitizeMimeType(o.type) : "";
     var chunks = [];
     if (blobParts !== undefined && blobParts !== null) {
       if (!Array.isArray(blobParts) && typeof blobParts.length !== "number") {
@@ -33,7 +45,7 @@
     var s = start === undefined ? 0 : (start < 0 ? Math.max(len + Number(start), 0) : Math.min(Number(start), len));
     var e = end === undefined ? len : (end < 0 ? Math.max(len + Number(end), 0) : Math.min(Number(end), len));
     var sub = e > s ? this._u8.subarray(s, e) : new Uint8Array(0);
-    return new Blob([sub], { type: contentType !== undefined ? String(contentType) : "" });
+    return new Blob([sub], { type: contentType !== undefined ? __sanitizeMimeType(contentType) : "" });
   };
   Blob.prototype.stream = function() {
     if (!globalThis.ReadableStream) __slice_ensure_shard(3);
@@ -115,26 +127,45 @@
     }
     this._p = nx;
   };
+  var __fdIterProto = Object.create(__IterProto);
+  __fdIterProto.next = function() {
+    var p = this._t._p;
+    if (this._i >= p.length) return { value: undefined, done: true };
+    var pair = p[this._i++];
+    var k = this._k;
+    return {
+      value: k === 0 ? pair[0] : (k === 1 ? pair[1] : [pair[0], pair[1]]),
+      done: false
+    };
+  };
+  if (typeof Symbol !== "undefined" && Symbol.toStringTag) {
+    Object.defineProperty(__fdIterProto, Symbol.toStringTag, {
+      value: "FormData Iterator",
+      configurable: true
+    });
+  }
+  function __mkFdIter(fd, kind) {
+    var it = Object.create(__fdIterProto);
+    it._t = fd;
+    it._i = 0;
+    it._k = kind;
+    return it;
+  }
+
   FormData.prototype.entries = function() {
-    return this._p.slice();
+    return __mkFdIter(this, 2);
   };
   FormData.prototype.keys = function() {
-    var r = [];
-    for (var i = 0; i < this._p.length; i++) r.push(this._p[i][0]);
-    return r;
+    return __mkFdIter(this, 0);
   };
   FormData.prototype.values = function() {
-    var r = [];
-    for (var i = 0; i < this._p.length; i++) r.push(this._p[i][1]);
-    return r;
+    return __mkFdIter(this, 1);
   };
   FormData.prototype.forEach = function(cb, thisArg) {
     for (var i = 0; i < this._p.length; i++) cb.call(thisArg, this._p[i][1], this._p[i][0], this);
   };
   if (typeof Symbol !== "undefined" && Symbol.iterator) {
-    FormData.prototype[Symbol.iterator] = function() {
-      return this._p[Symbol.iterator]();
-    };
+    FormData.prototype[Symbol.iterator] = FormData.prototype.entries;
   }
   globalThis.FormData = FormData;
 
@@ -145,18 +176,38 @@
       .replace(/"/g, "%22");
   }
 
+  function __formDataContainsBoundary(es, boundary) {
+    for (var i = 0; i < es.length; i++) {
+      var escName = __escapeMpAttr(es[i][0]);
+      if (escName.indexOf(boundary) !== -1) return true;
+      var v = es[i][1];
+      if (v && v._isBlob) {
+        var fn = __escapeMpAttr(v.name !== undefined ? v.name : "blob");
+        if (fn.indexOf(boundary) !== -1) return true;
+        if (__slice_u8_contains(v._u8, boundary)) return true;
+      } else if (String(v).indexOf(boundary) !== -1) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   globalThis.__slice_encode_formdata = function(rawBody, headers) {
-    var boundary = "----SliceFormBoundary";
+    var es = rawBody._p;
+    var boundary = __slice_multipart_boundary();
+    for (var attempt = 0; attempt < 16 && __formDataContainsBoundary(es, boundary); attempt++) {
+      boundary = __slice_multipart_boundary();
+    }
     if (headers && !headers.has("content-type")) {
       headers.set("content-type", "multipart/form-data; boundary=" + boundary);
     }
-    var chunks = [], es = rawBody.entries();
+    var chunks = [];
     for (var i = 0; i < es.length; i++) {
       var escName = __escapeMpAttr(es[i][0]);
       var v = es[i][1];
       if (v && v._isBlob) {
         var fn = __escapeMpAttr(v.name !== undefined ? v.name : "blob");
-        var bType = v.type || "application/octet-stream";
+        var bType = __sanitizeMimeType(v.type) || "application/octet-stream";
         chunks.push(
           __slice_text_encode(
             "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + escName + "\"; filename=\"" + fn + "\"\r\nContent-Type: " + bType + "\r\n\r\n"
@@ -194,12 +245,20 @@
         : __slice_text_encode((obj && obj._body) || "");
       var rawParts = __slice_multipart_parse(rawBytes, boundary);
       var fd = new FormData();
+      var fdPairs = fd._p;
+      var nowMs = Date.now();
       for (var p = 0; p < rawParts.length; p++) {
         var item = rawParts[p];
         if (item[1]) {
-          fd.append(item[0], new File([item[4]], item[2], { type: item[3] }));
+          var fObj = Object.create(File.prototype);
+          fObj.type = __sanitizeMimeType(item[3]);
+          fObj._u8 = item[4];
+          fObj.size = item[4].byteLength;
+          fObj.name = String(item[2]);
+          fObj.lastModified = nowMs;
+          fdPairs.push([String(item[0]), fObj]);
         } else {
-          fd.append(item[0], item[2]);
+          fdPairs.push([String(item[0]), String(item[2])]);
         }
       }
       return fd;
@@ -212,7 +271,7 @@
       var qsInput = rawText.charCodeAt(0) === 63 ? ("?" + rawText) : rawText;
       var usp = new globalThis.URLSearchParams(qsInput);
       var fdUrl = new FormData();
-      var es = usp.entries();
+      var es = usp._ensureP();
       for (var i = 0; i < es.length; i++) fdUrl.append(es[i][0], es[i][1]);
       return fdUrl;
     }

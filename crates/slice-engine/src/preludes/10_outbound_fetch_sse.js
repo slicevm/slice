@@ -147,14 +147,16 @@
 
   function __reqHeadersJson(req) {
     if (req._h === null && req._hm === null && !req._ct) return "[]";
-    return JSON.stringify(req.headers.entries());
+    return JSON.stringify(req.headers._toPairs());
   }
 
   function __doFetch(input, init) {
     var req = new Request(input, init);
     var sig = (init && init.signal) || req.signal || null;
     if (sig && sig.aborted) throw (sig.reason !== undefined ? sig.reason : __mkAbortErr());
-    var reqBody = req._u8 instanceof Uint8Array ? req._u8 : (req._body || "");
+    var reqBody = req._stream
+      ? (typeof req._stream._toBytes === "function" ? req.textSync() : "")
+      : (req._u8 instanceof Uint8Array ? req._u8 : (req._body || ""));
     var raw = JSON.parse(
       __slice_fetch_sync(req.url, req.method, __reqHeadersJson(req), reqBody, req.redirect || "follow")
     );
@@ -241,7 +243,7 @@
       var wireObj = {
         status: o.status || 200,
         statusText: o.statusText || "OK",
-        headers: h.entries(),
+        headers: h._toPairs(),
         body: ""
       };
       if (isBin) {
@@ -250,7 +252,7 @@
         wireObj.body = o.body === undefined || o.body === null ? "" : (typeof o.body === "string" ? o.body : JSON.stringify(o.body));
         if (typeof o.body === "object" && o.body !== null && !h._m["content-type"]) {
           h._m["content-type"] = "application/json";
-          wireObj.headers = h.entries();
+          wireObj.headers = h._toPairs();
         }
       }
       __slice_mock_fetch(

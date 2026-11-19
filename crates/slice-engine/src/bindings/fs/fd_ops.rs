@@ -2,9 +2,8 @@
 //! `fstatSync`, `ftruncateSync`, `futimesSync`, and FD-overloaded `readFileSync`/`writeFileSync`).
 
 use crate::bindings::fs::path_ops::{
-    ResolvedPathKind, anchor_vfs_path, classify_path_lstat, classify_path_stat,
-    default_mtime_ms_for_path, has_file_ancestor, is_host_unc_blocked, js_eloop_error,
-    try_resolve_vfs_path_symlinks, utf8_slice_to_js_val,
+    ResolvedPathKind, classify_path_lstat, classify_path_stat, default_mtime_ms_for_path,
+    is_host_unc_blocked, resolve_or_js_err, utf8_slice_to_js_val,
 };
 use crate::bindings::fs::state::{OpenFd, PathEntry, VfsEntryKind};
 use crate::bindings::helpers::{
@@ -289,24 +288,27 @@ pub(crate) fn register_fs_fd_host_functions(ctx: &mut boa_engine::Context) {
             mark_subsystem_dirty(DIRTY_VFS);
 
             let allow_host = !is_host_unc_blocked(&path);
-            let anchored = anchor_vfs_path(&path);
 
             // POSIX O_CREAT | O_EXCL must fail with EEXIST on an existing symlink (even dangling)
             // without following the final symlink component.
             if fl.create && fl.excl {
-                let (norm_lstat, trav_lstat) =
-                    try_resolve_vfs_path_symlinks(anchored.clone(), false)
-                        .map_err(|()| js_eloop_error("open", &path, context))?;
-                if trav_lstat {
-                    if fl.readable && !check_boa_fs_read_ocap(&norm_lstat) {
+                let Some(res_lstat) = resolve_or_js_err(&path, false, allow_host, "open", context)?
+                else {
+                    return Ok(BoaVal::undefined());
+                };
+                if res_lstat.traversed_symlink {
+                    if fl.readable && !check_boa_fs_read_ocap(&res_lstat.norm) {
                         return Ok(BoaVal::undefined());
                     }
-                    if needs_write && !check_boa_fs_write_ocap(&norm_lstat) {
+                    if needs_write && !check_boa_fs_write_ocap(&res_lstat.norm) {
                         return Ok(BoaVal::undefined());
                     }
                 }
+                if res_lstat.has_file_ancestor {
+                    return Ok(BoaVal::from(-20));
+                }
                 let exists_lstat = BOA_VFS_STATE.with(|v| {
-                    classify_path_lstat(&v.borrow(), &norm_lstat, allow_host)
+                    classify_path_lstat(&v.borrow(), &res_lstat.norm, allow_host)
                         != ResolvedPathKind::Missing
                 });
                 if exists_lstat {
@@ -314,16 +316,22 @@ pub(crate) fn register_fs_fd_host_functions(ctx: &mut boa_engine::Context) {
                 }
             }
 
-            let (norm, traversed) = try_resolve_vfs_path_symlinks(anchored, true)
-                .map_err(|()| js_eloop_error("open", &path, context))?;
-            if traversed {
-                if fl.readable && !check_boa_fs_read_ocap(&norm) {
+            let Some(resolved) = resolve_or_js_err(&path, true, allow_host, "open", context)?
+            else {
+                return Ok(BoaVal::undefined());
+            };
+            if resolved.traversed_symlink {
+                if fl.readable && !check_boa_fs_read_ocap(&resolved.norm) {
                     return Ok(BoaVal::undefined());
                 }
-                if needs_write && !check_boa_fs_write_ocap(&norm) {
+                if needs_write && !check_boa_fs_write_ocap(&resolved.norm) {
                     return Ok(BoaVal::undefined());
                 }
             }
+            if resolved.has_file_ancestor {
+                return Ok(BoaVal::from(-20)); // ENOTDIR
+            }
+            let norm = resolved.norm;
 
             enum OpenTarget {
                 VfsFile(crate::bindings::fs::state::InodeId, usize),
@@ -336,9 +344,6 @@ pub(crate) fn register_fs_fd_host_functions(ctx: &mut boa_engine::Context) {
 
             let target = BOA_VFS_STATE.with(|v| {
                 let vfs = v.borrow();
-                if has_file_ancestor(&vfs, &norm, allow_host) {
-                    return OpenTarget::ErrCode(-20); // ENOTDIR
-                }
                 if let Some((id, ino)) = vfs.lookup_present(&norm) {
                     return match &ino.kind {
                         VfsEntryKind::Directory { .. } => {
@@ -451,6 +456,9 @@ pub(crate) fn register_fs_fd_host_functions(ctx: &mut boa_engine::Context) {
                     let bytes = if fl.trunc {
                         Vec::new()
                     } else {
+                        if !check_boa_fs_read_ocap(&norm) {
+                            return Ok(BoaVal::undefined());
+                        }
                         match std::fs::read(&norm) {
                             Ok(b) => b,
                             Err(_) => return Ok(BoaVal::from(-2)),

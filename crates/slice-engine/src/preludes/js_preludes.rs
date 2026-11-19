@@ -127,7 +127,7 @@ pub(crate) fn register_shard_host_functions_for_mask(
     if (shards_mask & (1 << 1)) != 0 {
         crate::host_bindings::register_url_and_usp_host_functions(context);
     }
-    if (shards_mask & ((1 << 2) | (1 << 5) | (1 << 14) | (1 << 15))) != 0 {
+    if (shards_mask & ((1 << 2) | (1 << 5) | (1 << 14) | (1 << 15) | (1 << 16))) != 0 {
         crate::host_bindings::register_wintertc_phase_n3_host_functions(context);
     }
     if (shards_mask & (1 << 4)) != 0 {

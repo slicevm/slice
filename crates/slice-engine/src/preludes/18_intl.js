@@ -737,11 +737,11 @@
     };
     obj[Symbol.iterator] = function() {
       var cur = 0;
-      return {
-        next: function() {
-          return cur < list.length ? { value: list[cur++], done: false } : { value: undefined, done: true };
-        }
+      var it = Object.create(Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())));
+      it.next = function() {
+        return cur < list.length ? { value: list[cur++], done: false } : { value: undefined, done: true };
       };
+      return it;
     };
     return obj;
   };

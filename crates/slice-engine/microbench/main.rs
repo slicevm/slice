@@ -642,8 +642,9 @@ for (let i = 0; i < rawBin.length; i++) rawBin[i] = i & 0xff;
 const fd = new FormData();
 fd.append("tenant", "acme-edge");
 fd.append("payload", new File([rawBin], "chunk.bin", { type: "application/octet-stream" }));
-globalThis.__mpBenchBytes = new Response(fd)._borrowBytes();
-globalThis.__mpBenchHdr = "multipart/form-data; boundary=----SliceFormBoundary";
+const __mpRes = new Response(fd);
+globalThis.__mpBenchBytes = __mpRes._borrowBytes();
+globalThis.__mpBenchHdr = __mpRes.headers.get("content-type");
 export default {
     async fetch() {
         const parsed = await new Response(globalThis.__mpBenchBytes, {

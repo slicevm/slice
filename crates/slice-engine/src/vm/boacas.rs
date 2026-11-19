@@ -262,7 +262,7 @@ pub fn compute_boacas_metadata(js_code: &str) -> (u16, u32, u64) {
 pub fn pack_boacas_container(compacted_js: &str) -> Vec<u8> {
     let mut fallback_js = String::with_capacity(compacted_js.len() + 4);
     fallback_js.push_str("{\n");
-    fallback_js.push_str(compacted_js.trim_end());
+    fallback_js.push_str(compacted_js);
     fallback_js.push_str("\n}");
 
     let (feature_flags, shards_mask, rc_key) = compute_boacas_metadata(&fallback_js);
@@ -297,7 +297,7 @@ pub fn pack_boacas_container(compacted_js: &str) -> Vec<u8> {
 ///
 /// When `is_cold_bare_realm` is `true` and `header.approach_kind == 3`, reconstructs the precompiled
 /// `Gc<CodeBlock>` tree directly from `precompiled_slice` via `boa_engine::Script::from_slicebc_bytes`
-/// and calls `script.evaluate(&mut realm.ctx)` — skipping `boa_lexer`, `boa_parser`, `Scope::analyze_scope`,
+/// and calls `script.evaluate(&mut realm.ctx)` - skipping `boa_lexer`, `boa_parser`, `Scope::analyze_scope`,
 /// and `ByteCompiler` at runtime.
 pub(crate) fn eval_boacas_on_realm(
     realm: &mut WarmBoaRealm,

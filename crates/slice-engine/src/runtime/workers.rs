@@ -354,19 +354,34 @@ fn resolve_worker_script_source(specifier_or_code: &str, is_eval: bool) -> Resul
         ));
     }
 
-    // 1. Check in-memory `VfsState` first (0 disk stat syscalls, explicit file-kind check)
-    match crate::bindings::fs::read_vfs_file_bytes_resolved(raw_path) {
-        Ok(Some(vfs_src)) => return Ok(String::from_utf8_lossy(&vfs_src).into_owned()),
-        Ok(None) => {}
-        Err(()) => {
+    // 1. Resolve VFS + host symlinks with per-hop OCap containment
+    let resolved_norm = match crate::bindings::fs::resolve_vfs_or_host_script(raw_path) {
+        Ok((_, Some(vfs_src))) => return Ok(String::from_utf8_lossy(&vfs_src).into_owned()),
+        Ok((resolved_norm, None)) => {
+            if !check_boa_fs_read_ocap(&resolved_norm) {
+                return Err(format!(
+                    "SandboxViolation: Worker script read '{}' denied by OCap read policy",
+                    resolved_norm
+                ));
+            }
+            resolved_norm
+        }
+        Err(crate::bindings::fs::SymlinkResolveError::ReadOcapDenied(denied)) => {
+            let _ = check_boa_fs_read_ocap(&denied);
             return Err(format!(
-                "WorkerError: Cannot read worker module '{}': symlink loop or OCap denied",
+                "SandboxViolation: Worker script read '{}' denied by OCap read policy",
+                denied
+            ));
+        }
+        Err(crate::bindings::fs::SymlinkResolveError::Loop) => {
+            return Err(format!(
+                "WorkerError: Cannot read worker module '{}': ELOOP too many symbolic links",
                 raw_path
             ));
         }
-    }
+    };
 
-    if crate::bindings::fs::is_vfs_tombstoned(&norm)
+    if crate::bindings::fs::is_vfs_tombstoned(&resolved_norm)
         || crate::bindings::fs::is_host_unc_blocked(raw_path)
     {
         return Err(format!(
@@ -376,7 +391,7 @@ fn resolve_worker_script_source(specifier_or_code: &str, is_eval: bool) -> Resul
     }
 
     // 2. Fallback to host filesystem if OCap permits
-    std::fs::read_to_string(&norm).map_err(|e| {
+    std::fs::read_to_string(&resolved_norm).map_err(|e| {
         format!(
             "WorkerError: Cannot read worker module '{}': {}",
             raw_path, e

@@ -953,6 +953,8 @@ impl SliceIsolate {
             ensure_realm_kv_sandbox(&mut realm);
         }
         let mut should_check_ses = rc_key_opt.is_none();
+        let mut owned_scoped_code = String::new();
+        let mut _scoped_active_src_guard: Option<crate::boa_realm::ActiveSourceSliceGuard> = None;
         // Phase 9B Priority 2 + Phase N1 Direct JsObject Invocation (`__slice_rc`):
         // When a warm `boa_engine::Context` has already evaluated this bundle's `node_modules` CJS factories
         // and cached its entrypoint `JsObject` function handle in `realm.loaded_bundles[key]`, invoke
@@ -1008,12 +1010,15 @@ impl SliceIsolate {
                 needs_lazy_global_getters(js_code),
             );
             self.apply_boa_realm_runtime_limits(&mut realm);
-            let scoped_code = if js_code.starts_with("#!") {
-                format!("{{\n{}\n}}", js_code)
-            } else {
-                format!("{{{}\n}}", js_code)
-            };
-            eval_or_reuse_cached_script(&mut realm, &scoped_code)
+            let clean = slice_cas::compiler::blank_leading_shebang(js_code);
+            owned_scoped_code.reserve(clean.len() + 4);
+            owned_scoped_code.push_str("{\n");
+            owned_scoped_code.push_str(&clean);
+            owned_scoped_code.push_str("\n}");
+            _scoped_active_src_guard = Some(crate::boa_realm::ActiveSourceSliceGuard::new(
+                &owned_scoped_code,
+            ));
+            eval_or_reuse_cached_script(&mut realm, &owned_scoped_code)
         };
 
         let need_ses_scan = should_check_ses || BOA_WAIT_UNTIL_COUNT.with(|c| c.get()) > 0;
