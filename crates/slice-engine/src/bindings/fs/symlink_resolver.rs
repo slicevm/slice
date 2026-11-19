@@ -63,20 +63,19 @@ pub(crate) fn anchor_vfs_path(raw: &str) -> String {
 
 /// Returns `true` when `meta` (obtained via `std::fs::symlink_metadata`) represents a symbolic
 /// link or, on Windows, an NTFS directory junction / mount reparse point (`0x0400`).
+#[cfg(windows)]
 #[inline]
 pub(crate) fn is_host_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
-    if meta.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-            return true;
-        }
-    }
-    false
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    meta.file_type().is_symlink() || (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+}
+
+/// Returns `true` when `meta` (obtained via `std::fs::symlink_metadata`) represents a symbolic link.
+#[cfg(not(windows))]
+#[inline]
+pub(crate) fn is_host_symlink_or_reparse(meta: &std::fs::Metadata) -> bool {
+    meta.file_type().is_symlink()
 }
 
 /// Normalizes a `std::fs::read_link` target path to forward slashes and strips Windows verbatim
