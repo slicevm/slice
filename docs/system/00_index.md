@@ -1,4 +1,4 @@
-# Slice (Nexus-JS): System Architecture & Internal Specification Index (`v0.12.0`)
+# Slice (Nexus-JS): System Architecture & Internal Specification Index (`v0.13.0`)
 
 Welcome to the **Slice (Nexus-JS)** System Architecture and Internal Specification (`docs/system/`). Engineered in pure Rust (`edition = 2024`, `rust-version = "1.91.0"`, `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`), Slice replaces the legacy POSIX + monolithic V8/JSC assumptions of Node.js, Deno, and Bun with four orthogonal, tightly integrated Rust crates:
 
@@ -32,7 +32,7 @@ For user-facing documentation and guides, see **[`docs/README.md`](../README.md)
 
 ```
 +---------------------------------------------------------------------------------------------------+
-|                                   Slice (Nexus-JS) v0.12.0 Host                                    |
+|                                   Slice (Nexus-JS) v0.13.0 Host                                    |
 |                                                                                                   |
 |  +---------------------------------------------------------------------------------------------+  |
 |  |                    slice-sandbox: Zero-Trust OCap, SES & Hardware Boundary                  |  |
