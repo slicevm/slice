@@ -259,10 +259,29 @@
     return globalThis.__slice_parse_formdata(obj);
   }
 
-  function __isStreamPendingOrOpen(st) {
-    if (!st || typeof st._toText !== "function") return false;
-    if (typeof st._isAsyncPending === "function" && st._isAsyncPending()) return true;
-    return Boolean(!st._closed || st._startPromise);
+  function __isReadableStreamObj(st) {
+    return Boolean(st && typeof st === "object" && typeof st.getReader === "function" && typeof st._cancelInternal === "function");
+  }
+
+  function __ensureUsableStream(st) {
+    if (st._disturbed || st.locked) {
+      throw new TypeError("Body ReadableStream is already disturbed or locked");
+    }
+  }
+
+  function __hasBody(obj) {
+    if (obj._used || obj._stream !== null) return true;
+    if (obj._isLiveReq) {
+      var m = obj._m || (obj._m = __slice_http_method() || "GET");
+      if (m !== "GET" && m !== "HEAD") return true;
+      var lb = __borrowBodyBytes(obj);
+      return Boolean(lb && lb.byteLength > 0);
+    }
+    return obj._body !== null || obj._u8 !== null;
+  }
+
+  function __isBodyUnusable(obj) {
+    return Boolean(obj._used || (obj._stream !== null && (obj._stream._disturbed || obj._stream.locked)));
   }
 
   function __normHttpBody(rawBody, headers) {
@@ -335,7 +354,7 @@
     r._stream = null;
     r.redirect = "follow";
     r.signal = __defaultReqSignal;
-    r.bodyUsed = false;
+    r._used = false;
     return r;
   }
 
@@ -356,7 +375,7 @@
       rSimple._u8 = null;
       rSimple.redirect = "follow";
       rSimple.signal = __defaultReqSignal;
-      rSimple.bodyUsed = false;
+      rSimple._used = false;
       return rSimple;
     }
     var o = init || {};
@@ -367,11 +386,15 @@
       (!oh || (typeof oh === "object" && !Array.isArray(oh)))
     ) {
       var rawMFast = o.method;
-      var rInit = Object.create(LazyReqProto);
-      rInit.url = input;
-      rInit.method = rawMFast
+      var fastMethod = rawMFast
         ? (rawMFast === "GET" || rawMFast === "POST" ? rawMFast : String(rawMFast).toUpperCase())
         : "GET";
+      if (o.body !== undefined && o.body !== null && (fastMethod === "GET" || fastMethod === "HEAD")) {
+        throw new TypeError("Request with GET/HEAD method cannot have body");
+      }
+      var rInit = Object.create(LazyReqProto);
+      rInit.url = input;
+      rInit.method = fastMethod;
       rInit._h = null;
       if (oh) {
         __assignHeadersMap(rInit, "_hm", "_hsc", oh);
@@ -388,7 +411,7 @@
         : "";
       rInit.redirect = o.redirect ? String(o.redirect) : "follow";
       rInit.signal = o.signal || __defaultReqSignal;
-      rInit.bodyUsed = false;
+      rInit._used = false;
       return rInit;
     }
     var isReq = Boolean(input && typeof input === "object" && input._isSliceReq);
@@ -402,13 +425,17 @@
     this.headers = (oh && oh._isHeaders) ? new Headers(oh) : new Headers(oh || (isReq ? input.headers : undefined));
     this._stream = null;
     if (o.body !== undefined && o.body !== null) {
+      if (this.method === "GET" || this.method === "HEAD") {
+        throw new TypeError("Request with GET/HEAD method cannot have body");
+      }
       if (typeof o.body === "string") {
         this._body = o.body;
         this._u8 = null;
         if (!this.headers._m["content-type"]) {
           this.headers._m["content-type"] = "text/plain;charset=UTF-8";
         }
-      } else if (typeof o.body === "object" && __isStreamPendingOrOpen(o.body)) {
+      } else if (__isReadableStreamObj(o.body)) {
+        __ensureUsableStream(o.body);
         this._stream = o.body;
         this._body = null;
         this._u8 = null;
@@ -417,15 +444,40 @@
         this._body = nb.str;
         this._u8 = nb.u8;
       }
-    } else if (isReq) {
-      this._stream = input._stream || null;
-      var inU8 = input._isLiveReq ? __borrowBodyBytes(input) : input._u8;
-      if (inU8 instanceof Uint8Array) {
-        this._u8 = new Uint8Array(inU8);
+    } else if (o.body === undefined && isReq && __hasBody(input)) {
+      if (this.method === "GET" || this.method === "HEAD") {
+        throw new TypeError("Request with GET/HEAD method cannot have body");
+      }
+      if (__isBodyUnusable(input)) {
+        throw new TypeError("Cannot construct a Request from a Request whose body is disturbed or locked");
+      }
+      if (input._stream !== null) {
+        if (!globalThis.ReadableStream) __slice_ensure_shard(3);
+        var srcReader = input._stream.getReader();
+        input._used = true;
+        this._stream = new globalThis.ReadableStream({
+          pull: function(c) {
+            return srcReader.read().then(function(step) {
+              if (step.done) c.close();
+              else c.enqueue(step.value);
+            });
+          },
+          cancel: function(reason) {
+            return srcReader.cancel(reason);
+          }
+        }, { highWaterMark: 0 });
         this._body = null;
-      } else {
-        this._body = input._body;
         this._u8 = null;
+      } else {
+        var inU8 = input._isLiveReq ? __borrowBodyBytes(input) : input._u8;
+        if (inU8 instanceof Uint8Array) {
+          this._u8 = new Uint8Array(inU8);
+          this._body = null;
+        } else {
+          this._body = __getBodyText(input);
+          this._u8 = null;
+        }
+        input._used = true;
       }
     } else {
       this._body = null;
@@ -433,7 +485,7 @@
     }
     this.redirect = o.redirect ? String(o.redirect) : (isReq && input.redirect ? input.redirect : "follow");
     this.signal = o.signal || (isReq && input.signal ? input.signal : __defaultReqSignal);
-    this.bodyUsed = false;
+    this._used = false;
   }
   Request.prototype._isSliceReq = true;
 
@@ -453,7 +505,7 @@
         rSimple._u8 = null;
         rSimple._ct = isSimpleStr ? "text/plain;charset=UTF-8" : "";
         rSimple._isSliceRes = true;
-        rSimple.bodyUsed = false;
+        rSimple._used = false;
         return rSimple;
       }
       this.status = 200;
@@ -461,7 +513,8 @@
       this.ok = true;
       this.headers = new Headers();
       this._stream = null;
-      if (typeof body === "object" && __isStreamPendingOrOpen(body)) {
+      if (__isReadableStreamObj(body)) {
+        __ensureUsableStream(body);
         this._stream = body;
         this._body = null;
         this._u8 = null;
@@ -472,7 +525,7 @@
       }
       this._ct = "";
       this._isSliceRes = true;
-      this.bodyUsed = false;
+      this._used = false;
       return;
     }
     var o = init;
@@ -509,7 +562,7 @@
         ? "text/plain;charset=UTF-8"
         : "";
       rInit._isSliceRes = true;
-      rInit.bodyUsed = false;
+      rInit._used = false;
       return rInit;
     }
     this.status = st;
@@ -527,7 +580,8 @@
       if (!this.headers._m["content-type"]) {
         this.headers._m["content-type"] = "text/plain;charset=UTF-8";
       }
-    } else if (typeof body === "object" && __isStreamPendingOrOpen(body)) {
+    } else if (__isReadableStreamObj(body)) {
+      __ensureUsableStream(body);
       this._stream = body;
       this._body = null;
       this._u8 = null;
@@ -537,7 +591,7 @@
       this._u8 = nb.u8;
     }
     this._isSliceRes = true;
-    this.bodyUsed = false;
+    this._used = false;
   }
 
   var RP = Request.prototype, SP = Response.prototype;
@@ -629,15 +683,41 @@
     return __getBodyText(this);
   };
 
+  var __bodyUsedDesc = {
+    get: function() {
+      return Boolean(this._used || (this._stream !== null && this._stream._disturbed));
+    },
+    configurable: true,
+    enumerable: true
+  };
+  Object.defineProperty(RP, "bodyUsed", __bodyUsedDesc);
+  Object.defineProperty(SP, "bodyUsed", __bodyUsedDesc);
+
   RP.text = SP.text = function() {
-    this.bodyUsed = true;
+    if (__isBodyUnusable(this)) {
+      return Promise.reject(new TypeError("Body has already been consumed or is locked"));
+    }
+    if (!__hasBody(this)) {
+      return Promise.resolve("");
+    }
+    this._used = true;
     if (this._stream) {
       return this._stream._drainToBody(this).then(__getBodyText);
     }
     return Promise.resolve(__getBodyText(this));
   };
   RP.json = SP.json = function() {
-    this.bodyUsed = true;
+    if (__isBodyUnusable(this)) {
+      return Promise.reject(new TypeError("Body has already been consumed or is locked"));
+    }
+    if (!__hasBody(this)) {
+      try {
+        return Promise.resolve(JSON.parse(""));
+      } catch (eEmpty) {
+        return Promise.reject(eEmpty);
+      }
+    }
+    this._used = true;
     if (this._stream) {
       return this._stream._drainToBody(this).then(function(s) {
         return JSON.parse(__getBodyText(s));
@@ -650,15 +730,23 @@
     }
   };
   RP.textSync = SP.textSync = function() {
-    this.bodyUsed = true;
+    if (__isBodyUnusable(this)) {
+      throw new TypeError("Body has already been consumed or is locked");
+    }
+    if (!__hasBody(this)) {
+      return "";
+    }
+    this._used = true;
     if (this._stream) {
-      if (__streamHasBinary(this._stream) && typeof this._stream._toBytes === "function") {
-        this._u8 = this._stream._toBytes();
+      var st = this._stream;
+      st.getReader();
+      st._disturbed = true;
+      if (__streamHasBinary(st) && typeof st._toBytes === "function") {
+        this._u8 = st._toBytes();
         this._body = null;
       } else {
-        this._body = this._stream._toText();
+        this._body = st._toText();
       }
-      this._stream = null;
     }
     return __getBodyText(this);
   };
@@ -666,23 +754,41 @@
     return JSON.parse(this.textSync());
   };
   RP.arrayBuffer = SP.arrayBuffer = function() {
-    this.bodyUsed = true;
+    if (__isBodyUnusable(this)) {
+      return Promise.reject(new TypeError("Body has already been consumed or is locked"));
+    }
+    if (!__hasBody(this)) {
+      return Promise.resolve(new ArrayBuffer(0));
+    }
+    this._used = true;
     if (this._stream) {
       return this._stream._drainToBody(this).then(function(s) { return __extractBodyBytes(s).buffer; });
     }
     return Promise.resolve(__extractBodyBytes(this).buffer);
   };
   RP.bytes = SP.bytes = function() {
-    this.bodyUsed = true;
+    if (__isBodyUnusable(this)) {
+      return Promise.reject(new TypeError("Body has already been consumed or is locked"));
+    }
+    if (!__hasBody(this)) {
+      return Promise.resolve(new Uint8Array(0));
+    }
+    this._used = true;
     if (this._stream) {
       return this._stream._drainToBody(this).then(function(s) { return __extractBodyBytes(s); });
     }
     return Promise.resolve(__extractBodyBytes(this));
   };
   RP.blob = SP.blob = function() {
-    this.bodyUsed = true;
+    if (__isBodyUnusable(this)) {
+      return Promise.reject(new TypeError("Body has already been consumed or is locked"));
+    }
     if (!globalThis.Blob) __slice_ensure_shard(15);
     var cType = __effectiveContentType(this);
+    if (!__hasBody(this)) {
+      return Promise.resolve(new globalThis.Blob([], { type: cType }));
+    }
+    this._used = true;
     if (this._stream) {
       return this._stream._drainToBody(this).then(function(s) {
         return new globalThis.Blob([__extractBodyBytes(s)], { type: cType });
@@ -691,7 +797,17 @@
     return Promise.resolve(new globalThis.Blob([__extractBodyBytes(this)], { type: cType }));
   };
   RP.formData = SP.formData = function() {
-    this.bodyUsed = true;
+    if (__isBodyUnusable(this)) {
+      return Promise.reject(new TypeError("Body has already been consumed or is locked"));
+    }
+    if (!__hasBody(this)) {
+      try {
+        return Promise.resolve(__bodyToFormData(this));
+      } catch (eEmpty) {
+        return Promise.reject(eEmpty);
+      }
+    }
+    this._used = true;
     if (this._stream) {
       return this._stream._drainToBody(this).then(function(s) { return __bodyToFormData(s); });
     }
@@ -702,8 +818,17 @@
     }
   };
   RP.clone = function() {
-    if (this.bodyUsed || (this._stream && this._stream.locked)) {
+    if (__isBodyUnusable(this)) {
       throw new TypeError("Cannot clone a disturbed or locked Request");
+    }
+    if (!__hasBody(this)) {
+      return new Request(this.url, {
+        method: this.method,
+        headers: new Headers(this.headers),
+        body: null,
+        redirect: this.redirect,
+        signal: this.signal
+      });
     }
     var stClone = null;
     if (this._stream && typeof this._stream.tee === "function") {
@@ -716,7 +841,7 @@
     var r = new Request(this.url, {
       method: this.method,
       headers: new Headers(this.headers),
-      body: stClone ? stClone : (hasBin ? null : this._body),
+      body: stClone ? stClone : (hasBin ? null : __getBodyText(this)),
       redirect: this.redirect,
       signal: this.signal
     });
@@ -727,7 +852,7 @@
     return r;
   };
   SP.clone = function() {
-    if (this.bodyUsed || (this._stream && this._stream.locked)) {
+    if (__isBodyUnusable(this)) {
       throw new TypeError("Cannot clone a disturbed or locked Response");
     }
     if (this.status < 200 || this.status > 599) {
@@ -735,6 +860,13 @@
       sr._h = new Headers(this.headers);
       if (this.type) sr.type = this.type;
       return sr;
+    }
+    if (!__hasBody(this)) {
+      return new Response(null, {
+        status: this.status,
+        statusText: this.statusText,
+        headers: new Headers(this.headers)
+      });
     }
     var stClone = null;
     if (this._stream && typeof this._stream.tee === "function") {
@@ -757,15 +889,17 @@
   var __bodyDesc = {
     get: function() {
       if (this._stream) return this._stream;
-      if (this._isLiveReq) {
-        var liveB = __borrowBodyBytes(this);
-        if ((!liveB || liveB.byteLength === 0) && (this.method === "GET" || this.method === "HEAD")) {
-          return null;
-        }
-      } else if (this._body === null && !this._u8) {
-        return null;
-      }
+      if (!__hasBody(this)) return null;
       if (!globalThis.ReadableStream) __slice_ensure_shard(3);
+      if (this._used) {
+        var emptyRs = new globalThis.ReadableStream({
+          start: function(c) { c.close(); }
+        });
+        emptyRs._disturbed = true;
+        emptyRs.getReader();
+        this._stream = emptyRs;
+        return emptyRs;
+      }
       var b = __extractBodyBytes(this);
       var rs = new globalThis.ReadableStream({
         start: function(c) {
@@ -775,7 +909,9 @@
       });
       this._stream = rs;
       return rs;
-    }
+    },
+    configurable: true,
+    enumerable: true
   };
   Object.defineProperty(RP, "body", __bodyDesc);
   Object.defineProperty(SP, "body", __bodyDesc);
@@ -797,7 +933,7 @@
     r._u8 = null;
     r._ct = "";
     r._isSliceRes = true;
-    r.bodyUsed = false;
+    r._used = false;
     return r;
   }
   globalThis.__slice_make_special_response = __makeSpecialResponse;
@@ -820,7 +956,7 @@
       rFast._u8 = null;
       rFast._ct = "application/json";
       rFast._isSliceRes = true;
-      rFast.bodyUsed = false;
+      rFast._used = false;
       return rFast;
     }
     if (typeof init === "object") {
@@ -851,7 +987,7 @@
         rJson._body = jsonStr;
         rJson._u8 = null;
         rJson._isSliceRes = true;
-        rJson.bodyUsed = false;
+        rJson._used = false;
         return rJson;
       }
     }

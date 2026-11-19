@@ -154,7 +154,9 @@
     var req = new Request(input, init);
     var sig = (init && init.signal) || req.signal || null;
     if (sig && sig.aborted) throw (sig.reason !== undefined ? sig.reason : __mkAbortErr());
-    var reqBody = req._u8 instanceof Uint8Array ? req._u8 : (req._body || "");
+    var reqBody = req._stream
+      ? (typeof req._stream._toBytes === "function" ? req.textSync() : "")
+      : (req._u8 instanceof Uint8Array ? req._u8 : (req._body || ""));
     var raw = JSON.parse(
       __slice_fetch_sync(req.url, req.method, __reqHeadersJson(req), reqBody, req.redirect || "follow")
     );
