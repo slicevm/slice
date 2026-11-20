@@ -28,6 +28,7 @@ compact_str.workspace = true
 parking_lot.workspace = true
 smallvec.workspace = true
 itoa.workspace = true
+simdutf8.workspace = true
 rustls.workspace = true
 ring.workspace = true
 x25519-dalek.workspace = true

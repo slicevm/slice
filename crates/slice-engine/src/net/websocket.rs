@@ -860,6 +860,9 @@ fn drain_available_live_frames(
                                 let is_binary = frame.opcode == WS_OPCODE_BINARY;
                                 let data = if is_binary {
                                     base64_encode(&frame.payload, false)
+                                } else if simdutf8::basic::from_utf8(&frame.payload).is_ok() {
+                                    // SAFETY: `simdutf8::basic::from_utf8` verified valid UTF-8.
+                                    unsafe { String::from_utf8_unchecked(frame.payload) }
                                 } else {
                                     String::from_utf8_lossy(&frame.payload).into_owned()
                                 };
@@ -918,6 +921,9 @@ fn drain_available_live_frames(
                                 let is_binary = orig_opcode == WS_OPCODE_BINARY;
                                 let data = if is_binary {
                                     base64_encode(&completed, false)
+                                } else if simdutf8::basic::from_utf8(&completed).is_ok() {
+                                    // SAFETY: `simdutf8::basic::from_utf8` verified valid UTF-8.
+                                    unsafe { String::from_utf8_unchecked(completed) }
                                 } else {
                                     String::from_utf8_lossy(&completed).into_owned()
                                 };

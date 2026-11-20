@@ -572,7 +572,7 @@
     restore: function(id) { return __slice_restore(Number(id)); },
     releaseCheckpoint: function(id) { return __slice_release_checkpoint(Number(id)); },
     evalSandbox: function(code, opts) {
-      return JSON.parse(__slice_eval_sandbox(String(code), opts ? JSON.stringify(opts) : "{}"));
+      return __slice_eval_sandbox(String(code), opts);
     },
     serve: function(optsOrHandler, maybeHandler) {
       __loadShard(1);

@@ -232,163 +232,199 @@ impl ResolvedExecutionConfig {
             )?;
         }
 
-        // 2. Apply `SLICE_*` environment variables (override slice.toml, overridden by CLI flags)
-        if let Ok(v) = std::env::var("SLICE_FUEL")
-            && let Some(parsed) = flags::parse_u64_digits(&v)
-        {
-            fuel_limit = parsed;
-            cli_fuel_override = Some(parsed);
-        }
-        if let Ok(v) = std::env::var("SLICE_MEMORY_KB")
-            && let Some(parsed) = flags::parse_u64_digits(&v)
-        {
-            let bytes = usize::try_from(parsed)
-                .unwrap_or(usize::MAX)
-                .saturating_mul(1024);
-            mem_limit = bytes;
-            cli_mem_override = Some(bytes);
-        }
-        if let Ok(v) = std::env::var("SLICE_MEMORY")
-            && let Some(parsed) = flags::parse_u64_digits(&v)
-        {
-            let bytes = usize::try_from(parsed).unwrap_or(usize::MAX);
-            mem_limit = bytes;
-            cli_mem_override = Some(bytes);
-        }
-        if let Ok(v) = std::env::var("SLICE_ALLOW_READ") {
-            for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                caps = caps.with_read_prefix(item);
-            }
-        }
-        if let Ok(v) = std::env::var("SLICE_ALLOW_WRITE") {
-            for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                caps = caps.with_write_prefix(item);
-            }
-        }
-        if let Ok(v) = std::env::var("SLICE_ALLOW_NET") {
-            for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                caps = caps.with_net_host(item);
-            }
-        }
-        if let Ok(v) = std::env::var("SLICE_ALLOW_EXEC") {
-            for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                if !caps.allowed_exec_binaries.contains(&item.to_string()) {
-                    caps = caps.with_exec_binary(item);
-                }
-            }
-        }
-        if let Ok(v) = std::env::var("SLICE_ALLOW_ENV") {
-            for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                if let Some((k, val)) = item.split_once('=') {
-                    let kt = k.trim();
-                    let vt = val.trim();
-                    maybe_register_sensitive_env_dlp(kt, vt, &mut audit_secrets);
-                    caps = caps.with_env(kt, vt);
+        // 2. Apply `SLICE_*` environment variables cached once per process via `OnceLock`
+        //    (eliminates 22 per-invocation `getenv` locks and heap allocations).
+        static CACHED_SLICE_ENV_VARS: std::sync::OnceLock<Vec<(String, String)>> =
+            std::sync::OnceLock::new();
+        let slice_env_vars = CACHED_SLICE_ENV_VARS.get_or_init(|| {
+            let mut out = Vec::new();
+            for (os_k, os_v) in std::env::vars_os() {
+                let Some(k_str) = os_k.to_str() else {
+                    continue;
+                };
+                let is_slice_var = if cfg!(windows) {
+                    k_str.len() >= 6 && k_str.as_bytes()[..6].eq_ignore_ascii_case(b"SLICE_")
                 } else {
-                    let env_val = std::env::var(item).unwrap_or_default();
-                    maybe_register_sensitive_env_dlp(item, &env_val, &mut audit_secrets);
-                    caps = caps.with_env(item, env_val);
+                    k_str.starts_with("SLICE_")
+                };
+                if is_slice_var && let Ok(v_str) = os_v.into_string() {
+                    let norm_k = if cfg!(windows) {
+                        k_str.to_ascii_uppercase()
+                    } else {
+                        k_str.to_string()
+                    };
+                    out.push((norm_k, v_str));
                 }
             }
-        }
-        if let Ok(v) = std::env::var("SLICE_ENV_FILE") {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                env_files.push(PathBuf::from(trimmed));
+            out
+        });
+
+        if !slice_env_vars.is_empty() {
+            let find_slice_env = |name: &str| -> Option<&str> {
+                slice_env_vars
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v.as_str())
+            };
+
+            if let Some(v) = find_slice_env("SLICE_FUEL")
+                && let Some(parsed) = flags::parse_u64_digits(v)
+            {
+                fuel_limit = parsed;
+                cli_fuel_override = Some(parsed);
             }
-        }
-        if let Ok(v) = std::env::var("SLICE_AUDIT_EGRESS_FILE") {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                audit_egress_files.push(PathBuf::from(trimmed));
+            if let Some(v) = find_slice_env("SLICE_MEMORY_KB")
+                && let Some(parsed) = flags::parse_u64_digits(v)
+            {
+                let bytes = usize::try_from(parsed)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(1024);
+                mem_limit = bytes;
+                cli_mem_override = Some(bytes);
             }
-        }
-        if let Ok(v) = std::env::var("SLICE_AUDIT_EGRESS") {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                audit_egress_specs.push(trimmed.to_string());
+            if let Some(v) = find_slice_env("SLICE_MEMORY")
+                && let Some(parsed) = flags::parse_u64_digits(v)
+            {
+                let bytes = usize::try_from(parsed).unwrap_or(usize::MAX);
+                mem_limit = bytes;
+                cli_mem_override = Some(bytes);
             }
-        }
-        if let Ok(v) = std::env::var("SLICE_CHECKPOINTS")
-            && let Some(b) = slice_sandbox::parse_bool_setting(&v)
-        {
-            caps = caps.with_checkpoints(b);
-            cli_checkpoints_override = Some(b);
-        }
-        if let Ok(v) = std::env::var("SLICE_MAX_CHECKPOINTS")
-            && let Some(n) = flags::parse_u64_digits(&v)
-        {
-            let max_cp = u32::try_from(n).unwrap_or(u32::MAX);
-            caps = caps.with_max_checkpoints(Some(max_cp));
-            cli_max_checkpoints_override = Some(max_cp);
-        }
-        if let Ok(v) = std::env::var("SLICE_WARM")
-            && let Some(b) = slice_sandbox::parse_bool_setting(&v)
-        {
-            warm_pool = b;
-            cli_warm_override = Some(b);
-        }
-        if let Ok(v) = std::env::var("SLICE_DETERMINISTIC_SEED")
-            && let Some(seed) = flags::parse_u64_digits(&v)
-        {
-            deterministic_seed = Some(seed);
-            cli_det_override = Some(Some(seed));
-        }
-        if let Ok(v) = std::env::var("SLICE_PORT")
-            && let Ok(p) = v.trim().parse::<u16>()
-        {
-            server_port = Some(p);
-            cli_port_override = Some(p);
-        }
-        if let Ok(v) = std::env::var("SLICE_WORKERS")
-            && let Ok(w) = v.trim().parse::<usize>()
-        {
-            let wk = w.max(1);
-            server_workers = Some(wk);
-            cli_workers_override = Some(wk);
-        }
-        if let Ok(v) = std::env::var("SLICE_STATIC_DIR") {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                let p = PathBuf::from(trimmed);
-                static_dir = Some(p.clone());
-                cli_static_override = Some(p);
+            if let Some(v) = find_slice_env("SLICE_ALLOW_READ") {
+                for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    caps = caps.with_read_prefix(item);
+                }
             }
-        }
-        if let Ok(v) = std::env::var("SLICE_TLS_CERT") {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                let p = PathBuf::from(trimmed);
-                tls_cert = Some(p.clone());
-                cli_tls_cert_override = Some(p);
+            if let Some(v) = find_slice_env("SLICE_ALLOW_WRITE") {
+                for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    caps = caps.with_write_prefix(item);
+                }
             }
-        }
-        if let Ok(v) = std::env::var("SLICE_TLS_KEY") {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                let p = PathBuf::from(trimmed);
-                tls_key = Some(p.clone());
-                cli_tls_key_override = Some(p);
+            if let Some(v) = find_slice_env("SLICE_ALLOW_NET") {
+                for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    caps = caps.with_net_host(item);
+                }
             }
-        }
-        if let Ok(v) =
-            std::env::var("SLICE_BOACAS").or_else(|_| std::env::var("SLICE_EXPER_BOACAS"))
-            && let Some(b) = slice_sandbox::parse_bool_setting(&v)
-        {
-            cli_boacas_override = Some(b);
-            apply_boacas_override(Some(b));
-        }
-        if let Ok(v) = std::env::var("SLICE_TIER")
-            && let Some(t) = slice_sandbox::parse_tier_setting(&v)
-        {
-            cli_tier_override = Some(t);
-            apply_tier_override(t);
-        }
-        if let Ok(v) = std::env::var("SLICE_TRUST_DIRECTIVES")
-            && let Some(b) = slice_sandbox::parse_bool_setting(&v)
-        {
-            trust_directives = b;
-            cli_trust_directives_override = Some(b);
+            if let Some(v) = find_slice_env("SLICE_ALLOW_EXEC") {
+                for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if !caps.allowed_exec_binaries.contains(&item.to_string()) {
+                        caps = caps.with_exec_binary(item);
+                    }
+                }
+            }
+            if let Some(v) = find_slice_env("SLICE_ALLOW_ENV") {
+                for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if let Some((k, val)) = item.split_once('=') {
+                        let kt = k.trim();
+                        let vt = val.trim();
+                        maybe_register_sensitive_env_dlp(kt, vt, &mut audit_secrets);
+                        caps = caps.with_env(kt, vt);
+                    } else {
+                        let env_val = std::env::var(item).unwrap_or_default();
+                        maybe_register_sensitive_env_dlp(item, &env_val, &mut audit_secrets);
+                        caps = caps.with_env(item, env_val);
+                    }
+                }
+            }
+            if let Some(v) = find_slice_env("SLICE_ENV_FILE") {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    env_files.push(PathBuf::from(trimmed));
+                }
+            }
+            if let Some(v) = find_slice_env("SLICE_AUDIT_EGRESS_FILE") {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    audit_egress_files.push(PathBuf::from(trimmed));
+                }
+            }
+            if let Some(v) = find_slice_env("SLICE_AUDIT_EGRESS") {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    audit_egress_specs.push(trimmed.to_string());
+                }
+            }
+            if let Some(v) = find_slice_env("SLICE_CHECKPOINTS")
+                && let Some(b) = slice_sandbox::parse_bool_setting(v)
+            {
+                caps = caps.with_checkpoints(b);
+                cli_checkpoints_override = Some(b);
+            }
+            if let Some(v) = find_slice_env("SLICE_MAX_CHECKPOINTS")
+                && let Some(n) = flags::parse_u64_digits(v)
+            {
+                let max_cp = u32::try_from(n).unwrap_or(u32::MAX);
+                caps = caps.with_max_checkpoints(Some(max_cp));
+                cli_max_checkpoints_override = Some(max_cp);
+            }
+            if let Some(v) = find_slice_env("SLICE_WARM")
+                && let Some(b) = slice_sandbox::parse_bool_setting(v)
+            {
+                warm_pool = b;
+                cli_warm_override = Some(b);
+            }
+            if let Some(v) = find_slice_env("SLICE_DETERMINISTIC_SEED")
+                && let Some(seed) = flags::parse_u64_digits(v)
+            {
+                deterministic_seed = Some(seed);
+                cli_det_override = Some(Some(seed));
+            }
+            if let Some(v) = find_slice_env("SLICE_PORT")
+                && let Ok(p) = v.trim().parse::<u16>()
+            {
+                server_port = Some(p);
+                cli_port_override = Some(p);
+            }
+            if let Some(v) = find_slice_env("SLICE_WORKERS")
+                && let Ok(w) = v.trim().parse::<usize>()
+            {
+                let wk = w.max(1);
+                server_workers = Some(wk);
+                cli_workers_override = Some(wk);
+            }
+            if let Some(v) = find_slice_env("SLICE_STATIC_DIR") {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    let p = PathBuf::from(trimmed);
+                    static_dir = Some(p.clone());
+                    cli_static_override = Some(p);
+                }
+            }
+            if let Some(v) = find_slice_env("SLICE_TLS_CERT") {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    let p = PathBuf::from(trimmed);
+                    tls_cert = Some(p.clone());
+                    cli_tls_cert_override = Some(p);
+                }
+            }
+            if let Some(v) = find_slice_env("SLICE_TLS_KEY") {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    let p = PathBuf::from(trimmed);
+                    tls_key = Some(p.clone());
+                    cli_tls_key_override = Some(p);
+                }
+            }
+            if let Some(v) =
+                find_slice_env("SLICE_BOACAS").or_else(|| find_slice_env("SLICE_EXPER_BOACAS"))
+                && let Some(b) = slice_sandbox::parse_bool_setting(v)
+            {
+                cli_boacas_override = Some(b);
+                apply_boacas_override(Some(b));
+            }
+            if let Some(v) = find_slice_env("SLICE_TIER")
+                && let Some(t) = slice_sandbox::parse_tier_setting(v)
+            {
+                cli_tier_override = Some(t);
+                apply_tier_override(t);
+            }
+            if let Some(v) = find_slice_env("SLICE_TRUST_DIRECTIVES")
+                && let Some(b) = slice_sandbox::parse_bool_setting(v)
+            {
+                trust_directives = b;
+                cli_trust_directives_override = Some(b);
+            }
         }
 
         // 3. Apply explicit CLI inline flags (highest precedence, fail-closed on empty/missing file paths)

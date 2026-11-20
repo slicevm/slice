@@ -87,7 +87,7 @@ impl MappedCasArchive {
                     )
                 })?;
 
-            if std::str::from_utf8(&mmap[src_start..src_end]).is_err() {
+            if simdutf8::basic::from_utf8(&mmap[src_start..src_end]).is_err() {
                 bail!(
                     "CAS blob '{}' contains invalid UTF-8 in source slice",
                     hash_key
@@ -157,7 +157,7 @@ impl MappedCasArchive {
         let Some(bytes) = self.mmap.get(start..end) else {
             return "";
         };
-        std::str::from_utf8(bytes).unwrap_or("")
+        simdutf8::basic::from_utf8(bytes).unwrap_or("")
     }
 
     /// Returns a zero-copy slice to the pre-compiled bytecode directly from the `mmap` region.
@@ -263,27 +263,31 @@ impl MappedCasArchive {
         )
     }
 
-    /// Checks if the current running executable has an embedded `SLICEEXE` trailer and maps it in O(1)
-    /// using a single `Mmap` call.
+    /// Checks if the current running executable has an embedded `SLICEEXE` trailer by reading only
+    /// the final 24 bytes first, avoiding a full-binary `mmap` + `munmap` cycle on normal CLI invocations.
     pub fn open_embedded_self() -> Result<Option<Self>> {
+        use std::io::{Read, Seek, SeekFrom};
+
         let exe_path = std::env::current_exe()?;
-        let file = File::open(&exe_path)?;
+        let mut file = File::open(&exe_path)?;
+        let file_len = match file.seek(SeekFrom::End(0)) {
+            Ok(len) => len,
+            Err(_) => return Ok(None),
+        };
+        if file_len < 24 {
+            return Ok(None);
+        }
+        file.seek(SeekFrom::End(-24))?;
+        let mut tail = [0u8; 24];
+        file.read_exact(&mut tail)?;
+        if &tail[16..24] != b"SLICEEXE" {
+            return Ok(None);
+        }
+        let cas_offset = usize::try_from(u64::from_le_bytes(tail[0..8].try_into()?))
+            .context("SLICEEXE cas_offset overflow")?;
+        let cas_len = usize::try_from(u64::from_le_bytes(tail[8..16].try_into()?))
+            .context("SLICEEXE cas_len overflow")?;
         let mmap = unsafe { Mmap::map(&file)? };
-        if mmap.len() < 24 {
-            return Ok(None);
-        }
-        let tail_start = mmap.len() - 24;
-        if &mmap[tail_start + 16..tail_start + 24] != b"SLICEEXE" {
-            return Ok(None);
-        }
-        let cas_offset = usize::try_from(u64::from_le_bytes(
-            mmap[tail_start..tail_start + 8].try_into()?,
-        ))
-        .context("SLICEEXE cas_offset overflow")?;
-        let cas_len = usize::try_from(u64::from_le_bytes(
-            mmap[tail_start + 8..tail_start + 16].try_into()?,
-        ))
-        .context("SLICEEXE cas_len overflow")?;
         let archive = Self::from_mmap_region(
             Arc::new(mmap),
             cas_offset,

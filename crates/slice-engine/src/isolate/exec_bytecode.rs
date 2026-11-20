@@ -52,10 +52,10 @@ impl SliceIsolate {
             self.compartment.consume_fuel(initial_charge)?;
             self.current_tier = ExecutionTier::Tier1Baseline;
             let last_val = if &bytecode[0..8] == crate::boacas::BOACAS_MAGIC {
-                if let Some((hdr, precompiled_slice, fallback_js)) =
-                    crate::boacas::BoaCasHeader::decode(bytecode)
-                {
-                    if crate::boacas::is_exper_boacas_runtime_enabled() {
+                if crate::boacas::is_exper_boacas_runtime_enabled() {
+                    if let Some((hdr, precompiled_slice, fallback_js_bytes)) =
+                        crate::boacas::BoaCasHeader::decode_raw(bytecode)
+                    {
                         let total_end = crate::boacas::BOACAS_HEADER_LEN
                             + (hdr.precompiled_len as usize)
                             + (hdr.fallback_js_len as usize);
@@ -64,17 +64,21 @@ impl SliceIsolate {
                         self.exec_boacas_vm(
                             &hdr,
                             precompiled_slice,
-                            fallback_js,
+                            fallback_js_bytes,
                             contiguous_payload,
                         )?
                     } else {
-                        self.exec_boa_full_es_vm(fallback_js)?
+                        JsValue::Undefined
                     }
+                } else if let Some((_, _, fallback_js)) =
+                    crate::boacas::BoaCasHeader::decode(bytecode)
+                {
+                    self.exec_boa_full_es_vm(fallback_js)?
                 } else {
                     JsValue::Undefined
                 }
             } else {
-                let js_code = std::str::from_utf8(&bytecode[8..]).unwrap_or_default();
+                let js_code = simdutf8::basic::from_utf8(&bytecode[8..]).unwrap_or_default();
                 self.exec_boa_full_es_vm(js_code)?
             };
             let has_secrets = !self.egress_audit_secrets.is_empty();

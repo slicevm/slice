@@ -176,8 +176,8 @@ impl SliceIsolate {
     /// Pre-warms a `boa_engine::Context` realm in `BOA_CONTEXT_POOL` bounded by `caps` so top-level
     /// module initialization obeys the exact same OCap permissions as subsequent executions.
     pub fn prewarm_boa_bundle_with_caps(bytecode: &[u8], caps: &CapabilityToken) {
-        if let Some((hdr, precompiled_slice, fallback_js)) =
-            crate::boacas::BoaCasHeader::decode(bytecode)
+        if let Some((hdr, precompiled_slice, fallback_js_bytes)) =
+            crate::boacas::BoaCasHeader::decode_raw(bytecode)
             && crate::boacas::is_exper_boacas_runtime_enabled()
         {
             if (hdr.feature_flags & crate::boacas::BOACAS_FLAG_HAS_WORKER) != 0 {
@@ -207,7 +207,7 @@ impl SliceIsolate {
                         &mut realm,
                         &hdr,
                         precompiled_slice,
-                        fallback_js,
+                        fallback_js_bytes,
                         contiguous_payload,
                         false,
                         is_cold_bare_realm,
@@ -1054,10 +1054,11 @@ impl SliceIsolate {
         &mut self,
         header: &crate::boacas::BoaCasHeader,
         precompiled_slice: &[u8],
-        fallback_js: &str,
+        fallback_js_bytes: &[u8],
         contiguous_payload: &[u8],
     ) -> Result<JsValue, SandboxViolation> {
-        let _active_src_guard = crate::boa_realm::ActiveSourceSliceGuard::new(fallback_js);
+        let _active_src_guard =
+            crate::boa_realm::ActiveSourceSliceGuard::new_bytes(fallback_js_bytes);
         let flags = self.setup_boa_compartment_thread_locals();
 
         if !flags.is_worker && (header.feature_flags & BOACAS_FLAG_HAS_WORKER) != 0 {
@@ -1150,7 +1151,7 @@ impl SliceIsolate {
             &mut realm,
             header,
             precompiled_slice,
-            fallback_js,
+            fallback_js_bytes,
             contiguous_payload,
             is_http_req,
             is_cold_bare_realm,

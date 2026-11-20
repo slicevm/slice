@@ -28,6 +28,9 @@ rustc-hash.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+mimalloc.workspace = true
+
 [dev-dependencies]
 criterion.workspace = true
 
