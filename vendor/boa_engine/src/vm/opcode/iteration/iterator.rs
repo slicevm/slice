@@ -222,8 +222,10 @@ impl IteratorResult {
             .last()
             .expect("iterator on the call frame must exist")
             .last_result()
-            .object()
-            .clone();
+            .map_or_else(
+                crate::object::JsObject::with_null_proto,
+                |r| r.object().clone(),
+            );
         context.vm.set_register(value.into(), last_result.into());
     }
 }

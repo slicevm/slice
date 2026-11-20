@@ -753,6 +753,81 @@ impl JsObject {
         kind: PropertyNameKind,
         context: &mut Context,
     ) -> JsResult<Vec<JsValue>> {
+        if self.is_ordinary() {
+            let fast_opt = {
+                let ob = self.borrow();
+                if ob.properties().index_property_values().len() == 0 {
+                    match kind {
+                        PropertyNameKind::Key => Some(Ok(ob.shape().with_property_keys(|keys| {
+                            let mut out = Vec::with_capacity(keys.len());
+                            for (k, slot) in keys {
+                                if slot
+                                    .attributes
+                                    .contains(crate::object::shape::slot::SlotAttributes::ENUMERABLE)
+                                    && let PropertyKey::String(s) = k
+                                {
+                                    out.push(JsValue::from(s.clone()));
+                                }
+                            }
+                            out
+                        }))),
+                        PropertyNameKind::Value => ob.shape().with_property_keys(|keys| {
+                            let mut out = Vec::with_capacity(keys.len());
+                            for (k, slot) in keys {
+                                if !slot
+                                    .attributes
+                                    .contains(crate::object::shape::slot::SlotAttributes::ENUMERABLE)
+                                {
+                                    continue;
+                                }
+                                if matches!(k, PropertyKey::String(_)) {
+                                    if slot.attributes.is_accessor_descriptor() {
+                                        return None;
+                                    }
+                                    out.push(ob.properties().storage[slot.index as usize].clone());
+                                }
+                            }
+                            Some(Ok(out))
+                        }),
+                        PropertyNameKind::KeyAndValue => ob.shape().with_property_keys(|keys| {
+                            let mut pairs = Vec::with_capacity(keys.len());
+                            for (k, slot) in keys {
+                                if !slot
+                                    .attributes
+                                    .contains(crate::object::shape::slot::SlotAttributes::ENUMERABLE)
+                                {
+                                    continue;
+                                }
+                                if let PropertyKey::String(s) = k {
+                                    if slot.attributes.is_accessor_descriptor() {
+                                        return None;
+                                    }
+                                    pairs.push((
+                                        s.clone(),
+                                        ob.properties().storage[slot.index as usize].clone(),
+                                    ));
+                                }
+                            }
+                            Some(Err(pairs))
+                        }),
+                    }
+                } else {
+                    None
+                }
+            };
+            match fast_opt {
+                Some(Ok(values)) => return Ok(values),
+                Some(Err(pairs)) => {
+                    let mut out = Vec::with_capacity(pairs.len());
+                    for (k, v) in pairs {
+                        out.push(Array::create_array_from_list([k.into(), v], context).into());
+                    }
+                    return Ok(out);
+                }
+                None => {}
+            }
+        }
+
         // 1. Assert: Type(O) is Object.
         // 2. Let ownKeys be ? O.[[OwnPropertyKeys]]().
         let own_keys =

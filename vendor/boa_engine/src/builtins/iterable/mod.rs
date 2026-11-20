@@ -366,6 +366,18 @@ impl IteratorResult {
     }
 }
 
+#[derive(Clone, Debug, Finalize, Trace)]
+pub(crate) struct FastForInState {
+    target: JsObject,
+    #[unsafe_ignore_trace]
+    keys: Box<[crate::JsString]>,
+    #[unsafe_ignore_trace]
+    index: usize,
+    #[unsafe_ignore_trace]
+    expected_proto_shape_id: u64,
+    current_value: JsValue,
+}
+
 /// Iterator Record
 ///
 /// An Iterator Record is a Record value used to encapsulate an
@@ -393,7 +405,10 @@ pub struct IteratorRecord {
     done: bool,
 
     /// The result of the last call to `next`.
-    last_result: IteratorResult,
+    last_result: Option<IteratorResult>,
+
+    /// Zero-allocation fast-path state for ordinary `for..in` loops.
+    fast_for_in: Option<Box<FastForInState>>,
 }
 
 impl IteratorRecord {
@@ -405,10 +420,72 @@ impl IteratorRecord {
             iterator,
             next_method,
             done: false,
-            last_result: IteratorResult {
-                object: JsObject::with_null_proto(),
-            },
+            last_result: None,
+            fast_for_in: None,
         }
+    }
+
+    /// Attempts to construct a zero-`ForInIterator`-allocation `IteratorRecord` for an ordinary
+    /// object with no indexed properties whose prototype chain has no enumerable properties.
+    pub(crate) fn try_new_fast_for_in(object: &JsObject, context: &Context) -> Option<Self> {
+        use crate::{object::shape::slot::SlotAttributes, property::PropertyKey};
+
+        if context.vm.frame().code_block().is_generator() || !object.is_ordinary() {
+            return None;
+        }
+        let ob = object.borrow();
+        if ob.properties().index_property_values().len() != 0 {
+            return None;
+        }
+        let expected_proto_shape_id = match ob.shape().prototype() {
+            None => 0,
+            Some(proto) => {
+                if !proto.is_ordinary() {
+                    return None;
+                }
+                let pb = proto.borrow();
+                if pb.shape().prototype().is_some()
+                    || pb.properties().index_property_values().len() != 0
+                {
+                    return None;
+                }
+                let has_enum = pb.shape().with_property_keys(|pkeys| {
+                    pkeys
+                        .iter()
+                        .any(|(_, s)| s.attributes.contains(SlotAttributes::ENUMERABLE))
+                });
+                if has_enum {
+                    return None;
+                }
+                pb.shape().id()
+            }
+        };
+        let keys = ob.shape().with_property_keys(|own_keys| {
+            let mut out = Vec::with_capacity(own_keys.len());
+            for (k, slot) in own_keys {
+                if slot.attributes.contains(SlotAttributes::ENUMERABLE)
+                    && let PropertyKey::String(s) = k
+                {
+                    out.push(s.clone());
+                }
+            }
+            out.into_boxed_slice()
+        });
+        drop(ob);
+
+        Some(Self {
+            iterator: context.intrinsics().constructors().iterator().prototype(),
+            next_method: JsValue::undefined(),
+            done: false,
+            last_result: None,
+            fast_for_in: Some(Box::new(FastForInState {
+                target: object.clone(),
+                keys,
+                index: 0,
+                expected_proto_shape_id,
+                current_value: JsValue::undefined(),
+            })),
+        })
     }
 
     /// Get the `[[Iterator]]` field of the `IteratorRecord`.
@@ -421,9 +498,9 @@ impl IteratorRecord {
         &self.next_method
     }
 
-    /// Gets the last result object of the iterator record.
-    pub(crate) const fn last_result(&self) -> &IteratorResult {
-        &self.last_result
+    /// Gets the last result object of the iterator record, if any.
+    pub(crate) const fn last_result(&self) -> Option<&IteratorResult> {
+        self.last_result.as_ref()
     }
 
     /// Runs `f`, setting the `done` field of this `IteratorRecord` to `true` if `f` returns
@@ -441,7 +518,14 @@ impl IteratorRecord {
 
     /// Gets the current value of the `IteratorRecord`.
     pub(crate) fn value(&mut self, context: &mut Context) -> JsResult<JsValue> {
-        self.set_done_on_err(|iter| iter.last_result.value(context))
+        if let Some(fast) = &self.fast_for_in {
+            return Ok(fast.current_value.clone());
+        }
+        self.set_done_on_err(|iter| {
+            iter.last_result
+                .as_ref()
+                .map_or_else(|| Ok(JsValue::undefined()), |r| r.value(context))
+        })
     }
 
     /// Get the `[[Done]]` field of the `IteratorRecord`.
@@ -465,7 +549,7 @@ impl IteratorRecord {
             // 3. If done is true, return false.
             iter.done = result.complete(context)?;
 
-            iter.last_result = result;
+            iter.last_result = Some(result);
 
             Ok(())
         })
@@ -522,6 +606,80 @@ impl IteratorRecord {
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-iteratorstep
     pub(crate) fn step(&mut self, context: &mut Context) -> JsResult<bool> {
+        if let Some(fast) = &mut self.fast_for_in {
+            use crate::{
+                builtins::object::for_in_iterator::ForInIterator,
+                object::shape::slot::SlotAttributes, property::PropertyKey,
+            };
+            loop {
+                if fast.index >= fast.keys.len() {
+                    let proto_unchanged = if fast.target.is_ordinary() {
+                        let ob = fast.target.borrow();
+                        match ob.shape().prototype() {
+                            None => fast.expected_proto_shape_id == 0,
+                            Some(p) => p.borrow().shape().id() == fast.expected_proto_shape_id,
+                        }
+                    } else {
+                        false
+                    };
+                    if proto_unchanged {
+                        self.done = true;
+                        fast.current_value = JsValue::undefined();
+                        return Ok(true);
+                    }
+                    let deopt = self.fast_for_in.take().expect("checked Some");
+                    let (iter_obj, next_fn) = ForInIterator::create_for_in_iterator_from_remaining(
+                        deopt.target.clone(),
+                        &deopt.keys,
+                        &[],
+                        context,
+                    );
+                    self.iterator = iter_obj;
+                    self.next_method = next_fn;
+                    break;
+                }
+
+                let idx = fast.index;
+                let proto_and_indexed_ok = if fast.target.is_ordinary() {
+                    let ob = fast.target.borrow();
+                    ob.properties().index_property_values().len() == 0
+                        && match ob.shape().prototype() {
+                            None => fast.expected_proto_shape_id == 0,
+                            Some(p) => p.borrow().shape().id() == fast.expected_proto_shape_id,
+                        }
+                } else {
+                    false
+                };
+                if !proto_and_indexed_ok {
+                    let deopt = self.fast_for_in.take().expect("checked Some");
+                    let (iter_obj, next_fn) = ForInIterator::create_for_in_iterator_from_remaining(
+                        deopt.target.clone(),
+                        &deopt.keys[..idx],
+                        &deopt.keys[idx..],
+                        context,
+                    );
+                    self.iterator = iter_obj;
+                    self.next_method = next_fn;
+                    break;
+                }
+
+                let key_str = fast.keys[idx].clone();
+                fast.index = idx + 1;
+                let still_enum = {
+                    let ob = fast.target.borrow();
+                    let pk = PropertyKey::String(key_str.clone());
+                    ob.shape()
+                        .lookup(&pk)
+                        .is_some_and(|s| s.attributes.contains(SlotAttributes::ENUMERABLE))
+                };
+                if still_enum {
+                    fast.current_value = key_str.into();
+                    self.done = false;
+                    return Ok(false);
+                }
+            }
+        }
+
         self.set_done_on_err(|iter| {
             // 1. Let result be ? IteratorNext(iteratorRecord).
             let result = iter.next(None, context)?;
@@ -536,7 +694,7 @@ impl IteratorRecord {
             //     b. Return done.
             iter.done = result.complete(context)?;
 
-            iter.last_result = result;
+            iter.last_result = Some(result);
 
             // 6. Return result.
             Ok(iter.done)

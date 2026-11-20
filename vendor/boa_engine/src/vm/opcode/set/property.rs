@@ -15,6 +15,7 @@ fn set_by_name(
     value: RegisterOperand,
     value_object: &JsValue,
     receiver: &JsValue,
+    same_receiver: bool,
     index: IndexOperand,
     context: &mut Context,
 ) -> JsResult<()> {
@@ -66,6 +67,59 @@ fn set_by_name(
         }
         return Ok(());
     }
+
+    if same_receiver
+        && ic.add_from_shape_id.get() == object_borrowed.shape().id()
+        && object.is_ordinary()
+        && object_borrowed.extensible
+        && let Some(next_shape) = ic.try_match_add_transition(
+            object_borrowed.shape(),
+            object_borrowed.properties().storage.len(),
+        )
+    {
+        drop(object_borrowed);
+        let mut object_mut = object.borrow_mut();
+        let props = object_mut.properties_mut();
+        props.shape = next_shape;
+        props.storage.push(value);
+        return Ok(());
+    }
+
+    let pre_add_candidate = if same_receiver
+        && !ic.megamorphic.get()
+        && ic.add_from_shape_id.get() == 0
+        && object.is_ordinary()
+        && object_borrowed.extensible
+        && object_borrowed.shape().is_shared()
+    {
+        let mut proto_ids = [0u64; crate::vm::inline_cache::MAX_ADD_IC_PROTO_DEPTH];
+        let mut depth = 0usize;
+        let mut cur = object_borrowed.shape().prototype();
+        let mut chain_ok = true;
+        while let Some(p) = cur {
+            if depth >= crate::vm::inline_cache::MAX_ADD_IC_PROTO_DEPTH || !p.is_ordinary() {
+                chain_ok = false;
+                break;
+            }
+            let pb = p.borrow();
+            proto_ids[depth] = pb.shape().id();
+            depth += 1;
+            cur = pb.shape().prototype();
+        }
+        if chain_ok {
+            Some((
+                object_borrowed.shape().id(),
+                object_borrowed.properties().storage.len() as u32,
+                proto_ids,
+                depth as u8,
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     drop(object_borrowed);
 
     let name: PropertyKey = ic.name.clone().into();
@@ -80,6 +134,26 @@ fn set_by_name(
 
     // Cache the property.
     let slot = *context.slot();
+    if succeeded
+        && let Some((before_id, before_len, proto_ids, proto_depth)) = pre_add_candidate
+        && !matches!(name, PropertyKey::Index(_))
+    {
+        let data_attrs =
+            SlotAttributes::WRITABLE | SlotAttributes::ENUMERABLE | SlotAttributes::CONFIGURABLE;
+        let object_borrowed = object.borrow();
+        let after_shape = object_borrowed.shape();
+        if after_shape.is_shared()
+            && after_shape.id() != before_id
+            && object_borrowed.properties().storage.len() == (before_len as usize) + 1
+            && after_shape
+                .lookup(&name)
+                .is_some_and(|added| added.index == before_len && added.attributes == data_attrs)
+        {
+            let ic = &context.vm.frame().code_block.ic[usize::from(index)];
+            ic.set_add_transition(before_id, after_shape, before_len, proto_ids, proto_depth);
+            return Ok(());
+        }
+    }
     if succeeded && slot.is_cacheable() {
         let ic = &context.vm.frame().code_block.ic[usize::from(index)];
         let object_borrowed = object.borrow();
@@ -104,7 +178,7 @@ impl SetPropertyByName {
         context: &mut Context,
     ) -> JsResult<()> {
         let object = context.vm.get_register(object.into()).clone();
-        set_by_name(value, &object, &object, index, context)
+        set_by_name(value, &object, &object, true, index, context)
     }
 }
 
@@ -134,7 +208,8 @@ impl SetPropertyByNameWithThis {
     ) -> JsResult<()> {
         let value_object = context.vm.get_register(object.into()).clone();
         let receiver = context.vm.get_register(receiver.into()).clone();
-        set_by_name(value, &value_object, &receiver, index, context)
+        let same = JsValue::same_value(&value_object, &receiver);
+        set_by_name(value, &value_object, &receiver, same, index, context)
     }
 }
 
@@ -165,8 +240,9 @@ impl SetPropertyByValue {
         let value = context.vm.get_register(value.into()).clone();
         let key = context.vm.get_register(key.into()).clone();
         let receiver = context.vm.get_register(receiver.into()).clone();
-        let object = context.vm.get_register(object.into()).clone();
-        let object = object.to_object(context)?;
+        let raw_object = context.vm.get_register(object.into()).clone();
+        let same_recv = raw_object.is_object() && JsValue::same_value(&raw_object, &receiver);
+        let object = raw_object.to_object(context)?;
 
         let key = key.to_property_key(context)?;
 
@@ -185,6 +261,38 @@ impl SetPropertyByValue {
                 if object_borrowed
                     .properties_mut()
                     .set_dense_property(index.get(), &value)
+                {
+                    return Ok(());
+                }
+            } else if same_recv
+                && !matches!(key, PropertyKey::Index(_))
+                && object.is_ordinary()
+            {
+                let mut ob = object.borrow_mut();
+                if let Some(slot) = ob.shape().lookup(&key) {
+                    if !slot.attributes.is_accessor_descriptor()
+                        && slot.attributes.contains(SlotAttributes::WRITABLE)
+                    {
+                        ob.properties_mut().storage[slot.index as usize] = value;
+                        return Ok(());
+                    }
+                    break 'fast_path;
+                }
+                if !ob.extensible {
+                    break 'fast_path;
+                }
+                let proto_clean = match ob.shape().prototype() {
+                    None => true,
+                    Some(proto) if proto.is_ordinary() => {
+                        let pb = proto.borrow();
+                        pb.shape().prototype().is_none() && pb.shape().lookup(&key).is_none()
+                    }
+                    _ => false,
+                };
+                if proto_clean
+                    && ob
+                        .properties_mut()
+                        .try_fast_define_own_data_property(&key, &value)
                 {
                     return Ok(());
                 }

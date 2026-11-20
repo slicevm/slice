@@ -72,6 +72,13 @@ pub trait HostHooks {
         JobCallback::new(callback, ())
     }
 
+    /// Returns `true` when [`Self::make_job_callback`] / [`Self::call_job_callback`] must capture
+    /// and restore per-job host continuation state (such as `AsyncLocalStorage`).
+    #[inline]
+    fn has_active_job_context(&self) -> bool {
+        false
+    }
+
     /// [`HostCallJobCallback ( jobCallback, V, argumentsList )`][spec]
     ///
     /// # Requirements

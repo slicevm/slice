@@ -80,9 +80,13 @@ impl IntrinsicObject for Array {
         let symbol_iterator = JsSymbol::iterator();
         let symbol_unscopables = JsSymbol::unscopables();
 
-        let get_species = BuiltInBuilder::callable(realm, Self::get_species)
-            .name(js_string!("get [Symbol.species]"))
-            .build();
+        let get_species = BuiltInBuilder::callable_with_object(
+            realm,
+            realm.intrinsics().objects().array_species_getter().into(),
+            Self::get_species,
+        )
+        .name(js_string!("get [Symbol.species]"))
+        .build();
 
         let values_function = BuiltInBuilder::callable_with_object(
             realm,
@@ -453,6 +457,56 @@ impl Array {
         Ok(this.clone())
     }
 
+    #[inline]
+    fn has_default_array_species(original_array: &JsObject, context: &Context) -> bool {
+        if !original_array.is_array() {
+            return false;
+        }
+        let intrinsics = context.intrinsics();
+        let arr_ctor_pair = intrinsics.constructors().array();
+        let arr_proto = arr_ctor_pair.prototype();
+        let arr_ctor = arr_ctor_pair.constructor();
+        {
+            let borrowed = original_array.borrow();
+            if borrowed.properties().shape.id() != intrinsics.templates().array().shape().id() {
+                return false;
+            }
+        }
+        {
+            let pb = arr_proto.borrow();
+            let valid_ctor = pb
+                .properties()
+                .shape
+                .lookup(&PropertyKey::from(CONSTRUCTOR))
+                .is_some_and(|slot| {
+                    !slot.attributes.is_accessor_descriptor()
+                        && pb
+                            .properties()
+                            .storage
+                            .get(slot.index as usize)
+                            .and_then(JsValue::as_object)
+                            .is_some_and(|o| JsObject::equals(&o, &arr_ctor))
+                });
+            if !valid_ctor {
+                return false;
+            }
+        }
+        let species_getter: JsObject = intrinsics.objects().array_species_getter().into();
+        let cb = arr_ctor.borrow();
+        cb.properties()
+            .shape
+            .lookup(&PropertyKey::from(JsSymbol::species()))
+            .is_some_and(|slot| {
+                slot.attributes.has_get()
+                    && cb
+                        .properties()
+                        .storage
+                        .get(slot.index as usize)
+                        .and_then(JsValue::as_object)
+                        .is_some_and(|g| JsObject::equals(&g, &species_getter))
+            })
+    }
+
     /// Utility function used to specify the creation of a new Array object using a constructor
     /// function that is derived from `original_array`.
     ///
@@ -462,6 +516,9 @@ impl Array {
         length: u64,
         context: &mut Context,
     ) -> JsResult<JsObject> {
+        if Self::has_default_array_species(original_array, context) {
+            return Self::array_create(length, None, context);
+        }
         // 1. Let isArray be ? IsArray(originalArray).
         // 2. If isArray is false, return ? ArrayCreate(length).
         if !original_array.is_array_abstract()? {
@@ -2095,6 +2152,84 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        // Fast path for dense unmodified intrinsic `Array` instances when `start` / `end` are
+        // omitted, `undefined`, or primitive numbers (zero observable `valueOf` side effects):
+        if let Some(o) = this.as_object()
+            && Self::has_default_array_species(&o, context)
+            && args
+                .first()
+                .is_none_or(|v| v.is_undefined() || v.as_number().is_some())
+            && args
+                .get(1)
+                .is_none_or(|v| v.is_undefined() || v.as_number().is_some())
+        {
+            let fast_sliced = {
+                let borrowed = o.borrow();
+                let len = borrowed
+                    .properties()
+                    .storage
+                    .first()
+                    .and_then(JsValue::as_number)
+                    .map(|n| n as u64);
+                if let Some(len) = len {
+                    let resolve_bound = |arg: Option<&JsValue>, default: u64| -> u64 {
+                        match arg.and_then(JsValue::as_number) {
+                            None => default,
+                            Some(n) if n.is_nan() => 0,
+                            Some(n) if n == f64::INFINITY => len,
+                            Some(n) if n == f64::NEG_INFINITY => 0,
+                            Some(n) => {
+                                let t = n.trunc();
+                                if t < 0.0 {
+                                    let back = (-t) as u64;
+                                    len.saturating_sub(back)
+                                } else {
+                                    (t as u64).min(len)
+                                }
+                            }
+                        }
+                    };
+                    let k = resolve_bound(args.first(), 0) as usize;
+                    let final_ = resolve_bound(args.get(1), len) as usize;
+                    let count = final_.saturating_sub(k);
+                    match &borrowed.properties().indexed_properties {
+                        IndexedProperties::DenseI32(vec) if final_ <= vec.len() => {
+                            let mut sub = ThinVec::with_capacity(count);
+                            if count > 0 {
+                                sub.extend_from_slice(&vec[k..final_]);
+                            }
+                            Some((count, IndexedProperties::DenseI32(sub)))
+                        }
+                        IndexedProperties::DenseF64(vec) if final_ <= vec.len() => {
+                            let mut sub = ThinVec::with_capacity(count);
+                            if count > 0 {
+                                sub.extend_from_slice(&vec[k..final_]);
+                            }
+                            Some((count, IndexedProperties::DenseF64(sub)))
+                        }
+                        IndexedProperties::DenseElement(vec) if final_ <= vec.len() => {
+                            let mut sub = ThinVec::with_capacity(count);
+                            if count > 0 {
+                                sub.extend_from_slice(&vec[k..final_]);
+                            }
+                            Some((count, IndexedProperties::from_dense_js_value(sub)))
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some((count, indexed)) = fast_sliced {
+                return Ok(context
+                    .intrinsics()
+                    .templates()
+                    .array()
+                    .create_with_indexed_properties(Array, vec![JsValue::new(count)], indexed)
+                    .into());
+            }
+        }
+
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
