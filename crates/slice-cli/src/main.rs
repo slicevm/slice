@@ -1,10 +1,14 @@
 //! `slice` (Nexus-JS): Production Next-Generation MicroVM-Grade Edge Runtime CLI
 //!
 //! Domain Architecture:
-//! - [`commands`] — CLI subcommands (`init`, `run`, `pack`, `compile`, `inspect`, `test`, `info`).
-//! - [`config`] — Unified configuration (`slice.toml`, `.env`, inline directives, `SLICE_*`), CAS packager, and OS-native file watcher.
-//! - [`server`] — Multi-threaded WinterTC HTTP/1.1 keep-alive, SSE, WebSocket, TLS 1.3 (`rustls`), and zero-downtime `.cas` hot-swap server.
-//! - [`diagnostics`] — Model Context Protocol (MCP) JSON-RPC 2.0 server, interactive SES REPL, kernel doctor, and 1,000-tenant microVM benchmark.
+//! - [`commands`] - CLI subcommands (`init`, `run`, `pack`, `compile`, `inspect`, `test`, `info`).
+//! - [`config`] - Unified configuration (`slice.toml`, `.env`, inline directives, `SLICE_*`), CAS packager, and OS-native file watcher.
+//! - [`server`] - Multi-threaded WinterTC HTTP/1.1 keep-alive, SSE, WebSocket, TLS 1.3 (`rustls`), and zero-downtime `.cas` hot-swap server.
+//! - [`diagnostics`] - Model Context Protocol (MCP) JSON-RPC 2.0 server, interactive SES REPL, kernel doctor, and 1,000-tenant microVM benchmark.
+
+#[cfg(windows)]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub(crate) mod commands;
 pub(crate) mod config;
@@ -48,7 +52,27 @@ use anyhow::{Result, bail};
 use slice_cas::MappedCasArchive;
 use std::env;
 
+fn finish_with_exit_code(res: Result<()>) -> Result<()> {
+    res?;
+    let exit_code = LAST_CLI_EXIT_CODE.load(std::sync::atomic::Ordering::Relaxed);
+    if exit_code != 0 {
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
+    // On Windows MSVC (`build.rs` sets `/STACK:16777216`) and optimized Linux builds
+    // (`RLIMIT_STACK` 8 MiB + `-Wl,-z,stack-size=16777216`), execute directly on the OS main
+    // thread without paying a 16 MiB `pthread_create` / `CreateThread` + join tax on cold start.
+    if !cfg!(debug_assertions)
+        && (cfg!(target_os = "linux") || (cfg!(target_os = "windows") && cfg!(target_env = "msvc")))
+    {
+        return finish_with_exit_code(cli_entrypoint());
+    }
+
     let builder = std::thread::Builder::new()
         .name("slice-main".to_string())
         .stack_size(16 * 1024 * 1024);

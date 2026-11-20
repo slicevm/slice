@@ -189,9 +189,10 @@ impl BoaCasHeader {
         dst.extend_from_slice(&self.fallback_js_len.to_le_bytes());
     }
 
-    /// Decodes a `SLICEBC\x01` buffer into `(BoaCasHeader, precompiled_slice, fallback_js_str)`.
+    /// Decodes a `SLICEBC\x01` buffer into `(BoaCasHeader, precompiled_slice, fallback_js_bytes)`
+    /// without eagerly paging in or scanning `fallback_js_bytes` for UTF-8 on cold `SLICEBC\x01` runs.
     #[inline]
-    pub fn decode(bytecode: &[u8]) -> Option<(Self, &[u8], &str)> {
+    pub fn decode_raw(bytecode: &[u8]) -> Option<(Self, &[u8], &[u8])> {
         if bytecode.len() < BOACAS_HEADER_LEN || &bytecode[0..8] != BOACAS_MAGIC {
             return None;
         }
@@ -220,7 +221,7 @@ impl BoaCasHeader {
             return None;
         }
         let precompiled_slice = &bytecode[BOACAS_HEADER_LEN..pre_end];
-        let fallback_js = std::str::from_utf8(&bytecode[pre_end..total_end]).ok()?;
+        let fallback_js_bytes = &bytecode[pre_end..total_end];
         Some((
             Self {
                 approach_kind,
@@ -231,8 +232,16 @@ impl BoaCasHeader {
                 fallback_js_len: fallback_js_len as u32,
             },
             precompiled_slice,
-            fallback_js,
+            fallback_js_bytes,
         ))
+    }
+
+    /// Decodes a `SLICEBC\x01` buffer into `(BoaCasHeader, precompiled_slice, fallback_js_str)`.
+    #[inline]
+    pub fn decode(bytecode: &[u8]) -> Option<(Self, &[u8], &str)> {
+        let (hdr, pre, fb_bytes) = Self::decode_raw(bytecode)?;
+        let fallback_js = simdutf8::basic::from_utf8(fb_bytes).ok()?;
+        Some((hdr, pre, fallback_js))
     }
 }
 
@@ -303,7 +312,7 @@ pub(crate) fn eval_boacas_on_realm(
     realm: &mut WarmBoaRealm,
     header: &BoaCasHeader,
     precompiled_slice: &[u8],
-    fallback_js: &str,
+    fallback_js_bytes: &[u8],
     _full_contiguous_payload: &[u8],
     is_http_req: bool,
     is_cold_bare_realm: bool,
@@ -392,7 +401,7 @@ pub(crate) fn eval_boacas_on_realm(
         ensure_realm_shards(realm, effective_shards, init_lazy);
         let res = realm
             .ctx
-            .eval(boa_engine::Source::from_bytes(fallback_js.as_bytes()));
+            .eval(boa_engine::Source::from_bytes(fallback_js_bytes));
         if res.is_ok() && BOA_VIOLATION.with(|v| v.borrow().is_none()) {
             let mut hex_buf = [0u8; 16];
             let _ = std::io::Write::write_fmt(
@@ -412,6 +421,14 @@ pub(crate) fn eval_boacas_on_realm(
         }
         (res, true)
     } else {
+        let Ok(fallback_js) = simdutf8::basic::from_utf8(fallback_js_bytes) else {
+            return (
+                Err(boa_engine::JsNativeError::syntax()
+                    .with_message("Invalid UTF-8 in SLICEBC fallback source")
+                    .into()),
+                false,
+            );
+        };
         ensure_realm_shards(realm, effective_shards, init_lazy);
         let res = if (header.feature_flags & BOACAS_FLAG_STARTS_WITH_BRACE) != 0 {
             crate::boa_realm::eval_or_reuse_cached_script(realm, fallback_js)

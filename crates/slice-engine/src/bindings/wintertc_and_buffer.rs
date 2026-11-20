@@ -257,7 +257,7 @@ pub(crate) fn register_wintertc_phase_n3_host_functions(ctx: &mut boa_engine::Co
                         bytes
                     };
                     if fatal {
-                        match std::str::from_utf8(slice) {
+                        match simdutf8::basic::from_utf8(slice) {
                             Ok(valid) => Ok(valid.to_string()),
                             Err(_) => Err("The encoded data was not valid for encoding utf-8"),
                         }

@@ -24,6 +24,7 @@ aho-corasick.workspace = true
 cow-utils.workspace = true
 smallvec.workspace = true
 itoa.workspace = true
+simdutf8.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

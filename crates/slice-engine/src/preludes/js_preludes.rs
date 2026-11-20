@@ -337,25 +337,27 @@ pub(crate) fn eval_static_js_with_2hit_slicebc_cache(
     {
         return script.evaluate(context);
     }
-    let prev = hit_counter
-        .fetch_update(
-            std::sync::atomic::Ordering::Relaxed,
-            std::sync::atomic::Ordering::Relaxed,
-            |v| Some(v.saturating_add(1)),
-        )
-        .unwrap_or(0);
-    if prev == 0 {
-        return context.eval(boa_engine::Source::from_bytes(bytes));
-    }
-    if cache.get().is_none() && context.realm().scope().num_bindings() == 0 {
-        let script =
-            boa_engine::Script::parse(boa_engine::Source::from_bytes(bytes), None, context)?;
-        if let Ok(compiled) = script.compile_to_slicebc(context)
-            && !compiled.is_empty()
-        {
-            let _ = cache.set(compiled);
+    if !cfg!(debug_assertions) {
+        let prev = hit_counter
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |v| Some(v.saturating_add(1)),
+            )
+            .unwrap_or(0);
+        if prev == 0 {
+            return context.eval(boa_engine::Source::from_bytes(bytes));
         }
-        return script.evaluate(context);
+        if cache.get().is_none() && context.realm().scope().num_bindings() == 0 {
+            let script =
+                boa_engine::Script::parse(boa_engine::Source::from_bytes(bytes), None, context)?;
+            if let Ok(compiled) = script.compile_to_slicebc(context)
+                && !compiled.is_empty()
+            {
+                let _ = cache.set(compiled);
+            }
+            return script.evaluate(context);
+        }
     }
     let precompiled = cache.get_or_init(|| compile_static_js_to_slicebc(bytes));
     if !precompiled.is_empty()

@@ -1676,3 +1676,85 @@ Slice.checkpoint();
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn test_issue_152_single_pass_slice_env_precedence_decode_raw_and_sliceexe_trailer() {
+    use crate::config_and_watch::ResolvedExecutionConfig;
+
+    if std::env::var("SLICE_TEST_ISSUE_152_CHILD").is_ok() {
+        let cfg_env = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(&[], false).unwrap();
+        assert_eq!(cfg_env.fuel_limit, 333_333);
+        assert_eq!(
+            cfg_env.mem_limit, 9_999_999,
+            "SLICE_MEMORY must override SLICE_MEMORY_KB"
+        );
+        assert_eq!(cfg_env.caps.max_checkpoints, Some(5));
+        assert!(
+            cfg_env
+                .caps
+                .allowed_read_prefixes
+                .iter()
+                .any(|p| p.contains("env152"))
+        );
+
+        let cfg_cli = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(
+            &["--fuel=777777".to_string()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(cfg_cli.fuel_limit, 777_777);
+        println!("ISSUE_152_CHILD_OK");
+        return;
+    }
+
+    // 1. Verify 24-byte EOF trailer check returns Ok(None) on non-SLICEEXE binary without error
+    assert!(
+        slice_cas::MappedCasArchive::open_embedded_self()
+            .expect("open_embedded_self should succeed")
+            .is_none()
+    );
+
+    // 2. Verify BoaCasHeader::decode_raw avoids fallback_js UTF-8 scan while decode rejects bad UTF-8
+    let mut bc = slice_engine::pack_boacas_container("console.log('ok152');");
+    assert!(slice_engine::BoaCasHeader::decode(&bc).is_some());
+    let last_idx = bc.len() - 1;
+    bc[last_idx] = 0xFF;
+    assert!(
+        slice_engine::BoaCasHeader::decode_raw(&bc).is_some(),
+        "decode_raw must defer fallback_js UTF-8 scan"
+    );
+    assert!(
+        slice_engine::BoaCasHeader::decode(&bc).is_none(),
+        "decode must reject invalid UTF-8 in fallback_js"
+    );
+    let mut iso = slice_engine::SliceIsolate::spawn(
+        "issue-152-decode-raw",
+        1,
+        slice_sandbox::CapabilityToken::pure_compute(),
+        500_000,
+        4 * 1024 * 1024,
+    );
+    let m = iso.execute_bytecode(&bc, None).unwrap();
+    assert_eq!(m.stdout, vec!["ok152"]);
+
+    // 3. Spawn child test process with explicit SLICE_* environment variables
+    let child_out = std::process::Command::new(std::env::current_exe().unwrap())
+        .env("SLICE_TEST_ISSUE_152_CHILD", "1")
+        .env("SLICE_FUEL", "333333")
+        .env("SLICE_MEMORY", "9999999")
+        .env("SLICE_MEMORY_KB", "4096")
+        .env("SLICE_ALLOW_READ", "/tmp/env152")
+        .env("SLICE_MAX_CHECKPOINTS", "5")
+        .arg("--exact")
+        .arg("cli_tests::frameworks_wasm_and_config_tests::test_issue_152_single_pass_slice_env_precedence_decode_raw_and_sliceexe_trailer")
+        .arg("--nocapture")
+        .output()
+        .expect("spawn issue 152 child");
+    assert!(
+        child_out.status.success(),
+        "child failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&child_out.stdout),
+        String::from_utf8_lossy(&child_out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&child_out.stdout).contains("ISSUE_152_CHILD_OK"));
+}

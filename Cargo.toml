@@ -43,6 +43,8 @@ parking_lot = "0.12"
 cow-utils = "0.1"
 smallvec = { version = "1.16", features = ["union", "const_generics", "const_new"] }
 itoa = "1.0"
+mimalloc = { version = "0.1", default-features = false }
+simdutf8 = "0.1"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [profile.release]

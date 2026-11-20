@@ -421,7 +421,7 @@ pub(crate) fn map_stack_with_active_source(raw_stack: &str) -> String {
     // SAFETY: `ActiveSourceSliceGuard` guarantees `(ptr, len)` points to a valid live `&[u8]`
     // on the current thread's call stack and restores `prev` before the slice lifetime ends.
     let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
-    let Ok(active_src) = std::str::from_utf8(bytes) else {
+    let Ok(active_src) = simdutf8::basic::from_utf8(bytes) else {
         return raw_stack.to_string();
     };
     let line_offset = active_source_line_offset();
@@ -437,7 +437,7 @@ pub(crate) fn map_error_with_active_source(raw_error: &str) -> String {
     // SAFETY: `ActiveSourceSliceGuard` guarantees `(ptr, len)` points to a valid live `&[u8]`
     // on the current thread's call stack and restores `prev` before the slice lifetime ends.
     let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
-    let Ok(active_src) = std::str::from_utf8(bytes) else {
+    let Ok(active_src) = simdutf8::basic::from_utf8(bytes) else {
         return raw_error.to_string();
     };
     let line_offset = active_source_line_offset();
