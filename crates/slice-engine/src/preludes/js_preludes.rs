@@ -338,14 +338,15 @@ pub(crate) fn eval_static_js_with_2hit_slicebc_cache(
         return script.evaluate(context);
     }
     if !cfg!(debug_assertions) {
-        let prev = hit_counter
-            .fetch_update(
+        if hit_counter
+            .compare_exchange(
+                0,
+                1,
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
-                |v| Some(v.saturating_add(1)),
             )
-            .unwrap_or(0);
-        if prev == 0 {
+            .is_ok()
+        {
             return context.eval(boa_engine::Source::from_bytes(bytes));
         }
         if cache.get().is_none() && context.realm().scope().num_bindings() == 0 {
