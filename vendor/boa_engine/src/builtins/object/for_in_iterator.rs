@@ -73,6 +73,36 @@ impl ForInIterator {
         (iterator, next_method.into())
     }
 
+    pub(crate) fn create_for_in_iterator_from_remaining(
+        object: JsObject,
+        visited: &[JsString],
+        remaining: &[JsString],
+        context: &Context,
+    ) -> (JsObject, JsValue) {
+        let mut iter_state = Self::new(JsValue::new(object));
+        iter_state.object_was_visited = true;
+        for k in visited {
+            iter_state.visited_keys.insert(k.clone());
+        }
+        for k in remaining {
+            iter_state.remaining_keys.push_back(k.clone());
+        }
+        let iterator = JsObject::from_proto_and_data_with_shared_shape(
+            context.root_shape(),
+            context.intrinsics().constructors().iterator().prototype(),
+            iter_state,
+        )
+        .upcast();
+
+        let next_method =
+            FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(Self::next))
+                .name(js_string!("next"))
+                .length(0)
+                .build();
+
+        (iterator, next_method.into())
+    }
+
     /// %ForInIteratorPrototype%.next( )
     ///
     /// Gets the next result in the object.

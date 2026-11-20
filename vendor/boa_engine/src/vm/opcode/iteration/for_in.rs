@@ -16,6 +16,10 @@ impl CreateForInIterator {
     pub(crate) fn operation(value: RegisterOperand, context: &mut Context) -> JsResult<()> {
         let object = context.vm.get_register(value.into()).clone();
         let object = object.to_object(context)?;
+        if let Some(fast_record) = IteratorRecord::try_new_fast_for_in(&object, context) {
+            context.vm.frame_mut().iterators.push(fast_record);
+            return Ok(());
+        }
         let (iterator, next_method) =
             ForInIterator::create_for_in_iterator(JsValue::new(object), context);
 

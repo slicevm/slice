@@ -275,12 +275,22 @@ impl Script {
     /// Serializes the compiled `CodeBlock` tree (`Bytecode`, `Constants`, `BindingLocator`s, `Handler`s,
     /// and `InlineCache` descriptors) plus the global scope binding count into a `SLCB\x01` binary buffer.
     pub fn compile_to_slicebc(&self, context: &mut Context) -> JsResult<Vec<u8>> {
+        self.compile_to_slicebc_with_min_line(context, 0)
+    }
+
+    /// Compiles and serializes this [`Script`]'s `CodeBlock` tree into `SLCB\x01` format, omitting
+    /// internal prelude `SourceMap` entries whose 1-based line number is strictly below `min_sourcemap_line`.
+    pub fn compile_to_slicebc_with_min_line(
+        &self,
+        context: &mut Context,
+        min_sourcemap_line: u32,
+    ) -> JsResult<Vec<u8>> {
         let cb = self.codeblock(context)?;
         let global_bindings = self.inner.realm.scope().num_bindings();
         let mut out = Vec::with_capacity(16_384);
         out.extend_from_slice(SLICEBC_MAGIC);
         out.extend_from_slice(&global_bindings.to_le_bytes());
-        encode_codeblock(&cb, &mut out);
+        encode_codeblock(&cb, &mut out, min_sourcemap_line);
         Ok(out)
     }
 
@@ -298,8 +308,21 @@ impl Script {
             return None;
         }
         let empty_global_scope = boa_ast::scope::Scope::new_global();
+        let empty_source_text = SpannedSourceText::new_empty();
+        let empty_source_info = crate::vm::source_info::SourceInfo::default();
         let mut scope_cache: FxHashMap<u32, boa_ast::scope::Scope> = FxHashMap::default();
-        let cb = decode_codeblock(bytes, &mut pos, &empty_global_scope, &mut scope_cache, 0)?;
+        let mut string_pool: FxHashMap<&[u8], JsString> =
+            FxHashMap::with_capacity_and_hasher(256, Default::default());
+        let cb = decode_codeblock(
+            bytes,
+            &mut pos,
+            &empty_global_scope,
+            &empty_source_text,
+            &empty_source_info,
+            &mut scope_cache,
+            &mut string_pool,
+            0,
+        )?;
         if pos != bytes.len() {
             return None;
         }
@@ -358,7 +381,7 @@ fn write_js_string(dst: &mut Vec<u8>, s: &JsString) {
     }
 }
 
-fn encode_codeblock(cb: &CodeBlock, dst: &mut Vec<u8>) {
+fn encode_codeblock(cb: &CodeBlock, dst: &mut Vec<u8>, min_sourcemap_line: u32) {
     dst.extend_from_slice(&cb.flags.get().bits().to_le_bytes());
     write_u32(dst, cb.length);
     write_u32(dst, cb.parameter_length);
@@ -387,7 +410,7 @@ fn encode_codeblock(cb: &CodeBlock, dst: &mut Vec<u8>) {
             }
             crate::vm::Constant::Function(child) => {
                 dst.push(1u8);
-                encode_codeblock(child, dst);
+                encode_codeblock(child, dst, min_sourcemap_line);
             }
             crate::vm::Constant::BigInt(bi) => {
                 dst.push(2u8);
@@ -437,8 +460,18 @@ fn encode_codeblock(cb: &CodeBlock, dst: &mut Vec<u8>) {
     write_js_string(dst, cb.name());
 
     let sm_entries = cb.source_info.map().entries();
-    write_u32(dst, sm_entries.len() as u32);
-    for entry in sm_entries {
+    let sm_slice = if min_sourcemap_line == 0 {
+        sm_entries
+    } else if let Some(first_idx) = sm_entries
+        .iter()
+        .position(|e| e.position().is_some_and(|p| p.line_number() >= min_sourcemap_line))
+    {
+        &sm_entries[first_idx..]
+    } else {
+        &[]
+    };
+    write_u32(dst, sm_slice.len() as u32);
+    for entry in sm_slice {
         write_u32(dst, entry.pc());
         if let Some(pos) = entry.position() {
             write_u32(dst, pos.line_number());
@@ -509,18 +542,38 @@ fn read_bounded_len(src: &[u8], pos: &mut usize, min_elem_bytes: usize) -> Optio
 }
 
 #[inline]
-fn read_js_string(src: &[u8], pos: &mut usize) -> Option<JsString> {
+fn read_js_string<'a>(
+    src: &'a [u8],
+    pos: &mut usize,
+    string_pool: &mut FxHashMap<&'a [u8], JsString>,
+) -> Option<JsString> {
     let kind = read_u8(src, pos)?;
     let len = read_u32(src, pos)? as usize;
     match kind {
         0 => {
+            if len == 0 {
+                return Some(crate::js_string!());
+            }
             if len > MAX_SLICEBC_STRING_BYTES {
                 return None;
             }
             let bytes = read_bytes(src, pos, len)?;
+            if len <= 64 {
+                if let Some(existing) = string_pool.get(bytes) {
+                    return Some(existing.clone());
+                }
+                let js = JsString::from(boa_string::JsStr::latin1(bytes));
+                if string_pool.len() < 4096 {
+                    string_pool.insert(bytes, js.clone());
+                }
+                return Some(js);
+            }
             Some(JsString::from(boa_string::JsStr::latin1(bytes)))
         }
         1 => {
+            if len == 0 {
+                return Some(crate::js_string!());
+            }
             let byte_len = len.checked_mul(2)?;
             if byte_len > MAX_SLICEBC_STRING_BYTES {
                 return None;
@@ -559,11 +612,14 @@ fn get_or_build_scope_with_len(
     Some(s)
 }
 
-fn decode_codeblock(
-    src: &[u8],
+fn decode_codeblock<'a>(
+    src: &'a [u8],
     pos: &mut usize,
     empty_global_scope: &boa_ast::scope::Scope,
+    empty_source_text: &SpannedSourceText,
+    empty_source_info: &crate::vm::source_info::SourceInfo,
     scope_cache: &mut FxHashMap<u32, boa_ast::scope::Scope>,
+    string_pool: &mut FxHashMap<&'a [u8], JsString>,
     depth: usize,
 ) -> Option<Gc<CodeBlock>> {
     if depth > MAX_SLICEBC_NESTING_DEPTH {
@@ -602,12 +658,15 @@ fn decode_codeblock(
     for _ in 0..const_len {
         let tag = read_u8(src, pos)?;
         let c = match tag {
-            0 => crate::vm::Constant::String(read_js_string(src, pos)?),
+            0 => crate::vm::Constant::String(read_js_string(src, pos, string_pool)?),
             1 => crate::vm::Constant::Function(decode_codeblock(
                 src,
                 pos,
                 empty_global_scope,
+                empty_source_text,
+                empty_source_info,
                 scope_cache,
+                string_pool,
                 depth + 1,
             )?),
             2 => {
@@ -633,7 +692,7 @@ fn decode_codeblock(
     let bind_len = read_bounded_len(src, pos, 14)?;
     let mut bindings_vec = Vec::with_capacity(bind_len);
     for _ in 0..bind_len {
-        let name = read_js_string(src, pos)?;
+        let name = read_js_string(src, pos, string_pool)?;
         let scope_kind = read_u8(src, pos)?;
         let stack_idx = read_u32(src, pos)?;
         let binding_index = read_u32(src, pos)?;
@@ -665,32 +724,36 @@ fn decode_codeblock(
     let ic_len = read_bounded_len(src, pos, 5)?;
     let mut ic_vec = Vec::with_capacity(ic_len);
     for _ in 0..ic_len {
-        let name = read_js_string(src, pos)?;
+        let name = read_js_string(src, pos, string_pool)?;
         ic_vec.push(crate::vm::InlineCache::new(name));
     }
 
-    let fn_name = read_js_string(src, pos)?;
+    let fn_name = read_js_string(src, pos, string_pool)?;
     let sm_len = read_bounded_len(src, pos, 12)?;
-    let mut sm_entries = Vec::with_capacity(sm_len);
-    for _ in 0..sm_len {
-        let pc = read_u32(src, pos)?;
-        let line = read_u32(src, pos)?;
-        let col = read_u32(src, pos)?;
-        let position = if line > 0 && col > 0 {
-            Some(boa_ast::Position::new(line, col))
-        } else {
-            None
-        };
-        sm_entries.push(crate::vm::source_info::Entry { pc, position });
-    }
-    let source_info = crate::vm::source_info::SourceInfo::new(
-        crate::vm::source_info::SourceMap::new(
-            sm_entries.into_boxed_slice(),
-            crate::vm::source_info::SourcePath::None,
-        ),
-        fn_name,
-        SpannedSourceText::new_empty(),
-    );
+    let source_info = if sm_len == 0 && fn_name.is_empty() {
+        empty_source_info.clone()
+    } else {
+        let mut sm_entries = Vec::with_capacity(sm_len);
+        for _ in 0..sm_len {
+            let pc = read_u32(src, pos)?;
+            let line = read_u32(src, pos)?;
+            let col = read_u32(src, pos)?;
+            let position = if line > 0 && col > 0 {
+                Some(boa_ast::Position::new(line, col))
+            } else {
+                None
+            };
+            sm_entries.push(crate::vm::source_info::Entry { pc, position });
+        }
+        crate::vm::source_info::SourceInfo::new(
+            crate::vm::source_info::SourceMap::new(
+                sm_entries.into_boxed_slice(),
+                crate::vm::source_info::SourcePath::None,
+            ),
+            fn_name,
+            empty_source_text.clone(),
+        )
+    };
 
     let glex_len = read_bounded_len(src, pos, 4)?;
     let mut glex_vec = Vec::with_capacity(glex_len);

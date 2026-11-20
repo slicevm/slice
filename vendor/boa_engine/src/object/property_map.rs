@@ -665,6 +665,64 @@ impl PropertyMap {
         self.storage.push(value);
     }
 
+    /// Fast path for `DefineOwnPropertyByName` on ordinary extensible objects when defining a
+    /// standard `WRITABLE | ENUMERABLE | CONFIGURABLE` own data property (`{ key: value }` literals).
+    /// Returns `false` for integer-index keys or if `key` already exists with different attributes
+    /// (e.g. an accessor or non-configurable property), allowing the caller to fall back to
+    /// `ordinary_define_own_property`.
+    #[inline]
+    pub(crate) fn try_fast_define_own_data_property(
+        &mut self,
+        key: &PropertyKey,
+        value: &JsValue,
+    ) -> bool {
+        if matches!(key, PropertyKey::Index(_)) {
+            return false;
+        }
+
+        let attributes =
+            SlotAttributes::WRITABLE | SlotAttributes::ENUMERABLE | SlotAttributes::CONFIGURABLE;
+
+        if let Some(shared) = self.shape.as_shared() {
+            let transition_key = TransitionKey {
+                property_key: key.clone(),
+                attributes,
+            };
+            if let Some(next_shape) = shared.try_fast_insert_property_transition(&transition_key) {
+                self.shape = Shape::from_shared_checked(next_shape);
+                self.storage.push(value.clone());
+                return true;
+            }
+            if let Some(slot) = shared.lookup(&transition_key.property_key) {
+                if slot.attributes == attributes {
+                    self.storage[slot.index as usize] = value.clone();
+                    return true;
+                }
+                return false;
+            }
+            self.shape =
+                Shape::from_shared_checked(shared.insert_property_transition_missed(transition_key));
+            self.storage.push(value.clone());
+            return true;
+        }
+
+        if let Some(slot) = self.shape.lookup(key) {
+            if slot.attributes == attributes {
+                self.storage[slot.index as usize] = value.clone();
+                return true;
+            }
+            return false;
+        }
+
+        let transition_key = TransitionKey {
+            property_key: key.clone(),
+            attributes,
+        };
+        self.shape = self.shape.insert_property_transition(transition_key);
+        self.storage.push(value.clone());
+        true
+    }
+
     /// Insert the given property descriptor with the given key [`PropertyMap`].
     pub(crate) fn insert_with_slot(
         &mut self,

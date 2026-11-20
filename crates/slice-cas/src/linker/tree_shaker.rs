@@ -663,7 +663,21 @@ pub fn extract_module_require_summary(consumer_code: &str) -> ModuleRequireSumma
                         for prop in &obj_pat.properties {
                             if let Some(key_name) = prop.key.name() {
                                 if is_to_esm && key_name == "default" {
-                                    entry.forces_all = true;
+                                    let mut def_props = FxHashSet::default();
+                                    if let BindingPattern::BindingIdentifier(local_id) = &prop.value
+                                        && collect_member_accesses_on_var(
+                                            consumer_code,
+                                            local_id.name.as_str(),
+                                            (decl.span.start as usize, decl.span.end as usize),
+                                            &mut def_props,
+                                        )
+                                    {
+                                        def_props.insert("default".to_string());
+                                        def_props.insert("__esModule".to_string());
+                                        entry.used_props.extend(def_props);
+                                    } else {
+                                        entry.forces_all = true;
+                                    }
                                 } else {
                                     entry.used_props.insert(key_name.to_string());
                                 }
@@ -676,7 +690,7 @@ pub fn extract_module_require_summary(consumer_code: &str) -> ModuleRequireSumma
                 }
                 BindingPattern::BindingIdentifier(ident) => {
                     let var_name = ident.name.as_str();
-                    if !is_to_esm && var_name.starts_with("__imp") {
+                    if var_name.starts_with("__imp") {
                         if vd.declarations.len() == 1 {
                             if let Some(props) = try_collect_esm_default_interop_props(
                                 &parser_ret.program.body,

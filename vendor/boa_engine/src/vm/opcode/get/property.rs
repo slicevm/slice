@@ -39,7 +39,38 @@ fn get_by_name<const LENGTH: bool>(
 
     let ic = &context.vm.frame().code_block().ic[usize::from(index)];
     let object_borrowed = object.borrow();
-    if let Some((shape_opt, slot)) = ic.get_fast(object_borrowed.shape()) {
+    let obj_shape = object_borrowed.shape();
+    if ic.mono_shape_id.get() == obj_shape.id() && !ic.megamorphic.get() {
+        let slot = ic.mono_slot.get();
+        if !slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+            let mut result = object_borrowed.properties().storage[slot.index as usize].clone();
+            drop(object_borrowed);
+            if slot.attributes.has_get() && result.is_object() {
+                result = result
+                    .as_object()
+                    .expect("should contain getter")
+                    .call(receiver, &[], context)?;
+            }
+            context.vm.set_register(dst.into(), result);
+            return Ok(());
+        } else if let Some(prototype) = obj_shape.prototype() {
+            let pb = prototype.borrow();
+            if pb.shape().id() == ic.mono_proto_shape_id.get() {
+                let mut result = pb.properties().storage[slot.index as usize].clone();
+                drop(pb);
+                drop(object_borrowed);
+                if slot.attributes.has_get() && result.is_object() {
+                    result = result
+                        .as_object()
+                        .expect("should contain getter")
+                        .call(receiver, &[], context)?;
+                }
+                context.vm.set_register(dst.into(), result);
+                return Ok(());
+            }
+        }
+    }
+    if let Some((shape_opt, slot)) = ic.get_fast(obj_shape) {
         let mut result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
             let prototype = shape_opt
                 .as_ref()
@@ -142,6 +173,47 @@ fn get_by_value<const PUSH_KEY: bool>(
             }
         }
         _ => {}
+    }
+
+    if !matches!(key_value, PropertyKey::Index(_)) && object.is_ordinary() {
+        let fast_val = {
+            let ob = object.borrow();
+            let shape = ob.shape();
+            if let Some(slot) = shape.lookup(&key_value) {
+                if !slot.attributes.is_accessor_descriptor() {
+                    Some(ob.properties().storage[slot.index as usize].clone())
+                } else {
+                    None
+                }
+            } else if let Some(proto) = shape.prototype() {
+                if proto.is_ordinary() {
+                    let pb = proto.borrow();
+                    let pshape = pb.shape();
+                    if let Some(pslot) = pshape.lookup(&key_value) {
+                        if !pslot.attributes.is_accessor_descriptor() {
+                            Some(pb.properties().storage[pslot.index as usize].clone())
+                        } else {
+                            None
+                        }
+                    } else if pshape.prototype().is_none() {
+                        Some(JsValue::undefined())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                Some(JsValue::undefined())
+            }
+        };
+        if let Some(val) = fast_val {
+            if PUSH_KEY {
+                context.vm.set_register(key.into(), key_value.into());
+            }
+            context.vm.set_register(dst.into(), val);
+            return Ok(());
+        }
     }
 
     let receiver = context.vm.get_register(receiver.into());

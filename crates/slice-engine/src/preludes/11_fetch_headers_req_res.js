@@ -30,18 +30,23 @@
     return lc;
   }
 
-  var __HDR_CTL_RE = /[\0\r\n]/;
+  var __hasOwn = Object.prototype.hasOwnProperty;
   var __hdrValCache = Object.create(null);
   var __hdrValCount = 0;
 
   function __normHdrVal(v) {
     if (typeof v === "string") {
-      var cached = __hdrValCache[v];
-      if (cached !== undefined) return cached;
       var len = v.length;
       if (len === 0) return "";
-      if (__HDR_CTL_RE.test(v)) {
-        throw new TypeError("Headers: invalid control character in header value");
+      if (len <= 96) {
+        var cached = __hdrValCache[v];
+        if (cached !== undefined) return cached;
+      }
+      for (var i = 0; i < len; i++) {
+        var c = v.charCodeAt(i);
+        if (c === 0 || c === 10 || c === 13) {
+          throw new TypeError("Headers: invalid control character in header value");
+        }
       }
       var res = v;
       var f = v.charCodeAt(0), l = v.charCodeAt(len - 1);
@@ -60,8 +65,11 @@
     var s = String(v);
     var sLen = s.length;
     if (sLen === 0) return "";
-    if (__HDR_CTL_RE.test(s)) {
-      throw new TypeError("Headers: invalid control character in header value");
+    for (var j = 0; j < sLen; j++) {
+      var sc0 = s.charCodeAt(j);
+      if (sc0 === 0 || sc0 === 10 || sc0 === 13) {
+        throw new TypeError("Headers: invalid control character in header value");
+      }
     }
     var sf = s.charCodeAt(0), sl = s.charCodeAt(sLen - 1);
     if (sf === 32 || sf === 9 || sl === 32 || sl === 9) {
@@ -76,20 +84,22 @@
   function __assignHeadersMap(target, mField, scField, oh) {
     var m = Object.create(null);
     if (oh._isHeaders) {
-      oh._ensure();
+      if (oh._live) oh._ensure();
       for (var hk in oh._m) m[hk] = oh._m[hk];
       target[mField] = m;
       target[scField] = oh._sc ? oh._sc.slice() : null;
       return;
     }
     var sc = null;
-    var ks = Object.keys(oh);
-    for (var k = 0; k < ks.length; k++) {
-      var key = ks[k], val = oh[key];
-      if (val !== undefined) {
-        var lk = __lcHdrName(key), sv = __normHdrVal(val);
-        m[lk] = m[lk] !== undefined ? m[lk] + ", " + sv : sv;
-        if (lk === "set-cookie") (sc || (sc = [])).push(sv);
+    var plainProto = Object.getPrototypeOf(oh) === Object.prototype;
+    for (var key in oh) {
+      if (plainProto || __hasOwn.call(oh, key)) {
+        var val = oh[key];
+        if (val !== undefined) {
+          var lk = __lcHdrName(key), sv = __normHdrVal(val);
+          m[lk] = m[lk] !== undefined ? m[lk] + ", " + sv : sv;
+          if (lk === "set-cookie") (sc || (sc = [])).push(sv);
+        }
       }
     }
     target[mField] = m;
@@ -159,6 +169,18 @@
     }
   };
   Headers.prototype.get = function(n) {
+    if (typeof n === "string") {
+      var lc = __hdrNameLc[n];
+      if (lc !== undefined) {
+        var mFast = this._m;
+        if (mFast) {
+          var vFast = mFast[lc];
+          return vFast !== undefined ? vFast : null;
+        }
+        if (this._live) return __slice_http_header(lc);
+        return null;
+      }
+    }
     var k = __lcHdrName(n);
     var m = this._m;
     if (m) {
@@ -407,32 +429,59 @@
     return r;
   }
 
+  function __FastHdr(m, sc) {
+    this._live = false;
+    this._m = m;
+    this._sc = sc;
+  }
+  __FastHdr.prototype = Headers.prototype;
+
+  function __FastReq(url, method, body, ct, redirect, signal) {
+    this.url = url;
+    this.method = method;
+    this._h = null;
+    this._hm = null;
+    this._hsc = null;
+    this._ct = ct;
+    this._stream = null;
+    this._body = body;
+    this._u8 = null;
+    this.redirect = redirect;
+    this.signal = signal;
+    this._used = false;
+  }
+
+  function __FastRes(status, statusText, body, ct) {
+    this.status = status;
+    this.statusText = statusText;
+    this.ok = status >= 200 && status < 300;
+    this._h = null;
+    this._hm = null;
+    this._hsc = null;
+    this._stream = null;
+    this._body = body;
+    this._u8 = null;
+    this._ct = ct;
+    this._isSliceRes = true;
+    this._used = false;
+  }
+
   function Request(input, init) {
     if (input === "__SLICE_LIVE_REQ__") {
       return __makeLiveReq();
     }
-    if (!init && typeof input === "string") {
-      var rSimple = Object.create(LazyReqProto);
-      rSimple.url = input;
-      rSimple.method = "GET";
-      rSimple._h = null;
-      rSimple._hm = null;
-      rSimple._hsc = null;
-      rSimple._ct = "";
-      rSimple._stream = null;
-      rSimple._body = null;
-      rSimple._u8 = null;
-      rSimple.redirect = "follow";
-      rSimple.signal = __defaultReqSignal;
-      rSimple._used = false;
-      return rSimple;
+    var fastUrl = typeof input === "string"
+      ? input
+      : (input && input._isSliceUrl === true ? input.href : null);
+    if (!init && fastUrl !== null) {
+      return new __FastReq(fastUrl, "GET", null, "", "follow", __defaultReqSignal);
     }
     var o = init || {};
     var oh = o.headers;
     if (
-      typeof input === "string" &&
+      fastUrl !== null &&
       (o.body === undefined || o.body === null || typeof o.body === "string") &&
-      (!oh || (typeof oh === "object" && !Array.isArray(oh)))
+      (!oh || (typeof oh === "object" && !Array.isArray(oh) && (oh._isHeaders || !(typeof Symbol !== "undefined" && Symbol.iterator && typeof oh[Symbol.iterator] === "function"))))
     ) {
       var rawMFast = o.method;
       var fastMethod = rawMFast
@@ -441,26 +490,21 @@
       if (o.body !== undefined && o.body !== null && (fastMethod === "GET" || fastMethod === "HEAD")) {
         throw new TypeError("Request with GET/HEAD method cannot have body");
       }
-      var rInit = Object.create(LazyReqProto);
-      rInit.url = input;
-      rInit.method = fastMethod;
-      rInit._h = null;
+      var isStrReqBody = typeof o.body === "string";
+      var rInit = new __FastReq(
+        fastUrl,
+        fastMethod,
+        isStrReqBody ? o.body : null,
+        "",
+        o.redirect ? String(o.redirect) : "follow",
+        o.signal || __defaultReqSignal
+      );
       if (oh) {
         __assignHeadersMap(rInit, "_hm", "_hsc", oh);
-      } else {
-        rInit._hm = null;
-        rInit._hsc = null;
       }
-      rInit._stream = null;
-      var isStrReqBody = typeof o.body === "string";
-      rInit._body = isStrReqBody ? o.body : null;
-      rInit._u8 = null;
-      rInit._ct = (isStrReqBody && (!rInit._hm || rInit._hm["content-type"] === undefined))
-        ? "text/plain;charset=UTF-8"
-        : "";
-      rInit.redirect = o.redirect ? String(o.redirect) : "follow";
-      rInit.signal = o.signal || __defaultReqSignal;
-      rInit._used = false;
+      if (isStrReqBody && (!rInit._hm || rInit._hm["content-type"] === undefined)) {
+        rInit._ct = "text/plain;charset=UTF-8";
+      }
       return rInit;
     }
     var isReq = Boolean(input && typeof input === "object" && input._isSliceReq);
@@ -471,7 +515,10 @@
     this.method = rawM
       ? (rawM === "GET" || rawM === "POST" ? rawM : String(rawM).toUpperCase())
       : (isReq ? input.method : "GET");
-    this.headers = (oh && oh._isHeaders) ? new Headers(oh) : new Headers(oh || (isReq ? input.headers : undefined));
+    this._h = (oh && oh._isHeaders) ? new Headers(oh) : new Headers(oh || (isReq ? input.headers : undefined));
+    this._hm = null;
+    this._hsc = null;
+    this._ct = "";
     this._stream = null;
     if (o.body !== undefined && o.body !== null) {
       if (this.method === "GET" || this.method === "HEAD") {
@@ -480,8 +527,8 @@
       if (typeof o.body === "string") {
         this._body = o.body;
         this._u8 = null;
-        if (!this.headers._m["content-type"]) {
-          this.headers._m["content-type"] = "text/plain;charset=UTF-8";
+        if (!this._h._m["content-type"]) {
+          this._h._m["content-type"] = "text/plain;charset=UTF-8";
         }
       } else if (__isReadableStreamObj(o.body)) {
         __ensureUsableStream(o.body);
@@ -489,7 +536,7 @@
         this._body = null;
         this._u8 = null;
       } else {
-        var nb = __normHttpBody(o.body, this.headers);
+        var nb = __normHttpBody(o.body, this._h);
         this._body = nb.str;
         this._u8 = nb.u8;
       }
@@ -541,26 +588,20 @@
   function Response(body, init) {
     if (!init) {
       if (body === undefined || body === null || typeof body === "string") {
-        var rSimple = Object.create(LazyResProto);
-        rSimple.status = 200;
-        rSimple.statusText = "OK";
-        rSimple.ok = true;
-        rSimple._h = null;
-        rSimple._hm = null;
-        rSimple._hsc = null;
-        rSimple._stream = null;
         var isSimpleStr = typeof body === "string";
-        rSimple._body = isSimpleStr ? body : null;
-        rSimple._u8 = null;
-        rSimple._ct = isSimpleStr ? "text/plain;charset=UTF-8" : "";
-        rSimple._isSliceRes = true;
-        rSimple._used = false;
-        return rSimple;
+        return new __FastRes(
+          200,
+          "OK",
+          isSimpleStr ? body : null,
+          isSimpleStr ? "text/plain;charset=UTF-8" : ""
+        );
       }
       this.status = 200;
       this.statusText = "OK";
       this.ok = true;
-      this.headers = new Headers();
+      this._h = new Headers();
+      this._hm = null;
+      this._hsc = null;
       this._stream = null;
       if (__isReadableStreamObj(body)) {
         __ensureUsableStream(body);
@@ -568,7 +609,7 @@
         this._body = null;
         this._u8 = null;
       } else {
-        var nbFast = __normHttpBody(body, this.headers);
+        var nbFast = __normHttpBody(body, this._h);
         this._body = nbFast.str;
         this._u8 = nbFast.u8;
       }
@@ -592,32 +633,22 @@
       (body === undefined || body === null || typeof body === "string") &&
       (!oh || (typeof oh === "object" && !Array.isArray(oh)))
     ) {
-      var rInit = Object.create(LazyResProto);
-      rInit.status = st;
-      rInit.statusText = stText;
-      rInit.ok = st >= 200 && st < 300;
-      rInit._h = null;
+      var isInitStr = typeof body === "string";
+      var rInit = new __FastRes(st, stText, isInitStr ? body : null, "");
       if (oh) {
         __assignHeadersMap(rInit, "_hm", "_hsc", oh);
-      } else {
-        rInit._hm = null;
-        rInit._hsc = null;
       }
-      rInit._stream = null;
-      var isInitStr = typeof body === "string";
-      rInit._body = isInitStr ? body : null;
-      rInit._u8 = null;
-      rInit._ct = (isInitStr && (!rInit._hm || rInit._hm["content-type"] === undefined))
-        ? "text/plain;charset=UTF-8"
-        : "";
-      rInit._isSliceRes = true;
-      rInit._used = false;
+      if (isInitStr && (!rInit._hm || rInit._hm["content-type"] === undefined)) {
+        rInit._ct = "text/plain;charset=UTF-8";
+      }
       return rInit;
     }
     this.status = st;
     this.statusText = stText;
     this.ok = st >= 200 && st < 300;
-    this.headers = (oh && oh._isHeaders) ? new Headers(oh) : new Headers(oh);
+    this._h = (oh && oh._isHeaders) ? new Headers(oh) : new Headers(oh);
+    this._hm = null;
+    this._hsc = null;
     this._stream = null;
     this._ct = "";
     if (body === undefined || body === null) {
@@ -626,8 +657,8 @@
     } else if (typeof body === "string") {
       this._body = body;
       this._u8 = null;
-      if (!this.headers._m["content-type"]) {
-        this.headers._m["content-type"] = "text/plain;charset=UTF-8";
+      if (!this._h._m["content-type"]) {
+        this._h._m["content-type"] = "text/plain;charset=UTF-8";
       }
     } else if (__isReadableStreamObj(body)) {
       __ensureUsableStream(body);
@@ -635,7 +666,7 @@
       this._body = null;
       this._u8 = null;
     } else {
-      var nb = __normHttpBody(body, this.headers);
+      var nb = __normHttpBody(body, this._h);
       this._body = nb.str;
       this._u8 = nb.u8;
     }
@@ -644,6 +675,8 @@
   }
 
   var RP = Request.prototype, SP = Response.prototype;
+  __FastReq.prototype = RP;
+  __FastRes.prototype = SP;
   var LiveReqProto = Object.create(RP);
   LiveReqProto._isLiveReq = true;
   Object.defineProperties(LiveReqProto, {
@@ -672,16 +705,12 @@
       enumerable: false
     }
   });
-  var LazyReqProto = Object.create(RP);
-  Object.defineProperty(LazyReqProto, "headers", {
+  var __lazyHeadersDesc = {
     get: function() {
       if (!this._h) {
-        var h = Object.create(Headers.prototype);
-        h._live = false;
         var hm = this._hm || Object.create(null);
         if (this._ct && hm["content-type"] === undefined) hm["content-type"] = this._ct;
-        h._m = hm;
-        h._sc = this._hsc || null;
+        var h = new __FastHdr(hm, this._hsc || null);
         this._h = h;
         this._hm = null;
         this._hsc = null;
@@ -697,33 +726,9 @@
     },
     configurable: true,
     enumerable: true
-  });
-  var LazyResProto = Object.create(SP);
-  Object.defineProperty(LazyResProto, "headers", {
-    get: function() {
-      if (!this._h) {
-        var h = Object.create(Headers.prototype);
-        h._live = false;
-        var hm = this._hm || Object.create(null);
-        if (this._ct && hm["content-type"] === undefined) hm["content-type"] = this._ct;
-        h._m = hm;
-        h._sc = this._hsc || null;
-        this._h = h;
-        this._hm = null;
-        this._hsc = null;
-        this._ct = "";
-      }
-      return this._h;
-    },
-    set: function(v) {
-      this._h = v;
-      this._hm = null;
-      this._hsc = null;
-      this._ct = "";
-    },
-    configurable: true,
-    enumerable: true
-  });
+  };
+  Object.defineProperty(RP, "headers", __lazyHeadersDesc);
+  Object.defineProperty(SP, "headers", __lazyHeadersDesc);
 
   RP._borrowBytes = SP._borrowBytes = function() {
     return __borrowBodyBytes(this);
@@ -751,7 +756,14 @@
     }
     this._used = true;
     if (this._stream) {
-      return this._stream._drainToBody(this).then(__getBodyText);
+      var st = this._stream;
+      if (st._closed && !st._startPromise && !st._pulling && !__streamHasBinary(st)) {
+        st.getReader();
+        var txt = st._toText();
+        this._body = txt;
+        return Promise.resolve(txt);
+      }
+      return st._drainToBody(this).then(__getBodyText);
     }
     return Promise.resolve(__getBodyText(this));
   };
@@ -768,7 +780,18 @@
     }
     this._used = true;
     if (this._stream) {
-      return this._stream._drainToBody(this).then(function(s) {
+      var st = this._stream;
+      if (st._closed && !st._startPromise && !st._pulling && !__streamHasBinary(st)) {
+        st.getReader();
+        var txt = st._toText();
+        this._body = txt;
+        try {
+          return Promise.resolve(JSON.parse(txt));
+        } catch (eJson) {
+          return Promise.reject(eJson);
+        }
+      }
+      return st._drainToBody(this).then(function(s) {
         return JSON.parse(__getBodyText(s));
       });
     }
@@ -966,23 +989,10 @@
   Object.defineProperty(SP, "body", __bodyDesc);
 
   function __makeSpecialResponse(status, statusText, rawHeaders) {
-    var r = Object.create(LazyResProto);
-    r.status = status;
-    r.statusText = statusText || "";
-    r.ok = status >= 200 && status < 300;
-    r._h = null;
+    var r = new __FastRes(status, statusText || "", null, "");
     if (rawHeaders) {
       __assignHeadersMap(r, "_hm", "_hsc", rawHeaders);
-    } else {
-      r._hm = null;
-      r._hsc = null;
     }
-    r._stream = null;
-    r._body = null;
-    r._u8 = null;
-    r._ct = "";
-    r._isSliceRes = true;
-    r._used = false;
     return r;
   }
   globalThis.__slice_make_special_response = __makeSpecialResponse;
@@ -993,20 +1003,7 @@
       throw new TypeError("Value is not JSON serializable");
     }
     if (!init) {
-      var rFast = Object.create(LazyResProto);
-      rFast.status = 200;
-      rFast.statusText = "OK";
-      rFast.ok = true;
-      rFast._h = null;
-      rFast._hm = null;
-      rFast._hsc = null;
-      rFast._stream = null;
-      rFast._body = jsonStr;
-      rFast._u8 = null;
-      rFast._ct = "application/json";
-      rFast._isSliceRes = true;
-      rFast._used = false;
-      return rFast;
+      return new __FastRes(200, "OK", jsonStr, "application/json");
     }
     if (typeof init === "object") {
       var jSt = init.status !== undefined
@@ -1019,24 +1016,16 @@
         jSt <= 599 &&
         (!jOh || (typeof jOh === "object" && !Array.isArray(jOh)))
       ) {
-        var rJson = Object.create(LazyResProto);
-        rJson.status = jSt;
-        rJson.statusText = init.statusText !== undefined ? String(init.statusText) : (jSt === 200 ? "OK" : "");
-        rJson.ok = jSt >= 200 && jSt < 300;
-        rJson._h = null;
+        var rJson = new __FastRes(
+          jSt,
+          init.statusText !== undefined ? String(init.statusText) : (jSt === 200 ? "OK" : ""),
+          jsonStr,
+          "application/json"
+        );
         if (jOh) {
           __assignHeadersMap(rJson, "_hm", "_hsc", jOh);
-          rJson._ct = rJson._hm["content-type"] === undefined ? "application/json" : "";
-        } else {
-          rJson._hm = null;
-          rJson._hsc = null;
-          rJson._ct = "application/json";
+          if (rJson._hm["content-type"] !== undefined) rJson._ct = "";
         }
-        rJson._stream = null;
-        rJson._body = jsonStr;
-        rJson._u8 = null;
-        rJson._isSliceRes = true;
-        rJson._used = false;
         return rJson;
       }
     }
@@ -1044,8 +1033,8 @@
     r._body = jsonStr;
     if (r._h === null) {
       if (!r._hm || r._hm["content-type"] === undefined) r._ct = "application/json";
-    } else if (!r.headers._m["content-type"]) {
-      r.headers._m["content-type"] = "application/json";
+    } else if (!r._h._m["content-type"]) {
+      r._h._m["content-type"] = "application/json";
     }
     return r;
   };

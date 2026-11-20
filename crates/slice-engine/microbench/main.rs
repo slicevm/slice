@@ -838,6 +838,103 @@ export default {
     group.finish();
 }
 
+fn bench_wave3_v0135_promise_and_wintertc_router(c: &mut Criterion) {
+    let mut group = c.benchmark_group("slice_engine::v0135_promise_and_wintertc");
+
+    let sse_stream_src = r#"
+(async () => {
+    let totalLen = 0;
+    for (let i = 0; i < 40; i++) {
+        const rs = new ReadableStream({
+            start(ctrl) {
+                for (let j = 0; j < 8; j++) {
+                    ctrl.enqueue("data: token-" + j + "\n\n");
+                }
+                ctrl.close();
+            }
+        });
+        const reader = rs.getReader();
+        while (true) {
+            const step = await reader.read();
+            if (step.done) break;
+            totalLen += step.value.length;
+        }
+        reader.releaseLock();
+    }
+    if (totalLen === 0) throw new Error("empty sse stream");
+})();
+"#;
+    let sse_stream_bc = compile_source_to_bytecode(sse_stream_src);
+    group.bench_function("promise_resolve_and_stream_await_40x8_sse", |b| {
+        SliceIsolate::prewarm_boa_pool(1);
+        b.iter(|| {
+            let mut iso = SliceIsolate::spawn(
+                "bench-sse-promise",
+                1,
+                CapabilityToken::pure_compute(),
+                50_000_000,
+                16 * 1024 * 1024,
+            );
+            let out = iso
+                .execute_bytecode(black_box(&sse_stream_bc), None)
+                .expect("sse promise bench");
+            black_box(out.highest_tier_reached)
+        });
+    });
+
+    let router_src = r#"
+(function() {
+    let okCount = 0;
+    for (let i = 0; i < 80; i++) {
+        const reqUrl = new URL("/api/v2/catalog", "https://edge.slice.dev");
+        reqUrl.searchParams.set("category", "compute");
+        reqUrl.searchParams.set("minPrice", String((i % 3) * 1000));
+        reqUrl.searchParams.set("sort", (i & 1) === 0 ? "asc" : "desc");
+        reqUrl.searchParams.append("tag", "pcie");
+        const req = new Request(reqUrl, {
+            method: "GET",
+            headers: {
+                "X-Tenant-Id": "tenant-1",
+                "X-Api-Key": "sk_edge_valid_tenant-1"
+            }
+        });
+        const parsed = new URL(req.url, "https://edge.slice.dev");
+        if (
+            parsed.pathname === "/api/v2/catalog" &&
+            parsed.searchParams.getAll("tag").length === 1 &&
+            req.headers.get("x-tenant-id") === "tenant-1"
+        ) {
+            const res = Response.json({ ok: true, i }, { status: 200, headers: { "x-ok": "1" } });
+            if (res.status === 200) okCount += 1;
+        }
+    }
+    if (okCount !== 80) throw new Error("router bench mismatch");
+})();
+"#;
+    let router_bc = compile_source_to_bytecode(router_src);
+    group.bench_function(
+        "wintertc_url_base_searchparams_and_request_router_80x",
+        |b| {
+            SliceIsolate::prewarm_boa_pool(1);
+            b.iter(|| {
+                let mut iso = SliceIsolate::spawn(
+                    "bench-wintertc-router",
+                    1,
+                    CapabilityToken::pure_compute(),
+                    50_000_000,
+                    16 * 1024 * 1024,
+                );
+                let out = iso
+                    .execute_bytecode(black_box(&router_bc), None)
+                    .expect("wintertc router bench");
+                black_box(out.highest_tier_reached)
+            });
+        },
+    );
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_boacas_and_automaton,
@@ -847,6 +944,7 @@ criterion_group!(
     bench_wave3_als_intl_crypto_and_buffer,
     bench_wave4_multipart_clone_and_binary_http,
     bench_wave5_wasm_numeric_i64_and_shared_store,
+    bench_wave3_v0135_promise_and_wintertc_router,
     bench_http_cli_and_host_fs
 );
 criterion_main!(benches);

@@ -1,7 +1,7 @@
 use crate::{
     Context, JsNativeError, JsResult,
     object::internal_methods::InternalMethodPropertyContext,
-    property::PropertyDescriptor,
+    property::{PropertyDescriptor, PropertyKey},
     vm::opcode::{IndexOperand, Operation, RegisterOperand},
 };
 
@@ -25,11 +25,24 @@ impl DefineOwnPropertyByName {
             .frame()
             .code_block()
             .constant_string(index.into());
+        let key: PropertyKey = name.into();
+        if let Some(obj) = object.as_object()
+            && obj.is_ordinary()
+        {
+            let mut borrowed = obj.borrow_mut();
+            if borrowed.extensible
+                && borrowed
+                    .properties_mut()
+                    .try_fast_define_own_data_property(&key, &value)
+            {
+                return Ok(());
+            }
+        }
         let object = object.to_object(context)?;
         object.__define_own_property__(
-            &name.into(),
+            &key,
             PropertyDescriptor::builder()
-                .value(value.clone())
+                .value(value)
                 .writable(true)
                 .enumerable(true)
                 .configurable(true)

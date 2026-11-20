@@ -9,7 +9,6 @@ use super::{
 };
 #[cfg(feature = "experimental")]
 use crate::object::internal_methods::InternalMethodPropertyContext;
-#[cfg(feature = "experimental")]
 use crate::property::PropertyKey;
 use crate::{
     Context, JsArgs, JsError, JsExpect, JsResult, JsString,
@@ -232,6 +231,24 @@ impl PromiseCapability {
         struct RejectResolve {
             reject: JsValue,
             resolve: JsValue,
+        }
+
+        // Fast path for the intrinsic `%Promise%` constructor: `Promise.prototype` is
+        // non-writable and non-configurable (`ECMA-262 27.2.4.2`), and the built-in executor
+        // merely captures `CreateResolvingFunctions(promise)`, so we can construct the pending
+        // `Promise` and its resolving functions directly without allocating `RejectResolve` or
+        // an intermediate `executor` `NativeFunction` or dispatching `c.construct(...)`.
+        if JsObject::equals(c, &context.intrinsics().constructors().promise().constructor()) {
+            let promise = JsObject::from_proto_and_data_with_shared_shape(
+                context.root_shape(),
+                context.intrinsics().constructors().promise().prototype(),
+                Promise::new(),
+            );
+            let functions = Promise::create_resolving_functions(&promise, context);
+            return Ok(Self {
+                promise: promise.upcast(),
+                functions,
+            });
         }
 
         // 1. If IsConstructor(C) is false, throw a TypeError exception.
@@ -463,6 +480,17 @@ impl Promise {
     pub(crate) fn new() -> Self {
         Self {
             state: PromiseState::Pending,
+            fulfill_reactions: Vec::default(),
+            reject_reactions: Vec::default(),
+            handled: false,
+        }
+    }
+
+    /// Creates a new `Promise` already settled in `PromiseState::Fulfilled(value)`.
+    #[inline]
+    pub(crate) fn new_fulfilled(value: JsValue) -> Self {
+        Self {
+            state: PromiseState::Fulfilled(value),
             fulfill_reactions: Vec::default(),
             reject_reactions: Vec::default(),
             handled: false,
@@ -1822,6 +1850,25 @@ impl Promise {
     ) -> JsResult<JsObject> {
         let e = e.into_opaque(context)?;
 
+        if JsObject::equals(c, &context.intrinsics().constructors().promise().constructor()) {
+            let promise = JsObject::from_proto_and_data_with_shared_shape(
+                context.root_shape(),
+                context.intrinsics().constructors().promise().prototype(),
+                Self {
+                    state: PromiseState::Rejected(e),
+                    fulfill_reactions: Vec::default(),
+                    reject_reactions: Vec::default(),
+                    handled: false,
+                },
+            );
+            context.host_hooks().promise_rejection_tracker(
+                &promise,
+                OperationType::Reject,
+                context,
+            );
+            return Ok(promise.upcast());
+        }
+
         // 2. Let promiseCapability be ? NewPromiseCapability(C).
         let promise_capability = PromiseCapability::new(c, context)?;
 
@@ -1860,6 +1907,63 @@ impl Promise {
         Self::promise_resolve(&c, x.clone(), context).map(JsValue::from)
     }
 
+    #[inline]
+    pub(crate) const fn is_handled(&self) -> bool {
+        self.handled
+    }
+
+    #[inline]
+    pub(crate) const fn mark_handled(&mut self) {
+        self.handled = true;
+    }
+
+    /// Fast path for `Await`: returns `Some(promise)` without allocating or cloning `%Promise%`
+    /// when `x` is already an unmodified intrinsic `%Promise%` instance.
+    #[inline]
+    pub(crate) fn try_fast_as_intrinsic_promise(
+        x: &JsValue,
+        context: &Context,
+    ) -> Option<JsObject<Self>> {
+        let p = x.as_promise_object()?;
+        let prom_ctor = context.intrinsics().constructors().promise();
+        let prom_proto = prom_ctor.prototype();
+        let ctor_obj = prom_ctor.constructor();
+        {
+            let borrowed = p.borrow();
+            let same_proto = borrowed
+                .prototype()
+                .as_ref()
+                .is_some_and(|pr| JsObject::equals(pr, &prom_proto));
+            if !same_proto {
+                return None;
+            }
+            if !borrowed.properties().storage.is_empty()
+                && borrowed
+                    .properties()
+                    .shape
+                    .lookup(&PropertyKey::from(CONSTRUCTOR))
+                    .is_some()
+            {
+                return None;
+            }
+        }
+        let pb = prom_proto.borrow();
+        let valid_proto_ctor = pb
+            .properties()
+            .shape
+            .lookup(&PropertyKey::from(CONSTRUCTOR))
+            .is_some_and(|slot| {
+                !slot.attributes.is_accessor_descriptor()
+                    && pb
+                        .properties()
+                        .storage
+                        .get(slot.index as usize)
+                        .and_then(JsValue::as_object)
+                        .is_some_and(|o| JsObject::equals(&o, &ctor_obj))
+            });
+        valid_proto_ctor.then_some(p)
+    }
+
     /// `PromiseResolve ( C, x )`
     ///
     /// The abstract operation `PromiseResolve` takes arguments `C` (a constructor) and `x` (an
@@ -1875,9 +1979,36 @@ impl Promise {
         x: JsValue,
         context: &mut Context,
     ) -> JsResult<JsObject> {
+        let is_intrinsic_promise =
+            JsObject::equals(c, &context.intrinsics().constructors().promise().constructor());
+
         // 1. If IsPromise(x) is true, then
         if let Some(x) = x.as_promise_object() {
             let x = x.upcast();
+            if is_intrinsic_promise {
+                let prom_proto = context.intrinsics().constructors().promise().prototype();
+                let ctor_key = PropertyKey::from(CONSTRUCTOR);
+                let fast_same_ctor = x
+                    .prototype()
+                    .as_ref()
+                    .is_some_and(|p| JsObject::equals(p, &prom_proto))
+                    && x.borrow().properties().shape.lookup(&ctor_key).is_none()
+                    && {
+                        let pb = prom_proto.borrow();
+                        pb.properties().shape.lookup(&ctor_key).is_some_and(|slot| {
+                            !slot.attributes.is_accessor_descriptor()
+                                && pb
+                                    .properties()
+                                    .storage
+                                    .get(slot.index as usize)
+                                    .and_then(JsValue::as_object)
+                                    .is_some_and(|o| JsObject::equals(&o, c))
+                        })
+                    };
+                if fast_same_ctor {
+                    return Ok(x);
+                }
+            }
             // a. Let xConstructor be ? Get(x, "constructor").
             let x_constructor = x.get(CONSTRUCTOR, context)?;
             // b. If SameValue(xConstructor, C) is true, return x.
@@ -1886,6 +2017,67 @@ impl Promise {
                 .is_some_and(|o| JsObject::equals(&o, c))
             {
                 return Ok(x);
+            }
+        } else if is_intrinsic_promise {
+            // ECMA-262 27.2.4.7.1 + 27.2.1.3.2 fast path when `C` is intrinsic `%Promise%`:
+            // - Primitives (`!x.is_object()`) never perform `Get(x, "then")`.
+            // - Ordinary objects / Arrays with `null`, `%Object.prototype%`, or `%Array.prototype%`
+            //   prototypes and no `"then"` property anywhere on that chain have `Get(x, "then")`
+            //   guaranteed to evaluate to `undefined` without observable side effects.
+            let can_fulfill_directly = match x.as_object() {
+                None => true,
+                Some(obj) if obj.is_ordinary() || obj.is_array() => {
+                    let then_key = PropertyKey::from(js_string!("then"));
+                    let obj_proto = context.intrinsics().constructors().object().prototype();
+                    let arr_proto = context.intrinsics().constructors().array().prototype();
+                    let own_has_no_then =
+                        obj.borrow().properties().shape.lookup(&then_key).is_none();
+                    if !own_has_no_then {
+                        false
+                    } else {
+                        match obj.prototype() {
+                            None => true,
+                            Some(p) if JsObject::equals(&p, &obj_proto) => {
+                                obj_proto
+                                    .borrow()
+                                    .properties()
+                                    .shape
+                                    .lookup(&then_key)
+                                    .is_none()
+                                    && obj_proto.prototype().is_none()
+                            }
+                            Some(p) if JsObject::equals(&p, &arr_proto) => {
+                                arr_proto
+                                    .borrow()
+                                    .properties()
+                                    .shape
+                                    .lookup(&then_key)
+                                    .is_none()
+                                    && arr_proto
+                                        .prototype()
+                                        .as_ref()
+                                        .is_some_and(|ap| JsObject::equals(ap, &obj_proto))
+                                    && obj_proto
+                                        .borrow()
+                                        .properties()
+                                        .shape
+                                        .lookup(&then_key)
+                                        .is_none()
+                                    && obj_proto.prototype().is_none()
+                            }
+                            _ => false,
+                        }
+                    }
+                }
+                Some(_) => false,
+            };
+            if can_fulfill_directly {
+                return Ok(JsObject::from_proto_and_data_with_shared_shape(
+                    context.root_shape(),
+                    context.intrinsics().constructors().promise().prototype(),
+                    Self::new_fulfilled(x),
+                )
+                .upcast());
             }
         }
 

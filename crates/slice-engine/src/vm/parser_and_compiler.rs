@@ -1426,14 +1426,14 @@ fn analyze_tier0_slicesnp_program(program: &oxc::ast::ast::Program<'_>) -> (bool
     }
 
     fn static_member_chain(expr: &Expression<'_>) -> Option<String> {
-        match expr.without_parentheses() {
+        match expr.get_inner_expression() {
             Expression::Identifier(id) => Some(id.name.to_string()),
             Expression::StaticMemberExpression(m) if !m.optional => {
                 let prefix = static_member_chain(&m.object)?;
                 Some(format!("{}.{}", prefix, m.property.name.as_str()))
             }
             Expression::ComputedMemberExpression(m) if !m.optional => {
-                if let Expression::StringLiteral(s) = m.expression.without_parentheses() {
+                if let Expression::StringLiteral(s) = m.expression.get_inner_expression() {
                     let prefix = static_member_chain(&m.object)?;
                     Some(format!("{}.{}", prefix, s.value.as_str()))
                 } else {
@@ -1602,7 +1602,7 @@ fn analyze_tier0_slicesnp_program(program: &oxc::ast::ast::Program<'_>) -> (bool
             }
         }
 
-        match callee {
+        match callee.get_inner_expression() {
             Expression::Identifier(id) => {
                 let name = id.name.as_str();
                 match name {
@@ -1672,7 +1672,7 @@ fn analyze_tier0_slicesnp_program(program: &oxc::ast::ast::Program<'_>) -> (bool
                 }
                 if matches!(prop, "push" | "pop") {
                     return matches!(
-                        &member.object,
+                        member.object.get_inner_expression(),
                         Expression::Identifier(id) if !is_tier0_disallowed_target_ident(id.name.as_str())
                     );
                 }
@@ -1697,16 +1697,13 @@ fn analyze_tier0_slicesnp_program(program: &oxc::ast::ast::Program<'_>) -> (bool
     }
 
     fn is_supported_expr(expr: &Expression<'_>, in_function_depth: usize) -> bool {
-        match expr {
+        match expr.get_inner_expression() {
             Expression::NumericLiteral(_)
             | Expression::StringLiteral(_)
             | Expression::BooleanLiteral(_)
             | Expression::NullLiteral(_) => true,
             Expression::TemplateLiteral(tpl) => tpl.expressions.is_empty() && tpl.quasis.len() == 1,
             Expression::Identifier(id) => !is_tier0_disallowed_ident(id.name.as_str()),
-            Expression::ParenthesizedExpression(p) => {
-                is_supported_expr(&p.expression, in_function_depth)
-            }
             Expression::UnaryExpression(u) => {
                 matches!(
                     u.operator,
@@ -1794,7 +1791,7 @@ fn analyze_tier0_slicesnp_program(program: &oxc::ast::ast::Program<'_>) -> (bool
                             return true;
                         }
                         matches!(
-                            &m.object,
+                            m.object.get_inner_expression(),
                             Expression::Identifier(id)
                                 if !is_tier0_disallowed_target_ident(id.name.as_str())
                         )
@@ -1802,7 +1799,7 @@ fn analyze_tier0_slicesnp_program(program: &oxc::ast::ast::Program<'_>) -> (bool
                     AssignmentTarget::ComputedMemberExpression(m) if !m.optional => {
                         if a.operator == AssignmentOperator::Assign
                             && let Expression::StringLiteral(prop_lit) =
-                                m.expression.without_parentheses()
+                                m.expression.get_inner_expression()
                             && let Some(chain) = static_member_chain(&m.object)
                             && (slice_sandbox::is_frozen_intrinsic(&chain)
                                 || slice_sandbox::is_frozen_intrinsic(&format!(
@@ -1812,21 +1809,22 @@ fn analyze_tier0_slicesnp_program(program: &oxc::ast::ast::Program<'_>) -> (bool
                         {
                             return true;
                         }
+                        let inner_idx = m.expression.get_inner_expression();
                         let non_array_idx = matches!(
-                            &m.expression,
+                            inner_idx,
                             Expression::UnaryExpression(u) if u.operator == UnaryOperator::UnaryNegation
                         ) || matches!(
-                            &m.expression,
+                            inner_idx,
                             Expression::Identifier(id)
                                 if matches!(id.name.as_str(), "NaN" | "Infinity" | "undefined")
                         ) || matches!(
-                            &m.expression,
+                            inner_idx,
                             Expression::NumericLiteral(nl) if nl.value < 0.0 || nl.value.fract() != 0.0
                         );
                         !non_array_idx
                             && a.operator == AssignmentOperator::Assign
                             && matches!(
-                                &m.object,
+                                m.object.get_inner_expression(),
                                 Expression::Identifier(id)
                                     if !is_tier0_disallowed_target_ident(id.name.as_str())
                             )
@@ -2187,7 +2185,7 @@ fn analyze_tier0_slicesnp_program(program: &oxc::ast::ast::Program<'_>) -> (bool
         let Statement::ExpressionStatement(es) = stmt else {
             return false;
         };
-        let Expression::AssignmentExpression(a) = es.expression.without_parentheses() else {
+        let Expression::AssignmentExpression(a) = es.expression.get_inner_expression() else {
             return false;
         };
         if a.operator != AssignmentOperator::Assign {
@@ -2200,7 +2198,7 @@ fn analyze_tier0_slicesnp_program(program: &oxc::ast::ast::Program<'_>) -> (bool
             }
             AssignmentTarget::ComputedMemberExpression(m) if !m.optional => {
                 matches!(
-                    m.expression.without_parentheses(),
+                    m.expression.get_inner_expression(),
                     Expression::StringLiteral(_)
                 ) && static_member_chain(&m.object)
                     .is_some_and(|chain| is_tier0_guarded_proto_target(&chain))

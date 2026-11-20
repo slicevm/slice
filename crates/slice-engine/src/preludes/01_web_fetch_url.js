@@ -5,9 +5,17 @@
     return __slice_usp_decode(s);
   }
 
+  var __uspEncCache = Object.create(null);
+  var __uspEncCount = 0;
+
   function __uspE(s) {
     var str = typeof s === "string" ? s : String(s), n = str.length;
     if (n === 0) return "";
+    if (n <= 48) {
+      var hit = __uspEncCache[str];
+      if (hit !== undefined) return hit;
+    }
+    var out;
     if (n <= 64) {
       var safe = true;
       for (var i = 0; i < n; i++) {
@@ -27,9 +35,15 @@
           break;
         }
       }
-      if (safe) return str;
+      out = safe ? str : __slice_usp_encode(str);
+    } else {
+      out = __slice_usp_encode(str);
     }
-    return __slice_usp_encode(str);
+    if (n <= 48 && __uspEncCount < 512) {
+      __uspEncCache[str] = out;
+      __uspEncCount++;
+    }
+    return out;
   }
 
   function URLSearchParams(init, u) {
@@ -102,7 +116,11 @@
     return p;
   };
   URLSearchParams.prototype._sync = function() {
-    if (this._u) this._u._syncSearch();
+    var u = this._u;
+    if (u) {
+      if (u._isFastUrl) u._sd = true;
+      else u._syncSearch();
+    }
   };
   URLSearchParams.prototype.get = function(n) {
     var k = typeof n === "string" ? n : String(n);
@@ -137,7 +155,32 @@
     return null;
   };
   URLSearchParams.prototype.getAll = function(n) {
-    var k = typeof n === "string" ? n : String(n), p = this._ensureP(), r = [];
+    var k = typeof n === "string" ? n : String(n);
+    var p = this._p;
+    if (p === null) {
+      var q = this._raw;
+      if (!q) return [];
+      if (q.indexOf("+") === -1 && q.indexOf("%") === -1) {
+        var rFast = [], qLen = q.length, kLen = k.length, pos = 0;
+        while (pos < qLen) {
+          var amp = q.indexOf("&", pos);
+          var end = amp === -1 ? qLen : amp;
+          var sgLen = end - pos;
+          if (sgLen > 0) {
+            if (sgLen > kLen && q.charCodeAt(pos + kLen) === 61 && q.startsWith(k, pos)) {
+              rFast.push(q.slice(pos + kLen + 1, end));
+            } else if (sgLen === kLen && q.startsWith(k, pos)) {
+              rFast.push("");
+            }
+          }
+          if (amp === -1) break;
+          pos = amp + 1;
+        }
+        return rFast;
+      }
+      p = this._ensureP();
+    }
+    var r = [];
     for (var i = 0; i < p.length; i++) {
       if (p[i][0] === k) r.push(p[i][1]);
     }
@@ -168,11 +211,19 @@
       }
     }
     if (fi === -1) p.push([k, s]);
-    if (this._u) this._u._syncSearch();
+    var u = this._u;
+    if (u) {
+      if (u._isFastUrl) u._sd = true;
+      else u._syncSearch();
+    }
   };
   URLSearchParams.prototype.append = function(n, v) {
     this._ensureP().push([typeof n === "string" ? n : String(n), typeof v === "string" ? v : String(v)]);
-    if (this._u) this._u._syncSearch();
+    var u = this._u;
+    if (u) {
+      if (u._isFastUrl) u._sd = true;
+      else u._syncSearch();
+    }
   };
   URLSearchParams.prototype.delete = function(n) {
     var k = typeof n === "string" ? n : String(n), p = this._ensureP(), nx = [];
@@ -180,13 +231,35 @@
       if (p[i][0] !== k) nx.push(p[i]);
     }
     this._p = nx;
-    if (this._u) this._u._syncSearch();
+    var u = this._u;
+    if (u) {
+      if (u._isFastUrl) u._sd = true;
+      else u._syncSearch();
+    }
   };
   URLSearchParams.prototype.sort = function() {
-    this._ensureP().sort(function(a, b) {
-      return a[0] < b[0] ? -1 : (a[0] > b[0] ? 1 : 0);
-    });
-    if (this._u) this._u._syncSearch();
+    var p = this._ensureP(), n = p.length;
+    if (n > 1) {
+      if (n <= 12) {
+        for (var i = 1; i < n; i++) {
+          var cur = p[i], ck = cur[0], j = i - 1;
+          while (j >= 0 && p[j][0] > ck) {
+            p[j + 1] = p[j];
+            j--;
+          }
+          p[j + 1] = cur;
+        }
+      } else {
+        p.sort(function(a, b) {
+          return a[0] < b[0] ? -1 : (a[0] > b[0] ? 1 : 0);
+        });
+      }
+    }
+    var u = this._u;
+    if (u) {
+      if (u._isFastUrl) u._sd = true;
+      else u._syncSearch();
+    }
   };
   URLSearchParams.prototype.forEach = function(cb, ta) {
     var p = this._ensureP();
@@ -279,10 +352,93 @@
   }
 
   var FastUrlProto;
+  var __originCache = Object.create(null);
+  var __originCacheCount = 0;
+  var __fastUrlSpecCache = Object.create(null);
+  var __fastUrlSpecCount = 0;
+
+  function __FastUrl(s, rs, pi, qi) {
+    this._r = s;
+    this._rs = rs;
+    this._pi = pi;
+    this._qi = qi;
+    this._sp = null;
+    this._sd = false;
+  }
+
+  function __fastHttpOrigin(b) {
+    var len = b.length;
+    if (len < 8) return "";
+    if (len <= 96) {
+      var hit = __originCache[b];
+      if (hit !== undefined) return hit;
+    }
+    var end = __fastHttpOriginEnd(b);
+    var res = end === -1 ? "" : (end === len ? b : b.slice(0, end));
+    if (len <= 96 && __originCacheCount < 256) {
+      __originCache[b] = res;
+      __originCacheCount++;
+    }
+    return res;
+  }
+
+  function __fastHttpOriginEnd(b) {
+    var len = b.length;
+    if (len < 8 || b.charCodeAt(0) !== 104 || b.charCodeAt(len - 1) <= 32) return -1;
+    var rs = 0;
+    if (b.charCodeAt(1) === 116 && b.charCodeAt(2) === 116 && b.charCodeAt(3) === 112) {
+      if (b.charCodeAt(4) === 58 && b.charCodeAt(5) === 47 && b.charCodeAt(6) === 47) rs = 7;
+      else if (b.charCodeAt(4) === 115 && b.charCodeAt(5) === 58 && b.charCodeAt(6) === 47 && b.charCodeAt(7) === 47) rs = 8;
+    }
+    if (rs === 0) return -1;
+    var end = len;
+    for (var i = rs; i < len; i++) {
+      var c = b.charCodeAt(i);
+      if (c <= 32) return -1;
+      if (c === 47 || c === 63 || c === 35) {
+        end = i;
+        break;
+      }
+    }
+    if (end <= rs) return -1;
+    var colon = -1;
+    for (var j = rs; j < end; j++) {
+      var hc = b.charCodeAt(j);
+      if (hc === 58) {
+        if (colon !== -1) return -1;
+        colon = j;
+      } else if (!((hc >= 97 && hc <= 122) || (hc >= 48 && hc <= 57) || hc === 46 || hc === 45)) {
+        return -1;
+      }
+    }
+    if (colon !== -1) {
+      if (colon === rs || colon + 1 >= end || end - colon - 1 > 5) return -1;
+      var portNum = 0;
+      for (var p = colon + 1; p < end; p++) {
+        var dc = b.charCodeAt(p);
+        if (dc < 48 || dc > 57) return -1;
+        portNum = portNum * 10 + (dc - 48);
+      }
+      if (portNum > 65535 || (rs === 7 && portNum === 80) || (rs === 8 && portNum === 443)) return -1;
+    }
+    for (var r = end + 1; r < len; r++) {
+      if (b.charCodeAt(r) <= 32) return -1;
+    }
+    return end;
+  }
 
   function __tryFastHttpUrl(s) {
-    var len = s.length;
-    if (len < 8 || s.charCodeAt(0) !== 104 || s.charCodeAt(len - 1) <= 32) return null;
+    var origS = s;
+    var origLen = origS.length;
+    if (origLen < 8) return null;
+    if (origLen <= 128) {
+      var cached = __fastUrlSpecCache[origS];
+      if (cached !== undefined) {
+        return cached === null ? null : new __FastUrl(cached[0], cached[1], cached[2], cached[3]);
+      }
+    }
+    var len = origLen;
+    if (s.charCodeAt(0) !== 104 || s.charCodeAt(len - 1) <= 32) return null;
     var rs = 0;
     if (s.charCodeAt(1) === 116 && s.charCodeAt(2) === 116 && s.charCodeAt(3) === 112) {
       if (s.charCodeAt(4) === 58 && s.charCodeAt(5) === 47 && s.charCodeAt(6) === 47) rs = 7;
@@ -292,16 +448,33 @@
     var qi = s.indexOf("?", rs);
     var pathEnd = qi === -1 ? len : qi;
     var pi = s.indexOf("/", rs);
-    if (pi <= rs || pi > pathEnd) return null;
+    if (pi === -1 && qi === -1 && len > rs) {
+      s = s + "/";
+      len += 1;
+      pi = len - 1;
+      pathEnd = len;
+    } else if (pi <= rs || pi > pathEnd) {
+      return null;
+    }
+    var colonIdx = -1;
     for (var i = rs; i < pi; i++) {
       var c = s.charCodeAt(i);
-      if (c <= 32 || c === 64 || (c >= 65 && c <= 90)) return null;
+      if (c === 58) {
+        if (colonIdx !== -1) return null;
+        colonIdx = i;
+      } else if (!((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 46 || c === 45)) {
+        return null;
+      }
     }
-    if (
-      (rs === 7 && pi - rs > 3 && s.charCodeAt(pi - 3) === 58 && s.charCodeAt(pi - 2) === 56 && s.charCodeAt(pi - 1) === 48) ||
-      (rs === 8 && pi - rs > 4 && s.charCodeAt(pi - 4) === 58 && s.charCodeAt(pi - 3) === 52 && s.charCodeAt(pi - 2) === 52 && s.charCodeAt(pi - 1) === 51)
-    ) {
-      return null;
+    if (colonIdx !== -1) {
+      if (colonIdx === rs || colonIdx + 1 >= pi || pi - colonIdx - 1 > 5) return null;
+      var pVal = 0;
+      for (var pk = colonIdx + 1; pk < pi; pk++) {
+        var pd = s.charCodeAt(pk);
+        if (pd < 48 || pd > 57) return null;
+        pVal = pVal * 10 + (pd - 48);
+      }
+      if (pVal > 65535 || (rs === 7 && pVal === 80) || (rs === 8 && pVal === 443)) return null;
     }
     if (pathEnd - pi > 1) {
       for (var p = pi; p < pathEnd - 1; p++) {
@@ -312,33 +485,50 @@
       }
     }
     if (qi !== -1 && qi + 1 === len) return null;
-    var u = Object.create(FastUrlProto);
-    u._r = s;
-    u._rs = rs;
-    u._pi = pi;
-    u._qi = qi;
-    u._sp = null;
-    return u;
+    if (origLen <= 128 && __fastUrlSpecCount < 256) {
+      __fastUrlSpecCache[origS] = [s, rs, pi, qi];
+      __fastUrlSpecCount++;
+    }
+    return new __FastUrl(s, rs, pi, qi);
   }
 
   function URL(input, base) {
-    if (base === undefined && typeof input === "string") {
-      var fastU = __tryFastHttpUrl(input);
-      if (fastU !== null) return fastU;
+    if (base === undefined) {
+      if (typeof input === "string") {
+        var fastU = __tryFastHttpUrl(input);
+        if (fastU !== null) return fastU;
+      }
+    } else if (typeof input === "string" && input.length > 0) {
+      if (typeof base === "string") {
+        var bOrig = __fastHttpOrigin(base);
+        if (bOrig !== "") {
+          var ic0 = input.charCodeAt(0);
+          if (ic0 === 104) {
+            var fastAbs = __tryFastHttpUrl(input);
+            if (fastAbs !== null) return fastAbs;
+          } else if (ic0 === 47 && (input.length === 1 || input.charCodeAt(1) !== 47)) {
+            var fastRel = __tryFastHttpUrl(bOrig + input);
+            if (fastRel !== null) return fastRel;
+          }
+        }
+      } else if (base && base._isSliceUrl) {
+        var ic1 = input.charCodeAt(0);
+        if (ic1 === 104) {
+          var fastAbsU = __tryFastHttpUrl(input);
+          if (fastAbsU !== null) return fastAbsU;
+        } else if (ic1 === 47 && (input.length === 1 || input.charCodeAt(1) !== 47)) {
+          var uOrig = base.origin;
+          if (uOrig !== "null") {
+            var fastRelU = __tryFastHttpUrl(uOrig + input);
+            if (fastRelU !== null) return fastRelU;
+          }
+        }
+      }
     }
     var raw = (input && input._isSliceUrl) ? input.href : (typeof input === "string" ? input.trim() : String(input).trim());
-    if (base !== undefined && !__hasRfc3986Scheme(raw)) {
-      if (typeof base === "string" && raw.charCodeAt(0) === 47 && raw.charCodeAt(1) !== 47) {
-        var bsi = base.indexOf("://");
-        if (bsi > 0 && base.indexOf("?", bsi + 3) === -1 && base.indexOf("#", bsi + 3) === -1) {
-          var bsl = base.indexOf("/", bsi + 3);
-          raw = (bsl === -1 ? base : base.slice(0, bsl)) + raw;
-        } else {
-          var b0 = new URL(base);
-          raw = b0.origin + raw;
-        }
-      } else {
-        var b = (base && base._isSliceUrl) ? base : new URL(String(base));
+    if (base !== undefined) {
+      var b = (base && base._isSliceUrl) ? base : new URL(typeof base === "string" ? base : String(base));
+      if (!__hasRfc3986Scheme(raw)) {
         if (raw === "") raw = b.href;
         else if (raw.indexOf("//") === 0) raw = b.protocol + raw;
         else if (raw.charCodeAt(0) === 47) raw = b.origin + raw;
@@ -397,6 +587,16 @@
       this.password = ci === -1 ? "" : up.slice(ci + 1);
       hostPort = authHost.slice(ai + 1);
     }
+    if (
+      !hostPort &&
+      (this.protocol === "http:" ||
+        this.protocol === "https:" ||
+        this.protocol === "ws:" ||
+        this.protocol === "wss:" ||
+        this.protocol === "ftp:")
+    ) {
+      throw new TypeError("Invalid URL: " + input);
+    }
     var pci = hostPort.lastIndexOf(":");
     if (pci !== -1 && hostPort.indexOf("]") < pci) {
       this.hostname = hostPort.slice(0, pci).toLowerCase();
@@ -437,7 +637,12 @@
   };
 
   FastUrlProto = Object.create(URL.prototype);
+  FastUrlProto._isSliceUrl = true;
+  FastUrlProto._isFastUrl = true;
+  FastUrlProto.toString = FastUrlProto.toJSON = URL.prototype.toString;
+  __FastUrl.prototype = FastUrlProto;
   function __matFastUrl(u, field, val) {
+    if (u._sd) u._syncSearch();
     var proto = u._rs === 7 ? "http:" : "https:";
     var host = u._r.slice(u._rs, u._pi);
     var pci = host.lastIndexOf(":");
@@ -448,6 +653,7 @@
     var pathname = u._qi === -1 ? u._r.slice(u._pi) : u._r.slice(u._pi, u._qi);
     var search = u._qi === -1 ? "" : u._r.slice(u._qi);
     var href = u._r;
+    u._isFastUrl = false;
     Object.setPrototypeOf(u, URL.prototype);
     u.protocol = proto;
     u.username = "";
@@ -460,11 +666,26 @@
     u.hash = "";
     u.search = search;
     u.href = href;
-    u[field] = val;
+    if (field === "pathname") {
+      u.pathname = val && val.charCodeAt(0) === 47 ? __normP(val) : __normP("/" + val);
+      u.href = u.origin + u.pathname + u.search + u.hash;
+    } else if (field === "search") {
+      u.search = !val || val === "?" ? "" : (val.charCodeAt(0) === 63 ? val : "?" + val);
+      if (u._sp) u._sp = new URLSearchParams(u.search, u);
+      u.href = u.origin + u.pathname + u.search + u.hash;
+    } else if (field === "hash") {
+      u.hash = !val || val === "#" ? "" : (val.charCodeAt(0) === 35 ? val : "#" + val);
+      u.href = u.origin + u.pathname + u.search + u.hash;
+    } else {
+      u[field] = val;
+    }
   }
   Object.defineProperties(FastUrlProto, {
     href: {
-      get: function() { return this._r; },
+      get: function() {
+        if (this._sd) this._syncSearch();
+        return this._r;
+      },
       set: function(v) { __matFastUrl(this, "href", String(v)); },
       configurable: true,
       enumerable: true
@@ -529,6 +750,7 @@
     },
     search: {
       get: function() {
+        if (this._sd) this._syncSearch();
         return this._qi === -1 ? "" : this._r.slice(this._qi);
       },
       set: function(v) { __matFastUrl(this, "search", String(v)); },
@@ -549,6 +771,7 @@
     }
   });
   FastUrlProto._syncSearch = function() {
+    this._sd = false;
     var baseHref = this._qi === -1 ? this._r : this._r.slice(0, this._qi);
     if (!this._sp || this._sp._ensureP().length === 0) {
       this._r = baseHref;
