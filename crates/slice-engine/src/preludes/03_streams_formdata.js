@@ -117,7 +117,7 @@
       }
       s._chunks.push(chunk);
     }
-    __rsCallPullIfNeeded(s);
+    if (s._hasPull && s._started) __rsCallPullIfNeeded(s);
   };
   __RSCtrl.prototype.close = function() {
     var s = this._s;
@@ -177,7 +177,7 @@
       var chunk = __popStreamChunk(s);
       if (s._closeRequested && s._chunks.length === s._head) {
         __rsFinishClose(s);
-      } else {
+      } else if (s._hasPull && s._started) {
         __rsCallPullIfNeeded(s);
       }
       return Promise.resolve({ value: chunk, done: false });
@@ -196,7 +196,7 @@
         rej: rej
       });
     });
-    __rsCallPullIfNeeded(s);
+    if (s._hasPull && s._started) __rsCallPullIfNeeded(s);
     return p;
   };
   __RSReader.prototype.cancel = function(reason) {
@@ -253,6 +253,7 @@
     }
     this._hwm = hwm;
     this._src = underlyingSource || null;
+    this._hasPull = Boolean(this._src && typeof this._src.pull === "function");
     var ctrl = new __RSCtrl(this);
     this._ctrl = ctrl;
     this._startPromise = null;
@@ -270,6 +271,8 @@
         self._startPromise = null;
         __rsError(self, err);
       });
+    } else if (this._closed || this._closeRequested || this._errored || !this._src || typeof this._src.pull !== "function") {
+      this._started = true;
     } else {
       Promise.resolve(undefined).then(function() {
         self._started = true;

@@ -284,7 +284,10 @@ pub fn pack_boacas_container(compacted_js: &str) -> Vec<u8> {
         has_next_tick,
     );
 
-    let precompiled = crate::js_preludes::compile_static_js_to_slicebc(&fused_bytes);
+    let prelude_nl = crate::js_preludes::count_fused_prelude_newlines(shards_mask, init_lazy);
+    let min_sm_line = (prelude_nl + 2) as u32;
+    let precompiled =
+        crate::js_preludes::compile_static_js_to_slicebc_with_min_line(&fused_bytes, min_sm_line);
 
     let header = BoaCasHeader {
         approach_kind: 3,

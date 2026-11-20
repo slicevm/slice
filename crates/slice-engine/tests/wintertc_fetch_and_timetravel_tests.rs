@@ -2294,3 +2294,340 @@ fn test_wave4_issues_140_141_145_148_149_structured_clone_formdata_and_iterators
         assert_eq!(m.stdout, vec!["WAVE4_ALL_OK"], "return={}", m.return_value);
     }
 }
+
+#[test]
+fn test_issue_154_promise_resolve_fast_path_url_base_request_urlobj_and_streams() {
+    let script = r#"
+        (async () => {
+            // 1. Promise.resolve 1-alloc fast path & full ECMA-262 subclass/thenable parity
+            const prims = await Promise.all([
+                Promise.resolve(undefined),
+                Promise.resolve(null),
+                Promise.resolve(42),
+                Promise.resolve("ok"),
+                Promise.resolve(true),
+                Promise.resolve(10n),
+            ]);
+            if (prims[2] !== 42 || prims[3] !== "ok" || prims[5] !== 10n) {
+                throw new Error("primitive Promise.resolve mismatch");
+            }
+            const sym = Symbol("s154");
+            if ((await Promise.resolve(sym)) !== sym) {
+                throw new Error("symbol Promise.resolve mismatch");
+            }
+            const stepObj = { value: "tok", done: false };
+            const nullProtoObj = Object.create(null);
+            nullProtoObj.k = 7;
+            const arrVal = [1, 2, 3];
+            if ((await Promise.resolve(stepObj)) !== stepObj) throw new Error("stepObj identity");
+            if ((await Promise.resolve(nullProtoObj)).k !== 7) throw new Error("nullProto mismatch");
+            if ((await Promise.resolve(arrVal)) !== arrVal) throw new Error("arrVal identity");
+
+            const baseP = Promise.resolve(123);
+            if (Promise.resolve(baseP) !== baseP) {
+                throw new Error("Promise.resolve(p) must return same Promise instance");
+            }
+            const customCtorP = Promise.resolve(456);
+            Object.defineProperty(customCtorP, "constructor", { value: function Custom() {} });
+            if (Promise.resolve(customCtorP) === customCtorP) {
+                throw new Error("Promise with overridden own constructor must wrap in new Promise");
+            }
+
+            class SubPromise extends Promise {}
+            const subFromPrim = SubPromise.resolve(77);
+            if (!(subFromPrim instanceof SubPromise) || (await subFromPrim) !== 77) {
+                throw new Error("SubPromise.resolve(77) failed");
+            }
+            const subWrapped = SubPromise.resolve(baseP);
+            if (subWrapped === baseP || !(subWrapped instanceof SubPromise) || (await subWrapped) !== 123) {
+                throw new Error("SubPromise.resolve(baseP) must wrap into SubPromise");
+            }
+            if (SubPromise.resolve(subFromPrim) !== subFromPrim) {
+                throw new Error("SubPromise.resolve(subInstance) must preserve identity");
+            }
+
+            const thenableVal = await Promise.resolve({
+                then(resolve) { resolve("from-thenable"); }
+            });
+            if (thenableVal !== "from-thenable") throw new Error("thenable resolve failed: " + thenableVal);
+
+            let rejectedThenableCaught = false;
+            try {
+                await Promise.resolve({
+                    then(_res, rej) { rej(new Error("thenable-boom")); }
+                });
+            } catch (e) {
+                rejectedThenableCaught = String(e && e.message) === "thenable-boom";
+            }
+            if (!rejectedThenableCaught) throw new Error("rejected thenable did not reject");
+
+            let throwingGetterCaught = false;
+            try {
+                const badThen = {};
+                Object.defineProperty(badThen, "then", {
+                    get() { throw new TypeError("getter-boom"); }
+                });
+                await Promise.resolve(badThen);
+            } catch (e) {
+                throwingGetterCaught = e instanceof TypeError && e.message === "getter-boom";
+            }
+            if (!throwingGetterCaught) throw new Error("throwing then getter did not reject");
+
+            // DefineOwnPropertyByName edge case: object literal overwriting getter with data property
+            const dupLit = { get a() { return 1; }, a: 99, 0: "idx0" };
+            const dupDesc = Object.getOwnPropertyDescriptor(dupLit, "a");
+            if (dupLit.a !== 99 || !dupDesc || dupDesc.value !== 99 || dupLit[0] !== "idx0") {
+                throw new Error("DefineOwnPropertyByName accessor->data literal override failed");
+            }
+
+            // 2. Sync-closed ReadableStream vs async pull ReadableStream
+            const syncRs = new ReadableStream({
+                start(c) {
+                    c.enqueue("chunk-1");
+                    c.enqueue("chunk-2");
+                    c.close();
+                }
+            });
+            const rdr = syncRs.getReader();
+            const c1 = await rdr.read();
+            const c2 = await rdr.read();
+            const c3 = await rdr.read();
+            rdr.releaseLock();
+            if (c1.value !== "chunk-1" || c2.value !== "chunk-2" || !c3.done) {
+                throw new Error("sync-closed ReadableStream read mismatch");
+            }
+
+            let pullCount = 0;
+            const pullRs = new ReadableStream({
+                pull(c) {
+                    pullCount += 1;
+                    if (pullCount <= 2) c.enqueue("p" + pullCount);
+                    else c.close();
+                }
+            });
+            const prdr = pullRs.getReader();
+            const pOut = [];
+            while (true) {
+                const st = await prdr.read();
+                if (st.done) break;
+                pOut.push(st.value);
+            }
+            if (pOut.join(",") !== "p1,p2") throw new Error("pull ReadableStream mismatch: " + pOut);
+
+            // 3. WHATWG URL(input, base), lazy _searchDirty, getAll fast scan, Request(urlObj, init)
+            const uAbs = new URL("https://edge.slice.dev/v2/items?cat=gpu", "https://fallback.slice.dev");
+            if (uAbs.origin !== "https://edge.slice.dev" || uAbs.pathname !== "/v2/items" || uAbs.searchParams.get("cat") !== "gpu") {
+                throw new Error("new URL(abs, validBase) mismatch");
+            }
+
+            let invalidBaseThrew = false;
+            try {
+                new URL("https://ok.example/path", "not-a-valid-base");
+            } catch (e) {
+                invalidBaseThrew = e instanceof TypeError;
+            }
+            if (!invalidBaseThrew) {
+                throw new Error("new URL(abs, invalidBase) MUST throw TypeError per WHATWG URL");
+            }
+
+            let emptyHttpHostThrew = false;
+            try {
+                new URL("https://");
+            } catch (e) {
+                emptyHttpHostThrew = e instanceof TypeError;
+            }
+            if (!emptyHttpHostThrew) {
+                throw new Error("new URL('https://') must throw TypeError");
+            }
+            // Non-special opaque empty host (used by SvelteKit DUMMY_BASE = new URL('a://')) must succeed
+            const nonSpecial = new URL("a://");
+            if (nonSpecial.protocol !== "a:") {
+                throw new Error("non-special a:// URL failed");
+            }
+
+            const uRel = new URL("/api/v2/catalog?tag=ai&sort=asc&tag=pcie", "https://edge.slice.dev");
+            if (uRel.searchParams.getAll("tag").join(",") !== "ai,pcie" || uRel.searchParams.get("sort") !== "asc") {
+                throw new Error("URLSearchParams.getAll fast scan mismatch");
+            }
+
+            const uMut = new URL("/api/v2/orders", new URL("https://edge.slice.dev/v1/old"));
+            uMut.searchParams.set("sku", "GPU-B200");
+            uMut.searchParams.set("qty", "3");
+            uMut.searchParams.append("tag", "nvlink");
+            uMut.searchParams.delete("missing");
+            uMut.searchParams.sort();
+            if (uMut.search !== "?qty=3&sku=GPU-B200&tag=nvlink") {
+                throw new Error("lazy _searchDirty search getter mismatch: " + uMut.search);
+            }
+            if (uMut.href !== "https://edge.slice.dev/api/v2/orders?qty=3&sku=GPU-B200&tag=nvlink") {
+                throw new Error("lazy _searchDirty href getter mismatch: " + uMut.href);
+            }
+            uMut.pathname = "/api/v3/orders";
+            if (uMut.href !== "https://edge.slice.dev/api/v3/orders?qty=3&sku=GPU-B200&tag=nvlink") {
+                throw new Error("__matFastUrl after _searchDirty mismatch: " + uMut.href);
+            }
+
+            const uDot = new URL("../rel/item", "https://edge.slice.dev/a/b/c");
+            if (uDot.href !== "https://edge.slice.dev/a/rel/item") {
+                throw new Error("relative ../rel resolution mismatch: " + uDot.href);
+            }
+
+            const reqFromUrl = new Request(new URL("/api/ping?ok=1", "https://edge.slice.dev"), {
+                method: "POST",
+                headers: { "X-Tenant-Id": "t-1", "X-Trace": "  abc  " },
+                body: "hello"
+            });
+            if (
+                reqFromUrl.url !== "https://edge.slice.dev/api/ping?ok=1" ||
+                reqFromUrl.headers.get("x-tenant-id") !== "t-1" ||
+                reqFromUrl.headers.get("x-trace") !== "abc" ||
+                (await reqFromUrl.text()) !== "hello"
+            ) {
+                throw new Error("new Request(new URL(...), init) mismatch");
+            }
+
+            let badHdrThrew = (() => {
+                try {
+                    new Request(uAbs, { headers: { "X-Bad": "line1\r\ninjected: 1" } });
+                    return false;
+                } catch (e) {
+                    return e instanceof TypeError;
+                }
+            })();
+            if (!badHdrThrew) throw new Error("CRLF header injection must throw TypeError");
+
+            // 4. Add-Property Transition IC + prototype setter invalidation & lazy toLocaleString
+            const FactoryProto = { tag: "f" };
+            function makeItem(i) {
+                const o = Object.create(FactoryProto);
+                o.alpha = i;
+                o.beta = i + 1;
+                return o;
+            }
+            let sum = 0;
+            for (let i = 0; i < 12; i++) {
+                const it = makeItem(i);
+                sum += it.alpha + it.beta;
+            }
+            if (sum !== 144) throw new Error("AddTransitionEntry factory sum mismatch: " + sum);
+            let setterIntercepted = 0;
+            Object.defineProperty(FactoryProto, "alpha", {
+                set(v) { setterIntercepted += v; },
+                configurable: true
+            });
+            const afterSetter = makeItem(10);
+            if (setterIntercepted !== 10 || Object.prototype.hasOwnProperty.call(afterSetter, "alpha")) {
+                throw new Error("AddTransitionEntry failed to invalidate when prototype gained setter");
+            }
+
+            if ((1234567).toLocaleString("en-US") !== "1,234,567" || "b".localeCompare("a") <= 0) {
+                throw new Error("lazy Shard 18 toLocaleString / localeCompare forwarder failed");
+            }
+
+            // 8. FastForInState live property deletion, mid-loop prototype mutation deopt, and Object.keys/values/entries
+            const dynObj = { a: 1, b: 2, c: 3 };
+            const seenDel = [];
+            for (const k in dynObj) {
+                seenDel.push(k);
+                if (k === "a") delete dynObj.b;
+            }
+            if (seenDel.join(",") !== "a,c") throw new Error("for..in live deletion failed: " + seenDel);
+
+            const deoptObj = { x: 1, y: 2 };
+            const seenDeopt = [];
+            for (const k in deoptObj) {
+                seenDeopt.push(k);
+                if (k === "x") Object.setPrototypeOf(deoptObj, { z: 3 });
+            }
+            if (seenDeopt.join(",") !== "x,y,z") throw new Error("for..in proto deopt failed: " + seenDeopt);
+
+            const accObj = { p: 10 };
+            Object.defineProperty(accObj, "q", { get() { return 20; }, enumerable: true, configurable: true });
+            Object.defineProperty(accObj, "hidden", { value: 99, enumerable: false });
+            if (Object.keys(accObj).join(",") !== "p,q" || Object.values(accObj).join(",") !== "10,20") {
+                throw new Error("Object.keys/values accessor handling failed");
+            }
+
+            const tsSes = Slice.evalSandbox("(Object.prototype as any).pollutedTs = 1; 42", { fuel: 5000 });
+            if (tsSes.ok || (!String(tsSes.violation || "").includes("SES Lockdown Violation") && !String(tsSes.violation || "").includes("IntrinsicMutationBlocked"))) {
+                throw new Error("TypeScript as-cast prototype mutation must trap cleanly: " + JSON.stringify(tsSes));
+            }
+
+            // 9. Array[Symbol.species] subclassing + dense slice + Response.text()/json() on closed ReadableStream
+            class SubArr extends Array {}
+            const sub = SubArr.from([10, 20, 30, 40]);
+            const subSliced = sub.slice(1, 3);
+            if (!(subSliced instanceof SubArr) || subSliced.join(",") !== "20,30") {
+                throw new Error("Array[Symbol.species] subclass slice failed");
+            }
+            const denseNums = [1, 2, 3, 4, 5];
+            if (denseNums.slice(-3, -1).join(",") !== "3,4" || denseNums.slice().length !== 5) {
+                throw new Error("dense Array.prototype.slice negative bounds failed");
+            }
+            const sseStream = new ReadableStream({
+                start(c) {
+                    c.enqueue("{\"ok\":");
+                    c.enqueue("true}");
+                    c.close();
+                }
+            });
+            const sseJson = await new Response(sseStream).json();
+            if (!sseJson || sseJson.ok !== true || !sseStream.locked) {
+                throw new Error("Response.json() on closed string ReadableStream failed");
+            }
+
+            console.log("ISSUE_154_OK");
+        })().catch((e) => console.log("ISSUE_154_ERR: " + (e && e.stack ? e.stack : e)));
+    "#;
+
+    let bc = compile_source_to_bytecode(script);
+    for turn in 0..2 {
+        let mut iso = SliceIsolate::spawn(
+            format!("issue-154-turn-{turn}"),
+            1,
+            CapabilityToken::pure_compute(),
+            20_000_000,
+            16 * 1024 * 1024,
+        );
+        let out = iso.execute_bytecode(&bc, None).unwrap();
+        assert_eq!(out.stdout, vec!["ISSUE_154_OK"]);
+    }
+
+    // Also verify `Object.prototype.then` and `Array.prototype.then` monkey-patch fallback in `boa_engine::Promise::promise_resolve`!
+    let mut raw_ctx = crate::boa_realm::build_compiler_boa_context();
+    let unlocked_js = r#"
+        var __protoOut = "";
+        Object.prototype.then = function(resolve) { resolve("obj-proto-then"); };
+        Promise.resolve({ plain: true }).then(function(v) {
+            __protoOut += v;
+            delete Object.prototype.then;
+            Array.prototype.then = function(resolve) { resolve(":arr-proto-then"); };
+            return Promise.resolve([1, 2]);
+        }).then(function(v2) {
+            __protoOut += v2;
+            delete Array.prototype.then;
+        });
+    "#;
+    raw_ctx
+        .eval(boa_engine::Source::from_bytes(unlocked_js.as_bytes()))
+        .unwrap();
+    let _ = raw_ctx.run_jobs();
+    let proto_out = raw_ctx
+        .global_object()
+        .get(boa_engine::js_string!("__protoOut"), &mut raw_ctx)
+        .unwrap()
+        .to_string(&mut raw_ctx)
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(proto_out, "obj-proto-then:arr-proto-then");
+
+    // Verify quoted string literals containing "fetch(" or unexecuted toLocaleString do not pre-fuse Shards 10/11/18
+    let (_, shards_str_lit, _) = crate::boacas::compute_boacas_metadata(
+        r#"const msg = "blocked fetch('https://evil.example')"; const fmt = (n) => n.toLocaleString();"#,
+    );
+    assert_eq!(
+        shards_str_lit & ((1u32 << 10) | (1u32 << 11) | (1u32 << 18)),
+        0,
+        "quoted fetch( and toLocaleString must not pre-fuse Shards 10/11/18, got {shards_str_lit:#x}"
+    );
+}

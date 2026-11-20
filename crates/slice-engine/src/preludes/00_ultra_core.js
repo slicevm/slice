@@ -690,6 +690,51 @@
     configurable: true,
     enumerable: false
   });
+  Object.defineProperty(Number.prototype, "toLocaleString", {
+    value: function(locales, options) {
+      __loadShard(18);
+      return Number.prototype.toLocaleString.call(this, locales, options);
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false
+  });
+  Object.defineProperty(Date.prototype, "toLocaleString", {
+    value: function(locales, options) {
+      __loadShard(18);
+      return Date.prototype.toLocaleString.call(this, locales, options);
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false
+  });
+  Object.defineProperty(Date.prototype, "toLocaleDateString", {
+    value: function(locales, options) {
+      __loadShard(18);
+      return Date.prototype.toLocaleDateString.call(this, locales, options);
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false
+  });
+  Object.defineProperty(Date.prototype, "toLocaleTimeString", {
+    value: function(locales, options) {
+      __loadShard(18);
+      return Date.prototype.toLocaleTimeString.call(this, locales, options);
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false
+  });
+  Object.defineProperty(String.prototype, "localeCompare", {
+    value: function(that, locales, options) {
+      __loadShard(18);
+      return String.prototype.localeCompare.call(this, that, locales, options);
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false
+  });
   var __origObjToStr = Object.prototype.toString;
   var __origObjValOf = Object.prototype.valueOf;
   var __origObjHasOwn = Object.prototype.hasOwnProperty;

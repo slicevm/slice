@@ -288,6 +288,14 @@ static SHARD_SLICEBC: [OnceLock<Vec<u8>>; 30] = [const { OnceLock::new() }; 30];
 
 #[inline]
 pub(crate) fn compile_static_js_to_slicebc(bytes: &[u8]) -> Vec<u8> {
+    compile_static_js_to_slicebc_with_min_line(bytes, u32::MAX)
+}
+
+#[inline]
+pub(crate) fn compile_static_js_to_slicebc_with_min_line(
+    bytes: &[u8],
+    min_sourcemap_line: u32,
+) -> Vec<u8> {
     if cfg!(debug_assertions) {
         let owned = bytes.to_vec();
         return std::thread::Builder::new()
@@ -301,7 +309,7 @@ pub(crate) fn compile_static_js_to_slicebc(bytes: &[u8]) -> Vec<u8> {
                     &mut compiler_ctx,
                 ) {
                     script
-                        .compile_to_slicebc(&mut compiler_ctx)
+                        .compile_to_slicebc_with_min_line(&mut compiler_ctx, min_sourcemap_line)
                         .unwrap_or_default()
                 } else {
                     Vec::new()
@@ -318,7 +326,7 @@ pub(crate) fn compile_static_js_to_slicebc(bytes: &[u8]) -> Vec<u8> {
         &mut compiler_ctx,
     ) {
         script
-            .compile_to_slicebc(&mut compiler_ctx)
+            .compile_to_slicebc_with_min_line(&mut compiler_ctx, min_sourcemap_line)
             .unwrap_or_default()
     } else {
         Vec::new()
@@ -358,7 +366,7 @@ pub(crate) fn eval_static_js_with_2hit_slicebc_cache(
         if cache.get().is_none() && context.realm().scope().num_bindings() == 0 {
             let script =
                 boa_engine::Script::parse(boa_engine::Source::from_bytes(bytes), None, context)?;
-            if let Ok(compiled) = script.compile_to_slicebc(context)
+            if let Ok(compiled) = script.compile_to_slicebc_with_min_line(context, u32::MAX)
                 && !compiled.is_empty()
             {
                 let _ = cache.set(compiled);
@@ -418,6 +426,31 @@ pub(crate) fn eval_lazy_prelude_shard(
 }
 
 #[inline]
+fn is_inside_quoted_string_on_line(bytes: &[u8], idx: usize) -> bool {
+    let line_start = memchr::memrchr(b'\n', &bytes[..idx]).map_or(0, |i| i + 1);
+    let mut i = line_start;
+    let mut quote: u8 = 0;
+    while i < idx {
+        let b = bytes[i];
+        if quote != 0 {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b == quote {
+                quote = 0;
+            }
+        } else if b == b'"' || b == b'\'' {
+            quote = b;
+        } else if b == b'/' && i + 1 < idx && bytes[i + 1] == b'/' {
+            return true;
+        }
+        i += 1;
+    }
+    quote != 0
+}
+
+#[inline]
 fn is_outbound_fetch_at(js_code: &str, idx: usize) -> bool {
     let bytes = js_code.as_bytes();
     let is_member = idx > 0 && bytes[idx - 1] == b'.';
@@ -427,7 +460,11 @@ fn is_outbound_fetch_at(js_code: &str, idx: usize) -> bool {
     let is_sync_method = js_code[idx + 6..]
         .find(')')
         .is_some_and(|c| js_code[idx + 6 + c + 1..].trim_start().starts_with('{'));
-    !is_member && !is_async_method && !is_ident_suffix && !is_sync_method
+    !is_member
+        && !is_async_method
+        && !is_ident_suffix
+        && !is_sync_method
+        && !is_inside_quoted_string_on_line(bytes, idx)
 }
 
 #[inline]
@@ -706,19 +743,31 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ),
     // WebAssembly (`1 << 9`)
     ("WebAssembly", ShardTriggerAction::Mask(1 << 9)),
-    // Shard 18: WinterTC `Intl` (`1 << 18`)
+    // Shard 18: WinterTC `Intl` (`1 << 18`); `toLocale*` / `localeCompare` lazy-load Shard 18 on first call via `00_ultra_core.js`
     ("Intl", ShardTriggerAction::Mask(1 << 18)),
-    ("toLocaleString", ShardTriggerAction::Mask(1 << 18)),
-    ("toLocaleDateString", ShardTriggerAction::Mask(1 << 18)),
-    ("toLocaleTimeString", ShardTriggerAction::Mask(1 << 18)),
-    ("localeCompare", ShardTriggerAction::Mask(1 << 18)),
     // Shard 29: `navigator`, `location`, & Complete `process` CLI Surface (`1 << 29`)
     ("navigator", ShardTriggerAction::Mask(1 << 29)),
     ("location.", ShardTriggerAction::Mask(1 << 29)),
     ("globalThis.location", ShardTriggerAction::Mask(1 << 29)),
-    ("stdout", ShardTriggerAction::Mask(1 << 29)),
-    ("stderr", ShardTriggerAction::Mask(1 << 29)),
-    ("stdin", ShardTriggerAction::Mask(1 << 29)),
+    ("process.stdout", ShardTriggerAction::Mask(1 << 29)),
+    ("process.stderr", ShardTriggerAction::Mask(1 << 29)),
+    ("process.stdin", ShardTriggerAction::Mask(1 << 29)),
+    ("stdout.write", ShardTriggerAction::Mask(1 << 29)),
+    ("stderr.write", ShardTriggerAction::Mask(1 << 29)),
+    ("stdin.on", ShardTriggerAction::Mask(1 << 29)),
+    ("stdin.read", ShardTriggerAction::Mask(1 << 29)),
+    ("{ stdout", ShardTriggerAction::Mask(1 << 29)),
+    ("{stdout", ShardTriggerAction::Mask(1 << 29)),
+    (", stdout", ShardTriggerAction::Mask(1 << 29)),
+    (",stdout", ShardTriggerAction::Mask(1 << 29)),
+    ("{ stderr", ShardTriggerAction::Mask(1 << 29)),
+    ("{stderr", ShardTriggerAction::Mask(1 << 29)),
+    (", stderr", ShardTriggerAction::Mask(1 << 29)),
+    (",stderr", ShardTriggerAction::Mask(1 << 29)),
+    ("{ stdin", ShardTriggerAction::Mask(1 << 29)),
+    ("{stdin", ShardTriggerAction::Mask(1 << 29)),
+    (", stdin", ShardTriggerAction::Mask(1 << 29)),
+    (",stdin", ShardTriggerAction::Mask(1 << 29)),
     ("memoryUsage", ShardTriggerAction::Mask(1 << 29)),
     ("hrtime", ShardTriggerAction::Mask(1 << 29)),
     ("uptime", ShardTriggerAction::Mask(1 << 29)),

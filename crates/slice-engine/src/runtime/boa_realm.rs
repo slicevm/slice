@@ -240,6 +240,11 @@ impl boa_engine::JsData for AlsCapturedSnap {}
 pub(crate) struct SliceHostHooks;
 
 impl boa_engine::context::HostHooks for SliceHostHooks {
+    #[inline]
+    fn has_active_job_context(&self) -> bool {
+        BOA_ALS_ACTIVE.with(|a| a.get())
+    }
+
     fn make_job_callback(
         &self,
         callback: boa_engine::object::builtins::JsFunction,
