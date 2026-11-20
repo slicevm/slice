@@ -8,7 +8,8 @@ use crate::linker::{
     ModuleRequireSummary, UsedExports, analyze_module_used_exports_from_summaries,
     canonical_mod_id, collect_eager_module_indices, extract_module_require_summary,
     has_esm_default_export_marker, has_top_level_await, inline_cold_method_requires_ast,
-    prune_and_minify_cjs_module_ast, transform_module_to_cjs,
+    maybe_rewrite_unmodified_npm_cjs_module, prune_and_minify_cjs_module_ast,
+    transform_module_to_cjs,
 };
 use anyhow::{Context, Result};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -120,9 +121,15 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
                 .map_err(anyhow::Error::msg)?;
         }
 
+        let effective_src = if mod_id.contains("/node_modules/") {
+            maybe_rewrite_unmodified_npm_cjs_module(&mod_id, &raw_src)
+        } else {
+            std::borrow::Cow::Borrowed(raw_src.as_str())
+        };
+
         let is_ts = matches!(ext, "ts" | "tsx" | "jsx" | "mts" | "cts");
         let is_jsx_ext = matches!(ext, "tsx" | "jsx");
-        let js_stripped = strip_typescript_raw_with_ext(&raw_src, is_ts, is_jsx_ext);
+        let js_stripped = strip_typescript_raw_with_ext(&effective_src, is_ts, is_jsx_ext);
         let from_dir = path.parent().unwrap_or_else(|| Path::new("."));
         let mut child_deps = Vec::new();
         let mut cjs_body =

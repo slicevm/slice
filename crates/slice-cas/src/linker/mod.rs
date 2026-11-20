@@ -28,8 +28,9 @@ pub use builtins_and_ids::{
     resolve_spec_and_record,
 };
 pub use cjs_rewrites::{
-    collect_require_edits_from_program, rewrite_buffer_fast_paths_ast, rewrite_cjs_requires_ast,
-    rewrite_cjs_requires_in_line, rewrite_require_ident_ast,
+    collect_require_edits_from_program, maybe_rewrite_unmodified_npm_cjs_module,
+    rewrite_buffer_fast_paths_ast, rewrite_cjs_requires_ast, rewrite_cjs_requires_in_line,
+    rewrite_require_ident_ast,
 };
 pub use esm_transform::{has_esm_default_export_marker, transform_module_to_cjs};
 pub use lazy_and_inline::{collect_eager_module_indices, inline_cold_method_requires_ast};

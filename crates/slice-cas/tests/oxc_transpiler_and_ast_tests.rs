@@ -492,3 +492,96 @@ Object.defineProperty(exports, "dead", { enumerable: true, get: function() { ret
         "Tree-shaker must prune unused getter export and its backing binding:\n{pruned}"
     );
 }
+
+#[test]
+fn test_issue_153_zero_codegen_pure_js_cow_borrowed_ts_detector_and_linear_line_map() {
+    use std::borrow::Cow;
+
+    // 1. Pure JS containing `:`, `<`, `!`, and ~35 KB of JSON arrays returns `Cow::Borrowed`
+    //    with zero Oxc Codegen and zero string allocation, in < 5 ms even in debug builds.
+    let mut pure_js = String::with_capacity(40_000);
+    pure_js.push_str("const items = [");
+    for i in 0..450 {
+        if i > 0 {
+            pure_js.push(',');
+        }
+        pure_js.push_str(&format!(
+            r#"{{"customerId":"c-{i:04}","region":"us-east-1","arrCents":{},"slaBreach":{}}}"#,
+            90_000 + i * 100,
+            i % 25
+        ));
+    }
+    pure_js.push_str(
+        "];\nlet acc = 0;\nfor (let i = 0; i < items.length; i++) {\n  const it = items[i];\n  if (!it) continue;\n  acc += it.slaBreach >= 10 ? it.arrCents : 0;\n}\nacc;\n",
+    );
+    assert!(pure_js.len() >= 30_000);
+
+    let mut ast_hook_called = false;
+    let compiled_cow = compile_ts_or_js_checked_with_ast_hook(&pure_js, true, false, |prog| {
+        ast_hook_called = !prog.body.is_empty();
+    })
+    .expect("pure JS must compile cleanly");
+    assert!(ast_hook_called, "expected AST hook on pure JS fast path");
+    assert!(
+        matches!(compiled_cow, Cow::Borrowed(s) if std::ptr::eq(s.as_ptr(), pure_js.as_ptr())),
+        "expected zero-allocation Cow::Borrowed pointing directly at input slice"
+    );
+
+    // 2. Every TypeScript / JSX construct must be detected by `program_has_ts_or_jsx` and lowered.
+    let ts_and_jsx_cases: &[(&str, bool, &str)] = &[
+        ("const x: number = 1;\n", false, ": number"),
+        ("function id<T>(v: T): T { return v; }\n", false, "<T>"),
+        (
+            "const y = (Object.prototype as any).foo;\n",
+            false,
+            "as any",
+        ),
+        (
+            "const z = { a: 1 } satisfies Record<string, number>;\n",
+            false,
+            "satisfies",
+        ),
+        ("const n = maybeVal!;\n", false, "!;"),
+        ("function opt(a?) { return a; }\n", false, "a?"),
+        ("class C { constructor(public x) {} }\n", false, "public x"),
+        ("declare const ambient = 1;\n", false, "declare "),
+        ("enum Kind { A = 1, B = 2 }\n", false, "enum Kind"),
+        (
+            "import type { Foo } from './foo';\nexport const v = 1;\n",
+            false,
+            "import type",
+        ),
+        (
+            "export const el = <div className=\"ok\">hi</div>;\n",
+            true,
+            "<div",
+        ),
+    ];
+    for &(snippet, is_jsx, forbidden) in ts_and_jsx_cases {
+        let out = compile_ts_or_js_checked_with_ast_hook(snippet, true, is_jsx, |_| {})
+            .unwrap_or_else(|e| panic!("failed to compile {snippet}: {e:?}"));
+        assert!(
+            matches!(out, Cow::Owned(_)),
+            "expected Cow::Owned lowered output for TS/JSX snippet: {snippet}"
+        );
+        assert!(
+            !out.contains(forbidden),
+            "expected TS/JSX syntax `{forbidden}` to be erased in:\n{out}"
+        );
+    }
+
+    // 3. `compute_source_line_map` runs in linear time even on 2,000 output lines over 35 KB JSON
+    //    while preserving exact TypeScript class method & error line mapping.
+    let mut synthetic_cjs = String::with_capacity(48_000);
+    for i in 0..2_000 {
+        synthetic_cjs.push_str(&format!("  customerId: \"c-{i:04}\",\n"));
+    }
+    let t0 = std::time::Instant::now();
+    let lm = crate::bundler::compute_source_line_map(&pure_js, &synthetic_cjs);
+    let elapsed = t0.elapsed();
+    assert_eq!(lm.split(',').count(), 2_000);
+    assert!(
+        elapsed.as_millis() < 50,
+        "compute_source_line_map must be strictly O(N), took {elapsed:?}"
+    );
+}

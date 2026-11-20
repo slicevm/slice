@@ -1,10 +1,12 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use rustc_hash::FxHashSet;
+use slice_cas::bundler::compute_source_line_map;
 use slice_cas::linker::{
     extract_module_require_summary, prune_and_minify_cjs_module_ast, transform_module_to_cjs,
 };
 use slice_cas::{
-    analyze_typescript_semantics, fuse_array_pipelines_ast, strip_typescript_and_normalize,
+    analyze_typescript_semantics, compile_ts_or_js_checked_with_ast_hook, fuse_array_pipelines_ast,
+    strip_typescript_and_normalize,
 };
 use std::hint::black_box;
 use std::path::Path;
@@ -44,6 +46,48 @@ const total = items.filter((x) => x.active).map((x) => x.price * x.qty).reduce((
         b.iter(|| {
             let fused = fuse_array_pipelines_ast(black_box(pipeline_sample));
             black_box(fused.len())
+        });
+    });
+
+    // ~35 KB pure-JS payload with JSON object colons (`:`), relational `<`, and `!` (CS-02 profile)
+    let mut pure_js_35kb = String::with_capacity(40_000);
+    pure_js_35kb.push_str("const records = [");
+    for i in 0..450 {
+        if i > 0 {
+            pure_js_35kb.push(',');
+        }
+        pure_js_35kb.push_str(&format!(
+            r#"{{"customerId":"cust-{i:04}","tier":"enterprise","arrCents":{},"breachMins":{},"active":true}}"#,
+            120_000 + i * 350,
+            (i % 19) * 12
+        ));
+    }
+    pure_js_35kb.push_str(
+        "];\nlet total = 0;\nfor (let i = 0; i < records.length; i++) {\n  const r = records[i];\n  if (!r.active) continue;\n  total += r.breachMins > 100 ? Math.floor(r.arrCents / 12) : r.breachMins;\n}\nconsole.log(total);\n",
+    );
+    assert!(pure_js_35kb.len() >= 34_000);
+
+    group.bench_function("compile_pure_js_35kb_json_payload", |b| {
+        b.iter(|| {
+            let out = compile_ts_or_js_checked_with_ast_hook(
+                black_box(&pure_js_35kb),
+                true,
+                false,
+                |_| {},
+            )
+            .expect("valid pure JS");
+            black_box(out.len())
+        });
+    });
+
+    let mut expanded_cjs = String::with_capacity(40_000);
+    for i in 0..1_200 {
+        expanded_cjs.push_str(&format!("const row_{i} = {{ id: {i}, ok: true }};\n"));
+    }
+    group.bench_function("compute_source_line_map_linear_1200_lines", |b| {
+        b.iter(|| {
+            let lm = compute_source_line_map(black_box(&pure_js_35kb), black_box(&expanded_cjs));
+            black_box(lm.len())
         });
     });
 
