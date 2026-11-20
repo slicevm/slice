@@ -1909,3 +1909,129 @@ fn test_issue_139_syntax_error_positions_across_bytecode_evalsandbox_ts_and_vm()
         Err(SandboxViolation::CpuFuelExhausted { .. })
     ));
 }
+
+#[test]
+fn test_issue_135_parenthesized_ses_gate_2hit_prelude_cache_zlib_prefusion_and_direct_evalsandbox()
+{
+    use crate::{
+        SNAPSHOT_MAGIC, SliceIsolate, compile_source_to_bytecode, compute_boacas_metadata,
+        is_tier0_slicesnp_compatible_ast, run_source_isolated,
+    };
+    use slice_sandbox::{CapabilityToken, SandboxViolation};
+
+    // 1. Parenthesized, TS-cast, and computed-string frozen prototype writes compile to Tier-0
+    //    `SLICESNP` `MutateIntrinsic` under both default and `--tier=1` overrides without touching Boa realms.
+    let proto_probes = [
+        "(Object.prototype as any).pollutedAuth = true; 1",
+        "((Array.prototype)).injectedPush = 99;",
+        "(Object[\"prototype\"] as any).backdoor = \"x\";",
+        "(Object.prototype as any)[\"pollutedKey\"] = 1;",
+        "(Promise.prototype as any).hijack = 1;",
+    ];
+    for probe in proto_probes {
+        assert!(
+            is_tier0_slicesnp_compatible_ast(&slice_cas::strip_typescript_and_normalize(
+                probe, true
+            )),
+            "expected Tier-0 compatibility for {probe}"
+        );
+        for tier_ov in [None, Some(1)] {
+            crate::set_thread_tier_override(tier_ov);
+            let bc = compile_source_to_bytecode(probe);
+            crate::set_thread_tier_override(None);
+            assert_eq!(
+                &bc[0..8],
+                SNAPSHOT_MAGIC,
+                "expected SLICESNP Tier-0 trap for {probe} under tier_ov={tier_ov:?}"
+            );
+            let mut iso = SliceIsolate::spawn(
+                "issue-135-ses-probe",
+                1,
+                CapabilityToken::pure_compute(),
+                50_000,
+                256 * 1024,
+            );
+            assert!(matches!(
+                iso.execute_bytecode(&bc, None),
+                Err(SandboxViolation::IntrinsicMutationBlocked { .. })
+            ));
+        }
+    }
+
+    // 2. `node:zlib` sets bit 30 + Buffer shard bit 5 in `compute_boacas_metadata` for pre-fusion.
+    let (_, zlib_mask, _) =
+        compute_boacas_metadata("var z = __slice_cjs_require(\"node:zlib\"); z.gzipSync(\"hi\");");
+    assert_ne!(zlib_mask & (1 << 30), 0, "expected node:zlib bit 30 set");
+    assert_ne!(
+        zlib_mask & (1 << 5),
+        0,
+        "expected Buffer prerequisite bit 5 set"
+    );
+
+    // 3. Direct JS-object `Slice.evalSandbox(code, opts)` bridge preserves all options,
+    //    empty-array explicit deny (`allowRead: []`), checkpoints, DLP secrets, and outcome fields
+    //    across 3+ sequential child realms (exercising hits 0, 1, and 2+ of the prelude cache).
+    let bridge_src = r#"
+    import * as fs from "node:fs";
+    import * as zlib from "node:zlib";
+
+    fs.writeFileSync("/workspace/allowed.txt", "secret-payload-135");
+    const gz = zlib.gzipSync("hello-135");
+    const unz = zlib.gunzipSync(gz).toString("utf8");
+    if (unz !== "hello-135") throw new Error("zlib mismatch: " + unz);
+
+    // Inherit read capability when allowRead is omitted
+    const inherited = Slice.evalSandbox(
+        'import * as fs from "node:fs"; const t = fs.readFileSync("/workspace/allowed.txt", "utf8"); console.log(t); t.length',
+        { fuel: 500_000, memoryBytes: 4 * 1024 * 1024 }
+    );
+    if (!inherited.ok || inherited.stdout[0] !== "secret-payload-135" || inherited.returnValue !== "18") {
+        throw new Error("inherited read failed: " + JSON.stringify(inherited));
+    }
+
+    // Explicit empty array `allowRead: []` denies parent read capability
+    const denied = Slice.evalSandbox(
+        'import * as fs from "node:fs"; fs.readFileSync("/workspace/allowed.txt", "utf8")',
+        { allowRead: [], fuel: 500_000 }
+    );
+    if (denied.ok || !String(denied.violation).includes("filesystem read authority")) {
+        throw new Error("empty allowRead did not deny: " + JSON.stringify(denied));
+    }
+
+    // Parenthesized Object.prototype mutation inside evalSandbox traps without dropping warm realm
+    const protoBlocked = Slice.evalSandbox('(Object.prototype as any).pollutedAuth = true; 1', { fuel: 50_000 });
+    if (protoBlocked.ok || !String(protoBlocked.violation).includes("Object.prototype")) {
+        throw new Error("parenthesized proto not blocked: " + JSON.stringify(protoBlocked));
+    }
+
+    // DLP secret registered via direct `auditSecret` + `auditSecrets` options
+    const dlpBlocked = Slice.evalSandbox('"CANARY_135_TOP"', {
+        auditSecret: "CANARY_135_A",
+        auditSecrets: ["CANARY_135_TOP"]
+    });
+    if (dlpBlocked.ok || !String(dlpBlocked.violation).includes("EGRESS_SECRET_LEAK_BLOCKED")) {
+        throw new Error("auditSecrets not enforced: " + JSON.stringify(dlpBlocked));
+    }
+
+    // Checkpoints disabled via `checkpoints: false`
+    const cpDenied = Slice.evalSandbox('Slice.checkpoint()', { checkpoints: false });
+    if (cpDenied.ok || !String(cpDenied.violation).includes("checkpoints")) {
+        throw new Error("checkpoints: false not enforced: " + JSON.stringify(cpDenied));
+    }
+
+    console.log("ISSUE_135_OK");
+    "#;
+    let caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/workspace")
+        .with_write_prefix("/workspace")
+        .with_checkpoints(true);
+    let m = run_source_isolated(
+        "issue-135-bridge",
+        bridge_src,
+        caps,
+        10_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(m.stdout, vec!["ISSUE_135_OK"], "ret={}", m.return_value);
+}

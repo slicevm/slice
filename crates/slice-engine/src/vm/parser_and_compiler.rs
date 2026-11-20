@@ -696,17 +696,26 @@ impl Parser {
                             value: Box::new(rhs),
                         }
                     }
-                    Expr::Index { object, index } => {
-                        if let Expr::Ident(target) = *object {
-                            Expr::IndexAssign {
-                                target,
-                                index,
-                                value: Box::new(rhs),
+                    Expr::Index { object, index } => match (*object, *index) {
+                        (Expr::Ident(target), idx_expr) => Expr::IndexAssign {
+                            target,
+                            index: Box::new(idx_expr),
+                            value: Box::new(rhs),
+                        },
+                        (obj_expr, Expr::Literal(JsValue::Str(prop))) => {
+                            let chain = expr_to_dotted_chain(&obj_expr);
+                            if !chain.is_empty() {
+                                Expr::PropAssign {
+                                    target_chain: chain,
+                                    prop: prop.to_string(),
+                                    value: Box::new(rhs),
+                                }
+                            } else {
+                                rhs
                             }
-                        } else {
-                            rhs
                         }
-                    }
+                        _ => rhs,
+                    },
                     _ => rhs,
                 }
             }
@@ -1202,11 +1211,37 @@ impl Parser {
     }
 }
 
+#[inline]
+fn is_tier0_guarded_proto_target(chain: &str) -> bool {
+    matches!(
+        chain,
+        "Object.prototype"
+            | "Array.prototype"
+            | "Function.prototype"
+            | "String.prototype"
+            | "Promise.prototype"
+    )
+}
+
 pub(crate) fn expr_to_dotted_chain(expr: &Expr) -> String {
     match expr {
         Expr::Ident(s) => s.clone(),
         Expr::Member { object, property } => {
-            format!("{}.{}", expr_to_dotted_chain(object), property)
+            let prefix = expr_to_dotted_chain(object);
+            if prefix.is_empty() {
+                String::new()
+            } else {
+                format!("{}.{}", prefix, property)
+            }
+        }
+        Expr::Index { object, index } => {
+            if let Expr::Literal(JsValue::Str(prop)) = index.as_ref() {
+                let prefix = expr_to_dotted_chain(object);
+                if !prefix.is_empty() {
+                    return format!("{}.{}", prefix, prop);
+                }
+            }
+            String::new()
         }
         _ => String::new(),
     }
@@ -1311,6 +1346,11 @@ pub(crate) fn compact_js_for_boa_bytecode(js: &str) -> String {
 /// statements, expressions, operators, and built-in calls in the Oxc AST belong to the exact
 /// subset supported by `SLICESNP` (`eval_stmt` / `eval_expr` / `NumericFuncIr`).
 pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
+    analyze_tier0_slicesnp_ast(source).0
+}
+
+/// Single-pass Oxc AST check returning `(is_tier0_compatible, has_guarded_proto_mutation)`.
+fn analyze_tier0_slicesnp_ast(source: &str) -> (bool, bool) {
     // Fast SIMD rejections for non-ASCII, multi-module bundles, large scripts, or constructs not in Tier-0
     let src_bytes = source.as_bytes();
     if !source.is_ascii()
@@ -1326,7 +1366,7 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
         || memchr::memmem::find(src_bytes, b"await").is_some()
         || memchr::memmem::find(src_bytes, b"class ").is_some()
     {
-        return false;
+        return (false, false);
     }
 
     let allocator = oxc::allocator::Allocator::default();
@@ -1347,12 +1387,12 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
         .with_options(parse_opts)
         .parse();
         if !parsed_script.diagnostics.is_empty() || parsed_script.program.body.is_empty() {
-            return false;
+            return (false, false);
         }
         parsed_script.program
     } else {
         if parsed.program.body.is_empty() {
-            return false;
+            return (false, false);
         }
         parsed.program
     };
@@ -1375,11 +1415,19 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
     }
 
     fn static_member_chain(expr: &Expression<'_>) -> Option<String> {
-        match expr {
+        match expr.without_parentheses() {
             Expression::Identifier(id) => Some(id.name.to_string()),
             Expression::StaticMemberExpression(m) if !m.optional => {
                 let prefix = static_member_chain(&m.object)?;
                 Some(format!("{}.{}", prefix, m.property.name.as_str()))
+            }
+            Expression::ComputedMemberExpression(m) if !m.optional => {
+                if let Expression::StringLiteral(s) = m.expression.without_parentheses() {
+                    let prefix = static_member_chain(&m.object)?;
+                    Some(format!("{}.{}", prefix, s.value.as_str()))
+                } else {
+                    None
+                }
             }
             _ => None,
         }
@@ -1741,6 +1789,18 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
                         )
                     }
                     AssignmentTarget::ComputedMemberExpression(m) if !m.optional => {
+                        if a.operator == AssignmentOperator::Assign
+                            && let Expression::StringLiteral(prop_lit) =
+                                m.expression.without_parentheses()
+                            && let Some(chain) = static_member_chain(&m.object)
+                            && (slice_sandbox::is_frozen_intrinsic(&chain)
+                                || slice_sandbox::is_frozen_intrinsic(&format!(
+                                    "{}.{}",
+                                    chain, prop_lit.value
+                                )))
+                        {
+                            return true;
+                        }
                         let non_array_idx = matches!(
                             &m.expression,
                             Expression::UnaryExpression(u) if u.operator == UnaryOperator::UnaryNegation
@@ -2112,12 +2172,44 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
         }
     }
 
+    fn stmt_has_top_level_guarded_proto_mutation(stmt: &Statement<'_>) -> bool {
+        let Statement::ExpressionStatement(es) = stmt else {
+            return false;
+        };
+        let Expression::AssignmentExpression(a) = es.expression.without_parentheses() else {
+            return false;
+        };
+        if a.operator != AssignmentOperator::Assign {
+            return false;
+        }
+        match &a.left {
+            AssignmentTarget::StaticMemberExpression(m) if !m.optional => {
+                static_member_chain(&m.object)
+                    .is_some_and(|chain| is_tier0_guarded_proto_target(&chain))
+            }
+            AssignmentTarget::ComputedMemberExpression(m) if !m.optional => {
+                matches!(
+                    m.expression.without_parentheses(),
+                    Expression::StringLiteral(_)
+                ) && static_member_chain(&m.object)
+                    .is_some_and(|chain| is_tier0_guarded_proto_target(&chain))
+            }
+            _ => false,
+        }
+    }
+
     let mut top_scope = Vec::new();
-    program.body.iter().all(|stmt| is_supported_stmt(stmt, 0))
+    let compatible = program.body.iter().all(|stmt| is_supported_stmt(stmt, 0))
         && program
             .body
             .iter()
-            .all(|stmt| check_scope_stmt(stmt, &mut top_scope, 0))
+            .all(|stmt| check_scope_stmt(stmt, &mut top_scope, 0));
+    let has_proto_mutation = compatible
+        && program
+            .body
+            .iter()
+            .any(stmt_has_top_level_guarded_proto_mutation);
+    (compatible, has_proto_mutation)
 }
 
 /// Magic header for deferred compile-time syntax errors (`SLICEERR` + UTF-8 error text).
@@ -2226,17 +2318,12 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
 
     let has_while_true = memchr::memmem::find(src_bytes, b"while (true)").is_some()
         || memchr::memmem::find(src_bytes, b"while(true)").is_some();
-    let tier0_ast_ok = match tier_ov {
-        Some(0) => true,
-        Some(1) if !has_while_true => false,
-        _ => is_tier0_slicesnp_compatible_ast(&source),
+    let has_proto_candidate = memchr::memmem::find(src_bytes, b"prototype").is_some();
+    let (tier0_ast_ok, has_proto_mutation) = match tier_ov {
+        Some(0) => (true, false),
+        Some(1) if !has_while_true && !has_proto_candidate => (false, false),
+        _ => analyze_tier0_slicesnp_ast(&source),
     };
-    let has_proto_mutation = (memchr::memmem::find(src_bytes, b"Object.prototype.").is_some()
-        || memchr::memmem::find(src_bytes, b"Array.prototype.").is_some())
-        && memchr::memmem::find(src_bytes, b"async ").is_none()
-        && memchr::memmem::find(src_bytes, b"await ").is_none()
-        && memchr::memmem::find(src_bytes, b"try ").is_none()
-        && memchr::memmem::find(src_bytes, b"try{").is_none();
     let has_direct_intrinsic_attack = (has_proto_mutation || (has_while_true && tier0_ast_ok))
         && memchr::memmem::find(src_bytes, b"Slice.").is_none()
         && memchr::memmem::find(src_bytes, b"Worker").is_none();
@@ -2384,10 +2471,7 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
                 continue;
             }
             Stmt::ExprStmt(Expr::PropAssign { target_chain, .. })
-                if target_chain == "Object.prototype"
-                    || target_chain == "Array.prototype"
-                    || target_chain == "Function.prototype"
-                    || target_chain == "String.prototype" =>
+                if is_tier0_guarded_proto_target(target_chain) =>
             {
                 ops.push(BytecodeOp::MutateIntrinsic {
                     target: target_chain.clone(),

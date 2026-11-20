@@ -364,9 +364,14 @@ pub(crate) struct ActiveSourceSliceGuard<'a> {
 impl<'a> ActiveSourceSliceGuard<'a> {
     #[inline]
     pub(crate) fn new(src: &'a str) -> Self {
+        Self::new_bytes(src.as_bytes())
+    }
+
+    #[inline]
+    pub(crate) fn new_bytes(bytes: &'a [u8]) -> Self {
         let prev = BOA_ACTIVE_SOURCE_PTR_LEN.with(|c| {
             let p = c.get();
-            c.set((src.as_ptr() as usize, src.len()));
+            c.set((bytes.as_ptr() as usize, bytes.len()));
             p
         });
         let prev_fused_spec = BOA_ACTIVE_SOURCE_FUSED_SPEC.with(|c| c.replace(0));
@@ -407,31 +412,33 @@ fn active_source_line_offset() -> usize {
     crate::js_preludes::count_fused_prelude_newlines(shards_mask, init_lazy)
 }
 
+#[cold]
 pub(crate) fn map_stack_with_active_source(raw_stack: &str) -> String {
     let (ptr, len) = BOA_ACTIVE_SOURCE_PTR_LEN.with(|c| c.get());
     if ptr == 0 || len == 0 {
         return raw_stack.to_string();
     }
-    // SAFETY: `ActiveSourceSliceGuard` guarantees `(ptr, len)` points to a valid live `&str`
-    // on the current thread's call stack and restores `prev` before the `&str` lifetime ends.
-    let active_src = unsafe {
-        let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
-        std::str::from_utf8_unchecked(bytes)
+    // SAFETY: `ActiveSourceSliceGuard` guarantees `(ptr, len)` points to a valid live `&[u8]`
+    // on the current thread's call stack and restores `prev` before the slice lifetime ends.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+    let Ok(active_src) = std::str::from_utf8(bytes) else {
+        return raw_stack.to_string();
     };
     let line_offset = active_source_line_offset();
     slice_cas::map_bundled_stack_trace_with_offset(active_src, raw_stack, line_offset)
 }
 
+#[cold]
 pub(crate) fn map_error_with_active_source(raw_error: &str) -> String {
     let (ptr, len) = BOA_ACTIVE_SOURCE_PTR_LEN.with(|c| c.get());
     if ptr == 0 || len == 0 {
         return raw_error.to_string();
     }
-    // SAFETY: `ActiveSourceSliceGuard` guarantees `(ptr, len)` points to a valid live `&str`
-    // on the current thread's call stack and restores `prev` before the `&str` lifetime ends.
-    let active_src = unsafe {
-        let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
-        std::str::from_utf8_unchecked(bytes)
+    // SAFETY: `ActiveSourceSliceGuard` guarantees `(ptr, len)` points to a valid live `&[u8]`
+    // on the current thread's call stack and restores `prev` before the slice lifetime ends.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+    let Ok(active_src) = std::str::from_utf8(bytes) else {
+        return raw_error.to_string();
     };
     let line_offset = active_source_line_offset();
     slice_cas::map_bundled_error_location_with_offset(active_src, raw_error, line_offset)
@@ -727,15 +734,37 @@ pub(crate) fn release_warm_boa_realm(realm: WarmBoaRealm) {
     });
 }
 
+thread_local! {
+    static IDLE_MODULE_LOADER: std::rc::Rc<boa_engine::module::IdleModuleLoader> =
+        std::rc::Rc::new(boa_engine::module::IdleModuleLoader);
+}
+
+/// Returns a zero-syscall thread-local `IdleModuleLoader` so `boa_engine::ContextBuilder::build`
+/// never falls back to `SimpleModuleLoader::new(".")` (`Path::canonicalize(".")` host `realpath`).
+#[inline]
+pub(crate) fn idle_module_loader() -> std::rc::Rc<boa_engine::module::IdleModuleLoader> {
+    IDLE_MODULE_LOADER.with(std::rc::Rc::clone)
+}
+
+/// Builds a minimal `boa_engine::Context` wired with `IdleModuleLoader` (zero filesystem syscalls).
+#[inline]
+pub(crate) fn build_compiler_boa_context() -> boa_engine::Context {
+    boa_engine::context::ContextBuilder::new()
+        .module_loader(idle_module_loader())
+        .build()
+        .unwrap_or_else(|_| boa_engine::Context::default())
+}
+
 /// Creates a bare `boa_engine::Context` with `SliceJobExecutor` and core native Rust host functions
 /// registered, without evaluating `ULTRA_CORE_PRELUDE` yet (used when executing pre-fused or
 /// pre-compiled `SLICEBC\x01` payloads on cold start).
 pub(crate) fn create_bare_boa_realm_for_tenant(tenant_id: &str) -> WarmBoaRealm {
     let mut ctx = boa_engine::context::ContextBuilder::new()
+        .module_loader(idle_module_loader())
         .job_executor(std::rc::Rc::new(SliceJobExecutor::new()))
         .host_hooks(std::rc::Rc::new(SliceHostHooks))
         .build()
-        .unwrap_or_else(|_| boa_engine::Context::default());
+        .unwrap_or_else(|_| build_compiler_boa_context());
     register_slice_native_host_functions(&mut ctx);
     BOA_SES_BASELINE_SIGS.with(|s| s.set(None));
     let ses_proto_sigs = capture_ses_proto_sigs(&ctx);

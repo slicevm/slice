@@ -8,7 +8,7 @@ use crate::boa_realm::{
     BOA_ACTIVE_TENANT, BOA_KV_MEM_BUDGET, BOA_VIOLATION, SavedIsolateContextGuard,
 };
 use crate::event_loop::{clear_event_loop_state, drive_event_loop_to_completion};
-use crate::isolate::{SandboxEvalOptions, SliceIsolate};
+use crate::isolate::{SandboxEvalOptions, SandboxEvalOutcome, SliceIsolate};
 use crate::state_and_kv::{
     checkpoint_tenant_state, edge_kv_del_bytes, edge_kv_get, edge_kv_incr_checked,
     edge_kv_set_checked, release_tenant_checkpoint, restore_tenant_state_checked,
@@ -262,41 +262,8 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            let opts_json = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_else(|| "{}".to_string());
-            let (opts, deny_read, deny_write, deny_net, deny_exec) = if opts_json == "{}" {
-                (SandboxEvalOptions::default(), false, false, false, false)
-            } else if !opts_json.contains("[]") {
-                (
-                    serde_json::from_str::<SandboxEvalOptions>(&opts_json).unwrap_or_default(),
-                    false,
-                    false,
-                    false,
-                    false,
-                )
-            } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&opts_json) {
-                let has_empty_arr = |keys: &[&str]| -> bool {
-                    val.as_object().is_some_and(|obj| {
-                        keys.iter().any(|k| {
-                            obj.get(*k)
-                                .and_then(|v| v.as_array())
-                                .is_some_and(|a| a.is_empty())
-                        })
-                    })
-                };
-                let dr = has_empty_arr(&["allowRead", "readPrefixes", "fsRead"]);
-                let dw = has_empty_arr(&["allowWrite", "writePrefixes", "fsWrite"]);
-                let dn = has_empty_arr(&["allowNet", "netHosts"]);
-                let de = has_empty_arr(&["allowExec", "execBinaries"]);
-                let parsed: SandboxEvalOptions = serde_json::from_value(val).unwrap_or_default();
-                (parsed, dr, dw, dn, de)
-            } else {
-                (SandboxEvalOptions::default(), false, false, false, false)
-            };
+            let (opts, deny_read, deny_write, deny_net, deny_exec) =
+                parse_sandbox_eval_options_arg(args.get(1), context)?;
 
             let scope_guard = SavedIsolateContextGuard::enter();
 
@@ -409,8 +376,7 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 );
             }
 
-            let json = serde_json::to_string(&outcome).unwrap_or_else(|_| "{}".to_string());
-            Ok(BoaVal::from(js_string!(json)))
+            Ok(sandbox_outcome_to_js_object(outcome, context))
         }),
     );
 
@@ -445,4 +411,273 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             }
         }),
     );
+}
+
+fn read_js_string_array_prop(
+    obj: &boa_engine::JsObject,
+    keys: &[boa_engine::JsString],
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsResult<(Vec<String>, bool)> {
+    for key in keys {
+        if !obj.has_own_property(key.clone(), context)? {
+            continue;
+        }
+        let val = obj.get(key.clone(), context)?;
+        if let Some(arr_obj) = val.as_object()
+            && arr_obj.is_array()
+        {
+            let len = arr_obj
+                .get(boa_engine::js_string!("length"), context)?
+                .as_number()
+                .map(|n| n.max(0.0) as usize)
+                .unwrap_or(0);
+            if len == 0 {
+                return Ok((Vec::new(), true));
+            }
+            let mut out = Vec::with_capacity(len.min(64));
+            for i in 0..len {
+                let elem = arr_obj.get(i, context)?;
+                if !elem.is_undefined() && !elem.is_null() {
+                    out.push(elem.to_string(context)?.to_std_string_escaped());
+                }
+            }
+            return Ok((out, false));
+        }
+    }
+    Ok((Vec::new(), false))
+}
+
+fn parse_sandbox_eval_options_arg(
+    arg: Option<&boa_engine::JsValue>,
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsResult<(SandboxEvalOptions, bool, bool, bool, bool)> {
+    use boa_engine::js_string;
+    let Some(val) = arg.filter(|v| !v.is_undefined() && !v.is_null()) else {
+        return Ok((SandboxEvalOptions::default(), false, false, false, false));
+    };
+
+    if let Some(obj) = val.as_object() {
+        let mut opts = SandboxEvalOptions::default();
+
+        if obj.has_own_property(js_string!("fuel"), context)? {
+            let v = obj.get(js_string!("fuel"), context)?;
+            if let Some(n) = v.as_number() {
+                opts.fuel = Some(n.max(0.0) as u64);
+            }
+        }
+
+        for mk in [
+            js_string!("memoryBytes"),
+            js_string!("memory"),
+            js_string!("maxMemoryBytes"),
+        ] {
+            if obj.has_own_property(mk.clone(), context)? {
+                let v = obj.get(mk, context)?;
+                if let Some(n) = v.as_number() {
+                    opts.memory_bytes = Some(n.max(0.0) as usize);
+                    break;
+                }
+            }
+        }
+
+        if obj.has_own_property(js_string!("tenantId"), context)? {
+            let v = obj.get(js_string!("tenantId"), context)?;
+            if !v.is_undefined() && !v.is_null() {
+                opts.tenant_id = Some(v.to_string(context)?.to_std_string_escaped());
+            }
+        }
+
+        if obj.has_own_property(js_string!("deterministicSeed"), context)? {
+            let v = obj.get(js_string!("deterministicSeed"), context)?;
+            if let Some(n) = v.as_number() {
+                opts.deterministic_seed = Some(n.max(0.0) as u64);
+            }
+        }
+
+        if obj.has_own_property(js_string!("auditSecret"), context)? {
+            let v = obj.get(js_string!("auditSecret"), context)?;
+            if !v.is_undefined() && !v.is_null() {
+                opts.audit_secret = Some(v.to_string(context)?.to_std_string_escaped());
+            }
+        }
+
+        let (audit_secrets, _) =
+            read_js_string_array_prop(&obj, &[js_string!("auditSecrets")], context)?;
+        opts.audit_secrets = audit_secrets;
+
+        for ck in [js_string!("checkpoints"), js_string!("allowCheckpoints")] {
+            if obj.has_own_property(ck.clone(), context)? {
+                let v = obj.get(ck, context)?;
+                if let Some(b) = v.as_boolean() {
+                    opts.checkpoints = Some(b);
+                    break;
+                }
+            }
+        }
+
+        if obj.has_own_property(js_string!("maxCheckpoints"), context)? {
+            let v = obj.get(js_string!("maxCheckpoints"), context)?;
+            if let Some(n) = v.as_number() {
+                opts.max_checkpoints = Some(n.max(0.0) as u32);
+            }
+        }
+
+        let (allow_read, deny_read) = read_js_string_array_prop(
+            &obj,
+            &[
+                js_string!("allowRead"),
+                js_string!("readPrefixes"),
+                js_string!("fsRead"),
+            ],
+            context,
+        )?;
+        opts.allow_read = allow_read;
+
+        let (allow_write, deny_write) = read_js_string_array_prop(
+            &obj,
+            &[
+                js_string!("allowWrite"),
+                js_string!("writePrefixes"),
+                js_string!("fsWrite"),
+            ],
+            context,
+        )?;
+        opts.allow_write = allow_write;
+
+        let (allow_net, deny_net) = read_js_string_array_prop(
+            &obj,
+            &[js_string!("allowNet"), js_string!("netHosts")],
+            context,
+        )?;
+        opts.allow_net = allow_net;
+
+        let (allow_exec, deny_exec) = read_js_string_array_prop(
+            &obj,
+            &[js_string!("allowExec"), js_string!("execBinaries")],
+            context,
+        )?;
+        opts.allow_exec = allow_exec;
+
+        let (allow_env, _) = read_js_string_array_prop(
+            &obj,
+            &[js_string!("allowEnv"), js_string!("envKeys")],
+            context,
+        )?;
+        opts.allow_env = allow_env;
+
+        return Ok((opts, deny_read, deny_write, deny_net, deny_exec));
+    }
+
+    let opts_json = val.to_string(context)?.to_std_string_escaped();
+    if opts_json == "{}" || opts_json.is_empty() {
+        Ok((SandboxEvalOptions::default(), false, false, false, false))
+    } else if !opts_json.contains("[]") {
+        Ok((
+            serde_json::from_str::<SandboxEvalOptions>(&opts_json).unwrap_or_default(),
+            false,
+            false,
+            false,
+            false,
+        ))
+    } else if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&opts_json) {
+        let has_empty_arr = |keys: &[&str]| -> bool {
+            json_val.as_object().is_some_and(|o| {
+                keys.iter().any(|k| {
+                    o.get(*k)
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|a| a.is_empty())
+                })
+            })
+        };
+        let dr = has_empty_arr(&["allowRead", "readPrefixes", "fsRead"]);
+        let dw = has_empty_arr(&["allowWrite", "writePrefixes", "fsWrite"]);
+        let dn = has_empty_arr(&["allowNet", "netHosts"]);
+        let de = has_empty_arr(&["allowExec", "execBinaries"]);
+        let parsed: SandboxEvalOptions = serde_json::from_value(json_val).unwrap_or_default();
+        Ok((parsed, dr, dw, dn, de))
+    } else {
+        Ok((SandboxEvalOptions::default(), false, false, false, false))
+    }
+}
+
+fn sandbox_outcome_to_js_object(
+    outcome: SandboxEvalOutcome,
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsValue {
+    use boa_engine::{
+        JsValue as BoaVal, js_string, object::ObjectInitializer, property::Attribute,
+    };
+
+    let stdout_arr = boa_engine::object::builtins::JsArray::from_iter(
+        outcome
+            .stdout
+            .into_iter()
+            .map(|line| BoaVal::from(js_string!(line))),
+        context,
+    );
+    let ret_json_val = match outcome.return_json {
+        Some(s) => BoaVal::from(js_string!(s)),
+        None => BoaVal::null(),
+    };
+    let err_val = match outcome.error {
+        Some(s) => BoaVal::from(js_string!(s)),
+        None => BoaVal::null(),
+    };
+    let viol_val = match outcome.violation {
+        Some(s) => BoaVal::from(js_string!(s)),
+        None => BoaVal::null(),
+    };
+    let attr = Attribute::WRITABLE | Attribute::ENUMERABLE | Attribute::CONFIGURABLE;
+
+    ObjectInitializer::new(context)
+        .property(js_string!("ok"), outcome.ok, attr)
+        .property(js_string!("stdout"), stdout_arr, attr)
+        .property(
+            js_string!("returnValue"),
+            js_string!(outcome.return_value),
+            attr,
+        )
+        .property(js_string!("returnJson"), ret_json_val, attr)
+        .property(js_string!("error"), err_val, attr)
+        .property(js_string!("violation"), viol_val, attr)
+        .property(js_string!("fuelUsed"), outcome.fuel_used as f64, attr)
+        .property(
+            js_string!("memoryUsedBytes"),
+            outcome.memory_used_bytes as f64,
+            attr,
+        )
+        .property(
+            js_string!("peakMemoryBytes"),
+            outcome.peak_memory_bytes as f64,
+            attr,
+        )
+        .property(
+            js_string!("spawnTimeNs"),
+            outcome.spawn_time_ns as f64,
+            attr,
+        )
+        .property(
+            js_string!("compileTimeNs"),
+            outcome.compile_time_ns as f64,
+            attr,
+        )
+        .property(js_string!("execTimeNs"), outcome.exec_time_ns as f64, attr)
+        .property(js_string!("totalTimeUs"), outcome.total_time_us, attr)
+        .property(
+            js_string!("checkpointsTaken"),
+            f64::from(outcome.checkpoints_taken),
+            attr,
+        )
+        .property(
+            js_string!("restoresPerformed"),
+            f64::from(outcome.restores_performed),
+            attr,
+        )
+        .property(
+            js_string!("restoreTimeNs"),
+            outcome.restore_time_ns as f64,
+            attr,
+        )
+        .build()
+        .into()
 }

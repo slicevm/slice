@@ -84,6 +84,9 @@ pub(crate) const fn expand_shard_prerequisites(mut mask: u32) -> u32 {
     if (mask & (1 << 14)) != 0 {
         mask |= 1 << 3;
     }
+    if (mask & (1 << 30)) != 0 {
+        mask |= 1 << 5;
+    }
     mask
 }
 
@@ -127,13 +130,13 @@ pub(crate) fn register_shard_host_functions_for_mask(
     if (shards_mask & (1 << 1)) != 0 {
         crate::host_bindings::register_url_and_usp_host_functions(context);
     }
-    if (shards_mask & ((1 << 2) | (1 << 5) | (1 << 14) | (1 << 15) | (1 << 16))) != 0 {
+    if (shards_mask & ((1 << 2) | (1 << 5) | (1 << 14) | (1 << 15) | (1 << 16) | (1 << 30))) != 0 {
         crate::host_bindings::register_wintertc_phase_n3_host_functions(context);
     }
     if (shards_mask & (1 << 4)) != 0 {
         crate::host_bindings::register_webcrypto_host_functions(context);
     }
-    if (shards_mask & ((1 << 5) | (1 << 7))) != 0 {
+    if (shards_mask & ((1 << 5) | (1 << 7) | (1 << 30))) != 0 {
         crate::host_bindings::register_buffer_host_functions(context);
     }
     if (shards_mask & (1 << 7)) != 0 {
@@ -161,6 +164,8 @@ pub(crate) fn register_shard_host_functions_for_mask(
         crate::host_bindings::register_os_host_functions(context);
     }
 }
+
+const PREFUSED_BUILTIN_BITS: [u32; 11] = [19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 30];
 
 /// Builds the single-pass fused prelude prefix (`ULTRA_CORE_PRELUDE`, all set shards in
 /// `shards_mask` in topological `SHARD_LOAD_ORDER`, `globalThis.__shMask`, optional
@@ -195,7 +200,7 @@ pub(crate) fn build_fused_prelude_prefix(
         out.extend_from_slice(mask_buf.format(active_mask).as_bytes());
         out.push(b';');
     }
-    for builtin_bit in 19..=28u32 {
+    for builtin_bit in PREFUSED_BUILTIN_BITS {
         if (shards_mask & (1u32 << builtin_bit)) != 0 {
             let b_bytes = crate::node_builtins::builtin_snippet_for_bit(builtin_bit);
             if !b_bytes.is_empty() {
@@ -231,7 +236,7 @@ pub(crate) fn count_fused_prelude_newlines(shards_mask: u32, init_lazy_getters: 
             nl += shard_bytes.iter().filter(|&&b| b == b'\n').count();
         }
     }
-    for builtin_bit in 19..=28u32 {
+    for builtin_bit in PREFUSED_BUILTIN_BITS {
         if (shards_mask & (1u32 << builtin_bit)) != 0 {
             let b_bytes = crate::node_builtins::builtin_snippet_for_bit(builtin_bit);
             nl += b_bytes.iter().filter(|&&b| b == b'\n').count();
@@ -267,8 +272,12 @@ pub(crate) fn build_fused_prelude_and_bundle(
     out
 }
 
+static ULTRA_CORE_HITS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 static ULTRA_CORE_SLICEBC: OnceLock<Vec<u8>> = OnceLock::new();
+static LAZY_GETTERS_HITS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 static LAZY_GETTERS_SLICEBC: OnceLock<Vec<u8>> = OnceLock::new();
+static SHARD_HITS: [std::sync::atomic::AtomicU8; 30] =
+    [const { std::sync::atomic::AtomicU8::new(0) }; 30];
 static SHARD_SLICEBC: [OnceLock<Vec<u8>>; 30] = [const { OnceLock::new() }; 30];
 
 #[inline]
@@ -279,7 +288,7 @@ pub(crate) fn compile_static_js_to_slicebc(bytes: &[u8]) -> Vec<u8> {
             .name("slicebc-static-compiler".to_string())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                let mut compiler_ctx = boa_engine::Context::default();
+                let mut compiler_ctx = crate::boa_realm::build_compiler_boa_context();
                 if let Ok(script) = boa_engine::Script::parse(
                     boa_engine::Source::from_bytes(&owned),
                     None,
@@ -296,7 +305,7 @@ pub(crate) fn compile_static_js_to_slicebc(bytes: &[u8]) -> Vec<u8> {
             .join()
             .expect("slicebc-static-compiler thread panicked");
     }
-    let mut compiler_ctx = boa_engine::Context::default();
+    let mut compiler_ctx = crate::boa_realm::build_compiler_boa_context();
     if let Ok(script) = boa_engine::Script::parse(
         boa_engine::Source::from_bytes(bytes),
         None,
@@ -310,38 +319,81 @@ pub(crate) fn compile_static_js_to_slicebc(bytes: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Evaluates `ULTRA_CORE_PRELUDE` inside `context` using cached precompiled `SLICEBC\x01` `CodeBlock` bytecode.
+/// Evaluates a static JS prelude/builtin snippet using a 2-hit `AtomicU8` gate:
+/// - **1st evaluation in a process (`hit == 0`)**: Evaluates `Source::from_bytes(bytes)` directly
+///   on `context`, avoiding any throwaway `Context` construction or `SLCB\x01` serialization on cold CLI runs.
+/// - **2nd+ evaluation in a process (`hit >= 1`)**: Compiles and caches `SLCB\x01` bytecode in `cache`
+///   (reusing `context` directly when `scope().num_bindings() == 0`) and evaluates from `SLCB\x01` thereafter.
+#[inline]
+pub(crate) fn eval_static_js_with_2hit_slicebc_cache(
+    hit_counter: &std::sync::atomic::AtomicU8,
+    cache: &OnceLock<Vec<u8>>,
+    bytes: &'static [u8],
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsResult<boa_engine::JsValue> {
+    if let Some(precompiled) = cache.get()
+        && !precompiled.is_empty()
+        && let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context)
+    {
+        return script.evaluate(context);
+    }
+    let prev = hit_counter
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |v| Some(v.saturating_add(1)),
+        )
+        .unwrap_or(0);
+    if prev == 0 {
+        return context.eval(boa_engine::Source::from_bytes(bytes));
+    }
+    if cache.get().is_none() && context.realm().scope().num_bindings() == 0 {
+        let script =
+            boa_engine::Script::parse(boa_engine::Source::from_bytes(bytes), None, context)?;
+        if let Ok(compiled) = script.compile_to_slicebc(context)
+            && !compiled.is_empty()
+        {
+            let _ = cache.set(compiled);
+        }
+        return script.evaluate(context);
+    }
+    let precompiled = cache.get_or_init(|| compile_static_js_to_slicebc(bytes));
+    if !precompiled.is_empty()
+        && let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context)
+    {
+        return script.evaluate(context);
+    }
+    context.eval(boa_engine::Source::from_bytes(bytes))
+}
+
+/// Evaluates `ULTRA_CORE_PRELUDE` inside `context` without cold throwaway `Context` allocation.
 #[inline]
 pub(crate) fn eval_ultra_core_prelude(
     context: &mut boa_engine::Context,
 ) -> boa_engine::JsResult<boa_engine::JsValue> {
-    let precompiled =
-        ULTRA_CORE_SLICEBC.get_or_init(|| compile_static_js_to_slicebc(ULTRA_CORE_PRELUDE));
-    if !precompiled.is_empty()
-        && let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context)
-    {
-        return script.evaluate(context);
-    }
-    context.eval(boa_engine::Source::from_bytes(ULTRA_CORE_PRELUDE))
+    eval_static_js_with_2hit_slicebc_cache(
+        &ULTRA_CORE_HITS,
+        &ULTRA_CORE_SLICEBC,
+        ULTRA_CORE_PRELUDE,
+        context,
+    )
 }
 
-/// Evaluates `LAZY_GETTERS_INIT_PRELUDE` inside `context` using cached precompiled `SLICEBC\x01` `CodeBlock` bytecode.
+/// Evaluates `LAZY_GETTERS_INIT_PRELUDE` inside `context` without cold throwaway `Context` allocation.
 #[inline]
 pub(crate) fn eval_lazy_getters_init_prelude(
     context: &mut boa_engine::Context,
 ) -> boa_engine::JsResult<boa_engine::JsValue> {
-    let precompiled = LAZY_GETTERS_SLICEBC
-        .get_or_init(|| compile_static_js_to_slicebc(LAZY_GETTERS_INIT_PRELUDE));
-    if !precompiled.is_empty()
-        && let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context)
-    {
-        return script.evaluate(context);
-    }
-    context.eval(boa_engine::Source::from_bytes(LAZY_GETTERS_INIT_PRELUDE))
+    eval_static_js_with_2hit_slicebc_cache(
+        &LAZY_GETTERS_HITS,
+        &LAZY_GETTERS_SLICEBC,
+        LAZY_GETTERS_INIT_PRELUDE,
+        context,
+    )
 }
 
 /// Evaluates a compile-time minified lazy prelude shard (`1..=18` or `29`) on demand inside `context`
-/// using cached precompiled `SLICEBC\x01` `CodeBlock` bytecode.
+/// without cold throwaway `Context` allocation.
 #[inline]
 pub(crate) fn eval_lazy_prelude_shard(
     shard_id: u32,
@@ -351,15 +403,9 @@ pub(crate) fn eval_lazy_prelude_shard(
         return Ok(boa_engine::JsValue::undefined());
     }
     register_shard_host_functions_for_mask(1u32 << shard_id, context);
+    let idx = shard_id as usize;
     let bytes = shard_prelude_bytes(shard_id);
-    let precompiled =
-        SHARD_SLICEBC[shard_id as usize].get_or_init(|| compile_static_js_to_slicebc(bytes));
-    if !precompiled.is_empty()
-        && let Some(script) = boa_engine::Script::from_slicebc_bytes(precompiled, context)
-    {
-        return script.evaluate(context);
-    }
-    context.eval(boa_engine::Source::from_bytes(bytes))
+    eval_static_js_with_2hit_slicebc_cache(&SHARD_HITS[idx], &SHARD_SLICEBC[idx], bytes, context)
 }
 
 #[inline]
@@ -705,6 +751,9 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ("node:timers", ShardTriggerAction::BuiltinMask(1 << 28)),
     ("\"timers\"", ShardTriggerAction::BuiltinMask(1 << 28)),
     ("'timers'", ShardTriggerAction::BuiltinMask(1 << 28)),
+    ("node:zlib", ShardTriggerAction::BuiltinMask(1 << 30)),
+    ("\"zlib\"", ShardTriggerAction::BuiltinMask(1 << 30)),
+    ("'zlib'", ShardTriggerAction::BuiltinMask(1 << 30)),
     // `SLICEBC\x01` feature flags (`BOACAS_FLAG_*`) folded into single-pass automaton
     (
         "nextTick",
