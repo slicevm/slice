@@ -5,10 +5,12 @@ use crate::compiler::diagnostics::{
     SyntaxErrorDiagnostic, blank_leading_shebang, check_syntax_source_detailed,
     extract_oxc_syntax_diagnostic,
 };
+use crate::compiler::ts_detector::program_has_ts_or_jsx;
 use crate::linker::{
     has_esm_default_export_marker, rewrite_buffer_fast_paths_ast, rewrite_require_ident_ast,
     transform_module_to_cjs,
 };
+use std::borrow::Cow;
 use std::path::Path;
 
 #[inline]
@@ -83,12 +85,31 @@ fn build_masked_top_level_returns(source: &str, top_ret_spans: &[(usize, usize, 
 
 fn transpile_parsed_oxc_program<'a>(
     allocator: &'a oxc::allocator::Allocator,
-    mut program: oxc::ast::ast::Program<'a>,
+    program: oxc::ast::ast::Program<'a>,
     active_path: &str,
     had_top_return: bool,
     fallback_source: &str,
 ) -> String {
+    transpile_parsed_oxc_program_with_hook(
+        allocator,
+        program,
+        active_path,
+        had_top_return,
+        fallback_source,
+        None,
+    )
+}
+
+fn transpile_parsed_oxc_program_with_hook<'a>(
+    allocator: &'a oxc::allocator::Allocator,
+    mut program: oxc::ast::ast::Program<'a>,
+    active_path: &str,
+    had_top_return: bool,
+    fallback_source: &str,
+    on_final_ast: Option<&mut dyn FnMut(&oxc::ast::ast::Program<'_>)>,
+) -> String {
     let scoping = oxc::semantic::SemanticBuilder::new()
+        .with_enum_eval(true)
         .build(&program)
         .semantic
         .into_scoping();
@@ -113,28 +134,37 @@ fn transpile_parsed_oxc_program<'a>(
 
     if had_top_return {
         use cow_utils::CowUtils;
-        if let std::borrow::Cow::Owned(restored) =
-            code.cow_replace("__slice_top_ret_stmt = ", "return ")
-        {
+        if let Cow::Owned(restored) = code.cow_replace("__slice_top_ret_stmt = ", "return ") {
             code = restored;
         }
-        if let std::borrow::Cow::Owned(restored) =
-            code.cow_replace("__slice_top_ret_stmt;", "return;")
-        {
+        if let Cow::Owned(restored) = code.cow_replace("__slice_top_ret_stmt;", "return;") {
             code = restored;
         }
     }
+    let mut had_export_empty = false;
     if memchr::memmem::find(code.as_bytes(), b"export {").is_some() {
         use cow_utils::CowUtils;
-        if let std::borrow::Cow::Owned(cleaned) = code.cow_replace("export {};", "") {
+        if let Cow::Owned(cleaned) = code.cow_replace("export {};", "") {
             code = cleaned;
+            had_export_empty = true;
         }
-        if let std::borrow::Cow::Owned(cleaned) = code.cow_replace("export { };", "") {
+        if let Cow::Owned(cleaned) = code.cow_replace("export { };", "") {
             code = cleaned;
+            had_export_empty = true;
         }
     }
 
-    if memchr::memmem::find(code.as_bytes(), b"Buffer.").is_some() {
+    let has_buffer_dot = memchr::memmem::find(code.as_bytes(), b"Buffer.").is_some();
+    if !had_top_return
+        && !had_export_empty
+        && !has_buffer_dot
+        && !needs_module_or_require_normalization(&code)
+        && let Some(cb) = on_final_ast
+    {
+        cb(&program);
+    }
+
+    if has_buffer_dot {
         rewrite_buffer_fast_paths_ast(&code)
     } else {
         code
@@ -229,7 +259,7 @@ pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool
 
     let top_ret_spans = extract_top_level_return_spans(&parser_ret.program, clean);
     if top_ret_spans.is_empty() {
-        if !has_jsx_hint && !may_contain_ts_or_jsx(clean) {
+        if !has_jsx_hint && !program_has_ts_or_jsx(&parser_ret.program) {
             return if memchr::memmem::find(clean.as_bytes(), b"Buffer.").is_some() {
                 rewrite_buffer_fast_paths_ast(clean)
             } else {
@@ -643,9 +673,60 @@ pub fn strip_typescript_and_normalize_with_ext(
     normalize_transpiled_module_js(js_code)
 }
 
+#[inline]
+fn needs_module_or_require_normalization(js_code: &str) -> bool {
+    let bytes = js_code.as_bytes();
+    if memchr::memmem::find(bytes, b"require(").is_some() {
+        return true;
+    }
+    if memchr::memmem::find(bytes, b"var __slice_modules =").is_some() {
+        return false;
+    }
+    if memchr::memmem::find(bytes, b"export default ").is_some() {
+        return true;
+    }
+    memchr::memmem::find(bytes, b"import ").is_some()
+        && (memchr::memmem::find(bytes, b"node:").is_some()
+            || memchr::memmem::find(bytes, b"slice:").is_some()
+            || memchr::memmem::find(bytes, b"bun:").is_some()
+            || memchr::memmem::find(bytes, b"cloudflare:").is_some()
+            || memchr::memmem::find(bytes, b"worker_threads").is_some()
+            || memchr::memmem::find(bytes, b"\"net\"").is_some()
+            || memchr::memmem::find(bytes, b"'net'").is_some()
+            || memchr::memmem::find(bytes, b"\"dgram\"").is_some()
+            || memchr::memmem::find(bytes, b"'dgram'").is_some()
+            || memchr::memmem::find(bytes, b"jsx-runtime").is_some())
+}
+
+fn maybe_invoke_ast_hook_for_pure_js(
+    clean: &str,
+    program: Option<&oxc::ast::ast::Program<'_>>,
+    on_final_ast: Option<&mut dyn FnMut(&oxc::ast::ast::Program<'_>)>,
+) {
+    if memchr::memmem::find(clean.as_bytes(), b"Buffer.").is_none()
+        && !needs_module_or_require_normalization(clean)
+        && let (Some(prog), Some(cb)) = (program, on_final_ast)
+    {
+        cb(prog);
+    }
+}
+
+fn finalize_pure_js_cow(clean_cow: Cow<'_, str>) -> Cow<'_, str> {
+    let has_buffer_dot = memchr::memmem::find(clean_cow.as_bytes(), b"Buffer.").is_some();
+    if !has_buffer_dot && !needs_module_or_require_normalization(&clean_cow) {
+        return clean_cow;
+    }
+    let fast_js = if has_buffer_dot {
+        rewrite_buffer_fast_paths_ast(&clean_cow)
+    } else {
+        clean_cow.into_owned()
+    };
+    Cow::Owned(normalize_transpiled_module_js(fast_js))
+}
+
 /// Single-pass syntax-checked TypeScript/JSX/ECMAScript compiler for `compile_source_to_bytecode`:
 /// - Returns `Err(SyntaxErrorDiagnostic)` with exact 1-based `(line, col)` in `source` when invalid.
-/// - Preserves pure-ECMAScript source lines and columns verbatim without running `Codegen`.
+/// - Preserves pure-ECMAScript source lines and columns verbatim (`Cow::Borrowed` with zero codegen).
 /// - Attaches an inline `//@sm:||<line_map>` header when TypeScript lowering alters line counts so
 ///   semantic early errors and runtime stack frames map back to original lines.
 pub fn compile_ts_or_js_checked(
@@ -653,8 +734,23 @@ pub fn compile_ts_or_js_checked(
     is_ts: bool,
     is_jsx_ext: bool,
 ) -> Result<String, SyntaxErrorDiagnostic> {
+    compile_ts_or_js_checked_with_ast_hook(source, is_ts, is_jsx_ext, |_| {}).map(Cow::into_owned)
+}
+
+/// Borrow-preserving variant of [`compile_ts_or_js_checked`] that invokes `on_final_ast` with the
+/// already-parsed (and, when TypeScript was lowered, post-transform) Oxc `Program` whenever no
+/// post-AST textual module/Buffer rewrite modified the code, eliminating redundant downstream Oxc parses.
+pub fn compile_ts_or_js_checked_with_ast_hook<'a, F>(
+    source: &'a str,
+    is_ts: bool,
+    is_jsx_ext: bool,
+    mut on_final_ast: F,
+) -> Result<Cow<'a, str>, SyntaxErrorDiagnostic>
+where
+    F: FnMut(&oxc::ast::ast::Program<'_>),
+{
     if source.starts_with("var __slice_modules =") {
-        return Ok(source.to_string());
+        return Ok(Cow::Borrowed(source));
     }
     let clean_cow = blank_leading_shebang(source);
     let clean = clean_cow.as_ref();
@@ -675,12 +771,13 @@ pub fn compile_ts_or_js_checked(
         if mjs_ret.diagnostics.is_empty()
             && extract_top_level_return_spans(&mjs_ret.program, clean).is_empty()
         {
-            let fast_js = if memchr::memmem::find(clean.as_bytes(), b"Buffer.").is_some() {
-                rewrite_buffer_fast_paths_ast(clean)
-            } else {
-                clean_cow.into_owned()
-            };
-            return Ok(normalize_transpiled_module_js(fast_js));
+            maybe_invoke_ast_hook_for_pure_js(
+                clean,
+                Some(&mjs_ret.program),
+                Some(&mut on_final_ast),
+            );
+            drop(mjs_ret);
+            return Ok(finalize_pure_js_cow(clean_cow));
         }
     }
 
@@ -727,12 +824,15 @@ pub fn compile_ts_or_js_checked(
                     .with_options(parse_opts)
                     .parse();
                 if retry_js.diagnostics.is_empty() {
-                    let fast_js = if memchr::memmem::find(clean.as_bytes(), b"Buffer.").is_some() {
-                        rewrite_buffer_fast_paths_ast(clean)
-                    } else {
-                        clean_cow.into_owned()
-                    };
-                    return Ok(normalize_transpiled_module_js(fast_js));
+                    let top_ok =
+                        extract_top_level_return_spans(&retry_js.program, clean).is_empty();
+                    maybe_invoke_ast_hook_for_pure_js(
+                        clean,
+                        top_ok.then_some(&retry_js.program),
+                        Some(&mut on_final_ast),
+                    );
+                    drop(retry_js);
+                    return Ok(finalize_pure_js_cow(clean_cow));
                 }
             }
             return Err(extract_oxc_syntax_diagnostic(
@@ -743,8 +843,25 @@ pub fn compile_ts_or_js_checked(
     }
 
     let top_ret_spans = extract_top_level_return_spans(&parser_ret.program, clean);
+    if top_ret_spans.is_empty() && !has_jsx_hint && !program_has_ts_or_jsx(&parser_ret.program) {
+        maybe_invoke_ast_hook_for_pure_js(
+            clean,
+            Some(&parser_ret.program),
+            Some(&mut on_final_ast),
+        );
+        drop(parser_ret);
+        return Ok(finalize_pure_js_cow(clean_cow));
+    }
+
     let raw_transpiled = if top_ret_spans.is_empty() {
-        transpile_parsed_oxc_program(&allocator, parser_ret.program, active_path, false, clean)
+        transpile_parsed_oxc_program_with_hook(
+            &allocator,
+            parser_ret.program,
+            active_path,
+            false,
+            clean,
+            Some(&mut on_final_ast),
+        )
     } else {
         let masked_source = build_masked_top_level_returns(clean, &top_ret_spans);
         let masked_alloc = oxc::allocator::Allocator::default();
@@ -758,24 +875,35 @@ pub fn compile_ts_or_js_checked(
                 &masked_ret.diagnostics[0],
             ));
         }
-        transpile_parsed_oxc_program(&masked_alloc, masked_ret.program, active_path, true, clean)
+        transpile_parsed_oxc_program_with_hook(
+            &masked_alloc,
+            masked_ret.program,
+            active_path,
+            true,
+            clean,
+            None,
+        )
     };
 
-    let normalized = normalize_transpiled_module_js(raw_transpiled);
+    let normalized = if needs_module_or_require_normalization(&raw_transpiled) {
+        normalize_transpiled_module_js(raw_transpiled)
+    } else {
+        raw_transpiled
+    };
     if !normalized.starts_with("var __slice_modules =")
         && !normalized.starts_with("// #slice-source: ")
         && !normalized.starts_with("//@sm:")
     {
-        let orig_nl = clean.bytes().filter(|&b| b == b'\n').count();
-        let out_nl = normalized.bytes().filter(|&b| b == b'\n').count();
+        let orig_nl = memchr::memchr_iter(b'\n', clean.as_bytes()).count();
+        let out_nl = memchr::memchr_iter(b'\n', normalized.as_bytes()).count();
         if orig_nl != out_nl {
             let line_map = crate::bundler::source_map::compute_source_line_map(clean, &normalized);
             if !line_map.is_empty() {
-                return Ok(format!("//@sm:||{}\n{}", line_map, normalized));
+                return Ok(Cow::Owned(format!("//@sm:||{}\n{}", line_map, normalized)));
             }
         }
     }
-    Ok(normalized)
+    Ok(Cow::Owned(normalized))
 }
 
 /// Rewrites legacy CommonJS `const x = require("mod")` into synthetic deterministic ESM/CAS lookup

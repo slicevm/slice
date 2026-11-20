@@ -1349,23 +1349,26 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
     analyze_tier0_slicesnp_ast(source).0
 }
 
+#[inline]
+fn can_attempt_tier0_slicesnp(source: &str) -> bool {
+    let src_bytes = source.as_bytes();
+    source.is_ascii()
+        && src_bytes.len() <= 4096
+        && memchr::memmem::find(src_bytes, b"var __slice_modules =").is_none()
+        && memchr::memmem::find(src_bytes, b"__slice_").is_none()
+        && memchr::memmem::find(src_bytes, b"node:").is_none()
+        && memchr::memmem::find(src_bytes, b"cloudflare:").is_none()
+        && memchr::memmem::find(src_bytes, b"slice:").is_none()
+        && memchr::memmem::find(src_bytes, b"new ").is_none()
+        && memchr::memmem::find(src_bytes, b"try").is_none()
+        && memchr::memmem::find(src_bytes, b"async").is_none()
+        && memchr::memmem::find(src_bytes, b"await").is_none()
+        && memchr::memmem::find(src_bytes, b"class ").is_none()
+}
+
 /// Single-pass Oxc AST check returning `(is_tier0_compatible, has_guarded_proto_mutation)`.
 fn analyze_tier0_slicesnp_ast(source: &str) -> (bool, bool) {
-    // Fast SIMD rejections for non-ASCII, multi-module bundles, large scripts, or constructs not in Tier-0
-    let src_bytes = source.as_bytes();
-    if !source.is_ascii()
-        || src_bytes.len() > 4096
-        || memchr::memmem::find(src_bytes, b"var __slice_modules =").is_some()
-        || memchr::memmem::find(src_bytes, b"__slice_").is_some()
-        || memchr::memmem::find(src_bytes, b"node:").is_some()
-        || memchr::memmem::find(src_bytes, b"cloudflare:").is_some()
-        || memchr::memmem::find(src_bytes, b"slice:").is_some()
-        || memchr::memmem::find(src_bytes, b"new ").is_some()
-        || memchr::memmem::find(src_bytes, b"try").is_some()
-        || memchr::memmem::find(src_bytes, b"async").is_some()
-        || memchr::memmem::find(src_bytes, b"await").is_some()
-        || memchr::memmem::find(src_bytes, b"class ").is_some()
-    {
+    if !can_attempt_tier0_slicesnp(source) {
         return (false, false);
     }
 
@@ -1396,6 +1399,14 @@ fn analyze_tier0_slicesnp_ast(source: &str) -> (bool, bool) {
         }
         parsed.program
     };
+
+    analyze_tier0_slicesnp_program(&program)
+}
+
+fn analyze_tier0_slicesnp_program(program: &oxc::ast::ast::Program<'_>) -> (bool, bool) {
+    if program.body.is_empty() {
+        return (false, false);
+    }
 
     use oxc::ast::ast::{
         Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentOperator, AssignmentTarget,
@@ -2304,7 +2315,21 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
         bytes.extend_from_slice(b"\n}");
         return bytes;
     }
-    let source = match slice_cas::compile_ts_or_js_checked(raw_source, true, false) {
+    let mut cached_tier0: Option<(bool, bool)> = None;
+    let source = match slice_cas::compile_ts_or_js_checked_with_ast_hook(
+        raw_source,
+        true,
+        false,
+        |program| {
+            if tier_ov != Some(0) {
+                if raw_source.is_ascii() && raw_source.len() <= 4096 {
+                    cached_tier0 = Some(analyze_tier0_slicesnp_program(program));
+                } else {
+                    cached_tier0 = Some((false, false));
+                }
+            }
+        },
+    ) {
         Ok(src) => src,
         Err(diag) => {
             let err_str = diag.to_uncaught_error_string();
@@ -2322,7 +2347,15 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
     let (tier0_ast_ok, has_proto_mutation) = match tier_ov {
         Some(0) => (true, false),
         Some(1) if !has_while_true && !has_proto_candidate => (false, false),
-        _ => analyze_tier0_slicesnp_ast(&source),
+        _ => {
+            if !can_attempt_tier0_slicesnp(&source) {
+                (false, false)
+            } else if let Some(res) = cached_tier0 {
+                res
+            } else {
+                analyze_tier0_slicesnp_ast(&source)
+            }
+        }
     };
     let has_direct_intrinsic_attack = (has_proto_mutation || (has_while_true && tier0_ast_ok))
         && memchr::memmem::find(src_bytes, b"Slice.").is_none()
@@ -2341,7 +2374,11 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
     };
 
     if route_to_tier1_boa || (tokens_opt.is_none() && !has_direct_intrinsic_attack) {
-        let boa_source = slice_cas::wrap_top_level_await_script(&source).unwrap_or(source);
+        let boa_source: std::borrow::Cow<'_, str> =
+            match slice_cas::wrap_top_level_await_script(&source) {
+                Some(wrapped) => std::borrow::Cow::Owned(wrapped),
+                None => source,
+            };
         if use_boacas {
             return crate::boacas::pack_boacas_container(&boa_source);
         }
@@ -2352,14 +2389,17 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
         return bytes;
     }
 
-    let ts_hints = slice_cas::analyze_typescript_semantics(raw_source);
+    let mut known_numeric_vars = if memchr::memchr(b':', raw_source.as_bytes()).is_some() {
+        slice_cas::analyze_typescript_semantics(raw_source).numeric_vars
+    } else {
+        rustc_hash::FxHashSet::default()
+    };
     let tokens = tokens_opt.unwrap_or_else(|| vec![Token::Eof]);
     let mut parser = Parser::new(tokens);
     let stmts = parser.parse_program();
 
     let mut ops = Vec::with_capacity(stmts.len());
     let mut static_exports = FxHashMap::default();
-    let mut known_numeric_vars = ts_hints.numeric_vars;
 
     for stmt in stmts {
         // Lower common top-level patterns into specialized Tier-0/Tier-2 fast-path opcodes

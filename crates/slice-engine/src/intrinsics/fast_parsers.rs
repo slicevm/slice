@@ -2,26 +2,42 @@
 
 #[inline]
 pub fn fast_parse_ms(input: &str) -> Option<f64> {
-    let s = input.trim();
-    if s.is_empty() || s.len() > 100 {
+    if input.is_empty() || input.len() > 100 {
         return None;
     }
-    let bytes = s.as_bytes();
-    let mut num_end = 0;
-    if bytes[0] == b'-' || bytes[0] == b'+' {
-        num_end += 1;
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    if bytes[0] == b'-' {
+        i += 1;
     }
-    while num_end < bytes.len() && (bytes[num_end].is_ascii_digit() || bytes[num_end] == b'.') {
-        num_end += 1;
+    let int_start = i;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
     }
-    if num_end == 0 {
+    let has_int_digits = i > int_start;
+    let mut has_frac_digits = false;
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        let frac_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        has_frac_digits = i > frac_start;
+        if !has_frac_digits {
+            return None;
+        }
+    }
+    if !has_int_digits && !has_frac_digits {
         return None;
     }
-    let n: f64 = s[..num_end].parse().ok()?;
+    let n: f64 = input[..i].parse().ok()?;
     if !n.is_finite() {
         return None;
     }
-    let unit = s[num_end..].trim();
+    while i < bytes.len() && bytes[i] == b' ' {
+        i += 1;
+    }
+    let unit = &input[i..];
     const S: f64 = 1000.0;
     const M: f64 = S * 60.0;
     const H: f64 = M * 60.0;
@@ -81,8 +97,25 @@ pub fn fast_parse_ms(input: &str) -> Option<f64> {
 }
 
 #[inline]
+fn js_math_round_i64(x: f64) -> Option<i64> {
+    if !x.is_finite() || x.abs() >= (1i64 << 52) as f64 {
+        return None;
+    }
+    let rounded = if (0.0..0.5).contains(&x) || (-0.5..0.0).contains(&x) {
+        0.0
+    } else if x > 0.0 {
+        let f = x.floor();
+        if x - f >= 0.5 { f + 1.0 } else { f }
+    } else {
+        let c = x.ceil();
+        if c - x > 0.5 { c - 1.0 } else { c }
+    };
+    Some(rounded as i64)
+}
+
+#[inline]
 pub(crate) fn fast_format_ms(ms: f64, long: bool) -> Option<String> {
-    if !ms.is_finite() {
+    if !ms.is_finite() || ms.abs() >= (1i64 << 52) as f64 * 86_400_000.0 {
         return None;
     }
     let ms_abs = ms.abs();
@@ -91,38 +124,43 @@ pub(crate) fn fast_format_ms(ms: f64, long: bool) -> Option<String> {
     const H: f64 = M * 60.0;
     const D: f64 = H * 24.0;
     if long {
-        let plural = |ms: f64, ms_abs: f64, n: f64, name: &str| -> String {
+        let plural = |ms: f64, ms_abs: f64, n: f64, name: &str| -> Option<String> {
             let is_plural = ms_abs >= n * 1.5;
-            let rounded = (ms / n).round() as i64;
+            let rounded = js_math_round_i64(ms / n)?;
             if is_plural {
-                format!("{} {}s", rounded, name)
+                Some(format!("{} {}s", rounded, name))
             } else {
-                format!("{} {}", rounded, name)
+                Some(format!("{} {}", rounded, name))
             }
         };
         if ms_abs >= D {
-            return Some(plural(ms, ms_abs, D, "day"));
+            return plural(ms, ms_abs, D, "day");
         }
         if ms_abs >= H {
-            return Some(plural(ms, ms_abs, H, "hour"));
+            return plural(ms, ms_abs, H, "hour");
         }
         if ms_abs >= M {
-            return Some(plural(ms, ms_abs, M, "minute"));
+            return plural(ms, ms_abs, M, "minute");
         }
         if ms_abs >= S {
-            return Some(plural(ms, ms_abs, S, "second"));
+            return plural(ms, ms_abs, S, "second");
         }
-        Some(format!("{} ms", ms as i64))
+        if ms.fract() == 0.0 && ms_abs < (1i64 << 52) as f64 {
+            return Some(format!("{} ms", ms as i64));
+        }
+        None
     } else if ms_abs >= D {
-        Some(format!("{}d", (ms / D).round() as i64))
+        Some(format!("{}d", js_math_round_i64(ms / D)?))
     } else if ms_abs >= H {
-        Some(format!("{}h", (ms / H).round() as i64))
+        Some(format!("{}h", js_math_round_i64(ms / H)?))
     } else if ms_abs >= M {
-        Some(format!("{}m", (ms / M).round() as i64))
+        Some(format!("{}m", js_math_round_i64(ms / M)?))
     } else if ms_abs >= S {
-        Some(format!("{}s", (ms / S).round() as i64))
-    } else {
+        Some(format!("{}s", js_math_round_i64(ms / S)?))
+    } else if ms.fract() == 0.0 && ms_abs < (1i64 << 52) as f64 {
         Some(format!("{}ms", ms as i64))
+    } else {
+        None
     }
 }
 

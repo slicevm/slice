@@ -2035,3 +2035,209 @@ fn test_issue_135_parenthesized_ses_gate_2hit_prelude_cache_zlib_prefusion_and_d
     .unwrap();
     assert_eq!(m.stdout, vec!["ISSUE_135_OK"], "ret={}", m.return_value);
 }
+
+#[test]
+fn test_issue_153_crypto_core_pki_split_fast_ms_parity_and_sandbox_pure_js() {
+    use crate::{compute_boacas_metadata, pack_boacas_container};
+    // 1. Verify `node:crypto` hash/HMAC-only bundle fuses ONLY bit 19 (`crypto-core`) and NOT bit 31 (`crypto-pki`),
+    //    shrinking precompiled `SLICEBC\x01` container size by > 15 KB vs a PKI-referencing bundle.
+    let hash_only_js = "var __slice_modules = {};//__SLICE_RC:1111222233334444\nconst crypto = __slice_cjs_require(\"node:crypto\");\nconsole.log(crypto.createHash(\"sha256\").update(\"slice\").digest(\"hex\"));\n";
+    let pki_js = "var __slice_modules = {};//__SLICE_RC:5555666677778888\nconst crypto = __slice_cjs_require(\"node:crypto\");\nconst kp = crypto.generateKeyPairSync(\"ed25519\");\nconsole.log(kp.publicKey.type);\n";
+
+    let (_, hash_mask, _) = compute_boacas_metadata(hash_only_js);
+    assert_ne!(hash_mask & (1 << 19), 0, "expected crypto-core bit 19 set");
+    assert_eq!(
+        hash_mask & (1 << 31),
+        0,
+        "hash-only bundle must NOT set crypto-pki bit 31"
+    );
+
+    let (_, pki_mask, _) = compute_boacas_metadata(pki_js);
+    assert_ne!(pki_mask & (1 << 19), 0, "expected crypto-core bit 19 set");
+    assert_ne!(
+        pki_mask & (1 << 31),
+        0,
+        "PKI bundle must set crypto-pki bit 31"
+    );
+
+    let hash_bc = pack_boacas_container(hash_only_js);
+    let pki_bc = pack_boacas_container(pki_js);
+    assert!(
+        pki_bc.len() > hash_bc.len() + 15_000,
+        "expected crypto-core container ({} B) to be > 15 KB smaller than PKI container ({} B)",
+        hash_bc.len(),
+        pki_bc.len()
+    );
+
+    // 2. Verify both `crypto-core` AND lazy `crypto-pki` getters (including dynamic `crypto["sign"]`,
+    //    `KeyObject`, `pbkdf2Sync`, `hkdfSync`, `scryptSync`, `createCipheriv`/`createDecipheriv`,
+    //    `diffieHellman`, and monkey-patch setter override) work identically on cold and warm runs.
+    let crypto_matrix_src = r#"
+    import crypto from "node:crypto";
+    import ms from "slice:ms";
+
+    // Core SHA-256, HMAC, UUID, CSPRNG, timingSafeEqual
+    const h = crypto.createHash("sha256").update("abc").digest("hex");
+    if (!h.startsWith("ba7816bf")) throw new Error("sha256 mismatch: " + h);
+    const hm = crypto.createHmac("sha256", "k").update("msg").digest("base64url");
+    if (!hm) throw new Error("hmac empty");
+    if (crypto.randomUUID().length !== 36) throw new Error("uuid length");
+    if (crypto.randomBytes(16).length !== 16) throw new Error("randomBytes length");
+
+    // Enumerable PKI keys exist BEFORE lazy PKI materialization
+    const keysBefore = Object.keys(crypto);
+    if (!keysBefore.includes("KeyObject") || !keysBefore.includes("pbkdf2Sync") || !keysBefore.includes("sign")) {
+        throw new Error("missing enumerable lazy PKI keys: " + keysBefore.join(","));
+    }
+
+    // Dynamic bracket access triggers lazy `slice:crypto-pki` without static PKI identifier match
+    const genKp = crypto["generateKeyPair" + "Sync"];
+    const kp = genKp("ed25519");
+    const sig = crypto["si" + "gn"](null, Buffer.from("payload"), kp.privateKey);
+    const ok = crypto["veri" + "fy"](null, Buffer.from("payload"), kp.publicKey, sig);
+    if (!ok) throw new Error("lazy Ed25519 sign/verify failed");
+
+    // AES-256-GCM & PBKDF2 & HKDF
+    const dk = crypto["pbkdf2" + "Sync"]("pw", "salt", 10, 32, "sha256");
+    const iv = crypto.randomBytes(12);
+    const ciph = crypto["createCipher" + "iv"]("aes-256-gcm", dk, iv);
+    const enc = Buffer.concat([ciph.update("secret-text", "utf8"), ciph.final()]);
+    const tag = ciph.getAuthTag();
+    const deciph = crypto["createDecipher" + "iv"]("aes-256-gcm", dk, iv);
+    deciph.setAuthTag(tag);
+    const dec = Buffer.concat([deciph.update(enc), deciph.final()]).toString("utf8");
+    if (dec !== "secret-text") throw new Error("AES-GCM mismatch: " + dec);
+
+    // Full ms@2.1.3 string / number / negative half-tie / fractional / invalid matrix
+    if (ms("2h") !== 7200000) throw new Error("ms 2h");
+    if (ms("-3.5s") !== -3500) throw new Error("ms -3.5s");
+    if (ms(".5d") !== 43200000) throw new Error("ms .5d");
+    if (ms("100") !== 100) throw new Error("ms 100");
+    if (ms("5.") !== undefined) throw new Error("ms '5.' must be undefined");
+    if (ms("+5s") !== undefined) throw new Error("ms '+5s' must be undefined");
+    if (ms(" 5s") !== undefined) throw new Error("ms ' 5s' must be undefined");
+    if (ms("invalid") !== undefined) throw new Error("ms invalid");
+    if (ms(60000) !== "1m") throw new Error("ms 60000 short: " + ms(60000));
+    if (ms(60000, { long: true }) !== "1 minute") throw new Error("ms 60000 long");
+    if (ms(120000, { long: true }) !== "2 minutes") throw new Error("ms 120000 long");
+    if (ms(-1500) !== "-1s") throw new Error("ms -1500 tie: " + ms(-1500));
+    if (ms(-1500, { long: true }) !== "-1 seconds") throw new Error("ms -1500 long tie: " + ms(-1500, { long: true }));
+    if (ms(0.5) !== "0.5ms") throw new Error("ms 0.5 short: " + ms(0.5));
+    if (ms(0.5, { long: true }) !== "0.5 ms") throw new Error("ms 0.5 long: " + ms(0.5, { long: true }));
+    let emptyThrew = false;
+    try { ms(""); } catch (_e) { emptyThrew = true; }
+    if (!emptyThrew) throw new Error("ms('') must throw");
+
+    console.log("ISSUE_153_MATRIX_OK");
+    "#;
+    let m = run_source_isolated(
+        "issue-153-matrix",
+        crypto_matrix_src,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        16 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        m.stdout,
+        vec!["ISSUE_153_MATRIX_OK"],
+        "ret={}",
+        m.return_value
+    );
+
+    // 3. Verify bundling a real unmodified `ms@2.1.3` `node_modules/ms/index.js` rewrites it to `__slice_fast_ms`
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "slice_issue_153_ms_bundle_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let nm_ms = tmp_dir.join("node_modules").join("ms");
+    std::fs::create_dir_all(&nm_ms).unwrap();
+    std::fs::write(
+        nm_ms.join("package.json"),
+        r#"{"name":"ms","version":"2.1.3","main":"index.js"}"#,
+    )
+    .unwrap();
+    let real_ms = r#"var s = 1000;
+var m = s * 60;
+var h = m * 60;
+var d = h * 24;
+var w = d * 7;
+var y = d * 365.25;
+module.exports = function (val, options) {
+  options = options || {};
+  var type = typeof val;
+  if (type === 'string' && val.length > 0) {
+    return parse(val);
+  } else if (type === 'number' && isFinite(val)) {
+    return options.long ? fmtLong(val) : fmtShort(val);
+  }
+  throw new Error('val is not a non-empty string or a valid number. val=' + JSON.stringify(val));
+};
+function parse(str) {
+  str = String(str);
+  if (str.length > 100) return;
+  var match = /^(-?(?:\d+)?\.?\d+) *(milliseconds?|msecs?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w|years?|yrs?|y)?$/i.exec(str);
+  if (!match) return;
+  var n = parseFloat(match[1]);
+  var type = (match[2] || 'ms').toLowerCase();
+  switch (type) {
+    case 'years': case 'year': case 'yrs': case 'yr': case 'y': return n * y;
+    case 'weeks': case 'week': case 'w': return n * w;
+    case 'days': case 'day': case 'd': return n * d;
+    case 'hours': case 'hour': case 'hrs': case 'hr': case 'h': return n * h;
+    case 'minutes': case 'minute': case 'mins': case 'min': case 'm': return n * m;
+    case 'seconds': case 'second': case 'secs': case 'sec': case 's': return n * s;
+    case 'milliseconds': case 'millisecond': case 'msecs': case 'msec': case 'ms': return n;
+    default: return undefined;
+  }
+}
+function fmtShort(ms) {
+  var msAbs = Math.abs(ms);
+  if (msAbs >= d) return Math.round(ms / d) + 'd';
+  if (msAbs >= h) return Math.round(ms / h) + 'h';
+  if (msAbs >= m) return Math.round(ms / m) + 'm';
+  if (msAbs >= s) return Math.round(ms / s) + 's';
+  return ms + 'ms';
+}
+function fmtLong(ms) {
+  var msAbs = Math.abs(ms);
+  if (msAbs >= d) return plural(ms, msAbs, d, 'day');
+  if (msAbs >= h) return plural(ms, msAbs, h, 'hour');
+  if (msAbs >= m) return plural(ms, msAbs, m, 'minute');
+  if (msAbs >= s) return plural(ms, msAbs, s, 'second');
+  return ms + ' ms';
+}
+function plural(ms, msAbs, n, name) {
+  var isPlural = msAbs >= n * 1.5;
+  return Math.round(ms / n) + ' ' + name + (isPlural ? 's' : '');
+}
+"#;
+    std::fs::write(nm_ms.join("index.js"), real_ms).unwrap();
+    let entry_ts = tmp_dir.join("index.ts");
+    std::fs::write(
+        &entry_ts,
+        r#"import ms from "ms"; console.log(`${ms("15m")}:${ms(-1500)}:${ms(0.5, { long: true })}`);"#,
+    )
+    .unwrap();
+
+    let bundled = slice_cas::bundle_entrypoint_with_deps(&entry_ts).unwrap();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    assert!(
+        bundled.contains("__slice_fast_ms") && !bundled.contains("milliseconds?|msecs?"),
+        "expected unmodified ms@2.1.3 to lower to __slice_fast_ms:\n{bundled}"
+    );
+    let bc_ms = compile_source_to_bytecode(&bundled);
+    let mut iso = SliceIsolate::spawn(
+        "issue-153-ms",
+        1,
+        CapabilityToken::pure_compute(),
+        2_000_000,
+        8 * 1024 * 1024,
+    );
+    let out_ms = iso.execute_bytecode(&bc_ms, None).unwrap();
+    assert_eq!(out_ms.stdout, vec!["900000:-1s:0.5 ms"]);
+}

@@ -25,7 +25,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 thiserror = "2.0"
 libc = "0.2"
-oxc = { version = "=0.152.0", features = ["transformer", "codegen", "semantic"] }
+oxc = { version = "=0.152.0", features = ["transformer", "codegen", "semantic", "ast_visit"] }
 boa_engine = { version = "0.22", default-features = false }
 rustc-hash = "2.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

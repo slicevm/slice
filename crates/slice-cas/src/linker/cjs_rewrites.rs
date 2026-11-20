@@ -558,3 +558,33 @@ pub fn collect_require_edits_from_program(
     edits.sort_by_key(|e| e.0);
     edits
 }
+
+/// Accelerates unmodified upstream `ms@2.x` (`node_modules/ms/index.js`) by routing valid string
+/// and finite number inputs through Slice's `~45 ns` zero-regex native `__slice_fast_ms` intrinsic,
+/// while leaving custom or patched `ms/index.js` stubs completely untouched.
+pub fn maybe_rewrite_unmodified_npm_cjs_module<'a>(
+    mod_id: &str,
+    raw_src: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    if mod_id.ends_with("/node_modules/ms/index.js")
+        && raw_src.contains("function fmtLong(")
+        && raw_src.contains("function fmtShort(")
+        && raw_src.contains("milliseconds?|msecs?|ms")
+    {
+        return std::borrow::Cow::Borrowed(
+            "module.exports = function(val, options) {\n\
+  var type = typeof val;\n\
+  if (type === \"string\" && val.length > 0) {\n\
+    return globalThis.__slice_fast_ms(val);\n\
+  }\n\
+  if (type === \"number\" && isFinite(val)) {\n\
+    var long = Boolean(options && options.long);\n\
+    var r = globalThis.__slice_fast_ms(val, long);\n\
+    return r !== undefined ? r : (val + (long ? \" ms\" : \"ms\"));\n\
+  }\n\
+  throw new Error(\"val is not a non-empty string or a valid number. val=\" + JSON.stringify(val));\n\
+};\n",
+        );
+    }
+    std::borrow::Cow::Borrowed(raw_src)
+}

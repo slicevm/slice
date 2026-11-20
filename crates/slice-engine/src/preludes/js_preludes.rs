@@ -87,6 +87,9 @@ pub(crate) const fn expand_shard_prerequisites(mut mask: u32) -> u32 {
     if (mask & (1 << 30)) != 0 {
         mask |= 1 << 5;
     }
+    if (mask & (1 << 31)) != 0 {
+        mask |= (1 << 19) | (1 << 5);
+    }
     mask
 }
 
@@ -133,7 +136,7 @@ pub(crate) fn register_shard_host_functions_for_mask(
     if (shards_mask & ((1 << 2) | (1 << 5) | (1 << 14) | (1 << 15) | (1 << 16) | (1 << 30))) != 0 {
         crate::host_bindings::register_wintertc_phase_n3_host_functions(context);
     }
-    if (shards_mask & (1 << 4)) != 0 {
+    if (shards_mask & ((1 << 4) | (1 << 31))) != 0 {
         crate::host_bindings::register_webcrypto_host_functions(context);
     }
     if (shards_mask & ((1 << 5) | (1 << 7) | (1 << 30))) != 0 {
@@ -165,7 +168,7 @@ pub(crate) fn register_shard_host_functions_for_mask(
     }
 }
 
-const PREFUSED_BUILTIN_BITS: [u32; 11] = [19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 30];
+const PREFUSED_BUILTIN_BITS: [u32; 12] = [19, 31, 20, 21, 22, 23, 24, 25, 26, 27, 28, 30];
 
 /// Builds the single-pass fused prelude prefix (`ULTRA_CORE_PRELUDE`, all set shards in
 /// `shards_mask` in topological `SHARD_LOAD_ORDER`, `globalThis.__shMask`, optional
@@ -190,6 +193,9 @@ pub(crate) fn build_fused_prelude_prefix(
                 active_mask |= bit;
             }
         }
+    }
+    if (shards_mask & (1u32 << 31)) != 0 {
+        active_mask |= 1u32 << 31;
     }
     if init_lazy_getters {
         active_mask |= 1;
@@ -445,6 +451,8 @@ enum ShardTriggerAction {
     Flags(u16),
     MaskAndFlags(u32, u16),
     BuiltinMask(u32),
+    CryptoPki,
+    CryptoPkiAndBuf,
     FetchCall,
     BufBin,
     HasBinRwMarker,
@@ -595,13 +603,22 @@ const SHARD_PATTERNS: &[(&str, ShardTriggerAction)] = &[
     ),
     ("instanceof Buffer", ShardTriggerAction::Mask(1 << 5)),
     ("randomBytes", ShardTriggerAction::Mask(1 << 5)),
-    ("pbkdf2", ShardTriggerAction::Mask(1 << 5)),
-    ("scrypt", ShardTriggerAction::Mask(1 << 5)),
-    ("createCipheriv", ShardTriggerAction::Mask(1 << 5)),
-    ("createDecipheriv", ShardTriggerAction::Mask(1 << 5)),
-    ("generateKeyPair", ShardTriggerAction::Mask(1 << 5)),
-    ("createSign", ShardTriggerAction::Mask(1 << 5)),
-    ("createVerify", ShardTriggerAction::Mask(1 << 5)),
+    ("pbkdf2", ShardTriggerAction::CryptoPkiAndBuf),
+    ("scrypt", ShardTriggerAction::CryptoPkiAndBuf),
+    ("hkdf", ShardTriggerAction::CryptoPki),
+    ("KeyObject", ShardTriggerAction::CryptoPki),
+    ("createCipheriv", ShardTriggerAction::CryptoPkiAndBuf),
+    ("createDecipheriv", ShardTriggerAction::CryptoPkiAndBuf),
+    ("generateKeyPair", ShardTriggerAction::CryptoPkiAndBuf),
+    ("diffieHellman", ShardTriggerAction::CryptoPkiAndBuf),
+    ("createPrivateKey", ShardTriggerAction::CryptoPki),
+    ("createPublicKey", ShardTriggerAction::CryptoPki),
+    ("createSecretKey", ShardTriggerAction::CryptoPkiAndBuf),
+    ("createSign", ShardTriggerAction::CryptoPkiAndBuf),
+    ("createVerify", ShardTriggerAction::CryptoPkiAndBuf),
+    ("crypto.sign(", ShardTriggerAction::CryptoPkiAndBuf),
+    ("crypto.verify(", ShardTriggerAction::CryptoPki),
+    ("-----BEGIN ", ShardTriggerAction::CryptoPki),
     ("createHash(\"md5\"", ShardTriggerAction::Mask(1 << 5)),
     ("createHash('md5'", ShardTriggerAction::Mask(1 << 5)),
     ("createHash(\"sha512\"", ShardTriggerAction::Mask(1 << 5)),
@@ -888,6 +905,7 @@ pub(crate) fn detect_shards_and_boacas_flags(
     let mut has_bin_rw_marker = false;
     let mut has_global_this = false;
     let mut has_get_own_prop_desc = false;
+    let mut has_crypto_pki = false;
 
     let ac = shard_detector_automaton();
     for mat in ac.find_overlapping_iter(raw_js_code) {
@@ -921,6 +939,13 @@ pub(crate) fn detect_shards_and_boacas_flags(
             ShardTriggerAction::Mask(bits) | ShardTriggerAction::MaskAndFlags(bits, _) => {
                 mask |= bits;
             }
+            ShardTriggerAction::CryptoPki => {
+                has_crypto_pki = true;
+            }
+            ShardTriggerAction::CryptoPkiAndBuf => {
+                mask |= 1 << 5;
+                has_crypto_pki = true;
+            }
             ShardTriggerAction::FetchCall => {
                 if is_outbound_fetch_at(raw_js_code, mat.start()) {
                     mask |= (1 << 10) | (1 << 11);
@@ -935,6 +960,10 @@ pub(crate) fn detect_shards_and_boacas_flags(
             }
             _ => {}
         }
+    }
+
+    if has_crypto_pki && (mask & (1 << 19)) != 0 {
+        mask |= 1 << 31;
     }
 
     if needs_buf_bin && !has_bin_rw_marker {
