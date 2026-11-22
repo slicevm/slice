@@ -4,7 +4,7 @@
 pub mod windows_iocp;
 
 use crate::slab::{FIXED_BUFFER_COUNT, FIXED_BUFFER_SIZE, RegisteredBufferPool};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, ensure};
 
 pub const DEFAULT_RING_ENTRIES: u32 = 256;
 pub const MAX_RING_ENTRIES: u32 = 4096;
@@ -163,7 +163,7 @@ impl CompletionRingEngine {
                 windows_iocp::CreateIoCompletionPort(windows_iocp::INVALID_HANDLE_VALUE, 0, 0, 0)
             };
             if handle == 0 {
-                bail!("Failed to initialize Windows IOCP completion ring");
+                anyhow::bail!("Failed to initialize Windows IOCP completion ring");
             }
             let reg_count = buffer_pool.capacity();
             Ok(Self {
@@ -334,10 +334,7 @@ impl CompletionRingEngine {
         {
             if let Some(ring) = &mut self.linux_ring {
                 {
-                    // SAFETY: We hold `&mut self.linux_ring` exclusively on this thread and verify
-                    // `sq.capacity() - sq.len() >= ops.len()` before pushing any SQE so no partial
-                    // batch can ever overflow `sq.push`.
-                    let mut sq = unsafe { ring.submission() };
+                    let mut sq = ring.submission();
                     let free_sq = sq.capacity().saturating_sub(sq.len());
                     ensure!(
                         free_sq >= ops.len(),
@@ -561,7 +558,7 @@ impl CompletionRingEngine {
                     }
                     drained += removed as usize;
                 }
-                bail!("Windows IOCP PostQueuedCompletionStatus failed: {}", err);
+                anyhow::bail!("Windows IOCP PostQueuedCompletionStatus failed: {}", err);
             }
 
             let mut completions = Vec::with_capacity(posted_count);
@@ -681,7 +678,7 @@ impl CompletionRingEngine {
         #[cfg(not(any(unix, target_os = "windows")))]
         {
             let _ = ops;
-            bail!("CompletionRingEngine is not supported on this target OS")
+            anyhow::bail!("CompletionRingEngine is not supported on this target OS")
         }
     }
 }
