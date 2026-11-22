@@ -120,26 +120,43 @@ fn test_compartment_clone_and_rebind_lifecycle_invariants() {
         0
     );
 
-    // Cloning and dropping the clone must keep the primary compartment's domain intact
+    // Cloning and dropping the clone inside a nested scope must restore the primary compartment's PKRU mask
     {
-        let cloned = primary.clone();
-        cloned.pkey_domain.enter_domain();
-        if primary.pkey_domain.hardware_enforced && cloned.pkey_domain.hardware_enforced {
-            assert_ne!(
-                cloned.pkey_domain.pkey, primary_pkey,
-                "Hardware-enforced clone must own a distinct kernel PKEY"
+        let _primary_guard = primary.pkey_domain.enter_domain();
+        let outer_pkru = current_thread_pkru(primary.pkey_domain.hardware_enforced);
+        assert_eq!(outer_pkru, primary.pkey_domain.pkru_mask);
+        {
+            let cloned = primary.clone();
+            let _cloned_guard = cloned.pkey_domain.enter_domain();
+            assert_eq!(
+                current_thread_pkru(cloned.pkey_domain.hardware_enforced),
+                cloned.pkey_domain.pkru_mask
             );
+            if primary.pkey_domain.hardware_enforced && cloned.pkey_domain.hardware_enforced {
+                assert_ne!(
+                    cloned.pkey_domain.pkey, primary_pkey,
+                    "Hardware-enforced clone must own a distinct kernel PKEY"
+                );
+            }
         }
+        assert_eq!(
+            current_thread_pkru(primary.pkey_domain.hardware_enforced),
+            primary.pkey_domain.pkru_mask,
+            "Dropping nested PkruDomainGuard + cloned compartment must restore outer PKRU mask"
+        );
     }
 
-    primary.pkey_domain.enter_domain();
     for slot in 0..32u32 {
         primary.pkey_domain.rebind_slot(slot);
         let k = primary.pkey_domain.pkey;
         assert!((1..=15).contains(&k));
         assert_eq!(primary.pkey_domain.pkru_mask & 0b11, 0);
         assert_eq!(primary.pkey_domain.pkru_mask & (0b11u32 << (k * 2)), 0);
-        primary.pkey_domain.enter_domain();
+        let _guard = primary.pkey_domain.enter_domain();
+        assert_eq!(
+            current_thread_pkru(primary.pkey_domain.hardware_enforced),
+            primary.pkey_domain.pkru_mask
+        );
     }
 }
 

@@ -20,8 +20,8 @@ pub mod net;
 pub mod vfs;
 
 pub use compartment::{
-    CapabilityToken, HardwareProtectionDomain, SandboxViolation, TenantCompartment,
-    is_frozen_intrinsic,
+    CapabilityToken, HardwareProtectionDomain, PkruDomainGuard, SandboxViolation,
+    TenantCompartment, current_thread_pkru, is_frozen_intrinsic,
 };
 pub use manifest::{
     InlineDirectives, SliceManifest, is_sensitive_env_key, parse_bool_setting,

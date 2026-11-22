@@ -269,6 +269,7 @@ impl SliceIsolate {
         if count == 0 {
             return Ok(0);
         }
+        let _pkru_guard = self.compartment.pkey_domain.enter_domain();
         self.compartment.consume_fuel((count as u64) * 5)?;
 
         let flags = self.setup_boa_compartment_thread_locals();
@@ -316,6 +317,7 @@ impl SliceIsolate {
         code: u16,
         reason: &str,
     ) -> Result<Vec<crate::websocket::ServerWsOutFrame>, SandboxViolation> {
+        let _pkru_guard = self.compartment.pkey_domain.enter_domain();
         self.compartment.consume_fuel(15)?;
         let payload_arg = if is_binary {
             crate::intrinsics::base64_encode(payload_bytes, false)

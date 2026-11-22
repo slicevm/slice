@@ -34,7 +34,7 @@ fn test_submission_bounds_and_pinned_safety() {
         user_data: 2,
     }];
     assert!(engine.submit_and_reap(&bad_len_op).is_err());
-    assert_eq!(engine.buffer_pool.get_slice(999, 16), &[]);
+    assert_eq!(engine.buffer_pool().get_slice(999, 16), &[]);
 }
 
 #[test]
@@ -42,15 +42,16 @@ fn test_ring_entry_clamping_and_extended_pool_aliasing() {
     let min_engine = CompletionRingEngine::new(0, false).unwrap();
     assert_eq!(min_engine.status.ring_capacity, 1);
 
-    let mut max_engine = CompletionRingEngine::new(u32::MAX, false).unwrap();
-    assert_eq!(max_engine.status.ring_capacity, MAX_RING_ENTRIES);
-    assert_eq!(max_engine.buffer_pool.capacity(), FIXED_BUFFER_COUNT);
-    assert_eq!(max_engine.buffer_pool.buffer_size(), FIXED_BUFFER_SIZE);
+    let default_max = CompletionRingEngine::new(u32::MAX, false).unwrap();
+    assert_eq!(default_max.status.ring_capacity, MAX_RING_ENTRIES);
+    assert_eq!(default_max.buffer_pool().capacity(), FIXED_BUFFER_COUNT);
+    assert_eq!(default_max.buffer_pool().buffer_size(), FIXED_BUFFER_SIZE);
 
-    // Attach an extended pool (> 256 slots) and verify high-index bounds and DMA aliasing guards
-    max_engine.buffer_pool = RegisteredBufferPool::new(320, 1024);
-    assert_eq!(max_engine.buffer_pool.capacity(), 320);
-    assert_eq!(max_engine.buffer_pool.buffer_size(), 1024);
+    // Construct an engine with an extended pool (> 256 slots) and verify high-index bounds and DMA aliasing guards
+    let mut max_engine =
+        CompletionRingEngine::with_pool_config(u32::MAX, false, 320, 1024).unwrap();
+    assert_eq!(max_engine.buffer_pool().capacity(), 320);
+    assert_eq!(max_engine.buffer_pool().buffer_size(), 1024);
 
     let aliased_high_slot = vec![
         IoSubmission::ReadFixed {

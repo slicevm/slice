@@ -21,7 +21,7 @@ impl SliceIsolate {
         need_return_str: bool,
     ) -> Result<(u64, u64, String), SandboxViolation> {
         let start = Instant::now();
-        self.compartment.pkey_domain.enter_domain();
+        let _pkru_guard = self.compartment.pkey_domain.enter_domain();
 
         // Deferred compile-time SyntaxError container (`SLICEERR` + exact 1-based line/col message)
         if bytecode.len() >= 8 && &bytecode[0..8] == crate::parser_and_compiler::SLICEERR_MAGIC {
