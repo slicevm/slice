@@ -935,6 +935,81 @@ fn bench_wave3_v0135_promise_and_wintertc_router(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_wave2_v0140_cas_and_slicesnp(c: &mut Criterion) {
+    use slice_cas::{CasBuilder, MappedCasArchive};
+    use std::path::PathBuf;
+
+    let mut group = c.benchmark_group("slice_engine::wave2_cas_and_slicesnp");
+
+    let cas_file =
+        std::env::temp_dir().join(format!("slice_engine_bench_500_{}.cas", std::process::id()));
+    let mut builder = CasBuilder::new("./index.ts");
+    let mut imports = String::with_capacity(28_000);
+    let mut sums = String::from("let total: number = 0;\n");
+    for idx in 0..500 {
+        let spec = format!("./mod_{idx}.ts");
+        let mod_src = format!("export const VAL_{idx}: number = {};\n", idx + 1);
+        builder.add_module(
+            &spec,
+            PathBuf::from(&spec),
+            &mod_src,
+            compile_source_to_bytecode,
+        );
+        imports.push_str(&format!(
+            "import {{ VAL_{idx} }} from \"./mod_{idx}.ts\";\n"
+        ));
+        sums.push_str(&format!("total += VAL_{idx};\n"));
+    }
+    imports.push_str(&sums);
+    imports.push_str("console.log(total);\n");
+    builder.add_module(
+        "./index.ts",
+        PathBuf::from("./index.ts"),
+        &imports,
+        compile_source_to_bytecode,
+    );
+    builder.write_to_file(&cas_file).expect("write bench cas");
+    let raw_cas = std::fs::read(&cas_file).expect("read bench cas");
+    let _ = std::fs::remove_file(&cas_file);
+
+    let mapped = MappedCasArchive::from_bytes(&raw_cas).expect("map bench cas");
+    let entry_bc = mapped
+        .get_bytecode_slice(mapped.entrypoint_blob().expect("entrypoint"))
+        .to_vec();
+
+    group.bench_function("cas_500_modules_slicesnp_v2_llint_warm", |b| {
+        let mut iso = SliceIsolate::spawn(
+            "bench-cas-500",
+            1,
+            CapabilityToken::pure_compute(),
+            1_000_000,
+            1024 * 1024,
+        );
+        // Prime hash table capacity once to measure steady-state in-memory 500-module CAS resolution
+        let m0 = iso
+            .execute_bytecode(&entry_bc, Some(&mapped))
+            .expect("warmup cas 500");
+        assert_eq!(m0.stdout, vec!["125250".to_string()]);
+        assert_eq!(m0.cas_modules_resolved, 500);
+        b.iter(|| {
+            iso.reset_for_request("bench-cas-500", 1, 1_000_000, 1024 * 1024);
+            let m = iso
+                .execute_bytecode(black_box(&entry_bc), Some(black_box(&mapped)))
+                .expect("exec cas 500");
+            black_box(m.cas_modules_resolved)
+        });
+    });
+
+    group.bench_function("compile_500_module_entrypoint_to_slicesnp_v2", |b| {
+        b.iter(|| {
+            let bc = compile_source_to_bytecode(black_box(&imports));
+            black_box(bc.len())
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_boacas_and_automaton,
@@ -945,6 +1020,7 @@ criterion_group!(
     bench_wave4_multipart_clone_and_binary_http,
     bench_wave5_wasm_numeric_i64_and_shared_store,
     bench_wave3_v0135_promise_and_wintertc_router,
+    bench_wave2_v0140_cas_and_slicesnp,
     bench_http_cli_and_host_fs
 );
 criterion_main!(benches);

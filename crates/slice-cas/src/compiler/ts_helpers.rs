@@ -191,11 +191,24 @@ pub(crate) fn lower_auto_accessors_in_js(js_code: &str) -> String {
         allow_return_outside_function: true,
         ..Default::default()
     };
-    let ret = oxc::parser::Parser::new(&allocator, js_code, oxc::span::SourceType::mjs())
+    let mut ret = oxc::parser::Parser::new(
+        &allocator,
+        js_code,
+        oxc::span::SourceType::ts().with_module(true),
+    )
+    .with_options(parse_opts)
+    .parse();
+    if !ret.diagnostics.is_empty() {
+        ret = oxc::parser::Parser::new(
+            &allocator,
+            js_code,
+            oxc::span::SourceType::ts().with_module(false),
+        )
         .with_options(parse_opts)
         .parse();
-    if !ret.diagnostics.is_empty() {
-        return js_code.to_string();
+        if !ret.diagnostics.is_empty() {
+            return js_code.to_string();
+        }
     }
 
     struct AccessorCollector<'s> {

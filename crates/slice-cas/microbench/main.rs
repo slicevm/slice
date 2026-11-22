@@ -5,7 +5,8 @@ use slice_cas::linker::{
     extract_module_require_summary, prune_and_minify_cjs_module_ast, transform_module_to_cjs,
 };
 use slice_cas::{
-    analyze_typescript_semantics, compile_ts_or_js_checked_with_ast_hook, fuse_array_pipelines_ast,
+    analyze_typescript_semantics, bundle_entrypoint_with_deps,
+    compile_ts_or_js_checked_with_ast_hook, fuse_array_pipelines_ast,
     strip_typescript_and_normalize,
 };
 use std::hint::black_box;
@@ -149,5 +150,48 @@ export function unusedHelper(x) {
     group.finish();
 }
 
-criterion_group!(benches, bench_oxc_compiler, bench_esm_cjs_linker);
+fn bench_graph_bundler(c: &mut Criterion) {
+    let mut group = c.benchmark_group("slice_cas::bundler");
+    let bench_dir =
+        std::env::temp_dir().join(format!("slice_cas_bundler_bench_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&bench_dir);
+    std::fs::create_dir_all(&bench_dir).expect("create bench dir");
+
+    let mut entry_src = String::new();
+    for idx in 0..20 {
+        let mod_name = format!("mod_{idx}.ts");
+        let mod_src = format!(
+            "export interface Item{idx} {{ readonly id: number; amount: number; }}\nexport function calc{idx}(item: Item{idx}): number {{ return item.amount + {}; }}\n",
+            idx + 1
+        );
+        std::fs::write(bench_dir.join(&mod_name), mod_src).expect("write mod");
+        entry_src.push_str(&format!(
+            "import {{ calc{idx} }} from \"./mod_{idx}.ts\";\n"
+        ));
+    }
+    entry_src.push_str("let sum: number = 0;\n");
+    for idx in 0..20 {
+        entry_src.push_str(&format!("sum += calc{idx}({{ id: {idx}, amount: 10 }});\n"));
+    }
+    entry_src.push_str("console.log(sum);\n");
+    let entry_path = bench_dir.join("index.ts");
+    std::fs::write(&entry_path, entry_src).expect("write entry");
+
+    group.bench_function("bundle_entrypoint_with_deps_20_ts_modules", |b| {
+        b.iter(|| {
+            let bundled = bundle_entrypoint_with_deps(black_box(&entry_path)).expect("bundle");
+            black_box(bundled.len())
+        });
+    });
+
+    group.finish();
+    let _ = std::fs::remove_dir_all(&bench_dir);
+}
+
+criterion_group!(
+    benches,
+    bench_oxc_compiler,
+    bench_esm_cjs_linker,
+    bench_graph_bundler
+);
 criterion_main!(benches);

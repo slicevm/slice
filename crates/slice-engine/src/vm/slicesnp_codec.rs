@@ -33,8 +33,8 @@ pub const SLICESNP_FLAG_FLAT_LLINT: u8 = 0x02;
 pub const MAX_SNP_CACHE_ENTRIES: usize = 1024;
 
 /// Maximum AST/value nesting depth accepted by the binary decoder so crafted recursive byte
-/// streams fail closed without risking host stack overflow.
-const MAX_CODEC_DEPTH: u16 = 512;
+/// streams fail closed without risking host stack overflow (including on 1 MB Windows debug stacks).
+const MAX_CODEC_DEPTH: u16 = if cfg!(debug_assertions) { 64 } else { 192 };
 
 /// Maximum pre-allocated container capacity per decoded length prefix before reading elements,
 /// preventing truncated payloads with huge `u32` prefixes from triggering OOM panics.

@@ -25,10 +25,45 @@ fn is_ts_declaration_filename(name: &str) -> bool {
     name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts")
 }
 
+type PendingCasModule = (String, PathBuf, String, Vec<u8>, Vec<(usize, String)>);
+
+fn extract_pre_transpile_markers(
+    specifier: &str,
+    raw_source: &str,
+    normalized_source: &str,
+) -> Vec<(usize, String)> {
+    if specifier.starts_with("static:/")
+        || specifier == "manifest:/slice.toml"
+        || normalized_source.contains("// #slice-source: ")
+    {
+        return Vec::new();
+    }
+    if raw_source.contains("// #slice-source: ") {
+        let mut out = Vec::new();
+        for line in raw_source.lines() {
+            if let Some(rest) = line.trim().strip_prefix("// #slice-source: ") {
+                out.push((1, rest.to_string()));
+            }
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
+    let orig_nl = memchr::memchr_iter(b'\n', raw_source.as_bytes()).count();
+    let norm_nl = memchr::memchr_iter(b'\n', normalized_source.as_bytes()).count();
+    if orig_nl != norm_nl {
+        let lm = crate::bundler::compute_source_line_map(raw_source, normalized_source);
+        let clean_spec = specifier.trim_start_matches("./");
+        let short = clean_spec.rsplit('/').next().unwrap_or(clean_spec);
+        return vec![(1, format!("{short}|{clean_spec}|{lm}"))];
+    }
+    Vec::new()
+}
+
 /// Builder for constructing a Zero-Stat Content-Addressed Storage (`.cas`) archive.
 pub struct CasBuilder {
     entrypoint: String,
-    modules: Vec<(String, PathBuf, String, Vec<u8>)>, // (specifier, path, stripped_source, precompiled_bytecode)
+    modules: Vec<PendingCasModule>,
     lockfile_blake3: Option<String>,
     resolved_dependencies: Vec<(String, String)>,
 }
@@ -120,8 +155,10 @@ impl CasBuilder {
         let is_ts =
             is_jsx_ext || spec.ends_with(".ts") || spec.ends_with(".mts") || spec.ends_with(".cts");
         let normalized = strip_typescript_and_normalize_with_ext(raw_source, is_ts, is_jsx_ext);
+        let markers = extract_pre_transpile_markers(&spec, raw_source, &normalized);
         let bytecode = bytecode_compiler_fn(&normalized);
-        self.modules.push((spec, path, normalized, bytecode));
+        self.modules
+            .push((spec, path, normalized, bytecode, markers));
     }
 
     /// Recursively ingests a directory or module tree into the CAS builder.
@@ -177,8 +214,10 @@ impl CasBuilder {
                     let is_ts = is_jsx_ext || matches!(ext, "ts" | "mts" | "cts");
                     let normalized =
                         strip_typescript_and_normalize_with_ext(&raw, is_ts, is_jsx_ext);
+                    let markers = extract_pre_transpile_markers(&specifier, &raw, &normalized);
                     let bytecode = bytecode_compiler_fn(&normalized);
-                    self.modules.push((specifier, path, normalized, bytecode));
+                    self.modules
+                        .push((specifier, path, normalized, bytecode, markers));
                     count += 1;
                 }
             }
@@ -223,7 +262,8 @@ impl CasBuilder {
                     let specifier = format!("static:/{}", rel);
                     let raw_bytes = std::fs::read(&path)?;
                     let mime = detect_static_mime_type(&path).to_string();
-                    self.modules.push((specifier, path, mime, raw_bytes));
+                    self.modules
+                        .push((specifier, path, mime, raw_bytes, Vec::new()));
                     count += 1;
                 }
             }
@@ -240,6 +280,7 @@ impl CasBuilder {
             PathBuf::from("slice.toml"),
             toml_content.to_string(),
             toml_content.as_bytes().to_vec(),
+            Vec::new(),
         ));
     }
 
@@ -259,10 +300,10 @@ impl CasBuilder {
             .unwrap_or(&self.entrypoint);
         let entry_stripped = strip_single_module_ext(&self.entrypoint);
 
-        for (specifier, _path, normalized_source, bytecode) in &self.modules {
+        for (specifier, _path, normalized_source, bytecode, pre_markers) in &self.modules {
             let is_static = specifier.starts_with("static:/");
             let is_manifest = specifier == "manifest:/slice.toml";
-            let mut module_markers: Vec<(usize, String)> = Vec::new();
+            let mut module_markers: Vec<(usize, String)> = pre_markers.clone();
             if !is_static && !is_manifest && normalized_source.contains("// #slice-source: ") {
                 let mut compacted_line_1 = 1usize;
                 for (idx, line) in normalized_source.lines().enumerate() {
