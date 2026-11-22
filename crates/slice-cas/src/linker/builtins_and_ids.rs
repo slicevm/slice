@@ -4,6 +4,8 @@ use crate::bundler::resolve_module_specifier;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 
+pub const VIRTUAL_NO_FS_DIR: &str = "__slice_virtual_no_fs__";
+
 #[inline]
 pub fn is_builtin_module(spec: &str) -> bool {
     if spec.starts_with("node:")
@@ -163,6 +165,9 @@ fn bare_package_name(spec: &str) -> Option<&str> {
 }
 
 fn warn_if_declared_in_package_json_but_uninstalled(spec: &str, from_dir: &Path) {
+    if from_dir == Path::new(VIRTUAL_NO_FS_DIR) {
+        return;
+    }
     let Some(pkg_name) = bare_package_name(spec) else {
         return;
     };
@@ -187,7 +192,7 @@ fn warn_if_declared_in_package_json_but_uninstalled(spec: &str, from_dir: &Path)
                 });
             if declared && !dir.join("node_modules").join(pkg_name).exists() {
                 eprintln!(
-                    "Hint: package '{}' is declared in {} but missing from node_modules/ — run 'npm install' (or pnpm/bun install) before packing or running.",
+                    "Hint: package '{}' is declared in {} but missing from node_modules/ - run 'npm install' (or pnpm/bun install) before packing or running.",
                     pkg_name,
                     pkg_json.display()
                 );

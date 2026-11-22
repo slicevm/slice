@@ -148,10 +148,16 @@ impl MappedCasArchive {
     /// Returns a zero-copy slice to the normalized JavaScript source directly from the `mmap` region.
     #[inline]
     pub fn get_source_slice<'a>(&'a self, entry: &CasBlobEntry) -> &'a str {
-        let Some(start) = self.data_start_offset.checked_add(entry.offset as usize) else {
+        let Ok(src_off) = usize::try_from(entry.offset) else {
             return "";
         };
-        let Some(end) = start.checked_add(entry.source_len as usize) else {
+        let Ok(src_len) = usize::try_from(entry.source_len) else {
+            return "";
+        };
+        let Some(start) = self.data_start_offset.checked_add(src_off) else {
+            return "";
+        };
+        let Some(end) = start.checked_add(src_len) else {
             return "";
         };
         let Some(bytes) = self.mmap.get(start..end) else {
@@ -163,13 +169,16 @@ impl MappedCasArchive {
     /// Returns a zero-copy slice to the pre-compiled bytecode directly from the `mmap` region.
     #[inline]
     pub fn get_bytecode_slice<'a>(&'a self, entry: &CasBlobEntry) -> &'a [u8] {
-        let Some(start) = self
-            .data_start_offset
-            .checked_add(entry.bytecode_offset as usize)
-        else {
+        let Ok(bc_off) = usize::try_from(entry.bytecode_offset) else {
             return &[];
         };
-        let Some(end) = start.checked_add(entry.bytecode_len as usize) else {
+        let Ok(bc_len) = usize::try_from(entry.bytecode_len) else {
+            return &[];
+        };
+        let Some(start) = self.data_start_offset.checked_add(bc_off) else {
+            return &[];
+        };
+        let Some(end) = start.checked_add(bc_len) else {
             return &[];
         };
         self.mmap.get(start..end).unwrap_or(&[])
@@ -182,10 +191,10 @@ impl MappedCasArchive {
         &self,
         entry: &CasBlobEntry,
     ) -> Option<(Arc<Mmap>, usize, usize)> {
-        let start = self
-            .data_start_offset
-            .checked_add(entry.bytecode_offset as usize)?;
-        let end = start.checked_add(entry.bytecode_len as usize)?;
+        let bc_off = usize::try_from(entry.bytecode_offset).ok()?;
+        let bc_len = usize::try_from(entry.bytecode_len).ok()?;
+        let start = self.data_start_offset.checked_add(bc_off)?;
+        let end = start.checked_add(bc_len)?;
         if end <= self.mmap.len() {
             Some((Arc::clone(&self.mmap), start, end))
         } else {
@@ -206,12 +215,19 @@ impl MappedCasArchive {
         Some(self.get_source_slice(entry))
     }
 
-    /// Reconstructs the `// #slice-source:` annotated JS source from `self.header.source_map_markers`
-    /// in $O(L + K)$ time so `.cas` archives and standalone `SLICEEXE` binaries map uncaught errors
-    /// back to exact TypeScript lines.
+    /// Reconstructs the `// #slice-source:` annotated JS source from per-blob `blob_source_map_markers`
+    /// (or legacy `source_map_markers`) in $O(L + K)$ time so `.cas` archives and standalone `SLICEEXE`
+    /// binaries map uncaught errors back to exact TypeScript lines.
     pub fn reconstruct_annotated_source(&self, entry: &CasBlobEntry) -> String {
         let src = self.get_source_slice(entry);
-        let markers = &self.header.source_map_markers;
+        let markers: &[(usize, String)] =
+            if let Some(per_blob) = self.header.blob_source_map_markers.get(&entry.hash_hex) {
+                per_blob.as_slice()
+            } else if self.header.blob_source_map_markers.is_empty() {
+                self.header.source_map_markers.as_slice()
+            } else {
+                &[]
+            };
         if markers.is_empty() || src.contains("// #slice-source: ") || src.contains("//@sm:") {
             return src.to_string();
         }
@@ -266,27 +282,16 @@ impl MappedCasArchive {
     /// Checks if the current running executable has an embedded `SLICEEXE` trailer by reading only
     /// the final 24 bytes first, avoiding a full-binary `mmap` + `munmap` cycle on normal CLI invocations.
     pub fn open_embedded_self() -> Result<Option<Self>> {
-        use std::io::{Read, Seek, SeekFrom};
-
         let exe_path = std::env::current_exe()?;
         let mut file = File::open(&exe_path)?;
-        let file_len = match file.seek(SeekFrom::End(0)) {
-            Ok(len) => len,
-            Err(_) => return Ok(None),
+        let Some((cas_offset_u64, cas_len_u64)) = inspect_sliceexe_trailer(&mut file)
+            .with_context(|| format!("Invalid SLICEEXE trailer in {}", exe_path.display()))?
+        else {
+            return Ok(None);
         };
-        if file_len < 24 {
-            return Ok(None);
-        }
-        file.seek(SeekFrom::End(-24))?;
-        let mut tail = [0u8; 24];
-        file.read_exact(&mut tail)?;
-        if &tail[16..24] != b"SLICEEXE" {
-            return Ok(None);
-        }
-        let cas_offset = usize::try_from(u64::from_le_bytes(tail[0..8].try_into()?))
-            .context("SLICEEXE cas_offset overflow")?;
-        let cas_len = usize::try_from(u64::from_le_bytes(tail[8..16].try_into()?))
-            .context("SLICEEXE cas_len overflow")?;
+        let cas_offset = usize::try_from(cas_offset_u64).context("SLICEEXE cas_offset overflow")?;
+        let cas_len = usize::try_from(cas_len_u64).context("SLICEEXE cas_len overflow")?;
+        // SAFETY: Maps the read-only running executable file validated against the 24-byte trailer.
         let mmap = unsafe { Mmap::map(&file)? };
         let archive = Self::from_mmap_region(
             Arc::new(mmap),
@@ -296,6 +301,52 @@ impl MappedCasArchive {
         )?;
         Ok(Some(archive))
     }
+}
+
+/// Inspects the final 24 bytes of `file` for a `SLICEEXE` standalone trailer.
+///
+/// - Returns `Ok(None)` when `file` is shorter than 24 bytes or does not end with `b"SLICEEXE"`.
+/// - Returns `Ok(Some((cas_offset, cas_len)))` when a valid trailer is present and
+///   `cas_offset + cas_len <= file_len - 24` (`cas_len >= 32`).
+/// - Returns `Err` when `b"SLICEEXE"` is present at EOF but `cas_offset` / `cas_len` overlap
+///   the 24-byte trailer or exceed the file bounds.
+pub fn inspect_sliceexe_trailer(file: &mut File) -> Result<Option<(u64, u64)>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let file_len = match file.seek(SeekFrom::End(0)) {
+        Ok(len) => len,
+        Err(_) => return Ok(None),
+    };
+    if file_len < 24 {
+        return Ok(None);
+    }
+    let trailer_offset = file_len - 24;
+    file.seek(SeekFrom::Start(trailer_offset))?;
+    let mut tail = [0u8; 24];
+    file.read_exact(&mut tail)?;
+    if &tail[16..24] != b"SLICEEXE" {
+        return Ok(None);
+    }
+    let cas_offset = u64::from_le_bytes(tail[0..8].try_into()?);
+    let cas_len = u64::from_le_bytes(tail[8..16].try_into()?);
+    if cas_len < 32 {
+        bail!(
+            "Corrupted SLICEEXE trailer: cas_len ({}) is smaller than 32-byte CAS header",
+            cas_len
+        );
+    }
+    let cas_end = cas_offset
+        .checked_add(cas_len)
+        .context("Corrupted SLICEEXE trailer: cas_offset + cas_len overflow")?;
+    if cas_end > trailer_offset {
+        bail!(
+            "Corrupted SLICEEXE trailer: CAS range [{}..{}] overlaps trailer at offset {}",
+            cas_offset,
+            cas_end,
+            trailer_offset
+        );
+    }
+    Ok(Some((cas_offset, cas_len)))
 }
 
 /// Embeds a compiled `.cas` archive into a copy of the `slice` runtime binary to produce a
@@ -331,9 +382,23 @@ pub fn embed_cas_into_executable(
     ));
 
     let write_result = (|| -> Result<u64> {
-        let base_file = std::fs::File::open(base_exe_path).with_context(|| {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut base_file = std::fs::File::open(base_exe_path).with_context(|| {
             format!("Failed to open base executable {}", base_exe_path.display())
         })?;
+        // If `base_exe_path` is already a packed `SLICEEXE` standalone binary, strip its
+        // previous `.cas` payload and 24-byte trailer so re-packing is idempotent without bloat.
+        let existing_cas_offset = inspect_sliceexe_trailer(&mut base_file)
+            .with_context(|| {
+                format!(
+                    "Base executable {} has a corrupted SLICEEXE trailer",
+                    base_exe_path.display()
+                )
+            })?
+            .map(|(off, _)| off);
+        base_file.seek(SeekFrom::Start(0))?;
+
         let cas_file = std::fs::File::open(cas_file_path)
             .with_context(|| format!("Failed to open CAS archive {}", cas_file_path.display()))?;
         let out_file = std::fs::File::create(&staging_path).with_context(|| {
@@ -343,11 +408,18 @@ pub fn embed_cas_into_executable(
             )
         })?;
 
-        let mut base_reader = BufReader::with_capacity(256 * 1024, base_file);
+        let base_reader = BufReader::with_capacity(256 * 1024, base_file);
         let mut cas_reader = BufReader::with_capacity(256 * 1024, cas_file);
         let mut writer = BufWriter::with_capacity(256 * 1024, out_file);
 
-        let exe_len = std::io::copy(&mut base_reader, &mut writer).with_context(|| {
+        let exe_len = if let Some(limit) = existing_cas_offset {
+            let mut limited = base_reader.take(limit);
+            std::io::copy(&mut limited, &mut writer)
+        } else {
+            let mut full = base_reader;
+            std::io::copy(&mut full, &mut writer)
+        }
+        .with_context(|| {
             format!(
                 "Failed to stream base executable {}",
                 base_exe_path.display()

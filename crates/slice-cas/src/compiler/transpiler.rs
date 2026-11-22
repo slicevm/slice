@@ -1,47 +1,23 @@
-//! Oxc TypeScript & JSX/TSX Ahead-of-Time Transpiler (`strip_typescript_raw_with_ext`)
-//! and Comment/Require Normalizer.
+//! Oxc TypeScript & JSX/TSX Ahead-of-Time Transpiler (`strip_typescript_raw_with_ext`),
+//! Single-Pass Syntax-Checked Bundler Stripper, and Standalone Module Normalizer.
 
+pub use crate::compiler::comments::strip_js_comments;
 use crate::compiler::diagnostics::{
     SyntaxErrorDiagnostic, blank_leading_shebang, check_syntax_source_detailed,
     extract_oxc_syntax_diagnostic,
 };
 use crate::compiler::ts_detector::program_has_ts_or_jsx;
+use crate::compiler::ts_helpers::{
+    SLICE_OXC_BABEL_HELPERS, has_standalone_builtin_import_or_cjs_export,
+    inspect_ts_transform_flags, lower_auto_accessors_in_js, lower_unbundled_esm_for_boa,
+    may_contain_ts_or_jsx,
+};
 use crate::linker::{
-    has_esm_default_export_marker, rewrite_buffer_fast_paths_ast, rewrite_require_ident_ast,
-    transform_module_to_cjs,
+    VIRTUAL_NO_FS_DIR, has_esm_default_export_marker, rewrite_buffer_fast_paths_ast,
+    rewrite_require_ident_ast, transform_module_to_cjs,
 };
 use std::borrow::Cow;
 use std::path::Path;
-
-#[inline]
-fn may_contain_ts_or_jsx(source: &str) -> bool {
-    let bytes = source.as_bytes();
-    if memchr::memchr3(b':', b'<', b'!', bytes).is_some() {
-        return true;
-    }
-    for kw in [
-        &b"interface "[..],
-        &b"interface{"[..],
-        &b"type "[..],
-        &b"enum "[..],
-        &b"namespace "[..],
-        &b"declare "[..],
-        &b" as "[..],
-        &b" satisfies "[..],
-        &b" implements "[..],
-        &b" abstract "[..],
-        &b" readonly "[..],
-        &b"public "[..],
-        &b"private "[..],
-        &b"protected "[..],
-        &b"override "[..],
-    ] {
-        if memchr::memmem::find(bytes, kw).is_some() {
-            return true;
-        }
-    }
-    false
-}
 
 /// Extracts any top-level `return <expr>;` spans directly from an already-parsed Oxc `Program`
 /// (`allow_return_outside_function: true`). Returns an empty `SmallVec` for the 99.9%+ common case
@@ -108,6 +84,7 @@ fn transpile_parsed_oxc_program_with_hook<'a>(
     fallback_source: &str,
     on_final_ast: Option<&mut dyn FnMut(&oxc::ast::ast::Program<'_>)>,
 ) -> String {
+    let (needs_cjs_mode, has_accessor) = inspect_ts_transform_flags(&program);
     let scoping = oxc::semantic::SemanticBuilder::new()
         .with_enum_eval(true)
         .build(&program)
@@ -116,6 +93,13 @@ fn transpile_parsed_oxc_program_with_hook<'a>(
 
     let mut transform_options = oxc::transformer::TransformOptions::default();
     transform_options.jsx.jsx_plugin = true;
+    transform_options.decorator.legacy = true;
+    transform_options.env.es2026.explicit_resource_management = true;
+    transform_options.helper_loader.mode = oxc::transformer::HelperLoaderMode::External;
+    if needs_cjs_mode {
+        transform_options.env.module = oxc::transformer::Module::CommonJS;
+    }
+
     let transform_ret =
         oxc::transformer::Transformer::new(allocator, Path::new(active_path), &transform_options)
             .build_with_scoping(scoping, &mut program);
@@ -131,6 +115,23 @@ fn transpile_parsed_oxc_program_with_hook<'a>(
         })
         .build(&program)
         .code;
+
+    if needs_cjs_mode && let Some(stripped) = code.strip_prefix("\"use strict\";\n") {
+        code = stripped.to_string();
+    }
+
+    let has_babel_helpers = memchr::memmem::find(code.as_bytes(), b"babelHelpers.").is_some();
+    if has_babel_helpers {
+        let mut with_helpers =
+            String::with_capacity(SLICE_OXC_BABEL_HELPERS.len() + code.len() + 2);
+        with_helpers.push_str(SLICE_OXC_BABEL_HELPERS);
+        with_helpers.push_str(&code);
+        code = with_helpers;
+    }
+
+    if has_accessor {
+        code = lower_auto_accessors_in_js(&code);
+    }
 
     if had_top_return {
         use cow_utils::CowUtils;
@@ -157,6 +158,8 @@ fn transpile_parsed_oxc_program_with_hook<'a>(
     let has_buffer_dot = memchr::memmem::find(code.as_bytes(), b"Buffer.").is_some();
     if !had_top_return
         && !had_export_empty
+        && !has_accessor
+        && !has_babel_helpers
         && !has_buffer_dot
         && !needs_module_or_require_normalization(&code)
         && let Some(cb) = on_final_ast
@@ -172,26 +175,11 @@ fn transpile_parsed_oxc_program_with_hook<'a>(
 }
 
 /// Production TypeScript & JSX/TSX Compiler powered by **Oxc** (The Oxidation Compiler).
-///
-/// Uses `oxc::allocator::Allocator`, `oxc::parser::Parser`, `oxc::semantic::SemanticBuilder`,
-/// `oxc::transformer::Transformer` (with native JSX/TSX transformation enabled), and
-/// `oxc::codegen::Codegen` to lower TypeScript types, interfaces, enums, generics, and JSX/TSX
-/// elements into clean standard ECMAScript.
 pub fn strip_typescript_raw(source: &str, is_ts: bool) -> String {
     strip_typescript_raw_with_ext(source, is_ts, false)
 }
 
-/// Extension-aware Oxc TypeScript & JSX/TSX compiler:
-/// - When `is_jsx_ext` is `true` (`.tsx` or `.jsx`), parses directly as `SourceType::tsx()`.
-/// - When `is_jsx_ext` is `false` (`.ts` or inline TypeScript), parses as `SourceType::ts()` FIRST
-///   so TypeScript `<T>` generic arrow functions (like `const id = <T>(x: T): T => x`) are never
-///   misinterpreted as JSX tags even if the file also contains HTML strings (`"<div>...</div>"`),
-///   and only retries as `SourceType::tsx()` if `.ts` parsing reported syntax diagnostics.
-/// - Inspects `parser_ret.program.body` directly on the primary AST pass so modules containing
-///   `return` statements inside functions/methods are parsed only ONCE, masking and re-parsing
-///   only when an actual top-level `ReturnStatement` is present.
-/// - Relies directly on `oxc::codegen::Codegen` (`CommentOptions::disabled()`) without running a
-///   redundant post-codegen line-by-line comment stripper.
+/// Extension-aware Oxc TypeScript & JSX/TSX compiler.
 pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool) -> String {
     if source.starts_with("var __slice_modules =") {
         return source.to_string();
@@ -228,7 +216,6 @@ pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool
         "module.ts"
     };
 
-    // If `.ts` parsing had diagnostics, retry with `.tsx` or sloppy script mode
     if !parser_ret.diagnostics.is_empty() && !has_jsx_hint {
         let tsx_type = oxc::span::SourceType::tsx().with_module(true);
         let retry_ret = oxc::parser::Parser::new(&allocator, clean, tsx_type)
@@ -251,8 +238,6 @@ pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool
         }
     }
 
-    // Preserve original lines verbatim when syntax diagnostics exist so downstream error
-    // reporting never suffers shifted line numbers.
     if !parser_ret.diagnostics.is_empty() {
         return source.to_string();
     }
@@ -286,343 +271,136 @@ pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool
     transpile_parsed_oxc_program(&masked_alloc, masked_ret.program, active_path, true, clean)
 }
 
-/// Strips JSDoc/license block comments (`/* ... */`), `//` line comments, and blank lines
-/// at `slice pack` compile time so `boa_engine` does not spend cold-start CPU cycles lexing comments,
-/// while preserving string literals, RegExp literals, and multi-line / nested `${...}` template literals.
-pub fn strip_js_comments(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let len = bytes.len();
-    let mut raw_out = Vec::with_capacity(len);
-    let mut i = 0usize;
+/// Fused syntax-validation + TypeScript/JSX stripping pass for `bundle_entrypoint_with_deps`,
+/// eliminating the redundant pre-strip `check_syntax_source` Oxc parse on every user module.
+pub(crate) fn strip_typescript_checked_for_bundler(
+    source: &str,
+    path: &Path,
+    is_ts: bool,
+    is_jsx_ext: bool,
+) -> Result<String, String> {
+    let clean_cow = blank_leading_shebang(source);
+    let clean = clean_cow.as_ref();
+    let allocator = oxc::allocator::Allocator::default();
+    let parse_opts = oxc::parser::ParseOptions {
+        allow_return_outside_function: true,
+        ..Default::default()
+    };
+    let has_jsx_hint =
+        is_jsx_ext || (is_ts && memchr::memmem::find(clean.as_bytes(), b"@jsx").is_some());
 
-    let mut in_template = false;
-    let mut brace_depth = 0usize;
-    let mut tpl_brace_stack: Vec<usize> = Vec::new();
-    let mut paren_stack: Vec<bool> = Vec::new();
-    let mut after_cond_close_paren = false;
-    let mut prev_sig_byte = 0u8;
-    let mut prev_was_regex_kw = false;
-    let mut prev_was_cond_kw = false;
-
-    let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_' || b == b'$';
-    let is_id_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
-
-    while i < len {
-        if in_template {
-            let b = bytes[i];
-            raw_out.push(b);
-            i += 1;
-            if b == b'\\' && i < len {
-                raw_out.push(bytes[i]);
-                i += 1;
-            } else if b == b'`' {
-                in_template = false;
-                prev_sig_byte = b'`';
-                prev_was_regex_kw = false;
-                prev_was_cond_kw = false;
-                after_cond_close_paren = false;
-            } else if b == b'$' && i < len && bytes[i] == b'{' {
-                raw_out.push(b'{');
-                i += 1;
-                tpl_brace_stack.push(brace_depth);
-                in_template = false;
-                prev_sig_byte = b'{';
-                prev_was_regex_kw = false;
-                prev_was_cond_kw = false;
-                after_cond_close_paren = false;
-            }
-            continue;
-        }
-
-        let b = bytes[i];
-
-        // Whitespace
-        if b == b' ' || b == b'\t' || b == b'\r' || b == b'\n' {
-            if b != b'\r' {
-                raw_out.push(b);
-            }
-            i += 1;
-            continue;
-        }
-
-        // Line comment `// ...`
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
-            i += 2;
-            while i < len && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        // Block comment `/* ... */`
-        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
-            i += 2;
-            let mut had_newline = false;
-            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                if bytes[i] == b'\n' {
-                    had_newline = true;
-                }
-                i += 1;
-            }
-            i = (i + 2).min(len);
-            if had_newline {
-                raw_out.push(b'\n');
-            } else if raw_out.last().is_some_and(|&p| !p.is_ascii_whitespace())
-                && bytes.get(i).is_some_and(|&n| !n.is_ascii_whitespace())
-            {
-                raw_out.push(b' ');
-            }
-            continue;
-        }
-
-        // Quoted string literal
-        if b == b'\'' || b == b'"' {
-            let q = b;
-            raw_out.push(q);
-            i += 1;
-            while i < len {
-                let c = bytes[i];
-                raw_out.push(c);
-                i += 1;
-                if c == b'\\' && i < len {
-                    raw_out.push(bytes[i]);
-                    i += 1;
-                } else if c == q {
-                    break;
-                }
-            }
-            prev_sig_byte = q;
-            prev_was_regex_kw = false;
-            prev_was_cond_kw = false;
-            after_cond_close_paren = false;
-            continue;
-        }
-
-        // Template literal opener
-        if b == b'`' {
-            raw_out.push(b'`');
-            i += 1;
-            in_template = true;
-            continue;
-        }
-
-        // RegExp literal vs division
-        if b == b'/' {
-            let can_start_regex = prev_was_regex_kw
-                || after_cond_close_paren
-                || prev_sig_byte == 0
-                || matches!(
-                    prev_sig_byte,
-                    b'(' | b','
-                        | b'='
-                        | b':'
-                        | b'['
-                        | b'!'
-                        | b'&'
-                        | b'|'
-                        | b'?'
-                        | b'{'
-                        | b'}'
-                        | b';'
-                        | b'+'
-                        | b'-'
-                        | b'*'
-                        | b'%'
-                        | b'^'
-                        | b'~'
-                        | b'<'
-                        | b'>'
-                );
-            if can_start_regex {
-                raw_out.push(b'/');
-                i += 1;
-                let mut in_class = false;
-                while i < len {
-                    let rc = bytes[i];
-                    if rc == b'\n' {
-                        break;
-                    }
-                    raw_out.push(rc);
-                    i += 1;
-                    if rc == b'\\' && i < len {
-                        raw_out.push(bytes[i]);
-                        i += 1;
-                    } else if rc == b'[' {
-                        in_class = true;
-                    } else if rc == b']' {
-                        in_class = false;
-                    } else if rc == b'/' && !in_class {
-                        while i < len && bytes[i].is_ascii_alphabetic() {
-                            raw_out.push(bytes[i]);
-                            i += 1;
-                        }
-                        break;
-                    }
-                }
-                prev_sig_byte = b'/';
-                prev_was_regex_kw = false;
-                prev_was_cond_kw = false;
-                after_cond_close_paren = false;
-                continue;
-            }
-        }
-
-        if b == b'(' {
-            paren_stack.push(prev_was_cond_kw);
-            raw_out.push(b'(');
-            prev_sig_byte = b'(';
-            prev_was_regex_kw = false;
-            prev_was_cond_kw = false;
-            after_cond_close_paren = false;
-            i += 1;
-            continue;
-        }
-        if b == b')' {
-            after_cond_close_paren = paren_stack.pop().unwrap_or(false);
-            raw_out.push(b')');
-            prev_sig_byte = b')';
-            prev_was_regex_kw = false;
-            prev_was_cond_kw = false;
-            i += 1;
-            continue;
-        }
-        if b == b'{' {
-            brace_depth += 1;
-            raw_out.push(b'{');
-            prev_sig_byte = b'{';
-            prev_was_regex_kw = false;
-            prev_was_cond_kw = false;
-            after_cond_close_paren = false;
-            i += 1;
-            continue;
-        }
-        if b == b'}' {
-            raw_out.push(b'}');
-            prev_sig_byte = b'}';
-            prev_was_regex_kw = false;
-            prev_was_cond_kw = false;
-            after_cond_close_paren = false;
-            i += 1;
-            if tpl_brace_stack.last() == Some(&brace_depth) {
-                tpl_brace_stack.pop();
-                in_template = true;
-            } else {
-                brace_depth = brace_depth.saturating_sub(1);
-            }
-            continue;
-        }
-
-        if is_id_start(b) {
-            let start = i;
-            i += 1;
-            while i < len && is_id_cont(bytes[i]) {
-                i += 1;
-            }
-            raw_out.extend_from_slice(&bytes[start..i]);
-            let ident = &source[start..i];
-            let is_dot_prop =
-                prev_sig_byte == b'.' && !(start >= 3 && &bytes[start - 3..start] == b"...");
-            prev_was_regex_kw = !is_dot_prop
-                && matches!(
-                    ident,
-                    "return"
-                        | "typeof"
-                        | "void"
-                        | "delete"
-                        | "in"
-                        | "of"
-                        | "instanceof"
-                        | "case"
-                        | "throw"
-                        | "else"
-                        | "do"
-                        | "new"
-                        | "yield"
-                        | "await"
-                );
-            prev_was_cond_kw = !is_dot_prop && matches!(ident, "if" | "while" | "for" | "with");
-            after_cond_close_paren = false;
-            prev_sig_byte = bytes[i - 1];
-            continue;
-        }
-
-        raw_out.push(b);
-        prev_sig_byte = b;
-        prev_was_regex_kw = false;
-        prev_was_cond_kw = false;
-        after_cond_close_paren = false;
-        i += 1;
-    }
-
-    // Compact blank lines Outside template literals while preserving multi-line templates verbatim:
-    let stripped_str = String::from_utf8(raw_out).unwrap_or_else(|_| source.to_string());
-    let mut out = String::with_capacity(stripped_str.len());
-    let mut tpl_state = false;
-    let mut tpl_braces: Vec<usize> = Vec::new();
-    let mut b_depth = 0usize;
-    for line in stripped_str.split('\n') {
-        if !tpl_state && line.trim().is_empty() {
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-        let lb = line.as_bytes();
-        let mut li = 0usize;
-        while li < lb.len() {
-            if tpl_state {
-                if lb[li] == b'\\' {
-                    li = (li + 2).min(lb.len());
-                    continue;
-                }
-                if lb[li] == b'`' {
-                    tpl_state = false;
-                } else if lb[li] == b'$' && li + 1 < lb.len() && lb[li + 1] == b'{' {
-                    tpl_braces.push(b_depth);
-                    tpl_state = false;
-                    li += 2;
-                    continue;
-                }
-                li += 1;
-                continue;
-            }
-            let c = lb[li];
-            if c == b'\'' || c == b'"' {
-                let q = c;
-                li += 1;
-                while li < lb.len() {
-                    if lb[li] == b'\\' {
-                        li = (li + 2).min(lb.len());
-                        continue;
-                    }
-                    if lb[li] == q {
-                        li += 1;
-                        break;
-                    }
-                    li += 1;
-                }
-                continue;
-            }
-            if c == b'`' {
-                tpl_state = true;
-            } else if c == b'{' {
-                b_depth += 1;
-            } else if c == b'}' {
-                if tpl_braces.last() == Some(&b_depth) {
-                    tpl_braces.pop();
-                    tpl_state = true;
+    if !has_jsx_hint && !may_contain_ts_or_jsx(clean) {
+        let mjs_ret = oxc::parser::Parser::new(&allocator, clean, oxc::span::SourceType::mjs())
+            .with_options(parse_opts)
+            .parse();
+        if mjs_ret.diagnostics.is_empty()
+            && extract_top_level_return_spans(&mjs_ret.program, clean).is_empty()
+            && !program_has_ts_or_jsx(&mjs_ret.program)
+        {
+            drop(mjs_ret);
+            return Ok(
+                if memchr::memmem::find(clean.as_bytes(), b"Buffer.").is_some() {
+                    rewrite_buffer_fast_paths_ast(clean)
                 } else {
-                    b_depth = b_depth.saturating_sub(1);
-                }
-            }
-            li += 1;
+                    clean_cow.into_owned()
+                },
+            );
         }
     }
 
-    if out.contains("Buffer.") {
-        rewrite_buffer_fast_paths_ast(&out)
+    let mut active_source_type = if has_jsx_hint {
+        oxc::span::SourceType::tsx().with_module(true)
     } else {
-        out
+        oxc::span::SourceType::ts().with_module(true)
+    };
+    let mut parser_ret = oxc::parser::Parser::new(&allocator, clean, active_source_type)
+        .with_options(parse_opts)
+        .parse();
+    let mut active_path = if has_jsx_hint {
+        "module.tsx"
+    } else {
+        "module.ts"
+    };
+
+    if !parser_ret.diagnostics.is_empty() && !has_jsx_hint {
+        let tsx_type = oxc::span::SourceType::tsx().with_module(true);
+        let retry_ret = oxc::parser::Parser::new(&allocator, clean, tsx_type)
+            .with_options(parse_opts)
+            .parse();
+        if retry_ret.diagnostics.is_empty() {
+            parser_ret = retry_ret;
+            active_source_type = tsx_type;
+            active_path = "module.tsx";
+        }
     }
+    if !parser_ret.diagnostics.is_empty() {
+        let script_ts = oxc::span::SourceType::ts().with_module(false);
+        let retry_script = oxc::parser::Parser::new(&allocator, clean, script_ts)
+            .with_options(parse_opts)
+            .parse();
+        if retry_script.diagnostics.is_empty() {
+            parser_ret = retry_script;
+            active_source_type = script_ts;
+        } else {
+            for sloppy_js in [
+                oxc::span::SourceType::cjs(),
+                oxc::span::SourceType::default(),
+            ] {
+                let retry_js = oxc::parser::Parser::new(&allocator, clean, sloppy_js)
+                    .with_options(parse_opts)
+                    .parse();
+                if retry_js.diagnostics.is_empty() {
+                    drop(retry_js);
+                    return Ok(
+                        if memchr::memmem::find(clean.as_bytes(), b"Buffer.").is_some() {
+                            rewrite_buffer_fast_paths_ast(clean)
+                        } else {
+                            clean_cow.into_owned()
+                        },
+                    );
+                }
+            }
+            let diag = extract_oxc_syntax_diagnostic(clean, &parser_ret.diagnostics[0]);
+            return Err(diag.to_labeled_error_string(&path.display().to_string()));
+        }
+    }
+
+    let top_ret_spans = extract_top_level_return_spans(&parser_ret.program, clean);
+    if top_ret_spans.is_empty() {
+        if !has_jsx_hint && !program_has_ts_or_jsx(&parser_ret.program) {
+            return Ok(
+                if memchr::memmem::find(clean.as_bytes(), b"Buffer.").is_some() {
+                    rewrite_buffer_fast_paths_ast(clean)
+                } else {
+                    clean_cow.into_owned()
+                },
+            );
+        }
+        return Ok(transpile_parsed_oxc_program(
+            &allocator,
+            parser_ret.program,
+            active_path,
+            false,
+            clean,
+        ));
+    }
+
+    let masked_source = build_masked_top_level_returns(clean, &top_ret_spans);
+    let masked_alloc = oxc::allocator::Allocator::default();
+    let masked_ret = oxc::parser::Parser::new(&masked_alloc, &masked_source, active_source_type)
+        .with_options(parse_opts)
+        .parse();
+    if !masked_ret.diagnostics.is_empty() {
+        let diag = extract_oxc_syntax_diagnostic(clean, &masked_ret.diagnostics[0]);
+        return Err(diag.to_labeled_error_string(&path.display().to_string()));
+    }
+    Ok(transpile_parsed_oxc_program(
+        &masked_alloc,
+        masked_ret.program,
+        active_path,
+        true,
+        clean,
+    ))
 }
 
 pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
@@ -630,30 +408,26 @@ pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
 }
 
 fn normalize_transpiled_module_js(mut js_code: String) -> String {
-    if ((js_code.contains("import ")
-        && (js_code.contains("node:")
-            || js_code.contains("slice:")
-            || js_code.contains("bun:")
-            || js_code.contains("cloudflare:")
-            || js_code.contains("worker_threads")
-            || js_code.contains("\"net\"")
-            || js_code.contains("'net'")
-            || js_code.contains("\"dgram\"")
-            || js_code.contains("'dgram'")
-            || js_code.contains("jsx-runtime")))
-        || js_code.contains("export default "))
-        && !js_code.contains("var __slice_modules =")
-    {
+    if has_standalone_builtin_import_or_cjs_export(&js_code) {
         let mut dummy_deps = Vec::new();
-        js_code = transform_module_to_cjs(&js_code, Path::new("."), None, &mut dummy_deps);
+        js_code = transform_module_to_cjs(
+            &js_code,
+            Path::new(VIRTUAL_NO_FS_DIR),
+            None,
+            &mut dummy_deps,
+        );
         if has_esm_default_export_marker(&js_code) {
             let digest = blake3::hash(js_code.as_bytes());
             let rc_u64 = u64::from_le_bytes(digest.as_bytes()[0..8].try_into().unwrap());
             let rc_key = format!("{:016x}", rc_u64);
             let direct_body = rewrite_cjs_require(&js_code);
             return format!(
-                "var __slice_modules = {{}};//__SLICE_RC:{}\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{}\"] = function() {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{}\n__h = exports.__esModule ? exports.default : module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n",
-                rc_key, rc_key, rc_key, direct_body
+                "var __slice_modules = {{}};//__SLICE_RC:{rc_key}\nif (typeof globalThis.__slice_cas_exports === \"object\" && globalThis.__slice_cas_exports !== null) {{\nvar exports = globalThis.__slice_cas_exports, module = globalThis.__slice_cas_module;\n{direct_body}\n}} else {{\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{rc_key}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{rc_key}\"] = function() {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{direct_body}\n__h = exports.__esModule ? exports.default : module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n}}\n"
+            );
+        }
+        if memchr::memmem::find(js_code.as_bytes(), b"exports").is_some() {
+            js_code = format!(
+                "var exports = (typeof globalThis.__slice_cas_exports === \"object\" && globalThis.__slice_cas_exports !== null) ? globalThis.__slice_cas_exports : {{}}, module = (typeof globalThis.__slice_cas_module === \"object\" && globalThis.__slice_cas_module !== null) ? globalThis.__slice_cas_module : {{ exports: exports }};\n{js_code}"
             );
         }
     }
@@ -662,6 +436,12 @@ fn normalize_transpiled_module_js(mut js_code: String) -> String {
     } else {
         js_code
     }
+}
+
+/// Lowers any unbundled ESM `import`/`export` statements into CJS (`__slice_cjs_require` +
+/// `exports` / `module.exports`) with zero host `stat()` syscalls.
+pub fn lower_unbundled_esm(js_code: &str) -> String {
+    lower_unbundled_esm_for_boa(js_code, rewrite_cjs_require)
 }
 
 pub fn strip_typescript_and_normalize_with_ext(
@@ -679,23 +459,7 @@ fn needs_module_or_require_normalization(js_code: &str) -> bool {
     if memchr::memmem::find(bytes, b"require(").is_some() {
         return true;
     }
-    if memchr::memmem::find(bytes, b"var __slice_modules =").is_some() {
-        return false;
-    }
-    if memchr::memmem::find(bytes, b"export default ").is_some() {
-        return true;
-    }
-    memchr::memmem::find(bytes, b"import ").is_some()
-        && (memchr::memmem::find(bytes, b"node:").is_some()
-            || memchr::memmem::find(bytes, b"slice:").is_some()
-            || memchr::memmem::find(bytes, b"bun:").is_some()
-            || memchr::memmem::find(bytes, b"cloudflare:").is_some()
-            || memchr::memmem::find(bytes, b"worker_threads").is_some()
-            || memchr::memmem::find(bytes, b"\"net\"").is_some()
-            || memchr::memmem::find(bytes, b"'net'").is_some()
-            || memchr::memmem::find(bytes, b"\"dgram\"").is_some()
-            || memchr::memmem::find(bytes, b"'dgram'").is_some()
-            || memchr::memmem::find(bytes, b"jsx-runtime").is_some())
+    has_standalone_builtin_import_or_cjs_export(js_code)
 }
 
 fn maybe_invoke_ast_hook_for_pure_js(
@@ -724,11 +488,7 @@ fn finalize_pure_js_cow(clean_cow: Cow<'_, str>) -> Cow<'_, str> {
     Cow::Owned(normalize_transpiled_module_js(fast_js))
 }
 
-/// Single-pass syntax-checked TypeScript/JSX/ECMAScript compiler for `compile_source_to_bytecode`:
-/// - Returns `Err(SyntaxErrorDiagnostic)` with exact 1-based `(line, col)` in `source` when invalid.
-/// - Preserves pure-ECMAScript source lines and columns verbatim (`Cow::Borrowed` with zero codegen).
-/// - Attaches an inline `//@sm:||<line_map>` header when TypeScript lowering alters line counts so
-///   semantic early errors and runtime stack frames map back to original lines.
+/// Single-pass syntax-checked TypeScript/JSX/ECMAScript compiler for `compile_source_to_bytecode`.
 pub fn compile_ts_or_js_checked(
     source: &str,
     is_ts: bool,
@@ -737,9 +497,8 @@ pub fn compile_ts_or_js_checked(
     compile_ts_or_js_checked_with_ast_hook(source, is_ts, is_jsx_ext, |_| {}).map(Cow::into_owned)
 }
 
-/// Borrow-preserving variant of [`compile_ts_or_js_checked`] that invokes `on_final_ast` with the
-/// already-parsed (and, when TypeScript was lowered, post-transform) Oxc `Program` whenever no
-/// post-AST textual module/Buffer rewrite modified the code, eliminating redundant downstream Oxc parses.
+/// Borrow-preserving variant of [`compile_ts_or_js_checked`] invoking `on_final_ast` with the
+/// already-parsed (and, when TypeScript was lowered, post-transform) Oxc `Program`.
 pub fn compile_ts_or_js_checked_with_ast_hook<'a, F>(
     source: &'a str,
     is_ts: bool,
@@ -770,6 +529,7 @@ where
             .parse();
         if mjs_ret.diagnostics.is_empty()
             && extract_top_level_return_spans(&mjs_ret.program, clean).is_empty()
+            && !program_has_ts_or_jsx(&mjs_ret.program)
         {
             maybe_invoke_ast_hook_for_pure_js(
                 clean,
@@ -923,8 +683,6 @@ pub fn rewrite_cjs_require(source: &str) -> String {
 }
 
 /// Validates JS/TS/JSX/TSX syntax using Oxc's parser (`oxc::parser::Parser`).
-/// Returns `Ok(())` if the source has no syntax errors, or `Err(SyntaxError message)` with exact
-/// 1-based `(line, col)` coordinates if invalid.
 pub fn check_syntax_source(source: &str, path_hint: Option<&Path>) -> Result<(), String> {
     let file_label = path_hint
         .map(|p| p.display().to_string())

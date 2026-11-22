@@ -10,7 +10,7 @@ pub mod reader;
 pub mod static_assets;
 
 pub use builder::CasBuilder;
-pub use reader::{MappedCasArchive, embed_cas_into_executable};
+pub use reader::{MappedCasArchive, embed_cas_into_executable, inspect_sliceexe_trailer};
 pub use static_assets::{
     StaticAssetEntry, StaticAssetPayload, StaticAssetTable, detect_static_mime_type,
 };
@@ -51,6 +51,9 @@ pub struct CasIndexHeader {
     /// Compact source-line table (`(compacted_line_1, "#slice-source payload")`) for `.cas` and `SLICEEXE` stack traces
     #[serde(default)]
     pub source_map_markers: Vec<(usize, String)>,
+    /// Per-blob source-line marker table keyed by `hash_hex` for multi-module `.cas` archives
+    #[serde(default)]
+    pub blob_source_map_markers: FxHashMap<String, Vec<(usize, String)>>,
     /// Optional BLAKE3 hash of the project's lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`)
     #[serde(default)]
     pub lockfile_blake3: Option<String>,

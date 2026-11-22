@@ -10,6 +10,21 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[inline]
+fn strip_single_module_ext(spec: &str) -> &str {
+    for ext in [".tsx", ".mts", ".cts", ".ts", ".jsx", ".mjs", ".cjs", ".js"] {
+        if let Some(stem) = spec.strip_suffix(ext) {
+            return stem;
+        }
+    }
+    spec
+}
+
+#[inline]
+fn is_ts_declaration_filename(name: &str) -> bool {
+    name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts")
+}
+
 /// Builder for constructing a Zero-Stat Content-Addressed Storage (`.cas`) archive.
 pub struct CasBuilder {
     entrypoint: String,
@@ -147,6 +162,10 @@ impl CasBuilder {
                         "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts"
                     )
                 {
+                    let fname = entry.file_name();
+                    if is_ts_declaration_filename(&fname.to_string_lossy()) {
+                        continue;
+                    }
                     let rel = path
                         .strip_prefix(root_dir)
                         .unwrap_or(&path)
@@ -230,11 +249,20 @@ impl CasBuilder {
         let mut blobs = FxHashMap::default();
         let mut data_payload: Vec<u8> = Vec::new();
         let mut entry_hash = String::new();
-        let mut source_map_markers: Vec<(usize, String)> = Vec::new();
+        let mut exact_entry_matched = false;
+        let mut blob_source_map_markers: FxHashMap<String, Vec<(usize, String)>> =
+            FxHashMap::default();
+        let mut first_nonempty_markers: Vec<(usize, String)> = Vec::new();
+        let entry_norm = self
+            .entrypoint
+            .strip_prefix("./")
+            .unwrap_or(&self.entrypoint);
+        let entry_stripped = strip_single_module_ext(&self.entrypoint);
 
         for (specifier, _path, normalized_source, bytecode) in &self.modules {
             let is_static = specifier.starts_with("static:/");
             let is_manifest = specifier == "manifest:/slice.toml";
+            let mut module_markers: Vec<(usize, String)> = Vec::new();
             if !is_static && !is_manifest && normalized_source.contains("// #slice-source: ") {
                 let mut compacted_line_1 = 1usize;
                 for (idx, line) in normalized_source.lines().enumerate() {
@@ -244,7 +272,7 @@ impl CasBuilder {
                     }
                     let trimmed = line.trim();
                     if let Some(rest) = trimmed.strip_prefix("// #slice-source: ") {
-                        source_map_markers.push((compacted_line_1, rest.to_string()));
+                        module_markers.push((compacted_line_1, rest.to_string()));
                         continue;
                     }
                     if trimmed.is_empty() || trimmed.starts_with("//") {
@@ -272,6 +300,14 @@ impl CasBuilder {
                 hasher.update(bytecode);
                 hasher.finalize().to_hex().to_string()
             };
+            if !module_markers.is_empty() {
+                if first_nonempty_markers.is_empty() {
+                    first_nonempty_markers.clone_from(&module_markers);
+                }
+                blob_source_map_markers
+                    .entry(hash_hex.clone())
+                    .or_insert(module_markers);
+            }
 
             radix_map.insert(specifier.clone(), hash_hex.clone());
             if is_static {
@@ -282,35 +318,38 @@ impl CasBuilder {
                     radix_map.insert(format!("{}/", dir_prefix), hash_hex.clone());
                 }
             } else if !is_manifest {
-                let stripped_ext = specifier
-                    .trim_end_matches(".tsx")
-                    .trim_end_matches(".ts")
-                    .trim_end_matches(".mts")
-                    .trim_end_matches(".cts")
-                    .trim_end_matches(".jsx")
-                    .trim_end_matches(".js")
-                    .trim_end_matches(".mjs")
-                    .trim_end_matches(".cjs")
-                    .to_string();
-                radix_map.insert(stripped_ext.clone(), hash_hex.clone());
-                if let Some(bare) = stripped_ext.strip_prefix("./") {
-                    radix_map.insert(bare.to_string(), hash_hex.clone());
+                let spec_norm = specifier.strip_prefix("./").unwrap_or(specifier.as_str());
+                if spec_norm != specifier {
+                    radix_map
+                        .entry(spec_norm.to_string())
+                        .or_insert_with(|| hash_hex.clone());
                 }
-
-                if *specifier == self.entrypoint
-                    || stripped_ext
-                        == self
-                            .entrypoint
-                            .trim_end_matches(".tsx")
-                            .trim_end_matches(".ts")
-                            .trim_end_matches(".mts")
-                            .trim_end_matches(".cts")
-                            .trim_end_matches(".jsx")
-                            .trim_end_matches(".js")
-                            .trim_end_matches(".mjs")
-                            .trim_end_matches(".cjs")
-                {
+                let is_exact_entry = *specifier == self.entrypoint || spec_norm == entry_norm;
+                let stripped_ext = strip_single_module_ext(specifier).to_string();
+                if is_exact_entry {
+                    radix_map.insert(stripped_ext.clone(), hash_hex.clone());
+                    if let Some(bare) = stripped_ext.strip_prefix("./") {
+                        radix_map.insert(bare.to_string(), hash_hex.clone());
+                    }
                     entry_hash = hash_hex.clone();
+                    exact_entry_matched = true;
+                } else {
+                    radix_map
+                        .entry(stripped_ext.clone())
+                        .or_insert_with(|| hash_hex.clone());
+                    if let Some(bare) = stripped_ext.strip_prefix("./") {
+                        radix_map
+                            .entry(bare.to_string())
+                            .or_insert_with(|| hash_hex.clone());
+                    }
+                    if !exact_entry_matched
+                        && entry_hash.is_empty()
+                        && !is_ts_declaration_filename(specifier)
+                        && (stripped_ext == entry_stripped
+                            || stripped_ext.strip_prefix("./") == entry_stripped.strip_prefix("./"))
+                    {
+                        entry_hash = hash_hex.clone();
+                    }
                 }
             }
 
@@ -320,7 +359,9 @@ impl CasBuilder {
                     data_payload.resize(data_payload.len() + (CACHE_LINE_ALIGN - rem), 0);
                 }
                 let source_bytes = normalized_source.as_bytes();
-                let (source_offset, source_len, bytecode_offset) = if bytecode.len() >= 36
+                let (source_offset, source_len, bytecode_offset) = if !is_static
+                    && !is_manifest
+                    && bytecode.len() >= 36
                     && &bytecode[0..8] == b"SLICEBC\x01"
                 {
                     let pre_len = u32::from_le_bytes([
@@ -357,14 +398,18 @@ impl CasBuilder {
                         data_payload.extend_from_slice(bytecode);
                         (src_off, source_bytes.len() as u64, bc_off)
                     }
-                } else if bytecode.len() >= 12
+                } else if !is_static
+                    && !is_manifest
+                    && bytecode.len() >= 12
                     && &bytecode[0..10] == b"SLICEBOA{\n"
                     && &bytecode[bytecode.len() - 2..] == b"\n}"
                 {
                     let bc_off = data_payload.len() as u64;
                     data_payload.extend_from_slice(bytecode);
                     (bc_off + 10, (bytecode.len() - 12) as u64, bc_off)
-                } else if bytecode.len() == source_bytes.len() + 8
+                } else if !is_static
+                    && !is_manifest
+                    && bytecode.len() == source_bytes.len() + 8
                     && &bytecode[0..8] == b"SLICEBOA"
                     && &bytecode[8..] == source_bytes
                 {
@@ -401,11 +446,21 @@ impl CasBuilder {
             }
         }
 
-        if entry_hash.is_empty()
-            && let Some((_, first_hash)) = radix_map.iter().next()
-        {
-            entry_hash = first_hash.clone();
+        if entry_hash.is_empty() {
+            if let Some((_, first_mod_hash)) = radix_map
+                .iter()
+                .find(|(k, _)| !k.starts_with("static:/") && k.as_str() != "manifest:/slice.toml")
+            {
+                entry_hash = first_mod_hash.clone();
+            } else if let Some((_, first_hash)) = radix_map.iter().next() {
+                entry_hash = first_hash.clone();
+            }
         }
+
+        let source_map_markers = blob_source_map_markers
+            .get(&entry_hash)
+            .cloned()
+            .unwrap_or(first_nonempty_markers);
 
         let header = CasIndexHeader {
             version: CAS_VERSION,
@@ -414,6 +469,7 @@ impl CasBuilder {
             radix_resolution_map: radix_map,
             blobs,
             source_map_markers,
+            blob_source_map_markers,
             lockfile_blake3: self.lockfile_blake3.clone(),
             resolved_dependencies: self.resolved_dependencies.clone(),
         };

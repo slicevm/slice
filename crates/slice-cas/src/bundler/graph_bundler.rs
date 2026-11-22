@@ -3,7 +3,10 @@
 use crate::bundler::{
     ResolverCacheGuard, compute_source_line_map, short_source_label, strip_jsonc,
 };
-use crate::compiler::{rewrite_cjs_require, source_contains_jsx, strip_typescript_raw_with_ext};
+use crate::compiler::{
+    rewrite_cjs_require, source_contains_jsx, strip_typescript_checked_for_bundler,
+    strip_typescript_raw_with_ext,
+};
 use crate::linker::{
     ModuleRequireSummary, UsedExports, analyze_module_used_exports_from_summaries,
     canonical_mod_id, collect_eager_module_indices, extract_module_require_summary,
@@ -21,6 +24,13 @@ fn entrypoint_needs_bundler_ac() -> &'static aho_corasick::AhoCorasick {
     AC.get_or_init(|| {
         aho_corasick::AhoCorasick::new([
             "import ",
+            "import{",
+            "import*",
+            "import\"",
+            "import'",
+            "import\n",
+            "import\r",
+            "import\t",
             "import(",
             "import.meta",
             "__dirname",
@@ -28,6 +38,12 @@ fn entrypoint_needs_bundler_ac() -> &'static aho_corasick::AhoCorasick {
             "throw ",
             "require(",
             "export ",
+            "export{",
+            "export*",
+            "export=",
+            "export\n",
+            "export\r",
+            "export\t",
             "class ",
             "Slice.",
             "Buffer.",
@@ -116,20 +132,15 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
             return Ok(mod_id);
         }
 
-        if !mod_id.contains("/node_modules/") {
-            crate::compiler::check_syntax_source(&raw_src, Some(path))
-                .map_err(anyhow::Error::msg)?;
-        }
-
-        let effective_src = if mod_id.contains("/node_modules/") {
-            maybe_rewrite_unmodified_npm_cjs_module(&mod_id, &raw_src)
-        } else {
-            std::borrow::Cow::Borrowed(raw_src.as_str())
-        };
-
         let is_ts = matches!(ext, "ts" | "tsx" | "jsx" | "mts" | "cts");
         let is_jsx_ext = matches!(ext, "tsx" | "jsx");
-        let js_stripped = strip_typescript_raw_with_ext(&effective_src, is_ts, is_jsx_ext);
+        let js_stripped = if mod_id.contains("/node_modules/") {
+            let effective_src = maybe_rewrite_unmodified_npm_cjs_module(&mod_id, &raw_src);
+            strip_typescript_raw_with_ext(&effective_src, is_ts, is_jsx_ext)
+        } else {
+            strip_typescript_checked_for_bundler(&raw_src, path, is_ts, is_jsx_ext)
+                .map_err(anyhow::Error::msg)?
+        };
         let from_dir = path.parent().unwrap_or_else(|| Path::new("."));
         let mut child_deps = Vec::new();
         let mut cjs_body =

@@ -25,7 +25,7 @@ pub use linker as esm_cjs_linker;
 pub use archive::{
     Blake3Hash, CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION, CasBlobEntry, CasBuilder, CasIndexHeader,
     MappedCasArchive, StaticAssetEntry, StaticAssetPayload, StaticAssetTable,
-    detect_static_mime_type, embed_cas_into_executable,
+    detect_static_mime_type, embed_cas_into_executable, inspect_sliceexe_trailer,
 };
 pub use bundler::{
     bundle_entrypoint_with_deps, map_bundled_error_location,
@@ -36,8 +36,8 @@ pub use compiler::{
     SyntaxErrorDiagnostic, TypeDirectedHints, analyze_typescript_semantics,
     byte_offset_to_line_col, check_syntax_source, check_syntax_source_detailed,
     compile_ts_or_js_checked, compile_ts_or_js_checked_with_ast_hook, fuse_array_pipelines_ast,
-    program_has_ts_or_jsx, strip_typescript_and_normalize, strip_typescript_and_normalize_with_ext,
-    strip_typescript_raw, strip_typescript_raw_with_ext,
+    lower_unbundled_esm, program_has_ts_or_jsx, strip_typescript_and_normalize,
+    strip_typescript_and_normalize_with_ext, strip_typescript_raw, strip_typescript_raw_with_ext,
 };
 pub use linker::{has_top_level_await, wrap_top_level_await_script};
 
