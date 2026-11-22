@@ -1,10 +1,13 @@
 //! Top-Level Bytecode Dispatcher (`SLICEBC\x01`, `SLICEBOA`, `SLICESNP`) and Tier-2 SIMD/Native Kernels.
 
-use crate::boa_realm::BOA_HTTP_RES;
+use crate::boa_realm::{ActiveCasArchiveGuard, BOA_HTTP_RES};
 use crate::isolate::{ControlFlow, ExecutionMetrics, SliceIsolate};
 use crate::parser_and_compiler::decode_slicesnp_cached;
+use crate::slicesnp_codec::{
+    SLICESNP_FLAG_FLAT_LLINT, SLICESNP_FLAG_PURE_STATIC_EXPORTS, SLICESNP_V2_VERSION,
+};
 use crate::value_and_ast::{
-    BytecodeModule, BytecodeOp, ExecutionTier, JsValue, SNAPSHOT_MAGIC, TIER1_PROMOTION_THRESHOLD,
+    BytecodeOp, ExecutionTier, JsValue, SNAPSHOT_MAGIC, TIER1_PROMOTION_THRESHOLD,
 };
 use slice_cas::MappedCasArchive;
 use slice_sandbox::SandboxViolation;
@@ -51,6 +54,7 @@ impl SliceIsolate {
             let initial_charge = base_fuel.min(self.compartment.fuel_limit.max(1));
             self.compartment.consume_fuel(initial_charge)?;
             self.current_tier = ExecutionTier::Tier1Baseline;
+            let mut cas_guard = ActiveCasArchiveGuard::enter(cas);
             let last_val = if &bytecode[0..8] == crate::boacas::BOACAS_MAGIC {
                 if crate::boacas::is_exper_boacas_runtime_enabled() {
                     if let Some((hdr, precompiled_slice, fallback_js_bytes)) =
@@ -81,6 +85,7 @@ impl SliceIsolate {
                 let js_code = simdutf8::basic::from_utf8(&bytecode[8..]).unwrap_or_default();
                 self.exec_boa_full_es_vm(js_code)?
             };
+            self.cas_modules_resolved += cas_guard.finish();
             let has_secrets = !self.egress_audit_secrets.is_empty();
             let has_custom_http_res =
                 !need_return_str && BOA_HTTP_RES.with(|res| res.borrow().is_some());
@@ -130,6 +135,15 @@ impl SliceIsolate {
             }
         }
 
+        if bytecode.len() >= 10
+            && &bytecode[0..8] == SNAPSHOT_MAGIC
+            && bytecode[8] == SLICESNP_V2_VERSION
+            && (bytecode[9] & !(SLICESNP_FLAG_PURE_STATIC_EXPORTS | SLICESNP_FLAG_FLAT_LLINT)) == 0
+            && (bytecode[9] & (SLICESNP_FLAG_FLAT_LLINT | SLICESNP_FLAG_PURE_STATIC_EXPORTS)) != 0
+        {
+            return self.execute_slicesnp_v2_flat_llint(bytecode, cas, start, need_return_str);
+        }
+
         let module = decode_slicesnp_cached(bytecode);
         self.current_tier = ExecutionTier::Tier0LLIntSnapshot;
         self.pending_tier0_throw = None;
@@ -138,66 +152,58 @@ impl SliceIsolate {
 
         let instantiate_ns = start.elapsed().as_nanos() as u64;
         let mut last_val = JsValue::Undefined;
+        let entry_referrer = cas
+            .and_then(|a| a.entrypoint_blob())
+            .map(|e| e.original_specifier.as_str());
 
         for op in &module.ops {
             self.compartment.consume_fuel(1)?;
 
             match op {
                 BytecodeOp::ConstNum { dst, val } => {
-                    self.env_vars.insert(dst.clone(), JsValue::Number(*val));
+                    self.set_env_var_str(dst, JsValue::Number(*val));
                     last_val = JsValue::Number(*val);
                 }
                 BytecodeOp::ConstStr { dst, val } => {
                     self.compartment.alloc_memory(val.len())?;
                     let v = JsValue::str(val.clone());
-                    self.env_vars.insert(dst.clone(), v.clone());
+                    self.set_env_var_str(dst, v.clone());
                     last_val = v;
                 }
                 BytecodeOp::ImportCas { dst, specifier } => {
-                    self.cas_modules_resolved += 1;
                     if let Some(archive) = cas
-                        && let Some(entry) = archive.resolve_specifier(specifier)
+                        && let Some(entry) =
+                            archive.resolve_specifier_from(entry_referrer, specifier)
                     {
-                        let child_bc = archive.get_bytecode_slice(entry);
-                        if child_bc.len() >= 8
-                            && &child_bc[0..8] == SNAPSHOT_MAGIC
-                            && let Ok(child_mod) =
-                                serde_json::from_slice::<BytecodeModule>(&child_bc[8..])
-                        {
-                            for (k, v) in &child_mod.static_exports {
-                                self.env_vars.insert(k.clone(), JsValue::Number(*v));
-                            }
-                            if let Some((_, first_v)) = child_mod.static_exports.iter().next() {
-                                self.env_vars.insert(dst.clone(), JsValue::Number(*first_v));
-                            }
-                        }
+                        let mut active_hashes = Vec::new();
+                        self.bind_tier0_cas_entry(archive, entry, dst, &mut active_hashes)?;
                     }
                 }
                 BytecodeOp::AddNum { dst, lhs, rhs } => {
                     let a = self
                         .env_vars
-                        .get(lhs)
+                        .get(lhs.as_str())
                         .map(|v| v.to_number())
                         .or_else(|| lhs.parse::<f64>().ok())
                         .unwrap_or(0.0);
                     let b = self
                         .env_vars
-                        .get(rhs)
+                        .get(rhs.as_str())
                         .map(|v| v.to_number())
                         .or_else(|| rhs.parse::<f64>().ok())
                         .unwrap_or(0.0);
                     let sum = a + b;
-                    self.env_vars.insert(dst.clone(), JsValue::Number(sum));
+                    self.set_env_var_str(dst, JsValue::Number(sum));
                     last_val = JsValue::Number(sum);
                 }
                 BytecodeOp::NumericLoopKernel { dst, iterations } => {
                     let val = self.exec_numeric_loop_kernel(*iterations)?;
-                    self.env_vars.insert(dst.clone(), val.clone());
+                    self.set_env_var_str(dst, val.clone());
                     last_val = val;
                 }
                 BytecodeOp::FibKernel { dst, n } => {
                     let val = self.exec_fib_kernel(*n)?;
-                    self.env_vars.insert(dst.clone(), val.clone());
+                    self.set_env_var_str(dst, val.clone());
                     last_val = val;
                 }
                 BytecodeOp::CryptoDigest {
@@ -206,7 +212,7 @@ impl SliceIsolate {
                     rounds,
                 } => {
                     let val = self.exec_crypto_digest(payload, *rounds)?;
-                    self.env_vars.insert(dst.clone(), val.clone());
+                    self.set_env_var_str(dst, val.clone());
                     last_val = val;
                 }
                 BytecodeOp::JsonTransform {
@@ -220,12 +226,12 @@ impl SliceIsolate {
                         serde_json::from_str(json_payload).unwrap_or(serde_json::Value::Null);
                     let out = serde_json::to_string(&parsed).unwrap_or_default();
                     let val = JsValue::str(out);
-                    self.env_vars.insert(dst.clone(), val.clone());
+                    self.set_env_var_str(dst, val.clone());
                     last_val = val;
                 }
                 BytecodeOp::WinterTcRoute { dst, method, url } => {
                     let val = self.exec_wintertc_route(method, url)?;
-                    self.env_vars.insert(dst.clone(), val.clone());
+                    self.set_env_var_str(dst, val.clone());
                     last_val = val;
                 }
                 BytecodeOp::MutateIntrinsic { target } => {
@@ -234,34 +240,40 @@ impl SliceIsolate {
                 BytecodeOp::VfsRead { dst, path } => {
                     self.compartment.verify_fs_read(path)?;
                     let val = JsValue::str(format!("CAS_VIRTUAL_FILE[{}]", path));
-                    self.env_vars.insert(dst.clone(), val.clone());
+                    self.set_env_var_str(dst, val.clone());
                     last_val = val;
                 }
                 BytecodeOp::NetFetch { dst, host, path } => {
                     self.compartment.verify_net_connect(host)?;
                     let val = JsValue::str(format!("HTTP/2 200 OK from {}{}", host, path));
-                    self.env_vars.insert(dst.clone(), val.clone());
+                    self.set_env_var_str(dst, val.clone());
                     last_val = val;
                 }
                 BytecodeOp::EnvGet { dst, key } => {
                     let s = self.compartment.verify_env_read(key)?.to_string();
                     let val = JsValue::str(s);
-                    self.env_vars.insert(dst.clone(), val.clone());
+                    self.set_env_var_str(dst, val.clone());
                     last_val = val;
                 }
                 BytecodeOp::ConsoleLog { expr } => {
                     let v = self
                         .env_vars
-                        .get(expr)
+                        .get(expr.as_str())
                         .cloned()
                         .unwrap_or_else(|| JsValue::str(expr.clone()));
                     self.stdout.push(v.to_string());
                     last_val = v;
                 }
+                BytecodeOp::ConsoleLogVar { var } => {
+                    last_val = self.exec_console_log_var(var);
+                }
+                BytecodeOp::AddAssignVar { dst, src } => {
+                    last_val = self.exec_add_assign_var(dst, src)?;
+                }
                 BytecodeOp::ReturnVar { var } => {
                     last_val = self
                         .env_vars
-                        .get(var)
+                        .get(var.as_str())
                         .cloned()
                         .unwrap_or(JsValue::Undefined);
                     break;
@@ -283,7 +295,7 @@ impl SliceIsolate {
                     }
                     let mut acc = self
                         .env_vars
-                        .get(acc_var)
+                        .get(acc_var.as_str())
                         .map(|v| v.to_number())
                         .unwrap_or(0.0);
                     if iterations > 0 {
@@ -322,9 +334,8 @@ impl SliceIsolate {
                         }
                     }
                     let res = JsValue::Number(acc);
-                    self.env_vars.insert(acc_var.clone(), res.clone());
-                    self.env_vars
-                        .insert(idx_var.clone(), JsValue::Number(*limit as f64));
+                    self.set_env_var_str(acc_var, res.clone());
+                    self.set_env_var_str(idx_var, JsValue::Number(*limit as f64));
                     last_val = res;
                 }
                 BytecodeOp::EvalStmt(stmt) => {
@@ -349,7 +360,9 @@ impl SliceIsolate {
                 BytecodeOp::BoaFullEsVm { js_code } => {
                     self.current_tier = ExecutionTier::Tier1Baseline;
                     self.compartment.consume_fuel(25)?;
+                    let mut cas_guard = ActiveCasArchiveGuard::enter(cas);
                     let val = self.exec_boa_full_es_vm(js_code)?;
+                    self.cas_modules_resolved += cas_guard.finish();
                     last_val = val;
                 }
             }

@@ -2,7 +2,6 @@
 
 use crate::host_bindings::register_slice_native_host_functions;
 use crate::state_and_kv::StateCheckpoint;
-use crate::value_and_ast::BytecodeModule;
 use compact_str::CompactString;
 use rustc_hash::{FxHashMap, FxHashSet};
 use slice_sandbox::SandboxViolation;
@@ -80,9 +79,89 @@ pub(crate) const SES_INTRINSIC_COUNT: usize = 29;
 pub(crate) type SesProtoSig = (u64, usize, u64);
 pub(crate) type SesIntlSigDelta = [(SesProtoSig, SesProtoSig); 3];
 
+pub(crate) struct ActiveCasState {
+    pub(crate) archive_ptr: *const slice_cas::MappedCasArchive,
+    pub(crate) referrer_stack: Vec<String>,
+    pub(crate) module_cache: Vec<(CompactString, boa_engine::JsObject)>,
+    pub(crate) resolved_count: usize,
+}
+
+/// Stack-scoped RAII guard binding `cas: Option<&MappedCasArchive>` onto `BOA_ACTIVE_CAS`
+/// for Tier-1 `__slice_cas_require(specifier)` resolution and restoring any outer state on
+/// normal return, early `?` error, or panic unwind (including hiding parent `.cas` modules
+/// when nested `Slice.evalSandbox` runs with `cas: None`).
+pub(crate) struct ActiveCasArchiveGuard {
+    prev: Option<ActiveCasState>,
+    swapped: bool,
+}
+
+impl ActiveCasArchiveGuard {
+    #[inline]
+    pub(crate) fn enter(cas: Option<&slice_cas::MappedCasArchive>) -> Self {
+        match cas {
+            None => BOA_ACTIVE_CAS.with(|slot| {
+                if slot.borrow().is_none() {
+                    Self {
+                        prev: None,
+                        swapped: false,
+                    }
+                } else {
+                    let prev = slot.borrow_mut().take();
+                    Self {
+                        prev,
+                        swapped: true,
+                    }
+                }
+            }),
+            Some(archive) => {
+                let mut referrer_stack = Vec::with_capacity(4);
+                if let Some(entry) = archive.entrypoint_blob() {
+                    referrer_stack.push(entry.original_specifier.clone());
+                }
+                let next = ActiveCasState {
+                    archive_ptr: std::ptr::from_ref(archive),
+                    referrer_stack,
+                    module_cache: Vec::new(),
+                    resolved_count: 0,
+                };
+                let prev = BOA_ACTIVE_CAS.with(|slot| slot.replace(Some(next)));
+                Self {
+                    prev,
+                    swapped: true,
+                }
+            }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn finish(&mut self) -> usize {
+        if !self.swapped {
+            return 0;
+        }
+        self.swapped = false;
+        let prev = self.prev.take();
+        BOA_ACTIVE_CAS.with(|slot| {
+            let ended = slot.replace(prev);
+            ended.map_or(0, |s| s.resolved_count)
+        })
+    }
+}
+
+impl Drop for ActiveCasArchiveGuard {
+    #[inline]
+    fn drop(&mut self) {
+        if self.swapped {
+            let prev = self.prev.take();
+            BOA_ACTIVE_CAS.with(|slot| {
+                let _ = slot.replace(prev);
+            });
+        }
+    }
+}
+
 thread_local! {
-    pub(crate) static SNP_MODULE_CACHE: std::cell::RefCell<FxHashMap<u64, std::sync::Arc<BytecodeModule>>> =
-        std::cell::RefCell::new(FxHashMap::default());
+    pub(crate) static BOA_ACTIVE_CAS: std::cell::RefCell<Option<ActiveCasState>> =
+        const { std::cell::RefCell::new(None) };
     pub(crate) static BOA_STDOUT: std::cell::RefCell<Vec<String>> =
         std::cell::RefCell::new(Vec::with_capacity(16));
     pub(crate) static BOA_CONTEXT_POOL: std::cell::RefCell<std::mem::ManuallyDrop<Vec<WarmBoaRealm>>> =

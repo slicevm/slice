@@ -461,6 +461,13 @@ pub enum BytecodeOp {
     ConsoleLog {
         expr: String,
     },
+    ConsoleLogVar {
+        var: String,
+    },
+    AddAssignVar {
+        dst: String,
+        src: String,
+    },
     ReturnVar {
         var: String,
     },

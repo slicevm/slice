@@ -318,6 +318,21 @@ pub(crate) fn has_standalone_builtin_import_or_cjs_export(js_code: &str) -> bool
     false
 }
 
+/// Fast pre-check returning `true` when `js_code` is not already a bundled `__slice_modules`
+/// envelope and contains an `import`, `export`, `module.exports`, or `require(` token that
+/// may need unbundled ESM/CJS lowering for Tier-1 `Boa` execution.
+#[inline]
+pub fn needs_unbundled_esm_lowering(js_code: &str) -> bool {
+    let bytes = js_code.as_bytes();
+    if memchr::memmem::find(bytes, b"var __slice_modules =").is_some() {
+        return false;
+    }
+    contains_ident_token(bytes, b"import")
+        || contains_ident_token(bytes, b"export")
+        || memchr::memmem::find(bytes, b"module.exports").is_some()
+        || memchr::memmem::find(bytes, b"require(").is_some()
+}
+
 /// Lowers any unbundled ESM `import` / `export` statements into CommonJS (`__slice_cjs_require` +
 /// `exports` / `module.exports`) with zero host filesystem `stat()` syscalls so Tier-1 `Boa` can
 /// execute both standalone `export const` scripts and multi-blob `MappedCasArchive` modules.
@@ -346,6 +361,7 @@ pub fn lower_unbundled_esm_for_boa(
     } else {
         js_code.to_string()
     };
+    let had_esm_transform = cjs != js_code;
     if has_esm_default_export_marker(&cjs) {
         let digest = blake3::hash(cjs.as_bytes());
         let rc_u64 = u64::from_le_bytes(digest.as_bytes()[0..8].try_into().unwrap());
@@ -356,7 +372,9 @@ pub fn lower_unbundled_esm_for_boa(
         );
     }
     let rewritten = rewrite_require_fn(&cjs);
-    if memchr::memmem::find(rewritten.as_bytes(), b"exports").is_some() {
+    if (had_esm_transform || has_mod_exp)
+        && memchr::memmem::find(rewritten.as_bytes(), b"exports").is_some()
+    {
         format!(
             "var exports = (typeof globalThis.__slice_cas_exports === \"object\" && globalThis.__slice_cas_exports !== null) ? globalThis.__slice_cas_exports : {{}}, module = (typeof globalThis.__slice_cas_module === \"object\" && globalThis.__slice_cas_module !== null) ? globalThis.__slice_cas_module : {{ exports: exports }};\n{rewritten}"
         )

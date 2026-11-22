@@ -35,7 +35,7 @@ pub use isolate::state_and_kv;
 pub use net::{outbound_http, sockets, websocket};
 pub use preludes::{js_minifier, js_preludes, node_builtins};
 pub use runtime::{boa_realm, event_loop, wasm, workers};
-pub use vm::{boacas, numeric_vm, parser_and_compiler, value_and_ast};
+pub use vm::{boacas, numeric_vm, parser_and_compiler, slicesnp_codec, value_and_ast};
 
 #[cfg(test)]
 #[path = "../tests/mod.rs"]
@@ -70,6 +70,7 @@ pub use outbound_http::{
 pub use parser_and_compiler::{
     compile_source_to_bytecode, disassemble_bytecode, is_tier0_slicesnp_compatible_ast,
 };
+pub use slicesnp_codec::{SLICESNP_V2_VERSION, decode_slicesnp_module, encode_slicesnp_v2};
 pub use value_and_ast::{
     BinOp, BytecodeModule, BytecodeOp, ExecutionTier, Expr, JsFunction, JsValue, SNAPSHOT_MAGIC,
     Stmt, TIER1_PROMOTION_THRESHOLD, UnaryOp,

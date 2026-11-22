@@ -15,6 +15,7 @@
 //! - `wasm`: Sandboxed WebAssembly (`wasmi`) compilation, memory, and execution (`Shard 9`).
 //! - `child_process`: 5-Ring OCap-jailed subprocess execution (`node:child_process`).
 
+pub(crate) mod cas_loader;
 pub(crate) mod child_process;
 pub(crate) mod core;
 pub(crate) mod crypto;

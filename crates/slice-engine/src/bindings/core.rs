@@ -141,6 +141,20 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     );
 
     let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_cas_require"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let id = args
+                .first()
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+            crate::bindings::cas_loader::eval_cas_require_module(&id, context)
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_lazy_prelude"),
         1,
         NativeFunction::from_fn_ptr(|_this, args, context| {

@@ -2,11 +2,10 @@ pub(crate) mod connection;
 pub(crate) mod tls;
 
 #[cfg(test)]
-pub(crate) use connection::serve_connection_keep_alive;
 pub(crate) use connection::{
-    serve_connection_keep_alive_with_tls_and_secrets, serve_connection_with_isolate,
-    spawn_worker_isolate,
+    serve_connection_keep_alive, serve_connection_keep_alive_with_tls_and_secrets,
 };
+pub(crate) use connection::{serve_connection_with_isolate, spawn_worker_isolate};
 pub(crate) use tls::load_tls_server_config;
 
 use crate::config::{
@@ -84,6 +83,7 @@ const route_res: string = WinterTC.route("GET", "https://edge.slice.local/api/v1
 console.log(route_res);
 "#;
     let mut static_table = slice_cas::StaticAssetTable::new();
+    let mut cas_archive_arc: Option<std::sync::Arc<MappedCasArchive>> = None;
     let bytecode = std::sync::Arc::new(if let Some(target) = &target_opt {
         let p = Path::new(target);
         if target.ends_with(".cas") {
@@ -95,7 +95,9 @@ console.log(route_res);
             let entry = archive
                 .entrypoint_blob()
                 .context("Missing CAS entrypoint")?;
-            archive.get_bytecode_slice(entry).to_vec()
+            let bc_vec = archive.get_bytecode_slice(entry).to_vec();
+            cas_archive_arc = Some(std::sync::Arc::new(archive));
+            bc_vec
         } else {
             exec_cfg.apply_target_path_manifest(p)?;
             let entry_file = slice_cas::resolve_project_entrypoint(p, None)?;
@@ -111,7 +113,9 @@ console.log(route_res);
         }
         static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
         if let Some(entry) = archive.entrypoint_blob() {
-            archive.get_bytecode_slice(entry).to_vec()
+            let bc_vec = archive.get_bytecode_slice(entry).to_vec();
+            cas_archive_arc = Some(std::sync::Arc::new(archive));
+            bc_vec
         } else {
             compile_source_to_bytecode(default_handler_src)
         }
@@ -157,6 +161,7 @@ console.log(route_res);
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let bound_port = listener.local_addr()?.port();
         let bc_clone = std::sync::Arc::clone(&bytecode);
+        let cas_clone = cas_archive_arc.as_ref().map(std::sync::Arc::clone);
         let st_clone = static_table_arc.as_ref().map(std::sync::Arc::clone);
         let caps_clone = caps.clone();
         let secrets_clone = std::sync::Arc::clone(&audit_secrets);
@@ -166,15 +171,22 @@ console.log(route_res);
             let mut read_buf = vec![0u8; 65536];
             let mut write_buf = Vec::with_capacity(4096);
             if let Ok((stream, _)) = listener.accept() {
-                let _ = serve_connection_keep_alive_with_tls_and_secrets(
-                    stream,
+                let mut isolate = spawn_worker_isolate(
                     1,
-                    &bc_clone,
-                    None,
-                    st_clone.as_deref(),
                     deterministic_seed,
                     &caps_clone,
                     &secrets_clone,
+                    fuel_limit,
+                    mem_limit,
+                );
+                let _ = serve_connection_with_isolate(
+                    stream,
+                    1,
+                    &mut isolate,
+                    &bc_clone,
+                    cas_clone.as_deref(),
+                    None,
+                    st_clone.as_deref(),
                     fuel_limit,
                     mem_limit,
                     &mut read_buf,
@@ -239,6 +251,7 @@ console.log(route_res);
     for worker_idx in 1..workers {
         let listener_clone = std::sync::Arc::clone(&listener);
         let bc_clone = std::sync::Arc::clone(&bytecode);
+        let cas_clone = cas_archive_arc.as_ref().map(std::sync::Arc::clone);
         let td_clone = tenant_dir_arc.as_ref().map(std::sync::Arc::clone);
         let st_clone = static_table_arc.as_ref().map(std::sync::Arc::clone);
         let tls_clone = tls_server_cfg.as_ref().map(std::sync::Arc::clone);
@@ -270,6 +283,7 @@ console.log(route_res);
                         local_slot,
                         &mut isolate,
                         &bc_clone,
+                        cas_clone.as_deref(),
                         td_clone.as_deref().map(|p| p.as_path()),
                         st_clone.as_deref(),
                         fuel_limit,
@@ -328,6 +342,7 @@ console.log(route_res);
                 local_slot,
                 &mut isolate,
                 &bytecode,
+                cas_archive_arc.as_deref(),
                 tenant_dir_arc.as_deref().map(|p| p.as_path()),
                 static_table_arc.as_deref(),
                 fuel_limit,
@@ -425,12 +440,14 @@ pub(crate) struct TenantHotSwapEntry {
     pub(crate) verified_gen: u64,
     pub(crate) last_stat_check: std::time::Instant,
     pub(crate) bytecode: std::sync::Arc<Vec<u8>>,
+    pub(crate) archive: std::sync::Arc<MappedCasArchive>,
 }
 
 struct CompiledCasBundleEntry {
     mtime_ns: u128,
     file_len: u64,
     bytecode: std::sync::Arc<Vec<u8>>,
+    archive: std::sync::Arc<MappedCasArchive>,
 }
 
 #[derive(Default)]
@@ -520,10 +537,18 @@ pub(crate) fn sanitize_tenant_id(tenant_id: &str) -> Cow<'_, str> {
 /// automatically hot-swapping and pre-warming the bundle when the file's modification timestamp
 /// or byte length changes on disk, deduplicating `default.cas` across unknown tenant headers,
 /// and bounding cache entries at `1,024`.
+#[allow(dead_code)]
 pub(crate) fn resolve_tenant_bytecode_hotswap(
     tenant_dir: &Path,
     tenant_id: &str,
 ) -> Option<std::sync::Arc<Vec<u8>>> {
+    resolve_tenant_cas_hotswap(tenant_dir, tenant_id).map(|(bc, _)| bc)
+}
+
+pub(crate) fn resolve_tenant_cas_hotswap(
+    tenant_dir: &Path,
+    tenant_id: &str,
+) -> Option<(std::sync::Arc<Vec<u8>>, std::sync::Arc<MappedCasArchive>)> {
     let safe_tenant = sanitize_tenant_id(tenant_id);
     if safe_tenant.is_empty() {
         return None;
@@ -540,7 +565,10 @@ pub(crate) fn resolve_tenant_bytecode_hotswap(
                 if entry.verified_gen == cur_gen
                     && entry.last_stat_check.elapsed() < TENANT_STAT_TTL
                 {
-                    return Some(std::sync::Arc::clone(&entry.bytecode));
+                    return Some((
+                        std::sync::Arc::clone(&entry.bytecode),
+                        std::sync::Arc::clone(&entry.archive),
+                    ));
                 }
                 if let Ok(meta) = std::fs::metadata(&entry.resolved_path)
                     && meta.is_file()
@@ -555,7 +583,10 @@ pub(crate) fn resolve_tenant_bytecode_hotswap(
                     if entry.mtime_ns == mtime_ns && entry.file_len == file_len {
                         entry.verified_gen = cur_gen;
                         entry.last_stat_check = std::time::Instant::now();
-                        return Some(std::sync::Arc::clone(&entry.bytecode));
+                        return Some((
+                            std::sync::Arc::clone(&entry.bytecode),
+                            std::sync::Arc::clone(&entry.archive),
+                        ));
                     }
                 }
             }
@@ -595,6 +626,7 @@ pub(crate) fn resolve_tenant_bytecode_hotswap(
             && bundle.file_len == file_len
         {
             let arc_bc = std::sync::Arc::clone(&bundle.bytecode);
+            let arc_cas = std::sync::Arc::clone(&bundle.archive);
             if !is_default_fallback {
                 let mut borrow = cache.borrow_mut();
                 if borrow.by_tenant.len() >= MAX_TENANT_CACHE_ENTRIES
@@ -612,17 +644,19 @@ pub(crate) fn resolve_tenant_bytecode_hotswap(
                         verified_gen: cur_gen,
                         last_stat_check: std::time::Instant::now(),
                         bytecode: std::sync::Arc::clone(&arc_bc),
+                        archive: std::sync::Arc::clone(&arc_cas),
                     },
                 );
             }
-            return Some(arc_bc);
+            return Some((arc_bc, arc_cas));
         }
 
-        let archive = MappedCasArchive::open(&canonical_path).ok()?;
+        let archive = MappedCasArchive::open_detached(&canonical_path).ok()?;
         let entry_blob = archive.entrypoint_blob()?;
         let bc_vec = archive.get_bytecode_slice(entry_blob).to_vec();
         SliceIsolate::prewarm_boa_bundle(&bc_vec);
         let arc_bc = std::sync::Arc::new(bc_vec);
+        let arc_cas = std::sync::Arc::new(archive);
 
         let mut borrow = cache.borrow_mut();
         if borrow.by_canonical_path.len() >= MAX_TENANT_CACHE_ENTRIES
@@ -636,6 +670,7 @@ pub(crate) fn resolve_tenant_bytecode_hotswap(
                 mtime_ns,
                 file_len,
                 bytecode: std::sync::Arc::clone(&arc_bc),
+                archive: std::sync::Arc::clone(&arc_cas),
             },
         );
         if !is_default_fallback {
@@ -654,9 +689,10 @@ pub(crate) fn resolve_tenant_bytecode_hotswap(
                     verified_gen: cur_gen,
                     last_stat_check: std::time::Instant::now(),
                     bytecode: std::sync::Arc::clone(&arc_bc),
+                    archive: std::sync::Arc::clone(&arc_cas),
                 },
             );
         }
-        Some(arc_bc)
+        Some((arc_bc, arc_cas))
     })
 }

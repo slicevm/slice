@@ -618,8 +618,16 @@
   globalThis.Bun = globalThis.Bun || { serve: globalThis.Slice.serve };
 
   globalThis.__slice_builtins = Object.create(null);
+  const __casMiss = Symbol("cas_miss");
+  globalThis.__slice_cas_miss = __casMiss;
   globalThis.__slice_cjs_require = function(id) {
-    return __slice_builtins[id] || __slice_load_builtin(id);
+    const b = __slice_builtins[id];
+    if (b !== undefined) return b;
+    if (typeof __slice_cas_require === "function") {
+      const m = __slice_cas_require(id);
+      if (m !== __casMiss) return m;
+    }
+    return __slice_load_builtin(id);
   };
   globalThis.require = __slice_cjs_require;
   globalThis.escape = function(str) {

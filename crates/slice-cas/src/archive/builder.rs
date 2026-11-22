@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[inline]
-fn strip_single_module_ext(spec: &str) -> &str {
+pub(super) fn strip_single_module_ext(spec: &str) -> &str {
     for ext in [".tsx", ".mts", ".cts", ".ts", ".jsx", ".mjs", ".cjs", ".js"] {
         if let Some(stem) = spec.strip_suffix(ext) {
             return stem;

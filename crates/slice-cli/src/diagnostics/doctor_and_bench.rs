@@ -135,8 +135,20 @@ console.log(status);
             100_000,
             65536,
         );
-        let _metrics = isolate.execute_bytecode(&bytecode, None)?;
+        let metrics = isolate.execute_bytecode(&bytecode, None)?;
         let elapsed_us = t0.elapsed().as_nanos() as f64 / 1_000.0;
+        if metrics.exit_code.unwrap_or(0) != 0
+            || metrics.return_value.starts_with("Uncaught ")
+            || metrics.stdout.as_slice() != ["128"]
+        {
+            bail!(
+                "microvm-bench tenant-{} failed verification: exit_code={:?}, return={:?}, stdout={:?}",
+                slot,
+                metrics.exit_code,
+                metrics.return_value,
+                metrics.stdout
+            );
+        }
         latencies_us.push(elapsed_us);
     }
 
@@ -149,7 +161,9 @@ console.log(status);
 
     let temp_cas = unique_temp_cas_path("slice_bench_500")?;
     let mut cas_builder = CasBuilder::new("./index.ts");
-    let mut entry_imports = String::new();
+    let mut entry_imports = String::with_capacity(28_000);
+    let mut entry_accum = String::with_capacity(10_000);
+    entry_accum.push_str("let total: number = 0;\n");
     for idx in 0..500 {
         let spec = format!("./mod_{}.ts", idx);
         let mod_src = format!("export const VAL_{}: number = {};\n", idx, idx + 1);
@@ -163,8 +177,10 @@ console.log(status);
             "import {{ VAL_{} }} from \"./mod_{}.ts\";\n",
             idx, idx
         ));
+        entry_accum.push_str(&format!("total += VAL_{};\n", idx));
     }
-    entry_imports.push_str("console.log(VAL_499);\n");
+    entry_imports.push_str(&entry_accum);
+    entry_imports.push_str("console.log(total);\n");
     cas_builder.add_module(
         "./index.ts",
         PathBuf::from("./index.ts"),
@@ -188,6 +204,20 @@ console.log(status);
     let cas_metrics = cas_isolate.execute_bytecode(entry_bc, Some(&mapped_cas))?;
     let cas_lookup_500_us = cas_mem_t0.elapsed().as_nanos() as f64 / 1_000.0;
     let inproc_cold_ms = open_t0.elapsed().as_secs_f64() * 1_000.0;
+    if cas_metrics.exit_code.unwrap_or(0) != 0
+        || cas_metrics.return_value.starts_with("Uncaught ")
+        || cas_metrics.stdout.as_slice() != ["125250"]
+        || cas_metrics.cas_modules_resolved != 500
+    {
+        let _ = std::fs::remove_file(&temp_cas);
+        bail!(
+            "microvm-bench 500-module CAS verification failed: exit_code={:?}, return={:?}, stdout={:?}, cas_modules_resolved={}",
+            cas_metrics.exit_code,
+            cas_metrics.return_value,
+            cas_metrics.stdout,
+            cas_metrics.cas_modules_resolved
+        );
+    }
     drop(mapped_cas);
 
     let cas_cold_boot_500_ms = match env::current_exe() {
@@ -196,10 +226,22 @@ console.log(status);
                 .file_stem()
                 .is_some_and(|s| s.eq_ignore_ascii_case("slice")) =>
         {
-            let _ = std::process::Command::new(&exe)
+            let warmup = std::process::Command::new(&exe)
                 .arg("run")
                 .arg(&temp_cas)
                 .output();
+            if let Ok(ref wout) = warmup
+                && (!wout.status.success()
+                    || String::from_utf8_lossy(&wout.stdout).trim() != "125250")
+            {
+                let _ = std::fs::remove_file(&temp_cas);
+                bail!(
+                    "microvm-bench subprocess `slice run` 500-module CAS failed: status={}, stdout={:?}, stderr={:?}",
+                    wout.status,
+                    String::from_utf8_lossy(&wout.stdout),
+                    String::from_utf8_lossy(&wout.stderr)
+                );
+            }
             let mut proc_samples_ms = Vec::with_capacity(5);
             for _ in 0..5 {
                 let pt0 = Instant::now();
@@ -208,6 +250,7 @@ console.log(status);
                     .arg(&temp_cas)
                     .output()
                     && out.status.success()
+                    && String::from_utf8_lossy(&out.stdout).trim() == "125250"
                 {
                     proc_samples_ms.push(pt0.elapsed().as_secs_f64() * 1_000.0);
                 }
@@ -254,8 +297,19 @@ console.log(f);
         50_000_000,
         1024 * 1024,
     );
-    let _ = comp_isolate.execute_bytecode(&compute_bc, None)?;
+    let comp_metrics = comp_isolate.execute_bytecode(&compute_bc, None)?;
     let compute_us = comp_t0.elapsed().as_nanos() as f64 / 1_000.0;
+    if comp_metrics.exit_code.unwrap_or(0) != 0
+        || comp_metrics.return_value.starts_with("Uncaught ")
+        || comp_metrics.stdout.as_slice() != ["102334155"]
+    {
+        bail!(
+            "microvm-bench compute verification failed: exit_code={:?}, return={:?}, stdout={:?}",
+            comp_metrics.exit_code,
+            comp_metrics.return_value,
+            comp_metrics.stdout
+        );
+    }
 
     let blocked_attacks = run_security_containment_checks()?;
 

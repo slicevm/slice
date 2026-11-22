@@ -36,10 +36,13 @@ pub use compiler::{
     SyntaxErrorDiagnostic, TypeDirectedHints, analyze_typescript_semantics,
     byte_offset_to_line_col, check_syntax_source, check_syntax_source_detailed,
     compile_ts_or_js_checked, compile_ts_or_js_checked_with_ast_hook, fuse_array_pipelines_ast,
-    lower_unbundled_esm, program_has_ts_or_jsx, strip_typescript_and_normalize,
-    strip_typescript_and_normalize_with_ext, strip_typescript_raw, strip_typescript_raw_with_ext,
+    lower_unbundled_esm, needs_unbundled_esm_lowering, program_has_ts_or_jsx,
+    strip_typescript_and_normalize, strip_typescript_and_normalize_with_ext, strip_typescript_raw,
+    strip_typescript_raw_with_ext,
 };
-pub use linker::{has_top_level_await, wrap_top_level_await_script};
+pub use linker::{
+    has_top_level_await, is_builtin_module, is_jsx_runtime_builtin, wrap_top_level_await_script,
+};
 
 #[cfg(test)]
 pub(crate) use std::path::PathBuf;

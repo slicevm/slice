@@ -27,3 +27,4 @@ pub use transpiler::{
     strip_typescript_and_normalize_with_ext, strip_typescript_raw, strip_typescript_raw_with_ext,
 };
 pub use ts_detector::program_has_ts_or_jsx;
+pub use ts_helpers::needs_unbundled_esm_lowering;

@@ -13,6 +13,9 @@ pub struct MappedCasArchive {
     mmap: Arc<Mmap>,
     pub header: CasIndexHeader,
     pub(crate) data_start_offset: usize,
+    blobs_vec: Vec<CasBlobEntry>,
+    specifier_index: rustc_hash::FxHashMap<String, u32>,
+    entrypoint_idx: Option<u32>,
 }
 
 impl MappedCasArchive {
@@ -101,7 +104,7 @@ impl MappedCasArchive {
             let bc_start = data_start_offset
                 .checked_add(bc_off)
                 .context("CAS blob bytecode start overflow")?;
-            let _bc_end = bc_start
+            let bc_end = bc_start
                 .checked_add(bc_len)
                 .filter(|&end| end <= cas_end)
                 .with_context(|| {
@@ -113,12 +116,40 @@ impl MappedCasArchive {
                         cas_end
                     )
                 })?;
+            if bc_start < bc_end {
+                std::hint::black_box(mmap[bc_start]);
+            }
         }
+
+        let mut blobs_vec = Vec::with_capacity(header.blobs.len());
+        let mut hash_to_idx: rustc_hash::FxHashMap<&str, u32> =
+            rustc_hash::FxHashMap::with_capacity_and_hasher(header.blobs.len(), Default::default());
+        for (hash_key, entry) in &header.blobs {
+            if let Ok(idx) = u32::try_from(blobs_vec.len()) {
+                hash_to_idx.insert(hash_key.as_str(), idx);
+                blobs_vec.push(entry.clone());
+            }
+        }
+        let mut specifier_index: rustc_hash::FxHashMap<String, u32> =
+            rustc_hash::FxHashMap::with_capacity_and_hasher(
+                header.radix_resolution_map.len(),
+                Default::default(),
+            );
+        for (spec, hash_hex) in &header.radix_resolution_map {
+            if let Some(&idx) = hash_to_idx.get(hash_hex.as_str()) {
+                specifier_index.insert(spec.clone(), idx);
+            }
+        }
+        let entrypoint_idx = hash_to_idx.get(header.entrypoint_hash.as_str()).copied();
+        drop(hash_to_idx);
 
         Ok(Self {
             mmap,
             header,
             data_start_offset,
+            blobs_vec,
+            specifier_index,
+            entrypoint_idx,
         })
     }
 
@@ -131,18 +162,107 @@ impl MappedCasArchive {
         Self::from_mmap_region(Arc::new(mmap), 0, len, &path.display().to_string())
     }
 
+    /// Constructs a `MappedCasArchive` inside an anonymous read-only memory mapping from raw bytes.
+    pub fn from_bytes(raw: &[u8]) -> Result<Self> {
+        let mut anon = memmap2::MmapMut::map_anon(raw.len().max(1))
+            .context("Failed to allocate anonymous CAS memory mapping")?;
+        anon[..raw.len()].copy_from_slice(raw);
+        let mmap = anon
+            .make_read_only()
+            .context("Failed to mark anonymous CAS mapping read-only")?;
+        Self::from_mmap_region(Arc::new(mmap), 0, raw.len(), "<in-memory-cas>")
+    }
+
+    /// Reads a `.cas` archive into an anonymous read-only mapping and closes the OS file handle
+    /// immediately so Windows `--tenant-dir` hot-swapping can overwrite `<tenant>.cas` in-place
+    /// without triggering `ERROR_USER_MAPPED_FILE` (`os error 1224`).
+    pub fn open_detached(path: &Path) -> Result<Self> {
+        let raw = std::fs::read(path)
+            .with_context(|| format!("Failed to read CAS archive {}", path.display()))?;
+        let mut anon = memmap2::MmapMut::map_anon(raw.len().max(1)).with_context(|| {
+            format!(
+                "Failed to allocate anonymous CAS mapping for {}",
+                path.display()
+            )
+        })?;
+        anon[..raw.len()].copy_from_slice(&raw);
+        let mmap = anon.make_read_only()?;
+        Self::from_mmap_region(Arc::new(mmap), 0, raw.len(), &path.display().to_string())
+    }
+
     /// Resolves an import specifier in O(1) time without touching the OS filesystem.
     #[inline]
     pub fn resolve_specifier(&self, specifier: &str) -> Option<&CasBlobEntry> {
-        let hash = self
-            .header
-            .radix_resolution_map
-            .get(specifier)
-            .or_else(|| {
-                let trimmed = specifier.trim_start_matches("./");
-                self.header.radix_resolution_map.get(trimmed)
-            })?;
-        self.header.blobs.get(hash)
+        let &idx = self.specifier_index.get(specifier).or_else(|| {
+            let trimmed = specifier.trim_start_matches("./");
+            self.specifier_index.get(trimmed)
+        })?;
+        self.blobs_vec.get(idx as usize)
+    }
+
+    /// Resolves a JavaScript/TypeScript module specifier relative to `referrer_specifier`
+    /// inside this `MappedCasArchive` with zero OS filesystem `stat()` syscalls.
+    ///
+    /// Supports root-level specifiers (`"./mod_0.ts"`, `"mod_0"`), nested relative paths
+    /// (`"./sub/dep.ts"`, `"../shared/util.ts"`), TypeScript `.js`->`.ts` stripped stems,
+    /// and directory `/index` modules while rejecting `static:/`, `manifest:/`, and `..`
+    /// path traversal above the archive root.
+    pub fn resolve_specifier_from<'a>(
+        &'a self,
+        referrer_specifier: Option<&str>,
+        specifier: &str,
+    ) -> Option<&'a CasBlobEntry> {
+        if specifier.starts_with("static:/") || specifier.starts_with("manifest:/") {
+            return None;
+        }
+        let ref_has_subdir = referrer_specifier.is_some_and(|r| {
+            let trimmed = r.trim_start_matches("./").trim_start_matches('/');
+            trimmed.contains('/')
+        });
+        if !ref_has_subdir
+            && !specifier.contains("..")
+            && let Some(hit) = self.resolve_specifier(specifier)
+        {
+            return Some(hit);
+        }
+
+        if let Some(ref_spec) = referrer_specifier
+            && (specifier.starts_with("./") || specifier.starts_with("../"))
+        {
+            let ref_clean = ref_spec.trim_start_matches("./").trim_start_matches('/');
+            let ref_dir = match ref_clean.rfind('/') {
+                Some(idx) => &ref_clean[..idx],
+                None => "",
+            };
+            let joined = normalize_cas_rel_path(ref_dir, specifier)?;
+            if let Some(hit) = self.lookup_module_candidate(&joined) {
+                return Some(hit);
+            }
+        }
+
+        let direct = normalize_cas_rel_path("", specifier)?;
+        self.lookup_module_candidate(&direct)
+    }
+
+    #[inline]
+    fn lookup_module_candidate<'a>(&'a self, normalized_bare: &str) -> Option<&'a CasBlobEntry> {
+        if normalized_bare.is_empty()
+            || normalized_bare.starts_with("static:/")
+            || normalized_bare.starts_with("manifest:/")
+        {
+            return None;
+        }
+        if let Some(hit) = self.resolve_specifier(normalized_bare) {
+            return Some(hit);
+        }
+        let stripped = super::builder::strip_single_module_ext(normalized_bare);
+        if stripped != normalized_bare
+            && let Some(hit) = self.resolve_specifier(stripped)
+        {
+            return Some(hit);
+        }
+        let idx_candidate = format!("{}/index", normalized_bare.trim_end_matches('/'));
+        self.resolve_specifier(&idx_candidate)
     }
 
     /// Returns a zero-copy slice to the normalized JavaScript source directly from the `mmap` region.
@@ -205,7 +325,8 @@ impl MappedCasArchive {
     /// Returns the entrypoint blob entry.
     #[inline]
     pub fn entrypoint_blob(&self) -> Option<&CasBlobEntry> {
-        self.header.blobs.get(&self.header.entrypoint_hash)
+        self.entrypoint_idx
+            .and_then(|idx| self.blobs_vec.get(idx as usize))
     }
 
     /// Returns the embedded `slice.toml` manifest string if one was packed into this `.cas` archive.
@@ -479,4 +600,30 @@ pub fn embed_cas_into_executable(
     }
 
     Ok(total_len)
+}
+
+fn normalize_cas_rel_path(base_dir: &str, specifier: &str) -> Option<String> {
+    let mut stack: smallvec::SmallVec<[&str; 8]> = smallvec::SmallVec::new();
+    if !base_dir.is_empty() {
+        for seg in base_dir.split('/') {
+            if !seg.is_empty() && seg != "." {
+                stack.push(seg);
+            }
+        }
+    }
+    for seg in specifier.split(['/', '\\']) {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            stack.pop()?;
+        } else {
+            stack.push(seg);
+        }
+    }
+    if stack.is_empty() {
+        None
+    } else {
+        Some(stack.join("/"))
+    }
 }
