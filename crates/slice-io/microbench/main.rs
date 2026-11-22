@@ -35,6 +35,57 @@ fn bench_completion_ring(c: &mut Criterion) {
         });
     });
 
+    let temp_path =
+        std::env::temp_dir().join(format!("slice_io_microbench_{}.bin", std::process::id()));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(&temp_path)
+        .expect("bench temp file");
+    #[cfg(unix)]
+    let raw_fd = {
+        use std::os::fd::AsRawFd;
+        file.as_raw_fd() as i64
+    };
+    #[cfg(windows)]
+    let raw_fd = {
+        use std::os::windows::io::AsRawHandle;
+        file.as_raw_handle() as isize as i64
+    };
+    let (w_slot, w_buf) = engine.buffer_pool_mut().acquire().expect("w_slot");
+    w_buf[..4096].fill(0xA5);
+    let (r_slot, _) = engine.buffer_pool_mut().acquire().expect("r_slot");
+    let _ = engine
+        .submit_and_reap(&[IoSubmission::WriteFixed {
+            fd: raw_fd,
+            buf_index: w_slot,
+            offset: 0,
+            len: 4096,
+            user_data: 0x1001,
+        }])
+        .expect("seed 4kb page");
+
+    let read_op = [IoSubmission::ReadFixed {
+        fd: raw_fd,
+        buf_index: r_slot,
+        offset: 0,
+        len: 4096,
+        user_data: 0x1002,
+    }];
+    group.bench_function("positioned_read_fixed_4kb", |b| {
+        b.iter(|| {
+            let res = engine.submit_and_reap(black_box(&read_op)).unwrap();
+            black_box(res[0].result);
+        });
+    });
+
+    engine.buffer_pool_mut().release(w_slot);
+    engine.buffer_pool_mut().release(r_slot);
+    drop(file);
+    let _ = std::fs::remove_file(&temp_path);
+
     group.finish();
 }
 

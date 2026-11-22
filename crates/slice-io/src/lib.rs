@@ -14,7 +14,7 @@ pub use ring::{
     CompletionRingEngine, DEFAULT_RING_ENTRIES, IoCompletion, IoSubmission, MAX_RING_ENTRIES,
     RingStatus,
 };
-pub use slab::{FIXED_BUFFER_COUNT, FIXED_BUFFER_SIZE, RegisteredBufferPool};
+pub use slab::{FIXED_BUFFER_COUNT, FIXED_BUFFER_SIZE, PAGE_ALIGNMENT, RegisteredBufferPool};
 
 #[cfg(test)]
 #[path = "../tests/mod.rs"]

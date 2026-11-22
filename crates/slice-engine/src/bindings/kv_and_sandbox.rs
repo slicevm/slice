@@ -301,17 +301,16 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 .saved_fuel_budget
                 .1
                 .saturating_sub(scope_guard.saved_fuel_budget.0);
-            let parent_rem_mem = scope_guard
-                .saved_kv_budget
-                .1
-                .saturating_sub(scope_guard.saved_kv_budget.0);
+            let parent_used_mem = scope_guard.saved_kv_budget.0;
+            let parent_limit_mem = scope_guard.saved_kv_budget.1;
             let mut proxy_parent = SliceIsolate::spawn(
                 scope_guard.saved_tenant.clone(),
                 98,
                 parent_caps,
                 parent_rem_fuel,
-                parent_rem_mem.saturating_add(4096),
+                parent_limit_mem.saturating_add(4096),
             );
+            proxy_parent.compartment.memory_used_bytes = parent_used_mem.saturating_add(4096);
             proxy_parent.egress_audit_secrets = scope_guard.saved_egress_secrets.clone();
             let parent_tenant_for_trace = scope_guard.saved_tenant.clone();
             let outcome = if cfg!(debug_assertions) {
@@ -344,6 +343,12 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
                 proxy_parent.eval_sandbox(&code, opts)
             };
             drop(scope_guard);
+            if outcome.net_persisted_delta_bytes != 0 {
+                let _ = crate::bindings::helpers::try_adjust_isolate_memory_ctx(
+                    outcome.net_persisted_delta_bytes,
+                    context,
+                );
+            }
             if outcome.checkpoints_taken > 0 || outcome.restores_performed > 0 {
                 crate::boa_realm::BOA_CHECKPOINT_STATS.with(|s| {
                     let (taken, restored, restore_ns) = s.get();

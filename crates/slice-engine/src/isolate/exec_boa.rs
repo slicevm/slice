@@ -17,9 +17,9 @@ use crate::boa_realm::{
     WarmBoaRealm, acquire_warm_boa_realm, acquire_warm_boa_realm_for_tenant, call_realm_ctl,
     create_bare_boa_realm, create_bare_boa_realm_for_tenant, create_warm_boa_realm,
     ensure_realm_shards, ensure_vfs_tenant_affinity, eval_or_reuse_cached_script,
-    first_ses_proto_sig_mismatch, has_process_exit, has_uncaught_error, mark_exec_dirty,
-    release_warm_boa_realm, try_acquire_pooled_boa_realm, try_acquire_pooled_boa_realm_for_tenant,
-    vfs_owner_namespace,
+    first_ses_proto_sig_mismatch_idx, has_process_exit, has_uncaught_error, mark_exec_dirty,
+    release_prewarmed_boa_realm, release_warm_boa_realm, try_acquire_pooled_boa_realm,
+    try_acquire_pooled_boa_realm_for_tenant, vfs_owner_namespace,
 };
 use crate::boacas::{
     BOACAS_FLAG_HAS_HTTP_BRIDGE, BOACAS_FLAG_HAS_KV_SANDBOX, BOACAS_FLAG_HAS_NEXT_TICK,
@@ -153,6 +153,96 @@ fn scrub_after_prewarm(realm: &mut WarmBoaRealm, prewarm_flags: (bool, bool, boo
     BOA_KV_MEM_BUDGET.with(|m| m.set((0, usize::MAX)));
 }
 
+#[inline(never)]
+#[cold]
+pub(crate) fn scrub_boa_thread_locals_on_unwind() {
+    BOA_STDOUT.with(|out| out.borrow_mut().clear());
+    BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
+    BOA_SES_INTL_SIG_PAIR.with(|p| p.set(None));
+    BOA_ACTIVE_TENANT.with(|t| t.borrow_mut().clear());
+    BOA_DET_STATE.with(|s| s.set(None));
+    BOA_FUEL_BUDGET.with(|f| f.set((0, u64::MAX)));
+    BOA_KV_MEM_BUDGET.with(|m| m.set((0, usize::MAX)));
+    BOA_CHECKPOINT_STATS.with(|s| s.set((0, 0, 0)));
+    crate::boa_realm::BOA_CHECKPOINT_CAP.with(|c| c.set((true, u32::MAX)));
+    BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
+    BOA_WS_UPGRADED.with(|w| w.set(false));
+    BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
+    BOA_ACTIVE_CAPS.with(|c| {
+        let mut caps = c.borrow_mut();
+        caps.read_prefixes.clear();
+        caps.write_prefixes.clear();
+    });
+    BOA_NET_HOSTS.with(|h| h.borrow_mut().clear());
+    BOA_EGRESS_SECRETS.with(|s| s.borrow_mut().clear());
+    BOA_ENV_MAP.with(|m| m.borrow_mut().clear());
+    BOA_EXEC_BINS.with(|b| b.borrow_mut().clear());
+    let exec_dirty = BOA_EXEC_DIRTY.with(|c| c.replace(0));
+    if exec_dirty != 0 {
+        BOA_PROCESS_EXIT.with(|e| e.set(None));
+        BOA_LAST_EXIT_CODE.with(|e| e.set(None));
+        BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
+        BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = None);
+        BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
+        BOA_CUSTOM_ARGV.with(|a| *a.borrow_mut() = None);
+    }
+    let dirty = BOA_DIRTY_SUBSYSTEMS.with(|d| d.replace(0));
+    scrub_dirty_subsystems_without_realm(dirty);
+    clear_event_loop_state();
+}
+
+#[inline(never)]
+#[cold]
+fn scrub_dirty_subsystems_without_realm(dirty: u16) {
+    if (dirty & DIRTY_FETCH_MOCK) != 0 {
+        BOA_FETCH_MOCKS.with(|m| m.borrow_mut().clear());
+    }
+    if (dirty & DIRTY_WEBSOCKET) != 0 {
+        crate::websocket::clear_thread_websocket_state();
+    }
+    if (dirty & DIRTY_SOCKETS) != 0 {
+        crate::sockets::clear_thread_socket_state();
+    }
+    if (dirty & DIRTY_WORKERS) != 0 {
+        crate::workers::clear_thread_worker_state();
+    }
+    if (dirty & DIRTY_WASM) != 0 {
+        crate::wasm::clear_thread_wasm_state();
+    }
+    if (dirty & DIRTY_VFS) != 0 {
+        BOA_VFS_STATE.with(|v| {
+            let mut vfs = v.borrow_mut();
+            let _ = vfs.close_all_open_fds();
+            vfs.has_active_watchers = false;
+        });
+    }
+}
+
+pub(crate) struct BoaSessionUnwindGuard {
+    pub(crate) armed: bool,
+}
+
+impl BoaSessionUnwindGuard {
+    #[inline(always)]
+    pub(crate) fn new() -> Self {
+        Self { armed: true }
+    }
+
+    #[inline(always)]
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for BoaSessionUnwindGuard {
+    #[inline]
+    fn drop(&mut self) {
+        if self.armed {
+            scrub_boa_thread_locals_on_unwind();
+        }
+    }
+}
+
 impl SliceIsolate {
     /// Pre-warms `count` full-ES2024+ `boa_engine::Context` realms on the current worker thread
     /// with all native Rust host intrinsics (`__slice_console_log`, `__slice_path_join`, `__slice_fs_*`,
@@ -161,7 +251,9 @@ impl SliceIsolate {
         BOA_CONTEXT_POOL.with(|pool| {
             let mut pool_borrow = pool.borrow_mut();
             while pool_borrow.len() < count {
-                pool_borrow.push(create_warm_boa_realm());
+                let mut realm = create_warm_boa_realm();
+                realm.virgin_prewarmed = true;
+                pool_borrow.push(realm);
             }
         });
     }
@@ -215,7 +307,9 @@ impl SliceIsolate {
                     let _ = realm.ctx.run_jobs();
                     scrub_after_prewarm(&mut realm, pw_flags);
                 }
-                release_warm_boa_realm(realm);
+                if first_ses_proto_sig_mismatch_idx(&realm).is_none() {
+                    release_prewarmed_boa_realm(realm);
+                }
                 return;
             }
         }
@@ -270,7 +364,9 @@ impl SliceIsolate {
                     let _ = realm.ctx.run_jobs();
                     scrub_after_prewarm(&mut realm, pw_flags);
                 }
-                release_warm_boa_realm(realm);
+                if first_ses_proto_sig_mismatch_idx(&realm).is_none() {
+                    release_prewarmed_boa_realm(realm);
+                }
             }
         }
     }
@@ -286,7 +382,10 @@ impl SliceIsolate {
         BOA_STDOUT.with(|out| out.borrow_mut().clear());
         BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
         BOA_SES_INTL_SIG_PAIR.with(|p| p.set(None));
-        BOA_DIRTY_SUBSYSTEMS.with(|d| d.set(0));
+        let stale_dirty = BOA_DIRTY_SUBSYSTEMS.with(|d| d.replace(0));
+        if stale_dirty != 0 {
+            scrub_dirty_subsystems_without_realm(stale_dirty);
+        }
         let stale_exec_dirty = BOA_EXEC_DIRTY.with(|c| c.replace(0));
         if stale_exec_dirty != 0 {
             if (stale_exec_dirty & EXEC_DIRTY_EXIT) != 0 {
@@ -317,10 +416,14 @@ impl SliceIsolate {
             b.push_str(&self.compartment.tenant_id);
         });
         let baseline_mem_used = self.compartment.memory_used_bytes.min(4096);
+        let live_persisted_bytes = crate::state_and_kv::current_vfs_state_bytes().saturating_add(
+            crate::state_and_kv::edge_kv_tenant_tree_bytes(&self.compartment.tenant_id),
+        );
         let initial_net_used = self
             .compartment
             .memory_used_bytes
-            .saturating_sub(baseline_mem_used);
+            .saturating_sub(baseline_mem_used)
+            .max(live_persisted_bytes);
         let net_limit_mem = self
             .compartment
             .memory_limit_bytes
@@ -342,6 +445,8 @@ impl SliceIsolate {
         crate::boa_realm::BOA_CHECKPOINT_CAP.with(|c| c.set((allow_cp, max_cp)));
         if let Some(seed) = self.deterministic_seed {
             BOA_DET_STATE.with(|s| s.set(Some((seed ^ 0x9E37_79B9_7F4A_7C15, 1_700_000_000_000))));
+        } else {
+            BOA_DET_STATE.with(|s| s.set(None));
         }
 
         let has_fs_grants = !self
@@ -354,22 +459,24 @@ impl SliceIsolate {
                 .capabilities
                 .allowed_write_prefixes
                 .is_empty();
-        if has_fs_grants {
-            BOA_ACTIVE_CAPS.with(|c| {
-                let mut caps = c.borrow_mut();
-                caps.read_prefixes.clear();
+        BOA_ACTIVE_CAPS.with(|c| {
+            let mut caps = c.borrow_mut();
+            caps.read_prefixes.clear();
+            caps.write_prefixes.clear();
+            if has_fs_grants {
                 caps.read_prefixes
                     .extend_from_slice(&self.compartment.capabilities.allowed_read_prefixes);
-                caps.write_prefixes.clear();
                 caps.write_prefixes
                     .extend_from_slice(&self.compartment.capabilities.allowed_write_prefixes);
-            });
-        }
+            }
+        });
         let has_net_hosts = !self.compartment.capabilities.allowed_net_hosts.is_empty();
-        if has_net_hosts {
-            BOA_NET_HOSTS.with(|h| {
-                let mut set = h.borrow_mut();
+        BOA_NET_HOSTS.with(|h| {
+            let mut set = h.borrow_mut();
+            if !set.is_empty() {
                 set.clear();
+            }
+            if has_net_hosts {
                 set.extend(
                     self.compartment
                         .capabilities
@@ -377,21 +484,25 @@ impl SliceIsolate {
                         .iter()
                         .cloned(),
                 );
-            });
-        }
+            }
+        });
         let has_egress_secrets = !self.egress_audit_secrets.is_empty();
-        if has_egress_secrets {
-            BOA_EGRESS_SECRETS.with(|s| {
-                let mut vec = s.borrow_mut();
+        BOA_EGRESS_SECRETS.with(|s| {
+            let mut vec = s.borrow_mut();
+            if !vec.is_empty() {
                 vec.clear();
+            }
+            if has_egress_secrets {
                 vec.extend(self.egress_audit_secrets.iter().cloned());
-            });
-        }
+            }
+        });
         let has_env_keys = !self.compartment.capabilities.allowed_env_keys.is_empty();
-        if has_env_keys {
-            BOA_ENV_MAP.with(|m| {
-                let mut map = m.borrow_mut();
+        BOA_ENV_MAP.with(|m| {
+            let mut map = m.borrow_mut();
+            if !map.is_empty() {
                 map.clear();
+            }
+            if has_env_keys {
                 map.extend(
                     self.compartment
                         .capabilities
@@ -399,17 +510,19 @@ impl SliceIsolate {
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone())),
                 );
-            });
-        }
+            }
+        });
         let has_exec_bins = !self
             .compartment
             .capabilities
             .allowed_exec_binaries
             .is_empty();
-        if has_exec_bins {
-            BOA_EXEC_BINS.with(|b| {
-                let mut set = b.borrow_mut();
+        BOA_EXEC_BINS.with(|b| {
+            let mut set = b.borrow_mut();
+            if !set.is_empty() {
                 set.clear();
+            }
+            if has_exec_bins {
                 set.extend(
                     self.compartment
                         .capabilities
@@ -417,8 +530,8 @@ impl SliceIsolate {
                         .iter()
                         .cloned(),
                 );
-            });
-        }
+            }
+        });
 
         BoaSessionFlags {
             has_fs_grants,
@@ -427,7 +540,7 @@ impl SliceIsolate {
             has_env_keys,
             has_exec_bins,
             is_worker: crate::workers::is_worker_thread(),
-            initial_mem_used: self.compartment.memory_used_bytes,
+            initial_mem_used: baseline_mem_used.saturating_add(initial_net_used),
         }
     }
 
@@ -683,15 +796,38 @@ impl SliceIsolate {
         self.restore_time_ns = cp_restore_ns;
 
         let pending_violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
-        if let Some((pre_intl, post_intl)) = BOA_SES_INTL_SIG_PAIR.with(|p| p.replace(None)) {
-            if realm.ses_proto_sigs[3] == pre_intl {
-                realm.ses_proto_sigs[3] = post_intl;
+        if let Some(
+            [
+                (pre_str, post_str),
+                (pre_num, post_num),
+                (pre_date, post_date),
+            ],
+        ) = BOA_SES_INTL_SIG_PAIR.with(|p| p.replace(None))
+        {
+            if realm.ses_proto_sigs[3] == pre_str {
+                realm.ses_proto_sigs[3] = post_str;
+            }
+            if realm.ses_proto_sigs[6] == pre_num {
+                realm.ses_proto_sigs[6] = post_num;
+            }
+            if realm.ses_proto_sigs[12] == pre_date {
+                realm.ses_proto_sigs[12] = post_date;
             }
             realm.loaded_shards_mask |= 1 << 18;
         }
         let mut ses_mutated_target = String::new();
-        if let Some(proto_name) = first_ses_proto_sig_mismatch(&realm) {
-            ses_mutated_target.push_str(proto_name);
+        if let Some(mut mismatch_idx) = first_ses_proto_sig_mismatch_idx(&realm) {
+            // If `Promise.prototype` (index 4) changed solely because guest code dynamically
+            // invoked `process.nextTick` (activating `__wrappedThen`), unhook cleanly and re-verify.
+            if mismatch_idx == 4 && !has_next_tick {
+                call_realm_ctl(&mut realm, REALM_CTL_SET_NEXT_TICK, false);
+                if let Some(recheck_idx) = first_ses_proto_sig_mismatch_idx(&realm) {
+                    mismatch_idx = recheck_idx;
+                    ses_mutated_target.push_str(crate::boa_realm::SES_PROTO_NAMES[mismatch_idx]);
+                }
+            } else {
+                ses_mutated_target.push_str(crate::boa_realm::SES_PROTO_NAMES[mismatch_idx]);
+            }
         } else if (check_ses || pending_violation.is_some())
             && let Some(check_fn) = realm.ses_check_fn.clone()
             && let Ok(v) = check_fn.call(&boa_engine::JsValue::undefined(), &[], &mut realm.ctx)
@@ -874,6 +1010,7 @@ impl SliceIsolate {
     ) -> Result<JsValue, SandboxViolation> {
         let _active_src_guard = crate::boa_realm::ActiveSourceSliceGuard::new(js_code);
         let flags = self.setup_boa_compartment_thread_locals();
+        let mut unwind_guard = BoaSessionUnwindGuard::new();
         let rc_key_opt = extract_slice_rc_key(js_code);
         let mut realm = acquire_warm_boa_realm_for_tenant(&self.compartment.tenant_id);
         if realm.has_pending_wu {
@@ -1037,14 +1174,16 @@ impl SliceIsolate {
         self.last_exec_check_ses = has_ses_keywords;
         let check_ses = should_check_ses && has_ses_keywords;
 
-        self.finish_boa_compartment_execution(
+        let res = self.finish_boa_compartment_execution(
             realm,
             flags,
             is_http_req,
             has_next_tick,
             check_ses,
             eval_res,
-        )
+        );
+        unwind_guard.disarm();
+        res
     }
 
     /// Executes a precompiled `SLICEBC\x01` container (`--exper-boacas`) using precomputed
@@ -1060,6 +1199,7 @@ impl SliceIsolate {
         let _active_src_guard =
             crate::boa_realm::ActiveSourceSliceGuard::new_bytes(fallback_js_bytes);
         let flags = self.setup_boa_compartment_thread_locals();
+        let mut unwind_guard = BoaSessionUnwindGuard::new();
 
         if !flags.is_worker && (header.feature_flags & BOACAS_FLAG_HAS_WORKER) != 0 {
             crate::workers::speculative_prewarm_worker_pool(1);
@@ -1161,13 +1301,15 @@ impl SliceIsolate {
         self.last_exec_check_ses = has_ses_flag;
         let check_ses = should_check_ses && has_ses_flag;
 
-        self.finish_boa_compartment_execution(
+        let res = self.finish_boa_compartment_execution(
             realm,
             flags,
             is_http_req,
             has_next_tick,
             check_ses,
             eval_res,
-        )
+        );
+        unwind_guard.disarm();
+        res
     }
 }

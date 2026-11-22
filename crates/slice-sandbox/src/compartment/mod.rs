@@ -2,7 +2,7 @@
 
 pub mod pkey;
 
-pub use pkey::HardwareProtectionDomain;
+pub use pkey::{HardwareProtectionDomain, PkruDomainGuard, current_thread_pkru};
 
 use crate::net::{
     extract_clean_hostname_and_port, is_cloud_metadata_ssrf_target,
@@ -197,20 +197,39 @@ impl CapabilityToken {
     }
 }
 
-/// Zero-allocation static check for SES frozen intrinsics.
+/// Zero-allocation static check for SES frozen intrinsics (covering intrinsic prototypes,
+/// intrinsic constructors, singleton namespaces, and optional `globalThis.` prefixes).
 #[inline(always)]
 pub fn is_frozen_intrinsic(target: &str) -> bool {
+    let clean = target.strip_prefix("globalThis.").unwrap_or(target);
     matches!(
-        target,
-        "Object.prototype"
+        clean,
+        "Object"
+            | "Object.prototype"
+            | "Array"
             | "Array.prototype"
+            | "Function"
             | "Function.prototype"
+            | "String"
             | "String.prototype"
+            | "Number"
             | "Number.prototype"
+            | "Boolean"
             | "Boolean.prototype"
+            | "RegExp"
             | "RegExp.prototype"
+            | "Error"
             | "Error.prototype"
+            | "Promise"
             | "Promise.prototype"
+            | "Map"
+            | "Map.prototype"
+            | "Set"
+            | "Set.prototype"
+            | "Date"
+            | "Date.prototype"
+            | "Uint8Array"
+            | "Uint8Array.prototype"
             | "Reflect"
             | "JSON"
             | "Math"
@@ -382,10 +401,13 @@ impl TenantCompartment {
         }
     }
 
-    /// Consumes `ops` deterministic instruction fuel units, trapping immediately if exceeded.
+    /// Consumes `ops` deterministic instruction fuel units, trapping immediately on overflow or ceiling breach.
     #[inline(always)]
     pub fn consume_fuel(&mut self, ops: u64) -> Result<(), SandboxViolation> {
-        let next = self.fuel_consumed.saturating_add(ops);
+        let Some(next) = self.fuel_consumed.checked_add(ops) else {
+            self.fuel_consumed = self.fuel_limit;
+            return Err(self.trap_fuel_exhausted());
+        };
         if next > self.fuel_limit {
             self.fuel_consumed = self.fuel_limit;
             return Err(self.trap_fuel_exhausted());
@@ -394,10 +416,12 @@ impl TenantCompartment {
         Ok(())
     }
 
-    /// Allocates bytes inside the tenant's isolated heap cage, trapping if exceeding the cap.
+    /// Allocates bytes inside the tenant's isolated heap cage, trapping on overflow or ceiling breach.
     #[inline(always)]
     pub fn alloc_memory(&mut self, bytes: usize) -> Result<(), SandboxViolation> {
-        let next = self.memory_used_bytes.saturating_add(bytes);
+        let Some(next) = self.memory_used_bytes.checked_add(bytes) else {
+            return Err(self.trap_memory_exceeded(usize::MAX));
+        };
         if next > self.memory_limit_bytes {
             return Err(self.trap_memory_exceeded(next));
         }

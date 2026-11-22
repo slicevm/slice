@@ -21,7 +21,7 @@ impl SliceIsolate {
         need_return_str: bool,
     ) -> Result<(u64, u64, String), SandboxViolation> {
         let start = Instant::now();
-        self.compartment.pkey_domain.enter_domain();
+        let _pkru_guard = self.compartment.pkey_domain.enter_domain();
 
         // Deferred compile-time SyntaxError container (`SLICEERR` + exact 1-based line/col message)
         if bytecode.len() >= 8 && &bytecode[0..8] == crate::parser_and_compiler::SLICEERR_MAGIC {
@@ -116,6 +116,18 @@ impl SliceIsolate {
             }
             let total_ns = start.elapsed().as_nanos() as u64;
             return Ok((instantiate_ns, total_ns, ret_str));
+        }
+
+        if self.compartment.memory_used_bytes == 0 {
+            let live_persisted = crate::state_and_kv::current_vfs_bytes_if_owned(
+                crate::boa_realm::vfs_owner_namespace(&self.compartment.tenant_id),
+            )
+            .saturating_add(crate::state_and_kv::edge_kv_tenant_tree_bytes(
+                &self.compartment.tenant_id,
+            ));
+            if live_persisted > 0 {
+                self.compartment.alloc_memory(live_persisted)?;
+            }
         }
 
         let module = decode_slicesnp_cached(bytecode);

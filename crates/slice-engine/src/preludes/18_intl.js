@@ -778,6 +778,7 @@
     }
   };
 
+  var __intlCleanMask = typeof __slice_capture_ses_sigs === "function" ? __slice_capture_ses_sigs(1) : 0;
   Date.prototype.toLocaleDateString = function(locales, options) {
     return new DateTimeFormat(locales, options).format(this);
   };
@@ -792,9 +793,8 @@
   Number.prototype.toLocaleString = function(locales, options) {
     return new NumberFormat(locales, options).format(this);
   };
-  var __intlStrClean = typeof __slice_capture_ses_sigs === "function" ? __slice_capture_ses_sigs(1) : false;
   String.prototype.localeCompare = function(that, locales, options) {
     return new Collator(locales, options).compare(String(this), String(that));
   };
-  if (__intlStrClean) __slice_capture_ses_sigs(2);
+  if (__intlCleanMask > 0) __slice_capture_ses_sigs(16 | __intlCleanMask);
 })();

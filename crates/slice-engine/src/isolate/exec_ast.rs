@@ -529,6 +529,7 @@ impl SliceIsolate {
         idx_val: JsValue,
         val: JsValue,
     ) -> Result<JsValue, SandboxViolation> {
+        self.compartment.verify_property_mutation(target)?;
         let arr_idx = as_canonical_array_index(&idx_val);
         let grow_bytes =
             if let (Some(JsValue::Array(vec)), Some(i)) = (self.env_vars.get(target), arr_idx) {
@@ -573,7 +574,7 @@ impl SliceIsolate {
         }
 
         if let Expr::Member { object, property } = callee
-            && let Some(res) = self.eval_member_call(object, property, &eval_args)?
+            && let Some(res) = self.eval_member_call(object, property, args, &eval_args)?
         {
             return Ok(res);
         }
@@ -596,10 +597,24 @@ impl SliceIsolate {
         &mut self,
         object: &Expr,
         property: &str,
+        raw_args: &[Expr],
         eval_args: &[JsValue],
     ) -> Result<Option<JsValue>, SandboxViolation> {
         let chain = expr_to_dotted_chain(object);
-        match (chain.as_str(), property) {
+        let clean_chain = chain.strip_prefix("globalThis.").unwrap_or(chain.as_str());
+        match (clean_chain, property) {
+            ("Object", "assign" | "defineProperty" | "defineProperties" | "setPrototypeOf")
+            | ("Reflect", "set" | "defineProperty" | "deleteProperty" | "setPrototypeOf") => {
+                if let Some(first_raw) = raw_args.first() {
+                    let tgt = expr_to_dotted_chain(first_raw);
+                    if !tgt.is_empty() {
+                        self.compartment.verify_property_mutation(&tgt)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        match (clean_chain, property) {
             ("console", "log" | "info" | "warn" | "error") => {
                 let formatted: Vec<String> = eval_args.iter().map(|v| v.to_string()).collect();
                 let line = formatted.join(" ");

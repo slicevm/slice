@@ -421,7 +421,7 @@ impl NanBoxedValue {
     /// Returns the value contained within this structure as a `u64`.
     #[must_use]
     #[inline(always)]
-    fn value(&self) -> u64 {
+    pub(crate) fn value(&self) -> u64 {
         let value = self.ptr.addr() as u64;
 
         #[cfg(target_pointer_width = "32")]

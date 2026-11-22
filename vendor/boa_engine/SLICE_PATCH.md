@@ -21,7 +21,7 @@ By serializing the compiled `Gc<CodeBlock>` tree and global `Scope` bindings int
 
 ## 2. Modified Files
 
-Thirty-three source files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
+Thirty-five source files in `vendor/boa_engine` differ from upstream `boa_engine v0.22.0`:
 - [`src/script.rs`](./src/script.rs):
   - `Script::compile_to_slicebc(&self, context: &mut Context) -> JsResult<Vec<u8>>` & `Script::compile_to_slicebc_with_min_line(&self, context: &mut Context, min_sourcemap_line: u32) -> JsResult<Vec<u8>>`
   - `Script::from_slicebc_bytes(bytes: &[u8], context: &mut Context) -> Option<Self>`
@@ -59,6 +59,8 @@ Thirty-three source files in `vendor/boa_engine` differ from upstream `boa_engin
 - [`src/builtins/iterable/mod.rs`](./src/builtins/iterable/mod.rs), [`src/builtins/object/for_in_iterator.rs`](./src/builtins/object/for_in_iterator.rs), [`src/vm/opcode/iteration/for_in.rs`](./src/vm/opcode/iteration/for_in.rs), & [`src/vm/opcode/iteration/iterator.rs`](./src/vm/opcode/iteration/iterator.rs):
   - `FastForInState` & `IteratorRecord::try_new_fast_for_in`: Zero-`ForInIterator`-allocation / zero-`{value, done}`-allocation `for..in` iteration over ordinary objects with no indexed properties and non-enumerable prototypes (`null` or `%Object.prototype%`), preserving live property deletion semantics and deoptimizing seamlessly into `ForInIterator::create_for_in_iterator_from_remaining` if the prototype or indexed storage mutates mid-loop; also makes `IteratorRecord::last_result` `Option<IteratorResult>` (`None` initially) so `for..of` loops skip eager `JsObject::with_null_proto()` allocation.
   - `JsObject::enumerable_own_property_names` in [`src/object/operations.rs`](./src/object/operations.rs): Single-pass `Shape::with_property_keys` fast path for `Object.keys`, `Object.values`, and `Object.entries` on ordinary objects without indexed properties or accessors.
+- [`src/value/mod.rs`](./src/value/mod.rs), [`src/value/inner/nan_boxed.rs`](./src/value/inner/nan_boxed.rs), & [`src/object/property_map.rs`](./src/object/property_map.rs):
+  - `JsValue::raw_fingerprint_bits`, `NanBoxedValue::value`, and `PropertyMap::storage_fingerprint`: Branchless 64-bit FNV/SplitMix-style mixing over NaN-boxed own-property slot bits and indexed storage length so `slice-engine` verifies 29 SES intrinsic prototypes, constructors, and singleton namespaces (`Object`, `Array`, `Function`, `String`, `Number`, `Boolean`, `RegExp`, `Error`, `Promise`, `Map`, `Set`, `Date`, `Uint8Array`, `Reflect`, `JSON`, `Math`) in native Rust (`~20 ns`, zero JS function calls), catching same-shape `Object.assign` / `Reflect.set` method overwrites.
 
 ---
 

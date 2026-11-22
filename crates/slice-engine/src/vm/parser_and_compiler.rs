@@ -1213,14 +1213,7 @@ impl Parser {
 
 #[inline]
 fn is_tier0_guarded_proto_target(chain: &str) -> bool {
-    matches!(
-        chain,
-        "Object.prototype"
-            | "Array.prototype"
-            | "Function.prototype"
-            | "String.prototype"
-            | "Promise.prototype"
-    )
+    slice_sandbox::is_frozen_intrinsic(chain)
 }
 
 pub(crate) fn expr_to_dotted_chain(expr: &Expr) -> String {
@@ -2221,6 +2214,86 @@ fn analyze_tier0_slicesnp_program(program: &oxc::ast::ast::Program<'_>) -> (bool
     (compatible, has_proto_mutation)
 }
 
+fn program_has_tier0_unsupported_mutation_syntax(program: &oxc::ast::ast::Program<'_>) -> bool {
+    use oxc::ast::ast::{AssignmentTarget, BindingPattern, ChainExpression};
+    use oxc::ast_visit::{Visit, walk};
+
+    struct ForcedTier0HazardVisitor {
+        found: bool,
+    }
+
+    impl<'a> Visit<'a> for ForcedTier0HazardVisitor {
+        #[inline]
+        fn visit_assignment_target(&mut self, it: &AssignmentTarget<'a>) {
+            if self.found {
+                return;
+            }
+            if matches!(
+                it,
+                AssignmentTarget::ObjectAssignmentTarget(_)
+                    | AssignmentTarget::ArrayAssignmentTarget(_)
+            ) {
+                self.found = true;
+                return;
+            }
+            walk::walk_assignment_target(self, it);
+        }
+
+        #[inline]
+        fn visit_chain_expression(&mut self, _it: &ChainExpression<'a>) {
+            self.found = true;
+        }
+
+        #[inline]
+        fn visit_binding_pattern(&mut self, it: &BindingPattern<'a>) {
+            if self.found {
+                return;
+            }
+            if matches!(
+                it,
+                BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_)
+            ) {
+                self.found = true;
+                return;
+            }
+            walk::walk_binding_pattern(self, it);
+        }
+    }
+
+    let mut v = ForcedTier0HazardVisitor { found: false };
+    v.visit_program(program);
+    v.found
+}
+
+fn source_has_tier0_unsupported_mutation_syntax(source: &str) -> bool {
+    let allocator = oxc::allocator::Allocator::default();
+    let parse_opts = oxc::parser::ParseOptions {
+        allow_return_outside_function: true,
+        ..Default::default()
+    };
+    let parsed = oxc::parser::Parser::new(
+        &allocator,
+        source,
+        oxc::span::SourceType::ts().with_module(true),
+    )
+    .with_options(parse_opts)
+    .parse();
+    if parsed.diagnostics.is_empty() {
+        return program_has_tier0_unsupported_mutation_syntax(&parsed.program);
+    }
+    let parsed_script = oxc::parser::Parser::new(
+        &allocator,
+        source,
+        oxc::span::SourceType::ts().with_module(false),
+    )
+    .with_options(parse_opts)
+    .parse();
+    if parsed_script.diagnostics.is_empty() {
+        return program_has_tier0_unsupported_mutation_syntax(&parsed_script.program);
+    }
+    true
+}
+
 /// Magic header for deferred compile-time syntax errors (`SLICEERR` + UTF-8 error text).
 pub const SLICEERR_MAGIC: &[u8; 8] = b"SLICEERR";
 
@@ -2314,17 +2387,19 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
         return bytes;
     }
     let mut cached_tier0: Option<(bool, bool)> = None;
+    let mut forced_tier0_needs_boa_ast: Option<bool> = None;
     let source = match slice_cas::compile_ts_or_js_checked_with_ast_hook(
         raw_source,
         true,
         false,
         |program| {
-            if tier_ov != Some(0) {
-                if raw_source.is_ascii() && raw_source.len() <= 4096 {
-                    cached_tier0 = Some(analyze_tier0_slicesnp_program(program));
-                } else {
-                    cached_tier0 = Some((false, false));
-                }
+            if tier_ov == Some(0) {
+                forced_tier0_needs_boa_ast =
+                    Some(program_has_tier0_unsupported_mutation_syntax(program));
+            } else if raw_source.is_ascii() && raw_source.len() <= 4096 {
+                cached_tier0 = Some(analyze_tier0_slicesnp_program(program));
+            } else {
+                cached_tier0 = Some((false, false));
             }
         },
     ) {
@@ -2343,7 +2418,12 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
         || memchr::memmem::find(src_bytes, b"while(true)").is_some();
     let has_proto_candidate = memchr::memmem::find(src_bytes, b"prototype").is_some();
     let (tier0_ast_ok, has_proto_mutation) = match tier_ov {
-        Some(0) => (true, false),
+        Some(0) => {
+            let needs_boa = memchr::memmem::find(src_bytes, b"?.").is_some()
+                || forced_tier0_needs_boa_ast
+                    .unwrap_or_else(|| source_has_tier0_unsupported_mutation_syntax(&source));
+            (!needs_boa, false)
+        }
         Some(1) if !has_while_true && !has_proto_candidate => (false, false),
         _ => {
             if !can_attempt_tier0_slicesnp(&source) {
@@ -2361,7 +2441,7 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
 
     let route_to_tier1_boa = match tier_ov {
         Some(1) => !has_direct_intrinsic_attack,
-        Some(0) => false,
+        Some(0) => !tier0_ast_ok,
         _ => !has_direct_intrinsic_attack && !tier0_ast_ok,
     };
 
@@ -2513,6 +2593,14 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
             {
                 ops.push(BytecodeOp::MutateIntrinsic {
                     target: target_chain.clone(),
+                });
+                continue;
+            }
+            Stmt::ExprStmt(Expr::IndexAssign { target, .. })
+                if is_tier0_guarded_proto_target(target) =>
+            {
+                ops.push(BytecodeOp::MutateIntrinsic {
+                    target: target.clone(),
                 });
                 continue;
             }

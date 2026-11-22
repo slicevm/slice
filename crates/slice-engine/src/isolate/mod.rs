@@ -105,7 +105,6 @@ impl SliceIsolate {
             fuel_limit,
             memory_limit_bytes,
         );
-        compartment.pkey_domain.enter_domain();
 
         Self {
             compartment,
@@ -296,7 +295,6 @@ impl SliceIsolate {
             self.compartment.tenant_id.push_str(tenant_id);
         }
         self.compartment.pkey_domain.rebind_slot(slot_id);
-        self.compartment.pkey_domain.enter_domain();
         self.compartment.fuel_limit = fuel_limit;
         self.compartment.fuel_consumed = 0;
         self.compartment.memory_limit_bytes = memory_limit_bytes;
