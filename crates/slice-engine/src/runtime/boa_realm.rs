@@ -76,9 +76,9 @@ pub(crate) struct BoaFsCaps {
 }
 
 pub(crate) type CapturedBoaHttpRes = (u16, String, Option<Vec<u8>>, String, Vec<(String, String)>);
-pub(crate) const SES_INTRINSIC_COUNT: usize = 27;
+pub(crate) const SES_INTRINSIC_COUNT: usize = 29;
 pub(crate) type SesProtoSig = (u64, usize, u64);
-pub(crate) type SesIntlSigDelta = ((SesProtoSig, SesProtoSig), (SesProtoSig, SesProtoSig));
+pub(crate) type SesIntlSigDelta = [(SesProtoSig, SesProtoSig); 3];
 
 thread_local! {
     pub(crate) static SNP_MODULE_CACHE: std::cell::RefCell<FxHashMap<u64, std::sync::Arc<BytecodeModule>>> =
@@ -661,6 +661,7 @@ pub(crate) const SES_PROTO_NAMES: [&str; SES_INTRINSIC_COUNT] = [
     "Error.prototype",
     "Map.prototype",
     "Set.prototype",
+    "Date.prototype",
     "Object",
     "Array",
     "Function",
@@ -676,6 +677,7 @@ pub(crate) const SES_PROTO_NAMES: [&str; SES_INTRINSIC_COUNT] = [
     "Reflect",
     "JSON",
     "Math",
+    "Date",
 ];
 
 #[inline]
@@ -711,6 +713,7 @@ pub(crate) fn capture_ses_proto_sigs(
         proto_sig(&c.error().prototype()),
         proto_sig(&c.map().prototype()),
         proto_sig(&c.set().prototype()),
+        proto_sig(&c.date().prototype()),
         proto_sig(&c.object().constructor()),
         proto_sig(&c.array().constructor()),
         proto_sig(&c.function().constructor()),
@@ -726,6 +729,7 @@ pub(crate) fn capture_ses_proto_sigs(
         proto_sig(&o.reflect()),
         proto_sig(&o.json()),
         proto_sig(&o.math()),
+        proto_sig(&c.date().constructor()),
     ]
 }
 
@@ -990,9 +994,16 @@ pub(crate) fn ensure_realm_shards(
     for shard_id in crate::js_preludes::SHARD_LOAD_ORDER {
         let bit = 1u32 << shard_id;
         if (missing & bit) != 0 {
-            let str_clean_before_intl = shard_id == 18
-                && proto_sig(&realm.ctx.intrinsics().constructors().string().prototype())
-                    == realm.ses_proto_sigs[3];
+            let intl_clean_before = if shard_id == 18 {
+                let c = realm.ctx.intrinsics().constructors();
+                (
+                    proto_sig(&c.string().prototype()) == realm.ses_proto_sigs[3],
+                    proto_sig(&c.number().prototype()) == realm.ses_proto_sigs[6],
+                    proto_sig(&c.date().prototype()) == realm.ses_proto_sigs[12],
+                )
+            } else {
+                (false, false, false)
+            };
             if lazy_getters_active {
                 if let Some(ref ensure_fn) = realm.ensure_shard_fn {
                     let _ = ensure_fn.call(
@@ -1005,9 +1016,18 @@ pub(crate) fn ensure_realm_shards(
                 let _ = crate::js_preludes::eval_lazy_prelude_shard(shard_id, &mut realm.ctx);
             }
             realm.loaded_shards_mask |= bit;
-            if str_clean_before_intl {
-                realm.ses_proto_sigs[3] =
-                    proto_sig(&realm.ctx.intrinsics().constructors().string().prototype());
+            if shard_id == 18 {
+                BOA_SES_INTL_SIG_PAIR.with(|p| p.set(None));
+                let c = realm.ctx.intrinsics().constructors();
+                if intl_clean_before.0 {
+                    realm.ses_proto_sigs[3] = proto_sig(&c.string().prototype());
+                }
+                if intl_clean_before.1 {
+                    realm.ses_proto_sigs[6] = proto_sig(&c.number().prototype());
+                }
+                if intl_clean_before.2 {
+                    realm.ses_proto_sigs[12] = proto_sig(&c.date().prototype());
+                }
             }
             if shard_id == 8 && realm.init_worker_self_fn.is_none() {
                 realm.init_worker_self_fn = realm

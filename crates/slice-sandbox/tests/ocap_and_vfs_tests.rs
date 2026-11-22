@@ -267,3 +267,102 @@ fn test_vfs_drive_relative_device_namespaces_catchall_routes_and_dot_prefix() {
     assert!(tenant_empty.verify_fs_read("Cargo.toml").is_err());
     assert!(tenant_empty.verify_fs_read(".").is_err());
 }
+
+#[test]
+fn test_pkru_nested_unwind_restoration_checked_ceilings_and_frozen_intrinsics() {
+    let outer = HardwareProtectionDomain::allocate(2);
+    let inner = HardwareProtectionDomain::allocate(3);
+    let hw = outer.hardware_enforced;
+    assert_eq!(current_thread_pkru(hw), 0);
+
+    {
+        let _outer_guard = outer.enter_domain();
+        let outer_pkru = current_thread_pkru(hw);
+        assert_eq!(outer_pkru, outer.pkru_mask);
+
+        // Normal nested scope restores outer PKRU on drop
+        {
+            let _inner_guard = inner.enter_domain();
+            assert_eq!(current_thread_pkru(hw), inner.pkru_mask);
+        }
+        assert_eq!(current_thread_pkru(hw), outer_pkru);
+
+        // Panic unwind inside nested scope must also restore outer PKRU (not reset to 0)
+        let unwind_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _inner_guard = inner.enter_domain();
+            assert_eq!(current_thread_pkru(hw), inner.pkru_mask);
+            panic!("simulated nested guest trap");
+        }));
+        assert!(unwind_res.is_err());
+        assert_eq!(
+            current_thread_pkru(hw),
+            outer_pkru,
+            "PkruDomainGuard must restore outer caller PKRU across panic unwind"
+        );
+    }
+    assert_eq!(current_thread_pkru(hw), 0);
+
+    // Checked arithmetic on consume_fuel(u64::MAX) and alloc_memory(usize::MAX)
+    let mut comp = TenantCompartment::new(
+        "overflow-guard",
+        4,
+        CapabilityToken::pure_compute(),
+        1_000,
+        8192,
+    );
+    comp.consume_fuel(600).expect("600 <= 1000");
+    assert!(
+        matches!(
+            comp.consume_fuel(u64::MAX),
+            Err(SandboxViolation::CpuFuelExhausted { .. })
+        ),
+        "consume_fuel(u64::MAX) must saturate and trap instead of wrapping around"
+    );
+    comp.alloc_memory(2048).expect("4096 base + 2048 <= 8192");
+    assert!(
+        matches!(
+            comp.alloc_memory(usize::MAX),
+            Err(SandboxViolation::MemoryCeilingExceeded { .. })
+        ),
+        "alloc_memory(usize::MAX) must saturate and trap instead of wrapping around"
+    );
+
+    // Expanded frozen intrinsic registry: constructors, globalThis.*, collections, TypedArrays
+    for frozen in [
+        "Object",
+        "Object.prototype",
+        "Array",
+        "Array.prototype",
+        "Function",
+        "Function.prototype",
+        "Promise",
+        "Promise.prototype",
+        "Map",
+        "Map.prototype",
+        "Set",
+        "Set.prototype",
+        "Uint8Array",
+        "Uint8Array.prototype",
+        "Reflect",
+        "JSON",
+        "Math",
+        "globalThis.Object",
+        "globalThis.Object.prototype",
+        "globalThis.Array.prototype",
+        "globalThis.Reflect",
+        "globalThis.JSON",
+    ] {
+        assert!(
+            is_frozen_intrinsic(frozen),
+            "expected '{}' to be recognized as a frozen SES intrinsic",
+            frozen
+        );
+    }
+    for mutable_user in ["myAppState", "globalThis.myAppState", "Widget.prototype"] {
+        assert!(
+            !is_frozen_intrinsic(mutable_user),
+            "expected user target '{}' not to be classified as a frozen intrinsic",
+            mutable_user
+        );
+    }
+}

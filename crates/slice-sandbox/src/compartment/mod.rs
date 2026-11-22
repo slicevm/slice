@@ -226,6 +226,8 @@ pub fn is_frozen_intrinsic(target: &str) -> bool {
             | "Map.prototype"
             | "Set"
             | "Set.prototype"
+            | "Date"
+            | "Date.prototype"
             | "Uint8Array"
             | "Uint8Array.prototype"
             | "Reflect"

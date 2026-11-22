@@ -25,7 +25,7 @@ We specifically welcome reports affecting any of Slice's **5 Isolation & Defense
    - Reading `process.env` keys not listed in `allow_env` or spawning subprocesses without `allow_exec`.
    - Child isolates (`Slice.evalSandbox(code, childCaps)` or `new Worker(..., { sliceCapabilities })`) escalating privileges beyond their parent isolate's capabilities.
 2. **Ring 2 - Dynamic SES (Hardened JavaScript) Escape (`slice-engine`)**:
-   - Mutating frozen primordials (`Object.prototype`, `Array.prototype`, `Function.prototype`, etc.) when `--lockdown` is enabled.
+   - Mutating frozen primordials across any execution tier (29 prototypes, constructors, and singleton namespaces including `Object.prototype`, `Array.prototype`, `Function.prototype`, `Promise.prototype`, `Map.prototype`, `Set.prototype`, `Date.prototype`, `Uint8Array.prototype`, `Reflect`, `JSON`, `Math`, and their constructors).
    - Accessing raw unattenuated `__slice_*` host bridge functions directly from user/tenant code after prelude bootstrap.
 3. **Ring 3 - Deterministic CPU Fuel & Byte-Level Heap Cage Escape**:
    - Bypassing `max_cpu_fuel` via un-metered loops, native intrinsics, or regex/compression amplification (zip bombs, KDF memory exhaustion).

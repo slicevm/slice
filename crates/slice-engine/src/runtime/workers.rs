@@ -858,6 +858,31 @@ fn worker_pool_thread_loop(
     }
 }
 
+pub(crate) struct WorkerTurnUnwindGuard {
+    pub(crate) armed: bool,
+}
+
+impl Drop for WorkerTurnUnwindGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            WORKER_SELF_ENV.with(|env| *env.borrow_mut() = WorkerSelfThreadEnv::default());
+            BOA_VFS_OWNER_TENANT.with(|o| o.borrow_mut().clear());
+            BOA_VFS_STATE.with(|v| v.borrow_mut().clear());
+            GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn global_active_workers_for_test() -> usize {
+    GLOBAL_ACTIVE_WORKERS.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+pub(crate) fn inc_global_active_workers_for_test() {
+    GLOBAL_ACTIVE_WORKERS.fetch_add(1, Ordering::AcqRel);
+}
+
 fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
     let worker_id = job.worker_id;
     let event_tx = job.event_tx;
@@ -925,20 +950,6 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
     }
     for sec in job.parent_egress_secrets {
         child_isolate.add_egress_audit_secret(sec);
-    }
-
-    struct WorkerTurnUnwindGuard {
-        armed: bool,
-    }
-    impl Drop for WorkerTurnUnwindGuard {
-        fn drop(&mut self) {
-            if self.armed {
-                WORKER_SELF_ENV.with(|env| *env.borrow_mut() = WorkerSelfThreadEnv::default());
-                BOA_VFS_OWNER_TENANT.with(|o| o.borrow_mut().clear());
-                BOA_VFS_STATE.with(|v| v.borrow_mut().clear());
-                GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
-            }
-        }
     }
 
     let mut worker_unwind_guard = WorkerTurnUnwindGuard { armed: true };

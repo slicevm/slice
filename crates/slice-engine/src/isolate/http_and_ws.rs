@@ -73,7 +73,7 @@ impl HttpFastOutcome {
 }
 
 #[inline]
-fn populate_boa_http_req(req: &HttpRequestContext<'_>) {
+pub(crate) fn populate_boa_http_req(req: &HttpRequestContext<'_>) {
     BOA_HTTP_REQ.with(|r| {
         let mut borrow = r.borrow_mut();
         borrow.active = true;
@@ -115,7 +115,7 @@ fn populate_boa_http_req(req: &HttpRequestContext<'_>) {
     BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
 }
 
-struct ActiveHttpReqGuard;
+pub(crate) struct ActiveHttpReqGuard;
 
 impl Drop for ActiveHttpReqGuard {
     #[inline]

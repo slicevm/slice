@@ -796,14 +796,22 @@ impl SliceIsolate {
         self.restore_time_ns = cp_restore_ns;
 
         let pending_violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
-        if let Some(((pre_str, post_str), (pre_num, post_num))) =
-            BOA_SES_INTL_SIG_PAIR.with(|p| p.replace(None))
+        if let Some(
+            [
+                (pre_str, post_str),
+                (pre_num, post_num),
+                (pre_date, post_date),
+            ],
+        ) = BOA_SES_INTL_SIG_PAIR.with(|p| p.replace(None))
         {
             if realm.ses_proto_sigs[3] == pre_str {
                 realm.ses_proto_sigs[3] = post_str;
             }
             if realm.ses_proto_sigs[6] == pre_num {
                 realm.ses_proto_sigs[6] = post_num;
+            }
+            if realm.ses_proto_sigs[12] == pre_date {
+                realm.ses_proto_sigs[12] = post_date;
             }
             realm.loaded_shards_mask |= 1 << 18;
         }

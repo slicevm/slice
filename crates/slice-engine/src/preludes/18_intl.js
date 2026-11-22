@@ -778,6 +778,7 @@
     }
   };
 
+  var __intlCleanMask = typeof __slice_capture_ses_sigs === "function" ? __slice_capture_ses_sigs(1) : 0;
   Date.prototype.toLocaleDateString = function(locales, options) {
     return new DateTimeFormat(locales, options).format(this);
   };
@@ -789,14 +790,11 @@
     var o = (options && (options.dateStyle || options.timeStyle)) ? options : Object.assign({ year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" }, options || {});
     return new DateTimeFormat(locales, o).format(this);
   };
-  var __intlCleanMask = typeof __slice_capture_ses_sigs === "function" ? __slice_capture_ses_sigs(1) : 0;
   Number.prototype.toLocaleString = function(locales, options) {
     return new NumberFormat(locales, options).format(this);
   };
   String.prototype.localeCompare = function(that, locales, options) {
     return new Collator(locales, options).compare(String(this), String(that));
   };
-  if (__intlCleanMask === 3) __slice_capture_ses_sigs(4);
-  else if (__intlCleanMask === 1) __slice_capture_ses_sigs(2);
-  else if (__intlCleanMask === 2) __slice_capture_ses_sigs(3);
+  if (__intlCleanMask > 0) __slice_capture_ses_sigs(16 | __intlCleanMask);
 })();

@@ -24,6 +24,19 @@ pub(crate) fn current_vfs_state_bytes() -> usize {
     BOA_VFS_STATE.with(|v| v.borrow().total_accounted_bytes())
 }
 
+#[inline]
+pub(crate) fn current_vfs_bytes_if_owned(vfs_ns: &str) -> usize {
+    let bytes = BOA_VFS_STATE.with(|v| v.borrow().total_accounted_bytes());
+    if bytes == 0 {
+        return 0;
+    }
+    if crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| o.borrow().as_str() == vfs_ns) {
+        bytes
+    } else {
+        0
+    }
+}
+
 pub(crate) fn checkpoint_tenant_state(tenant_id: &str) -> u64 {
     let trace_on = crate::boa_realm::is_trace_recording_enabled();
     let t0 = if trace_on {
@@ -130,10 +143,18 @@ pub(crate) fn restore_tenant_state_checked(
     BOA_VFS_STATE.with(|v| v.borrow_mut().restore_from_snapshot(snap.vfs_snap));
     let shards = EDGE_KV_SLAB
         .get_or_init(|| std::array::from_fn(|_| parking_lot::RwLock::new(FxHashMap::default())));
+    let mut restored_kv_bytes = 0usize;
+    let now = current_epoch_ms();
     for (idx, shard_snap) in snap.tenant_kv.into_iter().enumerate() {
         if let Some(t_map) = shard_snap {
             if !t_map.is_empty() {
                 EDGE_KV_HAS_WRITES.store(true, std::sync::atomic::Ordering::Relaxed);
+                for (k, entry) in &t_map {
+                    if entry.expires_at_ms.is_none_or(|exp| now < exp) {
+                        restored_kv_bytes = restored_kv_bytes
+                            .saturating_add(edge_kv_entry_bytes(k.as_str(), entry));
+                    }
+                }
             }
             shards[idx]
                 .write()
@@ -145,6 +166,7 @@ pub(crate) fn restore_tenant_state_checked(
             }
         }
     }
+    set_kv_owner_exact_bytes(tenant_id, restored_kv_bytes);
     if let Some(start) = t0 {
         crate::boa_realm::record_trace_event(
             "state.restore",
@@ -257,6 +279,72 @@ pub(crate) static EDGE_KV_SLAB: std::sync::OnceLock<[parking_lot::RwLock<KvShard
     std::sync::OnceLock::new();
 pub(crate) static EDGE_KV_HAS_WRITES: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static EDGE_KV_OWNER_BYTES: std::sync::OnceLock<
+    parking_lot::RwLock<FxHashMap<CompactString, usize>>,
+> = std::sync::OnceLock::new();
+pub(crate) static EDGE_KV_NONEMPTY_OWNERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static EDGE_KV_HAS_SUBTENANT_OWNERS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[inline]
+fn kv_owner_bytes_map() -> &'static parking_lot::RwLock<FxHashMap<CompactString, usize>> {
+    EDGE_KV_OWNER_BYTES.get_or_init(|| parking_lot::RwLock::new(FxHashMap::default()))
+}
+
+#[inline]
+fn adjust_kv_owner_bytes(tenant_id: &str, delta: isize) {
+    if delta == 0 {
+        return;
+    }
+    let mut map = kv_owner_bytes_map().write();
+    if delta > 0 {
+        let add = delta as usize;
+        if let Some(cur) = map.get_mut(tenant_id) {
+            *cur = cur.saturating_add(add);
+        } else {
+            if tenant_id.contains(':') {
+                EDGE_KV_HAS_SUBTENANT_OWNERS.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            map.insert(CompactString::new(tenant_id), add);
+            EDGE_KV_NONEMPTY_OWNERS.store(map.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+    } else {
+        let sub = delta.unsigned_abs();
+        let mut removed_sub = false;
+        if let Some(cur) = map.get_mut(tenant_id) {
+            if *cur <= sub {
+                removed_sub = tenant_id.contains(':');
+                map.remove(tenant_id);
+                EDGE_KV_NONEMPTY_OWNERS.store(map.len(), std::sync::atomic::Ordering::Relaxed);
+            } else {
+                *cur -= sub;
+            }
+        }
+        if removed_sub && !map.keys().any(|k| k.contains(':')) {
+            EDGE_KV_HAS_SUBTENANT_OWNERS.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+fn set_kv_owner_exact_bytes(tenant_id: &str, bytes: usize) {
+    let mut map = kv_owner_bytes_map().write();
+    if bytes == 0 {
+        let removed = map.remove(tenant_id).is_some();
+        if removed {
+            EDGE_KV_NONEMPTY_OWNERS.store(map.len(), std::sync::atomic::Ordering::Relaxed);
+            if tenant_id.contains(':') && !map.keys().any(|k| k.contains(':')) {
+                EDGE_KV_HAS_SUBTENANT_OWNERS.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    } else {
+        if tenant_id.contains(':') {
+            EDGE_KV_HAS_SUBTENANT_OWNERS.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        map.insert(CompactString::new(tenant_id), bytes);
+        EDGE_KV_NONEMPTY_OWNERS.store(map.len(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 #[inline]
 pub(crate) fn current_epoch_ms() -> u64 {
@@ -315,8 +403,11 @@ pub(crate) fn edge_kv_get(tenant_id: &str, key: &str) -> Option<String> {
         None
     };
     drop(guard);
-    if freed_expired > 0 && BOA_ACTIVE_TENANT.with(|t| t.borrow().as_str() == tenant_id) {
-        crate::bindings::helpers::release_isolate_memory(freed_expired);
+    if freed_expired > 0 {
+        adjust_kv_owner_bytes(tenant_id, -(freed_expired as isize));
+        if BOA_ACTIVE_TENANT.with(|t| t.borrow().as_str() == tenant_id) {
+            crate::bindings::helpers::release_isolate_memory(freed_expired);
+        }
     }
     found
 }
@@ -383,6 +474,8 @@ pub(crate) fn edge_kv_set_checked(
             );
         }
         EDGE_KV_HAS_WRITES.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(guard);
+        adjust_kv_owner_bytes(tenant_id, delta);
         return Ok(delta);
     }
 
@@ -400,6 +493,8 @@ pub(crate) fn edge_kv_set_checked(
     );
     guard.insert(CompactString::new(tenant_id), t_map);
     EDGE_KV_HAS_WRITES.store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(guard);
+    adjust_kv_owner_bytes(tenant_id, new_bytes as isize);
     Ok(new_bytes as isize)
 }
 
@@ -412,57 +507,43 @@ pub(crate) fn edge_kv_entry_bytes(key: &str, entry: &KvEntry) -> usize {
     key.len().saturating_add(val_bytes)
 }
 
+#[inline]
 pub(crate) fn edge_kv_tenant_bytes(tenant_id: &str) -> usize {
-    if !EDGE_KV_HAS_WRITES.load(std::sync::atomic::Ordering::Relaxed) {
+    if EDGE_KV_NONEMPTY_OWNERS.load(std::sync::atomic::Ordering::Relaxed) == 0 {
         return 0;
     }
-    let Some(shards) = EDGE_KV_SLAB.get() else {
-        return 0;
-    };
-    let now = current_epoch_ms();
-    let mut total = 0usize;
-    for shard in shards {
-        let guard = shard.read();
-        if let Some(t_map) = guard.get(tenant_id) {
-            for (k, entry) in t_map {
-                if entry.expires_at_ms.is_none_or(|exp| now < exp) {
-                    total = total.saturating_add(edge_kv_entry_bytes(k.as_str(), entry));
-                }
-            }
-        }
-    }
-    total
+    kv_owner_bytes_map()
+        .read()
+        .get(tenant_id)
+        .copied()
+        .unwrap_or(0)
 }
 
 /// Computes live `Slice.kv` bytes owned by `tenant_id` AND any nested child sub-sandboxes
-/// (`{tenant_id}:sub` and `{tenant_id}:sub:*`), fast-pathing in `< 1 ns` when no KV writes exist.
-#[inline]
+/// (`{tenant_id}:sub` and `{tenant_id}:sub:*`), fast-pathing in `< 1 ns` when empty and
+/// `O(1)` (`~8 ns`, zero shard iteration) when no sub-tenant KV owners exist.
+#[inline(always)]
 pub(crate) fn edge_kv_tenant_tree_bytes(tenant_id: &str) -> usize {
-    if !EDGE_KV_HAS_WRITES.load(std::sync::atomic::Ordering::Relaxed) {
+    if EDGE_KV_NONEMPTY_OWNERS.load(std::sync::atomic::Ordering::Relaxed) == 0 {
         return 0;
     }
-    let Some(shards) = EDGE_KV_SLAB.get() else {
-        return 0;
-    };
-    let now = current_epoch_ms();
+    edge_kv_tenant_tree_bytes_slow(tenant_id)
+}
+
+#[inline(never)]
+fn edge_kv_tenant_tree_bytes_slow(tenant_id: &str) -> usize {
+    let map = kv_owner_bytes_map().read();
+    if !EDGE_KV_HAS_SUBTENANT_OWNERS.load(std::sync::atomic::Ordering::Relaxed) {
+        return map.get(tenant_id).copied().unwrap_or(0);
+    }
     let mut total = 0usize;
-    for shard in shards {
-        let guard = shard.read();
-        if guard.is_empty() {
-            continue;
-        }
-        for (owner, t_map) in guard.iter() {
-            let matches_tree = owner.as_str() == tenant_id
-                || (!tenant_id.is_empty()
-                    && owner.starts_with(tenant_id)
-                    && owner.as_bytes().get(tenant_id.len()) == Some(&b':'));
-            if matches_tree {
-                for (k, entry) in t_map {
-                    if entry.expires_at_ms.is_none_or(|exp| now < exp) {
-                        total = total.saturating_add(edge_kv_entry_bytes(k.as_str(), entry));
-                    }
-                }
-            }
+    for (owner, &bytes) in map.iter() {
+        let matches_tree = owner.as_str() == tenant_id
+            || (!tenant_id.is_empty()
+                && owner.starts_with(tenant_id)
+                && owner.as_bytes().get(tenant_id.len()) == Some(&b':'));
+        if matches_tree {
+            total = total.saturating_add(bytes);
         }
     }
     total
@@ -505,6 +586,8 @@ pub(crate) fn restore_or_clear_tenant_tree_kv(
         return;
     };
     let mut snap_arr = snap;
+    let mut restored_owners: FxHashMap<CompactString, usize> = FxHashMap::default();
+    let now = current_epoch_ms();
     for (idx, shard) in shards.iter().enumerate() {
         let mut guard = shard.write();
         if !guard.is_empty() {
@@ -517,19 +600,48 @@ pub(crate) fn restore_or_clear_tenant_tree_kv(
         }
         if let Some(ref mut arr) = snap_arr {
             for (owner, t_map) in arr[idx].drain() {
+                let mut b = 0usize;
+                for (k, entry) in &t_map {
+                    if entry.expires_at_ms.is_none_or(|exp| now < exp) {
+                        b = b.saturating_add(edge_kv_entry_bytes(k.as_str(), entry));
+                    }
+                }
+                if b > 0 {
+                    *restored_owners.entry(owner.clone()).or_insert(0) += b;
+                }
                 guard.insert(owner, t_map);
             }
         }
     }
+    let mut map = kv_owner_bytes_map().write();
+    map.retain(|owner, _| {
+        !(owner.as_str() == tenant_id
+            || (!tenant_id.is_empty()
+                && owner.starts_with(tenant_id)
+                && owner.as_bytes().get(tenant_id.len()) == Some(&b':')))
+    });
+    for (owner, bytes) in restored_owners {
+        map.insert(owner, bytes);
+    }
+    EDGE_KV_NONEMPTY_OWNERS.store(map.len(), std::sync::atomic::Ordering::Relaxed);
+    EDGE_KV_HAS_SUBTENANT_OWNERS.store(
+        map.keys().any(|k| k.contains(':')),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 pub(crate) fn edge_kv_del_bytes(tenant_id: &str, key: &str) -> Option<usize> {
     let shard = edge_kv_shard(tenant_id, key);
     let mut guard = shard.write();
-    guard
+    let freed = guard
         .get_mut(tenant_id)
         .and_then(|t_map| t_map.remove(key))
-        .map(|entry| edge_kv_entry_bytes(key, &entry))
+        .map(|entry| edge_kv_entry_bytes(key, &entry));
+    drop(guard);
+    if let Some(b) = freed {
+        adjust_kv_owner_bytes(tenant_id, -(b as isize));
+    }
+    freed
 }
 
 /// Atomically increments a 64-bit integer counter in `tenant_id`'s shard under a single write lock,
@@ -578,6 +690,8 @@ pub(crate) fn edge_kv_incr_checked(
             entry.val = KvValue::Int(next);
             entry.expires_at_ms = None;
             EDGE_KV_HAS_WRITES.store(true, std::sync::atomic::Ordering::Relaxed);
+            drop(guard);
+            adjust_kv_owner_bytes(tenant_id, mem_delta);
             return Ok((next, mem_delta));
         }
         t_map.insert(
@@ -588,6 +702,8 @@ pub(crate) fn edge_kv_incr_checked(
             },
         );
         EDGE_KV_HAS_WRITES.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(guard);
+        adjust_kv_owner_bytes(tenant_id, mem_delta);
         return Ok((delta, mem_delta));
     }
 
@@ -605,5 +721,7 @@ pub(crate) fn edge_kv_incr_checked(
     );
     guard.insert(CompactString::new(tenant_id), t_map);
     EDGE_KV_HAS_WRITES.store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(guard);
+    adjust_kv_owner_bytes(tenant_id, new_bytes as isize);
     Ok((delta, new_bytes as isize))
 }

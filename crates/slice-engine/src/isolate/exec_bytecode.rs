@@ -118,6 +118,18 @@ impl SliceIsolate {
             return Ok((instantiate_ns, total_ns, ret_str));
         }
 
+        if self.compartment.memory_used_bytes == 0 {
+            let live_persisted = crate::state_and_kv::current_vfs_bytes_if_owned(
+                crate::boa_realm::vfs_owner_namespace(&self.compartment.tenant_id),
+            )
+            .saturating_add(crate::state_and_kv::edge_kv_tenant_tree_bytes(
+                &self.compartment.tenant_id,
+            ));
+            if live_persisted > 0 {
+                self.compartment.alloc_memory(live_persisted)?;
+            }
+        }
+
         let module = decode_slicesnp_cached(bytecode);
         self.current_tier = ExecutionTier::Tier0LLIntSnapshot;
         self.pending_tier0_throw = None;
