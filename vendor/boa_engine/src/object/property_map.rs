@@ -1005,6 +1005,19 @@ impl PropertyMap {
     pub const fn storage_len(&self) -> usize {
         self.storage.len()
     }
+
+    /// Computes a branchless 64-bit integrity digest across all own property slot values and
+    /// indexed property count for zero-allocation SES intrinsic verification.
+    #[inline]
+    #[must_use]
+    pub fn storage_fingerprint(&self) -> u64 {
+        let mut h = (self.storage.len() as u64).wrapping_mul(0x517c_c1b7_2722_0a95)
+            ^ (self.index_property_values().len() as u64);
+        for val in &self.storage {
+            h = h.rotate_left(7) ^ val.raw_fingerprint_bits().wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+        h
+    }
 }
 
 /// An iterator over the indexed property entries of an `Object`.

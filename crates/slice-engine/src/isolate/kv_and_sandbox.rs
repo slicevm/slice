@@ -3,9 +3,10 @@
 
 use crate::isolate::SliceIsolate;
 use crate::state_and_kv::{
-    checkpoint_tenant_state, clear_tenant_checkpoints, edge_kv_del_bytes, edge_kv_get,
-    edge_kv_incr_checked, edge_kv_set_checked, edge_kv_tenant_bytes, release_tenant_checkpoint,
-    restore_tenant_state,
+    checkpoint_tenant_state, clear_tenant_checkpoints, current_vfs_state_bytes, edge_kv_del_bytes,
+    edge_kv_get, edge_kv_incr_checked, edge_kv_set_checked, edge_kv_tenant_bytes,
+    edge_kv_tenant_tree_bytes, release_tenant_checkpoint, restore_or_clear_tenant_tree_kv,
+    restore_tenant_state, snapshot_tenant_tree_kv,
 };
 use serde::{Deserialize, Serialize};
 use slice_sandbox::{CapabilityToken, SandboxViolation};
@@ -59,6 +60,8 @@ pub struct SandboxEvalOutcome {
     pub checkpoints_taken: u32,
     pub restores_performed: u32,
     pub restore_time_ns: u64,
+    #[serde(skip)]
+    pub(crate) net_persisted_delta_bytes: isize,
 }
 
 impl SliceIsolate {
@@ -98,7 +101,13 @@ impl SliceIsolate {
     /// isolated `Slice.kv` partition, charging signed byte deltas against the compartment memory limit.
     #[inline]
     pub fn kv_set(&mut self, key: &str, val: &str, ttl_ms: u64) -> Result<(), SandboxViolation> {
-        let current_used = self.compartment.memory_used_bytes;
+        let baseline = self.compartment.memory_used_bytes.min(4096);
+        let live_persisted = edge_kv_tenant_tree_bytes(&self.compartment.tenant_id);
+        let current_used = self
+            .compartment
+            .memory_used_bytes
+            .max(baseline.saturating_add(live_persisted));
+        self.compartment.memory_used_bytes = current_used;
         let mem_limit = self.compartment.memory_limit_bytes;
         match edge_kv_set_checked(
             &self.compartment.tenant_id,
@@ -116,7 +125,7 @@ impl SliceIsolate {
                         .compartment
                         .memory_used_bytes
                         .saturating_sub(delta.unsigned_abs())
-                        .max(4096);
+                        .max(baseline);
                 }
                 Ok(())
             }
@@ -131,12 +140,13 @@ impl SliceIsolate {
     /// Deletes a key from this tenant's isolated `Slice.kv` partition.
     #[inline]
     pub fn kv_del(&mut self, key: &str) -> bool {
+        let baseline = self.compartment.memory_used_bytes.min(4096);
         if let Some(freed) = edge_kv_del_bytes(&self.compartment.tenant_id, key) {
             self.compartment.memory_used_bytes = self
                 .compartment
                 .memory_used_bytes
                 .saturating_sub(freed)
-                .max(4096);
+                .max(baseline);
             true
         } else {
             false
@@ -146,7 +156,13 @@ impl SliceIsolate {
     /// Atomically increments a 64-bit integer counter in this tenant's isolated `Slice.kv` partition.
     #[inline]
     pub fn kv_incr(&mut self, key: &str, delta: i64) -> Result<i64, SandboxViolation> {
-        let current_used = self.compartment.memory_used_bytes;
+        let baseline = self.compartment.memory_used_bytes.min(4096);
+        let live_persisted = edge_kv_tenant_tree_bytes(&self.compartment.tenant_id);
+        let current_used = self
+            .compartment
+            .memory_used_bytes
+            .max(baseline.saturating_add(live_persisted));
+        self.compartment.memory_used_bytes = current_used;
         let mem_limit = self.compartment.memory_limit_bytes;
         match edge_kv_incr_checked(
             &self.compartment.tenant_id,
@@ -163,7 +179,7 @@ impl SliceIsolate {
                         .compartment
                         .memory_used_bytes
                         .saturating_sub(mem_delta.unsigned_abs())
-                        .max(4096);
+                        .max(baseline);
                 }
                 Ok(next)
             }
@@ -193,20 +209,27 @@ impl SliceIsolate {
     /// this parent's remaining budget).
     pub fn eval_sandbox(&mut self, code: &str, opts: SandboxEvalOptions) -> SandboxEvalOutcome {
         let start = Instant::now();
+        let parent_vfs_ns =
+            crate::boa_realm::vfs_owner_namespace(&self.compartment.tenant_id).to_string();
+        crate::boa_realm::ensure_vfs_tenant_affinity(&parent_vfs_ns);
+
         let parent_rem_fuel = self
             .compartment
             .fuel_limit
             .saturating_sub(self.compartment.fuel_consumed);
-        let parent_net_used = self.compartment.memory_used_bytes.saturating_sub(4096);
+        let parent_baseline = self.compartment.memory_used_bytes.min(4096);
+        let parent_live_persisted = current_vfs_state_bytes()
+            .saturating_add(edge_kv_tenant_tree_bytes(&self.compartment.tenant_id));
+        let parent_effective_used = self
+            .compartment
+            .memory_used_bytes
+            .max(parent_baseline.saturating_add(parent_live_persisted));
+        self.compartment.memory_used_bytes = parent_effective_used;
         let parent_rem_mem = self
             .compartment
             .memory_limit_bytes
-            .saturating_sub(parent_net_used);
+            .saturating_sub(parent_effective_used);
         let child_fuel = opts.fuel.unwrap_or(parent_rem_fuel).min(parent_rem_fuel);
-        let child_mem = opts
-            .memory_bytes
-            .unwrap_or(parent_rem_mem)
-            .min(parent_rem_mem);
 
         // Attenuate child CapabilityToken strictly against parent's capabilities (zero escalation)
         let mut child_caps = CapabilityToken::pure_compute();
@@ -309,8 +332,31 @@ impl SliceIsolate {
             Some(sub_id) => format!("{}:sub:{}", self.compartment.tenant_id, sub_id),
             None => format!("{}:sub", self.compartment.tenant_id),
         };
+        let pre_child_kv_bytes = edge_kv_tenant_tree_bytes(&child_tenant);
+        let saved_child_kv = if pre_child_kv_bytes > 0 {
+            snapshot_tenant_tree_kv(&child_tenant)
+        } else {
+            None
+        };
+        let pre_shared_vfs_bytes = if !has_isolated_sub_tenant {
+            current_vfs_state_bytes()
+        } else {
+            0
+        };
+        // `parent_rem_mem` already subtracts `pre_child_kv_bytes` and `pre_shared_vfs_bytes`
+        // (via `parent_live_persisted`). Because `child_iso` initializes its own `initial_net_used`
+        // to `pre_child_kv_bytes + child_vfs_bytes`, allow those existing bytes inside `child_mem`
+        // while strictly capping net new allocations to `parent_rem_mem` (and `opts.memory_bytes`).
+        let max_child_total = parent_rem_mem
+            .saturating_add(pre_child_kv_bytes)
+            .saturating_add(pre_shared_vfs_bytes)
+            .saturating_add(4096);
+        let child_mem = match opts.memory_bytes {
+            Some(req) => req.min(max_child_total),
+            None => max_child_total,
+        };
         let mut child_iso =
-            SliceIsolate::spawn(child_tenant, 99, child_caps, child_fuel, child_mem);
+            SliceIsolate::spawn(child_tenant.clone(), 99, child_caps, child_fuel, child_mem);
         child_iso.capture_return_json = true;
         if let Some(seed) = opts.deterministic_seed.or(self.deterministic_seed) {
             child_iso.set_deterministic_seed(Some(seed));
@@ -328,8 +374,6 @@ impl SliceIsolate {
         let bc = crate::parser_and_compiler::compile_source_for_sandbox_eval(code);
         let compile_time_ns = (compile_start.elapsed().as_nanos() as u64).max(1);
 
-        let parent_vfs_ns = crate::boa_realm::vfs_owner_namespace(&self.compartment.tenant_id);
-        crate::boa_realm::ensure_vfs_tenant_affinity(parent_vfs_ns);
         let saved_vfs = if has_isolated_sub_tenant {
             Some((
                 crate::boa_realm::BOA_VFS_OWNER_TENANT
@@ -359,6 +403,9 @@ impl SliceIsolate {
         let exec_res = child_iso.execute_bytecode(&bc, None);
         let exec_time_ns = (exec_start.elapsed().as_nanos() as u64).max(1);
 
+        if exec_res.is_err() {
+            restore_or_clear_tenant_tree_kv(&child_tenant, saved_child_kv);
+        }
         if (has_isolated_sub_tenant || exec_res.is_err())
             && let Some((owner, snap)) = saved_vfs
         {
@@ -380,13 +427,36 @@ impl SliceIsolate {
         let outcome = match exec_res {
             Ok(metrics) => {
                 let _ = self.compartment.consume_fuel(metrics.fuel_consumed.max(1));
-                let net_mem_used = metrics.memory_used_bytes.saturating_sub(4096);
-                if net_mem_used > 0 {
+                let post_child_kv_bytes = edge_kv_tenant_tree_bytes(&child_tenant);
+                let post_shared_vfs_bytes = if !has_isolated_sub_tenant {
+                    current_vfs_state_bytes()
+                } else {
+                    0
+                };
+                let kv_delta = post_child_kv_bytes as isize - pre_child_kv_bytes as isize;
+                let vfs_delta = post_shared_vfs_bytes as isize - pre_shared_vfs_bytes as isize;
+                let persisted_delta = kv_delta.saturating_add(vfs_delta);
+                if persisted_delta > 0 {
                     self.compartment.memory_used_bytes = self
                         .compartment
                         .memory_used_bytes
-                        .saturating_add(net_mem_used)
+                        .saturating_add(persisted_delta as usize)
                         .min(self.compartment.memory_limit_bytes);
+                } else if persisted_delta < 0 {
+                    self.compartment.memory_used_bytes = self
+                        .compartment
+                        .memory_used_bytes
+                        .saturating_sub(persisted_delta.unsigned_abs())
+                        .max(parent_baseline);
+                } else {
+                    let net_mem_used = metrics.memory_used_bytes.saturating_sub(4096);
+                    if net_mem_used > 0 && pre_child_kv_bytes == 0 && pre_shared_vfs_bytes == 0 {
+                        self.compartment.memory_used_bytes = self
+                            .compartment
+                            .memory_used_bytes
+                            .saturating_add(net_mem_used)
+                            .min(self.compartment.memory_limit_bytes);
+                    }
                 }
                 let is_uncaught = metrics.return_value.starts_with("Uncaught ");
                 let (return_value, return_json, error) = if is_uncaught {
@@ -415,6 +485,7 @@ impl SliceIsolate {
                     checkpoints_taken: child_iso.checkpoints_taken,
                     restores_performed: child_iso.restores_performed,
                     restore_time_ns: child_iso.restore_time_ns,
+                    net_persisted_delta_bytes: persisted_delta,
                 }
             }
             Err(violation) => {
@@ -447,6 +518,7 @@ impl SliceIsolate {
                     checkpoints_taken: child_iso.checkpoints_taken,
                     restores_performed: child_iso.restores_performed,
                     restore_time_ns: child_iso.restore_time_ns,
+                    net_persisted_delta_bytes: 0,
                 }
             }
         };

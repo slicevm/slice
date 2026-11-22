@@ -173,6 +173,25 @@ impl JsValue {
         self.0.as_variant()
     }
 
+    /// Returns a fast deterministic 64-bit representation of this [`JsValue`] (exact NaN-boxed raw
+    /// bits on 64-bit targets, or a `rustc_hash::FxHasher` digest under `jsvalue-enum`) for SES
+    /// intrinsic slot integrity verification.
+    #[inline(always)]
+    #[must_use]
+    pub fn raw_fingerprint_bits(&self) -> u64 {
+        #[cfg(not(feature = "jsvalue-enum"))]
+        {
+            self.0.value()
+        }
+        #[cfg(feature = "jsvalue-enum")]
+        {
+            use std::hash::{Hash, Hasher};
+            let mut h = rustc_hash::FxHasher::default();
+            self.hash(&mut h);
+            h.finish()
+        }
+    }
+
     /// Creates a new `undefined` value.
     ///
     /// # Examples

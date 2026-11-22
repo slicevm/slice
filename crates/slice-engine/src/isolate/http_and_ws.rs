@@ -115,6 +115,27 @@ fn populate_boa_http_req(req: &HttpRequestContext<'_>) {
     BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
 }
 
+struct ActiveHttpReqGuard;
+
+impl Drop for ActiveHttpReqGuard {
+    #[inline]
+    fn drop(&mut self) {
+        BOA_HTTP_REQ.with(|r| {
+            let mut req = r.borrow_mut();
+            if std::thread::panicking() {
+                *req = crate::boa_realm::ActiveBoaHttpReq::default();
+            } else {
+                req.active = false;
+            }
+        });
+        if std::thread::panicking() {
+            BOA_HTTP_RES.with(|res| *res.borrow_mut() = None);
+            BOA_WS_UPGRADED.with(|w| w.set(false));
+            BOA_WAIT_UNTIL_COUNT.with(|c| c.set(0));
+        }
+    }
+}
+
 impl SliceIsolate {
     /// Executes an HTTP request inside this `SliceIsolate` with zero-copy request metadata
     /// (`HttpRequestContext`), custom status/content-type response capture (`Slice.respond`),
@@ -129,9 +150,9 @@ impl SliceIsolate {
             && (&bytecode[0..8] == b"SLICEBOA" || &bytecode[0..8] == crate::boacas::BOACAS_MAGIC)
         {
             populate_boa_http_req(req);
-            let metrics_res = self.execute_bytecode(bytecode, cas);
-            BOA_HTTP_REQ.with(|r| r.borrow_mut().active = false);
-            let mut metrics = metrics_res?;
+            let _http_req_guard = ActiveHttpReqGuard;
+            let mut metrics = self.execute_bytecode(bytecode, cas)?;
+            drop(_http_req_guard);
 
             let custom_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
             let ws_upgraded = BOA_WS_UPGRADED.with(|w| w.replace(false));
@@ -202,9 +223,10 @@ impl SliceIsolate {
             && (&bytecode[0..8] == b"SLICEBOA" || &bytecode[0..8] == crate::boacas::BOACAS_MAGIC)
         {
             populate_boa_http_req(req);
-            let core_res = self.execute_bytecode_core(bytecode, cas, false);
-            BOA_HTTP_REQ.with(|r| r.borrow_mut().active = false);
-            let (_instantiate_ns, total_time_ns, ret_str) = core_res?;
+            let _http_req_guard = ActiveHttpReqGuard;
+            let (_instantiate_ns, total_time_ns, ret_str) =
+                self.execute_bytecode_core(bytecode, cas, false)?;
+            drop(_http_req_guard);
 
             let custom_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
             let ws_upgraded = BOA_WS_UPGRADED.with(|w| w.replace(false));
@@ -273,6 +295,7 @@ impl SliceIsolate {
         self.compartment.consume_fuel((count as u64) * 5)?;
 
         let flags = self.setup_boa_compartment_thread_locals();
+        let mut unwind_guard = crate::isolate::exec_boa::BoaSessionUnwindGuard::new();
         let mut realm = acquire_warm_boa_realm_for_tenant(&self.compartment.tenant_id);
         realm.has_pending_wu = false;
 
@@ -295,7 +318,10 @@ impl SliceIsolate {
         };
 
         let check_ses = self.last_exec_check_ses;
-        self.finish_boa_compartment_execution(realm, flags, false, false, check_ses, eval_res)?;
+        let finish_res =
+            self.finish_boa_compartment_execution(realm, flags, false, false, check_ses, eval_res);
+        unwind_guard.disarm();
+        finish_res?;
 
         if !self.egress_audit_secrets.is_empty() {
             for line in &self.stdout[prev_stdout_len..] {
@@ -326,6 +352,7 @@ impl SliceIsolate {
         };
 
         let flags = self.setup_boa_compartment_thread_locals();
+        let mut unwind_guard = crate::isolate::exec_boa::BoaSessionUnwindGuard::new();
         let mut realm = acquire_warm_boa_realm_for_tenant(&self.compartment.tenant_id);
         realm.has_pending_wu = false;
         ensure_realm_shards(&mut realm, (1 << 13) | (1 << 7), false);
@@ -371,7 +398,10 @@ impl SliceIsolate {
         crate::event_loop::drive_event_loop_to_completion(&mut realm.ctx);
         let frames = crate::websocket::drain_server_ws_outbox();
 
-        self.finish_boa_compartment_execution(realm, flags, false, false, true, eval_res)?;
+        let finish_res =
+            self.finish_boa_compartment_execution(realm, flags, false, false, true, eval_res);
+        unwind_guard.disarm();
+        finish_res?;
 
         if !self.egress_audit_secrets.is_empty() {
             for line in &self.stdout[prev_stdout_len..] {

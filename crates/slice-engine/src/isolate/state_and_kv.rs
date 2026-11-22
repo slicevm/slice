@@ -20,7 +20,7 @@ pub(crate) struct StateCheckpoint {
 }
 
 #[inline]
-fn current_vfs_state_bytes() -> usize {
+pub(crate) fn current_vfs_state_bytes() -> usize {
     BOA_VFS_STATE.with(|v| v.borrow().total_accounted_bytes())
 }
 
@@ -132,6 +132,9 @@ pub(crate) fn restore_tenant_state_checked(
         .get_or_init(|| std::array::from_fn(|_| parking_lot::RwLock::new(FxHashMap::default())));
     for (idx, shard_snap) in snap.tenant_kv.into_iter().enumerate() {
         if let Some(t_map) = shard_snap {
+            if !t_map.is_empty() {
+                EDGE_KV_HAS_WRITES.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             shards[idx]
                 .write()
                 .insert(CompactString::new(tenant_id), t_map);
@@ -252,6 +255,8 @@ pub(crate) type KvShardMap = FxHashMap<CompactString, KvTenantMap>;
 
 pub(crate) static EDGE_KV_SLAB: std::sync::OnceLock<[parking_lot::RwLock<KvShardMap>; 16]> =
     std::sync::OnceLock::new();
+pub(crate) static EDGE_KV_HAS_WRITES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 #[inline]
 pub(crate) fn current_epoch_ms() -> u64 {
@@ -377,6 +382,7 @@ pub(crate) fn edge_kv_set_checked(
                 },
             );
         }
+        EDGE_KV_HAS_WRITES.store(true, std::sync::atomic::Ordering::Relaxed);
         return Ok(delta);
     }
 
@@ -393,6 +399,7 @@ pub(crate) fn edge_kv_set_checked(
         },
     );
     guard.insert(CompactString::new(tenant_id), t_map);
+    EDGE_KV_HAS_WRITES.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(new_bytes as isize)
 }
 
@@ -406,6 +413,9 @@ pub(crate) fn edge_kv_entry_bytes(key: &str, entry: &KvEntry) -> usize {
 }
 
 pub(crate) fn edge_kv_tenant_bytes(tenant_id: &str) -> usize {
+    if !EDGE_KV_HAS_WRITES.load(std::sync::atomic::Ordering::Relaxed) {
+        return 0;
+    }
     let Some(shards) = EDGE_KV_SLAB.get() else {
         return 0;
     };
@@ -422,6 +432,95 @@ pub(crate) fn edge_kv_tenant_bytes(tenant_id: &str) -> usize {
         }
     }
     total
+}
+
+/// Computes live `Slice.kv` bytes owned by `tenant_id` AND any nested child sub-sandboxes
+/// (`{tenant_id}:sub` and `{tenant_id}:sub:*`), fast-pathing in `< 1 ns` when no KV writes exist.
+#[inline]
+pub(crate) fn edge_kv_tenant_tree_bytes(tenant_id: &str) -> usize {
+    if !EDGE_KV_HAS_WRITES.load(std::sync::atomic::Ordering::Relaxed) {
+        return 0;
+    }
+    let Some(shards) = EDGE_KV_SLAB.get() else {
+        return 0;
+    };
+    let now = current_epoch_ms();
+    let mut total = 0usize;
+    for shard in shards {
+        let guard = shard.read();
+        if guard.is_empty() {
+            continue;
+        }
+        for (owner, t_map) in guard.iter() {
+            let matches_tree = owner.as_str() == tenant_id
+                || (!tenant_id.is_empty()
+                    && owner.starts_with(tenant_id)
+                    && owner.as_bytes().get(tenant_id.len()) == Some(&b':'));
+            if matches_tree {
+                for (k, entry) in t_map {
+                    if entry.expires_at_ms.is_none_or(|exp| now < exp) {
+                        total = total.saturating_add(edge_kv_entry_bytes(k.as_str(), entry));
+                    }
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Captures a snapshot of `tenant_id` (and any `{tenant_id}:*` sub-tenants) across the 16 KV shards
+/// so an aborted/trapped child `Slice.evalSandbox` turn can roll back uncommitted KV writes cleanly.
+pub(crate) fn snapshot_tenant_tree_kv(tenant_id: &str) -> Option<Box<[KvShardMap; 16]>> {
+    if !EDGE_KV_HAS_WRITES.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let shards = EDGE_KV_SLAB.get()?;
+    let mut out: Box<[KvShardMap; 16]> = Box::new(std::array::from_fn(|_| FxHashMap::default()));
+    let mut any = false;
+    for (idx, shard) in shards.iter().enumerate() {
+        let guard = shard.read();
+        for (owner, t_map) in guard.iter() {
+            let matches_tree = owner.as_str() == tenant_id
+                || (!tenant_id.is_empty()
+                    && owner.starts_with(tenant_id)
+                    && owner.as_bytes().get(tenant_id.len()) == Some(&b':'));
+            if matches_tree && !t_map.is_empty() {
+                out[idx].insert(owner.clone(), t_map.clone());
+                any = true;
+            }
+        }
+    }
+    any.then_some(out)
+}
+
+/// Restores (or wipes if `snap` is `None`) `tenant_id` and `{tenant_id}:*` across all 16 KV shards.
+pub(crate) fn restore_or_clear_tenant_tree_kv(
+    tenant_id: &str,
+    snap: Option<Box<[KvShardMap; 16]>>,
+) {
+    if !EDGE_KV_HAS_WRITES.load(std::sync::atomic::Ordering::Relaxed) && snap.is_none() {
+        return;
+    }
+    let Some(shards) = EDGE_KV_SLAB.get() else {
+        return;
+    };
+    let mut snap_arr = snap;
+    for (idx, shard) in shards.iter().enumerate() {
+        let mut guard = shard.write();
+        if !guard.is_empty() {
+            guard.retain(|owner, _| {
+                !(owner.as_str() == tenant_id
+                    || (!tenant_id.is_empty()
+                        && owner.starts_with(tenant_id)
+                        && owner.as_bytes().get(tenant_id.len()) == Some(&b':')))
+            });
+        }
+        if let Some(ref mut arr) = snap_arr {
+            for (owner, t_map) in arr[idx].drain() {
+                guard.insert(owner, t_map);
+            }
+        }
+    }
 }
 
 pub(crate) fn edge_kv_del_bytes(tenant_id: &str, key: &str) -> Option<usize> {
@@ -478,6 +577,7 @@ pub(crate) fn edge_kv_incr_checked(
             let next = current.wrapping_add(delta);
             entry.val = KvValue::Int(next);
             entry.expires_at_ms = None;
+            EDGE_KV_HAS_WRITES.store(true, std::sync::atomic::Ordering::Relaxed);
             return Ok((next, mem_delta));
         }
         t_map.insert(
@@ -487,6 +587,7 @@ pub(crate) fn edge_kv_incr_checked(
                 expires_at_ms: None,
             },
         );
+        EDGE_KV_HAS_WRITES.store(true, std::sync::atomic::Ordering::Relaxed);
         return Ok((delta, mem_delta));
     }
 
@@ -503,5 +604,6 @@ pub(crate) fn edge_kv_incr_checked(
         },
     );
     guard.insert(CompactString::new(tenant_id), t_map);
+    EDGE_KV_HAS_WRITES.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok((delta, new_bytes as isize))
 }

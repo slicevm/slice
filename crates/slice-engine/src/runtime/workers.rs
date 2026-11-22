@@ -3,7 +3,7 @@
 //! Implements capability-attenuated multi-threaded background isolate execution:
 //! - Sub-millisecond warm isolate checkout on background worker threads (`16 MB` stack size)
 //! - Strict Capability Attenuation (`attenuate_worker_capabilities`): child workers can only
-//!   receive a subset (`parent ∩ requested`) of the parent isolate's `allow_read`, `allow_write`,
+//!   receive a subset (`parent & requested`) of the parent isolate's `allow_read`, `allow_write`,
 //!   and `allow_net` permissions, and always inherit `BOA_EGRESS_SECRETS` DLP rules
 //! - Bounded CPU instruction fuel (`fuel`) and memory ceiling (`memoryBytes`) per worker
 //! - Lock-free `mpsc` bidirectional message channels integrated directly into `event_loop.rs`
@@ -409,7 +409,7 @@ fn build_attenuated_worker_caps(
     let parent_reads = parent_caps.read_prefixes.as_slice();
     let parent_writes = parent_caps.write_prefixes.as_slice();
 
-    // 1. Attenuate read prefixes strictly (`parent ∩ requested`; empty allow-list = deny-all)
+    // 1. Attenuate read prefixes strictly (`parent & requested`; empty allow-list = deny-all)
     if let Some(req_reads) = attenuation.and_then(|a| a.allow_read.as_ref()) {
         for req in req_reads {
             if !slice_sandbox::is_rejected_vfs_candidate(req)
@@ -426,7 +426,7 @@ fn build_attenuated_worker_caps(
         }
     }
 
-    // 2. Attenuate write prefixes strictly (`parent ∩ requested`; empty allow-list = deny-all)
+    // 2. Attenuate write prefixes strictly (`parent & requested`; empty allow-list = deny-all)
     if let Some(req_writes) = attenuation.and_then(|a| a.allow_write.as_ref()) {
         for req in req_writes {
             if !slice_sandbox::is_rejected_vfs_candidate(req)
@@ -927,6 +927,21 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
         child_isolate.add_egress_audit_secret(sec);
     }
 
+    struct WorkerTurnUnwindGuard {
+        armed: bool,
+    }
+    impl Drop for WorkerTurnUnwindGuard {
+        fn drop(&mut self) {
+            if self.armed {
+                WORKER_SELF_ENV.with(|env| *env.borrow_mut() = WorkerSelfThreadEnv::default());
+                BOA_VFS_OWNER_TENANT.with(|o| o.borrow_mut().clear());
+                BOA_VFS_STATE.with(|v| v.borrow_mut().clear());
+                GLOBAL_ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+    }
+
+    let mut worker_unwind_guard = WorkerTurnUnwindGuard { armed: true };
     let child_fuel_cap = job.child_fuel;
     let exec_res = child_isolate.execute_bytecode(&job.bytecode, None);
     let was_terminated = terminated_clone.load(Ordering::Acquire);
@@ -946,6 +961,7 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
     // Scrub thread-local worker state and return this thread to `IDLE_WORKER_POOL`
     // BEFORE sending `Exit` to the parent isolate so sequential `await worker` loops
     // immediately reuse this warm thread without a race condition!
+    worker_unwind_guard.armed = false;
     WORKER_SELF_ENV.with(|env| *env.borrow_mut() = WorkerSelfThreadEnv::default());
     BOA_VFS_OWNER_TENANT.with(|o| o.borrow_mut().clear());
     BOA_VFS_STATE.with(|v| v.borrow_mut().clear());

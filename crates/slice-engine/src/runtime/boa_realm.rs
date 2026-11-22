@@ -62,10 +62,11 @@ pub(crate) struct WarmBoaRealm {
     pub(crate) init_worker_self_fn: Option<boa_engine::JsObject>,
     pub(crate) drain_wu_fn: Option<boa_engine::JsObject>,
     pub(crate) ctl_fn: Option<boa_engine::JsObject>,
-    pub(crate) ses_proto_sigs: [(u64, usize, usize); 6],
+    pub(crate) ses_proto_sigs: [SesProtoSig; SES_INTRINSIC_COUNT],
     pub(crate) loaded_shards_mask: u32,
     pub(crate) registered_host_groups: u8,
     pub(crate) has_pending_wu: bool,
+    pub(crate) virgin_prewarmed: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -75,7 +76,9 @@ pub(crate) struct BoaFsCaps {
 }
 
 pub(crate) type CapturedBoaHttpRes = (u16, String, Option<Vec<u8>>, String, Vec<(String, String)>);
-pub(crate) type SesProtoSig = (u64, usize, usize);
+pub(crate) const SES_INTRINSIC_COUNT: usize = 27;
+pub(crate) type SesProtoSig = (u64, usize, u64);
+pub(crate) type SesIntlSigDelta = ((SesProtoSig, SesProtoSig), (SesProtoSig, SesProtoSig));
 
 thread_local! {
     pub(crate) static SNP_MODULE_CACHE: std::cell::RefCell<FxHashMap<u64, std::sync::Arc<BytecodeModule>>> =
@@ -146,9 +149,9 @@ thread_local! {
         const { std::cell::Cell::new((true, u32::MAX)) };
     pub(crate) static BOA_ALS_ACTIVE: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
-    pub(crate) static BOA_SES_BASELINE_SIGS: std::cell::Cell<Option<[SesProtoSig; 6]>> =
+    pub(crate) static BOA_SES_BASELINE_SIGS: std::cell::Cell<Option<[SesProtoSig; SES_INTRINSIC_COUNT]>> =
         const { std::cell::Cell::new(None) };
-    pub(crate) static BOA_SES_INTL_SIG_PAIR: std::cell::Cell<Option<(SesProtoSig, SesProtoSig)>> =
+    pub(crate) static BOA_SES_INTL_SIG_PAIR: std::cell::Cell<Option<SesIntlSigDelta>> =
         const { std::cell::Cell::new(None) };
     pub(crate) static BOA_ALS_SNAP: std::cell::RefCell<boa_engine::JsValue> =
         const { std::cell::RefCell::new(boa_engine::JsValue::undefined()) };
@@ -645,28 +648,56 @@ pub(crate) fn ensure_vfs_tenant_affinity(vfs_ns: &str) {
     });
 }
 
-pub(crate) const SES_PROTO_NAMES: [&str; 6] = [
+pub(crate) const SES_PROTO_NAMES: [&str; SES_INTRINSIC_COUNT] = [
     "Object.prototype",
     "Array.prototype",
     "Function.prototype",
     "String.prototype",
     "Promise.prototype",
     "Uint8Array.prototype",
+    "Number.prototype",
+    "Boolean.prototype",
+    "RegExp.prototype",
+    "Error.prototype",
+    "Map.prototype",
+    "Set.prototype",
+    "Object",
+    "Array",
+    "Function",
+    "String",
+    "Number",
+    "Boolean",
+    "RegExp",
+    "Error",
+    "Promise",
+    "Map",
+    "Set",
+    "Uint8Array",
+    "Reflect",
+    "JSON",
+    "Math",
 ];
 
 #[inline]
 pub(crate) fn proto_sig(obj: &boa_engine::JsObject) -> SesProtoSig {
     let b = obj.borrow();
+    let proto_addr = b
+        .prototype()
+        .as_ref()
+        .map_or(0, |p| std::ptr::from_ref(&*p.borrow()) as usize);
     (
         b.shape().id(),
-        b.properties().storage_len(),
-        b.properties().index_property_values().len(),
+        proto_addr,
+        b.properties().storage_fingerprint(),
     )
 }
 
 #[inline]
-pub(crate) fn capture_ses_proto_sigs(ctx: &boa_engine::Context) -> [SesProtoSig; 6] {
+pub(crate) fn capture_ses_proto_sigs(
+    ctx: &boa_engine::Context,
+) -> [SesProtoSig; SES_INTRINSIC_COUNT] {
     let c = ctx.intrinsics().constructors();
+    let o = ctx.intrinsics().objects();
     [
         proto_sig(&c.object().prototype()),
         proto_sig(&c.array().prototype()),
@@ -674,18 +705,36 @@ pub(crate) fn capture_ses_proto_sigs(ctx: &boa_engine::Context) -> [SesProtoSig;
         proto_sig(&c.string().prototype()),
         proto_sig(&c.promise().prototype()),
         proto_sig(&c.typed_uint8_array().prototype()),
+        proto_sig(&c.number().prototype()),
+        proto_sig(&c.boolean().prototype()),
+        proto_sig(&c.regexp().prototype()),
+        proto_sig(&c.error().prototype()),
+        proto_sig(&c.map().prototype()),
+        proto_sig(&c.set().prototype()),
+        proto_sig(&c.object().constructor()),
+        proto_sig(&c.array().constructor()),
+        proto_sig(&c.function().constructor()),
+        proto_sig(&c.string().constructor()),
+        proto_sig(&c.number().constructor()),
+        proto_sig(&c.boolean().constructor()),
+        proto_sig(&c.regexp().constructor()),
+        proto_sig(&c.error().constructor()),
+        proto_sig(&c.promise().constructor()),
+        proto_sig(&c.map().constructor()),
+        proto_sig(&c.set().constructor()),
+        proto_sig(&c.typed_uint8_array().constructor()),
+        proto_sig(&o.reflect()),
+        proto_sig(&o.json()),
+        proto_sig(&o.math()),
     ]
 }
 
 #[inline]
-pub(crate) fn first_ses_proto_sig_mismatch(realm: &WarmBoaRealm) -> Option<&'static str> {
+pub(crate) fn first_ses_proto_sig_mismatch_idx(realm: &WarmBoaRealm) -> Option<usize> {
     let cur = capture_ses_proto_sigs(&realm.ctx);
-    for (idx, name) in SES_PROTO_NAMES.iter().enumerate() {
-        if cur[idx] != realm.ses_proto_sigs[idx] {
-            return Some(name);
-        }
-    }
-    None
+    cur.iter()
+        .zip(realm.ses_proto_sigs.iter())
+        .position(|(a, b)| a != b)
 }
 
 #[inline]
@@ -705,9 +754,15 @@ pub(crate) fn try_acquire_pooled_boa_realm_for_tenant(tenant_id: &str) -> Option
         if let Some(idx) = p.iter().rposition(|r| r.owner_tenant == tenant_id) {
             return Some(p.remove(idx));
         }
-        if let Some(idx) = p.iter().rposition(|r| r.owner_tenant.is_empty()) {
+        // Only adopt an unnamed (`""`) realm if it is a virgin prewarmed realm that has never
+        // executed untrusted guest code for an unnamed isolate.
+        if let Some(idx) = p
+            .iter()
+            .rposition(|r| r.owner_tenant.is_empty() && r.virgin_prewarmed)
+        {
             let mut realm = p.remove(idx);
             realm.owner_tenant = CompactString::new(tenant_id);
+            realm.virgin_prewarmed = false;
             return Some(realm);
         }
         None
@@ -725,11 +780,23 @@ pub(crate) fn acquire_warm_boa_realm_for_tenant(tenant_id: &str) -> WarmBoaRealm
         .unwrap_or_else(|| create_warm_boa_realm_for_tenant(tenant_id))
 }
 
+#[allow(dead_code)]
 pub(crate) fn acquire_warm_boa_realm() -> WarmBoaRealm {
     acquire_warm_boa_realm_for_tenant("")
 }
 
-pub(crate) fn release_warm_boa_realm(realm: WarmBoaRealm) {
+pub(crate) fn release_warm_boa_realm(mut realm: WarmBoaRealm) {
+    realm.virgin_prewarmed = false;
+    push_realm_to_pool(realm);
+}
+
+pub(crate) fn release_prewarmed_boa_realm(mut realm: WarmBoaRealm) {
+    realm.virgin_prewarmed = true;
+    push_realm_to_pool(realm);
+}
+
+#[inline]
+fn push_realm_to_pool(realm: WarmBoaRealm) {
     BOA_CONTEXT_POOL.with(|pool| {
         let mut p = pool.borrow_mut();
         if p.len() >= 8 {
@@ -789,6 +856,7 @@ pub(crate) fn create_bare_boa_realm_for_tenant(tenant_id: &str) -> WarmBoaRealm 
         loaded_shards_mask: 0,
         registered_host_groups: 0,
         has_pending_wu: false,
+        virgin_prewarmed: false,
     }
 }
 
@@ -994,7 +1062,7 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_uncaught_error: Option<String>,
     pub(crate) saved_ev_loop: Option<crate::event_loop::SavedEventLoopSnapshot>,
     pub(crate) saved_wasm_state: Option<crate::wasm::WasmThreadState>,
-    pub(crate) saved_ses_intl_pair: Option<(SesProtoSig, SesProtoSig)>,
+    pub(crate) saved_ses_intl_pair: Option<SesIntlSigDelta>,
 }
 
 impl SavedIsolateContextGuard {

@@ -150,14 +150,21 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                 .map(|n| n as u32)
                 .unwrap_or(0);
             if shard_id == 18 {
-                let pre = crate::boa_realm::proto_sig(
+                let pre_str = crate::boa_realm::proto_sig(
                     &context.intrinsics().constructors().string().prototype(),
+                );
+                let pre_num = crate::boa_realm::proto_sig(
+                    &context.intrinsics().constructors().number().prototype(),
                 );
                 let res = eval_lazy_prelude_shard(shard_id, context)?;
-                let post = crate::boa_realm::proto_sig(
+                let post_str = crate::boa_realm::proto_sig(
                     &context.intrinsics().constructors().string().prototype(),
                 );
-                crate::boa_realm::BOA_SES_INTL_SIG_PAIR.with(|p| p.set(Some((pre, post))));
+                let post_num = crate::boa_realm::proto_sig(
+                    &context.intrinsics().constructors().number().prototype(),
+                );
+                crate::boa_realm::BOA_SES_INTL_SIG_PAIR
+                    .with(|p| p.set(Some(((pre_str, post_str), (pre_num, post_num)))));
                 return Ok(res);
             }
             eval_lazy_prelude_shard(shard_id, context)
@@ -180,20 +187,29 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
                     Ok(BoaVal::undefined())
                 }
                 1 => {
-                    let cur_str = crate::boa_realm::proto_sig(
-                        &context.intrinsics().constructors().string().prototype(),
-                    );
-                    let matches = crate::boa_realm::BOA_SES_BASELINE_SIGS
-                        .with(|s| s.get().is_some_and(|sigs| sigs[3] == cur_str));
-                    Ok(BoaVal::from(matches))
+                    let c = context.intrinsics().constructors();
+                    let cur_str = crate::boa_realm::proto_sig(&c.string().prototype());
+                    let cur_num = crate::boa_realm::proto_sig(&c.number().prototype());
+                    let mask = crate::boa_realm::BOA_SES_BASELINE_SIGS.with(|s| {
+                        s.get().map_or(0i32, |sigs| {
+                            (if sigs[3] == cur_str { 1 } else { 0 })
+                                | (if sigs[6] == cur_num { 2 } else { 0 })
+                        })
+                    });
+                    Ok(BoaVal::from(mask))
                 }
-                2 => {
-                    let cur_str = crate::boa_realm::proto_sig(
-                        &context.intrinsics().constructors().string().prototype(),
-                    );
+                2..=4 => {
+                    let c = context.intrinsics().constructors();
+                    let cur_str = crate::boa_realm::proto_sig(&c.string().prototype());
+                    let cur_num = crate::boa_realm::proto_sig(&c.number().prototype());
                     crate::boa_realm::BOA_SES_BASELINE_SIGS.with(|s| {
                         if let Some(mut sigs) = s.get() {
-                            sigs[3] = cur_str;
+                            if mode == 2 || mode == 4 {
+                                sigs[3] = cur_str;
+                            }
+                            if mode == 3 || mode == 4 {
+                                sigs[6] = cur_num;
+                            }
                             s.set(Some(sigs));
                         }
                     });

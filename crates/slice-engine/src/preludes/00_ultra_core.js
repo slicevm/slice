@@ -223,26 +223,29 @@
   var __orand = Math.random;
   var __onow = Date.now;
   var __perfNowNative = __slice_perf_now;
+  var __detRand = function() {
+    var v = __slice_det_random();
+    return v >= 0 ? v : __orand();
+  };
+  var __detNow = function() {
+    var v = __slice_det_now();
+    return v >= 0 ? v : __onow();
+  };
+  var __detPerfNow = function() {
+    var v = __slice_det_now();
+    return (v >= 0 ? v : __onow()) - 1700000000000;
+  };
   globalThis.performance = {
     now: __perfNowNative
   };
   function __setDetMode(on) {
     if (on) {
-      Math.random = function() {
-        var v = __slice_det_random();
-        return v >= 0 ? v : __orand();
-      };
-      Date.now = function() {
-        var v = __slice_det_now();
-        return v >= 0 ? v : __onow();
-      };
-      globalThis.performance.now = function() {
-        var v = __slice_det_now();
-        return (v >= 0 ? v : __onow()) - 1700000000000;
-      };
+      Math.random = __detRand;
+      Date.now = __detNow;
+      globalThis.performance.now = __detPerfNow;
     } else {
-      Math.random = __orand;
-      Date.now = __onow;
+      if (Math.random === __detRand) Math.random = __orand;
+      if (Date.now === __detNow) Date.now = __onow;
       globalThis.performance.now = __perfNowNative;
     }
   }
@@ -294,7 +297,9 @@
       __ntQ.length = 0;
       __ntH = 0;
       __ntHooked = false;
-      Promise.prototype.then = __origThen;
+      if (Promise.prototype.then === __wrappedThen) {
+        Promise.prototype.then = __origThen;
+      }
     }
   }
 
