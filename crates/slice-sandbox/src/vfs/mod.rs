@@ -171,10 +171,7 @@ pub fn is_rejected_vfs_candidate(candidate_path: &str) -> bool {
         }
     }
 
-    if has_win32_reserved_device_segment(trimmed) {
-        return true;
-    }
-    false
+    has_win32_reserved_device_segment(trimmed)
 }
 
 /// Fast zero-allocation check for paths that are already in canonical lexical VFS form (`SBX-PERF-02`).

@@ -74,10 +74,9 @@ fn host_ends_in_number(h: &str) -> bool {
     if last.bytes().all(|b| b.is_ascii_digit()) {
         return true;
     }
-    if let Some(hex) = last.strip_prefix("0x").or_else(|| last.strip_prefix("0X")) {
-        return hex.is_empty() || hex.bytes().all(|b| b.is_ascii_hexdigit());
-    }
-    false
+    last.strip_prefix("0x")
+        .or_else(|| last.strip_prefix("0X"))
+        .is_some_and(|hex| hex.is_empty() || hex.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// Parses 4-part decimal IPv4 strings that include leading zeros with digits `8` or `9`
@@ -670,13 +669,7 @@ pub(crate) fn is_cloud_metadata_clean_host(h: &str) -> bool {
     {
         return true;
     }
-    if h.contains(':')
-        && let Ok(ip) = h.parse::<IpAddr>()
-        && is_cloud_metadata_ip(ip)
-    {
-        return true;
-    }
-    false
+    h.contains(':') && h.parse::<IpAddr>().is_ok_and(is_cloud_metadata_ip)
 }
 
 /// Checks an already-cleaned lowercase hostname `h` (no brackets, port, or trailing dot)
@@ -713,13 +706,10 @@ pub(crate) fn is_private_or_loopback_clean_host(h: &str) -> bool {
     if let Ok(ip) = h.parse::<IpAddr>() {
         return is_private_or_loopback_ip(ip);
     }
-    if parse_nonstandard_ipv4(h).is_some() || host_ends_in_number(h) {
-        // Any non-canonical or malformed numeric IPv4 literal (octal `0177.0.0.1`,
-        // leading-zero non-octal `127.0.0.08`, hex `0x7f.0.0.1`, dword `2130706433`,
-        // or shorthand `127.1`) is unconditionally blocked under wildcard allow_net.
-        return true;
-    }
-    false
+    // Any non-canonical or malformed numeric IPv4 literal (octal `0177.0.0.1`,
+    // leading-zero non-octal `127.0.0.08`, hex `0x7f.0.0.1`, dword `2130706433`,
+    // or shorthand `127.1`) is unconditionally blocked under wildcard allow_net.
+    parse_nonstandard_ipv4(h).is_some() || host_ends_in_number(h)
 }
 
 /// Returns `true` if `host` resolves to a cloud instance metadata endpoint
