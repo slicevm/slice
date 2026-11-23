@@ -331,6 +331,176 @@
     return "/" + out.join("/") + (p.length > 1 && p.charCodeAt(p.length - 1) === 47 && out.length > 0 ? "/" : "");
   }
 
+  function __isSpecialUrlProto(p) {
+    return p === "http:" || p === "https:" || p === "ws:" || p === "wss:" || p === "ftp:" || p === "file:";
+  }
+  function __defaultUrlPort(p) {
+    if (p === "http:" || p === "ws:") return "80";
+    if (p === "https:" || p === "wss:") return "443";
+    if (p === "ftp:") return "21";
+    return null;
+  }
+  function __parseLeadingPort(s) {
+    var i = 0, len = s.length;
+    while (i < len && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) i++;
+    if (i === 0) return null;
+    for (var j = i; j < len; j++) {
+      var cj = s.charCodeAt(j);
+      if (cj !== 47 && cj !== 92 && cj !== 63 && cj !== 35) return null;
+    }
+    var n = Number(s.slice(0, i));
+    if (!(n >= 0 && n <= 65535)) return null;
+    return String(n);
+  }
+  function __rebuildUrlHref(u) {
+    var p = u._proto;
+    var defP = __defaultUrlPort(p);
+    if (defP !== null && u._port === defP) u._port = "";
+    u._host = u._port ? (u._hostname + ":" + u._port) : u._hostname;
+    if (p === "http:" || p === "https:" || p === "ws:" || p === "wss:" || p === "ftp:") {
+      u._origin = p + "//" + u._host;
+      var auth = u._user ? (u._pass ? u._user + ":" + u._pass + "@" : u._user + "@") : "";
+      u._href = p + "//" + auth + u._host + u._path + u._search + u._hash;
+    } else if (p === "file:") {
+      u._origin = "null";
+      u._href = "file://" + u._host + u._path + u._search + u._hash;
+    } else {
+      u._origin = "null";
+      u._href = p + (u._host ? "//" + u._host : "") + u._path + u._search + u._hash;
+    }
+  }
+  function __syncExistingSp(u) {
+    if (u._sp) {
+      u._sp._p = null;
+      u._sp._raw = u._search ? u._search.slice(1) : "";
+    }
+  }
+  function __setUrlField(u, field, val) {
+    if (field === "href") {
+      var parsed = new URL(val);
+      if (parsed._isFastUrl) {
+        if (parsed._sd) parsed._syncSearch();
+        var fh = parsed._r.slice(parsed._rs, parsed._pi);
+        var fpci = fh.lastIndexOf(":");
+        var fHasPort = fpci !== -1 && fh.indexOf("]") < fpci;
+        u._proto = parsed._rs === 7 ? "http:" : "https:";
+        u._user = "";
+        u._pass = "";
+        u._hostname = fHasPort ? fh.slice(0, fpci) : fh;
+        u._port = fHasPort ? fh.slice(fpci + 1) : "";
+        u._host = fh;
+        u._origin = parsed._r.slice(0, parsed._pi);
+        u._path = parsed._qi === -1 ? parsed._r.slice(parsed._pi) : parsed._r.slice(parsed._pi, parsed._qi);
+        u._hash = "";
+        u._search = parsed._qi === -1 ? "" : parsed._r.slice(parsed._qi);
+        u._href = parsed._r;
+      } else {
+        u._proto = parsed._proto;
+        u._user = parsed._user;
+        u._pass = parsed._pass;
+        u._hostname = parsed._hostname;
+        u._port = parsed._port;
+        u._host = parsed._host;
+        u._origin = parsed._origin;
+        u._path = parsed._path;
+        u._hash = parsed._hash;
+        u._search = parsed._search;
+        u._href = parsed._href;
+      }
+      __syncExistingSp(u);
+      return;
+    }
+    if (field === "protocol") {
+      var ci = val.indexOf(":");
+      var cand = (ci === -1 ? val : val.slice(0, ci)).toLowerCase();
+      if (!/^[a-z][a-z0-9+.-]*$/.test(cand)) return;
+      var nextP = cand + ":";
+      if (__isSpecialUrlProto(u._proto) !== __isSpecialUrlProto(nextP)) return;
+      if ((u._user || u._pass || u._port) && nextP === "file:") return;
+      if (u._proto === "file:" && !u._hostname && __isSpecialUrlProto(nextP) && nextP !== "file:") return;
+      u._proto = nextP;
+      __rebuildUrlHref(u);
+      return;
+    }
+    if (field === "username") {
+      if (!u._hostname || u._proto === "file:") return;
+      u._user = encodeURIComponent(val).replace(/%3A/gi, "%3A");
+      __rebuildUrlHref(u);
+      return;
+    }
+    if (field === "password") {
+      if (!u._hostname || u._proto === "file:") return;
+      u._pass = encodeURIComponent(val);
+      __rebuildUrlHref(u);
+      return;
+    }
+    if (field === "host") {
+      if (!__isSpecialUrlProto(u._proto) && !u._hostname) return;
+      var cutH = val.search(/[\/\\?#]/);
+      var hp = cutH === -1 ? val : val.slice(0, cutH);
+      if (!hp) return;
+      var hpci = hp.lastIndexOf(":");
+      var hasCol = hpci !== -1 && hp.indexOf("]") < hpci;
+      var nextHn = (hasCol ? hp.slice(0, hpci) : hp).toLowerCase();
+      if (!nextHn) return;
+      if (hasCol) {
+        var prtStr = hp.slice(hpci + 1);
+        if (prtStr !== "") {
+          var parsedP = __parseLeadingPort(prtStr);
+          if (parsedP === null) return;
+          u._port = parsedP;
+        }
+      }
+      u._hostname = nextHn;
+      __rebuildUrlHref(u);
+      return;
+    }
+    if (field === "hostname") {
+      if (!__isSpecialUrlProto(u._proto) && !u._hostname) return;
+      var cutHn = val.search(/[\/\\?#]/);
+      var rawHn = cutHn === -1 ? val : val.slice(0, cutHn);
+      var hCol = rawHn.indexOf(":");
+      if (hCol !== -1 && !(rawHn.charCodeAt(0) === 91 && rawHn.charCodeAt(rawHn.length - 1) === 93)) {
+        rawHn = rawHn.slice(0, hCol);
+      }
+      var lowHn = rawHn.toLowerCase();
+      if (!lowHn && u._proto !== "file:") return;
+      u._hostname = lowHn;
+      __rebuildUrlHref(u);
+      return;
+    }
+    if (field === "port") {
+      if (!u._hostname || u._proto === "file:") return;
+      if (val === "") {
+        u._port = "";
+        __rebuildUrlHref(u);
+        return;
+      }
+      var nextPrt = __parseLeadingPort(val);
+      if (nextPrt === null) return;
+      u._port = nextPrt;
+      __rebuildUrlHref(u);
+      return;
+    }
+    if (field === "pathname") {
+      if (!__isSpecialUrlProto(u._proto) && !u._hostname) return;
+      var pNorm = val.replace(/\\/g, "/");
+      u._path = pNorm && pNorm.charCodeAt(0) === 47 ? __normP(pNorm) : __normP("/" + pNorm);
+      __rebuildUrlHref(u);
+      return;
+    }
+    if (field === "search") {
+      u._search = !val || val === "?" ? "" : (val.charCodeAt(0) === 63 ? val : "?" + val);
+      __syncExistingSp(u);
+      __rebuildUrlHref(u);
+      return;
+    }
+    if (field === "hash") {
+      u._hash = !val || val === "#" ? "" : (val.charCodeAt(0) === 35 ? val : "#" + val);
+      __rebuildUrlHref(u);
+    }
+  }
+
   function __hasRfc3986Scheme(s) {
     var len = s.length;
     if (len < 2) return false;
@@ -556,81 +726,144 @@
       if (ci0 > 0 && /^[a-zA-Z][a-zA-Z0-9+.-]*$/.test(raw.slice(0, ci0))) {
         var proto0 = raw.slice(0, ci0 + 1).toLowerCase();
         if (proto0 !== "http:" && proto0 !== "https:" && proto0 !== "ws:" && proto0 !== "wss:" && proto0 !== "file:" && proto0 !== "ftp:" && raw.charCodeAt(ci0 + 1) !== 47) {
-          this.protocol = proto0;
-          this.username = "";
-          this.password = "";
-          this.hostname = "";
-          this.port = "";
-          this.host = "";
-          this.origin = "null";
-          this.pathname = raw.slice(ci0 + 1);
-          this.hash = hash === "#" ? "" : hash;
-          this.search = search === "?" ? "" : search;
-          this.href = this.protocol + this.pathname + this.search + this.hash;
+          this._proto = proto0;
+          this._user = "";
+          this._pass = "";
+          this._hostname = "";
+          this._port = "";
+          this._host = "";
+          this._origin = "null";
+          this._path = raw.slice(ci0 + 1);
+          this._hash = hash === "#" ? "" : hash;
+          this._search = search === "?" ? "" : search;
+          this._href = this._proto + this._path + this._search + this._hash;
           this._sp = null;
           return;
         }
       }
       throw new TypeError("Invalid URL: " + input);
     }
-    this.protocol = raw.slice(0, si + 1).toLowerCase();
+    this._proto = raw.slice(0, si + 1).toLowerCase();
     var rest = raw.slice(si + 3);
     var pi = rest.indexOf("/");
     var authHost = pi === -1 ? rest : rest.slice(0, pi);
     var pathRaw = pi === -1 ? "/" : rest.slice(pi);
     var ai = authHost.indexOf("@"), hostPort = authHost;
-    this.username = "";
-    this.password = "";
+    this._user = "";
+    this._pass = "";
     if (ai !== -1) {
       var up = authHost.slice(0, ai), ci = up.indexOf(":");
-      this.username = ci === -1 ? up : up.slice(0, ci);
-      this.password = ci === -1 ? "" : up.slice(ci + 1);
+      this._user = ci === -1 ? up : up.slice(0, ci);
+      this._pass = ci === -1 ? "" : up.slice(ci + 1);
       hostPort = authHost.slice(ai + 1);
     }
     if (
       !hostPort &&
-      (this.protocol === "http:" ||
-        this.protocol === "https:" ||
-        this.protocol === "ws:" ||
-        this.protocol === "wss:" ||
-        this.protocol === "ftp:")
+      (this._proto === "http:" ||
+        this._proto === "https:" ||
+        this._proto === "ws:" ||
+        this._proto === "wss:" ||
+        this._proto === "ftp:")
     ) {
       throw new TypeError("Invalid URL: " + input);
     }
     var pci = hostPort.lastIndexOf(":");
     if (pci !== -1 && hostPort.indexOf("]") < pci) {
-      this.hostname = hostPort.slice(0, pci).toLowerCase();
-      var prt = hostPort.slice(pci + 1);
-      if ((this.protocol === "http:" && prt === "80") || (this.protocol === "https:" && prt === "443")) prt = "";
-      this.port = prt;
+      this._hostname = hostPort.slice(0, pci).toLowerCase();
+      this._port = hostPort.slice(pci + 1);
     } else {
-      this.hostname = hostPort.toLowerCase();
-      this.port = "";
+      this._hostname = hostPort.toLowerCase();
+      this._port = "";
     }
-    this.host = this.port ? this.hostname + ":" + this.port : this.hostname;
-    this.origin = this.protocol + "//" + this.host;
-    this.pathname = __normP(pathRaw);
-    this.hash = hash === "#" ? "" : hash;
-    this.search = search === "?" ? "" : search;
-    this.href = this.origin + this.pathname + this.search + this.hash;
+    this._path = __normP(pathRaw);
+    this._hash = hash === "#" ? "" : hash;
+    this._search = search === "?" ? "" : search;
     this._sp = null;
+    __rebuildUrlHref(this);
   }
   URL.prototype._isSliceUrl = true;
-  Object.defineProperty(URL.prototype, "searchParams", {
-    get: function() {
-      return this._sp || (this._sp = new URLSearchParams(this.search, this));
+  Object.defineProperties(URL.prototype, {
+    href: {
+      get: function() { return this._href; },
+      set: function(v) { __setUrlField(this, "href", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    origin: {
+      get: function() { return this._origin; },
+      configurable: true,
+      enumerable: true
+    },
+    protocol: {
+      get: function() { return this._proto; },
+      set: function(v) { __setUrlField(this, "protocol", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    username: {
+      get: function() { return this._user; },
+      set: function(v) { __setUrlField(this, "username", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    password: {
+      get: function() { return this._pass; },
+      set: function(v) { __setUrlField(this, "password", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    host: {
+      get: function() { return this._host; },
+      set: function(v) { __setUrlField(this, "host", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    hostname: {
+      get: function() { return this._hostname; },
+      set: function(v) { __setUrlField(this, "hostname", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    port: {
+      get: function() { return this._port; },
+      set: function(v) { __setUrlField(this, "port", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    pathname: {
+      get: function() { return this._path; },
+      set: function(v) { __setUrlField(this, "pathname", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    search: {
+      get: function() { return this._search; },
+      set: function(v) { __setUrlField(this, "search", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    hash: {
+      get: function() { return this._hash; },
+      set: function(v) { __setUrlField(this, "hash", String(v)); },
+      configurable: true,
+      enumerable: true
+    },
+    searchParams: {
+      get: function() {
+        return this._sp || (this._sp = new URLSearchParams(this._search, this));
+      },
+      configurable: true,
+      enumerable: true
     }
   });
   URL.prototype._syncSearch = function() {
-    var baseHref = (this.origin === "null" ? this.protocol : this.origin) + this.pathname;
     if (!this._sp || this._sp._ensureP().length === 0) {
-      this.search = "";
-      this.href = baseHref + this.hash;
-      return;
+      this._search = "";
+    } else {
+      var qs = this._sp.toString();
+      this._search = qs ? "?" + qs : "";
     }
-    var qs = this._sp.toString();
-    this.search = qs ? "?" + qs : "";
-    this.href = baseHref + this.search + this.hash;
+    __rebuildUrlHref(this);
   };
   URL.prototype.toString = URL.prototype.toJSON = function() {
     return this.href;
@@ -655,30 +888,18 @@
     var href = u._r;
     u._isFastUrl = false;
     Object.setPrototypeOf(u, URL.prototype);
-    u.protocol = proto;
-    u.username = "";
-    u.password = "";
-    u.hostname = hostname;
-    u.port = port;
-    u.host = host;
-    u.origin = origin;
-    u.pathname = pathname;
-    u.hash = "";
-    u.search = search;
-    u.href = href;
-    if (field === "pathname") {
-      u.pathname = val && val.charCodeAt(0) === 47 ? __normP(val) : __normP("/" + val);
-      u.href = u.origin + u.pathname + u.search + u.hash;
-    } else if (field === "search") {
-      u.search = !val || val === "?" ? "" : (val.charCodeAt(0) === 63 ? val : "?" + val);
-      if (u._sp) u._sp = new URLSearchParams(u.search, u);
-      u.href = u.origin + u.pathname + u.search + u.hash;
-    } else if (field === "hash") {
-      u.hash = !val || val === "#" ? "" : (val.charCodeAt(0) === 35 ? val : "#" + val);
-      u.href = u.origin + u.pathname + u.search + u.hash;
-    } else {
-      u[field] = val;
-    }
+    u._proto = proto;
+    u._user = "";
+    u._pass = "";
+    u._hostname = hostname;
+    u._port = port;
+    u._host = host;
+    u._origin = origin;
+    u._path = pathname;
+    u._hash = "";
+    u._search = search;
+    u._href = href;
+    __setUrlField(u, field, val);
   }
   Object.defineProperties(FastUrlProto, {
     href: {
@@ -736,7 +957,6 @@
     },
     origin: {
       get: function() { return this._r.slice(0, this._pi); },
-      set: function(v) { __matFastUrl(this, "origin", String(v)); },
       configurable: true,
       enumerable: true
     },

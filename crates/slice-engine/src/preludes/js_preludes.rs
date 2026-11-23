@@ -139,7 +139,7 @@ pub(crate) fn register_shard_host_functions_for_mask(
     if (shards_mask & ((1 << 4) | (1 << 31))) != 0 {
         crate::host_bindings::register_webcrypto_host_functions(context);
     }
-    if (shards_mask & ((1 << 5) | (1 << 7) | (1 << 30))) != 0 {
+    if (shards_mask & ((1 << 5) | (1 << 7) | (1 << 30) | (1 << 31))) != 0 {
         crate::host_bindings::register_buffer_host_functions(context);
     }
     if (shards_mask & (1 << 7)) != 0 {

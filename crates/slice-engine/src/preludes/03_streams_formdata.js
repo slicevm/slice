@@ -387,6 +387,7 @@
     }
     this._chunks = [];
     this._head = 0;
+    if (this._closeRequested && !this._closed) __rsFinishClose(this);
     return out;
   };
   ReadableStream.prototype._toBytes = function() {
@@ -396,6 +397,7 @@
     for (var i = this._head; i < this._chunks.length; i++) u8s.push(__slice_toU8(this._chunks[i]));
     this._chunks = [];
     this._head = 0;
+    if (this._closeRequested && !this._closed) __rsFinishClose(this);
     return __slice_concatU8(u8s);
   };
   ReadableStream.prototype._cancelInternal = function(reason) {
@@ -825,7 +827,7 @@
     var st = this;
     st._disturbed = true;
     var reader = st.getReader();
-    if (st._closed && !st._startPromise && !st._pulling) {
+    if ((st._closed || st._closeRequested) && !st._errored && !st._startPromise && !st._pulling) {
       self._u8 = st._toBytes();
       self._body = null;
       return Promise.resolve(self);

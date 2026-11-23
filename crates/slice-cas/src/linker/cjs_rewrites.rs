@@ -580,7 +580,8 @@ pub fn maybe_rewrite_unmodified_npm_cjs_module<'a>(
   if (type === \"number\" && isFinite(val)) {\n\
     var long = Boolean(options && options.long);\n\
     var r = globalThis.__slice_fast_ms(val, long);\n\
-    return r !== undefined ? r : (val + (long ? \" ms\" : \"ms\"));\n\
+    if (r !== undefined) return r;\n\
+    return Math.abs(val) >= 86400000 ? (Math.round(val / 86400000) + (long ? \" days\" : \"d\")) : (val + (long ? \" ms\" : \"ms\"));\n\
   }\n\
   throw new Error(\"val is not a non-empty string or a valid number. val=\" + JSON.stringify(val));\n\
 };\n",
