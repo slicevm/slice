@@ -5,6 +5,16 @@ use std::path::PathBuf;
 pub(crate) const DEFAULT_SLICE_D_TS: &str = r#"// Slice (Nexus-JS) Ambient TypeScript Declarations (`slice.d.ts`)
 // Automatically included by `tsconfig.json` for IDE IntelliSense and `tsc --noEmit`.
 
+declare var process: {
+    env: Record<string, string | undefined>;
+    argv: string[];
+    exitCode?: number;
+    readonly platform: string;
+    readonly arch: string;
+    cwd(): string;
+    exit(code?: number): never;
+};
+
 declare function env(key: string): string;
 
 declare namespace WinterTC {
@@ -593,25 +603,59 @@ pub(crate) fn cmd_init(args: &[String]) -> Result<()> {
 
     let entry_path = target_dir.join("src").join("index.ts");
     if !entry_path.exists() {
-        let sample_ts = r#"// Slice (Nexus-JS) Edge MicroVM Entrypoint
-interface TenantContext {
-    service: string;
-    version: number;
+        let sample_ts = r#"// Slice (Nexus-JS) WinterTC Edge MicroVM Entrypoint
+export interface ServiceStatus {
+    status: string;
+    stage: string;
+    runtime: string;
+    method: string;
+    url: string;
 }
 
-function fib(n: number): number {
-    if (n <= 1) return n;
-    return fib(n - 1) + fib(n - 2);
+export function buildStatus(method: string, url: string): ServiceStatus {
+    const stage = process.env.SERVICE_STAGE ?? "production";
+    const runtime = process.env.RUNTIME_ENGINE ?? "Slice-NexusJS";
+    return {
+        status: "ok",
+        stage,
+        runtime,
+        method,
+        url,
+    };
 }
 
-const stage: string = env("SERVICE_STAGE");
-const f: number = fib(30);
-const route_response: string = WinterTC.route("GET", "https://edge.slice.local/api/v1/status");
-console.log(stage);
-console.log(f);
-console.log(route_response);
+export function handleRequest(request: Request): Response {
+    return Response.json(buildStatus(request.method, request.url));
+}
+
+export default {
+    fetch: handleRequest,
+};
+
+console.log(JSON.stringify(buildStatus("CLI", "https://edge.slice.local/api/v1/status")));
 "#;
         std::fs::write(&entry_path, sample_ts)?;
+    }
+
+    let tests_dir = target_dir.join("tests");
+    std::fs::create_dir_all(&tests_dir)?;
+    let test_path = tests_dir.join("index.test.ts");
+    if !test_path.exists() {
+        let sample_test_ts = r#"import { describe, test, expect } from "slice:test";
+import { handleRequest } from "../src/index.ts";
+
+describe("WinterTC Edge Handler", () => {
+    test("returns 200 JSON service status", async () => {
+        const req = new Request("https://edge.slice.local/api/v1/status", { method: "GET" });
+        const res = handleRequest(req);
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.status).toBe("ok");
+        expect(body.method).toBe("GET");
+    });
+});
+"#;
+        std::fs::write(&test_path, sample_test_ts)?;
     }
 
     println!(

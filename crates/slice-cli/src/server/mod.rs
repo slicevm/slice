@@ -79,8 +79,19 @@ pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
 
     // Pre-compile or map handler bytecode and extract any embedded CAS static assets
     let default_handler_src = r#"
-const route_res: string = WinterTC.route("GET", "https://edge.slice.local/api/v1/status");
-console.log(route_res);
+const req = Slice.request();
+Slice.respond(
+    200,
+    JSON.stringify({
+        status: 200,
+        runtime: "Slice-NexusJS",
+        wintertc: true,
+        method: req.method,
+        path: req.path,
+        tenant: req.tenantId,
+    }),
+    "application/json"
+);
 "#;
     let mut static_table = slice_cas::StaticAssetTable::new();
     let mut cas_archive_arc: Option<std::sync::Arc<MappedCasArchive>> = None;

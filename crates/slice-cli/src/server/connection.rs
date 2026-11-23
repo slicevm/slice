@@ -953,14 +953,34 @@ pub(crate) fn serve_connection_with_isolate(
                     stream.flush()?;
                     write_buf.clear();
 
-                    if let Ok(open_frames) =
-                        isolate.execute_websocket_event("open", false, &[], 0, "")
-                        && flush_server_ws_frames(&mut stream, open_frames)?
-                    {
-                        if let Some((counter, _)) = max_requests_tracker {
-                            counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    // Clear the 10s HTTP Slowloris header timeout so upgraded WebSockets stay alive while idle.
+                    stream.set_read_timeout(None);
+
+                    match isolate.execute_websocket_event("open", false, &[], 0, "") {
+                        Ok(open_frames) => {
+                            if flush_server_ws_frames(&mut stream, open_frames)? {
+                                if let Some((counter, _)) = max_requests_tracker {
+                                    counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                                }
+                                return Ok(());
+                            }
                         }
-                        return Ok(());
+                        Err(_violation) => {
+                            let close_payload =
+                                slice_engine::build_close_frame_payload(1008, "Policy Violation");
+                            let close_frame = slice_engine::encode_websocket_frame(
+                                true,
+                                slice_engine::WS_OPCODE_CLOSE,
+                                None,
+                                &close_payload,
+                            );
+                            let _ = stream.write_all(&close_frame);
+                            let _ = stream.flush();
+                            if let Some((counter, _)) = max_requests_tracker {
+                                counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                            }
+                            return Ok(());
+                        }
                     }
 
                     let mut ws_pending = Vec::new();
@@ -1028,7 +1048,11 @@ pub(crate) fn serve_connection_with_isolate(
                                     }
                                 }
                             }
-                            Ok(None) | Err(_) => break,
+                            Ok(None) | Err(_) => {
+                                let _ =
+                                    isolate.execute_websocket_event("close", false, &[], 1006, "");
+                                break;
+                            }
                         }
                     }
                     if let Some((counter, _)) = max_requests_tracker {

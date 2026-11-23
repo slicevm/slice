@@ -136,6 +136,28 @@ impl Drop for ActiveHttpReqGuard {
     }
 }
 
+#[inline]
+fn format_uncaught_http_error_json(raw_err: &str) -> String {
+    let mut out = String::with_capacity(raw_err.len() + 16);
+    out.push_str(r#"{"error":""#);
+    for ch in raw_err.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push_str(r#""}"#);
+    out
+}
+
 impl SliceIsolate {
     /// Executes an HTTP request inside this `SliceIsolate` with zero-copy request metadata
     /// (`HttpRequestContext`), custom status/content-type response capture (`Slice.respond`),
@@ -155,7 +177,7 @@ impl SliceIsolate {
             drop(_http_req_guard);
 
             let custom_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
-            let ws_upgraded = BOA_WS_UPGRADED.with(|w| w.replace(false));
+            let mut ws_upgraded = BOA_WS_UPGRADED.with(|w| w.replace(false));
             let wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.get());
 
             let (status_code, content_type, response_body, response_body_bytes, response_headers) =
@@ -166,6 +188,15 @@ impl SliceIsolate {
                         body = String::from_utf8_lossy(raw).into_owned();
                     }
                     (st, Cow::Owned(ct), body, body_bytes, hdrs)
+                } else if metrics.return_value.starts_with("Uncaught ") {
+                    ws_upgraded = false;
+                    (
+                        500,
+                        Cow::Borrowed("application/json"),
+                        format_uncaught_http_error_json(&metrics.return_value),
+                        None,
+                        Vec::new(),
+                    )
                 } else {
                     let body = if !metrics.stdout.is_empty() {
                         metrics.stdout.join("\n")
@@ -194,14 +225,16 @@ impl SliceIsolate {
         }
 
         let mut metrics = self.execute_bytecode(bytecode, cas)?;
-        let body = if !metrics.stdout.is_empty() {
-            metrics.stdout.join("\n")
+        let (status_code, body) = if metrics.return_value.starts_with("Uncaught ") {
+            (500, format_uncaught_http_error_json(&metrics.return_value))
+        } else if !metrics.stdout.is_empty() {
+            (200, metrics.stdout.join("\n"))
         } else {
-            std::mem::take(&mut metrics.return_value)
+            (200, std::mem::take(&mut metrics.return_value))
         };
         Ok(HttpExecutionOutcome {
             metrics,
-            status_code: 200,
+            status_code,
             content_type: Cow::Borrowed("application/json"),
             response_body: body,
             response_body_bytes: None,
@@ -229,12 +262,21 @@ impl SliceIsolate {
             drop(_http_req_guard);
 
             let custom_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
-            let ws_upgraded = BOA_WS_UPGRADED.with(|w| w.replace(false));
+            let mut ws_upgraded = BOA_WS_UPGRADED.with(|w| w.replace(false));
             let wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.get());
 
             let (status_code, content_type, response_body, response_body_bytes, response_headers) =
                 if let Some((st, body, body_bytes, ct, hdrs)) = custom_res {
                     (st, Cow::Owned(ct), body, body_bytes, hdrs)
+                } else if ret_str.starts_with("Uncaught ") {
+                    ws_upgraded = false;
+                    (
+                        500,
+                        Cow::Borrowed("application/json"),
+                        format_uncaught_http_error_json(&ret_str),
+                        None,
+                        Vec::new(),
+                    )
                 } else {
                     let body = if !self.stdout.is_empty() {
                         self.stdout.join("\n")
@@ -265,15 +307,17 @@ impl SliceIsolate {
 
         let (_instantiate_ns, total_time_ns, ret_str) =
             self.execute_bytecode_core(bytecode, cas, false)?;
-        let body = if !self.stdout.is_empty() {
-            self.stdout.join("\n")
+        let (status_code, body) = if ret_str.starts_with("Uncaught ") {
+            (500, format_uncaught_http_error_json(&ret_str))
+        } else if !self.stdout.is_empty() {
+            (200, self.stdout.join("\n"))
         } else {
-            ret_str
+            (200, ret_str)
         };
         Ok(HttpFastOutcome {
             total_time_ns,
             fuel_consumed: self.compartment.fuel_consumed,
-            status_code: 200,
+            status_code,
             content_type: Cow::Borrowed("application/json"),
             response_body: body,
             response_body_bytes: None,

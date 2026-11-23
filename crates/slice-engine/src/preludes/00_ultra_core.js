@@ -142,6 +142,17 @@
   globalThis.env = function(k) {
     return __slice_env_get(String(k));
   };
+  globalThis.WinterTC = {
+    route: function(method, url) {
+      return JSON.stringify({
+        status: 200,
+        runtime: "Slice-NexusJS",
+        wintertc: true,
+        method: String(method),
+        url: String(url)
+      });
+    }
+  };
 
   var __pExitCode = undefined;
   var __argvCache = null;

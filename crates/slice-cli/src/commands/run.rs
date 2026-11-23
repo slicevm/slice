@@ -564,39 +564,80 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     }
 
     if watch_mode && !target.ends_with(".cas") {
+        let base_watch_cfg = ResolvedExecutionConfig::from_cli_args(args)?;
         if !watch_once {
             install_ctrlc_handler();
         }
         let mut watcher = OsNativeFileWatcher::new(path);
         while watcher.wait_for_change(watch_once) {
             let reload_start = Instant::now();
-            let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
-            let bundled_source = match slice_cas::bundle_entrypoint_with_deps(&entry_file) {
-                Ok(s) => s,
-                Err(e) => {
+            let reload_outcome: Result<_> = (|| {
+                let mut reload_cfg = base_watch_cfg.clone();
+                reload_cfg.apply_target_path_manifest(path)?;
+                let entry_file = slice_cas::resolve_project_entrypoint(path, None)?;
+                let raw_entry = std::fs::read_to_string(&entry_file)
+                    .with_context(|| format!("Failed to read {}", entry_file.display()))?;
+                reload_cfg.apply_inline_directives(&raw_entry, entry_file.parent())?;
+                let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
+                let bytecode = compile_source_to_bytecode(&bundled_source);
+                let mut isolate = SliceIsolate::spawn(
+                    "tenant-cli-watch",
+                    1,
+                    reload_cfg.caps,
+                    reload_cfg.fuel_limit,
+                    reload_cfg.mem_limit,
+                );
+                isolate.set_deterministic_seed(reload_cfg.deterministic_seed);
+                for sec in &reload_cfg.audit_secrets {
+                    isolate.add_egress_audit_secret(sec.clone());
+                }
+                let reload_metrics = isolate
+                    .execute_bytecode(&bytecode, None)
+                    .map_err(|v| anyhow::anyhow!("Sandbox containment violation: {}", v))?;
+                Ok((bundled_source, reload_metrics))
+            })();
+
+            match reload_outcome {
+                Ok((bundled_source, reload_metrics)) => {
+                    if !quiet {
+                        for line in &reload_metrics.stdout {
+                            println!("{}", line);
+                        }
+                    }
+                    if let Some(code) = reload_metrics.exit_code {
+                        LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
+                    } else {
+                        LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);
+                    }
+                    if reload_metrics.return_value.starts_with("Uncaught ") {
+                        if reload_metrics.exit_code.is_none() {
+                            LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
+                        }
+                        let mapped = slice_cas::map_bundled_error_location(
+                            &bundled_source,
+                            &reload_metrics.return_value,
+                        );
+                        if watch_once {
+                            bail!("{}", mapped);
+                        }
+                        eprintln!("[Slice Watch Error] {}", mapped);
+                    } else if watch_once
+                        && let Some(code) = reload_metrics.exit_code
+                        && code != 0
+                    {
+                        bail!("Process exited with status code {}", code);
+                    } else if !quiet {
+                        let reload_ms = reload_start.elapsed().as_secs_f64() * 1_000.0;
+                        println!("[Slice Watch] Reloaded in {:.2} ms", reload_ms);
+                    }
+                }
+                Err(err) => {
                     LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
-                    return Err(e);
+                    if watch_once {
+                        return Err(err);
+                    }
+                    eprintln!("[Slice Watch Error] {:#}", err);
                 }
-            };
-            let bytecode = compile_source_to_bytecode(&bundled_source);
-            let mut isolate = SliceIsolate::spawn(
-                "tenant-cli-watch",
-                1,
-                exec_cfg.caps.clone(),
-                exec_cfg.fuel_limit,
-                exec_cfg.mem_limit,
-            );
-            isolate.set_deterministic_seed(exec_cfg.deterministic_seed);
-            for sec in &exec_cfg.audit_secrets {
-                isolate.add_egress_audit_secret(sec.clone());
-            }
-            let reload_metrics = isolate.execute_bytecode(&bytecode, None)?;
-            let reload_ms = reload_start.elapsed().as_secs_f64() * 1_000.0;
-            if !quiet {
-                for line in &reload_metrics.stdout {
-                    println!("{}", line);
-                }
-                println!("[Slice Watch] Reloaded in {:.2} ms", reload_ms);
             }
             if watch_once {
                 break;
