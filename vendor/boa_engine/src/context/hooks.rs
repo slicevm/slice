@@ -79,6 +79,16 @@ pub trait HostHooks {
         false
     }
 
+    /// Pushes an empty host continuation snapshot before resuming a pre-existing settled `Await`
+    /// continuation when [`Self::has_active_job_context`] became `true` synchronously after the
+    /// `await` suspended (e.g. `als.enterWith(...)`). Paired with [`Self::exit_empty_job_context`].
+    #[inline]
+    fn enter_empty_job_context(&self) {}
+
+    /// Restores the host continuation snapshot saved by [`Self::enter_empty_job_context`].
+    #[inline]
+    fn exit_empty_job_context(&self) {}
+
     /// [`HostCallJobCallback ( jobCallback, V, argumentsList )`][spec]
     ///
     /// # Requirements

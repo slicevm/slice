@@ -68,6 +68,7 @@ pub(crate) fn eval_lazy_builtin_module(
         "slice:crypto-pki" => {
             crate::host_bindings::register_node_crypto_bootstrap_host_function(context);
             crate::host_bindings::register_webcrypto_host_functions(context);
+            crate::host_bindings::register_buffer_host_functions(context);
             (47, BUILTIN_CRYPTO_PKI_SNIPPET)
         }
         "fs" | "node:fs" => {
@@ -195,7 +196,7 @@ pub(crate) fn eval_lazy_builtin_module(
         }
         "slice:ms" => {
             crate::host_bindings::register_semver_and_fast_intrinsics_host_functions(context);
-            (43, br#"(function(){var m=function(v,o){var t=typeof v;if(t==="string"&&v.length>0)return __slice_fast_ms(v);if(t==="number"&&isFinite(v)){var l=Boolean(o&&o.long),r=__slice_fast_ms(v,l);return r!==undefined?r:(v+(l?" ms":"ms"));}throw new Error("val is not a non-empty string or a valid number. val="+JSON.stringify(v));};m.default=m;return __slice_builtins["slice:ms"]=m;})()"#)
+            (43, br#"(function(){var m=function(v,o){var t=typeof v;if(t==="string"&&v.length>0)return __slice_fast_ms(v);if(t==="number"&&isFinite(v)){var l=Boolean(o&&o.long),r=__slice_fast_ms(v,l);if(r!==undefined)return r;return Math.abs(v)>=86400000?(Math.round(v/86400000)+(l?" days":"d")):(v+(l?" ms":"ms"));}throw new Error("val is not a non-empty string or a valid number. val="+JSON.stringify(v));};m.default=m;return __slice_builtins["slice:ms"]=m;})()"#)
         }
         "async_hooks" | "node:async_hooks" => {
             crate::host_bindings::register_async_hooks_host_functions(context);

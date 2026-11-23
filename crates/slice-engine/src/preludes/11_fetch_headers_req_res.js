@@ -466,6 +466,8 @@
     this._used = false;
   }
 
+  var __symIter = (typeof Symbol !== "undefined" && Symbol.iterator) || null;
+
   function Request(input, init) {
     if (input === "__SLICE_LIVE_REQ__") {
       return __makeLiveReq();
@@ -481,7 +483,7 @@
     if (
       fastUrl !== null &&
       (o.body === undefined || o.body === null || typeof o.body === "string") &&
-      (!oh || (typeof oh === "object" && !Array.isArray(oh) && (oh._isHeaders || !(typeof Symbol !== "undefined" && Symbol.iterator && typeof oh[Symbol.iterator] === "function"))))
+      (!oh || (typeof oh === "object" && !Array.isArray(oh) && (oh._isHeaders || !(__symIter && typeof oh[__symIter] === "function"))))
     ) {
       var rawMFast = o.method;
       var fastMethod = rawMFast
@@ -631,7 +633,7 @@
     var oh = o.headers;
     if (
       (body === undefined || body === null || typeof body === "string") &&
-      (!oh || (typeof oh === "object" && !Array.isArray(oh)))
+      (!oh || (typeof oh === "object" && !Array.isArray(oh) && (oh._isHeaders || !(__symIter && typeof oh[__symIter] === "function"))))
     ) {
       var isInitStr = typeof body === "string";
       var rInit = new __FastRes(st, stText, isInitStr ? body : null, "");
@@ -757,10 +759,17 @@
     this._used = true;
     if (this._stream) {
       var st = this._stream;
-      if (st._closed && !st._startPromise && !st._pulling && !__streamHasBinary(st)) {
+      if ((st._closed || st._closeRequested) && !st._errored && !st._startPromise && !st._pulling) {
         st.getReader();
-        var txt = st._toText();
-        this._body = txt;
+        var txt;
+        if (__streamHasBinary(st) && typeof st._toBytes === "function") {
+          this._u8 = st._toBytes();
+          this._body = null;
+          txt = __getBodyText(this);
+        } else {
+          txt = st._toText();
+          this._body = txt;
+        }
         return Promise.resolve(txt);
       }
       return st._drainToBody(this).then(__getBodyText);
@@ -781,10 +790,17 @@
     this._used = true;
     if (this._stream) {
       var st = this._stream;
-      if (st._closed && !st._startPromise && !st._pulling && !__streamHasBinary(st)) {
+      if ((st._closed || st._closeRequested) && !st._errored && !st._startPromise && !st._pulling) {
         st.getReader();
-        var txt = st._toText();
-        this._body = txt;
+        var txt;
+        if (__streamHasBinary(st) && typeof st._toBytes === "function") {
+          this._u8 = st._toBytes();
+          this._body = null;
+          txt = __getBodyText(this);
+        } else {
+          txt = st._toText();
+          this._body = txt;
+        }
         try {
           return Promise.resolve(JSON.parse(txt));
         } catch (eJson) {
@@ -1014,7 +1030,7 @@
         (jSt | 0) === jSt &&
         jSt >= 200 &&
         jSt <= 599 &&
-        (!jOh || (typeof jOh === "object" && !Array.isArray(jOh)))
+        (!jOh || (typeof jOh === "object" && !Array.isArray(jOh) && (jOh._isHeaders || !(__symIter && typeof jOh[__symIter] === "function"))))
       ) {
         var rJson = new __FastRes(
           jSt,

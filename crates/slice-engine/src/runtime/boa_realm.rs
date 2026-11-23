@@ -319,12 +319,51 @@ unsafe impl boa_engine::gc::Trace for AlsCapturedSnap {
 
 impl boa_engine::JsData for AlsCapturedSnap {}
 
+struct AlsSnapGuard {
+    prev: Option<boa_engine::JsValue>,
+}
+
+impl AlsSnapGuard {
+    #[inline]
+    fn enter(next: boa_engine::JsValue) -> Self {
+        let prev = BOA_ALS_SNAP.with(|s| s.replace(next));
+        Self { prev: Some(prev) }
+    }
+}
+
+impl Drop for AlsSnapGuard {
+    #[inline]
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
+        }
+    }
+}
+
+thread_local! {
+    static BOA_ALS_MASK_STACK: std::cell::RefCell<Vec<boa_engine::JsValue>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 pub(crate) struct SliceHostHooks;
 
 impl boa_engine::context::HostHooks for SliceHostHooks {
     #[inline]
     fn has_active_job_context(&self) -> bool {
         BOA_ALS_ACTIVE.with(|a| a.get())
+    }
+
+    #[inline]
+    fn enter_empty_job_context(&self) {
+        let prev = BOA_ALS_SNAP.with(|s| s.replace(boa_engine::JsValue::undefined()));
+        BOA_ALS_MASK_STACK.with(|st| st.borrow_mut().push(prev));
+    }
+
+    #[inline]
+    fn exit_empty_job_context(&self) {
+        if let Some(prev) = BOA_ALS_MASK_STACK.with(|st| st.borrow_mut().pop()) {
+            BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
+        }
     }
 
     fn make_job_callback(
@@ -349,16 +388,14 @@ impl boa_engine::context::HostHooks for SliceHostHooks {
         if !BOA_ALS_ACTIVE.with(|a| a.get()) {
             return job.callback().call(this, args, context);
         }
-        if let Some(captured) = job.host_defined().downcast_ref::<AlsCapturedSnap>() {
-            let prev = BOA_ALS_SNAP.with(|s| s.replace(captured.0.clone()));
-            let res = job.callback().call(this, args, context);
-            BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
-            return res;
-        }
-        let prev = BOA_ALS_SNAP.with(|s| s.replace(boa_engine::JsValue::undefined()));
-        let res = job.callback().call(this, args, context);
-        BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
-        res
+        let next = job
+            .host_defined()
+            .downcast_ref::<AlsCapturedSnap>()
+            .map_or_else(boa_engine::JsValue::undefined, |captured| {
+                captured.0.clone()
+            });
+        let _guard = AlsSnapGuard::enter(next);
+        job.callback().call(this, args, context)
     }
 
     fn promise_rejection_tracker(

@@ -271,26 +271,46 @@ fn test_vfs_drive_relative_device_namespaces_catchall_routes_and_dot_prefix() {
 #[test]
 fn test_pkru_nested_unwind_restoration_checked_ceilings_and_frozen_intrinsics() {
     let outer = HardwareProtectionDomain::allocate(2);
-    let inner = HardwareProtectionDomain::allocate(3);
     let hw = outer.hardware_enforced;
-    assert_eq!(current_thread_pkru(hw), 0);
+    let baseline_pkru = current_thread_pkru(hw);
+    assert_eq!(
+        baseline_pkru & 0b11,
+        0,
+        "Default PKEY 0 must remain accessible in host baseline PKRU"
+    );
+    let inner = HardwareProtectionDomain::allocate(3);
+    assert_eq!(
+        current_thread_pkru(hw),
+        baseline_pkru,
+        "Allocating a domain must not mutate the calling thread's active PKRU"
+    );
 
     {
         let _outer_guard = outer.enter_domain();
         let outer_pkru = current_thread_pkru(hw);
         assert_eq!(outer_pkru, outer.pkru_mask);
 
+        // Allocating while inside an outer domain must also leave `outer_pkru` intact
+        let transient = HardwareProtectionDomain::allocate(4);
+        assert_eq!(
+            current_thread_pkru(hw),
+            outer_pkru,
+            "Nested domain allocation must preserve active outer PKRU"
+        );
+        drop(transient);
+
         // Normal nested scope restores outer PKRU on drop
+        let inner_hw = inner.hardware_enforced;
         {
             let _inner_guard = inner.enter_domain();
-            assert_eq!(current_thread_pkru(hw), inner.pkru_mask);
+            assert_eq!(current_thread_pkru(inner_hw), inner.pkru_mask);
         }
         assert_eq!(current_thread_pkru(hw), outer_pkru);
 
         // Panic unwind inside nested scope must also restore outer PKRU (not reset to 0)
         let unwind_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _inner_guard = inner.enter_domain();
-            assert_eq!(current_thread_pkru(hw), inner.pkru_mask);
+            assert_eq!(current_thread_pkru(inner_hw), inner.pkru_mask);
             panic!("simulated nested guest trap");
         }));
         assert!(unwind_res.is_err());
@@ -300,7 +320,7 @@ fn test_pkru_nested_unwind_restoration_checked_ceilings_and_frozen_intrinsics() 
             "PkruDomainGuard must restore outer caller PKRU across panic unwind"
         );
     }
-    assert_eq!(current_thread_pkru(hw), 0);
+    assert_eq!(current_thread_pkru(hw), baseline_pkru);
 
     // Checked arithmetic on consume_fuel(u64::MAX) and alloc_memory(usize::MAX)
     let mut comp = TenantCompartment::new(

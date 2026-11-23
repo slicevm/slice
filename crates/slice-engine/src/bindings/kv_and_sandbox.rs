@@ -466,7 +466,7 @@ fn parse_sandbox_eval_options_arg(
 
         if obj.has_own_property(js_string!("fuel"), context)? {
             let v = obj.get(js_string!("fuel"), context)?;
-            if let Some(n) = v.as_number() {
+            if let Some(n) = v.as_number().filter(|n| n.is_finite()) {
                 opts.fuel = Some(n.max(0.0) as u64);
             }
         }
@@ -478,7 +478,7 @@ fn parse_sandbox_eval_options_arg(
         ] {
             if obj.has_own_property(mk.clone(), context)? {
                 let v = obj.get(mk, context)?;
-                if let Some(n) = v.as_number() {
+                if let Some(n) = v.as_number().filter(|n| n.is_finite()) {
                     opts.memory_bytes = Some(n.max(0.0) as usize);
                     break;
                 }
@@ -494,7 +494,7 @@ fn parse_sandbox_eval_options_arg(
 
         if obj.has_own_property(js_string!("deterministicSeed"), context)? {
             let v = obj.get(js_string!("deterministicSeed"), context)?;
-            if let Some(n) = v.as_number() {
+            if let Some(n) = v.as_number().filter(|n| n.is_finite()) {
                 opts.deterministic_seed = Some(n.max(0.0) as u64);
             }
         }
@@ -522,7 +522,7 @@ fn parse_sandbox_eval_options_arg(
 
         if obj.has_own_property(js_string!("maxCheckpoints"), context)? {
             let v = obj.get(js_string!("maxCheckpoints"), context)?;
-            if let Some(n) = v.as_number() {
+            if let Some(n) = v.as_number().filter(|n| n.is_finite()) {
                 opts.max_checkpoints = Some(n.max(0.0) as u32);
             }
         }

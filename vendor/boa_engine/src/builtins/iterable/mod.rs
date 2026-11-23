@@ -463,14 +463,18 @@ impl IteratorRecord {
         let keys = ob.shape().with_property_keys(|own_keys| {
             let mut out = Vec::with_capacity(own_keys.len());
             for (k, slot) in own_keys {
-                if slot.attributes.contains(SlotAttributes::ENUMERABLE)
-                    && let PropertyKey::String(s) = k
-                {
+                if let PropertyKey::String(s) = k {
+                    if !slot.attributes.contains(SlotAttributes::ENUMERABLE) {
+                        // Fall back to `ForInIterator` when `target` owns non-enumerable string
+                        // keys so `visited_keys` shadows matching prototype properties added
+                        // mid-loop in exact ECMA-262 14.7.5.9 creation order.
+                        return None;
+                    }
                     out.push(s.clone());
                 }
             }
-            out.into_boxed_slice()
-        });
+            Some(out.into_boxed_slice())
+        })?;
         drop(ob);
 
         Some(Self {

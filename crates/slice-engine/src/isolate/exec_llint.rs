@@ -73,15 +73,23 @@ impl SliceIsolate {
         Ok(next)
     }
 
+    /// Returns `Ok(true)` if `entry` was resolved in Tier-0, or `Ok(false)` if `entry` (or one of
+    /// its transitive imports) is a Tier-1 `SLICEBC\x01`/`SLICEBOA` module requiring Tier-1 Boa
+    /// promotion of the `.cas` entrypoint.
     pub(crate) fn bind_tier0_cas_entry<'a>(
         &mut self,
         archive: &'a MappedCasArchive,
         entry: &'a slice_cas::CasBlobEntry,
         dst: &str,
         active_hashes: &mut Vec<&'a str>,
-    ) -> Result<(), SandboxViolation> {
-        self.cas_modules_resolved += 1;
+    ) -> Result<bool, SandboxViolation> {
         let child_bc = archive.get_bytecode_slice(entry);
+        if child_bc.len() >= 8
+            && (&child_bc[0..8] == b"SLICEBOA" || &child_bc[0..8] == crate::boacas::BOACAS_MAGIC)
+        {
+            return Ok(false);
+        }
+        self.cas_modules_resolved += 1;
         if let Some(exp_iter) = visit_pure_static_exports(child_bc) {
             let (exact_count, _) = exp_iter.size_hint();
             let mut single_val: Option<f64> = None;
@@ -101,10 +109,10 @@ impl SliceIsolate {
             {
                 self.set_env_var_str(dst, JsValue::Number(first_v));
             }
-            return Ok(());
+            return Ok(true);
         }
         let Some(child_mod) = decode_slicesnp_import_cached(child_bc) else {
-            return Ok(());
+            return Ok(true);
         };
 
         if child_mod.ops.len() == child_mod.static_exports.len()
@@ -123,17 +131,18 @@ impl SliceIsolate {
             {
                 self.set_env_var_str(dst, JsValue::Number(*first_v));
             }
-            return Ok(());
+            return Ok(true);
         }
 
         if active_hashes.contains(&entry.hash_hex.as_str()) {
-            return Ok(());
+            return Ok(true);
         }
         active_hashes.push(entry.hash_hex.as_str());
 
         let saved_env = std::mem::take(&mut self.env_vars);
         let child_ref = Some(entry.original_specifier.as_str());
         let mut exported_names: Vec<String> = child_mod.static_exports.keys().cloned().collect();
+        let mut needs_tier1 = false;
 
         let eval_res = (|| -> Result<(), SandboxViolation> {
             for op in &child_mod.ops {
@@ -151,8 +160,15 @@ impl SliceIsolate {
                         specifier: sub_spec,
                     } => {
                         if let Some(sub_entry) = archive.resolve_specifier_from(child_ref, sub_spec)
+                            && !self.bind_tier0_cas_entry(
+                                archive,
+                                sub_entry,
+                                sub_dst,
+                                active_hashes,
+                            )?
                         {
-                            self.bind_tier0_cas_entry(archive, sub_entry, sub_dst, active_hashes)?;
+                            needs_tier1 = true;
+                            return Ok(());
                         }
                     }
                     BytecodeOp::EvalStmt(stmt) => {
@@ -180,6 +196,9 @@ impl SliceIsolate {
         let child_env = std::mem::replace(&mut self.env_vars, saved_env);
         let _ = active_hashes.pop();
         eval_res?;
+        if needs_tier1 {
+            return Ok(false);
+        }
 
         for exp_name in &exported_names {
             if let Some(val) = child_env.get(exp_name.as_str()) {
@@ -193,7 +212,53 @@ impl SliceIsolate {
         {
             self.set_env_var_str(dst, val.clone());
         }
-        Ok(())
+        Ok(true)
+    }
+
+    pub(crate) fn promote_tier0_cas_to_tier1_boa(
+        &mut self,
+        archive: &MappedCasArchive,
+        start: Instant,
+        need_return_str: bool,
+    ) -> Result<(u64, u64, String), SandboxViolation> {
+        let instantiate_ns = start.elapsed().as_nanos() as u64;
+        self.env_vars.clear();
+        self.cas_modules_resolved = 0;
+        self.current_tier = ExecutionTier::Tier1Baseline;
+        let Some(entry_blob) = archive.entrypoint_blob() else {
+            let total_ns = start.elapsed().as_nanos() as u64;
+            return Ok((instantiate_ns, total_ns, "undefined".to_string()));
+        };
+        let raw_src = archive.get_source_slice(entry_blob);
+        let js_src: std::borrow::Cow<'_, str> = if slice_cas::needs_unbundled_esm_lowering(raw_src)
+        {
+            std::borrow::Cow::Owned(slice_cas::lower_unbundled_esm(raw_src))
+        } else {
+            std::borrow::Cow::Borrowed(raw_src)
+        };
+        let mut cas_guard = crate::boa_realm::ActiveCasArchiveGuard::enter(Some(archive));
+        let last_val = self.exec_boa_full_es_vm(&js_src)?;
+        self.cas_modules_resolved += cas_guard.finish();
+        let has_secrets = !self.egress_audit_secrets.is_empty();
+        let has_custom_http_res =
+            !need_return_str && crate::boa_realm::BOA_HTTP_RES.with(|res| res.borrow().is_some());
+        let ret_str =
+            if need_return_str || has_secrets || (!has_custom_http_res && self.stdout.is_empty()) {
+                last_val.to_string()
+            } else {
+                String::new()
+            };
+        if has_secrets {
+            for line in &self.stdout {
+                self.verify_egress_not_leaked(line)?;
+            }
+            self.verify_egress_not_leaked(&ret_str)?;
+            if let Some(ref rj) = self.last_return_json {
+                self.verify_egress_not_leaked(rj)?;
+            }
+        }
+        let total_ns = start.elapsed().as_nanos() as u64;
+        Ok((instantiate_ns, total_ns, ret_str))
     }
 
     pub(crate) fn execute_slicesnp_v2_flat_llint(
@@ -273,7 +338,13 @@ impl SliceIsolate {
                             archive.resolve_specifier_from(entry_referrer, specifier)
                     {
                         let mut active_hashes = Vec::new();
-                        self.bind_tier0_cas_entry(archive, entry, dst, &mut active_hashes)?;
+                        if !self.bind_tier0_cas_entry(archive, entry, dst, &mut active_hashes)? {
+                            return self.promote_tier0_cas_to_tier1_boa(
+                                archive,
+                                start,
+                                need_return_str,
+                            );
+                        }
                     }
                 }
                 3 => {

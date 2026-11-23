@@ -98,6 +98,20 @@ impl Await {
                 let realm = context.realm().clone();
                 let job = PromiseJob::with_realm(
                     move |context| {
+                        struct EmptyJobCtxGuard(std::rc::Rc<dyn crate::context::HostHooks>);
+                        impl Drop for EmptyJobCtxGuard {
+                            #[inline]
+                            fn drop(&mut self) {
+                                self.0.exit_empty_job_context();
+                            }
+                        }
+                        let _als_guard = if context.host_hooks().has_active_job_context() {
+                            let hooks = context.host_hooks();
+                            hooks.enter_empty_job_context();
+                            Some(EmptyJobCtxGuard(hooks))
+                        } else {
+                            None
+                        };
                         let async_generator = r#gen.async_generator_object()?;
                         r#gen.resume(Some(arg), resume_kind, context);
                         if let Some(async_generator) = async_generator {
