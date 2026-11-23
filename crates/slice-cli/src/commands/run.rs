@@ -418,7 +418,11 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     let metrics = if target.ends_with(".cas") {
         let archive = MappedCasArchive::open(path)?;
         if let Some(toml_str) = archive.get_manifest_toml() {
-            exec_cfg.apply_manifest_toml(toml_str, None)?;
+            let cas_base_dir = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .or_else(|| Some(Path::new(".")));
+            exec_cfg.apply_manifest_toml(toml_str, cas_base_dir)?;
         }
         let prewarm_pool = exec_cfg.warm_pool;
         let deterministic_seed = exec_cfg.deterministic_seed;

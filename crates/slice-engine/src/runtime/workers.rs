@@ -107,6 +107,9 @@ pub struct WorkerSliceAttenuationOpts {
     pub allow_write: Option<Vec<String>>,
     pub allow_net: Option<Vec<String>>,
     pub allow_exec: Option<Vec<String>>,
+    pub allow_env: Option<Vec<String>>,
+    pub checkpoints: Option<bool>,
+    pub max_checkpoints: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -405,83 +408,29 @@ fn build_attenuated_worker_caps(
     parent_net_hosts: &FxHashSet<String>,
     parent_env_map: &FxHashMap<String, String>,
 ) -> CapabilityToken {
-    let mut child_caps = CapabilityToken::pure_compute();
-    let parent_reads = parent_caps.read_prefixes.as_slice();
-    let parent_writes = parent_caps.write_prefixes.as_slice();
-
-    // 1. Attenuate read prefixes strictly (`parent & requested`; empty allow-list = deny-all)
-    if let Some(req_reads) = attenuation.and_then(|a| a.allow_read.as_ref()) {
-        for req in req_reads {
-            if !slice_sandbox::is_rejected_vfs_candidate(req)
-                && parent_reads
-                    .iter()
-                    .any(|p| slice_sandbox::vfs_prefix_matches(req, p))
-            {
-                child_caps = child_caps.with_read_prefix(norm_vfs_path(req));
-            }
-        }
-    } else {
-        for p in parent_reads {
-            child_caps = child_caps.with_read_prefix(p.clone());
-        }
-    }
-
-    // 2. Attenuate write prefixes strictly (`parent & requested`; empty allow-list = deny-all)
-    if let Some(req_writes) = attenuation.and_then(|a| a.allow_write.as_ref()) {
-        for req in req_writes {
-            if !slice_sandbox::is_rejected_vfs_candidate(req)
-                && parent_writes
-                    .iter()
-                    .any(|p| slice_sandbox::vfs_prefix_matches(req, p))
-            {
-                child_caps = child_caps.with_write_prefix(norm_vfs_path(req));
-            }
-        }
-    } else {
-        for p in parent_writes {
-            child_caps = child_caps.with_write_prefix(p.clone());
-        }
-    }
-
-    // 3. Attenuate network hosts
-    if let Some(req_nets) = attenuation.and_then(|a| a.allow_net.as_ref()) {
-        for req_host in req_nets {
-            let h_lower = req_host.trim().to_ascii_lowercase();
-            if !slice_sandbox::is_cloud_metadata_ssrf_target(&h_lower)
-                && (parent_net_hosts.contains(&h_lower) || parent_net_hosts.contains("*"))
-            {
-                child_caps = child_caps.with_net_host(h_lower);
-            }
-        }
-    } else {
-        for h in parent_net_hosts {
-            child_caps = child_caps.with_net_host(h.clone());
-        }
-    }
-
-    // 4. Inherit allowed environment variables
-    for (k, v) in parent_env_map {
-        child_caps = child_caps.with_env(k.clone(), v.clone());
-    }
-
-    // 5. Attenuate allowed exec binaries against parent's `BOA_EXEC_BINS`
     let parent_execs = BOA_EXEC_BINS.with(|eb_cell| eb_cell.borrow().clone());
-    if let Some(req_execs) = attenuation.and_then(|a| a.allow_exec.as_ref()) {
-        for req_bin in req_execs {
-            if parent_execs
-                .iter()
-                .any(|allowed| slice_sandbox::exec_binary_matches(req_bin, allowed))
-            {
-                child_caps = child_caps.with_exec_binary(req_bin.clone());
-            }
-        }
-    } else {
-        for eb in &parent_execs {
-            child_caps = child_caps.with_exec_binary(eb.clone());
-        }
-    }
-
-    child_caps
+    let (parent_allow_cp, parent_max_cp_raw) =
+        crate::boa_realm::BOA_CHECKPOINT_CAP.with(|c| c.get());
+    let consumed_cp = crate::boa_realm::BOA_CHECKPOINT_STATS.with(|s| s.get().0);
+    let parent_token = CapabilityToken {
+        allowed_read_prefixes: parent_caps.read_prefixes.clone(),
+        allowed_write_prefixes: parent_caps.write_prefixes.clone(),
+        allowed_net_hosts: parent_net_hosts.clone(),
+        allowed_env_keys: parent_env_map.clone(),
+        allowed_exec_binaries: parent_execs,
+        allow_checkpoints: parent_allow_cp,
+        max_checkpoints: (parent_max_cp_raw < u32::MAX).then_some(parent_max_cp_raw),
+    };
+    parent_token.attenuate(&slice_sandbox::CapabilityAttenuationRequest {
+        allow_read: attenuation.and_then(|a| a.allow_read.as_deref()),
+        allow_write: attenuation.and_then(|a| a.allow_write.as_deref()),
+        allow_net: attenuation.and_then(|a| a.allow_net.as_deref()),
+        allow_exec: attenuation.and_then(|a| a.allow_exec.as_deref()),
+        allow_env: attenuation.and_then(|a| a.allow_env.as_deref()),
+        allow_checkpoints: attenuation.and_then(|a| a.checkpoints),
+        max_checkpoints: attenuation.and_then(|a| a.max_checkpoints),
+        consumed_checkpoints: consumed_cp,
+    })
 }
 
 /// Spawns a capability-attenuated MicroVM Worker thread and returns its `worker_id`.
@@ -948,9 +897,7 @@ fn run_pooled_worker_job(job: WorkerJob, self_job_tx: &Sender<WorkerJob>) {
             prng ^ (worker_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
         ));
     }
-    for sec in job.parent_egress_secrets {
-        child_isolate.add_egress_audit_secret(sec);
-    }
+    child_isolate.egress_audit_secrets = job.parent_egress_secrets;
 
     let mut worker_unwind_guard = WorkerTurnUnwindGuard { armed: true };
     let child_fuel_cap = job.child_fuel;

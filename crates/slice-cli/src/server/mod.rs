@@ -89,7 +89,11 @@ console.log(route_res);
         if target.ends_with(".cas") {
             let archive = MappedCasArchive::open(p)?;
             if let Some(toml_str) = archive.get_manifest_toml() {
-                exec_cfg.apply_manifest_toml(toml_str, None)?;
+                let cas_base_dir = p
+                    .parent()
+                    .filter(|d| !d.as_os_str().is_empty())
+                    .or_else(|| Some(Path::new(".")));
+                exec_cfg.apply_manifest_toml(toml_str, cas_base_dir)?;
             }
             static_table = slice_cas::StaticAssetTable::from_cas_archive(&archive);
             let entry = archive

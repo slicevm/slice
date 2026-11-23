@@ -159,24 +159,15 @@ impl SliceIsolate {
 
     /// Registers a sensitive secret token to be guarded against egress exfiltration (`--audit-egress`).
     /// When no secrets are registered (default), the egress guard costs `0.00 ns`.
-    /// Pre-computes both standard Base64 and URL-safe Base64 encodings at registration time
-    /// so `verify_egress_secrets_slice` performs zero heap allocations on hot egress paths.
+    /// Pre-expands raw, hex, URL/percent-encoded, padded/unpadded Base64 & Base64URL, and all 3
+    /// Base64 triplet-alignment slices at registration time so `verify_egress_secrets_slice` scans
+    /// payloads in a single `O(payload)` pass via a cached `aho-corasick` automaton.
     pub fn add_egress_audit_secret(&mut self, secret: impl Into<String>) {
         let s = secret.into();
         if s.is_empty() {
             return;
         }
-        let b64_std = crate::intrinsics::base64_encode(s.as_bytes(), false);
-        let b64_url = crate::intrinsics::base64_encode(s.as_bytes(), true);
-        if !self.egress_audit_secrets.contains(&s) {
-            self.egress_audit_secrets.push(s);
-        }
-        if !b64_std.is_empty() && !self.egress_audit_secrets.contains(&b64_std) {
-            self.egress_audit_secrets.push(b64_std);
-        }
-        if !b64_url.is_empty() && !self.egress_audit_secrets.contains(&b64_url) {
-            self.egress_audit_secrets.push(b64_url);
-        }
+        crate::state_and_kv::expand_egress_secret_variants(&s, &mut self.egress_audit_secrets);
     }
 
     /// Parses `.env` content, grants each `KEY=VALUE` in this compartment's `CapabilityToken`,

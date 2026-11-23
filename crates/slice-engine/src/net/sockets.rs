@@ -285,6 +285,19 @@ fn verify_raw_socket_ocap(host: &str, port: u16) -> Result<bool, String> {
         ));
     }
     let clean_host = slice_sandbox::extract_clean_hostname(&host.trim().to_ascii_lowercase());
+    if clean_host.is_empty() {
+        let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+        BOA_VIOLATION.with(|v| {
+            *v.borrow_mut() = Some(SandboxViolation::NetAccessDenied {
+                tenant_id,
+                host: format!("{}:{}", host.trim(), port),
+            });
+        });
+        return Err(format!(
+            "SocketError: Invalid or forbidden socket hostname '{}:{}'",
+            host, port
+        ));
+    }
     let host_port = format_socket_host_port(&clean_host, port);
 
     if slice_sandbox::is_cloud_metadata_ssrf_target(&clean_host) {
