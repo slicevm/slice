@@ -1,7 +1,8 @@
 //! Zero-Stat Content-Addressed Storage (`.cas`) Builder (`CasBuilder`).
 
 use crate::archive::{
-    CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION, CasBlobEntry, CasIndexHeader, detect_static_mime_type,
+    CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION, CasBlobEntry, CasIndexHeader,
+    detect_static_mime_type, walk_sorted_non_symlink_files,
 };
 use crate::compiler::strip_typescript_and_normalize_with_ext;
 use anyhow::{Context, Result, bail};
@@ -173,27 +174,11 @@ impl CasBuilder {
     ) -> Result<usize> {
         self.scan_project_dependencies(root_dir);
         let mut count = 0;
-        let mut stack = vec![root_dir.to_path_buf()];
-
-        while let Some(dir) = stack.pop() {
-            let mut entries: Vec<std::fs::DirEntry> =
-                std::fs::read_dir(&dir)?.collect::<std::io::Result<Vec<_>>>()?;
-            entries.sort_by_key(|e| e.file_name());
-
-            for entry in entries {
-                let ft = entry.file_type()?;
-                if ft.is_symlink() {
-                    continue;
-                }
-                let path = entry.path();
-                if ft.is_dir() {
-                    let dir_name = entry.file_name();
-                    if dir_name == ".git" || dir_name == "node_modules" || dir_name == "target" {
-                        continue;
-                    }
-                    stack.push(path);
-                } else if ft.is_file()
-                    && let Some(ext) = path.extension().and_then(|e| e.to_str())
+        walk_sorted_non_symlink_files(
+            root_dir,
+            |dir_name| dir_name != ".git" && dir_name != "node_modules" && dir_name != "target",
+            |entry, path| {
+                if let Some(ext) = path.extension().and_then(|e| e.to_str())
                     && matches!(
                         ext,
                         "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts"
@@ -201,27 +186,33 @@ impl CasBuilder {
                 {
                     let fname = entry.file_name();
                     if is_ts_declaration_filename(&fname.to_string_lossy()) {
-                        continue;
+                        return Ok(());
                     }
                     let rel = path
                         .strip_prefix(root_dir)
-                        .unwrap_or(&path)
+                        .unwrap_or(path)
                         .to_string_lossy()
                         .replace('\\', "/");
                     let specifier = format!("./{}", rel);
-                    let raw = std::fs::read_to_string(&path)?;
+                    let raw = std::fs::read_to_string(path)?;
                     let is_jsx_ext = matches!(ext, "tsx" | "jsx");
                     let is_ts = is_jsx_ext || matches!(ext, "ts" | "mts" | "cts");
                     let normalized =
                         strip_typescript_and_normalize_with_ext(&raw, is_ts, is_jsx_ext);
                     let markers = extract_pre_transpile_markers(&specifier, &raw, &normalized);
                     let bytecode = bytecode_compiler_fn(&normalized);
-                    self.modules
-                        .push((specifier, path, normalized, bytecode, markers));
+                    self.modules.push((
+                        specifier,
+                        path.to_path_buf(),
+                        normalized,
+                        bytecode,
+                        markers,
+                    ));
                     count += 1;
                 }
-            }
-        }
+                Ok(())
+            },
+        )?;
         Ok(count)
     }
 
@@ -239,35 +230,24 @@ impl CasBuilder {
             );
         }
         let mut count = 0;
-        let mut stack = vec![static_dir.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            let mut entries: Vec<std::fs::DirEntry> =
-                std::fs::read_dir(&dir)?.collect::<std::io::Result<Vec<_>>>()?;
-            entries.sort_by_key(|e| e.file_name());
-
-            for entry in entries {
-                let ft = entry.file_type()?;
-                if ft.is_symlink() {
-                    continue;
-                }
-                let path = entry.path();
-                if ft.is_dir() {
-                    stack.push(path);
-                } else if ft.is_file() {
-                    let rel = path
-                        .strip_prefix(static_dir)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    let specifier = format!("static:/{}", rel);
-                    let raw_bytes = std::fs::read(&path)?;
-                    let mime = detect_static_mime_type(&path).to_string();
-                    self.modules
-                        .push((specifier, path, mime, raw_bytes, Vec::new()));
-                    count += 1;
-                }
-            }
-        }
+        walk_sorted_non_symlink_files(
+            static_dir,
+            |_| true,
+            |_entry, path| {
+                let rel = path
+                    .strip_prefix(static_dir)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let specifier = format!("static:/{}", rel);
+                let raw_bytes = std::fs::read(path)?;
+                let mime = detect_static_mime_type(path).to_string();
+                self.modules
+                    .push((specifier, path.to_path_buf(), mime, raw_bytes, Vec::new()));
+                count += 1;
+                Ok(())
+            },
+        )?;
         Ok(count)
     }
 

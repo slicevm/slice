@@ -1,6 +1,6 @@
 //! Zero-Stat Static Web Asset Table & Cryptographic BLAKE3 `ETag` Indexer (`--static`).
 
-use crate::archive::MappedCasArchive;
+use crate::archive::{MappedCasArchive, walk_sorted_non_symlink_files};
 use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 use std::path::Path;
@@ -142,35 +142,24 @@ impl StaticAssetTable {
             );
         }
         let mut count = 0;
-        let mut stack = vec![static_dir.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            let mut entries: Vec<std::fs::DirEntry> =
-                std::fs::read_dir(&dir)?.collect::<std::io::Result<Vec<_>>>()?;
-            entries.sort_by_key(|e| e.file_name());
-
-            for entry in entries {
-                let ft = entry.file_type()?;
-                if ft.is_symlink() {
-                    continue;
-                }
-                let path = entry.path();
-                if ft.is_dir() {
-                    stack.push(path);
-                } else if ft.is_file() {
-                    let rel = path
-                        .strip_prefix(static_dir)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    let raw_bytes = std::fs::read(&path)?;
-                    let hash_hex = blake3::hash(&raw_bytes).to_hex().to_string();
-                    let mime = detect_static_mime_type(&path).to_string();
-                    let url_path = format!("/{}", rel);
-                    self.insert_asset(&url_path, mime, &hash_hex[..16], Arc::new(raw_bytes));
-                    count += 1;
-                }
-            }
-        }
+        walk_sorted_non_symlink_files(
+            static_dir,
+            |_| true,
+            |_entry, path| {
+                let rel = path
+                    .strip_prefix(static_dir)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let raw_bytes = std::fs::read(path)?;
+                let hash_hex = blake3::hash(&raw_bytes).to_hex().to_string();
+                let mime = detect_static_mime_type(path).to_string();
+                let url_path = format!("/{}", rel);
+                self.insert_asset(&url_path, mime, &hash_hex[..16], Arc::new(raw_bytes));
+                count += 1;
+                Ok(())
+            },
+        )?;
         Ok(count)
     }
 

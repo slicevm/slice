@@ -55,6 +55,7 @@ pub use event_loop::{
     MAX_FETCH_REACTOR_WORKERS, fetch_reactor_active_threads, fetch_reactor_pool_reuse_count,
     reset_fetch_reactor_telemetry, reset_virtual_time_warped_ms, virtual_time_warped_ms,
 };
+pub use intrinsics::{base64_decode, base64_encode};
 pub use isolate::{
     ExecutionMetrics, HttpExecutionOutcome, HttpFastOutcome, HttpRequestContext,
     SandboxEvalOptions, SandboxEvalOutcome, SliceIsolate, run_source_isolated,

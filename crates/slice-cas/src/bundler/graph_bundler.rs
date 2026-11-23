@@ -3,6 +3,7 @@
 use crate::bundler::{
     ResolverCacheGuard, compute_source_line_map, short_source_label, strip_jsonc,
 };
+use crate::compiler::ts_helpers::{compute_slice_rc_hex_key, compute_slice_rc_hex_key_parts};
 use crate::compiler::{
     rewrite_cjs_require, source_contains_jsx, strip_typescript_checked_for_bundler,
     strip_typescript_raw_with_ext,
@@ -171,27 +172,11 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
 
     let _entry_id = visit_module(entry_path, &mut seen, &mut visited_order)?;
 
-    fn compute_bundle_rc_key(payload: &str) -> String {
-        let digest = blake3::hash(payload.as_bytes());
-        let key_u64 = u64::from_le_bytes(digest.as_bytes()[0..8].try_into().unwrap());
-        format!("{:016x}", key_u64)
-    }
-
-    fn compute_bundle_rc_key_parts(modules_code: &str, entry_body: &str) -> String {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(modules_code.as_bytes());
-        hasher.update(b"\n");
-        hasher.update(entry_body.as_bytes());
-        let digest = hasher.finalize();
-        let key_u64 = u64::from_le_bytes(digest.as_bytes()[0..8].try_into().unwrap());
-        format!("{:016x}", key_u64)
-    }
-
     // Single-Module Unwrapping + Persistent Realm Cache (`__slice_rc`):
     if visited_order.len() == 1 {
         let (_, entry_body) = visited_order.pop().unwrap();
         let direct_body = rewrite_cjs_require(&entry_body);
-        let rc_key = compute_bundle_rc_key(&direct_body);
+        let rc_key = compute_slice_rc_hex_key(&direct_body);
         let fn_kw = if has_top_level_await(&direct_body) {
             "async function()"
         } else {
@@ -357,7 +342,7 @@ pub fn bundle_entrypoint_with_deps(entry_path: &Path) -> Result<String> {
         ));
     }
 
-    let rc_key = compute_bundle_rc_key_parts(&modules_code, &entry_body);
+    let rc_key = compute_slice_rc_hex_key_parts(&modules_code, &entry_body);
     let mut bundle = String::with_capacity(modules_code.len() + entry_body.len() + 512);
     bundle.push_str(&format!(
         "var __slice_modules = {{}};//__SLICE_RC:{}\n",

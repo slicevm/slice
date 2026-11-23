@@ -287,3 +287,175 @@ fn test_wave6_issue_102_checkpoint_inline_directives_and_unlimited_default() {
     assert_eq!(kv_zero.allow_checkpoints, Some(false));
     assert_eq!(kv_zero.max_checkpoints, Some(0));
 }
+
+#[test]
+fn test_manifest_and_dotenv_inline_comments_and_quoted_hashes() {
+    let toml = r#"
+[package]
+name = "sveltekit-app" # inline comment on quoted string
+version = "0.1.0"
+entrypoint = "./build/slice-entry.js" # entry comment
+
+[server]
+static_dir = "./build/client" # static assets
+
+[limits]
+fuel = 50_000_000 # 50M instructions
+memory_mb = 64
+
+[capabilities]
+allow_net = ["api.internal:443", "127.0.0.1:8080"] # multi-host array
+allow_env = ["NODE_ENV", "HOOK_URL=https://example.com/#frag", "PAIR=a,b"] # trailing array comment
+"#;
+    let m = SliceManifest::parse_toml(toml);
+    assert_eq!(m.name, "sveltekit-app");
+    assert_eq!(m.entrypoint, "./build/slice-entry.js");
+    assert_eq!(m.static_dir.as_deref(), Some("./build/client"));
+    assert_eq!(m.fuel_limit, 50_000_000);
+    assert_eq!(m.memory_limit_kb, 64 * 1024);
+    assert!(
+        m.capabilities
+            .allowed_net_hosts
+            .contains("api.internal:443")
+    );
+    assert!(m.capabilities.allowed_net_hosts.contains("127.0.0.1:8080"));
+    assert_eq!(
+        m.capabilities
+            .allowed_env_keys
+            .get("HOOK_URL")
+            .map(|s| s.as_str()),
+        Some("https://example.com/#frag")
+    );
+    assert_eq!(
+        m.capabilities
+            .allowed_env_keys
+            .get("PAIR")
+            .map(|s| s.as_str()),
+        Some("a,b")
+    );
+
+    let dotenv = r#"
+API_KEY="sec#ret_value_123" # trailing comment after double quotes
+SINGLE_SECRET='lit#eral_456' # trailing comment after single quotes
+PLAIN_VAL=hello_world # trailing comment after unquoted
+"#;
+    let (pairs, secrets) = parse_dotenv_content(dotenv);
+    assert_eq!(
+        pairs,
+        vec![
+            ("API_KEY".to_string(), "sec#ret_value_123".to_string()),
+            ("SINGLE_SECRET".to_string(), "lit#eral_456".to_string()),
+            ("PLAIN_VAL".to_string(), "hello_world".to_string()),
+        ]
+    );
+    assert!(secrets.contains(&"sec#ret_value_123".to_string()));
+    assert!(secrets.contains(&"lit#eral_456".to_string()));
+}
+
+#[test]
+fn test_shared_parsers_json_error_auto_dlp_net_grant_and_egress_dlp_scanner() {
+    // 1. parse_strict_u64 & parse_byte_size_usize
+    assert_eq!(parse_strict_u64("50_000_000"), Some(50_000_000));
+    assert_eq!(parse_strict_u64(" \"1_024\" "), Some(1_024));
+    assert_eq!(parse_strict_u64("_100"), None);
+    assert_eq!(parse_strict_u64("64MB"), None);
+
+    assert_eq!(parse_byte_size_usize("65_536"), Some(65_536));
+    assert_eq!(parse_byte_size_usize("64KB"), Some(64 * 1024));
+    assert_eq!(parse_byte_size_usize("16MiB"), Some(16 * 1024 * 1024));
+    assert_eq!(parse_byte_size_usize("1GB"), Some(1024 * 1024 * 1024));
+    assert_eq!(parse_byte_size_usize("128B"), Some(128));
+    assert_eq!(parse_byte_size_usize("bad"), None);
+
+    let m = SliceManifest::parse_toml("[limits]\nmemory_bytes = \"32MB\"\n");
+    assert_eq!(m.memory_limit_kb, 32 * 1024);
+    let d = parse_inline_directives("// @slice-memory: 16MiB\nexport default 1;\n");
+    assert_eq!(d.memory_limit_bytes, Some(16 * 1024 * 1024));
+
+    // 2. Auto-DLP env entry & JSON escaping helpers
+    assert_eq!(MIN_SENSITIVE_SECRET_LEN, 6);
+    assert!(is_auto_dlp_env_entry("STRIPE_SECRET_KEY", "sk_live_123"));
+    assert!(!is_auto_dlp_env_entry("STRIPE_SECRET_KEY", "short"));
+    assert!(!is_auto_dlp_env_entry("NODE_ENV", "production"));
+    assert_eq!(
+        format_json_error_body("bad \"quote\"\n\\slash\x01"),
+        r#"{"error":"bad \"quote\"\n\\slash\u0001"}"#
+    );
+
+    // 3. check_net_host_grant, vfs_path_matches_any_prefix, push_exec_binary, has_exec_shell_metachar
+    let mut caps = CapabilityToken::pure_compute();
+    caps.insert_net_host("localhost:8080");
+    caps.insert_net_host("[2001:db8::1]:8443");
+    caps.insert_net_host("*");
+    caps.push_exec_binary("git");
+    caps.push_exec_binary("git");
+    assert_eq!(caps.allowed_exec_binaries, vec!["git".to_string()]);
+    assert!(has_exec_shell_metachar("echo hi; id"));
+    assert!(has_exec_shell_metachar("echo \\$HOME"));
+    assert!(!has_exec_shell_metachar("echo hello"));
+
+    assert_eq!(
+        check_net_host_grant(&caps.allowed_net_hosts, "127.0.0.1", 8080, false),
+        (false, false)
+    );
+    assert_eq!(
+        check_net_host_grant(&caps.allowed_net_hosts, "127.0.0.1", 8080, true),
+        (true, false)
+    );
+    assert_eq!(
+        check_net_host_grant(&caps.allowed_net_hosts, "2001:db8::1", 8443, false),
+        (true, false)
+    );
+    assert_eq!(
+        check_net_host_grant(&caps.allowed_net_hosts, "api.openai.com", 443, false),
+        (false, true)
+    );
+    assert!(vfs_path_matches_any_prefix(
+        "/app/public/index.html",
+        &["/app/public".to_string()]
+    ));
+    assert!(!vfs_path_matches_any_prefix(
+        "/app/public/../secret.env",
+        &["/app/public".to_string()]
+    ));
+
+    // 4. Outbound Egress DLP (raw, hex, percent-encoded, and 0/1/2-shifted Base64 + Base64URL)
+    let raw_secret = "sk_live_dlp_central_secret+99/=";
+    let mut expanded = Vec::new();
+    expand_egress_secret_variants(raw_secret, &mut expanded);
+    assert!(verify_egress_secrets_slice("t1", &expanded, "clean body").is_ok());
+
+    for slice_ref in [&expanded[..], &[raw_secret.to_string()][..]] {
+        assert!(verify_egress_secrets_slice("t1", slice_ref, raw_secret).is_err());
+        assert!(
+            verify_egress_secrets_slice(
+                "t1",
+                slice_ref,
+                "736b5f6c6976655f646c705f63656e7472616c5f7365637265742b39392f3d"
+            )
+            .is_err()
+        );
+        assert!(
+            verify_egress_secrets_slice("t1", slice_ref, "sk_live_dlp_central_secret%2B99%2F%3D")
+                .is_err()
+        );
+        // 1-byte shifted Base64 (`"X" + raw_secret` = `"Xsk_live_dlp_central_secret+99/="`)
+        assert!(
+            verify_egress_secrets_slice(
+                "t1",
+                slice_ref,
+                "WHNrX2xpdmVfZGxwX2NlbnRyYWxfc2VjcmV0Kzk5Lz0="
+            )
+            .is_err()
+        );
+        // 2-byte shifted Base64URL (`"XY" + raw_secret`)
+        assert!(
+            verify_egress_secrets_slice(
+                "t1",
+                slice_ref,
+                "WFlza19saXZlX2RscF9jZW50cmFsX3NlY3JldCs5OS89"
+            )
+            .is_err()
+        );
+    }
+}

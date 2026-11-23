@@ -30,23 +30,23 @@ const B64_STRICT_STD_LUT: [u8; 256] = build_b64_decode_lut(false);
 /// Fast Lookup-Table (`HEX_LUT`) hex encoder for 32-byte digests avoiding `std::fmt::Write` overhead.
 #[inline]
 pub(crate) fn digest_to_hex(digest: &[u8; 32]) -> String {
-    let mut hex_bytes = Vec::with_capacity(64);
+    let mut out = String::with_capacity(64);
     for &b in digest {
-        hex_bytes.push(HEX_LUT[(b >> 4) as usize]);
-        hex_bytes.push(HEX_LUT[(b & 0x0f) as usize]);
+        out.push((HEX_LUT[(b >> 4) as usize] & 0x7f) as char);
+        out.push((HEX_LUT[(b & 0x0f) as usize] & 0x7f) as char);
     }
-    unsafe { String::from_utf8_unchecked(hex_bytes) }
+    out
 }
 
 /// Fast Lookup-Table (`HEX_LUT`) hex encoder for arbitrary byte slices.
 #[inline]
 pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
-    let mut hex_bytes = Vec::with_capacity(bytes.len() * 2);
+    let mut out = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
-        hex_bytes.push(HEX_LUT[(b >> 4) as usize]);
-        hex_bytes.push(HEX_LUT[(b & 0x0f) as usize]);
+        out.push((HEX_LUT[(b >> 4) as usize] & 0x7f) as char);
+        out.push((HEX_LUT[(b & 0x0f) as usize] & 0x7f) as char);
     }
-    unsafe { String::from_utf8_unchecked(hex_bytes) }
+    out
 }
 
 /// Decodes hexadecimal raw bytes into raw bytes (stopping at the first non-hex byte pair,
@@ -86,31 +86,31 @@ pub fn base64_encode(data: &[u8], url_safe: bool) -> String {
     const URL_TABLE: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let table = if url_safe { URL_TABLE } else { STD_TABLE };
-    let mut out = Vec::with_capacity(data.len().div_ceil(3) * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     let (chunks, rem) = data.as_chunks::<3>();
     for chunk in chunks {
         let triple = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32);
-        out.push(table[((triple >> 18) & 0x3f) as usize]);
-        out.push(table[((triple >> 12) & 0x3f) as usize]);
-        out.push(table[((triple >> 6) & 0x3f) as usize]);
-        out.push(table[(triple & 0x3f) as usize]);
+        out.push((table[((triple >> 18) & 0x3f) as usize] & 0x7f) as char);
+        out.push((table[((triple >> 12) & 0x3f) as usize] & 0x7f) as char);
+        out.push((table[((triple >> 6) & 0x3f) as usize] & 0x7f) as char);
+        out.push((table[(triple & 0x3f) as usize] & 0x7f) as char);
     }
     if !rem.is_empty() {
         let b0 = rem[0] as u32;
         let b1 = if rem.len() > 1 { rem[1] as u32 } else { 0 };
         let triple = (b0 << 16) | (b1 << 8);
-        out.push(table[((triple >> 18) & 0x3f) as usize]);
-        out.push(table[((triple >> 12) & 0x3f) as usize]);
+        out.push((table[((triple >> 18) & 0x3f) as usize] & 0x7f) as char);
+        out.push((table[((triple >> 12) & 0x3f) as usize] & 0x7f) as char);
         if rem.len() > 1 {
-            out.push(table[((triple >> 6) & 0x3f) as usize]);
+            out.push((table[((triple >> 6) & 0x3f) as usize] & 0x7f) as char);
         } else if !url_safe {
-            out.push(b'=');
+            out.push('=');
         }
         if !url_safe {
-            out.push(b'=');
+            out.push('=');
         }
     }
-    unsafe { String::from_utf8_unchecked(out) }
+    out
 }
 
 #[inline]
@@ -211,18 +211,6 @@ pub(crate) fn whatwg_atob_bytes(raw_bytes: &[u8]) -> Result<Vec<u8>, &'static st
         }
     }
     Ok(out_bytes)
-}
-
-/// Strict WHATWG `atob`: strips ASCII whitespace, validates Base64 alphabet and padding,
-/// and returns decoded Latin1 bytes (mapped 1:1 to `0x00..=0xFF` code points).
-#[allow(dead_code)]
-pub(crate) fn whatwg_atob(input: &str) -> Result<String, &'static str> {
-    let bytes = whatwg_atob_bytes(input.as_bytes())?;
-    let mut out_chars = String::with_capacity(bytes.len());
-    for b in bytes {
-        out_chars.push(b as char);
-    }
-    Ok(out_chars)
 }
 
 #[cfg(test)]

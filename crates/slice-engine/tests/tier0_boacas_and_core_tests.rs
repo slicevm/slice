@@ -349,9 +349,7 @@ fn test_phase_9a_micro_optimizations_and_streaming_sha256() {
         let mut s_hw = Sha256State::new();
         let block: &[u8; 64] = payload[..64].try_into().unwrap();
         Sha256State::compress_block_soft(&mut s_soft.h, block);
-        unsafe {
-            Sha256State::compress_block_sha_ni(&mut s_hw.h, block);
-        }
+        assert!(Sha256State::try_compress_block_sha_ni(&mut s_hw.h, block));
         assert_eq!(s_soft.h, s_hw.h);
     }
 

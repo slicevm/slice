@@ -8,14 +8,43 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Zero-Stat Memory-Mapped Content-Addressed Storage Archive (`mmap(MAP_SHARED)`).
-pub struct MappedCasArchive {
+/// Maps an open `.cas` archive or `SLICEEXE` executable file handle into read-only virtual memory.
+#[allow(unsafe_code)]
+fn map_readonly_cas_file(file: &File) -> std::io::Result<Mmap> {
+    // SAFETY: `file` is an open read-only file descriptor referencing an immutable `.cas` archive
+    // or standalone `SLICEEXE` binary image. `Mmap::map` creates a read-only virtual memory mapping
+    // (`PROT_READ`), and `MappedCasArchive::from_mmap_region` validates all header and blob byte
+    // offsets/lengths plus source UTF-8 validity once at open time. Callers that hot-swap `.cas`
+    // files on disk (`--tenant-dir`) use `MappedCasArchive::open_detached` (anonymous mapping)
+    // rather than file-backed `mmap`.
+    unsafe { Mmap::map(file) }
+}
+
+/// Shared immutable state backing a [`MappedCasArchive`].
+pub struct MappedCasInner {
     mmap: Arc<Mmap>,
     pub header: CasIndexHeader,
-    pub(crate) data_start_offset: usize,
+    pub data_start_offset: usize,
     blobs_vec: Vec<CasBlobEntry>,
     specifier_index: rustc_hash::FxHashMap<String, u32>,
     entrypoint_idx: Option<u32>,
+}
+
+/// Zero-Stat Memory-Mapped Content-Addressed Storage Archive (`mmap(MAP_SHARED)`).
+///
+/// Cloning a `MappedCasArchive` is an `O(1)` `Arc` reference-count increment.
+#[derive(Clone)]
+pub struct MappedCasArchive {
+    inner: Arc<MappedCasInner>,
+}
+
+impl std::ops::Deref for MappedCasArchive {
+    type Target = MappedCasInner;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 impl MappedCasArchive {
@@ -144,12 +173,14 @@ impl MappedCasArchive {
         drop(hash_to_idx);
 
         Ok(Self {
-            mmap,
-            header,
-            data_start_offset,
-            blobs_vec,
-            specifier_index,
-            entrypoint_idx,
+            inner: Arc::new(MappedCasInner {
+                mmap,
+                header,
+                data_start_offset,
+                blobs_vec,
+                specifier_index,
+                entrypoint_idx,
+            }),
         })
     }
 
@@ -157,7 +188,7 @@ impl MappedCasArchive {
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("Failed to open CAS archive {}", path.display()))?;
-        let mmap = unsafe { Mmap::map(&file)? };
+        let mmap = map_readonly_cas_file(&file)?;
         let len = mmap.len();
         Self::from_mmap_region(Arc::new(mmap), 0, len, &path.display().to_string())
     }
@@ -190,6 +221,43 @@ impl MappedCasArchive {
         Self::from_mmap_region(Arc::new(mmap), 0, raw.len(), &path.display().to_string())
     }
 
+    /// Opens a `.cas` archive embedded at `cas_offset` inside a larger file (such as a standalone executable).
+    pub fn open_from_offset(path: &Path, cas_offset: usize, cas_len: usize) -> Result<Self> {
+        let file = File::open(path)
+            .with_context(|| format!("Failed to open standalone binary {}", path.display()))?;
+        let mmap = map_readonly_cas_file(&file)?;
+        Self::from_mmap_region(
+            Arc::new(mmap),
+            cas_offset,
+            cas_len,
+            &path.display().to_string(),
+        )
+    }
+
+    /// Checks if the current running executable has an embedded `SLICEEXE` trailer by reading only
+    /// the final 24 bytes first, avoiding a full-binary `mmap` + `munmap` cycle on normal CLI invocations.
+    pub fn open_embedded_self() -> Result<Option<Self>> {
+        let exe_path = std::env::current_exe()?;
+        let mut file = File::open(&exe_path)?;
+        let Some((cas_offset_u64, cas_len_u64)) = inspect_sliceexe_trailer(&mut file)
+            .with_context(|| format!("Invalid SLICEEXE trailer in {}", exe_path.display()))?
+        else {
+            return Ok(None);
+        };
+        let cas_offset = usize::try_from(cas_offset_u64).context("SLICEEXE cas_offset overflow")?;
+        let cas_len = usize::try_from(cas_len_u64).context("SLICEEXE cas_len overflow")?;
+        let mmap = map_readonly_cas_file(&file)?;
+        let archive = Self::from_mmap_region(
+            Arc::new(mmap),
+            cas_offset,
+            cas_len,
+            &exe_path.display().to_string(),
+        )?;
+        Ok(Some(archive))
+    }
+}
+
+impl MappedCasInner {
     /// Resolves an import specifier in O(1) time without touching the OS filesystem.
     #[inline]
     pub fn resolve_specifier(&self, specifier: &str) -> Option<&CasBlobEntry> {
@@ -385,42 +453,6 @@ impl MappedCasArchive {
             }
         }
         out
-    }
-
-    /// Opens a `.cas` archive embedded at `cas_offset` inside a larger file (such as a standalone executable).
-    pub fn open_from_offset(path: &Path, cas_offset: usize, cas_len: usize) -> Result<Self> {
-        let file = File::open(path)
-            .with_context(|| format!("Failed to open standalone binary {}", path.display()))?;
-        let mmap = unsafe { Mmap::map(&file)? };
-        Self::from_mmap_region(
-            Arc::new(mmap),
-            cas_offset,
-            cas_len,
-            &path.display().to_string(),
-        )
-    }
-
-    /// Checks if the current running executable has an embedded `SLICEEXE` trailer by reading only
-    /// the final 24 bytes first, avoiding a full-binary `mmap` + `munmap` cycle on normal CLI invocations.
-    pub fn open_embedded_self() -> Result<Option<Self>> {
-        let exe_path = std::env::current_exe()?;
-        let mut file = File::open(&exe_path)?;
-        let Some((cas_offset_u64, cas_len_u64)) = inspect_sliceexe_trailer(&mut file)
-            .with_context(|| format!("Invalid SLICEEXE trailer in {}", exe_path.display()))?
-        else {
-            return Ok(None);
-        };
-        let cas_offset = usize::try_from(cas_offset_u64).context("SLICEEXE cas_offset overflow")?;
-        let cas_len = usize::try_from(cas_len_u64).context("SLICEEXE cas_len overflow")?;
-        // SAFETY: Maps the read-only running executable file validated against the 24-byte trailer.
-        let mmap = unsafe { Mmap::map(&file)? };
-        let archive = Self::from_mmap_region(
-            Arc::new(mmap),
-            cas_offset,
-            cas_len,
-            &exe_path.display().to_string(),
-        )?;
-        Ok(Some(archive))
     }
 }
 

@@ -4,17 +4,18 @@
 pub use crate::compiler::comments::strip_js_comments;
 use crate::compiler::diagnostics::{
     SyntaxErrorDiagnostic, blank_leading_shebang, check_syntax_source_detailed,
-    extract_oxc_syntax_diagnostic,
+    default_oxc_parse_options, extract_oxc_syntax_diagnostic, parse_ts_or_tsx_with_retries,
+    try_parse_sloppy_js,
 };
 use crate::compiler::ts_detector::program_has_ts_or_jsx;
 use crate::compiler::ts_helpers::{
-    SLICE_OXC_BABEL_HELPERS, has_standalone_builtin_import_or_cjs_export,
-    inspect_ts_transform_flags, lower_auto_accessors_in_js, lower_unbundled_esm_for_boa,
-    may_contain_ts_or_jsx,
+    SLICE_OXC_BABEL_HELPERS, finalize_standalone_cjs_envelope,
+    has_standalone_builtin_import_or_cjs_export, inspect_ts_transform_flags,
+    lower_auto_accessors_in_js, lower_unbundled_esm_for_boa, may_contain_ts_or_jsx,
 };
 use crate::linker::{
-    VIRTUAL_NO_FS_DIR, has_esm_default_export_marker, rewrite_buffer_fast_paths_ast,
-    rewrite_require_ident_ast, transform_module_to_cjs,
+    VIRTUAL_NO_FS_DIR, rewrite_buffer_fast_paths_ast, rewrite_require_ident_ast,
+    transform_module_to_cjs,
 };
 use std::borrow::Cow;
 use std::path::Path;
@@ -198,46 +199,8 @@ pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool
     }
 
     let allocator = oxc::allocator::Allocator::default();
-    let parse_opts = oxc::parser::ParseOptions {
-        allow_return_outside_function: true,
-        ..Default::default()
-    };
-    let mut active_source_type = if has_jsx_hint {
-        oxc::span::SourceType::tsx().with_module(true)
-    } else {
-        oxc::span::SourceType::ts().with_module(true)
-    };
-    let mut parser_ret = oxc::parser::Parser::new(&allocator, clean, active_source_type)
-        .with_options(parse_opts)
-        .parse();
-    let mut active_path = if has_jsx_hint {
-        "module.tsx"
-    } else {
-        "module.ts"
-    };
-
-    if !parser_ret.diagnostics.is_empty() && !has_jsx_hint {
-        let tsx_type = oxc::span::SourceType::tsx().with_module(true);
-        let retry_ret = oxc::parser::Parser::new(&allocator, clean, tsx_type)
-            .with_options(parse_opts)
-            .parse();
-        if retry_ret.diagnostics.is_empty() {
-            parser_ret = retry_ret;
-            active_source_type = tsx_type;
-            active_path = "module.tsx";
-        }
-    }
-    if !parser_ret.diagnostics.is_empty() {
-        let script_ts = oxc::span::SourceType::ts().with_module(false);
-        let retry_script = oxc::parser::Parser::new(&allocator, clean, script_ts)
-            .with_options(parse_opts)
-            .parse();
-        if retry_script.diagnostics.is_empty() {
-            parser_ret = retry_script;
-            active_source_type = script_ts;
-        }
-    }
-
+    let (parser_ret, active_source_type, active_path) =
+        parse_ts_or_tsx_with_retries(&allocator, clean, has_jsx_hint);
     if !parser_ret.diagnostics.is_empty() {
         return source.to_string();
     }
@@ -263,7 +226,7 @@ pub fn strip_typescript_raw_with_ext(source: &str, is_ts: bool, is_jsx_ext: bool
     let masked_source = build_masked_top_level_returns(clean, &top_ret_spans);
     let masked_alloc = oxc::allocator::Allocator::default();
     let masked_ret = oxc::parser::Parser::new(&masked_alloc, &masked_source, active_source_type)
-        .with_options(parse_opts)
+        .with_options(default_oxc_parse_options())
         .parse();
     if !masked_ret.diagnostics.is_empty() {
         return source.to_string();
@@ -282,10 +245,7 @@ pub(crate) fn strip_typescript_checked_for_bundler(
     let clean_cow = blank_leading_shebang(source);
     let clean = clean_cow.as_ref();
     let allocator = oxc::allocator::Allocator::default();
-    let parse_opts = oxc::parser::ParseOptions {
-        allow_return_outside_function: true,
-        ..Default::default()
-    };
+    let parse_opts = default_oxc_parse_options();
     let has_jsx_hint =
         is_jsx_ext || (is_ts && memchr::memmem::find(clean.as_bytes(), b"@jsx").is_some());
 
@@ -308,61 +268,20 @@ pub(crate) fn strip_typescript_checked_for_bundler(
         }
     }
 
-    let mut active_source_type = if has_jsx_hint {
-        oxc::span::SourceType::tsx().with_module(true)
-    } else {
-        oxc::span::SourceType::ts().with_module(true)
-    };
-    let mut parser_ret = oxc::parser::Parser::new(&allocator, clean, active_source_type)
-        .with_options(parse_opts)
-        .parse();
-    let mut active_path = if has_jsx_hint {
-        "module.tsx"
-    } else {
-        "module.ts"
-    };
-
-    if !parser_ret.diagnostics.is_empty() && !has_jsx_hint {
-        let tsx_type = oxc::span::SourceType::tsx().with_module(true);
-        let retry_ret = oxc::parser::Parser::new(&allocator, clean, tsx_type)
-            .with_options(parse_opts)
-            .parse();
-        if retry_ret.diagnostics.is_empty() {
-            parser_ret = retry_ret;
-            active_source_type = tsx_type;
-            active_path = "module.tsx";
-        }
-    }
+    let (parser_ret, active_source_type, active_path) =
+        parse_ts_or_tsx_with_retries(&allocator, clean, has_jsx_hint);
     if !parser_ret.diagnostics.is_empty() {
-        let script_ts = oxc::span::SourceType::ts().with_module(false);
-        let retry_script = oxc::parser::Parser::new(&allocator, clean, script_ts)
-            .with_options(parse_opts)
-            .parse();
-        if retry_script.diagnostics.is_empty() {
-            parser_ret = retry_script;
-            active_source_type = script_ts;
-        } else {
-            for sloppy_js in [
-                oxc::span::SourceType::cjs(),
-                oxc::span::SourceType::default(),
-            ] {
-                let retry_js = oxc::parser::Parser::new(&allocator, clean, sloppy_js)
-                    .with_options(parse_opts)
-                    .parse();
-                if retry_js.diagnostics.is_empty() {
-                    drop(retry_js);
-                    return Ok(
-                        if memchr::memmem::find(clean.as_bytes(), b"Buffer.").is_some() {
-                            rewrite_buffer_fast_paths_ast(clean)
-                        } else {
-                            clean_cow.into_owned()
-                        },
-                    );
-                }
-            }
-            let diag = extract_oxc_syntax_diagnostic(clean, &parser_ret.diagnostics[0]);
-            return Err(diag.to_labeled_error_string(&path.display().to_string()));
+        if try_parse_sloppy_js(&allocator, clean).is_some() {
+            return Ok(
+                if memchr::memmem::find(clean.as_bytes(), b"Buffer.").is_some() {
+                    rewrite_buffer_fast_paths_ast(clean)
+                } else {
+                    clean_cow.into_owned()
+                },
+            );
         }
+        let diag = extract_oxc_syntax_diagnostic(clean, &parser_ret.diagnostics[0]);
+        return Err(diag.to_labeled_error_string(&path.display().to_string()));
     }
 
     let top_ret_spans = extract_top_level_return_spans(&parser_ret.program, clean);
@@ -407,29 +326,16 @@ pub fn strip_typescript_and_normalize(source: &str, is_ts: bool) -> String {
     strip_typescript_and_normalize_with_ext(source, is_ts, false)
 }
 
-fn normalize_transpiled_module_js(mut js_code: String) -> String {
+fn normalize_transpiled_module_js(js_code: String) -> String {
     if has_standalone_builtin_import_or_cjs_export(&js_code) {
         let mut dummy_deps = Vec::new();
-        js_code = transform_module_to_cjs(
+        let cjs = transform_module_to_cjs(
             &js_code,
             Path::new(VIRTUAL_NO_FS_DIR),
             None,
             &mut dummy_deps,
         );
-        if has_esm_default_export_marker(&js_code) {
-            let digest = blake3::hash(js_code.as_bytes());
-            let rc_u64 = u64::from_le_bytes(digest.as_bytes()[0..8].try_into().unwrap());
-            let rc_key = format!("{:016x}", rc_u64);
-            let direct_body = rewrite_cjs_require(&js_code);
-            return format!(
-                "var __slice_modules = {{}};//__SLICE_RC:{rc_key}\nif (typeof globalThis.__slice_cas_exports === \"object\" && globalThis.__slice_cas_exports !== null) {{\nvar exports = globalThis.__slice_cas_exports, module = globalThis.__slice_cas_module;\n{direct_body}\n}} else {{\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{rc_key}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{rc_key}\"] = function() {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{direct_body}\n__h = exports.__esModule ? exports.default : module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n}}\n"
-            );
-        }
-        if memchr::memmem::find(js_code.as_bytes(), b"exports").is_some() {
-            js_code = format!(
-                "var exports = (typeof globalThis.__slice_cas_exports === \"object\" && globalThis.__slice_cas_exports !== null) ? globalThis.__slice_cas_exports : {{}}, module = (typeof globalThis.__slice_cas_module === \"object\" && globalThis.__slice_cas_module !== null) ? globalThis.__slice_cas_module : {{ exports: exports }};\n{js_code}"
-            );
-        }
+        return finalize_standalone_cjs_envelope(&cjs, true, rewrite_cjs_require);
     }
     if js_code.contains("require(") {
         rewrite_cjs_require(&js_code)
@@ -514,10 +420,7 @@ where
     let clean_cow = blank_leading_shebang(source);
     let clean = clean_cow.as_ref();
     let allocator = oxc::allocator::Allocator::default();
-    let parse_opts = oxc::parser::ParseOptions {
-        allow_return_outside_function: true,
-        ..Default::default()
-    };
+    let parse_opts = default_oxc_parse_options();
 
     let has_jsx_hint =
         is_jsx_ext || (is_ts && memchr::memmem::find(clean.as_bytes(), b"@jsx").is_some());
@@ -541,65 +444,24 @@ where
         }
     }
 
-    let mut active_source_type = if has_jsx_hint {
-        oxc::span::SourceType::tsx().with_module(true)
-    } else {
-        oxc::span::SourceType::ts().with_module(true)
-    };
-    let mut parser_ret = oxc::parser::Parser::new(&allocator, clean, active_source_type)
-        .with_options(parse_opts)
-        .parse();
-    let mut active_path = if has_jsx_hint {
-        "module.tsx"
-    } else {
-        "module.ts"
-    };
-
-    if !parser_ret.diagnostics.is_empty() && !has_jsx_hint {
-        let tsx_type = oxc::span::SourceType::tsx().with_module(true);
-        let retry_ret = oxc::parser::Parser::new(&allocator, clean, tsx_type)
-            .with_options(parse_opts)
-            .parse();
-        if retry_ret.diagnostics.is_empty() {
-            parser_ret = retry_ret;
-            active_source_type = tsx_type;
-            active_path = "module.tsx";
-        }
-    }
+    let (parser_ret, active_source_type, active_path) =
+        parse_ts_or_tsx_with_retries(&allocator, clean, has_jsx_hint);
 
     if !parser_ret.diagnostics.is_empty() {
-        let script_ts = oxc::span::SourceType::ts().with_module(false);
-        let retry_script = oxc::parser::Parser::new(&allocator, clean, script_ts)
-            .with_options(parse_opts)
-            .parse();
-        if retry_script.diagnostics.is_empty() {
-            parser_ret = retry_script;
-            active_source_type = script_ts;
-        } else {
-            for sloppy_js in [
-                oxc::span::SourceType::cjs(),
-                oxc::span::SourceType::default(),
-            ] {
-                let retry_js = oxc::parser::Parser::new(&allocator, clean, sloppy_js)
-                    .with_options(parse_opts)
-                    .parse();
-                if retry_js.diagnostics.is_empty() {
-                    let top_ok =
-                        extract_top_level_return_spans(&retry_js.program, clean).is_empty();
-                    maybe_invoke_ast_hook_for_pure_js(
-                        clean,
-                        top_ok.then_some(&retry_js.program),
-                        Some(&mut on_final_ast),
-                    );
-                    drop(retry_js);
-                    return Ok(finalize_pure_js_cow(clean_cow));
-                }
-            }
-            return Err(extract_oxc_syntax_diagnostic(
+        if let Some(retry_js) = try_parse_sloppy_js(&allocator, clean) {
+            let top_ok = extract_top_level_return_spans(&retry_js.program, clean).is_empty();
+            maybe_invoke_ast_hook_for_pure_js(
                 clean,
-                &parser_ret.diagnostics[0],
-            ));
+                top_ok.then_some(&retry_js.program),
+                Some(&mut on_final_ast),
+            );
+            drop(retry_js);
+            return Ok(finalize_pure_js_cow(clean_cow));
         }
+        return Err(extract_oxc_syntax_diagnostic(
+            clean,
+            &parser_ret.diagnostics[0],
+        ));
     }
 
     let top_ret_spans = extract_top_level_return_spans(&parser_ret.program, clean);

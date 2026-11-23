@@ -10,12 +10,14 @@
 //! - [`asymmetric_and_keys`]: `Ed25519`, `X25519`, `ECDSA P-256/P-384`, and `RSA 2048..8192` PKCS#8/PKCS#1/SPKI/JWK codecs and tenant-scoped key handle table.
 //! - [`prng_and_uuid`]: Deterministic `SplitMix64` PRNG, OS-backed `SystemRandom` CSPRNG pool, and RFC 4122 `UUIDv4`.
 //! - [`compression`]: Self-contained RFC 1951 `DEFLATE`, RFC 1950 `Zlib`, and RFC 1952 `Gzip` with 9-bit Huffman LUT and table CRC-32.
+//! - [`multipart`]: Pure RFC 7578 `multipart/form-data` parser with bounded header and part limits.
 
 pub mod asymmetric_and_keys;
 pub mod compression;
 pub mod encoding;
 pub mod fast_parsers;
 pub mod hash_and_hmac;
+pub mod multipart;
 pub mod prng_and_uuid;
 pub mod symmetric_and_kdf;
 pub mod url_and_usp;
@@ -25,6 +27,7 @@ pub use compression::*;
 pub use encoding::*;
 pub use fast_parsers::*;
 pub use hash_and_hmac::*;
+pub use multipart::*;
 pub use prng_and_uuid::*;
 pub use symmetric_and_kdf::*;
 pub use url_and_usp::{

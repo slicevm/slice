@@ -632,10 +632,16 @@ fn sandbox_outcome_to_js_object(
         Some(s) => BoaVal::from(js_string!(s)),
         None => BoaVal::null(),
     };
+    let exit_code_val = match outcome.exit_code {
+        Some(c) => BoaVal::from(c),
+        None => BoaVal::null(),
+    };
     let attr = Attribute::WRITABLE | Attribute::ENUMERABLE | Attribute::CONFIGURABLE;
 
     ObjectInitializer::new(context)
         .property(js_string!("ok"), outcome.ok, attr)
+        .property(js_string!("exitCode"), exit_code_val, attr)
+        .property(js_string!("processExited"), outcome.process_exited, attr)
         .property(js_string!("stdout"), stdout_arr, attr)
         .property(
             js_string!("returnValue"),

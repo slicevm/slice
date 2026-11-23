@@ -11,25 +11,23 @@
 //! - [`linker`]: Zero-Overhead ESM/CJS AST linker, exported-symbol tree-shaker, and demand-driven lazy `require()` thunks.
 //! - [`bundler`]: Node/Deno/TypeScript module specifier resolver, dependency graph bundler, and stack-trace source mapping.
 
+#![deny(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod archive;
 pub mod bundler;
 pub mod compiler;
 pub mod linker;
 
-// Backward-compatible module aliases for internal/external callers
-pub use archive::static_assets;
-pub use bundler as resolver;
-pub use compiler as oxc_compiler;
-pub use linker as esm_cjs_linker;
-
 pub use archive::{
-    Blake3Hash, CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION, CasBlobEntry, CasBuilder, CasIndexHeader,
-    MappedCasArchive, StaticAssetEntry, StaticAssetPayload, StaticAssetTable,
+    CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION, CasBlobEntry, CasBuilder, CasIndexHeader,
+    MappedCasArchive, MappedCasInner, StaticAssetEntry, StaticAssetPayload, StaticAssetTable,
     detect_static_mime_type, embed_cas_into_executable, inspect_sliceexe_trailer,
 };
 pub use bundler::{
-    bundle_entrypoint_with_deps, map_bundled_error_location,
-    map_bundled_error_location_with_offset, map_bundled_stack_trace,
+    bundle_entrypoint_with_deps, compact_js_for_boa_bytecode, extract_slice_rc_key,
+    map_bundled_error_location, map_bundled_error_location_with_offset, map_bundled_stack_trace,
     map_bundled_stack_trace_with_offset, resolve_project_entrypoint,
 };
 pub use compiler::{

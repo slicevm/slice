@@ -7,7 +7,13 @@
 //! - [`slab`]: [`RegisteredBufferPool`] pinned 64 KB slab allocator with cache-warm LIFO slot recycling.
 //! - [`ring`]: [`CompletionRingEngine`], [`IoSubmission`], [`IoCompletion`], and [`RingStatus`].
 
+#![deny(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
+#[allow(unsafe_code)]
 pub mod ring;
+#[allow(unsafe_code)]
 pub mod slab;
 
 pub use ring::{

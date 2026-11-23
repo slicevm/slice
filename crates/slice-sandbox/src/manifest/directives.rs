@@ -1,8 +1,8 @@
 //! Top-of-File Inline Source Directives (`// @slice-<key>: <value>`).
 
-use crate::manifest::{
-    parse_bool_setting, parse_tier_setting, parse_toml_string_array,
-    parse_u64_ignoring_underscores, strip_toml_inline_comment,
+use super::parsers::{
+    parse_bool_setting, parse_byte_size_usize, parse_tier_setting, parse_toml_string_array,
+    parse_u64_ignoring_underscores, strip_toml_inline_comment, unquote_trimmed,
 };
 
 /// Top-of-file inline source directives (`// @slice-<key>: <value>` or `// @slice-<key>=<value>`).
@@ -32,15 +32,7 @@ pub struct InlineDirectives {
 
 #[inline]
 fn unquote_scalar_directive(raw: &str) -> &str {
-    let cleaned = strip_toml_inline_comment(raw);
-    if cleaned.len() >= 2
-        && ((cleaned.starts_with('"') && cleaned.ends_with('"'))
-            || (cleaned.starts_with('\'') && cleaned.ends_with('\'')))
-    {
-        cleaned[1..cleaned.len() - 1].trim()
-    } else {
-        cleaned
-    }
+    unquote_trimmed(strip_toml_inline_comment(raw))
 }
 
 fn apply_directive_body(dirs: &mut InlineDirectives, comment_body: &str) {
@@ -114,9 +106,9 @@ fn apply_directive_body(dirs: &mut InlineDirectives, comment_body: &str) {
                 dirs.memory_limit_bytes = Some(bytes);
             }
         }
-        "memory" | "memory-bytes" => {
-            if let Some(n) = parse_u64_ignoring_underscores(val) {
-                dirs.memory_limit_bytes = Some(usize::try_from(n).unwrap_or(usize::MAX));
+        "memory" | "memory-bytes" | "memory_bytes" => {
+            if let Some(bytes) = parse_byte_size_usize(val) {
+                dirs.memory_limit_bytes = Some(bytes);
             }
         }
         "allow-read" | "allow_read" => {
