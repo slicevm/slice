@@ -1,7 +1,8 @@
 //! Top-of-File Inline Source Directives (`// @slice-<key>: <value>`).
 
 use crate::manifest::{
-    parse_bool_setting, parse_tier_setting, parse_toml_string_array, parse_u64_ignoring_underscores,
+    parse_bool_setting, parse_tier_setting, parse_toml_string_array,
+    parse_u64_ignoring_underscores, strip_toml_inline_comment,
 };
 
 /// Top-of-file inline source directives (`// @slice-<key>: <value>` or `// @slice-<key>=<value>`).
@@ -17,6 +18,7 @@ pub struct InlineDirectives {
     pub allow_write: Vec<String>,
     pub allow_net: Vec<String>,
     pub allow_env: Vec<(String, String)>,
+    pub allow_env_inherit: Vec<String>,
     pub allow_exec: Vec<String>,
     pub allow_checkpoints: Option<bool>,
     pub max_checkpoints: Option<u32>,
@@ -28,13 +30,27 @@ pub struct InlineDirectives {
     pub tls_key: Option<String>,
 }
 
+#[inline]
+fn unquote_scalar_directive(raw: &str) -> &str {
+    let cleaned = strip_toml_inline_comment(raw);
+    if cleaned.len() >= 2
+        && ((cleaned.starts_with('"') && cleaned.ends_with('"'))
+            || (cleaned.starts_with('\'') && cleaned.ends_with('\'')))
+    {
+        cleaned[1..cleaned.len() - 1].trim()
+    } else {
+        cleaned
+    }
+}
+
 fn apply_directive_body(dirs: &mut InlineDirectives, comment_body: &str) {
     let body = comment_body.trim();
     let Some(rest) = body.strip_prefix("@slice-") else {
         return;
     };
     let Some((raw_k, raw_v)) = rest.split_once(':').or_else(|| rest.split_once('=')) else {
-        match rest {
+        let flag = strip_toml_inline_comment(rest);
+        match flag {
             "no-boacas" | "no-exper-boacas" => dirs.boacas = Some(false),
             "boacas" | "exper-boacas" => dirs.boacas = Some(true),
             "warm" => dirs.warm = Some(true),
@@ -54,7 +70,8 @@ fn apply_directive_body(dirs: &mut InlineDirectives, comment_body: &str) {
         return;
     };
     let key = raw_k.trim();
-    let val = raw_v.trim().trim_matches('"').trim_matches('\'').trim();
+    let raw_v_trimmed = raw_v.trim();
+    let val = unquote_scalar_directive(raw_v_trimmed);
     match key {
         "tier" => {
             if let Some(t) = parse_tier_setting(val) {
@@ -83,36 +100,42 @@ fn apply_directive_body(dirs: &mut InlineDirectives, comment_body: &str) {
         }
         "memory-kb" | "memory_kb" => {
             if let Some(n) = parse_u64_ignoring_underscores(val) {
-                dirs.memory_limit_bytes = Some((n as usize).saturating_mul(1024));
+                let bytes = usize::try_from(n)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(1024);
+                dirs.memory_limit_bytes = Some(bytes);
             }
         }
         "memory-mb" | "memory_mb" => {
             if let Some(n) = parse_u64_ignoring_underscores(val) {
-                dirs.memory_limit_bytes = Some((n as usize).saturating_mul(1024 * 1024));
+                let bytes = usize::try_from(n)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(1024 * 1024);
+                dirs.memory_limit_bytes = Some(bytes);
             }
         }
         "memory" | "memory-bytes" => {
             if let Some(n) = parse_u64_ignoring_underscores(val) {
-                dirs.memory_limit_bytes = Some(n as usize);
+                dirs.memory_limit_bytes = Some(usize::try_from(n).unwrap_or(usize::MAX));
             }
         }
         "allow-read" | "allow_read" => {
-            for item in parse_toml_string_array(val) {
+            for item in parse_toml_string_array(raw_v_trimmed) {
                 dirs.allow_read.push(item);
             }
         }
         "allow-write" | "allow_write" => {
-            for item in parse_toml_string_array(val) {
+            for item in parse_toml_string_array(raw_v_trimmed) {
                 dirs.allow_write.push(item);
             }
         }
         "allow-net" | "allow_net" => {
-            for item in parse_toml_string_array(val) {
+            for item in parse_toml_string_array(raw_v_trimmed) {
                 dirs.allow_net.push(item);
             }
         }
         "allow-exec" | "allow_exec" => {
-            for item in parse_toml_string_array(val) {
+            for item in parse_toml_string_array(raw_v_trimmed) {
                 dirs.allow_exec.push(item);
             }
         }
@@ -136,14 +159,17 @@ fn apply_directive_body(dirs: &mut InlineDirectives, comment_body: &str) {
             }
         }
         "allow-env" | "allow_env" => {
-            for item in parse_toml_string_array(val) {
+            for item in parse_toml_string_array(raw_v_trimmed) {
                 if let Some((ek, ev)) = item.split_once('=') {
-                    dirs.allow_env
-                        .push((ek.trim().to_string(), ev.trim().to_string()));
+                    let k = ek.trim();
+                    if !k.is_empty() {
+                        dirs.allow_env.push((k.to_string(), ev.trim().to_string()));
+                    }
                 } else {
                     let ek = item.trim();
-                    let ev = std::env::var(ek).unwrap_or_default();
-                    dirs.allow_env.push((ek.to_string(), ev));
+                    if !ek.is_empty() {
+                        dirs.allow_env_inherit.push(ek.to_string());
+                    }
                 }
             }
         }
@@ -153,7 +179,7 @@ fn apply_directive_body(dirs: &mut InlineDirectives, comment_body: &str) {
             }
         }
         "audit-egress" | "audit_egress" => {
-            for item in parse_toml_string_array(val) {
+            for item in parse_toml_string_array(raw_v_trimmed) {
                 dirs.audit_egress.push(item);
             }
         }
@@ -166,7 +192,7 @@ fn apply_directive_body(dirs: &mut InlineDirectives, comment_body: &str) {
         }
         "workers" => {
             if let Some(n) = parse_u64_ignoring_underscores(val) {
-                dirs.workers = Some((n as usize).max(1));
+                dirs.workers = Some(usize::try_from(n).unwrap_or(usize::MAX).max(1));
             }
         }
         "tls-cert" | "tls_cert" if !val.is_empty() => {

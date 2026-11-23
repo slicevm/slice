@@ -135,7 +135,9 @@ pub fn parse_tier_setting(raw: &str) -> Option<Option<u8>> {
     }
 }
 
-fn strip_toml_inline_comment(raw: &str) -> &str {
+pub(crate) const MAX_SAFE_MEMORY_KB: usize = usize::MAX / 1024;
+
+pub(crate) fn strip_toml_inline_comment(raw: &str) -> &str {
     let mut in_double = false;
     let mut in_single = false;
     let mut escaped = false;
@@ -167,12 +169,50 @@ fn strip_toml_inline_comment(raw: &str) -> &str {
 }
 
 #[inline]
+fn bracket_delta_outside_quotes(cleaned_line: &str) -> i32 {
+    let mut delta = 0i32;
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut escaped = false;
+    for ch in cleaned_line.chars() {
+        if in_double {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_double = true,
+            '\'' => in_single = true,
+            '[' => delta += 1,
+            ']' => delta -= 1,
+            _ => {}
+        }
+    }
+    delta
+}
+
+#[inline]
 pub(crate) fn parse_toml_string_array(raw: &str) -> Vec<String> {
     let cleaned = strip_toml_inline_comment(raw);
-    let inner = cleaned
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(cleaned);
+    let inner = if let Some(after_open) = cleaned.strip_prefix('[') {
+        let Some(closed) = after_open.strip_suffix(']') else {
+            return Vec::new();
+        };
+        closed
+    } else {
+        cleaned
+    };
     let mut items = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
@@ -243,20 +283,50 @@ pub(crate) fn parse_toml_string_array(raw: &str) -> Vec<String> {
 }
 
 impl SliceManifest {
-    /// Parses a `slice.toml` configuration string without external heavy dependencies.
+    /// Parses a `slice.toml` configuration string without external heavy dependencies,
+    /// supporting single-line and multi-line `[...]` array values with `#` comments.
     pub fn parse_toml(content: &str) -> Self {
         let mut manifest = Self::default();
         let mut current_section = "";
+        let mut pending_buf = String::new();
+        let mut pending_depth = 0i32;
 
         for line in content.lines() {
-            let trimmed = strip_toml_inline_comment(line);
-            if trimmed.is_empty() {
+            let cleaned = strip_toml_inline_comment(line);
+            if cleaned.is_empty() {
                 continue;
             }
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                current_section = trimmed[1..trimmed.len() - 1].trim();
-                continue;
-            }
+
+            let owned_joined;
+            let trimmed = if pending_depth > 0 {
+                pending_depth += bracket_delta_outside_quotes(cleaned);
+                if !pending_buf.is_empty() {
+                    pending_buf.push(' ');
+                }
+                pending_buf.push_str(cleaned);
+                if pending_depth > 0 {
+                    continue;
+                }
+                pending_depth = 0;
+                owned_joined = std::mem::take(&mut pending_buf);
+                owned_joined.as_str()
+            } else {
+                if cleaned.starts_with('[') && cleaned.ends_with(']') && !cleaned.contains('=') {
+                    current_section = cleaned[1..cleaned.len() - 1].trim();
+                    continue;
+                }
+                if cleaned.contains('=') {
+                    let delta = bracket_delta_outside_quotes(cleaned);
+                    if delta > 0 {
+                        pending_buf.clear();
+                        pending_buf.push_str(cleaned);
+                        pending_depth = delta;
+                        continue;
+                    }
+                }
+                cleaned
+            };
+
             if let Some((k, v)) = trimmed.split_once('=') {
                 let key = k.trim();
                 let val = v.trim();
@@ -277,17 +347,24 @@ impl SliceManifest {
                     }
                     ("limits", "memory_kb") => {
                         if let Some(n) = parse_u64_ignoring_underscores(val) {
-                            manifest.memory_limit_kb = n as usize;
+                            manifest.memory_limit_kb = usize::try_from(n)
+                                .unwrap_or(MAX_SAFE_MEMORY_KB)
+                                .min(MAX_SAFE_MEMORY_KB);
                         }
                     }
                     ("limits", "memory_mb") => {
                         if let Some(n) = parse_u64_ignoring_underscores(val) {
-                            manifest.memory_limit_kb = (n as usize).saturating_mul(1024);
+                            manifest.memory_limit_kb = usize::try_from(n)
+                                .unwrap_or(MAX_SAFE_MEMORY_KB)
+                                .saturating_mul(1024)
+                                .min(MAX_SAFE_MEMORY_KB);
                         }
                     }
                     ("limits", "memory_bytes") => {
                         if let Some(n) = parse_u64_ignoring_underscores(val) {
-                            manifest.memory_limit_kb = ((n as usize) / 1024).max(1);
+                            let bytes = usize::try_from(n).unwrap_or(usize::MAX);
+                            manifest.memory_limit_kb =
+                                (bytes / 1024).max(1).min(MAX_SAFE_MEMORY_KB);
                         }
                     }
                     ("limits", "max_checkpoints") | ("capabilities", "max_checkpoints") => {
@@ -303,30 +380,27 @@ impl SliceManifest {
                     | ("capabilities", "allow_checkpoints")
                     | ("limits", "checkpoints") => {
                         if let Some(b) = parse_bool_setting(val) {
-                            manifest.capabilities.allow_checkpoints = b;
-                            if !b {
-                                manifest.capabilities.max_checkpoints = Some(0);
-                            }
+                            manifest.capabilities.set_checkpoints(b);
                         }
                     }
                     ("capabilities", "allow_read") => {
                         for item in parse_toml_string_array(val) {
-                            manifest.capabilities.allowed_read_prefixes.push(item);
+                            manifest.capabilities.push_read_prefix(&item);
                         }
                     }
                     ("capabilities", "allow_write") => {
                         for item in parse_toml_string_array(val) {
-                            manifest.capabilities.allowed_write_prefixes.push(item);
+                            manifest.capabilities.push_write_prefix(&item);
                         }
                     }
                     ("capabilities", "allow_net") => {
                         for item in parse_toml_string_array(val) {
-                            manifest.capabilities.allowed_net_hosts.insert(item);
+                            manifest.capabilities.insert_net_host(&item);
                         }
                     }
                     ("capabilities", "allow_exec") | ("capabilities", "allow-exec") => {
                         for item in parse_toml_string_array(val) {
-                            manifest.capabilities.allowed_exec_binaries.push(item);
+                            manifest.capabilities = manifest.capabilities.with_exec_binary(item);
                         }
                     }
                     ("capabilities", "allow_env") => {

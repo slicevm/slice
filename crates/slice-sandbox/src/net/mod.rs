@@ -60,6 +60,63 @@ fn is_valid_decoded_hostname(h: &str, is_ipv6: bool) -> bool {
     !is_ipv6 || h.parse::<Ipv6Addr>().is_ok()
 }
 
+/// Returns `true` when `h` (an unbracketed non-IPv6 hostname with trailing dots already stripped)
+/// ends in a purely numeric or `0x`-hex label per WHATWG URL Standard "ends in a number checker".
+#[inline]
+fn host_ends_in_number(h: &str) -> bool {
+    if h.is_empty() || h.contains(':') {
+        return false;
+    }
+    let last = h.rsplit('.').next().unwrap_or(h);
+    if last.is_empty() {
+        return false;
+    }
+    if last.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    if let Some(hex) = last.strip_prefix("0x").or_else(|| last.strip_prefix("0X")) {
+        return hex.is_empty() || hex.bytes().all(|b| b.is_ascii_hexdigit());
+    }
+    false
+}
+
+/// Parses 4-part decimal IPv4 strings that include leading zeros with digits `8` or `9`
+/// (such as `127.0.0.08` or `0169.0254.0169.0254`) so metadata/loopback classifiers detect
+/// non-octal leading-zero IPv4 strings regardless of downstream resolver quirks.
+#[inline]
+fn parse_leading_zero_decimal_ipv4(h: &str) -> Option<Ipv4Addr> {
+    let bytes = h.as_bytes();
+    if bytes.is_empty() || !bytes[0].is_ascii_digit() {
+        return None;
+    }
+    let mut octs = [0u8; 4];
+    let mut count = 0usize;
+    for part in h.split('.') {
+        if part.is_empty() || count >= 4 || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let val = part.parse::<u16>().ok()?;
+        if val > 255 {
+            return None;
+        }
+        octs[count] = val as u8;
+        count += 1;
+    }
+    if count == 4 {
+        Some(Ipv4Addr::from(octs))
+    } else {
+        None
+    }
+}
+
+/// Returns `true` when `h` ends in a numeric label (per WHATWG URL rules) yet is neither a
+/// canonical `Ipv4Addr` nor a valid non-standard octal/hex/shorthand `Ipv4Addr` (for example,
+/// `127.0.0.08`, `0169.0254.0169.0254`, or `999.999.999.999`).
+#[inline]
+fn is_malformed_numeric_host(h: &str) -> bool {
+    host_ends_in_number(h) && h.parse::<Ipv4Addr>().is_err() && parse_nonstandard_ipv4(h).is_none()
+}
+
 /// Parsed and normalized HTTP/WebSocket URL authority and request target shared across
 /// `slice-sandbox` OCap checks and `slice-engine` outbound `fetch()` / `WebSocket` clients.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,7 +217,7 @@ pub fn parse_http_authority_and_path(raw_url: &str) -> Option<ParsedHttpUrl<'_>>
         let clean: Cow<'_, str> = match decoded {
             Cow::Borrowed(b) => {
                 let no_dot = b.trim_end_matches('.');
-                if !is_valid_decoded_hostname(no_dot, false) {
+                if !is_valid_decoded_hostname(no_dot, false) || is_malformed_numeric_host(no_dot) {
                     return None;
                 }
                 if no_dot.bytes().any(|c| c.is_ascii_uppercase()) {
@@ -173,7 +230,7 @@ pub fn parse_http_authority_and_path(raw_url: &str) -> Option<ParsedHttpUrl<'_>>
                 while s.ends_with('.') {
                     s.pop();
                 }
-                if !is_valid_decoded_hostname(&s, false) {
+                if !is_valid_decoded_hostname(&s, false) || is_malformed_numeric_host(&s) {
                     return None;
                 }
                 s.make_ascii_lowercase();
@@ -193,6 +250,93 @@ pub fn parse_http_authority_and_path(raw_url: &str) -> Option<ParsedHttpUrl<'_>>
     })
 }
 
+/// Single-pass parsed network connection target for [`crate::TenantCompartment::verify_net_connect`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedNetConnectTarget<'a> {
+    pub clean_host: Cow<'a, str>,
+    pub is_ipv6: bool,
+    pub explicit_port: Option<u16>,
+    pub scheme_default_port: Option<u16>,
+}
+
+/// Parses a network connection target (`host`, `host:port`, `[ipv6]`, `[ipv6]:port`, or full
+/// `http(s)://` / `ws(s)://` URL) in a single pass, rejecting userinfo `@`, percent-decoded
+/// delimiters/control bytes (`%40`, `%2f`, `%00`, `%0d%0a`), invalid/`:0` ports, and malformed
+/// numeric IPv4 literals (`127.0.0.08`, `0169.0254.0169.0254`).
+#[inline]
+pub fn parse_net_connect_target(raw: &str) -> Option<ParsedNetConnectTarget<'_>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.bytes().any(|b| b <= 0x20 || b == 0x7F) {
+        return None;
+    }
+    if trimmed.contains("://") {
+        let parsed = parse_http_authority_and_path(trimmed)?;
+        return Some(ParsedNetConnectTarget {
+            clean_host: parsed.clean_host,
+            is_ipv6: parsed.is_ipv6,
+            explicit_port: Some(parsed.port),
+            scheme_default_port: Some(parsed.default_port),
+        });
+    }
+    if trimmed.contains(['@', '/', '?', '#', '\\']) {
+        return None;
+    }
+    let (clean_host, explicit_port, scheme_default_port) = extract_clean_hostname_and_port(trimmed);
+    if clean_host.is_empty() {
+        return None;
+    }
+    let is_ipv6 = clean_host.contains(':');
+    if !is_ipv6 && is_malformed_numeric_host(&clean_host) {
+        return None;
+    }
+    Some(ParsedNetConnectTarget {
+        clean_host,
+        is_ipv6,
+        explicit_port,
+        scheme_default_port,
+    })
+}
+
+/// Canonicalizes a `CapabilityToken` `allow_net` grant entry (`"*"`, `host`, `host:port`, `[ipv6]`,
+/// `[ipv6]:port`, or full `http(s)://` URL) into lowercase canonical form:
+/// - `"*"` -> `"*"`
+/// - `"API.Example.com."` -> `"api.example.com"`
+/// - `"API.Example.com.:443"` -> `"api.example.com:443"`
+/// - `"[::1]"` or `"[0:0:0:0:0:0:0:1]"` -> `"::1"`
+/// - `"[2001:DB8::1]:8443"` -> `"[2001:db8::1]:8443"`
+///
+/// Returns `None` if `raw` is empty or has an invalid host or `:port` (`0` or `> 65535`).
+#[inline]
+pub fn canonicalize_net_grant_entry(raw: &str) -> Option<String> {
+    let (host, is_ipv6, port_opt) = parse_net_grant_parts(raw)?;
+    if host == "*" {
+        return Some("*".to_string());
+    }
+    match port_opt {
+        Some(port) if is_ipv6 => Some(format!("[{}]:{}", host, port)),
+        Some(port) => Some(format!("{}:{}", host, port)),
+        None => Some(host),
+    }
+}
+
+/// Parses an `allow_net` entry into `(canonical_host, is_ipv6, explicit_port)`.
+/// For wildcard `"*"`, returns `Some(("*".to_string(), false, None))`.
+#[inline]
+pub(crate) fn parse_net_grant_parts(raw: &str) -> Option<(String, bool, Option<u16>)> {
+    let trimmed = raw.trim();
+    if trimmed == "*" {
+        return Some(("*".to_string(), false, None));
+    }
+    let parsed = parse_net_connect_target(trimmed)?;
+    let canon_host = if parsed.is_ipv6 {
+        let v6: Ipv6Addr = parsed.clean_host.parse().ok()?;
+        v6.to_string()
+    } else {
+        parsed.clean_host.into_owned()
+    };
+    Some((canon_host, parsed.is_ipv6, parsed.explicit_port))
+}
+
 /// Extracts `(clean_lowercase_hostname, explicit_port, scheme_default_port)` from a `host`,
 /// `host:port`, `[ipv6]:port`, or full URL string.
 ///
@@ -200,11 +344,17 @@ pub fn parse_http_authority_and_path(raw_url: &str) -> Option<ParsedHttpUrl<'_>>
 /// - Splits URL authority at the earliest byte in `['/', '?', '#', '\\']`.
 /// - Percent-decodes `%XX` hostnames when `%` is present while returning `Cow::Borrowed`
 ///   whenever the hostname slice is already lowercase ASCII without percent escapes.
+/// - Validates decoded hostnames via `is_valid_decoded_hostname` and fails closed (returning an
+///   empty `Cow::Borrowed("")`) on decoded delimiters/control chars (`%40`, `%2f`, `%00`, `%0d%0a`)
+///   or malformed/`:0` `:port` suffixes.
 /// - Strips trailing DNS root dots (`"metadata.google.internal."` -> `"metadata.google.internal"`).
 /// - Strips IPv6 zone identifiers (`"[fe80::1%eth0]:80"` -> `"fe80::1"`).
 #[inline]
 pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>, Option<u16>) {
     let mut trimmed = host.trim();
+    if trimmed.is_empty() || trimmed.bytes().any(|b| b <= 0x20 || b == 0x7F) {
+        return (Cow::Borrowed(""), None, None);
+    }
     let mut scheme_default_port = None;
     if let Some((scheme, after_scheme)) = trimmed.split_once("://") {
         if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss") {
@@ -220,58 +370,92 @@ pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>
     if let Some((_, after_auth)) = trimmed.rsplit_once('@') {
         trimmed = after_auth;
     }
+    if trimmed.is_empty() {
+        return (Cow::Borrowed(""), None, scheme_default_port);
+    }
 
     let mut explicit_port = None;
-    let mut is_bracketed_ipv6 = false;
+    let mut is_ipv6_host = false;
     let without_port = if let Some(rest) = trimmed.strip_prefix('[') {
-        if let Some((ipv6, after_bracket)) = rest.split_once(']') {
-            is_bracketed_ipv6 = true;
-            if let Some(port_str) = after_bracket.strip_prefix(':')
-                && let Ok(p) = port_str.parse::<u16>()
-            {
-                explicit_port = Some(p);
-            }
-            // Strip RFC 6874 / OS IPv6 zone identifier (`%eth0` or `%25eth0`)
-            if let Some((v6_clean, _zone)) = ipv6.split_once('%') {
-                v6_clean
+        let Some((ipv6, after_bracket)) = rest.split_once(']') else {
+            return (Cow::Borrowed(""), None, scheme_default_port);
+        };
+        is_ipv6_host = true;
+        if !after_bracket.is_empty() {
+            let Some(port_str) = after_bracket.strip_prefix(':') else {
+                return (Cow::Borrowed(""), None, scheme_default_port);
+            };
+            if port_str.is_empty() {
+                if scheme_default_port.is_none() {
+                    return (Cow::Borrowed(""), None, None);
+                }
             } else {
-                ipv6
-            }
-        } else {
-            trimmed
-        }
-    } else if let Some((h, port_part)) = trimmed.rsplit_once(':') {
-        if !h.contains(':')
-            && !port_part.is_empty()
-            && port_part.bytes().all(|b| b.is_ascii_digit())
-        {
-            if let Ok(p) = port_part.parse::<u16>() {
+                let Ok(p) = port_str.parse::<u16>() else {
+                    return (Cow::Borrowed(""), None, scheme_default_port);
+                };
+                if p == 0 {
+                    return (Cow::Borrowed(""), None, scheme_default_port);
+                }
                 explicit_port = Some(p);
             }
-            h
-        } else if let Some((v6_clean, _zone)) = trimmed.split_once('%') {
-            is_bracketed_ipv6 = true;
+        }
+        // Strip RFC 6874 / OS IPv6 zone identifier (`%eth0` or `%25eth0`)
+        if let Some((v6_clean, _zone)) = ipv6.split_once('%') {
             v6_clean
         } else {
-            trimmed
+            ipv6
+        }
+    } else if let Some((h, port_part)) = trimmed.rsplit_once(':') {
+        if h.contains(':') {
+            // Bare IPv6 address (contains at least two colons, e.g. `::1` or `fe80::1%eth0`)
+            is_ipv6_host = true;
+            if let Some((v6_clean, _zone)) = trimmed.split_once('%') {
+                v6_clean
+            } else {
+                trimmed
+            }
+        } else if port_part.is_empty() {
+            if scheme_default_port.is_none() {
+                return (Cow::Borrowed(""), None, None);
+            }
+            h
+        } else {
+            let Ok(p) = port_part.parse::<u16>() else {
+                return (Cow::Borrowed(""), None, scheme_default_port);
+            };
+            if p == 0 {
+                return (Cow::Borrowed(""), None, scheme_default_port);
+            }
+            explicit_port = Some(p);
+            h
         }
     } else {
         trimmed
     };
 
-    if !is_bracketed_ipv6
-        && without_port.as_bytes().contains(&b'%')
-        && let Some(decoded) = percent_decode_host_cow(without_port)
-    {
+    if !is_ipv6_host && without_port.as_bytes().contains(&b'%') {
+        let Some(decoded) = percent_decode_host_cow(without_port) else {
+            return (Cow::Borrowed(""), None, scheme_default_port);
+        };
         let mut s = decoded.into_owned();
         while s.ends_with('.') {
             s.pop();
+        }
+        if !is_valid_decoded_hostname(&s, false) {
+            return (Cow::Borrowed(""), None, scheme_default_port);
         }
         s.make_ascii_lowercase();
         return (Cow::Owned(s), explicit_port, scheme_default_port);
     }
 
-    let without_trailing_dot = without_port.trim_end_matches('.');
+    let without_trailing_dot = if is_ipv6_host {
+        without_port
+    } else {
+        without_port.trim_end_matches('.')
+    };
+    if !is_valid_decoded_hostname(without_trailing_dot, is_ipv6_host) {
+        return (Cow::Borrowed(""), None, scheme_default_port);
+    }
     let clean_cow = if without_trailing_dot.bytes().any(|b| b.is_ascii_uppercase()) {
         Cow::Owned(without_trailing_dot.to_ascii_lowercase())
     } else {
@@ -399,19 +583,22 @@ fn extract_embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
     None
 }
 
-/// Returns `true` if `host` resolves to a cloud instance metadata endpoint
-/// (AWS/GCP/Azure/DigitalOcean `169.254.169.254`, AWS ECS `169.254.170.2`,
-/// Alibaba `100.100.100.200`, AWS IPv6 `fd00:ec2::254`, or GCP `metadata.google.internal`).
-/// These endpoints are unconditionally blocked by the Slice SSRF shield.
+/// Checks an already-cleaned lowercase hostname `h` (no brackets, port, or trailing dot)
+/// against cloud instance metadata endpoints without re-parsing `h`.
 #[inline]
-pub fn is_cloud_metadata_ssrf_target(host: &str) -> bool {
-    let (h, _, _) = extract_clean_hostname_and_port(host);
+pub(crate) fn is_cloud_metadata_clean_host(h: &str) -> bool {
+    if h.is_empty() {
+        return false;
+    }
     if matches!(
-        h.as_ref(),
+        h,
         "169.254.169.254"
             | "169.254.170.2"
+            | "169.254.170.23"
+            | "168.63.129.16"
             | "100.100.100.200"
             | "fd00:ec2::254"
+            | "fd00:ec2::23"
             | "metadata.google.internal"
             | "metadata.goog"
             | "instance-data"
@@ -419,7 +606,7 @@ pub fn is_cloud_metadata_ssrf_target(host: &str) -> bool {
     {
         return true;
     }
-    if let Some(v4) = parse_nonstandard_ipv4(&h)
+    if let Some(v4) = parse_nonstandard_ipv4(h).or_else(|| parse_leading_zero_decimal_ipv4(h))
         && is_cloud_metadata_ip(IpAddr::V4(v4))
     {
         return true;
@@ -433,20 +620,23 @@ pub fn is_cloud_metadata_ssrf_target(host: &str) -> bool {
     false
 }
 
-/// Returns `true` if `host` is a cloud metadata endpoint, loopback address (`localhost`, `127.0.0.0/8`, `::1`),
-/// link-local (`169.254.0.0/16`, `fe80::/10`), RFC1918 private network (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`),
-/// CGNAT (`100.64.0.0/10`), benchmark (`198.18.0.0/15`), IETF protocol (`192.0.0.0/24`), multicast (`224.0.0.0/4`, `ff00::/8`),
-/// IPv6 Unique Local (`fc00::/7`), or any non-canonical numeric IP representation (octal, hex, dword, shorthand IPv4).
-/// Wildcard `allow_net = ["*"]` never grants access to these targets; they require explicit host allowlisting.
+/// Checks an already-cleaned lowercase hostname `h` (no brackets, port, or trailing dot)
+/// against cloud metadata, loopback, link-local, RFC1918, CGNAT, special-use CIDRs, and
+/// non-canonical/malformed numeric IPv4 representations without re-parsing `h`.
 #[inline]
-pub fn is_private_or_loopback_ssrf_target(host: &str) -> bool {
-    let (h, _, _) = extract_clean_hostname_and_port(host);
+pub(crate) fn is_private_or_loopback_clean_host(h: &str) -> bool {
+    if h.is_empty() {
+        return true;
+    }
     if matches!(
-        h.as_ref(),
+        h,
         "169.254.169.254"
             | "169.254.170.2"
+            | "169.254.170.23"
+            | "168.63.129.16"
             | "100.100.100.200"
             | "fd00:ec2::254"
+            | "fd00:ec2::23"
             | "metadata.google.internal"
             | "metadata.goog"
             | "instance-data"
@@ -464,16 +654,40 @@ pub fn is_private_or_loopback_ssrf_target(host: &str) -> bool {
     if let Ok(ip) = h.parse::<IpAddr>() {
         return is_private_or_loopback_ip(ip);
     }
-    if parse_nonstandard_ipv4(&h).is_some() {
-        // Any non-canonical numeric IPv4 literal (octal `0177.0.0.1`, hex `0x7f.0.0.1`,
-        // dword `2130706433`, or shorthand `127.1`) is unconditionally blocked under wildcard allow_net.
+    if parse_nonstandard_ipv4(h).is_some() || host_ends_in_number(h) {
+        // Any non-canonical or malformed numeric IPv4 literal (octal `0177.0.0.1`,
+        // leading-zero non-octal `127.0.0.08`, hex `0x7f.0.0.1`, dword `2130706433`,
+        // or shorthand `127.1`) is unconditionally blocked under wildcard allow_net.
         return true;
     }
     false
 }
 
+/// Returns `true` if `host` resolves to a cloud instance metadata endpoint
+/// (AWS/GCP/Azure/DigitalOcean `169.254.169.254`, AWS ECS `169.254.170.2`,
+/// AWS EKS Pod Identity `169.254.170.23` / `fd00:ec2::23`, Azure WireServer `168.63.129.16`,
+/// Alibaba `100.100.100.200`, AWS IPv6 `fd00:ec2::254`, or GCP `metadata.google.internal`).
+/// These endpoints are unconditionally blocked by the Slice SSRF shield.
+#[inline]
+pub fn is_cloud_metadata_ssrf_target(host: &str) -> bool {
+    let (h, _, _) = extract_clean_hostname_and_port(host);
+    is_cloud_metadata_clean_host(&h)
+}
+
+/// Returns `true` if `host` is a cloud metadata endpoint, loopback address (`localhost`, `127.0.0.0/8`, `::1`),
+/// link-local (`169.254.0.0/16`, `fe80::/10`), RFC1918 private network (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`),
+/// CGNAT (`100.64.0.0/10`), benchmark (`198.18.0.0/15`), IETF protocol (`192.0.0.0/24`), multicast (`224.0.0.0/4`, `ff00::/8`),
+/// IPv6 Unique Local (`fc00::/7`), or any non-canonical/malformed numeric IP representation (octal, leading-zero, hex, dword, shorthand IPv4).
+/// Wildcard `allow_net = ["*"]` never grants access to these targets; they require explicit host allowlisting.
+#[inline]
+pub fn is_private_or_loopback_ssrf_target(host: &str) -> bool {
+    let (h, _, _) = extract_clean_hostname_and_port(host);
+    is_private_or_loopback_clean_host(&h)
+}
+
 /// Returns `true` if `ip` is a cloud instance metadata IP address (`169.254.169.254`,
-/// `169.254.170.2`, `100.100.100.200`, `fd00:ec2::254`, or their IPv6-embedded equivalents).
+/// `169.254.170.2`, `169.254.170.23`, `168.63.129.16`, `100.100.100.200`, `fd00:ec2::254`,
+/// `fd00:ec2::23`, or their IPv6-embedded equivalents).
 #[inline]
 pub fn is_cloud_metadata_ip(ip: IpAddr) -> bool {
     match ip {
@@ -481,6 +695,8 @@ pub fn is_cloud_metadata_ip(ip: IpAddr) -> bool {
             let octs = v4.octets();
             octs == [169, 254, 169, 254]
                 || octs == [169, 254, 170, 2]
+                || octs == [169, 254, 170, 23]
+                || octs == [168, 63, 129, 16]
                 || octs == [100, 100, 100, 200]
         }
         IpAddr::V6(v6) => {
@@ -491,6 +707,7 @@ pub fn is_cloud_metadata_ip(ip: IpAddr) -> bool {
             }
             let segs = v6.segments();
             segs == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254]
+                || segs == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0023]
         }
     }
 }

@@ -19,12 +19,66 @@ fn has_dotdot_segment(path: &str) -> bool {
     rest.split(['/', '\\']).any(|seg| seg == "..")
 }
 
+#[inline]
+fn is_win32_reserved_device_stem(stem: &[u8]) -> bool {
+    match stem.len() {
+        3 => {
+            stem.eq_ignore_ascii_case(b"CON")
+                || stem.eq_ignore_ascii_case(b"PRN")
+                || stem.eq_ignore_ascii_case(b"AUX")
+                || stem.eq_ignore_ascii_case(b"NUL")
+        }
+        4 => {
+            (stem[..3].eq_ignore_ascii_case(b"COM") || stem[..3].eq_ignore_ascii_case(b"LPT"))
+                && matches!(stem[3], b'1'..=b'9')
+        }
+        5 => {
+            // Win32 also reserves ISO-8859-1 / UTF-8 superscript digits 1..3 (`\u{00b9}`, `\u{00b2}`, `\u{00b3}`)
+            (stem[..3].eq_ignore_ascii_case(b"COM") || stem[..3].eq_ignore_ascii_case(b"LPT"))
+                && stem[3] == 0xc2
+                && matches!(stem[4], 0xb9 | 0xb2 | 0xb3)
+        }
+        6 => stem.eq_ignore_ascii_case(b"CONIN$"),
+        7 => stem.eq_ignore_ascii_case(b"CONOUT$"),
+        _ => false,
+    }
+}
+
+#[inline]
+fn has_win32_reserved_device_segment(trimmed: &str) -> bool {
+    let mut rest = trimmed;
+    if let Some(after_ext) = rest
+        .strip_prefix(r"\\?\")
+        .or_else(|| rest.strip_prefix("//?/"))
+    {
+        rest = after_ext;
+    }
+    if rest.len() >= 2 && rest.as_bytes()[0].is_ascii_alphabetic() && rest.as_bytes()[1] == b':' {
+        rest = &rest[2..];
+    }
+    for seg in rest.split(['/', '\\']) {
+        let seg_trimmed = seg.trim_end_matches([' ', '.']);
+        if seg_trimmed.is_empty() {
+            continue;
+        }
+        let stem_str = match seg_trimmed.find(['.', ':']) {
+            Some(idx) => seg_trimmed[..idx].trim_end_matches(' '),
+            None => seg_trimmed,
+        };
+        if is_win32_reserved_device_stem(stem_str.as_bytes()) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Checks whether a raw VFS candidate path contains forbidden sequences (`SBX-SEC-01`):
 /// - `..` parent traversal segments (allowing non-traversal filenames like `[...slug].tsx`)
 /// - Null bytes (`\0`)
 /// - NT native namespace prefixes (`\??\` or `/??/`)
 /// - Win32 device namespace prefixes (`\\.\`, `//./`, or non-drive `\\?\` / `//?/` such as `GLOBALROOT` or `UNC`)
-/// - Raw Windows SMB UNC network share paths (`\\server\share`)
+/// - Raw or mixed-slash Windows SMB UNC network share paths (`\\server\share`, `\/server\share`, `/\server\share`)
+/// - Win32 reserved console/serial/parallel device basenames (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM1..9`, `LPT1..9`)
 /// - Windows drive-relative paths (`C:file.txt` without a root slash after `:`)
 #[inline]
 pub fn is_rejected_vfs_candidate(candidate_path: &str) -> bool {
@@ -71,8 +125,13 @@ pub fn is_rejected_vfs_candidate(candidate_path: &str) -> bool {
         }
     }
 
-    // Reject raw Windows UNC network shares `\\server\share` (two leading backslashes not followed by `?\X:\`)
-    if tb.len() >= 2 && tb[0] == b'\\' && tb[1] == b'\\' {
+    // Reject raw or mixed-slash Windows UNC network shares (`\\server\share`, `\/server\share`, `/\server\share`)
+    // unless followed by a valid extended local drive (`?\X:\`)
+    if tb.len() >= 2
+        && (tb[0] == b'\\' || tb[0] == b'/')
+        && (tb[1] == b'\\' || tb[1] == b'/')
+        && (tb[0] == b'\\' || tb[1] == b'\\')
+    {
         let is_extended_drive = tb.len() >= 7
             && tb[2] == b'?'
             && (tb[3] == b'\\' || tb[3] == b'/')
@@ -82,6 +141,10 @@ pub fn is_rejected_vfs_candidate(candidate_path: &str) -> bool {
         if !is_extended_drive {
             return true;
         }
+    }
+
+    if has_win32_reserved_device_segment(trimmed) {
+        return true;
     }
     false
 }
@@ -354,29 +417,76 @@ fn path_starts_with_dir_boundary(norm_candidate: &str, norm_prefix: &str) -> boo
     false
 }
 
-/// Checks a pre-normalized candidate path (`norm_cand`) against `allowed_prefix`.
-#[inline]
-pub fn vfs_normalized_candidate_matches_prefix(norm_cand: &str, allowed_prefix: &str) -> bool {
-    let trimmed_pref = allowed_prefix.trim();
-    if trimmed_pref.is_empty() {
-        return false;
-    }
-    if trimmed_pref == "*" || trimmed_pref == "/" {
-        return true;
-    }
-    let norm_pref = normalize_vfs_path_cow(trimmed_pref);
-    if path_starts_with_dir_boundary(norm_cand, &norm_pref) {
-        return true;
-    }
+#[derive(Debug, Clone)]
+pub(crate) struct CachedOsTmpInfo {
+    pub(crate) primary: Option<String>,
+    pub(crate) lexical_alias: Option<String>,
+}
 
-    // Cross-platform `/tmp` <-> `std::env::temp_dir()` equivalence (cached once per process)
+#[inline]
+fn is_unsafe_root_tmp_dir(norm: &str) -> bool {
+    if norm.is_empty()
+        || norm == "/"
+        || norm == "."
+        || norm == "*"
+        || norm == ".."
+        || norm.starts_with("../")
+    {
+        return true;
+    }
+    let b = norm.as_bytes();
+    b.len() == 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'/'
+}
+
+#[inline]
+pub(crate) fn build_os_tmp_info(raw_tmp: &std::path::Path) -> CachedOsTmpInfo {
+    let lex_raw = normalize_vfs_path_lexical(&raw_tmp.to_string_lossy());
+    let lex_opt = (!is_unsafe_root_tmp_dir(&lex_raw)).then_some(lex_raw);
+    let canon_opt = std::fs::canonicalize(raw_tmp)
+        .ok()
+        .map(|p| normalize_vfs_path_lexical(&p.to_string_lossy()))
+        .filter(|c| !is_unsafe_root_tmp_dir(c));
+
+    match (canon_opt, lex_opt) {
+        (Some(canon), Some(lex)) if canon != lex => CachedOsTmpInfo {
+            primary: Some(canon),
+            lexical_alias: Some(lex),
+        },
+        (Some(canon), _) => CachedOsTmpInfo {
+            primary: Some(canon),
+            lexical_alias: None,
+        },
+        (None, Some(lex)) => CachedOsTmpInfo {
+            primary: Some(lex),
+            lexical_alias: None,
+        },
+        (None, None) => CachedOsTmpInfo {
+            primary: None,
+            lexical_alias: None,
+        },
+    }
+}
+
+#[inline]
+fn os_tmp_info() -> &'static CachedOsTmpInfo {
+    static OS_TMP_INFO: std::sync::OnceLock<CachedOsTmpInfo> = std::sync::OnceLock::new();
+    OS_TMP_INFO.get_or_init(|| build_os_tmp_info(&std::env::temp_dir()))
+}
+
+#[inline]
+fn matches_bidirectional_tmp_alias(
+    norm_cand: &str,
+    norm_pref: &str,
+    tmp_info: &CachedOsTmpInfo,
+) -> bool {
+    let aliases = [
+        tmp_info.primary.as_deref(),
+        tmp_info.lexical_alias.as_deref(),
+    ];
     if norm_pref == "/tmp" || norm_pref.starts_with("/tmp/") {
-        static NORMALIZED_OS_TMP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        let os_tmp = NORMALIZED_OS_TMP
-            .get_or_init(|| normalize_vfs_path_lexical(&std::env::temp_dir().to_string_lossy()));
-        if !os_tmp.is_empty() {
+        for os_tmp in aliases.into_iter().flatten() {
             let mapped_pref: Cow<'_, str> = if norm_pref == "/tmp" {
-                Cow::Borrowed(os_tmp.as_str())
+                Cow::Borrowed(os_tmp)
             } else {
                 Cow::Owned(format!("{}{}", os_tmp, &norm_pref[4..]))
             };
@@ -386,28 +496,95 @@ pub fn vfs_normalized_candidate_matches_prefix(norm_cand: &str, allowed_prefix: 
         }
     }
 
+    for (idx, os_tmp_opt) in aliases.iter().enumerate() {
+        let Some(os_tmp) = *os_tmp_opt else {
+            continue;
+        };
+        let suffix_opt = if norm_pref == os_tmp {
+            Some("")
+        } else if let Some(rem) = norm_pref.strip_prefix(os_tmp)
+            && rem.starts_with('/')
+        {
+            Some(rem)
+        } else {
+            None
+        };
+        if let Some(suffix) = suffix_opt {
+            let posix_pref: Cow<'_, str> = if suffix.is_empty() {
+                Cow::Borrowed("/tmp")
+            } else {
+                Cow::Owned(format!("/tmp{}", suffix))
+            };
+            if path_starts_with_dir_boundary(norm_cand, &posix_pref) {
+                return true;
+            }
+            if let Some(other_alias) = aliases[1 - idx] {
+                let cross_pref: Cow<'_, str> = if suffix.is_empty() {
+                    Cow::Borrowed(other_alias)
+                } else {
+                    Cow::Owned(format!("{}{}", other_alias, suffix))
+                };
+                if path_starts_with_dir_boundary(norm_cand, &cross_pref) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+#[inline]
+fn anchor_rel_to_base<'a>(norm_path: &'a str, is_abs: bool, norm_cwd: &'a str) -> Cow<'a, str> {
+    if is_abs {
+        return Cow::Borrowed(norm_path);
+    }
+    if norm_path == "." {
+        return Cow::Borrowed(norm_cwd);
+    }
+    let sep = if norm_cwd.ends_with('/') { "" } else { "/" };
+    let joined = format!("{}{}{}", norm_cwd, sep, norm_path);
+    if norm_path == ".." || norm_path.starts_with("../") || norm_path.contains("/..") {
+        Cow::Owned(normalize_vfs_path_lexical(&joined))
+    } else {
+        Cow::Owned(joined)
+    }
+}
+
+#[inline]
+pub(crate) fn vfs_normalized_candidate_matches_prefix_with_tmp(
+    raw_norm_cand: &str,
+    allowed_prefix: &str,
+    tmp_info: &CachedOsTmpInfo,
+) -> bool {
+    let trimmed_pref = allowed_prefix.trim();
+    if trimmed_pref.is_empty() {
+        return false;
+    }
+    if trimmed_pref == "*" || trimmed_pref == "/" {
+        return true;
+    }
+    let norm_cand_cow = normalize_vfs_path_cow(raw_norm_cand);
+    let norm_cand = norm_cand_cow.as_ref();
+    let norm_pref = normalize_vfs_path_cow(trimmed_pref);
+    if path_starts_with_dir_boundary(norm_cand, &norm_pref) {
+        return true;
+    }
+
+    // Bidirectional cross-platform `/tmp` <-> `std::env::temp_dir()` equivalence
+    if matches_bidirectional_tmp_alias(norm_cand, &norm_pref, tmp_info) {
+        return true;
+    }
+
     // Relative-vs-absolute workspace resolution against cached `current_dir()`
     let cand_is_abs = is_abs_normalized_vfs_path(norm_cand);
     let pref_is_abs = is_abs_normalized_vfs_path(&norm_pref);
+    let cand_has_dotdot = !cand_is_abs && (norm_cand == ".." || norm_cand.starts_with("../"));
+    let pref_has_dotdot = !pref_is_abs && (norm_pref == ".." || norm_pref.starts_with("../"));
     let cwd_info = workspace_cwd_info();
-    if cand_is_abs != pref_is_abs {
+    if cand_is_abs != pref_is_abs || cand_has_dotdot || pref_has_dotdot {
         let check_against_base = |norm_cwd: &str| -> bool {
-            let abs_cand: Cow<'_, str> = if cand_is_abs {
-                Cow::Borrowed(norm_cand)
-            } else if norm_cand == "." {
-                Cow::Borrowed(norm_cwd)
-            } else {
-                let sep = if norm_cwd.ends_with('/') { "" } else { "/" };
-                Cow::Owned(format!("{}{}{}", norm_cwd, sep, norm_cand))
-            };
-            let abs_pref: Cow<'_, str> = if pref_is_abs {
-                Cow::Borrowed(norm_pref.as_ref())
-            } else if norm_pref == "." {
-                Cow::Borrowed(norm_cwd)
-            } else {
-                let sep = if norm_cwd.ends_with('/') { "" } else { "/" };
-                Cow::Owned(format!("{}{}{}", norm_cwd, sep, norm_pref))
-            };
+            let abs_cand = anchor_rel_to_base(norm_cand, cand_is_abs, norm_cwd);
+            let abs_pref = anchor_rel_to_base(&norm_pref, pref_is_abs, norm_cwd);
             path_starts_with_dir_boundary(&abs_cand, &abs_pref)
         };
         if check_against_base(&cwd_info.canonical) {
@@ -446,6 +623,12 @@ pub fn vfs_normalized_candidate_matches_prefix(norm_cand: &str, allowed_prefix: 
         }
     }
     false
+}
+
+/// Checks a pre-normalized candidate path (`norm_cand`) against `allowed_prefix`.
+#[inline]
+pub fn vfs_normalized_candidate_matches_prefix(norm_cand: &str, allowed_prefix: &str) -> bool {
+    vfs_normalized_candidate_matches_prefix_with_tmp(norm_cand, allowed_prefix, os_tmp_info())
 }
 
 /// Verifies whether `candidate_path` is authorized by `allowed_prefix` under OCap VFS rules:

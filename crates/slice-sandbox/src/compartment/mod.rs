@@ -5,12 +5,12 @@ pub mod pkey;
 pub use pkey::{HardwareProtectionDomain, PkruDomainGuard, current_thread_pkru};
 
 use crate::net::{
-    extract_clean_hostname_and_port, is_cloud_metadata_ssrf_target,
-    is_private_or_loopback_ssrf_target,
+    canonicalize_net_grant_entry, is_cloud_metadata_clean_host, is_private_or_loopback_clean_host,
+    parse_net_connect_target, parse_net_grant_parts,
 };
 use crate::vfs::{
     exec_binary_matches, is_rejected_vfs_candidate, normalize_vfs_path_cow,
-    vfs_normalized_candidate_matches_prefix,
+    vfs_normalized_candidate_matches_prefix, vfs_prefix_matches,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -116,6 +116,23 @@ impl Default for CapabilityToken {
     }
 }
 
+/// Monotonic capability narrowing request passed to [`CapabilityToken::attenuate`].
+///
+/// Every `Option<&[String]>` field uses `None` to mean "inherit parent grants unchanged"
+/// and `Some(slice)` to mean "strictly intersect against `slice`" (`parent & requested`,
+/// where `Some(&[])` yields an empty grant set / deny-all).
+#[derive(Debug, Clone, Default)]
+pub struct CapabilityAttenuationRequest<'a> {
+    pub allow_read: Option<&'a [String]>,
+    pub allow_write: Option<&'a [String]>,
+    pub allow_net: Option<&'a [String]>,
+    pub allow_exec: Option<&'a [String]>,
+    pub allow_env: Option<&'a [String]>,
+    pub allow_checkpoints: Option<bool>,
+    pub max_checkpoints: Option<u32>,
+    pub consumed_checkpoints: u32,
+}
+
 impl CapabilityToken {
     /// Pure compute compartment with zero I/O or environment authority.
     #[inline]
@@ -123,36 +140,58 @@ impl CapabilityToken {
         Self::default()
     }
 
-    pub fn with_read_prefix(mut self, prefix: impl Into<String>) -> Self {
-        let raw = prefix.into();
-        let trimmed = raw.trim();
+    #[inline]
+    pub fn push_read_prefix(&mut self, prefix: &str) {
+        let trimmed = prefix.trim();
         if !trimmed.is_empty() {
             let canon = if trimmed == "*" || trimmed == "/" {
                 trimmed.to_string()
             } else {
                 crate::vfs::normalize_vfs_path_lexical(trimmed)
             };
-            self.allowed_read_prefixes.push(canon);
+            if !self.allowed_read_prefixes.contains(&canon) {
+                self.allowed_read_prefixes.push(canon);
+            }
         }
+    }
+
+    #[inline]
+    pub fn push_write_prefix(&mut self, prefix: &str) {
+        let trimmed = prefix.trim();
+        if !trimmed.is_empty() {
+            let canon = if trimmed == "*" || trimmed == "/" {
+                trimmed.to_string()
+            } else {
+                crate::vfs::normalize_vfs_path_lexical(trimmed)
+            };
+            if !self.allowed_write_prefixes.contains(&canon) {
+                self.allowed_write_prefixes.push(canon);
+            }
+        }
+    }
+
+    #[inline]
+    pub fn insert_net_host(&mut self, host: &str) {
+        if let Some(canon) = canonicalize_net_grant_entry(host) {
+            self.allowed_net_hosts.insert(canon);
+        }
+    }
+
+    pub fn with_read_prefix(mut self, prefix: impl Into<String>) -> Self {
+        let raw = prefix.into();
+        self.push_read_prefix(&raw);
         self
     }
 
     pub fn with_write_prefix(mut self, prefix: impl Into<String>) -> Self {
         let raw = prefix.into();
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            let canon = if trimmed == "*" || trimmed == "/" {
-                trimmed.to_string()
-            } else {
-                crate::vfs::normalize_vfs_path_lexical(trimmed)
-            };
-            self.allowed_write_prefixes.push(canon);
-        }
+        self.push_write_prefix(&raw);
         self
     }
 
     pub fn with_net_host(mut self, host: impl Into<String>) -> Self {
-        self.allowed_net_hosts.insert(host.into());
+        let raw = host.into();
+        self.insert_net_host(&raw);
         self
     }
 
@@ -162,7 +201,14 @@ impl CapabilityToken {
     }
 
     pub fn with_exec_binary(mut self, binary: impl Into<String>) -> Self {
-        self.allowed_exec_binaries.push(binary.into());
+        let raw = binary.into();
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let owned = trimmed.to_string();
+            if !self.allowed_exec_binaries.contains(&owned) {
+                self.allowed_exec_binaries.push(owned);
+            }
+        }
         self
     }
 
@@ -194,6 +240,184 @@ impl CapabilityToken {
     pub fn with_max_checkpoints(mut self, max: Option<u32>) -> Self {
         self.set_max_checkpoints(max);
         self
+    }
+
+    /// Produces a monotonically attenuated child [`CapabilityToken`] (`child <= self`) across
+    /// `FsRead`, `FsWrite`, `NetCap`, `ExecCap`, `EnvCap`, and `Checkpoints`.
+    ///
+    /// Security invariants:
+    /// 1. **Strict Port-Scope Lattice**: A port-scoped parent grant (`"api.internal:443"`) NEVER
+    ///    authorizes a bare all-ports child grant (`"api.internal"`). A bare child grant is only
+    ///    admitted if the parent itself holds bare `"api.internal"`, or holds `"*"` AND the host
+    ///    is a public non-SSRF target (`!is_private_or_loopback_clean_host`).
+    /// 2. **Wildcard SSRF Containment**: Wildcard `"*"` in the parent never materializes an
+    ///    explicit grant for loopback, RFC1918, link-local, non-canonical numeric IPv4, or cloud
+    ///    metadata endpoints (`"127.0.0.1:6379"`, `"::1"`, `"169.254.169.254"`).
+    /// 3. **VFS Traversal & Prefix Containment**: Rejects `is_rejected_vfs_candidate` (`..`, NUL,
+    ///    Win32 devices/UNC) and requires every requested prefix to match an existing parent prefix.
+    /// 4. **Host Env Value Integrity**: `allow_env` filters by key membership only and copies the
+    ///    parent's exact value, preventing untrusted callers from spoofing `KEY=evil`.
+    pub fn attenuate(&self, req: &CapabilityAttenuationRequest<'_>) -> Self {
+        let mut child = Self::pure_compute();
+
+        match req.allow_read {
+            Some(requested) => {
+                for r in requested {
+                    if !is_rejected_vfs_candidate(r)
+                        && self
+                            .allowed_read_prefixes
+                            .iter()
+                            .any(|p| vfs_prefix_matches(r, p))
+                    {
+                        child.push_read_prefix(r);
+                    }
+                }
+            }
+            None => {
+                for p in &self.allowed_read_prefixes {
+                    child.push_read_prefix(p);
+                }
+            }
+        }
+
+        match req.allow_write {
+            Some(requested) => {
+                for w in requested {
+                    if !is_rejected_vfs_candidate(w)
+                        && self
+                            .allowed_write_prefixes
+                            .iter()
+                            .any(|p| vfs_prefix_matches(w, p))
+                    {
+                        child.push_write_prefix(w);
+                    }
+                }
+            }
+            None => {
+                for p in &self.allowed_write_prefixes {
+                    child.push_write_prefix(p);
+                }
+            }
+        }
+
+        let mut norm_parent_nets =
+            FxHashSet::with_capacity_and_hasher(self.allowed_net_hosts.len(), Default::default());
+        for raw_parent in &self.allowed_net_hosts {
+            if let Some(canon) = canonicalize_net_grant_entry(raw_parent) {
+                norm_parent_nets.insert(canon);
+            }
+        }
+
+        match req.allow_net {
+            Some(requested) => {
+                let parent_wildcard = norm_parent_nets.contains("*");
+                for raw_req in requested {
+                    let Some((canon_host, is_ipv6, port_opt)) = parse_net_grant_parts(raw_req)
+                    else {
+                        continue;
+                    };
+                    if canon_host == "*" {
+                        if parent_wildcard {
+                            child.allowed_net_hosts.insert("*".to_string());
+                        }
+                        continue;
+                    }
+                    if is_cloud_metadata_clean_host(&canon_host) {
+                        continue;
+                    }
+                    let parent_has_bare = norm_parent_nets.contains(&canon_host);
+                    let wildcard_allows_public =
+                        parent_wildcard && !is_private_or_loopback_clean_host(&canon_host);
+                    match port_opt {
+                        None => {
+                            if parent_has_bare || wildcard_allows_public {
+                                child.allowed_net_hosts.insert(canon_host);
+                            }
+                        }
+                        Some(port) => {
+                            let formatted = if is_ipv6 {
+                                format!("[{}]:{}", canon_host, port)
+                            } else {
+                                format!("{}:{}", canon_host, port)
+                            };
+                            if norm_parent_nets.contains(&formatted)
+                                || parent_has_bare
+                                || wildcard_allows_public
+                            {
+                                child.allowed_net_hosts.insert(formatted);
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                child.allowed_net_hosts = norm_parent_nets;
+            }
+        }
+
+        match req.allow_exec {
+            Some(requested) => {
+                let parent_wildcard = self.allowed_exec_binaries.iter().any(|a| a.trim() == "*");
+                for req_bin in requested {
+                    let trimmed = req_bin.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if trimmed == "*" {
+                        if parent_wildcard {
+                            child = child.with_exec_binary("*");
+                        }
+                    } else if self
+                        .allowed_exec_binaries
+                        .iter()
+                        .any(|allowed| exec_binary_matches(trimmed, allowed))
+                    {
+                        child = child.with_exec_binary(trimmed);
+                    }
+                }
+            }
+            None => {
+                for eb in &self.allowed_exec_binaries {
+                    child = child.with_exec_binary(eb.clone());
+                }
+            }
+        }
+
+        match req.allow_env {
+            Some(requested) => {
+                for k in requested {
+                    let kt = k.trim();
+                    if let Some(val) = self.allowed_env_keys.get(kt) {
+                        child.allowed_env_keys.insert(kt.to_string(), val.clone());
+                    }
+                }
+            }
+            None => {
+                child.allowed_env_keys = self.allowed_env_keys.clone();
+            }
+        }
+
+        let parent_rem_cp = self
+            .max_checkpoints
+            .map(|m| m.saturating_sub(req.consumed_checkpoints));
+        let child_allow_cp = self.allow_checkpoints
+            && req.allow_checkpoints.unwrap_or(true)
+            && req.max_checkpoints != Some(0)
+            && parent_rem_cp != Some(0);
+        let child_max_cp = if !child_allow_cp {
+            Some(0)
+        } else {
+            match (parent_rem_cp, req.max_checkpoints) {
+                (Some(p), Some(c)) => Some(p.min(c)),
+                (Some(p), None) => Some(p),
+                (None, Some(c)) => Some(c),
+                (None, None) => None,
+            }
+        };
+        child.allow_checkpoints = child_allow_cp;
+        child.max_checkpoints = child_max_cp;
+
+        child
     }
 }
 
@@ -508,70 +732,44 @@ impl TenantCompartment {
         if self.capabilities.allowed_net_hosts.is_empty() {
             return Err(self.trap_net_access(host));
         }
-        let trimmed = host.trim();
-        if trimmed.is_empty() || trimmed.bytes().any(|b| b <= 0x20 || b == 0x7F) {
+        let Some(parsed) = parse_net_connect_target(host) else {
+            return Err(self.trap_net_access(host));
+        };
+        let clean_host = parsed.clean_host.as_ref();
+        if is_cloud_metadata_clean_host(clean_host) {
             return Err(self.trap_net_access(host));
         }
-
-        if trimmed.contains("://") {
-            let Some(parsed) = crate::net::parse_http_authority_and_path(trimmed) else {
-                return Err(self.trap_net_access(host));
-            };
-            let clean_host = parsed.clean_host.as_ref();
-            if is_cloud_metadata_ssrf_target(clean_host) {
-                return Err(self.trap_net_access(host));
-            }
-            if self.capabilities.allowed_net_hosts.contains(clean_host)
-                || contains_host_and_port(
-                    &self.capabilities.allowed_net_hosts,
-                    clean_host,
-                    parsed.port,
-                )
-            {
-                return Ok(());
-            }
-            if self.capabilities.allowed_net_hosts.contains("*")
-                && !is_private_or_loopback_ssrf_target(clean_host)
-            {
-                return Ok(());
-            }
-            return Err(self.trap_net_access(host));
-        }
-
-        if trimmed.contains(['@', '/', '?', '#', '\\']) {
-            return Err(self.trap_net_access(host));
-        }
-        if is_cloud_metadata_ssrf_target(trimmed) {
-            return Err(self.trap_net_access(host));
-        }
-        let (clean_host, explicit_port, scheme_default_port) =
-            extract_clean_hostname_and_port(trimmed);
-        if clean_host.is_empty() {
-            return Err(self.trap_net_access(host));
-        }
-        if self.capabilities.allowed_net_hosts.contains(trimmed)
-            || self
-                .capabilities
-                .allowed_net_hosts
-                .contains(clean_host.as_ref())
-        {
+        if self.capabilities.allowed_net_hosts.contains(clean_host) {
             return Ok(());
         }
-        if let Some(port) = explicit_port {
-            if contains_host_and_port(&self.capabilities.allowed_net_hosts, &clean_host, port) {
+        if parsed.is_ipv6 && parsed.explicit_port.is_none() {
+            let mut v6_buf = [0u8; 64];
+            if clean_host.len() + 2 <= v6_buf.len() {
+                v6_buf[0] = b'[';
+                v6_buf[1..1 + clean_host.len()].copy_from_slice(clean_host.as_bytes());
+                v6_buf[1 + clean_host.len()] = b']';
+                if let Ok(bracketed) = core::str::from_utf8(&v6_buf[..clean_host.len() + 2])
+                    && self.capabilities.allowed_net_hosts.contains(bracketed)
+                {
+                    return Ok(());
+                }
+            }
+        }
+        if let Some(port) = parsed.explicit_port {
+            if contains_host_and_port(&self.capabilities.allowed_net_hosts, clean_host, port) {
                 return Ok(());
             }
-        } else if let Some(def_port) = scheme_default_port {
-            if contains_host_and_port(&self.capabilities.allowed_net_hosts, &clean_host, def_port) {
+        } else if let Some(def_port) = parsed.scheme_default_port {
+            if contains_host_and_port(&self.capabilities.allowed_net_hosts, clean_host, def_port) {
                 return Ok(());
             }
-        } else if contains_host_and_port(&self.capabilities.allowed_net_hosts, &clean_host, 443)
-            || contains_host_and_port(&self.capabilities.allowed_net_hosts, &clean_host, 80)
+        } else if contains_host_and_port(&self.capabilities.allowed_net_hosts, clean_host, 443)
+            || contains_host_and_port(&self.capabilities.allowed_net_hosts, clean_host, 80)
         {
             return Ok(());
         }
         if self.capabilities.allowed_net_hosts.contains("*")
-            && !is_private_or_loopback_ssrf_target(&clean_host)
+            && !is_private_or_loopback_clean_host(clean_host)
         {
             return Ok(());
         }
