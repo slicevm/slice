@@ -25,12 +25,8 @@ fn x86_ospke_enabled() -> bool {
         2 => return true,
         _ => {}
     }
-    // SAFETY: `CPUID` leaves 0 and 7 are unprivileged on all `x86_64` CPUs; `ECX` bit 4 (`OSPKE`)
-    // is set by hardware iff the OS kernel enabled `CR4.PKE`, making `RDPKRU`/`WRPKRU` legal.
-    let supported = unsafe {
-        let max_leaf = core::arch::x86_64::__cpuid(0).eax;
-        max_leaf >= 7 && (core::arch::x86_64::__cpuid_count(7, 0).ecx & (1 << 4)) != 0
-    };
+    let max_leaf = core::arch::x86_64::__cpuid(0).eax;
+    let supported = max_leaf >= 7 && (core::arch::x86_64::__cpuid_count(7, 0).ecx & (1 << 4)) != 0;
     OSPKE_STATE.store(if supported { 2 } else { 1 }, Ordering::Relaxed);
     supported
 }
