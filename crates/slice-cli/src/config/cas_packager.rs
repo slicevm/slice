@@ -1,9 +1,36 @@
 use super::{apply_boacas_override, find_project_manifest_path};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use slice_cas::CasBuilder;
 use slice_engine::compile_source_to_bytecode;
 use slice_sandbox::SliceManifest;
-use std::path::Path;
+use std::env;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static TEMP_CAS_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// Generates a collision-resistant, non-predictable temporary `.cas` staging path (`CLI-SEC-02`)
+/// combining `prefix`, process ID, monotonic sequence counter, and nanosecond timestamp,
+/// and rejects any pre-existing symlink at that path.
+pub(crate) fn unique_temp_cas_path(prefix: &str) -> Result<PathBuf> {
+    let pid = std::process::id();
+    let seq = TEMP_CAS_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let candidate = env::temp_dir().join(format!("{}_{}_{}_{}.cas", prefix, pid, seq, nanos));
+    if let Ok(meta) = std::fs::symlink_metadata(&candidate)
+        && meta.file_type().is_symlink()
+    {
+        bail!(
+            "Refusing to write staging CAS archive to pre-existing symlink: {}",
+            candidate.display()
+        );
+    }
+    Ok(candidate)
+}
 
 #[cfg(test)]
 pub(crate) fn build_cas_archive(

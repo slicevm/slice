@@ -10,14 +10,14 @@ use crate::slicesnp_codec::{
     SLICESNP_FLAG_PURE_STATIC_EXPORTS, SnpCursor, decode_slicesnp_import_cached,
     visit_pure_static_exports,
 };
-use crate::value_and_ast::{BytecodeOp, ExecutionTier, JsValue, Stmt, TIER1_PROMOTION_THRESHOLD};
+use crate::value_and_ast::{BytecodeOp, ExecutionTier, JsValue, Stmt};
 use compact_str::CompactString;
 use slice_cas::MappedCasArchive;
 use slice_sandbox::SandboxViolation;
 use std::time::Instant;
 
 impl SliceIsolate {
-    #[inline]
+    #[inline(always)]
     pub(crate) fn set_env_var_str(&mut self, key: &str, val: JsValue) {
         if let Some(slot) = self.env_vars.get_mut(key) {
             *slot = val;
@@ -76,6 +76,7 @@ impl SliceIsolate {
     /// Returns `Ok(true)` if `entry` was resolved in Tier-0, or `Ok(false)` if `entry` (or one of
     /// its transitive imports) is a Tier-1 `SLICEBC\x01`/`SLICEBOA` module requiring Tier-1 Boa
     /// promotion of the `.cas` entrypoint.
+    #[inline]
     pub(crate) fn bind_tier0_cas_entry<'a>(
         &mut self,
         archive: &'a MappedCasArchive,
@@ -248,19 +249,12 @@ impl SliceIsolate {
             } else {
                 String::new()
             };
-        if has_secrets {
-            for line in &self.stdout {
-                self.verify_egress_not_leaked(line)?;
-            }
-            self.verify_egress_not_leaked(&ret_str)?;
-            if let Some(ref rj) = self.last_return_json {
-                self.verify_egress_not_leaked(rj)?;
-            }
-        }
+        self.verify_isolate_outputs_not_leaked(&ret_str, false)?;
         let total_ns = start.elapsed().as_nanos() as u64;
         Ok((instantiate_ns, total_ns, ret_str))
     }
 
+    #[inline]
     pub(crate) fn execute_slicesnp_v2_flat_llint(
         &mut self,
         bytecode: &[u8],
@@ -306,6 +300,7 @@ impl SliceIsolate {
         let entry_referrer = cas
             .and_then(|a| a.entrypoint_blob())
             .map(|e| e.original_specifier.as_str());
+        let mut active_hashes = Vec::new();
 
         for _ in 0..op_count {
             self.compartment.consume_fuel(1)?;
@@ -337,7 +332,7 @@ impl SliceIsolate {
                         && let Some(entry) =
                             archive.resolve_specifier_from(entry_referrer, specifier)
                     {
-                        let mut active_hashes = Vec::new();
+                        active_hashes.clear();
                         if !self.bind_tier0_cas_entry(archive, entry, dst, &mut active_hashes)? {
                             return self.promote_tier0_cas_to_tier1_boa(
                                 archive,
@@ -488,57 +483,8 @@ impl SliceIsolate {
                     ) else {
                         break;
                     };
-                    let iterations = (limit - loop_start).max(0) as u64;
-                    let fuel_cost = (iterations / 250).max(1);
-                    self.compartment.consume_fuel(fuel_cost)?;
-                    if iterations >= 1_000 {
-                        self.current_tier = ExecutionTier::Tier2PeakNative;
-                    } else if iterations >= TIER1_PROMOTION_THRESHOLD {
-                        self.current_tier = ExecutionTier::Tier1Baseline;
-                    }
-                    let mut acc = self
-                        .env_vars
-                        .get(acc_var)
-                        .map(|v| v.to_number())
-                        .unwrap_or(0.0);
-                    if iterations > 0 {
-                        let n = iterations as u128;
-                        let two_first_last = (loop_start as i128) + (limit as i128) - 1;
-                        let arith_sum_i128 = if n.is_multiple_of(2) {
-                            ((n / 2) as i128).saturating_mul(two_first_last)
-                        } else {
-                            (n as i128).saturating_mul(two_first_last / 2)
-                        };
-                        if (scale - 1.0).abs() < f64::EPSILON {
-                            let sum_i: i64 = if n.is_multiple_of(2) {
-                                ((n / 2) as u64).wrapping_mul(two_first_last as u64) as i64
-                            } else {
-                                (n as u64).wrapping_mul((two_first_last / 2) as u64) as i64
-                            };
-                            acc += sum_i as f64;
-                        } else {
-                            let exact_int_domain = scale.is_finite()
-                                && scale.fract() == 0.0
-                                && acc.is_finite()
-                                && acc.fract() == 0.0
-                                && arith_sum_i128.unsigned_abs() < (1u128 << 53)
-                                && (acc.abs() + (arith_sum_i128 as f64 * scale).abs())
-                                    < 9_007_199_254_740_992.0;
-                            if exact_int_domain {
-                                acc += (arith_sum_i128 as f64) * scale;
-                            } else {
-                                let mut i = loop_start;
-                                while i < limit {
-                                    acc += (i as f64) * scale;
-                                    i += 1;
-                                }
-                            }
-                        }
-                    }
-                    let res = JsValue::Number(acc);
-                    self.set_env_var_str(acc_var, res.clone());
-                    self.set_env_var_str(idx_var, JsValue::Number(limit as f64));
-                    last_val = res;
+                    last_val =
+                        self.exec_monomorphic_for_loop(acc_var, idx_var, loop_start, limit, scale)?;
                 }
                 18 => {
                     let (Some(dst), Some(src)) = (cur.read_str(), cur.read_str()) else {
@@ -567,15 +513,7 @@ impl SliceIsolate {
         } else {
             String::new()
         };
-        if has_secrets {
-            for line in &self.stdout {
-                self.verify_egress_not_leaked(line)?;
-            }
-            self.verify_egress_not_leaked(&ret_str)?;
-            if let Some(ref rj) = self.last_return_json {
-                self.verify_egress_not_leaked(rj)?;
-            }
-        }
+        self.verify_isolate_outputs_not_leaked(&ret_str, false)?;
         Ok((instantiate_ns, total_ns, ret_str))
     }
 }

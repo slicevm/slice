@@ -6,7 +6,7 @@
 //! - [`ast_walker`]: Oxc AST statement/expression walkers, binding pattern extractors, `has_top_level_await`, and span edit slicers.
 //! - [`cjs_rewrites`]: Oxc AST `require(...)`, dynamic `import(...)`, `import.meta`, and `Buffer.*` fast-path rewriters.
 //! - [`esm_transform`]: `transform_module_to_cjs`, `try_transform_esm_to_cjs_ast`, and CJS lazy barrel getter lowering.
-//! - [`tree_shaker`]: `UsedExports`, `ModuleRequireSummary`, `analyze_module_used_exports`, and `prune_and_minify_cjs_module_ast`.
+//! - [`tree_shaker`]: `UsedExports`, `ModuleRequireSummary`, `analyze_module_used_exports_from_summaries`, and `prune_and_minify_cjs_module_ast`.
 //! - [`lazy_and_inline`]: `inline_cold_method_requires_ast` and `collect_eager_module_indices`.
 
 pub mod ast_walker;
@@ -35,8 +35,8 @@ pub use cjs_rewrites::{
 pub use esm_transform::{has_esm_default_export_marker, transform_module_to_cjs};
 pub use lazy_and_inline::{collect_eager_module_indices, inline_cold_method_requires_ast};
 pub use tree_shaker::{
-    ModuleRequireSummary, UsedExports, analyze_module_used_exports,
-    analyze_module_used_exports_from_summaries, extract_module_require_summary,
-    extract_referenced_identifiers, extract_referenced_identifiers_with_offsets,
-    is_js_ident_continue, is_js_ident_start, is_js_keyword, prune_and_minify_cjs_module_ast,
+    ModuleRequireSummary, UsedExports, analyze_module_used_exports_from_summaries,
+    extract_module_require_summary, extract_referenced_identifiers,
+    extract_referenced_identifiers_with_offsets, is_js_ident_continue, is_js_ident_start,
+    is_js_keyword, prune_and_minify_cjs_module_ast,
 };

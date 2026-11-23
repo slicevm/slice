@@ -61,15 +61,9 @@ impl Drop for PageAlignedSlab {
 /// Pre-allocated, `4096`-byte page-aligned fixed buffer pool registered with the kernel completion ring.
 ///
 /// Backed by a single contiguous `4096`-byte aligned slab (`PageAlignedSlab`) so every slot begins on an
-/// exact `4 KB` hardware page boundary (required for `O_DIRECT` and eliminating 17-page straddling on
-/// 64 KB `io_uring` pinned buffers) with immutable capacity and stable virtual addresses for the entire
-/// lifetime of the pool.
-///
-/// Performance & Safety (`IO-PERF-01`, `IO-SEC-01`, `#162`):
-/// - Uses a flat pre-allocated LIFO `free_stack` (`Box<[u16]>`) so recently released 64 KB slab buffers
-///   are reused while still hot in L1/L2 cache.
-/// - Tracks `in_flight` kernel DMA slots so unharvested kernel operations can never alias safe Rust
-///   `&[u8]` / `&mut [u8]` slice borrows or premature slot releases.
+/// exact `4 KB` hardware page boundary with immutable capacity and stable virtual addresses for the
+/// lifetime of the pool. Uses a LIFO `free_stack` (`Box<[u16]>`) for cache-warm reuse and tracks
+/// `in_flight` kernel DMA slots to prevent aliasing safe Rust slice borrows.
 pub struct RegisteredBufferPool {
     slab: PageAlignedSlab,
     slot_count: usize,
@@ -112,22 +106,23 @@ impl RegisteredBufferPool {
 
     #[inline]
     pub(crate) fn slot_ptr(&self, slot: usize) -> *const u8 {
-        debug_assert!(slot < self.slot_count);
+        assert!(slot < self.slot_count);
         if self.stride == 0 {
             return self.slab.ptr.as_ptr();
         }
-        // SAFETY: `slot < self.slot_count` and `self.slab` has `slot_count * stride` allocated bytes.
+        // SAFETY: `assert!(slot < self.slot_count)` guarantees `slot * self.stride` is within the
+        // `slot_count * stride` byte allocation owned by `self.slab`.
         unsafe { self.slab.ptr.as_ptr().add(slot * self.stride) }
     }
 
     #[inline]
     pub(crate) fn slot_mut_ptr(&mut self, slot: usize) -> *mut u8 {
-        debug_assert!(slot < self.slot_count);
+        assert!(slot < self.slot_count);
         if self.stride == 0 {
             return self.slab.ptr.as_ptr();
         }
-        // SAFETY: `slot < self.slot_count`, `&mut self` guarantees exclusive pool access,
-        // and `self.slab` has `slot_count * stride` allocated bytes.
+        // SAFETY: `assert!(slot < self.slot_count)` and `&mut self` guarantee exclusive in-bounds
+        // pointer arithmetic within `self.slab`'s `slot_count * stride` allocation.
         unsafe { self.slab.ptr.as_ptr().add(slot * self.stride) }
     }
 
@@ -167,20 +162,27 @@ impl RegisteredBufferPool {
     }
 
     /// Acquires the most recently released (cache-warm) slab slot and returns `(slot_idx, &mut [u8])`.
-    #[inline]
+    #[inline(always)]
     pub fn acquire(&mut self) -> Option<(u16, &mut [u8])> {
         while self.free_len > 0 {
             self.free_len -= 1;
             let idx = self.free_stack[self.free_len];
             let slot = idx as usize;
-            if self.in_flight[slot] {
+            if slot >= self.slot_count || self.in_flight[slot] {
                 continue;
             }
             self.in_use[slot] = true;
-            let ptr = self.slot_mut_ptr(slot);
-            // SAFETY: `slot < self.slot_count`, `!self.in_flight[slot]`, `buf_size <= stride`,
-            // and `&mut self` holds exclusive access to the slab for the returned borrow lifetime.
-            let slice = unsafe { core::slice::from_raw_parts_mut(ptr, self.buf_size) };
+            // SAFETY: `slot < self.slot_count` and `!self.in_flight[slot]` were verified above,
+            // `self.buf_size <= self.stride` (`slot * stride + buf_size <= slab capacity`), and
+            // `&mut self` holds exclusive access to the slab for the returned borrow lifetime.
+            let slice = unsafe {
+                let ptr = if self.stride == 0 {
+                    self.slab.ptr.as_ptr()
+                } else {
+                    self.slab.ptr.as_ptr().add(slot * self.stride)
+                };
+                core::slice::from_raw_parts_mut(ptr, self.buf_size)
+            };
             return Some((idx, slice));
         }
         None
@@ -193,7 +195,7 @@ impl RegisteredBufferPool {
             self.free_len -= 1;
             let idx = self.free_stack[self.free_len];
             let slot = idx as usize;
-            if self.in_flight[slot] {
+            if slot >= self.slot_count || self.in_flight[slot] {
                 continue;
             }
             self.in_use[slot] = true;
@@ -248,10 +250,10 @@ impl RegisteredBufferPool {
     }
 
     /// Releases an active slab slot back onto the cache-warm LIFO free stack (no-op if `in_flight` or free).
-    #[inline]
+    #[inline(always)]
     pub fn release(&mut self, idx: u16) {
         let slot = idx as usize;
-        if slot < self.in_use.len() && self.in_use[slot] && !self.in_flight[slot] {
+        if slot < self.slot_count && self.in_use[slot] && !self.in_flight[slot] {
             self.in_use[slot] = false;
             self.free_stack[self.free_len] = idx;
             self.free_len += 1;
@@ -261,18 +263,13 @@ impl RegisteredBufferPool {
     /// Zeroizes the first `dirty_len` bytes of an active slab slot and releases it back to the pool (`IO-SEC-01`).
     #[inline]
     pub fn release_zeroed(&mut self, idx: u16, dirty_len: usize) {
-        let slot = idx as usize;
-        if slot < self.in_use.len() && self.in_use[slot] && !self.in_flight[slot] {
-            let n = dirty_len.min(self.buf_size);
-            let ptr = self.slot_mut_ptr(slot);
-            // SAFETY: `slot < self.slot_count`, `!self.in_flight[slot]`, and `n <= self.buf_size <= self.stride`.
-            let slice = unsafe { core::slice::from_raw_parts_mut(ptr, n) };
-            slice.fill(0);
-            std::hint::black_box(slice);
-            self.in_use[slot] = false;
-            self.free_stack[self.free_len] = idx;
-            self.free_len += 1;
+        if let Some(buf) = self.buffer_mut(idx) {
+            let n = dirty_len.min(buf.len());
+            let dirty = &mut buf[..n];
+            dirty.fill(0);
+            std::hint::black_box(dirty);
         }
+        self.release(idx);
     }
 
     /// Returns an immutable slice of up to `len` bytes from an active (`in_use`, non-`in_flight`) slab slot (`IO-SEC-01`).

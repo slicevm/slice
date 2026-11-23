@@ -23,7 +23,9 @@
 //!   for pure numeric Wasm), `ResetMemoryBuffer` detachment on native/JS `memory.grow`, and
 //!   unconditional word-aligned delta synchronization across normal returns, host callbacks, and traps.
 
-mod linking;
+mod call;
+mod globals_and_tables;
+mod instantiate;
 mod memory;
 mod store;
 mod values;
@@ -35,10 +37,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use wasmi::{CompilationMode, Config, Engine, ExternType, Module};
 
-pub use self::linking::{
-    wasm_create_global, wasm_create_table, wasm_get_global, wasm_instantiate_module,
-    wasm_set_global, wasm_table_get, wasm_table_grow, wasm_table_length, wasm_table_set,
+pub use self::globals_and_tables::{
+    wasm_create_global, wasm_create_table, wasm_get_global, wasm_set_global, wasm_table_get,
+    wasm_table_grow, wasm_table_length, wasm_table_set,
 };
+pub use self::instantiate::wasm_instantiate_module;
 pub use self::memory::{wasm_create_memory, wasm_grow_memory, wasm_memory_buffer};
 pub(crate) use self::store::{
     WasmErrorKind, WasmThreadState, restore_thread_wasm_state, take_thread_wasm_state_if_nonempty,
@@ -256,6 +259,26 @@ pub fn wasm_module_imports_json(mod_id: u32) -> Result<String, String> {
     Ok(serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string()))
 }
 
+fn for_each_wasm_section(bytes: &[u8], mut f: impl FnMut(u8, &[u8]) -> bool) {
+    if bytes.len() < 8 {
+        return;
+    }
+    let mut pos = 8usize;
+    while pos < bytes.len() {
+        let sec_id = bytes[pos];
+        pos += 1;
+        let Some((sec_len, read_bytes)) = decode_leb128_u32(&bytes[pos..]) else {
+            break;
+        };
+        pos += read_bytes;
+        let sec_end = pos.saturating_add(sec_len as usize).min(bytes.len());
+        if pos < sec_end && !f(sec_id, &bytes[pos..sec_end]) {
+            break;
+        }
+        pos = sec_end;
+    }
+}
+
 /// Extracts custom sections matching `section_name` from the raw `.wasm` binary.
 pub fn wasm_module_custom_sections(
     mod_id: u32,
@@ -263,82 +286,56 @@ pub fn wasm_module_custom_sections(
 ) -> Result<Vec<Vec<u8>>, String> {
     let entry =
         get_compiled_module(mod_id).ok_or_else(|| "Invalid WebAssembly.Module".to_string())?;
-    let bytes = entry.raw_bytes.as_ref();
     let mut out = Vec::new();
-    if bytes.len() < 8 {
-        return Ok(out);
-    }
-    let mut pos = 8usize;
-    while pos < bytes.len() {
-        let sec_id = bytes[pos];
-        pos += 1;
-        let Some((sec_len, read_bytes)) = decode_leb128_u32(&bytes[pos..]) else {
-            break;
-        };
-        pos += read_bytes;
-        let sec_end = pos.saturating_add(sec_len as usize).min(bytes.len());
-        if sec_id == 0 && pos < sec_end {
-            let sec_slice = &bytes[pos..sec_end];
-            if let Some((name_len, name_hdr_len)) = decode_leb128_u32(sec_slice) {
-                let name_start = name_hdr_len;
-                let name_end = name_start.saturating_add(name_len as usize);
-                if name_end <= sec_slice.len()
-                    && let Ok(name_str) = std::str::from_utf8(&sec_slice[name_start..name_end])
-                    && name_str == section_name
-                {
-                    out.push(sec_slice[name_end..].to_vec());
-                }
+    for_each_wasm_section(entry.raw_bytes.as_ref(), |sec_id, sec_slice| {
+        if sec_id == 0
+            && let Some((name_len, name_start)) = decode_leb128_u32(sec_slice)
+        {
+            let name_end = name_start.saturating_add(name_len as usize);
+            if name_end <= sec_slice.len()
+                && let Ok(name_str) = std::str::from_utf8(&sec_slice[name_start..name_end])
+                && name_str == section_name
+            {
+                out.push(sec_slice[name_end..].to_vec());
             }
         }
-        pos = sec_end;
-    }
+        true
+    });
     Ok(out)
 }
 
 /// Parses Section 7 (Export section) of a valid `.wasm` binary into `(name, kind, index)` entries.
 fn parse_module_export_indices(bytes: &[u8]) -> Vec<(String, u8, u32)> {
     let mut exports = Vec::new();
-    if bytes.len() < 8 {
-        return exports;
-    }
-    let mut pos = 8usize;
-    while pos < bytes.len() {
-        let sec_id = bytes[pos];
-        pos += 1;
-        let Some((sec_len, read_bytes)) = decode_leb128_u32(&bytes[pos..]) else {
-            break;
+    for_each_wasm_section(bytes, |sec_id, sec_slice| {
+        if sec_id != 7 {
+            return true;
+        }
+        let Some((count, n)) = decode_leb128_u32(sec_slice) else {
+            return false;
         };
-        pos += read_bytes;
-        let sec_end = pos.saturating_add(sec_len as usize).min(bytes.len());
-        if sec_id == 7 && pos < sec_end {
-            let mut cur = &bytes[pos..sec_end];
-            let Some((count, n)) = decode_leb128_u32(cur) else {
+        let mut cur = &sec_slice[n..];
+        exports.reserve(count as usize);
+        for _ in 0..count {
+            let Some((name_len, n1)) = decode_leb128_u32(cur) else {
                 break;
             };
-            cur = &cur[n..];
-            exports.reserve(count as usize);
-            for _ in 0..count {
-                let Some((name_len, n1)) = decode_leb128_u32(cur) else {
-                    break;
-                };
-                cur = &cur[n1..];
-                let nlen = name_len as usize;
-                if cur.len() < nlen + 1 {
-                    break;
-                }
-                let name = String::from_utf8_lossy(&cur[..nlen]).into_owned();
-                let kind = cur[nlen];
-                cur = &cur[nlen + 1..];
-                let Some((item_idx, n2)) = decode_leb128_u32(cur) else {
-                    break;
-                };
-                cur = &cur[n2..];
-                exports.push((name, kind, item_idx));
+            cur = &cur[n1..];
+            let nlen = name_len as usize;
+            if cur.len() < nlen + 1 {
+                break;
             }
-            break;
+            let name = String::from_utf8_lossy(&cur[..nlen]).into_owned();
+            let kind = cur[nlen];
+            cur = &cur[nlen + 1..];
+            let Some((item_idx, n2)) = decode_leb128_u32(cur) else {
+                break;
+            };
+            cur = &cur[n2..];
+            exports.push((name, kind, item_idx));
         }
-        pos = sec_end;
-    }
+        false
+    });
     exports
 }
 

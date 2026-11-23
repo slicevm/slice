@@ -3,11 +3,22 @@
 
 pub mod directives;
 pub mod dotenv;
+pub mod parsers;
 
 pub use directives::{InlineDirectives, parse_inline_directives};
-pub use dotenv::{is_sensitive_env_key, parse_dotenv_content};
+pub use dotenv::{
+    MIN_SENSITIVE_SECRET_LEN, is_auto_dlp_env_entry, is_sensitive_env_key, parse_dotenv_content,
+};
+pub use parsers::{
+    escape_json_string_into, format_json_error_body, parse_bool_setting, parse_byte_size_usize,
+    parse_strict_u64, parse_tier_setting,
+};
 
 use crate::compartment::CapabilityToken;
+use parsers::{
+    bracket_delta_outside_quotes, parse_toml_string_array, parse_u64_ignoring_underscores,
+    strip_toml_inline_comment,
+};
 use serde::{Deserialize, Serialize};
 
 /// Declarative Project & OCap Manifest (`slice.toml`).
@@ -69,218 +80,7 @@ impl Default for SliceManifest {
     }
 }
 
-/// Parses an unsigned 64-bit integer while ignoring `_` numeric separators on the stack (`SBX-PERF-03`).
-#[inline]
-pub(crate) fn parse_u64_ignoring_underscores(raw: &str) -> Option<u64> {
-    let mut acc = 0u64;
-    let mut saw_digit = false;
-    for &b in raw.trim().as_bytes() {
-        if b.is_ascii_digit() {
-            acc = acc.checked_mul(10)?.checked_add((b - b'0') as u64)?;
-            saw_digit = true;
-        } else if b == b'_' || b == b'"' || b == b'\'' || b.is_ascii_whitespace() {
-            continue;
-        } else {
-            return None;
-        }
-    }
-    saw_digit.then_some(acc)
-}
-
-/// Parses a boolean setting string (`true`/`1`/`yes`/`on` vs `false`/`0`/`no`/`off`).
-#[inline]
-pub fn parse_bool_setting(raw: &str) -> Option<bool> {
-    let norm = raw.trim().trim_matches('"').trim_matches('\'').trim();
-    if matches!(
-        norm,
-        "true" | "TRUE" | "1" | "yes" | "YES" | "on" | "ON" | "enabled"
-    ) {
-        Some(true)
-    } else if matches!(
-        norm,
-        "false" | "FALSE" | "0" | "no" | "NO" | "off" | "OFF" | "disabled"
-    ) {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-/// Parses an execution tier setting (`"1"`/`"tier1"`/`"boa"` -> `Some(1)`,
-/// `"0"`/`"tier0"`/`"snp"`/`"slicesnp"` -> `Some(0)`, `"auto"`/`"default"` -> `None`).
-#[inline]
-pub fn parse_tier_setting(raw: &str) -> Option<Option<u8>> {
-    let norm = raw.trim().trim_matches('"').trim_matches('\'').trim();
-    if norm.eq_ignore_ascii_case("1")
-        || norm.eq_ignore_ascii_case("tier1")
-        || norm.eq_ignore_ascii_case("tier-1")
-        || norm.eq_ignore_ascii_case("boa")
-        || norm.eq_ignore_ascii_case("baseline")
-    {
-        Some(Some(1))
-    } else if norm.eq_ignore_ascii_case("0")
-        || norm.eq_ignore_ascii_case("tier0")
-        || norm.eq_ignore_ascii_case("tier-0")
-        || norm.eq_ignore_ascii_case("snp")
-        || norm.eq_ignore_ascii_case("slicesnp")
-    {
-        Some(Some(0))
-    } else if norm.eq_ignore_ascii_case("auto")
-        || norm.eq_ignore_ascii_case("default")
-        || norm.eq_ignore_ascii_case("optimal")
-    {
-        Some(None)
-    } else {
-        None
-    }
-}
-
 pub(crate) const MAX_SAFE_MEMORY_KB: usize = usize::MAX / 1024;
-
-pub(crate) fn strip_toml_inline_comment(raw: &str) -> &str {
-    let mut in_double = false;
-    let mut in_single = false;
-    let mut escaped = false;
-    for (idx, ch) in raw.char_indices() {
-        if in_double {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_double = false;
-            }
-            continue;
-        }
-        if in_single {
-            if ch == '\'' {
-                in_single = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_double = true,
-            '\'' => in_single = true,
-            '#' => return raw[..idx].trim(),
-            _ => {}
-        }
-    }
-    raw.trim()
-}
-
-#[inline]
-fn bracket_delta_outside_quotes(cleaned_line: &str) -> i32 {
-    let mut delta = 0i32;
-    let mut in_double = false;
-    let mut in_single = false;
-    let mut escaped = false;
-    for ch in cleaned_line.chars() {
-        if in_double {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_double = false;
-            }
-            continue;
-        }
-        if in_single {
-            if ch == '\'' {
-                in_single = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_double = true,
-            '\'' => in_single = true,
-            '[' => delta += 1,
-            ']' => delta -= 1,
-            _ => {}
-        }
-    }
-    delta
-}
-
-#[inline]
-pub(crate) fn parse_toml_string_array(raw: &str) -> Vec<String> {
-    let cleaned = strip_toml_inline_comment(raw);
-    let inner = if let Some(after_open) = cleaned.strip_prefix('[') {
-        let Some(closed) = after_open.strip_suffix(']') else {
-            return Vec::new();
-        };
-        closed
-    } else {
-        cleaned
-    };
-    let mut items = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut had_quotes = false;
-
-    for ch in inner.chars() {
-        if let Some(q) = quote {
-            if q == '"' && escaped {
-                match ch {
-                    'n' => current.push('\n'),
-                    'r' => current.push('\r'),
-                    't' => current.push('\t'),
-                    '\\' => current.push('\\'),
-                    '"' => current.push('"'),
-                    other => {
-                        current.push('\\');
-                        current.push(other);
-                    }
-                }
-                escaped = false;
-            } else if q == '"' && ch == '\\' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            } else {
-                current.push(ch);
-            }
-            continue;
-        }
-
-        match ch {
-            '"' | '\'' => {
-                if !had_quotes {
-                    current.clear();
-                }
-                quote = Some(ch);
-                had_quotes = true;
-            }
-            ',' => {
-                let val = if had_quotes {
-                    current.clone()
-                } else {
-                    current.trim().to_string()
-                };
-                if !val.is_empty() {
-                    items.push(val);
-                }
-                current.clear();
-                had_quotes = false;
-            }
-            _ => {
-                if !had_quotes {
-                    current.push(ch);
-                }
-            }
-        }
-    }
-    let tail = if had_quotes {
-        current
-    } else {
-        current.trim().to_string()
-    };
-    if !tail.is_empty() {
-        items.push(tail);
-    }
-    items
-}
 
 impl SliceManifest {
     /// Parses a `slice.toml` configuration string without external heavy dependencies,
@@ -360,9 +160,8 @@ impl SliceManifest {
                                 .min(MAX_SAFE_MEMORY_KB);
                         }
                     }
-                    ("limits", "memory_bytes") => {
-                        if let Some(n) = parse_u64_ignoring_underscores(val) {
-                            let bytes = usize::try_from(n).unwrap_or(usize::MAX);
+                    ("limits", "memory_bytes") | ("limits", "memory") => {
+                        if let Some(bytes) = parse_byte_size_usize(val) {
                             manifest.memory_limit_kb = (bytes / 1024).clamp(1, MAX_SAFE_MEMORY_KB);
                         }
                     }
@@ -399,7 +198,7 @@ impl SliceManifest {
                     }
                     ("capabilities", "allow_exec") | ("capabilities", "allow-exec") => {
                         for item in parse_toml_string_array(val) {
-                            manifest.capabilities = manifest.capabilities.with_exec_binary(item);
+                            manifest.capabilities.push_exec_binary(item);
                         }
                     }
                     ("capabilities", "allow_env") => {
@@ -541,75 +340,5 @@ RUNTIME_ENGINE = "Slice-NexusJS"
 "#,
             project_name
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::SliceManifest;
-    use crate::manifest::dotenv::parse_dotenv_content;
-
-    #[test]
-    fn test_manifest_and_dotenv_inline_comments_and_quoted_hashes() {
-        let toml = r#"
-[package]
-name = "sveltekit-app" # inline comment on quoted string
-version = "0.1.0"
-entrypoint = "./build/slice-entry.js" # entry comment
-
-[server]
-static_dir = "./build/client" # static assets
-
-[limits]
-fuel = 50_000_000 # 50M instructions
-memory_mb = 64
-
-[capabilities]
-allow_net = ["api.internal:443", "127.0.0.1:8080"] # multi-host array
-allow_env = ["NODE_ENV", "HOOK_URL=https://example.com/#frag", "PAIR=a,b"] # trailing array comment
-"#;
-        let m = SliceManifest::parse_toml(toml);
-        assert_eq!(m.name, "sveltekit-app");
-        assert_eq!(m.entrypoint, "./build/slice-entry.js");
-        assert_eq!(m.static_dir.as_deref(), Some("./build/client"));
-        assert_eq!(m.fuel_limit, 50_000_000);
-        assert_eq!(m.memory_limit_kb, 64 * 1024);
-        assert!(
-            m.capabilities
-                .allowed_net_hosts
-                .contains("api.internal:443")
-        );
-        assert!(m.capabilities.allowed_net_hosts.contains("127.0.0.1:8080"));
-        assert_eq!(
-            m.capabilities
-                .allowed_env_keys
-                .get("HOOK_URL")
-                .map(|s| s.as_str()),
-            Some("https://example.com/#frag")
-        );
-        assert_eq!(
-            m.capabilities
-                .allowed_env_keys
-                .get("PAIR")
-                .map(|s| s.as_str()),
-            Some("a,b")
-        );
-
-        let dotenv = r#"
-API_KEY="sec#ret_value_123" # trailing comment after double quotes
-SINGLE_SECRET='lit#eral_456' # trailing comment after single quotes
-PLAIN_VAL=hello_world # trailing comment after unquoted
-"#;
-        let (pairs, secrets) = parse_dotenv_content(dotenv);
-        assert_eq!(
-            pairs,
-            vec![
-                ("API_KEY".to_string(), "sec#ret_value_123".to_string()),
-                ("SINGLE_SECRET".to_string(), "lit#eral_456".to_string()),
-                ("PLAIN_VAL".to_string(), "hello_world".to_string()),
-            ]
-        );
-        assert!(secrets.contains(&"sec#ret_value_123".to_string()));
-        assert!(secrets.contains(&"lit#eral_456".to_string()));
     }
 }

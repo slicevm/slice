@@ -1,11 +1,14 @@
+//! `slice run`, `slice check`, and embedded standalone `SLICEEXE` execution.
+
 use crate::config::{
     OsNativeFileWatcher, ResolvedExecutionConfig, install_ctrlc_handler,
     is_known_slice_runtime_flag, skip_runtime_flag_with_separate_value,
 };
 use anyhow::{Context, Result, bail};
 use slice_cas::MappedCasArchive;
-use slice_engine::{SliceIsolate, compile_source_to_bytecode};
+use slice_engine::{ExecutionMetrics, SliceIsolate, compile_source_to_bytecode};
 use slice_sandbox::SliceManifest;
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::env;
 use std::io::Read;
@@ -32,6 +35,91 @@ impl ThreadLocalExitCode {
 }
 
 pub(crate) static LAST_CLI_EXIT_CODE: ThreadLocalExitCode = ThreadLocalExitCode;
+
+fn compile_cli_source_for_run(
+    source: &str,
+    warm_pool: bool,
+    cli_boacas_override: Option<bool>,
+) -> Vec<u8> {
+    if !warm_pool && cli_boacas_override.is_none() {
+        slice_engine::set_thread_exper_boacas_override(Some(false));
+    }
+    let bytecode = compile_source_to_bytecode(source);
+    if !warm_pool && cli_boacas_override.is_none() {
+        slice_engine::set_thread_exper_boacas_override(None);
+    }
+    bytecode
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_configured_cli_isolate<'a>(
+    tenant_id: &str,
+    exec_cfg: &ResolvedExecutionConfig,
+    bytecode: &[u8],
+    archive_opt: Option<&MappedCasArchive>,
+    argv_opt: Option<Vec<String>>,
+    prewarm_bundle: bool,
+    capture_return_json: bool,
+    quiet: bool,
+    error_source_fn: impl FnOnce() -> Cow<'a, str>,
+) -> Result<(ExecutionMetrics, Option<String>)> {
+    let mut isolate = SliceIsolate::spawn(
+        tenant_id,
+        1,
+        exec_cfg.caps.clone(),
+        exec_cfg.fuel_limit,
+        exec_cfg.mem_limit,
+    );
+    isolate.set_deterministic_seed(exec_cfg.deterministic_seed);
+    if capture_return_json {
+        isolate.set_capture_return_json(true);
+    }
+    if let Some(argv) = argv_opt {
+        isolate.set_process_argv(argv);
+    }
+    for sec in &exec_cfg.audit_secrets {
+        isolate.add_egress_audit_secret(sec.clone());
+    }
+    if prewarm_bundle {
+        SliceIsolate::prewarm_boa_bundle_with_caps(bytecode, &exec_cfg.caps);
+        let snap = isolate.checkpoint();
+        let _ = isolate.execute_bytecode(bytecode, archive_opt);
+        isolate.restore(snap);
+        isolate.reset_for_request(tenant_id, 1, exec_cfg.fuel_limit, exec_cfg.mem_limit);
+    }
+    if exec_cfg.trace_output_path.is_some() {
+        isolate.enable_tracing(true);
+    }
+    let metrics = isolate.execute_bytecode(bytecode, archive_opt)?;
+    if let Some(ref trace_path) = exec_cfg.trace_output_path {
+        let trace_json = isolate.export_chrome_trace_json(&metrics);
+        isolate.enable_tracing(false);
+        std::fs::write(trace_path, trace_json)
+            .with_context(|| format!("Failed to write Chrome trace to {}", trace_path.display()))?;
+    }
+    if !quiet {
+        for line in &metrics.stdout {
+            println!("{}", line);
+        }
+    }
+    if let Some(code) = metrics.exit_code {
+        LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
+    }
+    if metrics.return_value.starts_with("Uncaught ") {
+        if metrics.exit_code.is_none() {
+            LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
+        }
+        let annotated = error_source_fn();
+        let mapped = slice_cas::map_bundled_error_location(&annotated, &metrics.return_value);
+        bail!("{}", mapped);
+    }
+    let captured_json = if capture_return_json {
+        isolate.last_return_json().map(str::to_owned)
+    } else {
+        None
+    };
+    Ok((metrics, captured_json))
+}
 
 pub(crate) fn cmd_check(args: &[String]) -> Result<()> {
     LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);
@@ -116,8 +204,7 @@ pub(crate) fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
     let args: Vec<String> = env::args().collect();
     let quiet = args.iter().any(|a| a == "--quiet" || a == "-q");
     let print_metrics = args.iter().any(|a| a == "--metrics");
-    let warm = args.iter().any(|a| a == "--warm");
-    if warm {
+    if args.iter().any(|a| a == "--warm") {
         SliceIsolate::prewarm_boa_pool(1);
     }
 
@@ -125,60 +212,47 @@ pub(crate) fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
     if let Some(toml_str) = archive.get_manifest_toml() {
         exec_cfg.apply_manifest_toml(toml_str, None)?;
     }
-    let mut isolate = SliceIsolate::spawn(
-        "standalone-exe",
-        1,
-        exec_cfg.caps,
-        exec_cfg.fuel_limit,
-        exec_cfg.mem_limit,
-    );
-    if !args.is_empty() {
-        let mut standalone_argv = Vec::with_capacity(args.len() + 1);
-        standalone_argv.push("slice".to_string());
-        standalone_argv.push(args[0].clone());
+
+    let standalone_argv = if !args.is_empty() {
+        let mut argv = Vec::with_capacity(args.len() + 1);
+        argv.push("slice".to_string());
+        argv.push(args[0].clone());
         let mut ai = 1;
         while ai < args.len() {
             let a = &args[ai];
             if a == "--" {
-                standalone_argv.extend(args[ai + 1..].iter().cloned());
+                argv.extend(args[ai + 1..].iter().cloned());
                 break;
             }
             if skip_runtime_flag_with_separate_value(&args, &mut ai)? {
                 continue;
             }
             if !is_known_slice_runtime_flag(a) {
-                standalone_argv.push(a.clone());
+                argv.push(a.clone());
             }
             ai += 1;
         }
-        isolate.set_process_argv(standalone_argv);
-    }
-    for sec in &exec_cfg.audit_secrets {
-        isolate.add_egress_audit_secret(sec.clone());
-    }
+        Some(argv)
+    } else {
+        None
+    };
+
     let entry = archive
         .entrypoint_blob()
         .context("Embedded CAS archive has no entrypoint blob")?;
     let bc = archive.get_bytecode_slice(entry);
-    let metrics = isolate.execute_bytecode(bc, Some(&archive))?;
+    let (metrics, _) = execute_configured_cli_isolate(
+        "standalone-exe",
+        &exec_cfg,
+        bc,
+        Some(&archive),
+        standalone_argv,
+        false,
+        false,
+        quiet,
+        || Cow::Owned(archive.reconstruct_annotated_source(entry)),
+    )?;
 
-    if !quiet {
-        for line in &metrics.stdout {
-            println!("{}", line);
-        }
-    }
-
-    if let Some(code) = metrics.exit_code {
-        LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
-    }
-    if metrics.return_value.starts_with("Uncaught ") {
-        if metrics.exit_code.is_none() {
-            LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
-        }
-        let annotated = archive.reconstruct_annotated_source(entry);
-        let mapped = slice_cas::map_bundled_error_location(&annotated, &metrics.return_value);
-        bail!("{}", mapped);
-    }
     if print_metrics {
         println!(
             "[Slice Standalone] Tier: {:?} | Instantiate: {:.2} us | Exec: {:.2} us | Total: {:.2} us | Memory: {} B | Stat Syscalls: 0",
@@ -289,56 +363,33 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
             bail!("{}", syn_err);
         }
-        if !exec_cfg.warm_pool && exec_cfg.cli_boacas_override.is_none() {
-            slice_engine::set_thread_exper_boacas_override(Some(false));
-        }
-        let bytecode = compile_source_to_bytecode(&raw_code);
-        if !exec_cfg.warm_pool && exec_cfg.cli_boacas_override.is_none() {
-            slice_engine::set_thread_exper_boacas_override(None);
-        }
-        let mut isolate = SliceIsolate::spawn(
-            "tenant-cli-eval",
-            1,
-            exec_cfg.caps.clone(),
-            exec_cfg.fuel_limit,
-            exec_cfg.mem_limit,
-        );
-        isolate.set_deterministic_seed(exec_cfg.deterministic_seed);
-        if print_result {
-            isolate.set_capture_return_json(true);
-        }
-        if !script_args.is_empty() {
+        let bytecode =
+            compile_cli_source_for_run(&raw_code, exec_cfg.warm_pool, exec_cfg.cli_boacas_override);
+        let argv_opt = (!script_args.is_empty()).then(|| {
             let mut argv = Vec::with_capacity(1 + script_args.len());
             argv.push("slice".to_string());
             argv.extend(script_args);
-            isolate.set_process_argv(argv);
-        }
-        for sec in &exec_cfg.audit_secrets {
-            isolate.add_egress_audit_secret(sec.clone());
-        }
-        let m = isolate.execute_bytecode(&bytecode, None)?;
-        if !quiet {
-            for line in &m.stdout {
-                println!("{}", line);
-            }
-        }
-        if let Some(code) = m.exit_code {
-            LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
-        }
-        if m.return_value.starts_with("Uncaught ") {
-            if m.exit_code.is_none() {
-                LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
-            }
-            let mapped = slice_cas::map_bundled_error_location(&raw_code, &m.return_value);
-            bail!("{}", mapped);
-        }
+            argv
+        });
+        let (m, return_json_opt) = execute_configured_cli_isolate(
+            "tenant-cli-eval",
+            &exec_cfg,
+            &bytecode,
+            None,
+            argv_opt,
+            false,
+            print_result,
+            quiet,
+            || Cow::Borrowed(raw_code.as_str()),
+        )?;
         if print_result && !m.process_exited && !quiet {
             if m.return_value == "[object Object]" {
-                if let Some(json_str) = isolate.last_return_json() {
-                    println!("{}", json_str);
-                } else {
-                    println!("{}", m.return_value);
-                }
+                println!(
+                    "{}",
+                    return_json_opt
+                        .as_deref()
+                        .unwrap_or(m.return_value.as_str())
+                );
             } else {
                 println!("{}", m.return_value);
             }
@@ -372,52 +423,41 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
             bail!("{}", syn_err);
         }
-        if !exec_cfg.warm_pool && exec_cfg.cli_boacas_override.is_none() {
-            slice_engine::set_thread_exper_boacas_override(Some(false));
-        }
-        let bytecode = compile_source_to_bytecode(&stdin_src);
-        if !exec_cfg.warm_pool && exec_cfg.cli_boacas_override.is_none() {
-            slice_engine::set_thread_exper_boacas_override(None);
-        }
-        let mut isolate = SliceIsolate::spawn(
-            "tenant-cli-stdin",
-            1,
-            exec_cfg.caps.clone(),
-            exec_cfg.fuel_limit,
-            exec_cfg.mem_limit,
+        let bytecode = compile_cli_source_for_run(
+            &stdin_src,
+            exec_cfg.warm_pool,
+            exec_cfg.cli_boacas_override,
         );
-        isolate.set_deterministic_seed(exec_cfg.deterministic_seed);
-        if !script_args.is_empty() {
+        let argv_opt = (!script_args.is_empty()).then(|| {
             let mut argv = Vec::with_capacity(2 + script_args.len());
             argv.push("slice".to_string());
             argv.push("-".to_string());
             argv.extend(script_args);
-            isolate.set_process_argv(argv);
-        }
-        for sec in &exec_cfg.audit_secrets {
-            isolate.add_egress_audit_secret(sec.clone());
-        }
-        let m = isolate.execute_bytecode(&bytecode, None)?;
-        if !quiet {
-            for line in &m.stdout {
-                println!("{}", line);
-            }
-        }
-        if let Some(code) = m.exit_code {
-            LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
-        }
-        if m.return_value.starts_with("Uncaught ") {
-            if m.exit_code.is_none() {
-                LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
-            }
-            let mapped = slice_cas::map_bundled_error_location(&stdin_src, &m.return_value);
-            bail!("{}", mapped);
-        }
+            argv
+        });
+        let _ = execute_configured_cli_isolate(
+            "tenant-cli-stdin",
+            &exec_cfg,
+            &bytecode,
+            None,
+            argv_opt,
+            false,
+            false,
+            quiet,
+            || Cow::Borrowed(stdin_src.as_str()),
+        )?;
         return Ok(());
     }
 
     let path = Path::new(&target);
-    let mut bundled_for_sourcemap = String::new();
+    let target_argv = {
+        let mut argv = Vec::with_capacity(2 + script_args.len());
+        argv.push("slice".to_string());
+        argv.push(target.clone());
+        argv.extend(script_args);
+        argv
+    };
+
     let metrics = if target.ends_with(".cas") {
         let archive = MappedCasArchive::open(path)?;
         if let Some(toml_str) = archive.get_manifest_toml() {
@@ -427,51 +467,21 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
                 .or_else(|| Some(Path::new(".")));
             exec_cfg.apply_manifest_toml(toml_str, cas_base_dir)?;
         }
-        let prewarm_pool = exec_cfg.warm_pool;
-        let deterministic_seed = exec_cfg.deterministic_seed;
         let entry = archive
             .entrypoint_blob()
             .context("CAS archive has no valid entrypoint blob")?;
         let bytecode = archive.get_bytecode_slice(entry);
-        let mut isolate = SliceIsolate::spawn(
+        let (m, _) = execute_configured_cli_isolate(
             "tenant-cli",
-            1,
-            exec_cfg.caps.clone(),
-            exec_cfg.fuel_limit,
-            exec_cfg.mem_limit,
-        );
-        isolate.set_deterministic_seed(deterministic_seed);
-        {
-            let mut argv = Vec::with_capacity(2 + script_args.len());
-            argv.push("slice".to_string());
-            argv.push(target.clone());
-            argv.extend(script_args.iter().cloned());
-            isolate.set_process_argv(argv);
-        }
-        for sec in &exec_cfg.audit_secrets {
-            isolate.add_egress_audit_secret(sec.clone());
-        }
-        if prewarm_pool {
-            SliceIsolate::prewarm_boa_bundle_with_caps(bytecode, &exec_cfg.caps);
-            let snap = isolate.checkpoint();
-            let _ = isolate.execute_bytecode(bytecode, Some(&archive));
-            isolate.restore(snap);
-            isolate.reset_for_request("tenant-cli", 1, exec_cfg.fuel_limit, exec_cfg.mem_limit);
-        }
-        if exec_cfg.trace_output_path.is_some() {
-            isolate.enable_tracing(true);
-        }
-        let m = isolate.execute_bytecode(bytecode, Some(&archive))?;
-        if let Some(ref trace_path) = exec_cfg.trace_output_path {
-            let trace_json = isolate.export_chrome_trace_json(&m);
-            isolate.enable_tracing(false);
-            std::fs::write(trace_path, trace_json).with_context(|| {
-                format!("Failed to write Chrome trace to {}", trace_path.display())
-            })?;
-        }
-        if m.return_value.starts_with("Uncaught ") {
-            bundled_for_sourcemap = archive.reconstruct_annotated_source(entry);
-        }
+            &exec_cfg,
+            bytecode,
+            Some(&archive),
+            Some(target_argv),
+            exec_cfg.warm_pool,
+            false,
+            quiet,
+            || Cow::Owned(archive.reconstruct_annotated_source(entry)),
+        )?;
         m
     } else {
         exec_cfg.apply_target_path_manifest(path)?;
@@ -479,8 +489,6 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
         let raw_entry = std::fs::read_to_string(&entry_file)
             .with_context(|| format!("Failed to read {}", entry_file.display()))?;
         exec_cfg.apply_inline_directives(&raw_entry, entry_file.parent())?;
-        let prewarm_pool = exec_cfg.warm_pool;
-        let deterministic_seed = exec_cfg.deterministic_seed;
         let bundled_source = match slice_cas::bundle_entrypoint_with_deps(&entry_file) {
             Ok(s) => s,
             Err(e) => {
@@ -488,71 +496,24 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
                 return Err(e);
             }
         };
-        if !prewarm_pool && exec_cfg.cli_boacas_override.is_none() {
-            slice_engine::set_thread_exper_boacas_override(Some(false));
-        }
-        let bytecode = compile_source_to_bytecode(&bundled_source);
-        if !prewarm_pool && exec_cfg.cli_boacas_override.is_none() {
-            slice_engine::set_thread_exper_boacas_override(None);
-        }
-        bundled_for_sourcemap = bundled_source;
-        let mut isolate = SliceIsolate::spawn(
-            "tenant-cli",
-            1,
-            exec_cfg.caps.clone(),
-            exec_cfg.fuel_limit,
-            exec_cfg.mem_limit,
+        let bytecode = compile_cli_source_for_run(
+            &bundled_source,
+            exec_cfg.warm_pool,
+            exec_cfg.cli_boacas_override,
         );
-        isolate.set_deterministic_seed(deterministic_seed);
-        {
-            let mut argv = Vec::with_capacity(2 + script_args.len());
-            argv.push("slice".to_string());
-            argv.push(target.clone());
-            argv.extend(script_args.iter().cloned());
-            isolate.set_process_argv(argv);
-        }
-        for sec in &exec_cfg.audit_secrets {
-            isolate.add_egress_audit_secret(sec.clone());
-        }
-        if prewarm_pool {
-            SliceIsolate::prewarm_boa_bundle_with_caps(&bytecode, &exec_cfg.caps);
-            let snap = isolate.checkpoint();
-            let _ = isolate.execute_bytecode(&bytecode, None);
-            isolate.restore(snap);
-            isolate.reset_for_request("tenant-cli", 1, exec_cfg.fuel_limit, exec_cfg.mem_limit);
-        }
-        if exec_cfg.trace_output_path.is_some() {
-            isolate.enable_tracing(true);
-        }
-        let m = isolate.execute_bytecode(&bytecode, None)?;
-        if let Some(ref trace_path) = exec_cfg.trace_output_path {
-            let trace_json = isolate.export_chrome_trace_json(&m);
-            isolate.enable_tracing(false);
-            std::fs::write(trace_path, trace_json).with_context(|| {
-                format!("Failed to write Chrome trace to {}", trace_path.display())
-            })?;
-        }
+        let (m, _) = execute_configured_cli_isolate(
+            "tenant-cli",
+            &exec_cfg,
+            &bytecode,
+            None,
+            Some(target_argv),
+            exec_cfg.warm_pool,
+            false,
+            quiet,
+            || Cow::Borrowed(bundled_source.as_str()),
+        )?;
         m
     };
-
-    if !quiet {
-        for line in &metrics.stdout {
-            println!("{}", line);
-        }
-    }
-
-    if let Some(code) = metrics.exit_code {
-        LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
-    }
-
-    if metrics.return_value.starts_with("Uncaught ") {
-        if metrics.exit_code.is_none() {
-            LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
-        }
-        let mapped =
-            slice_cas::map_bundled_error_location(&bundled_for_sourcemap, &metrics.return_value);
-        bail!("{}", mapped);
-    }
 
     if print_metrics {
         println!(
@@ -607,11 +568,8 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
                             println!("{}", line);
                         }
                     }
-                    if let Some(code) = reload_metrics.exit_code {
-                        LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
-                    } else {
-                        LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);
-                    }
+                    LAST_CLI_EXIT_CODE
+                        .store(reload_metrics.exit_code.unwrap_or(0), Ordering::Relaxed);
                     if reload_metrics.return_value.starts_with("Uncaught ") {
                         if reload_metrics.exit_code.is_none() {
                             LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);

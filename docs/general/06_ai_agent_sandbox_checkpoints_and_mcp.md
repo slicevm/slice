@@ -50,8 +50,12 @@ interface SandboxEvalOptions {
 }
 
 interface SandboxEvalOutcome {
-    /** true if execution succeeded without any OCap, SES, Fuel, Memory, or uncaught JS error */
+    /** true if execution succeeded without any OCap, SES, Fuel, Memory, uncaught JS error, or non-zero exitCode */
     ok: boolean;
+    /** Explicit exit status set via `process.exit(code)` or `process.exitCode`, otherwise `null` */
+    exitCode: number | null;
+    /** true when `process.exit(code)` terminated execution early, otherwise `false` */
+    processExited: boolean;
     /** Captured console.log / print lines emitted by the child sandbox (preserved even on trap) */
     stdout: string[];
     /** Stringified final expression return value of the child script (supports top-level await) */
@@ -236,7 +240,7 @@ Compiles and executes TypeScript or JavaScript (including top-level `await`) ins
     "maxCheckpoints": 8
   }
   ```
-- **Returns:** JSON `SandboxEvalOutcome` (`ok`, `stdout`, `returnValue`, `returnJson`, `fuelUsed`, `memoryUsedBytes`, `peakMemoryBytes`, `spawnTimeNs`, `compileTimeNs`, `execTimeNs`, `totalTimeUs`, `checkpointsTaken`, `restoresPerformed`, `restoreTimeNs`, `violation`, `error`).
+- **Returns:** JSON `SandboxEvalOutcome` (`ok`, `exitCode`, `processExited`, `stdout`, `returnValue`, `returnJson`, `fuelUsed`, `memoryUsedBytes`, `peakMemoryBytes`, `spawnTimeNs`, `compileTimeNs`, `execTimeNs`, `totalTimeUs`, `checkpointsTaken`, `restoresPerformed`, `restoreTimeNs`, `violation`, `error`; non-zero `exitCode` sets `ok: false` and MCP `isError: true`).
 
 #### 2. `slice_kv_set`
 Stores a key-value pair inside the MCP host's sharded `Slice.kv` store so the agent can persist intermediate plans or results across tool calls.

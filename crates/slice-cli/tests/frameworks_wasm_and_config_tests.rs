@@ -1,12 +1,12 @@
 #![allow(unused_imports)]
-use crate::config_and_watch::{
+use crate::commands::test_runner::{cmd_test, discover_test_files};
+use crate::config::{
     build_cas_archive, build_cas_archive_with_static, merge_manifest_toml_into_caps,
 };
-use crate::http_server::{resolve_tenant_bytecode_hotswap, serve_connection_keep_alive};
-use crate::mcp_and_repl::{
+use crate::diagnostics::{
     handle_mcp_jsonrpc_line, measure_current_process_rss_kb, run_security_containment_checks,
 };
-use crate::test_runner::{cmd_test, discover_test_files};
+use crate::server::{resolve_tenant_bytecode_hotswap, serve_connection_keep_alive};
 use crate::{cmd_init, cmd_run};
 use slice_cas::MappedCasArchive;
 use slice_engine::{SliceIsolate, compile_source_to_bytecode};
@@ -298,7 +298,7 @@ fn test_wave_f_slice_init_generates_slice_d_ts_and_tsconfig() {
 
 #[test]
 fn test_resolved_execution_config_subdirectory_manifest_and_cli_override_precedence() {
-    use crate::config_and_watch::ResolvedExecutionConfig;
+    use crate::config::ResolvedExecutionConfig;
 
     let tmp_dir = env::temp_dir().join("slice_cli_test_resolved_exec_cfg");
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -454,7 +454,7 @@ console.log("hi");
 
 #[test]
 fn test_phase1_untrusted_inline_directives_cannot_escalate_privileges() {
-    use crate::config_and_watch::ResolvedExecutionConfig;
+    use crate::config::ResolvedExecutionConfig;
 
     let malicious_script = r#"// @slice-allow-read: ["/"]
 // @slice-allow-write: ["/tmp"]
@@ -583,7 +583,7 @@ fs.readFileSync("/etc/passwd", "utf8");
 
 #[test]
 fn test_phase3_slice_serve_tls_config_layers() {
-    use crate::config_and_watch::ResolvedExecutionConfig;
+    use crate::config::ResolvedExecutionConfig;
     use std::path::PathBuf;
 
     // 1. Verify [server] tls_cert and tls_key in slice.toml
@@ -1510,7 +1510,7 @@ fn test_wave6_issues_102_104_checkpoint_directives_attenuation_and_doctor() {
         return;
     }
 
-    use crate::config_and_watch::ResolvedExecutionConfig;
+    use crate::config::ResolvedExecutionConfig;
 
     // 1. Default CLI config leaves allow_checkpoints = true, max_checkpoints = None (unlimited)
     let cfg_base = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(&[], false).unwrap();
@@ -1679,7 +1679,7 @@ Slice.checkpoint();
 
 #[test]
 fn test_issue_152_single_pass_slice_env_precedence_decode_raw_and_sliceexe_trailer() {
-    use crate::config_and_watch::ResolvedExecutionConfig;
+    use crate::config::ResolvedExecutionConfig;
 
     if std::env::var("SLICE_TEST_ISSUE_152_CHILD").is_ok() {
         let cfg_env = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(&[], false).unwrap();

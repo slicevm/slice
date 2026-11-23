@@ -61,6 +61,36 @@ fn load_cached_package_json(pkg_json_path: &Path) -> Option<Arc<serde_json::Valu
     })
 }
 
+fn strip_toml_inline_comment(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    let mut in_quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = in_quote {
+            if q == b'"' && b == b'\\' {
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            if b == q {
+                in_quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' || b == b'\'' {
+            in_quote = Some(b);
+            i += 1;
+            continue;
+        }
+        if b == b'#' {
+            return &s[..i];
+        }
+        i += 1;
+    }
+    s
+}
+
 /// Resolves a folder or file path to its concrete entrypoint script (`slice.toml`, `package.json`, `src/index.ts`, `src/index.tsx`, etc.).
 pub fn resolve_project_entrypoint(target: &Path, explicit_entry: Option<&str>) -> Result<PathBuf> {
     if target.is_file() {
@@ -83,25 +113,27 @@ pub fn resolve_project_entrypoint(target: &Path, explicit_entry: Option<&str>) -
         && let Ok(raw) = std::fs::read_to_string(&slice_toml)
     {
         for line in raw.lines() {
-            let trimmed = line.trim();
+            let trimmed = strip_toml_inline_comment(line).trim();
             if let Some(rest) = trimmed.strip_prefix("entrypoint")
+                && rest
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_whitespace() || *b == b'=')
                 && let Some((_, val)) = rest.split_once('=')
             {
                 let clean = val.trim().trim_matches('"').trim_matches('\'');
-                let candidate = target.join(clean);
-                if candidate.is_file() {
-                    return Ok(candidate);
+                if !clean.is_empty() {
+                    let candidate = target.join(clean);
+                    if candidate.is_file() {
+                        return Ok(candidate);
+                    }
                 }
             }
         }
     }
 
     // 2. Check `package.json`
-    let pkg_json = target.join("package.json");
-    if pkg_json.is_file()
-        && let Ok(raw) = std::fs::read_to_string(&pkg_json)
-        && let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw)
-    {
+    if let Some(val) = load_cached_package_json(&target.join("package.json")) {
         for field in ["module", "main"] {
             if let Some(entry_str) = val.get(field).and_then(|v| v.as_str()) {
                 let candidate = target.join(entry_str);
@@ -143,34 +175,18 @@ pub fn try_file_with_extensions(base: &Path) -> Option<PathBuf> {
     }
     // TypeScript ESM convention: `import { x } from "./foo.js"` where `./foo.ts` or `./foo.tsx` exists on disk
     if let Some(ext) = base.extension().and_then(|e| e.to_str()) {
-        match ext {
-            "js" => {
-                for ts_ext in ["ts", "tsx"] {
-                    let ts_cand = base.with_extension(ts_ext);
-                    if ts_cand.is_file() {
-                        return Some(ts_cand);
-                    }
-                }
+        let ts_exts: &[&str] = match ext {
+            "js" => &["ts", "tsx"],
+            "jsx" => &["tsx"],
+            "mjs" => &["mts"],
+            "cjs" => &["cts"],
+            _ => &[],
+        };
+        for &ts_ext in ts_exts {
+            let ts_cand = base.with_extension(ts_ext);
+            if ts_cand.is_file() {
+                return Some(ts_cand);
             }
-            "jsx" => {
-                let tsx_cand = base.with_extension("tsx");
-                if tsx_cand.is_file() {
-                    return Some(tsx_cand);
-                }
-            }
-            "mjs" => {
-                let mts_cand = base.with_extension("mts");
-                if mts_cand.is_file() {
-                    return Some(mts_cand);
-                }
-            }
-            "cjs" => {
-                let cts_cand = base.with_extension("cts");
-                if cts_cand.is_file() {
-                    return Some(cts_cand);
-                }
-            }
-            _ => {}
         }
     }
     for ext in ["ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "wasm"] {
@@ -187,17 +203,13 @@ pub fn try_file_with_extensions(base: &Path) -> Option<PathBuf> {
             {
                 return Some(found);
             }
-            if let Some(mod_str) = val.get("module").and_then(|v| v.as_str())
-                && !has_parent_traversal_segment(mod_str)
-                && let Some(found) = try_file_with_extensions(&base.join(mod_str))
-            {
-                return Some(found);
-            }
-            if let Some(main_str) = val.get("main").and_then(|v| v.as_str())
-                && !has_parent_traversal_segment(main_str)
-                && let Some(found) = try_file_with_extensions(&base.join(main_str))
-            {
-                return Some(found);
+            for field in ["module", "main"] {
+                if let Some(entry_str) = val.get(field).and_then(|v| v.as_str())
+                    && !has_parent_traversal_segment(entry_str)
+                    && let Some(found) = try_file_with_extensions(&base.join(entry_str))
+                {
+                    return Some(found);
+                }
             }
         }
         for idx in [
@@ -296,6 +308,44 @@ fn resolve_exports_target(
     }
 }
 
+fn match_sorted_wildcard_map<'a>(
+    map: &'a serde_json::Map<String, serde_json::Value>,
+    key: &'a str,
+    mut try_target: impl FnMut(&'a serde_json::Value, Option<&'a str>) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(exact) = map.get(key)
+        && let Some(found) = try_target(exact, None)
+    {
+        return Some(found);
+    }
+    let mut pattern_keys: Vec<(&String, &serde_json::Value)> =
+        map.iter().filter(|(k, _)| k.contains('*')).collect();
+    pattern_keys.sort_by_key(|(b, _)| std::cmp::Reverse(b.len()));
+    for (pat_key, target_val) in pattern_keys {
+        if let Some((prefix, suffix)) = pat_key.split_once('*')
+            && key.starts_with(prefix)
+            && key.ends_with(suffix)
+            && key.len() >= prefix.len() + suffix.len()
+        {
+            let matched = &key[prefix.len()..key.len() - suffix.len()];
+            if let Some(found) = try_target(target_val, Some(matched)) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_subpath_pattern_map(
+    pkg_dir: &Path,
+    map: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<PathBuf> {
+    match_sorted_wildcard_map(map, key, |target, sub| {
+        resolve_exports_target(pkg_dir, target, sub)
+    })
+}
+
 fn resolve_package_exports(
     pkg_dir: &Path,
     exports: &serde_json::Value,
@@ -316,33 +366,13 @@ fn resolve_package_exports(
         serde_json::Value::Object(map) => {
             let has_dot_keys = map.keys().any(|k| k.starts_with('.'));
             if !has_dot_keys {
-                if subpath == "." {
-                    return resolve_exports_target(pkg_dir, exports, None);
-                }
-                return None;
+                return if subpath == "." {
+                    resolve_exports_target(pkg_dir, exports, None)
+                } else {
+                    None
+                };
             }
-            if let Some(exact) = map.get(subpath)
-                && let Some(found) = resolve_exports_target(pkg_dir, exact, None)
-            {
-                return Some(found);
-            }
-            let mut pattern_keys: Vec<(&String, &serde_json::Value)> =
-                map.iter().filter(|(k, _)| k.contains('*')).collect();
-            pattern_keys.sort_by_key(|(b, _)| std::cmp::Reverse(b.len()));
-            for (pat_key, target_val) in pattern_keys {
-                if let Some((prefix, suffix)) = pat_key.split_once('*')
-                    && subpath.starts_with(prefix)
-                    && subpath.ends_with(suffix)
-                    && subpath.len() >= prefix.len() + suffix.len()
-                {
-                    let matched = &subpath[prefix.len()..subpath.len() - suffix.len()];
-                    if let Some(found) = resolve_exports_target(pkg_dir, target_val, Some(matched))
-                    {
-                        return Some(found);
-                    }
-                }
-            }
-            None
+            resolve_subpath_pattern_map(pkg_dir, map, subpath)
         }
         _ => None,
     }
@@ -365,6 +395,28 @@ fn split_bare_package_specifier(spec: &str) -> (&str, String) {
     }
 }
 
+fn skip_ws_and_jsonc_comments(bytes: &[u8], mut k: usize) -> usize {
+    while k < bytes.len() {
+        if bytes[k].is_ascii_whitespace() {
+            k += 1;
+        } else if bytes[k] == b'/' && k + 1 < bytes.len() && bytes[k + 1] == b'/' {
+            k += 2;
+            while k < bytes.len() && bytes[k] != b'\n' {
+                k += 1;
+            }
+        } else if bytes[k] == b'/' && k + 1 < bytes.len() && bytes[k + 1] == b'*' {
+            k += 2;
+            while k + 1 < bytes.len() && !(bytes[k] == b'*' && bytes[k + 1] == b'/') {
+                k += 1;
+            }
+            k = (k + 2).min(bytes.len());
+        } else {
+            break;
+        }
+    }
+    k
+}
+
 pub fn strip_jsonc(raw: &str) -> Cow<'_, str> {
     let bytes = raw.as_bytes();
     let has_comments = memchr::memmem::find(bytes, b"//").is_some()
@@ -373,15 +425,15 @@ pub fn strip_jsonc(raw: &str) -> Cow<'_, str> {
         return Cow::Borrowed(raw);
     }
 
-    let mut no_comments = Vec::with_capacity(bytes.len());
+    let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     let mut in_str = false;
     while i < bytes.len() {
         let b = bytes[i];
         if in_str {
-            no_comments.push(b);
+            out.push(b);
             if b == b'\\' && i + 1 < bytes.len() {
-                no_comments.push(bytes[i + 1]);
+                out.push(bytes[i + 1]);
                 i += 2;
                 continue;
             }
@@ -393,7 +445,7 @@ pub fn strip_jsonc(raw: &str) -> Cow<'_, str> {
         }
         if b == b'"' {
             in_str = true;
-            no_comments.push(b);
+            out.push(b);
             i += 1;
             continue;
         }
@@ -413,46 +465,17 @@ pub fn strip_jsonc(raw: &str) -> Cow<'_, str> {
                 continue;
             }
         }
-        no_comments.push(b);
-        i += 1;
-    }
-
-    let mut out = Vec::with_capacity(no_comments.len());
-    let mut j = 0;
-    let mut in_str2 = false;
-    while j < no_comments.len() {
-        let b = no_comments[j];
-        if in_str2 {
-            out.push(b);
-            if b == b'\\' && j + 1 < no_comments.len() {
-                out.push(no_comments[j + 1]);
-                j += 2;
-                continue;
-            }
-            if b == b'"' {
-                in_str2 = false;
-            }
-            j += 1;
+        if b == b','
+            && matches!(
+                bytes.get(skip_ws_and_jsonc_comments(bytes, i + 1)),
+                Some(b'}' | b']')
+            )
+        {
+            i += 1;
             continue;
-        }
-        if b == b'"' {
-            in_str2 = true;
-            out.push(b);
-            j += 1;
-            continue;
-        }
-        if b == b',' {
-            let mut k = j + 1;
-            while k < no_comments.len() && no_comments[k].is_ascii_whitespace() {
-                k += 1;
-            }
-            if k < no_comments.len() && (no_comments[k] == b'}' || no_comments[k] == b']') {
-                j += 1;
-                continue;
-            }
         }
         out.push(b);
-        j += 1;
+        i += 1;
     }
     Cow::Owned(String::from_utf8_lossy(&out).into_owned())
 }
@@ -465,27 +488,7 @@ fn resolve_package_imports(
     let serde_json::Value::Object(map) = imports else {
         return None;
     };
-    if let Some(exact) = map.get(spec)
-        && let Some(found) = resolve_exports_target(pkg_dir, exact, None)
-    {
-        return Some(found);
-    }
-    let mut pattern_keys: Vec<(&String, &serde_json::Value)> =
-        map.iter().filter(|(k, _)| k.contains('*')).collect();
-    pattern_keys.sort_by_key(|(b, _)| std::cmp::Reverse(b.len()));
-    for (pat_key, target_val) in pattern_keys {
-        if let Some((prefix, suffix)) = pat_key.split_once('*')
-            && spec.starts_with(prefix)
-            && spec.ends_with(suffix)
-            && spec.len() >= prefix.len() + suffix.len()
-        {
-            let matched = &spec[prefix.len()..spec.len() - suffix.len()];
-            if let Some(found) = resolve_exports_target(pkg_dir, target_val, Some(matched)) {
-                return Some(found);
-            }
-        }
-    }
-    None
+    resolve_subpath_pattern_map(pkg_dir, map, spec)
 }
 
 /// Loads and caches `tsconfig.json` / `jsconfig.json` with cycle protection (`CAS-SEC-03`).
@@ -510,18 +513,13 @@ fn load_tsconfig_value(config_path: &Path) -> Option<Arc<serde_json::Value>> {
 
 fn resolve_tsconfig_extends_path(parent_dir: &Path, ext_str: &str) -> Option<PathBuf> {
     let try_with_json = |cand: PathBuf| -> Option<PathBuf> {
-        if cand.is_file() {
-            return Some(cand);
-        }
-        let appended = PathBuf::from(format!("{}.json", cand.display()));
-        if appended.is_file() {
-            return Some(appended);
-        }
-        let dir_cfg = cand.join("tsconfig.json");
-        if dir_cfg.is_file() {
-            return Some(dir_cfg);
-        }
-        None
+        [
+            cand.clone(),
+            PathBuf::from(format!("{}.json", cand.display())),
+            cand.join("tsconfig.json"),
+        ]
+        .into_iter()
+        .find(|p| p.is_file())
     };
 
     if ext_str.starts_with('.') || Path::new(ext_str).is_absolute() {
@@ -534,10 +532,7 @@ fn resolve_tsconfig_extends_path(parent_dir: &Path, ext_str: &str) -> Option<Pat
         if let Some(found) = try_with_json(nm_cand.clone()) {
             return Some(found);
         }
-        let pkg_json = nm_cand.join("package.json");
-        if pkg_json.is_file()
-            && let Ok(raw) = std::fs::read_to_string(&pkg_json)
-            && let Ok(pv) = serde_json::from_str::<serde_json::Value>(&raw)
+        if let Some(pv) = load_cached_package_json(&nm_cand.join("package.json"))
             && let Some(ts_rel) = pv.get("tsconfig").and_then(|v| v.as_str())
             && let Some(found) = try_with_json(nm_cand.join(ts_rel))
         {
@@ -610,40 +605,24 @@ fn resolve_tsconfig_paths(from_dir: &Path, spec: &str) -> Option<PathBuf> {
                 Some(b) => dir.join(b),
                 None => dir.to_path_buf(),
             };
-            if let Some(paths_map) = co.get("paths").and_then(|v| v.as_object()) {
-                if let Some(exact_targets) = paths_map.get(spec).and_then(|v| v.as_array()) {
-                    for t in exact_targets.iter().filter_map(|x| x.as_str()) {
-                        let rel = t.strip_prefix("./").unwrap_or(t);
-                        if let Some(found) = try_file_with_extensions(&base_url_dir.join(rel)) {
-                            return Some(found);
-                        }
-                    }
-                }
-                let mut pattern_keys: Vec<(&String, &serde_json::Value)> =
-                    paths_map.iter().filter(|(k, _)| k.contains('*')).collect();
-                pattern_keys.sort_by_key(|(b, _)| std::cmp::Reverse(b.len()));
-                for (pat_key, target_val) in pattern_keys {
-                    let Some((prefix, suffix)) = pat_key.split_once('*') else {
-                        continue;
-                    };
-                    if spec.starts_with(prefix)
-                        && spec.ends_with(suffix)
-                        && spec.len() >= prefix.len() + suffix.len()
-                    {
-                        let matched = &spec[prefix.len()..spec.len() - suffix.len()];
-                        if let Some(targets) = target_val.as_array() {
-                            for t in targets.iter().filter_map(|x| x.as_str()) {
-                                let expanded = t.replace('*', matched);
+            if let Some(paths_map) = co.get("paths").and_then(|v| v.as_object())
+                && let Some(found) =
+                    match_sorted_wildcard_map(paths_map, spec, |target_val, sub| {
+                        target_val
+                            .as_array()?
+                            .iter()
+                            .filter_map(|x| x.as_str())
+                            .find_map(|t| {
+                                let expanded = match sub {
+                                    Some(m) => Cow::Owned(t.replace('*', m)),
+                                    None => Cow::Borrowed(t),
+                                };
                                 let rel = expanded.strip_prefix("./").unwrap_or(&expanded);
-                                if let Some(found) =
-                                    try_file_with_extensions(&base_url_dir.join(rel))
-                                {
-                                    return Some(found);
-                                }
-                            }
-                        }
-                    }
-                }
+                                try_file_with_extensions(&base_url_dir.join(rel))
+                            })
+                    })
+            {
+                return Some(found);
             }
             if has_explicit_base_url
                 && let Some(found) = try_file_with_extensions(&base_url_dir.join(spec))

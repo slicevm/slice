@@ -45,6 +45,8 @@ pub struct SandboxEvalOptions {
 #[serde(rename_all = "camelCase")]
 pub struct SandboxEvalOutcome {
     pub ok: bool,
+    pub exit_code: Option<i32>,
+    pub process_exited: bool,
     pub stdout: Vec<String>,
     pub return_value: String,
     pub return_json: Option<String>,
@@ -384,8 +386,15 @@ impl SliceIsolate {
                     }
                 }
                 let is_uncaught = metrics.return_value.starts_with("Uncaught ");
+                let nonzero_exit = metrics.exit_code.is_some_and(|code| code != 0);
                 let (return_value, return_json, error) = if is_uncaught {
                     ("undefined".to_string(), None, Some(metrics.return_value))
+                } else if let Some(code) = metrics.exit_code.filter(|&c| c != 0) {
+                    (
+                        metrics.return_value,
+                        child_iso.last_return_json.take(),
+                        Some(format!("Process exited with status code {}", code)),
+                    )
                 } else {
                     (
                         metrics.return_value,
@@ -394,7 +403,9 @@ impl SliceIsolate {
                     )
                 };
                 SandboxEvalOutcome {
-                    ok: !is_uncaught,
+                    ok: !is_uncaught && !nonzero_exit,
+                    exit_code: metrics.exit_code,
+                    process_exited: metrics.process_exited,
                     stdout: metrics.stdout,
                     return_value,
                     return_json,
@@ -428,6 +439,8 @@ impl SliceIsolate {
                 };
                 SandboxEvalOutcome {
                     ok: false,
+                    exit_code: None,
+                    process_exited: false,
                     stdout: safe_stdout,
                     return_value: "undefined".to_string(),
                     return_json: None,

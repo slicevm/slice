@@ -2175,6 +2175,7 @@ dependencies = [
 name = "slice-sandbox"
 version = "0.13.5"
 dependencies = [
+ "aho-corasick",
  "cow-utils",
  "criterion",
  "libc",

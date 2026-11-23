@@ -1,119 +1,50 @@
+//! `slice pack`, `slice compile`, and `slice inspect` subcommands.
+
 use crate::config::{
     build_cas_archive_with_static, match_non_empty_flag_path, match_non_empty_flag_value,
+    unique_temp_cas_path,
 };
 use anyhow::{Context, Result, bail};
 use slice_cas::{MappedCasArchive, embed_cas_into_executable};
 use slice_engine::{compile_source_to_bytecode, disassemble_bytecode};
-use slice_io::CompletionRingEngine;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-static TEMP_CAS_SEQ: AtomicU64 = AtomicU64::new(1);
-
-/// Generates a collision-resistant, non-predictable temporary `.cas` staging path (`CLI-SEC-02`)
-/// combining `prefix`, process ID, monotonic sequence counter, and nanosecond timestamp,
-/// and removes any pre-existing symlink at that path.
-pub(crate) fn unique_temp_cas_path(prefix: &str) -> Result<PathBuf> {
-    let pid = std::process::id();
-    let seq = TEMP_CAS_SEQ.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let candidate = env::temp_dir().join(format!("{}_{}_{}_{}.cas", prefix, pid, seq, nanos));
-    if let Ok(meta) = std::fs::symlink_metadata(&candidate)
-        && meta.file_type().is_symlink()
-    {
-        bail!(
-            "Refusing to write staging CAS archive to pre-existing symlink: {}",
-            candidate.display()
-        );
+fn parse_build_engine_flag(
+    args: &[String],
+    i: &mut usize,
+    exper_override: &mut Option<bool>,
+) -> Result<bool> {
+    if let Some(t_str) = match_non_empty_flag_value(args, i, "--tier")? {
+        let t = slice_sandbox::parse_tier_setting(t_str).with_context(|| {
+            format!(
+                "Invalid --tier value {:?} (expected 0/tier0, 1/tier1, or 2/tier2)",
+                t_str
+            )
+        })?;
+        slice_engine::set_tier_override(t);
+        return Ok(true);
     }
-    Ok(candidate)
-}
-
-pub(crate) fn print_usage() {
-    println!(
-        "slice (Nexus-JS) v{} - Production MicroVM-Grade Edge Runtime",
-        env!("CARGO_PKG_VERSION")
-    );
-    println!();
-    println!("Core Commands:");
-    println!(
-        "  slice init [dir] [--template=sveltekit]        Scaffold a new TypeScript Edge or SvelteKit 3 project"
-    );
-    println!(
-        "  slice run [target] [--warm] [--watch]          Execute a script, folder app, .cas bundle, or slice.toml"
-    );
-    println!(
-        "  slice check <target>                           Parse and syntax-check TypeScript/JavaScript without executing"
-    );
-    println!(
-        "  slice test [target] [--filter=PAT] [--json]    Run Time-Travel Test Suite (< 5us VFS+KV rollback per test)"
-    );
-    println!(
-        "  slice serve [target] [--port=N] [--smoke-test] Launch multi-tenant WinterTC HTTP MicroVM server"
-    );
-    println!(
-        "  slice pack <input> <output.cas>                Pack a file or folder app into a Zero-Stat BLAKE3 .cas archive"
-    );
-    println!(
-        "  slice compile <input> -o <binary>              Compile a script, folder app, or .cas into a standalone binary"
-    );
-    println!(
-        "  slice inspect <bundle.cas|script.ts|dir>       Disassemble SLICEBC/SLICEBOA/SLICESNP bytecode and inspect CAS Radix table"
-    );
-    println!(
-        "  slice mcp [--smoke-test] [--audit-egress=SEC]  Start built-in Model Context Protocol (MCP) JSON-RPC 2.0 server"
-    );
-    println!(
-        "  slice repl                                     Start interactive SES-Locked TypeScript/JS shell"
-    );
-    println!(
-        "  slice doctor                                   Audit host OS kernel io_uring/IOCP, MPK, Warm Pool, and OCap"
-    );
-    println!(
-        "  slice microvm-bench [--tenants=1000] [--json]  Run 1,000-tenant MicroVM cold-start & density benchmark"
-    );
-    println!(
-        "  slice verify-security                          Run 5-vector OCap, SES, and Fuel containment verification"
-    );
-    println!(
-        "  slice info                                     Display runtime architecture and active kernel rings"
-    );
-}
-
-pub(crate) fn cmd_info() -> Result<()> {
-    let io_engine = CompletionRingEngine::new(64, true)?;
-    println!(
-        "slice (Nexus-JS) v{} [{}-{}]",
-        env!("CARGO_PKG_VERSION"),
-        env::consts::OS,
-        env::consts::ARCH
-    );
-    println!(
-        "  I/O Completion Engine : {}",
-        io_engine.status.backend_name
-    );
-    println!(
-        "  Zero-Stat CAS Format  : SLICE_CAS v{} (64-byte aligned BLAKE3 mmap + SLICEEXE + SLICEBC\\x01)",
-        slice_cas::CAS_VERSION
-    );
-    println!(
-        "  TypeScript & JSX/TSX  : Oxc v0.152.0 AOT Compiler + Built-In SSR (`slice:jsx`) + Tree-Shaking"
-    );
-    println!(
-        "  Execution Pipeline    : Tier-1 Precompiled Boa CodeBlock (`SLICEBC\\x01` Default) + Tier-2 SIMD + Tier-0 SLICESNP"
-    );
-    println!(
-        "  Native Fast Intrinsics: FIPS-180-4 SHA-256 / RFC-2104 HMAC / SemVer / In-Memory VFS Slab"
-    );
-    println!(
-        "  Security Architecture : SES Lockdown + TC39 OCap Compartments + Hardware PKEY/Cage"
-    );
-    Ok(())
+    let arg = &args[*i];
+    if arg == "--boacas" || arg == "--exper-boacas" {
+        *exper_override = Some(true);
+        return Ok(true);
+    }
+    if arg == "--no-boacas" || arg == "--no-exper-boacas" {
+        *exper_override = Some(false);
+        return Ok(true);
+    }
+    if let Some(b_str) = arg
+        .strip_prefix("--boacas=")
+        .or_else(|| arg.strip_prefix("--exper-boacas="))
+    {
+        let b = slice_sandbox::parse_bool_setting(b_str)
+            .with_context(|| format!("Invalid --boacas boolean value: {:?}", b_str))?;
+        *exper_override = Some(b);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 pub(crate) fn cmd_pack(args: &[String]) -> Result<()> {
@@ -140,30 +71,12 @@ pub(crate) fn cmd_pack(args: &[String]) -> Result<()> {
             i += 1;
             continue;
         }
-        if let Some(t_str) = match_non_empty_flag_value(args, &mut i, "--tier")? {
-            let t = slice_sandbox::parse_tier_setting(t_str).with_context(|| {
-                format!(
-                    "Invalid --tier value {:?} (expected 0/tier0, 1/tier1, or 2/tier2)",
-                    t_str
-                )
-            })?;
-            slice_engine::set_tier_override(t);
+        if parse_build_engine_flag(args, &mut i, &mut exper_override)? {
             i += 1;
             continue;
         }
         let arg = &args[i];
-        if arg == "--boacas" || arg == "--exper-boacas" {
-            exper_override = Some(true);
-        } else if arg == "--no-boacas" || arg == "--no-exper-boacas" {
-            exper_override = Some(false);
-        } else if let Some(b_str) = arg
-            .strip_prefix("--boacas=")
-            .or_else(|| arg.strip_prefix("--exper-boacas="))
-        {
-            let b = slice_sandbox::parse_bool_setting(b_str)
-                .with_context(|| format!("Invalid --boacas boolean value: {:?}", b_str))?;
-            exper_override = Some(b);
-        } else if arg.starts_with('-') {
+        if arg.starts_with('-') {
             bail!("Unknown option for 'slice pack': {}", arg);
         } else {
             positionals.push(arg.as_str());
@@ -245,30 +158,12 @@ pub(crate) fn cmd_compile(args: &[String]) -> Result<()> {
             i += 1;
             continue;
         }
-        if let Some(t_str) = match_non_empty_flag_value(args, &mut i, "--tier")? {
-            let t = slice_sandbox::parse_tier_setting(t_str).with_context(|| {
-                format!(
-                    "Invalid --tier value {:?} (expected 0/tier0, 1/tier1, or 2/tier2)",
-                    t_str
-                )
-            })?;
-            slice_engine::set_tier_override(t);
+        if parse_build_engine_flag(args, &mut i, &mut exper_override)? {
             i += 1;
             continue;
         }
         let arg = &args[i];
-        if arg == "--boacas" || arg == "--exper-boacas" {
-            exper_override = Some(true);
-        } else if arg == "--no-boacas" || arg == "--no-exper-boacas" {
-            exper_override = Some(false);
-        } else if let Some(b_str) = arg
-            .strip_prefix("--boacas=")
-            .or_else(|| arg.strip_prefix("--exper-boacas="))
-        {
-            let b = slice_sandbox::parse_bool_setting(b_str)
-                .with_context(|| format!("Invalid --boacas boolean value: {:?}", b_str))?;
-            exper_override = Some(b);
-        } else if arg.starts_with('-') {
+        if arg.starts_with('-') {
             bail!("Unknown option for 'slice compile': {}", arg);
         } else if input_opt.is_none() {
             input_opt = Some(arg.as_str());

@@ -35,9 +35,9 @@ fn x86_ospke_enabled() -> bool {
 #[inline(always)]
 fn read_hw_pkru() -> u32 {
     let pkru: u32;
-    // SAFETY: Caller only invokes `read_hw_pkru` when `hardware_enforced == true`, which proves
-    // `SYS_pkey_alloc` succeeded on an OSPKE-enabled `x86_64` Linux kernel/CPU (`RDPKRU` legal).
-    // `ECX = 0` is required by `RDPKRU` (non-zero `ECX` faults `#GP`).
+    // SAFETY: Caller only invokes `read_hw_pkru` when `x86_ospke_enabled() || hardware_enforced`
+    // holds on Linux `x86_64`, proving `CR4.PKE == 1` so `RDPKRU` is legal. `ECX = 0` is required
+    // by `RDPKRU` (non-zero `ECX` faults `#GP`).
     unsafe {
         core::arch::asm!(
             "xor ecx, ecx",
@@ -54,9 +54,10 @@ fn read_hw_pkru() -> u32 {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[inline(always)]
 fn write_hw_pkru(pkru: u32) {
-    // SAFETY: Caller only invokes `write_hw_pkru` when `hardware_enforced == true` (`OSPKE` active).
-    // `ECX = 0` and `EDX = 0` are required by `WRPKRU`. Omit `nomem` so LLVM treats the permission
-    // switch as a compiler memory barrier across guarded memory accesses.
+    // SAFETY: Caller only invokes `write_hw_pkru` when `x86_ospke_enabled() || hardware_enforced`
+    // holds on Linux `x86_64`, proving `CR4.PKE == 1` so `WRPKRU` is legal. `ECX = 0` and `EDX = 0`
+    // are required by `WRPKRU`. Omit `nomem` so LLVM treats the permission switch as a compiler
+    // memory barrier across guarded memory accesses.
     unsafe {
         core::arch::asm!(
             "xor ecx, ecx",
@@ -136,9 +137,9 @@ impl HardwareProtectionDomain {
             // cloning a compartment never alters an outer tenant's active `PKRU` mask before
             // `enter_domain()` is explicitly entered.
             let caller_pkru = read_hw_pkru();
-            // SAFETY: `SYS_pkey_alloc` (330 on `x86_64` Linux) takes `(flags = 0, access_rights = 3)`
-            // and has no memory-aliasing side effects; returns `-1` if blocked by seccomp or exhausted.
-            let pkey = unsafe { libc::syscall(330, 0usize, 3usize) as i32 };
+            // SAFETY: `libc::SYS_pkey_alloc` takes `(flags = 0, access_rights = 3)` and has no
+            // memory-aliasing side effects; returns `-1` if blocked by seccomp or exhausted.
+            let pkey = unsafe { libc::syscall(libc::SYS_pkey_alloc, 0usize, 3usize) as i32 };
             write_hw_pkru(caller_pkru);
             if pkey > 0 && pkey < 16 {
                 // Keep PKEY 0 (bits 0..1, default kernel stack/heap key) and the active tenant's
@@ -236,9 +237,9 @@ impl Drop for HardwareProtectionDomain {
                     VIRTUAL_THREAD_PKRU.with(|slot| slot.set(0));
                 }
                 // SAFETY: `self.pkey` (`1..=15`) is exclusively owned by this handle (`hardware_enforced`
-                // cleared above) and freed via `SYS_pkey_free` (331 on `x86_64` Linux) after clearing `PKRU`.
+                // cleared above) and freed via `libc::SYS_pkey_free` after clearing `PKRU`.
                 unsafe {
-                    let _ = libc::syscall(331, self.pkey as usize);
+                    let _ = libc::syscall(libc::SYS_pkey_free, self.pkey as usize);
                 }
             }
         }

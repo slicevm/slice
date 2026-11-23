@@ -1,8 +1,8 @@
 use crate::config::{
     ResolvedExecutionConfig, build_cas_archive, parse_byte_size_usize, parse_strict_u64,
 };
-use crate::http_server::connection::write_all_vectored2;
-use crate::http_server::{
+use crate::server::connection::write_all_vectored2;
+use crate::server::{
     clear_tenant_cas_cache, current_tenant_fs_generation, notify_tenant_cas_updated,
     resolve_tenant_cas_hotswap, serve_connection_with_isolate, spawn_worker_isolate,
     tenant_cas_cache_len,

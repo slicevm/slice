@@ -2,6 +2,7 @@
 name = "slice-sandbox"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -16,6 +17,7 @@ thiserror.workspace = true
 serde.workspace = true
 rustc-hash.workspace = true
 memchr.workspace = true
+aho-corasick.workspace = true
 cow-utils.workspace = true
 smallvec.workspace = true
 

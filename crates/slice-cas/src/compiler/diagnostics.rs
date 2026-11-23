@@ -124,6 +124,86 @@ pub fn extract_oxc_syntax_diagnostic(
     SyntaxErrorDiagnostic { message, line, col }
 }
 
+#[inline]
+pub(crate) fn default_oxc_parse_options() -> oxc::parser::ParseOptions {
+    oxc::parser::ParseOptions {
+        allow_return_outside_function: true,
+        ..Default::default()
+    }
+}
+
+/// Parses `clean` as `.tsx` (when `has_jsx_hint`) or `.ts` module, retrying `.tsx` module
+/// (when `!has_jsx_hint`) and `.ts` non-module script (`with_module(false)`) if syntax diagnostics
+/// occur. Preserves the primary parse diagnostics in the returned `ParserReturn` when all retries fail.
+pub(crate) fn parse_ts_or_tsx_with_retries<'a>(
+    allocator: &'a oxc::allocator::Allocator,
+    clean: &'a str,
+    has_jsx_hint: bool,
+) -> (
+    oxc::parser::ParserReturn<'a>,
+    oxc::span::SourceType,
+    &'static str,
+) {
+    let parse_opts = default_oxc_parse_options();
+    let active_source_type = if has_jsx_hint {
+        oxc::span::SourceType::tsx().with_module(true)
+    } else {
+        oxc::span::SourceType::ts().with_module(true)
+    };
+    let active_path = if has_jsx_hint {
+        "module.tsx"
+    } else {
+        "module.ts"
+    };
+    let parser_ret = oxc::parser::Parser::new(allocator, clean, active_source_type)
+        .with_options(parse_opts)
+        .parse();
+    if parser_ret.diagnostics.is_empty() {
+        return (parser_ret, active_source_type, active_path);
+    }
+
+    if !has_jsx_hint {
+        let tsx_type = oxc::span::SourceType::tsx().with_module(true);
+        let retry_ret = oxc::parser::Parser::new(allocator, clean, tsx_type)
+            .with_options(parse_opts)
+            .parse();
+        if retry_ret.diagnostics.is_empty() {
+            return (retry_ret, tsx_type, "module.tsx");
+        }
+    }
+
+    let script_ts = oxc::span::SourceType::ts().with_module(false);
+    let retry_script = oxc::parser::Parser::new(allocator, clean, script_ts)
+        .with_options(parse_opts)
+        .parse();
+    if retry_script.diagnostics.is_empty() {
+        return (retry_script, script_ts, active_path);
+    }
+
+    (parser_ret, active_source_type, active_path)
+}
+
+/// Attempts cold sloppy CommonJS (`SourceType::cjs()`) and sloppy script (`SourceType::default()`)
+/// fallbacks when TS/ESM module parsing produced diagnostics.
+pub(crate) fn try_parse_sloppy_js<'a>(
+    allocator: &'a oxc::allocator::Allocator,
+    clean: &'a str,
+) -> Option<oxc::parser::ParserReturn<'a>> {
+    let parse_opts = default_oxc_parse_options();
+    for sloppy_js in [
+        oxc::span::SourceType::cjs(),
+        oxc::span::SourceType::default(),
+    ] {
+        let retry = oxc::parser::Parser::new(allocator, clean, sloppy_js)
+            .with_options(parse_opts)
+            .parse();
+        if retry.diagnostics.is_empty() {
+            return Some(retry);
+        }
+    }
+    None
+}
+
 /// Validates JS/TS/JSX/TSX syntax using Oxc's parser and returns structured 1-based `(line, col)`
 /// coordinates on failure.
 ///
@@ -138,52 +218,13 @@ pub fn check_syntax_source_detailed(
     let clean = clean_cow.as_ref();
 
     let allocator = oxc::allocator::Allocator::default();
-    let parse_opts = oxc::parser::ParseOptions {
-        allow_return_outside_function: true,
-        ..Default::default()
-    };
     let is_jsx_ext = path_hint
         .and_then(|p| p.extension())
         .and_then(|e| e.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("tsx") || ext.eq_ignore_ascii_case("jsx"));
-    let src_type = if is_jsx_ext {
-        oxc::span::SourceType::tsx().with_module(true)
-    } else {
-        oxc::span::SourceType::ts().with_module(true)
-    };
-    let parsed = oxc::parser::Parser::new(&allocator, clean, src_type)
-        .with_options(parse_opts)
-        .parse();
-    if parsed.diagnostics.is_empty() {
+    let (parsed, _, _) = parse_ts_or_tsx_with_retries(&allocator, clean, is_jsx_ext);
+    if parsed.diagnostics.is_empty() || try_parse_sloppy_js(&allocator, clean).is_some() {
         return Ok(());
-    }
-
-    // Cold fallback 1: JSX in a `.ts` / `.js` / `<eval>` snippet
-    if !is_jsx_ext {
-        let retry_tsx = oxc::parser::Parser::new(
-            &allocator,
-            clean,
-            oxc::span::SourceType::tsx().with_module(true),
-        )
-        .with_options(parse_opts)
-        .parse();
-        if retry_tsx.diagnostics.is_empty() {
-            return Ok(());
-        }
-    }
-
-    // Cold fallback 2: Sloppy-mode TS/JS script (`with`, legacy octals, Annex-B HTML comments)
-    for fallback_type in [
-        oxc::span::SourceType::ts().with_module(false),
-        oxc::span::SourceType::cjs(),
-        oxc::span::SourceType::default(),
-    ] {
-        let retry = oxc::parser::Parser::new(&allocator, clean, fallback_type)
-            .with_options(parse_opts)
-            .parse();
-        if retry.diagnostics.is_empty() {
-            return Ok(());
-        }
     }
 
     Err(extract_oxc_syntax_diagnostic(clean, &parsed.diagnostics[0]))

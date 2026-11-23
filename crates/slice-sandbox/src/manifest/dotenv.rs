@@ -1,6 +1,10 @@
 //! `.env` File Parser & Automatic Outbound Egress DLP Credential Classification.
 
+use super::parsers::unescape_double_quoted_str;
 use rustc_hash::FxHashSet;
+
+/// Minimum credential value byte length eligible for automatic outbound Egress DLP registration.
+pub const MIN_SENSITIVE_SECRET_LEN: usize = 6;
 
 #[inline]
 fn contains_ascii_ignore_case(haystack: &[u8], needle_upper: &[u8]) -> bool {
@@ -46,38 +50,16 @@ pub fn is_sensitive_env_key(key: &str) -> bool {
         || contains_ascii_ignore_case(b, b"AUTH")
 }
 
-/// Unescapes double-quoted `.env` string values in a single pass (`SBX-PERF-03`).
+/// Returns `true` when `(key, val)` qualifies for automatic outbound Egress DLP registration
+/// (`val.len() >= MIN_SENSITIVE_SECRET_LEN && is_sensitive_env_key(key)`).
 #[inline]
-fn unescape_double_quoted_dotenv(inner: &str) -> String {
-    if !inner.contains('\\') {
-        return inner.to_string();
-    }
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('r') => out.push('\r'),
-                Some('t') => out.push('\t'),
-                Some('"') => out.push('"'),
-                Some('\\') => out.push('\\'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
-                }
-                None => out.push('\\'),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+pub fn is_auto_dlp_env_entry(key: &str, val: &str) -> bool {
+    val.len() >= MIN_SENSITIVE_SECRET_LEN && is_sensitive_env_key(key)
 }
 
 /// Parses `.env` file content into `(env_pairs, auto_dlp_secrets)`.
-/// Automatically classifies values of keys matching [`is_sensitive_env_key`] (with length >= 6)
-/// as outbound Egress DLP secrets so they cannot be exfiltrated via `stdout`, HTTP responses, SSE, or `fetch()`.
+/// Automatically classifies values matching [`is_auto_dlp_env_entry`] as outbound Egress DLP secrets
+/// so they cannot be exfiltrated via `stdout`, HTTP responses, SSE, or `fetch()`.
 pub fn parse_dotenv_content(content: &str) -> (Vec<(String, String)>, Vec<String>) {
     let mut pairs = Vec::new();
     let mut secrets = Vec::new();
@@ -113,9 +95,9 @@ pub fn parse_dotenv_content(content: &str) -> (Vec<(String, String)>, Vec<String
                 }
             }
             if let Some(eq_idx) = end_quote {
-                unescape_double_quoted_dotenv(&after_open[..eq_idx])
+                unescape_double_quoted_str(&after_open[..eq_idx])
             } else {
-                unescape_double_quoted_dotenv(after_open)
+                unescape_double_quoted_str(after_open)
             }
         } else if let Some(after_open) = val_part.strip_prefix('\'') {
             // Single-quoted `.env` values are literal according to POSIX shell / dotenv rules
@@ -135,7 +117,7 @@ pub fn parse_dotenv_content(content: &str) -> (Vec<(String, String)>, Vec<String
             unquoted.to_string()
         };
 
-        if val.len() >= 6 && is_sensitive_env_key(key_slice) && seen_secrets.insert(val.clone()) {
+        if is_auto_dlp_env_entry(key_slice, &val) && seen_secrets.insert(val.clone()) {
             secrets.push(val.clone());
         }
         pairs.push((key_slice.to_string(), val));

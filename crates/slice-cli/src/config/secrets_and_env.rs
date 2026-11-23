@@ -17,7 +17,7 @@ pub(crate) fn maybe_register_sensitive_env_dlp(
     val: &str,
     audit_secrets: &mut Vec<String>,
 ) {
-    if val.len() >= 6 && slice_sandbox::is_sensitive_env_key(key) {
+    if slice_sandbox::is_auto_dlp_env_entry(key, val) {
         push_unique_audit_secret(audit_secrets, val.to_string());
     }
 }

@@ -1,7 +1,6 @@
 // Slice (Nexus-JS) Lazy Prelude Shard 3: WHATWG `ReadableStream` (`03_streams_formdata.js`)
 (function() {
   var MAX_STREAM_CHUNKS = 4096;
-
   function __popStreamChunk(s) {
     var v = s._chunks[s._head++];
     if (s._head === s._chunks.length) {
@@ -13,7 +12,6 @@
     }
     return v;
   }
-
   function __rsFinishClose(s) {
     if (s._closed || s._errored) return;
     s._closed = true;
@@ -32,7 +30,6 @@
       }
     }
   }
-
   function __rsError(s, e) {
     if (s._closed || s._errored) return;
     var errVal = arguments.length > 1 ? e : new Error("ReadableStream error");
@@ -55,7 +52,6 @@
       }
     }
   }
-
   function __rsShouldCallPull(s) {
     if (!s._started || s._closed || s._closeRequested || s._errored) return false;
     if (!s._src || typeof s._src.pull !== "function") return false;
@@ -63,7 +59,6 @@
     var desired = s._hwm - (s._chunks.length - s._head);
     return desired > 0;
   }
-
   function __rsCallPullIfNeeded(s) {
     if (!__rsShouldCallPull(s)) return;
     if (s._pulling) {
@@ -89,7 +84,6 @@
       __rsError(s, err);
     });
   }
-
   function __RSCtrl(stream) {
     this._s = stream;
   }

@@ -1,5 +1,4 @@
-use crate::commands::unique_temp_cas_path;
-use crate::config::{match_non_empty_flag_value, parse_strict_u64};
+use crate::config::{match_non_empty_flag_value, parse_strict_u64, unique_temp_cas_path};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use slice_cas::{CasBuilder, MappedCasArchive};
@@ -574,8 +573,10 @@ pub(crate) fn measure_current_process_rss_kb() -> u64 {
     }
 
     #[cfg(target_os = "windows")]
+    #[allow(unsafe_code)]
     {
         #[repr(C)]
+        #[derive(Default)]
         struct ProcessMemoryCounters {
             cb: u32,
             page_fault_count: u32,
@@ -589,8 +590,11 @@ pub(crate) fn measure_current_process_rss_kb() -> u64 {
             peak_pagefile_usage: usize,
         }
 
-        #[link(name = "psapi")]
+        // SAFETY: Exact Win32 `kernel32.dll` `system` ABI signatures (`GetCurrentProcess` and
+        // `K32GetProcessMemoryInfo` matching `PROCESS_MEMORY_COUNTERS`).
+        #[link(name = "kernel32")]
         unsafe extern "system" {
+            fn GetCurrentProcess() -> isize;
             fn K32GetProcessMemoryInfo(
                 process: isize,
                 ppsmemcounters: *mut ProcessMemoryCounters,
@@ -598,17 +602,16 @@ pub(crate) fn measure_current_process_rss_kb() -> u64 {
             ) -> i32;
         }
 
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GetCurrentProcess() -> isize;
-        }
-
-        unsafe {
-            let mut pmc = std::mem::zeroed::<ProcessMemoryCounters>();
-            pmc.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
-            if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb) != 0 {
-                return (pmc.working_set_size / 1024) as u64;
-            }
+        let mut pmc = ProcessMemoryCounters {
+            cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+            ..ProcessMemoryCounters::default()
+        };
+        // SAFETY: `GetCurrentProcess()` returns the valid `-1` pseudo-handle for the current
+        // process, and `&mut pmc` points to a properly aligned `#[repr(C)]` `ProcessMemoryCounters`
+        // initialized with `cb = size_of::<ProcessMemoryCounters>()`.
+        let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb) };
+        if ok != 0 {
+            return (pmc.working_set_size / 1024) as u64;
         }
     }
 

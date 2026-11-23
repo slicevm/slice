@@ -140,3 +140,53 @@ fn test_audit_neo_phase4_zero_copy_static_mmap_and_resolver_cache() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_mapped_cas_archive_arc_clone_and_rc_helpers() {
+    let temp_dir = std::env::temp_dir().join("slice_cas_arc_clone_and_toml_comment_test");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let src_dir = temp_dir.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    let entry_file = src_dir.join("main#entry.ts");
+    std::fs::write(&entry_file, "export const x: number = 42;\n").unwrap();
+    std::fs::write(
+        temp_dir.join("slice.toml"),
+        "# top comment\nentrypoint = \"src/main#entry.ts\" # inline comment with \"quotes\"\n",
+    )
+    .unwrap();
+
+    let resolved = resolve_project_entrypoint(&temp_dir, None).unwrap();
+    assert_eq!(resolved, entry_file);
+
+    let cas_path = temp_dir.join("arc_clone.cas");
+    let mut builder = CasBuilder::new("./index.ts");
+    builder.add_module(
+        "./index.ts",
+        PathBuf::from("index.ts"),
+        "const answer: number = 42;\n",
+        |src| src.as_bytes().to_vec(),
+    );
+    builder.write_to_file(&cas_path).unwrap();
+
+    let archive = MappedCasArchive::open(&cas_path).unwrap();
+    let cloned = archive.clone();
+    let inner_a: &MappedCasInner = &archive;
+    let inner_b: &MappedCasInner = &cloned;
+    assert!(std::ptr::eq(inner_a, inner_b));
+    let entry = cloned.entrypoint_blob().unwrap();
+    assert!(cloned.get_source_slice(entry).contains("42"));
+
+    let raw_bundle = "var __slice_modules = {};//__SLICE_RC:0123456789abcdef\n// #slice-source: app.ts|/abs/app.ts|1,2\n  const msg = `line1\n  line2`;\n  // comment\n\n  console.log(msg);\n";
+    let compacted = compact_js_for_boa_bytecode(raw_bundle);
+    assert!(compacted.starts_with("var __slice_modules = {};//__SLICE_RC:0123456789abcdef\n"));
+    assert!(compacted.contains("//@sm:app.ts|/abs/app.ts|1,2\n"));
+    assert!(compacted.contains("const msg = `line1\n  line2`;\n"));
+    assert!(!compacted.contains("// comment"));
+
+    let wrapped_rc = format!("{{\n{}\n}}", compacted.trim_end());
+    let (rc_u64, rc_hex) = extract_slice_rc_key(&wrapped_rc).expect("expected RC key");
+    assert_eq!(rc_u64, 0x0123_4567_89ab_cdef);
+    assert_eq!(rc_hex, b"0123456789abcdef");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

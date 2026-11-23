@@ -16,6 +16,7 @@ pub use resolver::{
     try_file_with_extensions,
 };
 pub use source_map::{
-    compute_source_line_map, map_bundled_error_location, map_bundled_error_location_with_offset,
-    map_bundled_stack_trace, map_bundled_stack_trace_with_offset, short_source_label,
+    compact_js_for_boa_bytecode, compute_source_line_map, extract_slice_rc_key,
+    map_bundled_error_location, map_bundled_error_location_with_offset, map_bundled_stack_trace,
+    map_bundled_stack_trace_with_offset, short_source_label,
 };

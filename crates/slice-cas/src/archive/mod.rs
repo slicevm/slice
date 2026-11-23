@@ -10,7 +10,9 @@ pub mod reader;
 pub mod static_assets;
 
 pub use builder::CasBuilder;
-pub use reader::{MappedCasArchive, embed_cas_into_executable, inspect_sliceexe_trailer};
+pub use reader::{
+    MappedCasArchive, MappedCasInner, embed_cas_into_executable, inspect_sliceexe_trailer,
+};
 pub use static_assets::{
     StaticAssetEntry, StaticAssetPayload, StaticAssetTable, detect_static_mime_type,
 };
@@ -22,8 +24,37 @@ pub const CAS_MAGIC: &[u8; 8] = b"SLICECAS";
 pub const CAS_VERSION: u32 = 1;
 pub const CACHE_LINE_ALIGN: usize = 64;
 
-/// 32-byte BLAKE3 cryptographic hash identifying a canonicalized module blob.
-pub type Blake3Hash = [u8; 32];
+/// Walks `root_dir` recursively in deterministic filename-sorted order while skipping symbolic
+/// links via `entry.file_type()` (`lstat`, `CAS-SEC-04`) and any directories rejected by
+/// `should_descend_dir`.
+pub(super) fn walk_sorted_non_symlink_files(
+    root_dir: &std::path::Path,
+    mut should_descend_dir: impl FnMut(&std::ffi::OsStr) -> bool,
+    mut on_file: impl FnMut(&std::fs::DirEntry, &std::path::Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let mut stack = vec![root_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries: Vec<std::fs::DirEntry> =
+            std::fs::read_dir(&dir)?.collect::<std::io::Result<Vec<_>>>()?;
+        entries.sort_by_key(|e| e.file_name());
+
+        for entry in entries {
+            let ft = entry.file_type()?;
+            if ft.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if ft.is_dir() {
+                if should_descend_dir(&entry.file_name()) {
+                    stack.push(path);
+                }
+            } else if ft.is_file() {
+                on_file(&entry, &path)?;
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Metadata entry in the CAS Radix/Index table pointing to a 64-byte aligned slice.
 #[repr(C)]

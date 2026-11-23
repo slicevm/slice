@@ -1,9 +1,10 @@
-//! Deterministic Replay (`__slice_det_random`, `__slice_det_now`), `os.tmpdir`, and `AsyncLocalStorage` Host Bindings.
+//! Deterministic Replay (`__slice_det_random`, `__slice_det_now`), `os` (`platform`, `arch`, `tmpdir`),
+//! and `AsyncLocalStorage` Host Bindings.
 
 use crate::boa_realm::{
     BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, DIRTY_ALS, mark_subsystem_dirty,
 };
-use crate::state_and_kv::splitmix64_next_f64;
+use crate::intrinsics::splitmix64_next_f64;
 
 pub(crate) fn register_deterministic_host_functions(ctx: &mut boa_engine::Context) {
     use boa_engine::{JsValue as BoaVal, NativeFunction, js_string};
@@ -50,8 +51,56 @@ pub(crate) fn register_deterministic_host_functions(ctx: &mut boa_engine::Contex
     );
 }
 
+pub(crate) fn register_core_os_host_functions(ctx: &mut boa_engine::Context) {
+    use boa_engine::{JsValue as BoaVal, NativeFunction, js_string};
+    if ctx
+        .global_object()
+        .has_own_property(js_string!("__slice_os_platform"), ctx)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_os_platform"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let is_det = BOA_DET_STATE.with(|s| s.get().is_some());
+            let plat = if is_det {
+                "linux"
+            } else {
+                match std::env::consts::OS {
+                    "windows" => "win32",
+                    "macos" => "darwin",
+                    other => other,
+                }
+            };
+            Ok(BoaVal::from(js_string!(plat)))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_os_arch"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let is_det = BOA_DET_STATE.with(|s| s.get().is_some());
+            let arch = if is_det {
+                "x64"
+            } else {
+                match std::env::consts::ARCH {
+                    "x86_64" => "x64",
+                    "aarch64" => "arm64",
+                    other => other,
+                }
+            };
+            Ok(BoaVal::from(js_string!(arch)))
+        }),
+    );
+}
+
 pub(crate) fn register_os_host_functions(ctx: &mut boa_engine::Context) {
     use boa_engine::{JsValue as BoaVal, NativeFunction, js_string};
+    register_core_os_host_functions(ctx);
     if ctx
         .global_object()
         .has_own_property(js_string!("__slice_os_tmpdir"), ctx)

@@ -3,6 +3,7 @@
 use crate::boa_realm::{BOA_ACTIVE_TENANT, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_VIOLATION};
 use crate::intrinsics::{
     hmac_md5_bytes, hmac_sha1_bytes, hmac_sha256_bytes, hmac_sha384_bytes, hmac_sha512_bytes,
+    md5_bytes, sha1_bytes, sha256_bytes, sha384_bytes, sha512_bytes,
 };
 use slice_sandbox::SandboxViolation;
 
@@ -137,9 +138,8 @@ pub(crate) fn with_buffer_from_bytes<R>(
 pub(crate) fn with_optional_buffer_source_bytes<R>(
     val: Option<&boa_engine::JsValue>,
     context: &mut boa_engine::Context,
-    f: impl FnMut(&[u8]) -> R,
+    mut f: impl FnMut(&[u8]) -> R,
 ) -> boa_engine::JsResult<R> {
-    let mut f = f;
     match val {
         Some(v) if !v.is_undefined() && !v.is_null() => with_buffer_source_bytes(v, context, f),
         _ => Ok(f(&[])),
@@ -170,6 +170,84 @@ pub(crate) fn with_two_buffer_source_bytes<R>(
     with_buffer_source_bytes(b, context, |bytes_b| f(&bytes_a, bytes_b))
 }
 
+/// Invokes `f` with a mutable `&mut [u8]` slice backing a `TypedArray`, `ArrayBuffer` (when
+/// `allow_raw_array_buffer` is `true`), or `ArrayBufferView`-like JS object (`{ buffer, byteOffset, byteLength }`).
+pub(crate) fn with_mutable_buffer_view_bytes<R>(
+    obj: &boa_engine::JsObject,
+    allow_raw_array_buffer: bool,
+    context: &mut boa_engine::Context,
+    mut f: impl FnMut(&mut [u8]) -> R,
+) -> boa_engine::JsResult<Option<R>> {
+    use boa_engine::builtins::typed_array::TypedArray;
+    use boa_engine::js_string;
+    use boa_engine::object::builtins::JsArrayBuffer;
+
+    if let Some(ta) = obj.downcast_ref::<TypedArray>()
+        && let Some(res) = ta.with_bytes_mut(&mut f)
+    {
+        return Ok(Some(res));
+    }
+    if allow_raw_array_buffer && let Ok(ab) = JsArrayBuffer::from_object(obj.clone()) {
+        return Ok(Some(match ab.data_mut() {
+            Some(mut d) => f(&mut d),
+            None => f(&mut []),
+        }));
+    }
+    let buf_val = obj.get(js_string!("buffer"), context)?;
+    let Some(buf_obj) = buf_val.as_object() else {
+        return Ok(None);
+    };
+    let Ok(ab) = JsArrayBuffer::from_object(buf_obj) else {
+        return Ok(None);
+    };
+    let view_off = obj
+        .get(js_string!("byteOffset"), context)
+        .ok()
+        .and_then(|v| v.as_number())
+        .map(|n| n.max(0.0) as usize)
+        .unwrap_or(0);
+    let view_len = obj
+        .get(js_string!("byteLength"), context)
+        .ok()
+        .and_then(|v| v.as_number())
+        .map(|n| n.max(0.0) as usize);
+    let Some(mut data_mut) = ab.data_mut() else {
+        return Ok(Some(f(&mut [])));
+    };
+    let start = view_off.min(data_mut.len());
+    let end = view_len
+        .map(|l| start.saturating_add(l).min(data_mut.len()))
+        .unwrap_or(data_mut.len());
+    Ok(Some(f(&mut data_mut[start..end])))
+}
+
+/// Copies `src` directly into `dest_val` starting at `dest_offset` with zero intermediate heap
+/// allocations when `dest_val` is a `TypedArray`, `Buffer`, `ArrayBuffer`, or `ArrayBufferView`.
+pub(crate) fn copy_into_js_buffer_view(
+    dest_val: &boa_engine::JsValue,
+    dest_offset: usize,
+    src: &[u8],
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsResult<usize> {
+    if src.is_empty() {
+        return Ok(0);
+    }
+    let Some(obj) = dest_val.as_object() else {
+        return Ok(0);
+    };
+    Ok(
+        with_mutable_buffer_view_bytes(&obj, true, context, |dest_slice| {
+            if dest_offset >= dest_slice.len() {
+                return 0;
+            }
+            let avail = src.len().min(dest_slice.len() - dest_offset);
+            dest_slice[dest_offset..dest_offset + avail].copy_from_slice(&src[..avail]);
+            avail
+        })?
+        .unwrap_or(0),
+    )
+}
+
 /// Extracts an owned `Vec<u8>` from a JS `TypedArray`, `Buffer`, `ArrayBuffer`, `DataView`, string,
 /// or array-like object using direct native downcast before falling back to JS property access.
 pub(crate) fn extract_buffer_source_bytes(
@@ -192,10 +270,7 @@ pub(crate) fn extract_buffer_source_bytes(
         return Ok(bytes);
     }
     if let Ok(ab) = JsArrayBuffer::from_object(obj.clone()) {
-        if let Some(data) = ab.data() {
-            return Ok(data.to_vec());
-        }
-        return Ok(Vec::new());
+        return Ok(ab.data().map(|d| d.to_vec()).unwrap_or_default());
     }
     if let Some(dv) = obj.downcast_ref::<DataView>()
         && let Some(bytes) = dv.with_bytes(|slice| slice.to_vec())
@@ -228,8 +303,9 @@ pub(crate) fn extract_buffer_source_bytes(
     if let Ok(len_val) = obj.get(js_string!("length"), context)
         && let Some(len) = len_val.as_number().map(|n| n.max(0.0) as usize)
     {
-        let mut out = Vec::with_capacity(len.min(1_048_576));
-        for i in 0..len.min(1_048_576) {
+        let capped = len.min(1_048_576);
+        let mut out = Vec::with_capacity(capped);
+        for i in 0..capped {
             let b = obj
                 .get(i as u32, context)?
                 .as_number()
@@ -240,6 +316,54 @@ pub(crate) fn extract_buffer_source_bytes(
         return Ok(out);
     }
     Ok(Vec::new())
+}
+
+/// Encodes a `boa_engine::JsString` (Latin-1 or UTF-16, replacing lone surrogates with U+FFFD)
+/// into an owned UTF-8 `Vec<u8>`.
+pub(crate) fn js_string_to_utf8_bytes(js_s: &boa_engine::JsString) -> Vec<u8> {
+    use boa_engine::string::JsStrVariant;
+    match js_s.as_str().variant() {
+        JsStrVariant::Latin1(bytes) => {
+            if bytes.is_ascii() {
+                return bytes.to_vec();
+            }
+            let mut out = Vec::with_capacity(bytes.len() * 2);
+            for &b in bytes {
+                if b < 0x80 {
+                    out.push(b);
+                } else {
+                    out.push(0xC0 | (b >> 6));
+                    out.push(0x80 | (b & 0x3F));
+                }
+            }
+            out
+        }
+        JsStrVariant::Utf16(units) => {
+            let mut out = Vec::with_capacity(units.len() * 3);
+            for item in char::decode_utf16(units.iter().copied()) {
+                let ch = item.unwrap_or(char::REPLACEMENT_CHARACTER);
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            }
+            out
+        }
+    }
+}
+
+#[inline]
+pub(crate) fn ascii_bytes_to_js_val(bytes: &[u8]) -> boa_engine::JsValue {
+    boa_engine::JsValue::from(boa_engine::JsString::from(
+        boa_engine::string::JsStr::latin1(bytes),
+    ))
+}
+
+#[inline]
+pub(crate) fn utf8_slice_to_js_val(bytes: &[u8]) -> boa_engine::JsValue {
+    if bytes.is_ascii() {
+        return ascii_bytes_to_js_val(bytes);
+    }
+    let content = String::from_utf8_lossy(bytes);
+    boa_engine::JsValue::from(boa_engine::js_string!(content.as_ref()))
 }
 
 #[inline]
@@ -284,6 +408,34 @@ pub(crate) fn normalize_webcrypto_hash_name(raw: &str) -> Option<&'static str> {
 }
 
 #[inline]
+pub(crate) fn compute_webcrypto_digest_stack(
+    norm_alg: &str,
+    bytes: &[u8],
+) -> Option<([u8; 64], usize)> {
+    let mut out = [0u8; 64];
+    match norm_alg {
+        "SHA-1" => {
+            out[..20].copy_from_slice(&sha1_bytes(bytes));
+            Some((out, 20))
+        }
+        "SHA-256" => {
+            out[..32].copy_from_slice(&sha256_bytes(bytes));
+            Some((out, 32))
+        }
+        "SHA-384" => {
+            out[..48].copy_from_slice(&sha384_bytes(bytes));
+            Some((out, 48))
+        }
+        "SHA-512" => Some((sha512_bytes(bytes), 64)),
+        "MD5" => {
+            out[..16].copy_from_slice(&md5_bytes(bytes));
+            Some((out, 16))
+        }
+        _ => None,
+    }
+}
+
+#[inline]
 pub(crate) fn compute_webcrypto_hmac_stack(
     hash_name: &str,
     key: &[u8],
@@ -292,27 +444,20 @@ pub(crate) fn compute_webcrypto_hmac_stack(
     let mut out = [0u8; 64];
     match normalize_webcrypto_hash_name(hash_name)? {
         "SHA-1" => {
-            let d = hmac_sha1_bytes(key, data);
-            out[..20].copy_from_slice(&d);
+            out[..20].copy_from_slice(&hmac_sha1_bytes(key, data));
             Some((out, 20))
         }
         "SHA-256" => {
-            let d = hmac_sha256_bytes(key, data);
-            out[..32].copy_from_slice(&d);
+            out[..32].copy_from_slice(&hmac_sha256_bytes(key, data));
             Some((out, 32))
         }
         "SHA-384" => {
-            let d = hmac_sha384_bytes(key, data);
-            out[..48].copy_from_slice(&d);
+            out[..48].copy_from_slice(&hmac_sha384_bytes(key, data));
             Some((out, 48))
         }
-        "SHA-512" => {
-            let d = hmac_sha512_bytes(key, data);
-            Some((d, 64))
-        }
+        "SHA-512" => Some((hmac_sha512_bytes(key, data), 64)),
         "MD5" => {
-            let d = hmac_md5_bytes(key, data);
-            out[..16].copy_from_slice(&d);
+            out[..16].copy_from_slice(&hmac_md5_bytes(key, data));
             Some((out, 16))
         }
         _ => None,
@@ -324,6 +469,16 @@ pub(crate) fn with_active_tenant<R>(f: impl FnOnce(&str) -> R) -> R {
     BOA_ACTIVE_TENANT.with(|t| f(&t.borrow()))
 }
 
+/// Records `violation` in `BOA_VIOLATION`, preserving the first violation of the turn.
+#[inline]
+pub(crate) fn record_boa_violation_once(violation: SandboxViolation) {
+    BOA_VIOLATION.with(|v| {
+        if v.borrow().is_none() {
+            *v.borrow_mut() = Some(violation);
+        }
+    });
+}
+
 /// Charges `cost` CPU fuel against the active isolate's `BOA_FUEL_BUDGET`, recording
 /// `SandboxViolation::CpuFuelExhausted` and returning `Err` if the budget is exceeded.
 #[inline]
@@ -333,11 +488,7 @@ pub(crate) fn consume_crypto_kdf_fuel(cost: u64) -> Result<(), String> {
     BOA_FUEL_BUDGET.with(|f| f.set((next, limit)));
     if next > limit {
         let tenant_id = active_tenant_id_or_default();
-        BOA_VIOLATION.with(|v| {
-            if v.borrow().is_none() {
-                *v.borrow_mut() = Some(SandboxViolation::CpuFuelExhausted { tenant_id, limit });
-            }
-        });
+        record_boa_violation_once(SandboxViolation::CpuFuelExhausted { tenant_id, limit });
         return Err(format!(
             "RangeError: Cryptographic KDF CPU fuel budget exhausted (limit: {} units)",
             limit
@@ -367,16 +518,11 @@ pub(crate) fn record_isolate_memory_violation(requested: usize, limit: usize) ->
         limit,
     };
     let msg = violation.to_string();
-    BOA_VIOLATION.with(|v| {
-        if v.borrow().is_none() {
-            *v.borrow_mut() = Some(violation);
-        }
-    });
+    record_boa_violation_once(violation);
     format!("RangeError: {}", msg)
 }
 
-/// Releases `released_bytes` from `BOA_KV_MEM_BUDGET` (`net_used` clamped at `0` so pre-existing
-/// cross-turn state deletions cannot underflow the active isolate's compartment baseline).
+/// Releases `released_bytes` from `BOA_KV_MEM_BUDGET` (`net_used` clamped at `0`).
 #[inline]
 pub(crate) fn release_isolate_memory(released_bytes: usize) {
     if released_bytes == 0 {
@@ -392,8 +538,6 @@ pub(crate) fn release_isolate_memory(released_bytes: usize) {
 }
 
 /// Applies a signed `delta_bytes` adjustment to `BOA_KV_MEM_BUDGET`.
-/// Positive deltas enforce `limit` and record `SandboxViolation::MemoryCeilingExceeded` on overflow;
-/// negative deltas reclaim memory down to the compartment baseline floor.
 #[inline]
 pub(crate) fn try_adjust_isolate_memory(delta_bytes: isize) -> Result<(), String> {
     if delta_bytes == 0 {
@@ -408,7 +552,6 @@ pub(crate) fn try_adjust_isolate_memory(delta_bytes: isize) -> Result<(), String
 
 /// Context-aware signed memory adjustment that also trips `trip_isolate_oom_limits(context)` on OOM.
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn try_adjust_isolate_memory_ctx(
     delta_bytes: isize,
     context: &mut boa_engine::Context,
@@ -421,8 +564,6 @@ pub(crate) fn try_adjust_isolate_memory_ctx(
 }
 
 /// Charges `added_bytes` against the active isolate's `BOA_KV_MEM_BUDGET` ceiling (`max_memory_bytes`).
-/// If the ceiling is exceeded, records `SandboxViolation::MemoryCeilingExceeded` in `BOA_VIOLATION`
-/// and returns `Err` with the violation message.
 #[inline]
 pub(crate) fn try_consume_isolate_memory(added_bytes: usize) -> Result<(), String> {
     if added_bytes == 0 {
@@ -444,8 +585,7 @@ pub(crate) fn try_consume_isolate_memory(added_bytes: usize) -> Result<(), Strin
     Ok(())
 }
 
-/// Charges `added_bytes` against `BOA_KV_MEM_BUDGET` and trips `trip_isolate_oom_limits(context)`
-/// immediately on overflow so `try { ... } catch {}` loops cannot swallow OOM.
+/// Charges `added_bytes` against `BOA_KV_MEM_BUDGET` and trips `trip_isolate_oom_limits(context)` on OOM.
 #[inline]
 pub(crate) fn try_consume_isolate_memory_ctx(
     added_bytes: usize,

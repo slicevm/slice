@@ -1,4 +1,4 @@
-use crate::http_server::{serve_connection_with_isolate, spawn_worker_isolate};
+use crate::server::{serve_connection_with_isolate, spawn_worker_isolate};
 use crate::{LAST_CLI_EXIT_CODE, cmd_microvm_bench, cmd_run};
 use slice_cas::{CasBuilder, MappedCasArchive};
 use slice_engine::compile_source_to_bytecode;

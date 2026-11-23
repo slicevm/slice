@@ -148,16 +148,13 @@ pub fn generate_uuid_v4(det_prng: Option<&mut u64>) -> String {
     b[8] = (b[8] & 0x3f) | 0x80;
 
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = [0u8; 36];
-    let mut j = 0;
+    let mut out = String::with_capacity(36);
     for (i, &byte) in b.iter().enumerate() {
         if i == 4 || i == 6 || i == 8 || i == 10 {
-            out[j] = b'-';
-            j += 1;
+            out.push('-');
         }
-        out[j] = HEX[(byte >> 4) as usize];
-        out[j + 1] = HEX[(byte & 0x0f) as usize];
-        j += 2;
+        out.push((HEX[(byte >> 4) as usize] & 0x7f) as char);
+        out.push((HEX[(byte & 0x0f) as usize] & 0x7f) as char);
     }
-    unsafe { String::from_utf8_unchecked(out.to_vec()) }
+    out
 }

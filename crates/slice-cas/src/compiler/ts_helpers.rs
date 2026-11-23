@@ -1,10 +1,31 @@
 //! TypeScript / Decorator / Explicit-Resource-Management / Auto-Accessor / Standalone ESM Helpers.
 
+use crate::compiler::diagnostics::default_oxc_parse_options;
 use crate::linker::{
     VIRTUAL_NO_FS_DIR, has_esm_default_export_marker, is_builtin_module, is_jsx_runtime_builtin,
     slice_with_edits, transform_module_to_cjs,
 };
 use std::path::Path;
+
+#[inline]
+fn format_blake3_rc_hex(digest: &blake3::Hash) -> String {
+    let key_u64 = u64::from_le_bytes(digest.as_bytes()[0..8].try_into().unwrap());
+    format!("{:016x}", key_u64)
+}
+
+#[inline]
+pub(crate) fn compute_slice_rc_hex_key(payload: &str) -> String {
+    format_blake3_rc_hex(&blake3::hash(payload.as_bytes()))
+}
+
+#[inline]
+pub(crate) fn compute_slice_rc_hex_key_parts(modules_code: &str, entry_body: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(modules_code.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(entry_body.as_bytes());
+    format_blake3_rc_hex(&hasher.finalize())
+}
 
 #[inline]
 fn is_ascii_ident_byte(b: u8) -> bool {
@@ -187,10 +208,7 @@ pub(crate) fn lower_auto_accessors_in_js(js_code: &str) -> String {
     }
 
     let allocator = oxc::allocator::Allocator::default();
-    let parse_opts = oxc::parser::ParseOptions {
-        allow_return_outside_function: true,
-        ..Default::default()
-    };
+    let parse_opts = default_oxc_parse_options();
     let mut ret = oxc::parser::Parser::new(
         &allocator,
         js_code,
@@ -309,10 +327,7 @@ pub(crate) fn has_standalone_builtin_import_or_cjs_export(js_code: &str) -> bool
     }
     // Parse quickly only when `import` token is present to inspect exact `ImportDeclaration` specifiers
     let allocator = oxc::allocator::Allocator::default();
-    let parse_opts = oxc::parser::ParseOptions {
-        allow_return_outside_function: true,
-        ..Default::default()
-    };
+    let parse_opts = default_oxc_parse_options();
     let ret = oxc::parser::Parser::new(
         &allocator,
         js_code,
@@ -346,6 +361,31 @@ pub fn needs_unbundled_esm_lowering(js_code: &str) -> bool {
         || memchr::memmem::find(bytes, b"require(").is_some()
 }
 
+/// Wraps an already-lowered standalone CommonJS body into either a `__SLICE_RC` default-export
+/// envelope or a `globalThis.__slice_cas_exports` / `exports` preamble, rewriting any unshadowed
+/// `require(...)` calls via `rewrite_require_fn`.
+pub(crate) fn finalize_standalone_cjs_envelope(
+    cjs: &str,
+    wrap_exports_preamble: bool,
+    rewrite_require_fn: fn(&str) -> String,
+) -> String {
+    if has_esm_default_export_marker(cjs) {
+        let rc_key = compute_slice_rc_hex_key(cjs);
+        let direct_body = rewrite_require_fn(cjs);
+        return format!(
+            "var __slice_modules = {{}};//__SLICE_RC:{rc_key}\nif (typeof globalThis.__slice_cas_exports === \"object\" && globalThis.__slice_cas_exports !== null) {{\nvar exports = globalThis.__slice_cas_exports, module = globalThis.__slice_cas_module;\n{direct_body}\n}} else {{\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{rc_key}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{rc_key}\"] = function() {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{direct_body}\n__h = exports.__esModule ? exports.default : module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n}}\n"
+        );
+    }
+    let rewritten = rewrite_require_fn(cjs);
+    if wrap_exports_preamble && memchr::memmem::find(rewritten.as_bytes(), b"exports").is_some() {
+        format!(
+            "var exports = (typeof globalThis.__slice_cas_exports === \"object\" && globalThis.__slice_cas_exports !== null) ? globalThis.__slice_cas_exports : {{}}, module = (typeof globalThis.__slice_cas_module === \"object\" && globalThis.__slice_cas_module !== null) ? globalThis.__slice_cas_module : {{ exports: exports }};\n{rewritten}"
+        )
+    } else {
+        rewritten
+    }
+}
+
 /// Lowers any unbundled ESM `import` / `export` statements into CommonJS (`__slice_cjs_require` +
 /// `exports` / `module.exports`) with zero host filesystem `stat()` syscalls so Tier-1 `Boa` can
 /// execute both standalone `export const` scripts and multi-blob `MappedCasArchive` modules.
@@ -375,23 +415,5 @@ pub fn lower_unbundled_esm_for_boa(
         js_code.to_string()
     };
     let had_esm_transform = cjs != js_code;
-    if has_esm_default_export_marker(&cjs) {
-        let digest = blake3::hash(cjs.as_bytes());
-        let rc_u64 = u64::from_le_bytes(digest.as_bytes()[0..8].try_into().unwrap());
-        let rc_key = format!("{:016x}", rc_u64);
-        let direct_body = rewrite_require_fn(&cjs);
-        return format!(
-            "var __slice_modules = {{}};//__SLICE_RC:{rc_key}\nif (typeof globalThis.__slice_cas_exports === \"object\" && globalThis.__slice_cas_exports !== null) {{\nvar exports = globalThis.__slice_cas_exports, module = globalThis.__slice_cas_module;\n{direct_body}\n}} else {{\nvar __rc = globalThis.__slice_rc || (globalThis.__slice_rc = Object.create(null));\nvar __run = __rc[\"{rc_key}\"];\nif (!__run) {{\nvar __h = null;\n__run = __rc[\"{rc_key}\"] = function() {{\nif (!__h) {{\nvar exports = {{}}, module = {{ exports: exports }};\n{direct_body}\n__h = exports.__esModule ? exports.default : module.exports;\n}}\nif (__h) globalThis.__slice_dispatch_fetch(__h);\n}};\n}}\n__run();\n}}\n"
-        );
-    }
-    let rewritten = rewrite_require_fn(&cjs);
-    if (had_esm_transform || has_mod_exp)
-        && memchr::memmem::find(rewritten.as_bytes(), b"exports").is_some()
-    {
-        format!(
-            "var exports = (typeof globalThis.__slice_cas_exports === \"object\" && globalThis.__slice_cas_exports !== null) ? globalThis.__slice_cas_exports : {{}}, module = (typeof globalThis.__slice_cas_module === \"object\" && globalThis.__slice_cas_module !== null) ? globalThis.__slice_cas_module : {{ exports: exports }};\n{rewritten}"
-        )
-    } else {
-        rewritten
-    }
+    finalize_standalone_cjs_envelope(&cjs, had_esm_transform || has_mod_exp, rewrite_require_fn)
 }

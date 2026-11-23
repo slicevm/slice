@@ -3,9 +3,27 @@
 use crate::bundler::resolve_module_specifier;
 use crate::linker::{
     canonical_mod_id, is_builtin_module, is_jsx_runtime_builtin, normalize_builtin_specifier,
-    resolve_spec_and_record, walk_ast_call_expressions, walk_ast_expressions,
+    resolve_spec_and_record, slice_with_edits, walk_ast_call_expressions, walk_ast_expressions,
 };
 use std::path::{Path, PathBuf};
+
+fn try_resolve_cjs_spec(
+    spec: &str,
+    from_dir: &Path,
+    deps_out: &mut Vec<PathBuf>,
+) -> Option<String> {
+    if is_builtin_module(spec) {
+        Some(normalize_builtin_specifier(spec))
+    } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
+        let id = canonical_mod_id(&resolved_path);
+        deps_out.push(resolved_path);
+        Some(id)
+    } else if is_jsx_runtime_builtin(spec) {
+        Some(normalize_builtin_specifier(spec))
+    } else {
+        None
+    }
+}
 
 pub fn rewrite_cjs_requires_in_line(
     line: &str,
@@ -35,22 +53,8 @@ pub fn rewrite_cjs_requires_in_line(
                 let after_quote = trimmed_after[1 + end_q + 1..].trim_start();
                 if after_quote.starts_with(')') {
                     let spec = &trimmed_after[1..1 + end_q];
-                    if is_builtin_module(spec) {
-                        let norm = normalize_builtin_specifier(spec);
-                        result.push_str(&format!("{:?}", norm));
-                        let consumed = ws_len + 1 + end_q + 1;
-                        rest = &after_req[consumed..];
-                        continue;
-                    } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
-                        let id = canonical_mod_id(&resolved_path);
-                        deps_out.push(resolved_path);
-                        result.push_str(&format!("{:?}", id));
-                        let consumed = ws_len + 1 + end_q + 1;
-                        rest = &after_req[consumed..];
-                        continue;
-                    } else if is_jsx_runtime_builtin(spec) {
-                        let norm = normalize_builtin_specifier(spec);
-                        result.push_str(&format!("{:?}", norm));
+                    if let Some(resolved) = try_resolve_cjs_spec(spec, from_dir, deps_out) {
+                        result.push_str(&format!("{:?}", resolved));
                         let consumed = ws_len + 1 + end_q + 1;
                         rest = &after_req[consumed..];
                         continue;
@@ -114,19 +118,9 @@ pub fn rewrite_cjs_requires_ast(
                 let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
                     return;
                 };
-                let spec = str_lit.value.as_str();
-                let resolved_opt = if is_builtin_module(spec) {
-                    Some(normalize_builtin_specifier(spec))
-                } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
-                    let id = canonical_mod_id(&resolved_path);
-                    deps_out.push(resolved_path);
-                    Some(id)
-                } else if is_jsx_runtime_builtin(spec) {
-                    Some(normalize_builtin_specifier(spec))
-                } else {
-                    None
-                };
-                if let Some(resolved) = resolved_opt {
+                if let Some(resolved) =
+                    try_resolve_cjs_spec(str_lit.value.as_str(), from_dir, deps_out)
+                {
                     let start = (str_lit.span.start as usize).saturating_sub(1);
                     let end = (str_lit.span.end as usize).saturating_sub(1);
                     edits.push((start, end, format!("{:?}", resolved)));
@@ -136,18 +130,7 @@ pub fn rewrite_cjs_requires_ast(
                 return snippet.to_string();
             }
             edits.sort_by_key(|e| e.0);
-            let mut out = String::with_capacity(snippet.len() + edits.len() * 32);
-            let mut cursor = 0usize;
-            for (s, e, rep) in edits {
-                if s < cursor || e > snippet.len() {
-                    continue;
-                }
-                out.push_str(&snippet[cursor..s]);
-                out.push_str(&rep);
-                cursor = e;
-            }
-            out.push_str(&snippet[cursor..]);
-            return out;
+            return slice_with_edits(snippet, 0, snippet.len(), &edits);
         }
         return snippet
             .lines()
@@ -177,19 +160,7 @@ pub fn rewrite_cjs_requires_ast(
         let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
             return;
         };
-        let spec = str_lit.value.as_str();
-        let resolved_opt = if is_builtin_module(spec) {
-            Some(normalize_builtin_specifier(spec))
-        } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
-            let id = canonical_mod_id(&resolved_path);
-            deps_out.push(resolved_path);
-            Some(id)
-        } else if is_jsx_runtime_builtin(spec) {
-            Some(normalize_builtin_specifier(spec))
-        } else {
-            None
-        };
-        if let Some(resolved) = resolved_opt {
+        if let Some(resolved) = try_resolve_cjs_spec(str_lit.value.as_str(), from_dir, deps_out) {
             edits.push((
                 str_lit.span.start as usize,
                 str_lit.span.end as usize,
@@ -203,18 +174,7 @@ pub fn rewrite_cjs_requires_ast(
     }
 
     edits.sort_by_key(|e| e.0);
-    let mut out = String::with_capacity(snippet.len() + edits.len() * 32);
-    let mut cursor = 0usize;
-    for (s, e, rep) in edits {
-        if s < cursor || e > snippet.len() {
-            continue;
-        }
-        out.push_str(&snippet[cursor..s]);
-        out.push_str(&rep);
-        cursor = e;
-    }
-    out.push_str(&snippet[cursor..]);
-    out
+    slice_with_edits(snippet, 0, snippet.len(), &edits)
 }
 
 /// Rewrites unshadowed global `require(...)` callee identifiers to `__slice_cjs_require(...)`
@@ -235,7 +195,7 @@ pub fn rewrite_require_ident_ast(source: &str) -> Option<String> {
     }
 
     let mut scoping_opt: Option<oxc::semantic::Scoping> = None;
-    let mut callee_spans: Vec<(usize, usize)> = Vec::new();
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
     walk_ast_call_expressions(&parser_ret.program, &mut |call| {
         if let Expression::Identifier(callee) = call.callee.without_parentheses()
             && callee.name.as_str() == "require"
@@ -247,28 +207,21 @@ pub fn rewrite_require_ident_ast(source: &str) -> Option<String> {
                     .into_scoping()
             });
             if is_unresolved_global_ident(scoping, callee) {
-                callee_spans.push((callee.span.start as usize, callee.span.end as usize));
+                edits.push((
+                    callee.span.start as usize,
+                    callee.span.end as usize,
+                    "__slice_cjs_require".to_string(),
+                ));
             }
         }
     });
 
-    if callee_spans.is_empty() {
+    if edits.is_empty() {
         return Some(source.to_string());
     }
 
-    callee_spans.sort_by_key(|s| s.0);
-    let mut out = String::with_capacity(source.len() + callee_spans.len() * 12);
-    let mut cursor = 0usize;
-    for (s, e) in callee_spans {
-        if s < cursor || e > source.len() {
-            continue;
-        }
-        out.push_str(&source[cursor..s]);
-        out.push_str("__slice_cjs_require");
-        cursor = e;
-    }
-    out.push_str(&source[cursor..]);
-    Some(out)
+    edits.sort_by_key(|s| s.0);
+    Some(slice_with_edits(source, 0, source.len(), &edits))
 }
 
 /// Lowers unshadowed global `Buffer.byteLength(<arg>)` and `Buffer.from(<arg>, <enc>?).toString(<to_enc>?)`
@@ -409,18 +362,7 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
     }
 
     edits.sort_by_key(|e| e.0);
-    let mut out = String::with_capacity(code.len() + edits.len() * 32);
-    let mut cursor = 0usize;
-    for (s, e, rep) in edits {
-        if s < cursor || e > code.len() {
-            continue;
-        }
-        out.push_str(&code[cursor..s]);
-        out.push_str(&rep);
-        cursor = e;
-    }
-    out.push_str(&code[cursor..]);
-    out
+    slice_with_edits(code, 0, code.len(), &edits)
 }
 
 pub fn collect_require_edits_from_program(
@@ -469,19 +411,7 @@ pub fn collect_require_edits_from_program(
         let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
             return;
         };
-        let spec = str_lit.value.as_str();
-        let resolved_opt = if is_builtin_module(spec) {
-            Some(normalize_builtin_specifier(spec))
-        } else if let Some(resolved_path) = resolve_module_specifier(from_dir, spec) {
-            let id = canonical_mod_id(&resolved_path);
-            deps_out.push(resolved_path);
-            Some(id)
-        } else if is_jsx_runtime_builtin(spec) {
-            Some(normalize_builtin_specifier(spec))
-        } else {
-            None
-        };
-        if let Some(resolved) = resolved_opt {
+        if let Some(resolved) = try_resolve_cjs_spec(str_lit.value.as_str(), from_dir, deps_out) {
             edits.push((
                 str_lit.span.start as usize,
                 str_lit.span.end as usize,

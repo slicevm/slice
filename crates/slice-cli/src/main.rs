@@ -6,6 +6,10 @@
 //! - [`server`] - Multi-threaded WinterTC HTTP/1.1 keep-alive, SSE, WebSocket, TLS 1.3 (`rustls`), and zero-downtime `.cas` hot-swap server.
 //! - [`diagnostics`] - Model Context Protocol (MCP) JSON-RPC 2.0 server, interactive SES REPL, kernel doctor, and 1,000-tenant microVM benchmark.
 
+#![deny(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 #[cfg(windows)]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -14,24 +18,6 @@ pub(crate) mod commands;
 pub(crate) mod config;
 pub(crate) mod diagnostics;
 pub(crate) mod server;
-
-// Backward-compatible module aliases for crate-level integration tests in `crates/slice-cli/tests/`
-#[cfg(test)]
-pub(crate) mod config_and_watch {
-    pub(crate) use crate::config::*;
-}
-#[cfg(test)]
-pub(crate) mod http_server {
-    pub(crate) use crate::server::*;
-}
-#[cfg(test)]
-pub(crate) mod mcp_and_repl {
-    pub(crate) use crate::diagnostics::*;
-}
-#[cfg(test)]
-pub(crate) mod test_runner {
-    pub(crate) use crate::commands::test_runner::*;
-}
 
 #[cfg(test)]
 #[path = "../tests/mod.rs"]

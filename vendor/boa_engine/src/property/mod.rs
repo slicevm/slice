@@ -692,10 +692,7 @@ fn parse_u32_index_bytes(bytes: &[u8]) -> Option<NonMaxU32> {
         return None;
     }
     if first == b'0' {
-        return (bytes.len() == 1).then(|| {
-            // SAFETY: `0` is not `u32::MAX`.
-            unsafe { NonMaxU32::new_unchecked(0) }
-        });
+        return (bytes.len() == 1).then_some(const { NonMaxU32::new(0).unwrap() });
     }
     let mut result = u32::from(first - b'0');
     if bytes.len() == 10 {
@@ -713,8 +710,7 @@ fn parse_u32_index_bytes(bytes: &[u8]) -> Option<NonMaxU32> {
             }
             result = result * 10 + u32::from(b - b'0');
         }
-        // SAFETY: `bytes.len() < 10`, so `result <= 999_999_999 < u32::MAX`.
-        Some(unsafe { NonMaxU32::new_unchecked(result) })
+        NonMaxU32::new(result)
     }
 }
 
