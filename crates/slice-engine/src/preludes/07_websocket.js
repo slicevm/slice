@@ -332,16 +332,21 @@
       }
       return;
     }
-    if (eventType === "open" && typeof h.open === "function") {
-      h.open(wsPeer);
-    } else if (eventType === "message" && typeof h.message === "function") {
+    var openFn = typeof h.open === "function" ? h.open : (typeof h.onOpen === "function" ? h.onOpen : null);
+    var msgFn = typeof h.message === "function" ? h.message : (typeof h.onMessage === "function" ? h.onMessage : null);
+    var closeFn = typeof h.close === "function" ? h.close : (typeof h.onClose === "function" ? h.onClose : null);
+    if (eventType === "open" && openFn) {
+      openFn.call(h, wsPeer);
+    } else if (eventType === "message" && msgFn) {
       var msgArg = isBinary ? __slice_base64_decode_bytes(payloadStrOrB64) : payloadStrOrB64;
-      var out = h.message(wsPeer, msgArg);
+      var out = msgFn.call(h, wsPeer, msgArg);
       if (out !== undefined && out !== null && typeof out.then !== "function") {
         wsPeer.send(out);
       }
-    } else if (eventType === "close" && typeof h.close === "function") {
-      h.close(wsPeer, code || 1000, reason || "");
+    } else if (eventType === "close" && closeFn) {
+      var closeCode = code || 1000;
+      var closeReason = reason || "";
+      closeFn.call(h, wsPeer, closeCode, closeReason);
     }
   };
 })();
