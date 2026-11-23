@@ -266,10 +266,11 @@ pub struct ParsedNetConnectTarget<'a> {
 #[inline]
 pub fn parse_net_connect_target(raw: &str) -> Option<ParsedNetConnectTarget<'_>> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.bytes().any(|b| b <= 0x20 || b == 0x7F) {
+    let tb = trimmed.as_bytes();
+    if tb.is_empty() {
         return None;
     }
-    if trimmed.contains("://") {
+    if memchr::memmem::find(tb, b"://").is_some() {
         let parsed = parse_http_authority_and_path(trimmed)?;
         return Some(ParsedNetConnectTarget {
             clean_host: parsed.clean_host,
@@ -278,14 +279,17 @@ pub fn parse_net_connect_target(raw: &str) -> Option<ParsedNetConnectTarget<'_>>
             scheme_default_port: Some(parsed.default_port),
         });
     }
-    if trimmed.contains(['@', '/', '?', '#', '\\']) {
-        return None;
+    for &b in tb {
+        if b <= 0x20 || b == 0x7F || matches!(b, b'@' | b'/' | b'?' | b'#' | b'\\') {
+            return None;
+        }
     }
-    let (clean_host, explicit_port, scheme_default_port) = extract_clean_hostname_and_port(trimmed);
+    let (clean_host, explicit_port, scheme_default_port) =
+        extract_clean_authority_host_and_port(trimmed, None);
     if clean_host.is_empty() {
         return None;
     }
-    let is_ipv6 = clean_host.contains(':');
+    let is_ipv6 = memchr::memchr(b':', clean_host.as_bytes()).is_some();
     if !is_ipv6 && is_malformed_numeric_host(&clean_host) {
         return None;
     }
@@ -337,43 +341,43 @@ pub(crate) fn parse_net_grant_parts(raw: &str) -> Option<(String, bool, Option<u
     Some((canon_host, parsed.is_ipv6, parsed.explicit_port))
 }
 
-/// Extracts `(clean_lowercase_hostname, explicit_port, scheme_default_port)` from a `host`,
-/// `host:port`, `[ipv6]:port`, or full URL string.
-///
-/// Security (`SBX-SEC-02`, `SBX-SEC-03`) & Performance (`SBX-PERF-01`):
-/// - Splits URL authority at the earliest byte in `['/', '?', '#', '\\']`.
-/// - Percent-decodes `%XX` hostnames when `%` is present while returning `Cow::Borrowed`
-///   whenever the hostname slice is already lowercase ASCII without percent escapes.
-/// - Validates decoded hostnames via `is_valid_decoded_hostname` and fails closed (returning an
-///   empty `Cow::Borrowed("")`) on decoded delimiters/control chars (`%40`, `%2f`, `%00`, `%0d%0a`)
-///   or malformed/`:0` `:port` suffixes.
-/// - Strips trailing DNS root dots (`"metadata.google.internal."` -> `"metadata.google.internal"`).
-/// - Strips IPv6 zone identifiers (`"[fe80::1%eth0]:80"` -> `"fe80::1"`).
 #[inline]
-pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>, Option<u16>) {
-    let mut trimmed = host.trim();
-    if trimmed.is_empty() || trimmed.bytes().any(|b| b <= 0x20 || b == 0x7F) {
-        return (Cow::Borrowed(""), None, None);
+fn validate_and_has_uppercase_host(h: &str, is_ipv6: bool) -> Option<bool> {
+    if h.is_empty() {
+        return None;
     }
-    let mut scheme_default_port = None;
-    if let Some((scheme, after_scheme)) = trimmed.split_once("://") {
-        if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss") {
-            scheme_default_port = Some(443);
-        } else if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("ws") {
-            scheme_default_port = Some(80);
+    let mut has_upper = false;
+    for b in h.bytes() {
+        if b <= 0x20
+            || b == 0x7F
+            || matches!(
+                b,
+                b'/' | b'\\' | b'?' | b'#' | b'@' | b'[' | b']' | b'<' | b'>' | b'|' | b'^' | b'`'
+            )
+        {
+            return None;
         }
-        trimmed = after_scheme;
+        if !is_ipv6 && b == b':' {
+            return None;
+        }
+        if b.is_ascii_uppercase() {
+            has_upper = true;
+        }
     }
-    if let Some((authority, _)) = trimmed.split_once(['/', '?', '#', '\\']) {
-        trimmed = authority;
+    if is_ipv6 && h.parse::<Ipv6Addr>().is_err() {
+        return None;
     }
-    if let Some((_, after_auth)) = trimmed.rsplit_once('@') {
-        trimmed = after_auth;
-    }
+    Some(has_upper)
+}
+
+#[inline]
+fn extract_clean_authority_host_and_port(
+    trimmed: &str,
+    scheme_default_port: Option<u16>,
+) -> (Cow<'_, str>, Option<u16>, Option<u16>) {
     if trimmed.is_empty() {
         return (Cow::Borrowed(""), None, scheme_default_port);
     }
-
     let mut explicit_port = None;
     let mut is_ipv6_host = false;
     let without_port = if let Some(rest) = trimmed.strip_prefix('[') {
@@ -399,15 +403,13 @@ pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>
                 explicit_port = Some(p);
             }
         }
-        // Strip RFC 6874 / OS IPv6 zone identifier (`%eth0` or `%25eth0`)
         if let Some((v6_clean, _zone)) = ipv6.split_once('%') {
             v6_clean
         } else {
             ipv6
         }
     } else if let Some((h, port_part)) = trimmed.rsplit_once(':') {
-        if h.contains(':') {
-            // Bare IPv6 address (contains at least two colons, e.g. `::1` or `fe80::1%eth0`)
+        if memchr::memchr(b':', h.as_bytes()).is_some() {
             is_ipv6_host = true;
             if let Some((v6_clean, _zone)) = trimmed.split_once('%') {
                 v6_clean
@@ -433,7 +435,7 @@ pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>
         trimmed
     };
 
-    if !is_ipv6_host && without_port.as_bytes().contains(&b'%') {
+    if !is_ipv6_host && memchr::memchr(b'%', without_port.as_bytes()).is_some() {
         let Some(decoded) = percent_decode_host_cow(without_port) else {
             return (Cow::Borrowed(""), None, scheme_default_port);
         };
@@ -453,16 +455,73 @@ pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>
     } else {
         without_port.trim_end_matches('.')
     };
-    if !is_valid_decoded_hostname(without_trailing_dot, is_ipv6_host) {
+    let Some(has_upper) = validate_and_has_uppercase_host(without_trailing_dot, is_ipv6_host)
+    else {
         return (Cow::Borrowed(""), None, scheme_default_port);
-    }
-    let clean_cow = if without_trailing_dot.bytes().any(|b| b.is_ascii_uppercase()) {
+    };
+    let clean_cow = if has_upper {
         Cow::Owned(without_trailing_dot.to_ascii_lowercase())
     } else {
         Cow::Borrowed(without_trailing_dot)
     };
 
     (clean_cow, explicit_port, scheme_default_port)
+}
+
+/// Extracts `(clean_lowercase_hostname, explicit_port, scheme_default_port)` from a `host`,
+/// `host:port`, `[ipv6]:port`, or full URL string.
+///
+/// Security (`SBX-SEC-02`, `SBX-SEC-03`) & Performance (`SBX-PERF-01`):
+/// - Splits URL authority at the earliest byte in `['/', '?', '#', '\\']`.
+/// - Percent-decodes `%XX` hostnames when `%` is present while returning `Cow::Borrowed`
+///   whenever the hostname slice is already lowercase ASCII without percent escapes.
+/// - Validates decoded hostnames via `is_valid_decoded_hostname` and fails closed (returning an
+///   empty `Cow::Borrowed("")`) on decoded delimiters/control chars (`%40`, `%2f`, `%00`, `%0d%0a`)
+///   or malformed/`:0` `:port` suffixes.
+/// - Strips trailing DNS root dots (`"metadata.google.internal."` -> `"metadata.google.internal"`).
+/// - Strips IPv6 zone identifiers (`"[fe80::1%eth0]:80"` -> `"fe80::1"`).
+#[inline]
+pub fn extract_clean_hostname_and_port(host: &str) -> (Cow<'_, str>, Option<u16>, Option<u16>) {
+    let mut trimmed = host.trim();
+    if trimmed.is_empty() {
+        return (Cow::Borrowed(""), None, None);
+    }
+    let mut scheme_default_port = None;
+    if let Some(idx) = memchr::memmem::find(trimmed.as_bytes(), b"://") {
+        let scheme = &trimmed[..idx];
+        if scheme.bytes().any(|b| b <= 0x20 || b == 0x7F) {
+            return (Cow::Borrowed(""), None, None);
+        }
+        if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss") {
+            scheme_default_port = Some(443);
+        } else if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("ws") {
+            scheme_default_port = Some(80);
+        }
+        trimmed = &trimmed[idx + 3..];
+    }
+    let tb = trimmed.as_bytes();
+    let mut auth_end = tb.len();
+    let mut at_idx = None;
+    let mut i = 0usize;
+    while i < tb.len() {
+        let b = tb[i];
+        if matches!(b, b'/' | b'?' | b'#' | b'\\') {
+            auth_end = i;
+            break;
+        }
+        if b <= 0x20 || b == 0x7F {
+            return (Cow::Borrowed(""), None, scheme_default_port);
+        }
+        if b == b'@' {
+            at_idx = Some(i);
+        }
+        i += 1;
+    }
+    let authority = match at_idx {
+        Some(at) => &trimmed[at + 1..auth_end],
+        None => &trimmed[..auth_end],
+    };
+    extract_clean_authority_host_and_port(authority, scheme_default_port)
 }
 
 /// Extracts the lowercase hostname (without scheme, path, `:port`, trailing dot, or IPv6 brackets)

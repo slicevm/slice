@@ -1,7 +1,8 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use slice_sandbox::{
-    CapabilityToken, TenantCompartment, is_cloud_metadata_ssrf_target,
-    is_private_or_loopback_ssrf_target, parse_dotenv_content, parse_inline_directives,
+    CapabilityAttenuationRequest, CapabilityToken, TenantCompartment,
+    is_cloud_metadata_ssrf_target, is_private_or_loopback_ssrf_target, parse_dotenv_content,
+    parse_inline_directives,
 };
 use std::hint::black_box;
 
@@ -32,6 +33,33 @@ fn bench_ocap_verification(c: &mut Criterion) {
         b.iter(|| {
             let res = tenant.verify_net_connect(black_box("api.stripe.com:443"));
             let _ = black_box(res);
+        });
+    });
+
+    let parent_caps = CapabilityToken::pure_compute()
+        .with_read_prefix("/app/data")
+        .with_write_prefix("/tmp/shards")
+        .with_net_host("api.stripe.com:443")
+        .with_net_host("*")
+        .with_env("NODE_ENV", "production")
+        .with_max_checkpoints(Some(16));
+    let req_reads = ["/app/data/users".to_string()];
+    let req_nets = [
+        "api.stripe.com:443".to_string(),
+        "api.openai.com:443".to_string(),
+    ];
+    let req_envs = ["NODE_ENV".to_string()];
+    group.bench_function("attenuate_capability_token", |b| {
+        b.iter(|| {
+            let child = parent_caps.attenuate(black_box(&CapabilityAttenuationRequest {
+                allow_read: Some(&req_reads),
+                allow_net: Some(&req_nets),
+                allow_env: Some(&req_envs),
+                max_checkpoints: Some(4),
+                consumed_checkpoints: 1,
+                ..Default::default()
+            }));
+            black_box(child.allowed_net_hosts.len())
         });
     });
 

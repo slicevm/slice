@@ -889,3 +889,193 @@ fn test_issue_101_process_exit_code_across_cli_cas_warm_and_test_runner() {
     LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn test_wave4_explicit_config_blocks_cas_manifest_escalation_and_cli_precedence() {
+    use crate::commands::pack_and_compile::cmd_pack;
+    use crate::commands::run::{LAST_CLI_EXIT_CODE, cmd_run};
+    use crate::config::ResolvedExecutionConfig;
+    use std::sync::atomic::Ordering;
+
+    let tmp_dir =
+        std::env::temp_dir().join(format!("slice_wave4_cas_cfg_prec_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let cas_proj = tmp_dir.join("wide_cas_proj");
+    std::fs::create_dir_all(cas_proj.join("src")).unwrap();
+
+    // 1. Pack a `.cas` archive whose embedded `slice.toml` grants wide capabilities AND an audit secret
+    std::fs::write(
+        cas_proj.join(".env.cas"),
+        "CAS_DOTENV_VAR=from_cas_dotenv\n",
+    )
+    .unwrap();
+    std::fs::write(
+        cas_proj.join("slice.toml"),
+        r#"
+[package]
+name = "wide-cas"
+entrypoint = "./src/index.ts"
+
+[capabilities]
+allow_read = ["/"]
+allow_net = ["*"]
+allow_env = ["CAS_EMBEDDED_VAR=from_embedded_cas"]
+env_file = ".env.cas"
+audit_egress = ["cas_embedded_dlp_canary_888"]
+"#,
+    )
+    .unwrap();
+    let victim_file = tmp_dir.join("victim.txt");
+    std::fs::write(&victim_file, "host-secret-file").unwrap();
+    let victim_escaped = victim_file.to_string_lossy().replace('\\', "/");
+
+    std::fs::write(
+        cas_proj.join("src/index.ts"),
+        format!(
+            r#"
+            import * as fs from "node:fs";
+            if (process.env.CAS_EMBEDDED_VAR || process.env.CAS_DOTENV_VAR) {{
+                process.exit(51);
+            }}
+            if (process.env.STRICT_CFG_VAR !== "strict_ok") {{
+                process.exit(53);
+            }}
+            if (process.argv.includes("--try-read")) {{
+                fs.readFileSync("{}");
+            }}
+            if (process.argv.includes("--try-leak")) {{
+                console.log("cas_embedded_dlp_canary_888");
+            }}
+            process.exit(0);
+            "#,
+            victim_escaped
+        ),
+    )
+    .unwrap();
+
+    let cas_file = cas_proj.join("wide.cas");
+    cmd_pack(&[
+        cas_proj.to_string_lossy().to_string(),
+        cas_file.to_string_lossy().to_string(),
+    ])
+    .unwrap();
+
+    // Running `.cas` WITHOUT `--config` resolves `.env.cas` relative to `cas_proj` (`base_dir = cas_file.parent()`)
+    let mut cfg_no_override =
+        ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(&[], false).unwrap();
+    let archive = slice_cas::MappedCasArchive::open(&cas_file).unwrap();
+    cfg_no_override
+        .apply_manifest_toml(archive.get_manifest_toml().unwrap(), cas_file.parent())
+        .unwrap();
+    assert_eq!(
+        cfg_no_override
+            .caps
+            .allowed_env_keys
+            .get("CAS_DOTENV_VAR")
+            .map(String::as_str),
+        Some("from_cas_dotenv"),
+        "embedded .cas env_file must resolve relative to .cas parent directory when --config is absent"
+    );
+
+    // Running `.cas` WITH explicit `--config=<strict.toml>` blocks ALL `.cas` capability widening
+    let strict_toml = tmp_dir.join("strict.toml");
+    std::fs::write(
+        &strict_toml,
+        r#"
+[capabilities]
+allow_env = ["STRICT_CFG_VAR=strict_ok"]
+"#,
+    )
+    .unwrap();
+
+    LAST_CLI_EXIT_CODE.store(99, Ordering::Relaxed);
+    cmd_run(&[
+        format!("--config={}", strict_toml.display()),
+        cas_file.to_string_lossy().to_string(),
+        "--quiet".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(
+        LAST_CLI_EXIT_CODE.load(Ordering::Relaxed),
+        0,
+        "explicit --config must prevent embedded .cas env capabilities from widening host sandbox"
+    );
+
+    // Embedded `allow_read = ["/"]` inside `wide.cas` is NOT granted under `--config=<strict.toml>`
+    let read_err = cmd_run(&[
+        format!("--config={}", strict_toml.display()),
+        cas_file.to_string_lossy().to_string(),
+        "--".to_string(),
+        "--try-read".to_string(),
+    ])
+    .unwrap_err();
+    assert!(
+        read_err
+            .to_string()
+            .contains("lacks filesystem read authority"),
+        "expected FsReadDenied under --config, got: {}",
+        read_err
+    );
+
+    // Embedded `audit_egress` DLP restriction still traps when `--try-leak` is passed
+    let leak_res = cmd_run(&[
+        format!("--config={}", strict_toml.display()),
+        cas_file.to_string_lossy().to_string(),
+        "--".to_string(),
+        "--try-leak".to_string(),
+    ]);
+    assert!(
+        leak_res.is_err(),
+        "monotonic DLP audit_egress from .cas must still block exfiltration under --config"
+    );
+
+    // 2. CLI `--checkpoints` overrides `checkpoints = false` in `slice.toml`
+    let mut cfg_cp = ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(
+        &["--checkpoints".to_string()],
+        false,
+    )
+    .unwrap();
+    cfg_cp
+        .apply_manifest_toml("[capabilities]\ncheckpoints = false\n", None)
+        .unwrap();
+    assert!(cfg_cp.caps.allow_checkpoints);
+    assert_eq!(cfg_cp.caps.max_checkpoints, None);
+
+    // 3. CLI `--allow-env=STAGE=from_cli` beats `--env-file=.env` in both flag orders
+    let dotenv_file = tmp_dir.join("prec.env");
+    std::fs::write(&dotenv_file, "STAGE=from_dotenv\nEXTRA_DOT=1\n").unwrap();
+
+    for flag_pair in [
+        vec![
+            "--allow-env=STAGE=from_cli".to_string(),
+            format!("--env-file={}", dotenv_file.display()),
+        ],
+        vec![
+            format!("--env-file={}", dotenv_file.display()),
+            "--allow-env=STAGE=from_cli".to_string(),
+        ],
+    ] {
+        let cfg_env =
+            ResolvedExecutionConfig::from_cli_args_with_ambient_cwd(&flag_pair, false).unwrap();
+        assert_eq!(
+            cfg_env
+                .caps
+                .allowed_env_keys
+                .get("STAGE")
+                .map(String::as_str),
+            Some("from_cli"),
+            "--allow-env must always take precedence over --env-file regardless of flag order"
+        );
+        assert_eq!(
+            cfg_env
+                .caps
+                .allowed_env_keys
+                .get("EXTRA_DOT")
+                .map(String::as_str),
+            Some("1")
+        );
+    }
+
+    LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

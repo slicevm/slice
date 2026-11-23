@@ -370,9 +370,11 @@ fn hash_dlp_pattern_slice(secrets: &[String]) -> u64 {
     h.finish()
 }
 
+type EgressDlpCacheEntry = (u64, usize, std::sync::Arc<aho_corasick::AhoCorasick>);
+
 thread_local! {
     static EGRESS_DLP_AUTOMATON_CACHE: std::cell::RefCell<
-        smallvec::SmallVec<[(u64, usize, std::sync::Arc<aho_corasick::AhoCorasick>); 8]>,
+        smallvec::SmallVec<[EgressDlpCacheEntry; 8]>,
     > = const { std::cell::RefCell::new(smallvec::SmallVec::new_const()) };
 }
 
@@ -402,7 +404,11 @@ fn get_or_build_dlp_automaton(
         if non_empty.is_empty() {
             return None;
         }
-        let ac = aho_corasick::AhoCorasick::new(&non_empty).ok()?;
+        let ac = aho_corasick::AhoCorasick::builder()
+            .kind(Some(aho_corasick::AhoCorasickKind::DFA))
+            .build(&non_empty)
+            .or_else(|_| aho_corasick::AhoCorasick::new(&non_empty))
+            .ok()?;
         let arc = std::sync::Arc::new(ac);
         let mut cache = cache_cell.borrow_mut();
         if cache.len() >= 8 {

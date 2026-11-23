@@ -27,21 +27,22 @@ fn contains_ascii_ignore_case(haystack: &[u8], needle_upper: &[u8]) -> bool {
 #[inline]
 pub fn is_sensitive_env_key(key: &str) -> bool {
     let b = key.trim().as_bytes();
-    if contains_ascii_ignore_case(b, b"SECRET")
-        || contains_ascii_ignore_case(b, b"PRIVATE")
-        || contains_ascii_ignore_case(b, b"PASSWORD")
-        || contains_ascii_ignore_case(b, b"PASSWD")
-        || contains_ascii_ignore_case(b, b"CREDENTIAL")
-    {
-        return true;
-    }
     if contains_ascii_ignore_case(b, b"PUBLIC_KEY")
         || contains_ascii_ignore_case(b, b"PUBLISHABLE_KEY")
     {
-        return false;
+        return contains_ascii_ignore_case(b, b"SECRET")
+            || contains_ascii_ignore_case(b, b"PRIVATE")
+            || contains_ascii_ignore_case(b, b"PASSWORD")
+            || contains_ascii_ignore_case(b, b"PASSWD")
+            || contains_ascii_ignore_case(b, b"CREDENTIAL");
     }
-    contains_ascii_ignore_case(b, b"TOKEN")
+    contains_ascii_ignore_case(b, b"SECRET")
+        || contains_ascii_ignore_case(b, b"TOKEN")
         || contains_ascii_ignore_case(b, b"KEY")
+        || contains_ascii_ignore_case(b, b"PASSWORD")
+        || contains_ascii_ignore_case(b, b"PASSWD")
+        || contains_ascii_ignore_case(b, b"PRIVATE")
+        || contains_ascii_ignore_case(b, b"CREDENTIAL")
         || contains_ascii_ignore_case(b, b"AUTH")
 }
 

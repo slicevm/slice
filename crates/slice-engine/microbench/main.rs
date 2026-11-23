@@ -1053,6 +1053,42 @@ fn bench_wave2_v0140_cas_and_slicesnp(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_wave4_v0140_egress_dlp_automaton(c: &mut Criterion) {
+    let mut group = c.benchmark_group("slice_engine::wave4_v0140_dlp");
+    let mut iso = SliceIsolate::spawn(
+        "bench-dlp-ac",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        16 * 1024 * 1024,
+    );
+    for i in 0..16 {
+        iso.add_egress_audit_secret(format!("sk_live_prod_tenant_secret_key_{:04}_x9z!", i));
+    }
+    let clean_16kb =
+        r#"{"id":1042,"service":"slice-edge","region":"us-east-1","ok":true,"items":["alpha","beta"]}"#
+            .repeat(175);
+    // Prime the thread-local Aho-Corasick automaton cache once before steady-state scan measurement
+    slice_engine::state_and_kv::verify_egress_secrets_slice(
+        "bench-dlp-ac",
+        &iso.egress_audit_secrets,
+        &clean_16kb,
+    )
+    .expect("clean warmup");
+
+    group.bench_function("egress_dlp_aho_corasick_16_secrets_16kb", |b| {
+        b.iter(|| {
+            let res = slice_engine::state_and_kv::verify_egress_secrets_slice(
+                black_box("bench-dlp-ac"),
+                black_box(&iso.egress_audit_secrets),
+                black_box(&clean_16kb),
+            );
+            black_box(res.is_ok())
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_boacas_and_automaton,
@@ -1064,6 +1100,7 @@ criterion_group!(
     bench_wave5_wasm_numeric_i64_and_shared_store,
     bench_wave3_v0135_promise_and_wintertc_router,
     bench_wave2_v0140_cas_and_slicesnp,
+    bench_wave4_v0140_egress_dlp_automaton,
     bench_http_cli_and_host_fs
 );
 criterion_main!(benches);

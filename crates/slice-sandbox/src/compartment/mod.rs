@@ -116,6 +116,22 @@ impl Default for CapabilityToken {
     }
 }
 
+#[inline]
+fn is_already_canonical_net_grant(s: &str) -> bool {
+    if s == "*" {
+        return true;
+    }
+    if s.is_empty() || s.ends_with('.') || (s.starts_with('[') && s.ends_with(']')) {
+        return false;
+    }
+    let sb = s.as_bytes();
+    if memchr::memchr(b'%', sb).is_some() || memchr::memmem::find(sb, b"://").is_some() {
+        return false;
+    }
+    sb.iter()
+        .all(|&b| b > 0x20 && b < 0x7F && !b.is_ascii_uppercase())
+}
+
 /// Monotonic capability narrowing request passed to [`CapabilityToken::attenuate`].
 ///
 /// Every `Option<&[String]>` field uses `None` to mean "inherit parent grants unchanged"
@@ -274,9 +290,7 @@ impl CapabilityToken {
                 }
             }
             None => {
-                for p in &self.allowed_read_prefixes {
-                    child.push_read_prefix(p);
-                }
+                child.allowed_read_prefixes = self.allowed_read_prefixes.clone();
             }
         }
 
@@ -294,19 +308,30 @@ impl CapabilityToken {
                 }
             }
             None => {
-                for p in &self.allowed_write_prefixes {
-                    child.push_write_prefix(p);
-                }
+                child.allowed_write_prefixes = self.allowed_write_prefixes.clone();
             }
         }
 
-        let mut norm_parent_nets =
-            FxHashSet::with_capacity_and_hasher(self.allowed_net_hosts.len(), Default::default());
-        for raw_parent in &self.allowed_net_hosts {
-            if let Some(canon) = canonicalize_net_grant_entry(raw_parent) {
-                norm_parent_nets.insert(canon);
+        let parent_nets_already_canonical = self
+            .allowed_net_hosts
+            .iter()
+            .all(|s| is_already_canonical_net_grant(s));
+        let owned_norm_parent_nets: FxHashSet<String>;
+        let norm_parent_nets: &FxHashSet<String> = if parent_nets_already_canonical {
+            &self.allowed_net_hosts
+        } else {
+            let mut set = FxHashSet::with_capacity_and_hasher(
+                self.allowed_net_hosts.len(),
+                Default::default(),
+            );
+            for raw_parent in &self.allowed_net_hosts {
+                if let Some(canon) = canonicalize_net_grant_entry(raw_parent) {
+                    set.insert(canon);
+                }
             }
-        }
+            owned_norm_parent_nets = set;
+            &owned_norm_parent_nets
+        };
 
         match req.allow_net {
             Some(requested) => {
@@ -351,7 +376,7 @@ impl CapabilityToken {
                 }
             }
             None => {
-                child.allowed_net_hosts = norm_parent_nets;
+                child.allowed_net_hosts = norm_parent_nets.clone();
             }
         }
 
@@ -377,9 +402,7 @@ impl CapabilityToken {
                 }
             }
             None => {
-                for eb in &self.allowed_exec_binaries {
-                    child = child.with_exec_binary(eb.clone());
-                }
+                child.allowed_exec_binaries = self.allowed_exec_binaries.clone();
             }
         }
 

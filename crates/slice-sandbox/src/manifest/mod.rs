@@ -363,8 +363,7 @@ impl SliceManifest {
                     ("limits", "memory_bytes") => {
                         if let Some(n) = parse_u64_ignoring_underscores(val) {
                             let bytes = usize::try_from(n).unwrap_or(usize::MAX);
-                            manifest.memory_limit_kb =
-                                (bytes / 1024).max(1).min(MAX_SAFE_MEMORY_KB);
+                            manifest.memory_limit_kb = (bytes / 1024).clamp(1, MAX_SAFE_MEMORY_KB);
                         }
                     }
                     ("limits", "max_checkpoints") | ("capabilities", "max_checkpoints") => {

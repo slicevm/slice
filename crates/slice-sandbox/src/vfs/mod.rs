@@ -46,26 +46,54 @@ fn is_win32_reserved_device_stem(stem: &[u8]) -> bool {
 
 #[inline]
 fn has_win32_reserved_device_segment(trimmed: &str) -> bool {
-    let mut rest = trimmed;
-    if let Some(after_ext) = rest
-        .strip_prefix(r"\\?\")
-        .or_else(|| rest.strip_prefix("//?/"))
+    let mut b = trimmed.as_bytes();
+    if b.len() >= 4
+        && (b[0] == b'\\' || b[0] == b'/')
+        && (b[1] == b'\\' || b[1] == b'/')
+        && b[2] == b'?'
+        && (b[3] == b'\\' || b[3] == b'/')
     {
-        rest = after_ext;
+        b = &b[4..];
     }
-    if rest.len() >= 2 && rest.as_bytes()[0].is_ascii_alphabetic() && rest.as_bytes()[1] == b':' {
-        rest = &rest[2..];
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        b = &b[2..];
     }
-    for seg in rest.split(['/', '\\']) {
-        let seg_trimmed = seg.trim_end_matches([' ', '.']);
-        if seg_trimmed.is_empty() {
+    let mut i = 0usize;
+    while i < b.len() {
+        let start = i;
+        while i < b.len() && b[i] != b'/' && b[i] != b'\\' {
+            i += 1;
+        }
+        let mut seg = &b[start..i];
+        i += 1;
+        while let Some(&last) = seg.last() {
+            if last == b' ' || last == b'.' {
+                seg = &seg[..seg.len() - 1];
+            } else {
+                break;
+            }
+        }
+        if seg.len() < 3 {
             continue;
         }
-        let stem_str = match seg_trimmed.find(['.', ':']) {
-            Some(idx) => seg_trimmed[..idx].trim_end_matches(' '),
-            None => seg_trimmed,
-        };
-        if is_win32_reserved_device_stem(stem_str.as_bytes()) {
+        let first_upper = seg[0] & !0x20;
+        if !matches!(first_upper, b'C' | b'P' | b'A' | b'N' | b'L') {
+            continue;
+        }
+        let mut stem_end = seg.len();
+        let mut j = 0usize;
+        while j < seg.len() {
+            if seg[j] == b'.' || seg[j] == b':' {
+                stem_end = j;
+                break;
+            }
+            j += 1;
+        }
+        let mut stem = &seg[..stem_end];
+        while stem.last() == Some(&b' ') {
+            stem = &stem[..stem.len() - 1];
+        }
+        if is_win32_reserved_device_stem(stem) {
             return true;
         }
     }
@@ -628,7 +656,20 @@ pub(crate) fn vfs_normalized_candidate_matches_prefix_with_tmp(
 /// Checks a pre-normalized candidate path (`norm_cand`) against `allowed_prefix`.
 #[inline]
 pub fn vfs_normalized_candidate_matches_prefix(norm_cand: &str, allowed_prefix: &str) -> bool {
-    vfs_normalized_candidate_matches_prefix_with_tmp(norm_cand, allowed_prefix, os_tmp_info())
+    let trimmed_pref = allowed_prefix.trim();
+    if trimmed_pref.is_empty() {
+        return false;
+    }
+    if trimmed_pref == "*" || trimmed_pref == "/" {
+        return true;
+    }
+    let norm_pref = normalize_vfs_path_cow(trimmed_pref);
+    if is_already_canonical_vfs_path(norm_cand)
+        && path_starts_with_dir_boundary(norm_cand, &norm_pref)
+    {
+        return true;
+    }
+    vfs_normalized_candidate_matches_prefix_with_tmp(norm_cand, trimmed_pref, os_tmp_info())
 }
 
 /// Verifies whether `candidate_path` is authorized by `allowed_prefix` under OCap VFS rules:

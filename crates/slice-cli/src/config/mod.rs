@@ -878,7 +878,15 @@ impl ResolvedExecutionConfig {
                 };
                 self.tls_key = Some(p);
             }
-        } else {
+        } else if !dirs.allow_read.is_empty()
+            || !dirs.allow_write.is_empty()
+            || !dirs.allow_net.is_empty()
+            || !dirs.allow_exec.is_empty()
+            || !dirs.allow_env.is_empty()
+            || !dirs.allow_env_inherit.is_empty()
+            || dirs.allow_checkpoints == Some(false)
+            || dirs.max_checkpoints.is_some()
+        {
             // Untrusted mode (default): canonical monotonic OCap attenuation (`parent & requested`)
             let mut requested_env_keys: Vec<String> = dirs
                 .allow_env
