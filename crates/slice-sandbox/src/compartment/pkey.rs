@@ -15,6 +15,27 @@ thread_local! {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[inline]
+fn x86_ospke_enabled() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // 0 = unprobed, 1 = disabled, 2 = OSPKE enabled (`CR4.PKE == 1`)
+    static OSPKE_STATE: AtomicU8 = AtomicU8::new(0);
+    match OSPKE_STATE.load(Ordering::Relaxed) {
+        1 => return false,
+        2 => return true,
+        _ => {}
+    }
+    // SAFETY: `CPUID` leaves 0 and 7 are unprivileged on all `x86_64` CPUs; `ECX` bit 4 (`OSPKE`)
+    // is set by hardware iff the OS kernel enabled `CR4.PKE`, making `RDPKRU`/`WRPKRU` legal.
+    let supported = unsafe {
+        let max_leaf = core::arch::x86_64::__cpuid(0).eax;
+        max_leaf >= 7 && (core::arch::x86_64::__cpuid_count(7, 0).ecx & (1 << 4)) != 0
+    };
+    OSPKE_STATE.store(if supported { 2 } else { 1 }, Ordering::Relaxed);
+    supported
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[inline(always)]
 fn read_hw_pkru() -> u32 {
     let pkru: u32;
@@ -71,7 +92,9 @@ pub fn current_thread_pkru(hardware_enforced: bool) -> u32 {
 /// compartments (`Slice.evalSandbox`) never clobber or unlock (`PKRU = 0`) an outer tenant's domain.
 #[must_use = "bind PkruDomainGuard (`let _guard = domain.enter_domain();`) so the domain remains active across the execution scope"]
 pub struct PkruDomainGuard {
-    saved_pkru: u32,
+    saved_virt_pkru: u32,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    saved_hw_pkru: u32,
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     hardware_enforced: bool,
     _not_send: core::marker::PhantomData<*mut ()>,
@@ -82,9 +105,9 @@ impl Drop for PkruDomainGuard {
     fn drop(&mut self) {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if self.hardware_enforced {
-            write_hw_pkru(self.saved_pkru);
+            write_hw_pkru(self.saved_hw_pkru);
         }
-        VIRTUAL_THREAD_PKRU.with(|slot| slot.set(self.saved_pkru));
+        VIRTUAL_THREAD_PKRU.with(|slot| slot.set(self.saved_virt_pkru));
     }
 }
 
@@ -110,10 +133,17 @@ impl HardwareProtectionDomain {
         let domain_slot = ((tenant_slot % 15) + 1) as i32;
 
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        {
-            // SAFETY: `SYS_pkey_alloc` (330 on `x86_64` Linux) takes `(flags = 0, access_rights = 0)`
-            // and has no memory-aliasing side effects; returns `-1` if unsupported or exhausted.
-            let pkey = unsafe { libc::syscall(330, 0usize, 0usize) as i32 };
+        if x86_ospke_enabled() {
+            // Linux `SYS_pkey_alloc` mutates the calling thread's `PKRU` register in kernel space
+            // to apply `init_val`. Save and immediately restore the caller's `PKRU` around the
+            // syscall (and pass `PKEY_DISABLE_ACCESS | PKEY_DISABLE_WRITE = 0x3`) so allocating or
+            // cloning a compartment never alters an outer tenant's active `PKRU` mask before
+            // `enter_domain()` is explicitly entered.
+            let caller_pkru = read_hw_pkru();
+            // SAFETY: `SYS_pkey_alloc` (330 on `x86_64` Linux) takes `(flags = 0, access_rights = 3)`
+            // and has no memory-aliasing side effects; returns `-1` if blocked by seccomp or exhausted.
+            let pkey = unsafe { libc::syscall(330, 0usize, 3usize) as i32 };
+            write_hw_pkru(caller_pkru);
             if pkey > 0 && pkey < 16 {
                 // Keep PKEY 0 (bits 0..1, default kernel stack/heap key) and the active tenant's
                 // PKEY (bits 2*pkey..2*pkey+1) set to 0b00 (read/write allowed), while setting
@@ -150,21 +180,23 @@ impl HardwareProtectionDomain {
     /// [`PkruDomainGuard`] that restores the previous `PKRU` mask on `Drop`.
     #[inline(always)]
     pub fn enter_domain(&self) -> PkruDomainGuard {
+        let saved_virt = VIRTUAL_THREAD_PKRU.with(|slot| slot.replace(self.pkru_mask));
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if self.hardware_enforced {
             let saved_hw = read_hw_pkru();
             write_hw_pkru(self.pkru_mask);
-            VIRTUAL_THREAD_PKRU.with(|slot| slot.set(self.pkru_mask));
             return PkruDomainGuard {
-                saved_pkru: saved_hw,
+                saved_virt_pkru: saved_virt,
+                saved_hw_pkru: saved_hw,
                 hardware_enforced: true,
                 _not_send: core::marker::PhantomData,
             };
         }
 
-        let saved_virt = VIRTUAL_THREAD_PKRU.with(|slot| slot.replace(self.pkru_mask));
         PkruDomainGuard {
-            saved_pkru: saved_virt,
+            saved_virt_pkru: saved_virt,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            saved_hw_pkru: 0,
             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             hardware_enforced: false,
             _not_send: core::marker::PhantomData,
@@ -200,10 +232,11 @@ impl Drop for HardwareProtectionDomain {
         {
             if self.hardware_enforced && self.pkey > 0 {
                 self.hardware_enforced = false;
-                // Only clear `PKRU` to `0` if this domain's mask is currently installed on this
-                // thread, ensuring dropping a child/cloned domain never unlocks an active parent!
+                // Only reset `PKRU` if this domain's mask is still installed on the current thread
+                // (never clobbering an outer compartment). Restore the Linux kernel default
+                // `init_pkru` (`0x5555_5554`: PKEY 0 RW, PKEYs 1..=15 access-disabled).
                 if read_hw_pkru() == self.pkru_mask {
-                    write_hw_pkru(0);
+                    write_hw_pkru(0x5555_5554);
                     VIRTUAL_THREAD_PKRU.with(|slot| slot.set(0));
                 }
                 // SAFETY: `self.pkey` (`1..=15`) is exclusively owned by this handle (`hardware_enforced`
