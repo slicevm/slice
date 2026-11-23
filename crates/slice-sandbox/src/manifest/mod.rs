@@ -527,7 +527,7 @@ boacas = true
 # Deterministic CPU instruction fuel ceiling per tenant invocation
 fuel = 50_000_000
 # Hard per-compartment memory allocation ceiling in KB
-memory_kb = 4096
+memory_kb = 16384
 
 [capabilities]
 # Attenuated Virtual Filesystem read prefixes (Zero ambient filesystem access)

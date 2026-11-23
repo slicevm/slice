@@ -189,6 +189,46 @@ pub(crate) fn write_http_error_and_close<S: Write>(
     Ok(())
 }
 
+#[inline]
+pub(crate) fn write_all_vectored2<W: Write>(
+    stream: &mut W,
+    mut first: &[u8],
+    mut second: &[u8],
+) -> std::io::Result<()> {
+    if second.is_empty() {
+        return stream.write_all(first);
+    }
+    if first.is_empty() {
+        return stream.write_all(second);
+    }
+    while !first.is_empty() {
+        let slices = [std::io::IoSlice::new(first), std::io::IoSlice::new(second)];
+        match stream.write_vectored(&slices) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "failed to write whole vectored response",
+                ));
+            }
+            Ok(n) => {
+                if n < first.len() {
+                    first = &first[n..];
+                } else {
+                    let rem = n - first.len();
+                    first = &[];
+                    second = &second[rem..];
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    if !second.is_empty() {
+        stream.write_all(second)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn flush_server_ws_frames<S: Write>(
     stream: &mut S,
     frames: Vec<slice_engine::ServerWsOutFrame>,
@@ -866,11 +906,8 @@ pub(crate) fn serve_connection_with_isolate(
                         || asset.payload.len() > STATIC_COALESCE_MAX_BYTES
                         || !keep_alive
                     {
-                        stream.write_all(write_buf)?;
+                        write_all_vectored2(&mut stream, write_buf, &asset.payload)?;
                         clear_and_trim_write_buf(write_buf);
-                        for chunk in asset.payload.chunks(65536) {
-                            stream.write_all(chunk)?;
-                        }
                     } else {
                         write_buf.extend_from_slice(&asset.payload);
                     }
@@ -1116,12 +1153,23 @@ pub(crate) fn serve_connection_with_isolate(
                     }
                 }
                 write_buf.extend_from_slice(b"\r\n");
-                if !suppress_wire_body {
-                    write_buf.extend_from_slice(body_bytes);
-                }
-                if !has_more_pipelined || write_buf.len() >= 32768 {
-                    stream.write_all(write_buf)?;
+                if suppress_wire_body {
+                    if !has_more_pipelined || write_buf.len() >= 32768 || !keep_alive {
+                        stream.write_all(write_buf)?;
+                        clear_and_trim_write_buf(write_buf);
+                    }
+                } else if !has_more_pipelined
+                    || body_bytes.len() > STATIC_COALESCE_MAX_BYTES
+                    || !keep_alive
+                {
+                    write_all_vectored2(&mut stream, write_buf, body_bytes)?;
                     clear_and_trim_write_buf(write_buf);
+                } else {
+                    write_buf.extend_from_slice(body_bytes);
+                    if write_buf.len() >= 32768 {
+                        stream.write_all(write_buf)?;
+                        clear_and_trim_write_buf(write_buf);
+                    }
                 }
 
                 // Phase N1.3: Execute deferred `Slice.waitUntil(fn)` tasks AFTER response is prepared/sent!

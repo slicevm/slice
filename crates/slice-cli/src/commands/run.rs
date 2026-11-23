@@ -69,6 +69,9 @@ pub(crate) fn cmd_check(args: &[String]) -> Result<()> {
             eval_snippets.push(code.to_string());
         } else if arg == "-" || !arg.starts_with('-') {
             targets.push(arg.clone());
+        } else if !is_known_slice_runtime_flag(arg) {
+            LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
+            bail!("Unknown option: {}", arg);
         }
         i += 1;
     }

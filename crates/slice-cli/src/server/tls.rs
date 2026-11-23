@@ -144,6 +144,14 @@ impl Write for ServerConnStream {
     }
 
     #[inline]
+    fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(s) => s.write_vectored(bufs),
+            Self::Tls(s) => s.write_vectored(bufs),
+        }
+    }
+
+    #[inline]
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             Self::Plain(s) => s.flush(),

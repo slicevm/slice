@@ -1,6 +1,7 @@
 use super::run::LAST_CLI_EXIT_CODE;
 use crate::config::{
     OsNativeFileWatcher, ResolvedExecutionConfig, install_ctrlc_handler,
+    is_known_slice_runtime_flag, match_non_empty_flag_value, parse_strict_u64,
     skip_runtime_flag_with_separate_value,
 };
 use anyhow::{Context, Result, bail};
@@ -86,14 +87,21 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
             }
             break;
         }
+        if let Some(f) = match_non_empty_flag_value(args, &mut i, "--filter")? {
+            filter_opt = Some(f.to_string());
+            i += 1;
+            continue;
+        }
         if skip_runtime_flag_with_separate_value(args, &mut i)? {
             continue;
         }
         let arg = &args[i];
-        if let Some(f) = arg.strip_prefix("--filter=") {
-            filter_opt = Some(f.to_string());
-        } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
-            deterministic_seed = Some(seed_str.parse().unwrap_or(20261024));
+        if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
+            let seed = parse_strict_u64(seed_str)
+                .with_context(|| format!("Invalid --deterministic seed integer: {:?}", seed_str))?;
+            deterministic_seed = Some(seed);
+        } else if arg == "--deterministic" {
+            deterministic_seed = Some(42);
         } else if arg == "--no-deterministic" {
             deterministic_seed = None;
         } else if arg == "--json" {
@@ -105,6 +113,8 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
             watch_once = true;
         } else if !arg.starts_with('-') && target_opt.is_none() {
             target_opt = Some(arg.clone());
+        } else if arg.starts_with('-') && !is_known_slice_runtime_flag(arg) {
+            bail!("Unknown option for 'slice test': {}", arg);
         }
         i += 1;
     }

@@ -10,7 +10,7 @@ pub(crate) use cas_packager::build_cas_archive_with_static;
 pub(crate) use flags::parse_u64_digits;
 pub(crate) use flags::{
     is_known_slice_runtime_flag, match_non_empty_flag_path, match_non_empty_flag_value,
-    skip_runtime_flag_with_separate_value,
+    parse_byte_size_usize, parse_strict_u64, skip_runtime_flag_with_separate_value,
 };
 pub(crate) use secrets_and_env::{
     apply_dotenv_file_to_caps_and_dlp, apply_dotenv_file_with_precedence, load_audit_egress_file,
@@ -269,24 +269,46 @@ impl ResolvedExecutionConfig {
             };
 
             if let Some(v) = find_slice_env("SLICE_FUEL")
-                && let Some(parsed) = flags::parse_u64_digits(v)
+                && !v.trim().is_empty()
             {
+                let parsed = parse_strict_u64(v)
+                    .with_context(|| format!("Invalid SLICE_FUEL integer value: {:?}", v.trim()))?;
                 fuel_limit = parsed;
                 cli_fuel_override = Some(parsed);
             }
             if let Some(v) = find_slice_env("SLICE_MEMORY_KB")
-                && let Some(parsed) = flags::parse_u64_digits(v)
+                && !v.trim().is_empty()
             {
+                let parsed = parse_strict_u64(v).with_context(|| {
+                    format!("Invalid SLICE_MEMORY_KB integer value: {:?}", v.trim())
+                })?;
                 let bytes = usize::try_from(parsed)
                     .unwrap_or(usize::MAX)
                     .saturating_mul(1024);
                 mem_limit = bytes;
                 cli_mem_override = Some(bytes);
             }
-            if let Some(v) = find_slice_env("SLICE_MEMORY")
-                && let Some(parsed) = flags::parse_u64_digits(v)
+            if let Some(v) = find_slice_env("SLICE_MEMORY_MB")
+                && !v.trim().is_empty()
             {
-                let bytes = usize::try_from(parsed).unwrap_or(usize::MAX);
+                let parsed = parse_strict_u64(v).with_context(|| {
+                    format!("Invalid SLICE_MEMORY_MB integer value: {:?}", v.trim())
+                })?;
+                let bytes = usize::try_from(parsed)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(1024 * 1024);
+                mem_limit = bytes;
+                cli_mem_override = Some(bytes);
+            }
+            if let Some(v) = find_slice_env("SLICE_MEMORY")
+                && !v.trim().is_empty()
+            {
+                let bytes = parse_byte_size_usize(v).with_context(|| {
+                    format!(
+                        "Invalid SLICE_MEMORY byte size {:?} (expected bytes or KB/KiB/MB/MiB/GB/GiB)",
+                        v.trim()
+                    )
+                })?;
                 mem_limit = bytes;
                 cli_mem_override = Some(bytes);
             }
@@ -356,8 +378,14 @@ impl ResolvedExecutionConfig {
                 cli_checkpoints_override = Some(b);
             }
             if let Some(v) = find_slice_env("SLICE_MAX_CHECKPOINTS")
-                && let Some(n) = flags::parse_u64_digits(v)
+                && !v.trim().is_empty()
             {
+                let n = parse_strict_u64(v).with_context(|| {
+                    format!(
+                        "Invalid SLICE_MAX_CHECKPOINTS integer value: {:?}",
+                        v.trim()
+                    )
+                })?;
                 let max_cp = u32::try_from(n).unwrap_or(u32::MAX);
                 caps = caps.with_max_checkpoints(Some(max_cp));
                 cli_max_checkpoints_override = Some(max_cp);
@@ -369,8 +397,14 @@ impl ResolvedExecutionConfig {
                 cli_warm_override = Some(b);
             }
             if let Some(v) = find_slice_env("SLICE_DETERMINISTIC_SEED")
-                && let Some(seed) = flags::parse_u64_digits(v)
+                && !v.trim().is_empty()
             {
+                let seed = parse_strict_u64(v).with_context(|| {
+                    format!(
+                        "Invalid SLICE_DETERMINISTIC_SEED integer value: {:?}",
+                        v.trim()
+                    )
+                })?;
                 deterministic_seed = Some(seed);
                 cli_det_override = Some(Some(seed));
             }
@@ -465,64 +499,170 @@ impl ResolvedExecutionConfig {
                 arg_idx += 1;
                 continue;
             }
-
-            let arg = &args[arg_idx];
-            if let Some(prefix) = arg.strip_prefix("--allow-read=") {
-                caps = caps.with_read_prefix(prefix);
-            } else if let Some(prefix) = arg.strip_prefix("--allow-write=") {
-                caps = caps.with_write_prefix(prefix);
-            } else if let Some(host) = arg.strip_prefix("--allow-net=") {
-                for h in host.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(prefixes) = match_non_empty_flag_value(args, &mut arg_idx, "--allow-read")?
+            {
+                for p in prefixes.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    caps = caps.with_read_prefix(p);
+                }
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(prefixes) = match_non_empty_flag_value(args, &mut arg_idx, "--allow-write")?
+            {
+                for p in prefixes.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    caps = caps.with_write_prefix(p);
+                }
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(hosts) = match_non_empty_flag_value(args, &mut arg_idx, "--allow-net")? {
+                for h in hosts.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     caps = caps.with_net_host(h);
                 }
-            } else if let Some(bins) = arg.strip_prefix("--allow-exec=") {
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(bins) = match_non_empty_flag_value(args, &mut arg_idx, "--allow-exec")? {
                 for b in bins.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     caps = caps.with_exec_binary(b);
                 }
-            } else if let Some(kv) = arg.strip_prefix("--allow-env=") {
-                if let Some((k, v)) = kv.split_once('=') {
-                    cli_allow_env_overrides.push((k.to_string(), v.to_string()));
-                } else {
-                    let k = kv.trim();
-                    let v = std::env::var(k).unwrap_or_default();
-                    cli_allow_env_overrides.push((k.to_string(), v));
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(kvs) = match_non_empty_flag_value(args, &mut arg_idx, "--allow-env")? {
+                for item in kvs.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if let Some((k, v)) = item.split_once('=') {
+                        cli_allow_env_overrides.push((k.trim().to_string(), v.to_string()));
+                    } else {
+                        let v = std::env::var(item).unwrap_or_default();
+                        cli_allow_env_overrides.push((item.to_string(), v));
+                    }
                 }
-            } else if arg == "--no-checkpoints" {
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(mcp_str) =
+                match_non_empty_flag_value(args, &mut arg_idx, "--max-checkpoints")?
+            {
+                let n = parse_strict_u64(mcp_str)
+                    .with_context(|| format!("Invalid --max-checkpoints value: {:?}", mcp_str))?;
+                let max_cp = u32::try_from(n).unwrap_or(u32::MAX);
+                caps = caps.with_max_checkpoints(Some(max_cp));
+                cli_max_checkpoints_override = Some(max_cp);
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(f_str) = match_non_empty_flag_value(args, &mut arg_idx, "--fuel")? {
+                let parsed = parse_strict_u64(f_str)
+                    .with_context(|| format!("Invalid --fuel integer value: {:?}", f_str))?;
+                fuel_limit = parsed;
+                cli_fuel_override = Some(parsed);
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(m_str) = match_non_empty_flag_value(args, &mut arg_idx, "--memory")? {
+                let bytes = parse_byte_size_usize(m_str).with_context(|| {
+                    format!(
+                        "Invalid --memory byte size {:?} (expected integer bytes or KB/KiB/MB/MiB/GB/GiB suffix)",
+                        m_str
+                    )
+                })?;
+                mem_limit = bytes;
+                cli_mem_override = Some(bytes);
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(mkb_str) = match_non_empty_flag_value(args, &mut arg_idx, "--memory-kb")? {
+                let parsed = parse_strict_u64(mkb_str)
+                    .with_context(|| format!("Invalid --memory-kb integer value: {:?}", mkb_str))?;
+                let bytes = usize::try_from(parsed)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(1024);
+                mem_limit = bytes;
+                cli_mem_override = Some(bytes);
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(mmb_str) = match_non_empty_flag_value(args, &mut arg_idx, "--memory-mb")? {
+                let parsed = parse_strict_u64(mmb_str)
+                    .with_context(|| format!("Invalid --memory-mb integer value: {:?}", mmb_str))?;
+                let bytes = usize::try_from(parsed)
+                    .unwrap_or(usize::MAX)
+                    .saturating_mul(1024 * 1024);
+                mem_limit = bytes;
+                cli_mem_override = Some(bytes);
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(t_str) = match_non_empty_flag_value(args, &mut arg_idx, "--tier")? {
+                let t = slice_sandbox::parse_tier_setting(t_str).with_context(|| {
+                    format!(
+                        "Invalid --tier value {:?} (expected 0/tier0, 1/tier1, or 2/tier2)",
+                        t_str
+                    )
+                })?;
+                cli_tier_override = Some(t);
+                apply_tier_override(t);
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(p_str) = match_non_empty_flag_value(args, &mut arg_idx, "--port")? {
+                let p = p_str.parse::<u16>().with_context(|| {
+                    format!("Invalid --port value {:?} (expected 0..=65535)", p_str)
+                })?;
+                server_port = Some(p);
+                cli_port_override = Some(p);
+                arg_idx += 1;
+                continue;
+            }
+            if match_non_empty_flag_value(args, &mut arg_idx, "--host")?.is_some() {
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(w_str) = match_non_empty_flag_value(args, &mut arg_idx, "--workers")? {
+                let w = parse_strict_u64(w_str)
+                    .and_then(|n| usize::try_from(n).ok())
+                    .filter(|&n| n >= 1)
+                    .with_context(|| {
+                        format!("Invalid --workers count {:?} (expected >= 1)", w_str)
+                    })?;
+                server_workers = Some(w);
+                cli_workers_override = Some(w);
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(sd) = match_non_empty_flag_path(args, &mut arg_idx, "--static")? {
+                static_dir = Some(sd.clone());
+                cli_static_override = Some(sd);
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(tc) = match_non_empty_flag_path(args, &mut arg_idx, "--tls-cert")? {
+                tls_cert = Some(tc.clone());
+                cli_tls_cert_override = Some(tc);
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(tk) = match_non_empty_flag_path(args, &mut arg_idx, "--tls-key")? {
+                tls_key = Some(tk.clone());
+                cli_tls_key_override = Some(tk);
+                arg_idx += 1;
+                continue;
+            }
+
+            let arg = &args[arg_idx];
+            if arg == "--no-checkpoints" {
                 caps = caps.with_checkpoints(false);
                 cli_checkpoints_override = Some(false);
             } else if arg == "--checkpoints" {
                 caps = caps.with_checkpoints(true);
                 cli_checkpoints_override = Some(true);
             } else if let Some(cp_str) = arg.strip_prefix("--checkpoints=") {
-                if let Some(b) = slice_sandbox::parse_bool_setting(cp_str) {
-                    caps = caps.with_checkpoints(b);
-                    cli_checkpoints_override = Some(b);
-                }
-            } else if let Some(mcp_str) = arg.strip_prefix("--max-checkpoints=") {
-                if let Some(n) = flags::parse_u64_digits(mcp_str) {
-                    let max_cp = u32::try_from(n).unwrap_or(u32::MAX);
-                    caps = caps.with_max_checkpoints(Some(max_cp));
-                    cli_max_checkpoints_override = Some(max_cp);
-                }
-            } else if let Some(f) = arg.strip_prefix("--fuel=") {
-                if let Some(parsed) = flags::parse_u64_digits(f) {
-                    fuel_limit = parsed;
-                    cli_fuel_override = Some(parsed);
-                }
-            } else if let Some(m) = arg.strip_prefix("--memory=") {
-                if let Some(parsed) = flags::parse_u64_digits(m) {
-                    let bytes = usize::try_from(parsed).unwrap_or(usize::MAX);
-                    mem_limit = bytes;
-                    cli_mem_override = Some(bytes);
-                }
-            } else if let Some(mkb) = arg.strip_prefix("--memory-kb=") {
-                if let Some(parsed) = flags::parse_u64_digits(mkb) {
-                    let bytes = usize::try_from(parsed)
-                        .unwrap_or(usize::MAX)
-                        .saturating_mul(1024);
-                    mem_limit = bytes;
-                    cli_mem_override = Some(bytes);
-                }
+                let b = slice_sandbox::parse_bool_setting(cp_str).with_context(|| {
+                    format!("Invalid --checkpoints boolean value: {:?}", cp_str)
+                })?;
+                caps = caps.with_checkpoints(b);
+                cli_checkpoints_override = Some(b);
             } else if arg == "--boacas" || arg == "--exper-boacas" {
                 cli_boacas_override = Some(true);
                 apply_boacas_override(Some(true));
@@ -533,15 +673,10 @@ impl ResolvedExecutionConfig {
                 .strip_prefix("--boacas=")
                 .or_else(|| arg.strip_prefix("--exper-boacas="))
             {
-                if let Some(b) = slice_sandbox::parse_bool_setting(b_str) {
-                    cli_boacas_override = Some(b);
-                    apply_boacas_override(Some(b));
-                }
-            } else if let Some(t_str) = arg.strip_prefix("--tier=") {
-                if let Some(t) = slice_sandbox::parse_tier_setting(t_str) {
-                    cli_tier_override = Some(t);
-                    apply_tier_override(t);
-                }
+                let b = slice_sandbox::parse_bool_setting(b_str)
+                    .with_context(|| format!("Invalid --boacas boolean value: {:?}", b_str))?;
+                cli_boacas_override = Some(b);
+                apply_boacas_override(Some(b));
             } else if arg == "--warm" {
                 warm_pool = true;
                 cli_warm_override = Some(true);
@@ -549,7 +684,9 @@ impl ResolvedExecutionConfig {
                 warm_pool = false;
                 cli_warm_override = Some(false);
             } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
-                let s = seed_str.parse().unwrap_or(42);
+                let s = parse_strict_u64(seed_str).with_context(|| {
+                    format!("Invalid --deterministic seed integer: {:?}", seed_str)
+                })?;
                 deterministic_seed = Some(s);
                 cli_det_override = Some(Some(s));
             } else if arg == "--deterministic" {
@@ -558,29 +695,6 @@ impl ResolvedExecutionConfig {
             } else if arg == "--no-deterministic" {
                 deterministic_seed = None;
                 cli_det_override = Some(None);
-            } else if let Some(p_str) = arg.strip_prefix("--port=") {
-                if let Ok(p) = p_str.parse::<u16>() {
-                    server_port = Some(p);
-                    cli_port_override = Some(p);
-                }
-            } else if let Some(w_str) = arg.strip_prefix("--workers=") {
-                if let Ok(w) = w_str.parse::<usize>() {
-                    let wk = w.max(1);
-                    server_workers = Some(wk);
-                    cli_workers_override = Some(wk);
-                }
-            } else if let Some(sd_str) = arg.strip_prefix("--static=") {
-                let p = PathBuf::from(sd_str);
-                static_dir = Some(p.clone());
-                cli_static_override = Some(p);
-            } else if let Some(tc_str) = arg.strip_prefix("--tls-cert=") {
-                let p = PathBuf::from(tc_str);
-                tls_cert = Some(p.clone());
-                cli_tls_cert_override = Some(p);
-            } else if let Some(tk_str) = arg.strip_prefix("--tls-key=") {
-                let p = PathBuf::from(tk_str);
-                tls_key = Some(p.clone());
-                cli_tls_key_override = Some(p);
             } else if arg == "--trust-directives" {
                 trust_directives = true;
                 cli_trust_directives_override = Some(true);
@@ -590,9 +704,10 @@ impl ResolvedExecutionConfig {
             {
                 trust_directives = false;
                 cli_trust_directives_override = Some(false);
-            } else if let Some(td_str) = arg.strip_prefix("--trust-directives=")
-                && let Some(b) = slice_sandbox::parse_bool_setting(td_str)
-            {
+            } else if let Some(td_str) = arg.strip_prefix("--trust-directives=") {
+                let b = slice_sandbox::parse_bool_setting(td_str).with_context(|| {
+                    format!("Invalid --trust-directives boolean value: {:?}", td_str)
+                })?;
                 trust_directives = b;
                 cli_trust_directives_override = Some(b);
             }

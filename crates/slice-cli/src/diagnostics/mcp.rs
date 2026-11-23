@@ -83,8 +83,26 @@ fn push_string_or_array_arg(args: &serde_json::Value, key: &str, out: &mut Vec<S
 }
 
 pub(crate) fn cmd_mcp(args: &[String]) -> Result<()> {
+    let mut smoke_test = false;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--" {
+            break;
+        }
+        if crate::config::skip_runtime_flag_with_separate_value(args, &mut i)? {
+            continue;
+        }
+        let arg = &args[i];
+        if arg == "--smoke-test" {
+            smoke_test = true;
+        } else if arg.starts_with('-') && !crate::config::is_known_slice_runtime_flag(arg) {
+            anyhow::bail!("Unknown option for 'slice mcp': {}", arg);
+        } else if !arg.starts_with('-') {
+            anyhow::bail!("Unexpected positional argument {:?} for 'slice mcp'", arg);
+        }
+        i += 1;
+    }
     let exec_cfg = ResolvedExecutionConfig::from_cli_args(args)?;
-    let smoke_test = args.iter().any(|a| a == "--smoke-test");
 
     SliceIsolate::prewarm_boa_pool(2);
     let mut isolate = SliceIsolate::spawn(
@@ -115,12 +133,49 @@ pub(crate) fn cmd_mcp(args: &[String]) -> Result<()> {
         println!("=========================================================================");
         println!("  SLICE (NEXUS-JS) MODEL CONTEXT PROTOCOL (MCP) JSON-RPC 2.0 SMOKE TEST");
         println!("=========================================================================");
-        for req in requests {
-            if let Some(resp) = handle_mcp_jsonrpc_line(req, &mut isolate) {
-                println!("  -> {}", resp);
+        let mut saw_eval_42 = false;
+        let mut saw_kv_ready = false;
+        for (idx, req) in requests.iter().enumerate() {
+            let Some(resp) = handle_mcp_jsonrpc_line(req, &mut isolate) else {
+                anyhow::bail!("MCP smoke test request #{} produced no response", idx + 1);
+            };
+            println!("  -> {}", resp);
+            let parsed: serde_json::Value = serde_json::from_str(&resp).map_err(|e| {
+                anyhow::anyhow!(
+                    "MCP smoke test request #{} returned invalid JSON: {}",
+                    idx + 1,
+                    e
+                )
+            })?;
+            if let Some(err_obj) = parsed.get("error") {
+                anyhow::bail!(
+                    "MCP smoke test request #{} returned JSON-RPC error: {}",
+                    idx + 1,
+                    err_obj
+                );
+            }
+            if parsed.pointer("/result/isError") == Some(&serde_json::Value::Bool(true)) {
+                anyhow::bail!(
+                    "MCP smoke test request #{} returned tool error: {}",
+                    idx + 1,
+                    resp
+                );
+            }
+            if resp.contains("mcp-eval=42") {
+                saw_eval_42 = true;
+            }
+            if idx == 4 && resp.contains("ready") {
+                saw_kv_ready = true;
             }
         }
         println!("=========================================================================");
+        if !saw_eval_42 || !saw_kv_ready {
+            anyhow::bail!(
+                "MCP smoke test output verification failed (eval_42={}, kv_ready={})",
+                saw_eval_42,
+                saw_kv_ready
+            );
+        }
         return Ok(());
     }
 

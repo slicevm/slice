@@ -9,10 +9,12 @@ pub(crate) use connection::{serve_connection_with_isolate, spawn_worker_isolate}
 pub(crate) use tls::load_tls_server_config;
 
 use crate::config::{
-    ResolvedExecutionConfig, install_ctrlc_handler, skip_runtime_flag_with_separate_value,
+    ResolvedExecutionConfig, install_ctrlc_handler, is_known_slice_runtime_flag,
+    match_non_empty_flag_path, match_non_empty_flag_value, parse_strict_u64,
+    skip_runtime_flag_with_separate_value,
 };
-use anyhow::{Context, Result};
-use rustc_hash::FxHashMap;
+use anyhow::{Context, Result, bail};
+use rustc_hash::{FxHashMap, FxHashSet};
 use slice_cas::MappedCasArchive;
 use slice_engine::{SliceIsolate, compile_source_to_bytecode};
 use std::borrow::Cow;
@@ -37,31 +39,39 @@ pub(crate) fn cmd_serve(args: &[String]) -> Result<()> {
             }
             break;
         }
+        if let Some(h) = match_non_empty_flag_value(args, &mut i, "--host")? {
+            bind_host = h.to_string();
+            i += 1;
+            continue;
+        }
+        if let Some(m_str) = match_non_empty_flag_value(args, &mut i, "--max-requests")? {
+            let parsed = parse_strict_u64(m_str)
+                .and_then(|n| usize::try_from(n).ok())
+                .with_context(|| format!("Invalid --max-requests value: {:?}", m_str))?;
+            max_requests_opt = Some(parsed);
+            i += 1;
+            continue;
+        }
+        if let Some(td) = match_non_empty_flag_path(args, &mut i, "--tenant-dir")? {
+            tenant_dir_opt = Some(td);
+            i += 1;
+            continue;
+        }
         if skip_runtime_flag_with_separate_value(args, &mut i)? {
             continue;
         }
         let arg = &args[i];
-        if arg == "--host" {
-            if let Some(h) = args.get(i + 1)
-                && !h.trim().is_empty()
-            {
-                bind_host = h.trim().to_string();
-            }
-            i += 2;
-            continue;
-        }
-        if let Some(h) = arg.strip_prefix("--host=") {
-            if !h.trim().is_empty() {
-                bind_host = h.trim().to_string();
-            }
-        } else if let Some(m) = arg.strip_prefix("--max-requests=") {
-            max_requests_opt = m.parse().ok();
-        } else if let Some(td) = arg.strip_prefix("--tenant-dir=") {
-            tenant_dir_opt = Some(PathBuf::from(td));
-        } else if arg == "--smoke-test" || arg == "--once" {
+        if arg == "--smoke-test" || arg == "--once" {
             smoke_test = true;
         } else if !arg.starts_with('-') && target_opt.is_none() {
             target_opt = Some(arg.clone());
+        } else if arg.starts_with('-') && !is_known_slice_runtime_flag(arg) {
+            bail!("Unknown option for 'slice serve': {}", arg);
+        } else if !arg.starts_with('-') {
+            bail!(
+                "Unexpected extra positional argument {:?} for 'slice serve'",
+                arg
+            );
         }
         i += 1;
     }
@@ -230,6 +240,14 @@ Slice.respond(
             println!("  {}", line);
         }
         println!("=========================================================================");
+        let ok_count = resp.matches("HTTP/1.1 200 OK").count();
+        if ok_count != 2 || resp.contains(r#"{"error":"Uncaught "#) {
+            bail!(
+                "Server smoke test failed: expected 2 HTTP/1.1 200 OK responses, got {}:\n{}",
+                ok_count,
+                resp
+            );
+        }
         return Ok(());
     }
 
@@ -447,6 +465,8 @@ fn ensure_tenant_dir_watched(tenant_dir: &Path) {
     }
 }
 
+type TenantBundlePair = (std::sync::Arc<Vec<u8>>, std::sync::Arc<MappedCasArchive>);
+
 pub(crate) struct TenantHotSwapEntry {
     pub(crate) tenant_dir: PathBuf,
     pub(crate) resolved_path: PathBuf,
@@ -465,10 +485,19 @@ struct CompiledCasBundleEntry {
     archive: std::sync::Arc<MappedCasArchive>,
 }
 
+struct TenantDirSnapshot {
+    dedicated_stems: FxHashSet<String>,
+    default_bundle: Option<TenantBundlePair>,
+    verified_gen: u64,
+    last_stat_check: std::time::Instant,
+}
+
 #[derive(Default)]
 struct TenantCasCacheState {
     by_tenant: FxHashMap<String, TenantHotSwapEntry>,
     by_canonical_path: FxHashMap<PathBuf, CompiledCasBundleEntry>,
+    by_dir: FxHashMap<PathBuf, TenantDirSnapshot>,
+    watched_dirs: FxHashSet<PathBuf>,
 }
 
 thread_local! {
@@ -490,6 +519,8 @@ pub(crate) fn clear_tenant_cas_cache() {
         let mut borrow = c.borrow_mut();
         borrow.by_tenant.clear();
         borrow.by_canonical_path.clear();
+        borrow.by_dir.clear();
+        borrow.watched_dirs.clear();
     });
 }
 
@@ -560,10 +591,59 @@ pub(crate) fn resolve_tenant_bytecode_hotswap(
     resolve_tenant_cas_hotswap(tenant_dir, tenant_id).map(|(bc, _)| bc)
 }
 
+fn load_or_reuse_canonical_cas_bundle(
+    state: &mut TenantCasCacheState,
+    candidate: &Path,
+    meta: &std::fs::Metadata,
+) -> Option<TenantBundlePair> {
+    let file_len = meta.len();
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let canonical_path =
+        std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+
+    if let Some(bundle) = state.by_canonical_path.get(&canonical_path)
+        && bundle.mtime_ns == mtime_ns
+        && bundle.file_len == file_len
+    {
+        return Some((
+            std::sync::Arc::clone(&bundle.bytecode),
+            std::sync::Arc::clone(&bundle.archive),
+        ));
+    }
+
+    let archive = MappedCasArchive::open_detached(&canonical_path).ok()?;
+    let entry_blob = archive.entrypoint_blob()?;
+    let bc_vec = archive.get_bytecode_slice(entry_blob).to_vec();
+    SliceIsolate::prewarm_boa_bundle(&bc_vec);
+    let arc_bc = std::sync::Arc::new(bc_vec);
+    let arc_cas = std::sync::Arc::new(archive);
+
+    if state.by_canonical_path.len() >= MAX_TENANT_CACHE_ENTRIES
+        && !state.by_canonical_path.contains_key(&canonical_path)
+    {
+        state.by_canonical_path.clear();
+    }
+    state.by_canonical_path.insert(
+        canonical_path,
+        CompiledCasBundleEntry {
+            mtime_ns,
+            file_len,
+            bytecode: std::sync::Arc::clone(&arc_bc),
+            archive: std::sync::Arc::clone(&arc_cas),
+        },
+    );
+    Some((arc_bc, arc_cas))
+}
+
 pub(crate) fn resolve_tenant_cas_hotswap(
     tenant_dir: &Path,
     tenant_id: &str,
-) -> Option<(std::sync::Arc<Vec<u8>>, std::sync::Arc<MappedCasArchive>)> {
+) -> Option<TenantBundlePair> {
     let safe_tenant = sanitize_tenant_id(tenant_id);
     if safe_tenant.is_empty() {
         return None;
@@ -571,7 +651,9 @@ pub(crate) fn resolve_tenant_cas_hotswap(
 
     TENANT_CAS_CACHE.with(|cache| {
         let cur_gen = TENANT_FS_GENERATION.load(std::sync::atomic::Ordering::Acquire);
-        // Fast path: dedicated `<tenant_id>.cas` already cached for this `tenant_dir`
+        let mut stale_last_known_good: Option<TenantBundlePair> = None;
+
+        // 1. Fast path: dedicated `<tenant_id>.cas` OR `default.cas` / negative directory snapshot
         {
             let mut borrow = cache.borrow_mut();
             if let Some(entry) = borrow.by_tenant.get_mut(safe_tenant.as_ref())
@@ -585,110 +667,75 @@ pub(crate) fn resolve_tenant_cas_hotswap(
                         std::sync::Arc::clone(&entry.archive),
                     ));
                 }
-                if let Ok(meta) = std::fs::metadata(&entry.resolved_path)
-                    && meta.is_file()
-                {
-                    let file_len = meta.len();
-                    let mtime_ns = meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0);
-                    if entry.mtime_ns == mtime_ns && entry.file_len == file_len {
-                        entry.verified_gen = cur_gen;
-                        entry.last_stat_check = std::time::Instant::now();
-                        return Some((
+                match std::fs::metadata(&entry.resolved_path) {
+                    Ok(meta) if meta.is_file() => {
+                        let file_len = meta.len();
+                        let mtime_ns = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0);
+                        if entry.mtime_ns == mtime_ns && entry.file_len == file_len {
+                            entry.verified_gen = cur_gen;
+                            entry.last_stat_check = std::time::Instant::now();
+                            return Some((
+                                std::sync::Arc::clone(&entry.bytecode),
+                                std::sync::Arc::clone(&entry.archive),
+                            ));
+                        }
+                        stale_last_known_good = Some((
                             std::sync::Arc::clone(&entry.bytecode),
                             std::sync::Arc::clone(&entry.archive),
                         ));
                     }
+                    _ => {
+                        borrow.by_tenant.remove(safe_tenant.as_ref());
+                    }
                 }
+            } else if let Some(dir_snap) = borrow.by_dir.get(tenant_dir)
+                && dir_snap.verified_gen == cur_gen
+                && dir_snap.last_stat_check.elapsed() < TENANT_STAT_TTL
+                && !dir_snap.dedicated_stems.contains(safe_tenant.as_ref())
+            {
+                return dir_snap
+                    .default_bundle
+                    .as_ref()
+                    .map(|(bc, cas)| (std::sync::Arc::clone(bc), std::sync::Arc::clone(cas)));
             }
         }
 
-        ensure_tenant_dir_watched(tenant_dir);
+        // 2. Register OS directory watcher once per worker thread (`0` global Mutex locks on steady state)
+        let needs_watch_reg = !cache.borrow().watched_dirs.contains(tenant_dir);
+        if needs_watch_reg {
+            ensure_tenant_dir_watched(tenant_dir);
+            let mut borrow = cache.borrow_mut();
+            if borrow.watched_dirs.len() < 64 {
+                borrow.watched_dirs.insert(tenant_dir.to_path_buf());
+            }
+        }
         let cur_gen = TENANT_FS_GENERATION.load(std::sync::atomic::Ordering::Acquire);
 
-        let mut candidate = tenant_dir.join(format!("{}.cas", safe_tenant));
-        let mut is_default_fallback = false;
-        let meta = match std::fs::metadata(&candidate) {
-            Ok(m) if m.is_file() => m,
-            _ => {
-                candidate = tenant_dir.join("default.cas");
-                is_default_fallback = true;
-                let m = std::fs::metadata(&candidate).ok()?;
-                if !m.is_file() {
-                    return None;
-                }
-                m
-            }
-        };
-
-        let file_len = meta.len();
-        let mtime_ns = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-
-        let canonical_path =
-            std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
-
-        if let Some(bundle) = cache.borrow().by_canonical_path.get(&canonical_path)
-            && bundle.mtime_ns == mtime_ns
-            && bundle.file_len == file_len
+        // 3. Dedicated `<tenant_id>.cas` check (retaining last-known-good Arc on transient mid-copy open failure)
+        let dedicated_candidate = tenant_dir.join(format!("{}.cas", safe_tenant));
+        if let Ok(meta) = std::fs::metadata(&dedicated_candidate)
+            && meta.is_file()
         {
-            let arc_bc = std::sync::Arc::clone(&bundle.bytecode);
-            let arc_cas = std::sync::Arc::clone(&bundle.archive);
-            if !is_default_fallback {
-                let mut borrow = cache.borrow_mut();
-                if borrow.by_tenant.len() >= MAX_TENANT_CACHE_ENTRIES
-                    && !borrow.by_tenant.contains_key(safe_tenant.as_ref())
-                {
-                    borrow.by_tenant.clear();
-                }
-                borrow.by_tenant.insert(
-                    safe_tenant.into_owned(),
-                    TenantHotSwapEntry {
-                        tenant_dir: tenant_dir.to_path_buf(),
-                        resolved_path: canonical_path,
-                        mtime_ns,
-                        file_len,
-                        verified_gen: cur_gen,
-                        last_stat_check: std::time::Instant::now(),
-                        bytecode: std::sync::Arc::clone(&arc_bc),
-                        archive: std::sync::Arc::clone(&arc_cas),
-                    },
-                );
-            }
-            return Some((arc_bc, arc_cas));
-        }
-
-        let archive = MappedCasArchive::open_detached(&canonical_path).ok()?;
-        let entry_blob = archive.entrypoint_blob()?;
-        let bc_vec = archive.get_bytecode_slice(entry_blob).to_vec();
-        SliceIsolate::prewarm_boa_bundle(&bc_vec);
-        let arc_bc = std::sync::Arc::new(bc_vec);
-        let arc_cas = std::sync::Arc::new(archive);
-
-        let mut borrow = cache.borrow_mut();
-        if borrow.by_canonical_path.len() >= MAX_TENANT_CACHE_ENTRIES
-            && !borrow.by_canonical_path.contains_key(&canonical_path)
-        {
-            borrow.by_canonical_path.clear();
-        }
-        borrow.by_canonical_path.insert(
-            canonical_path.clone(),
-            CompiledCasBundleEntry {
-                mtime_ns,
-                file_len,
-                bytecode: std::sync::Arc::clone(&arc_bc),
-                archive: std::sync::Arc::clone(&arc_cas),
-            },
-        );
-        if !is_default_fallback {
+            let file_len = meta.len();
+            let mtime_ns = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let canonical_path = std::fs::canonicalize(&dedicated_candidate)
+                .unwrap_or_else(|_| dedicated_candidate.clone());
+            let mut borrow = cache.borrow_mut();
+            let Some((arc_bc, arc_cas)) =
+                load_or_reuse_canonical_cas_bundle(&mut borrow, &canonical_path, &meta)
+            else {
+                return stale_last_known_good;
+            };
             if borrow.by_tenant.len() >= MAX_TENANT_CACHE_ENTRIES
                 && !borrow.by_tenant.contains_key(safe_tenant.as_ref())
             {
@@ -707,7 +754,72 @@ pub(crate) fn resolve_tenant_cas_hotswap(
                     archive: std::sync::Arc::clone(&arc_cas),
                 },
             );
+            return Some((arc_bc, arc_cas));
         }
-        Some((arc_bc, arc_cas))
+
+        // 4. Refresh directory snapshot (`dedicated_stems` + `default.cas`) so both `default.cas`
+        //    and negative lookups remain O(1) lock-free within `TENANT_STAT_TTL` with 0 `by_tenant` growth.
+        let mut dedicated_stems = FxHashSet::default();
+        if let Ok(rd) = std::fs::read_dir(tenant_dir) {
+            for entry in rd.flatten() {
+                if let Ok(ft) = entry.file_type()
+                    && (ft.is_file() || ft.is_symlink())
+                {
+                    let fname = entry.file_name();
+                    if let Some(s) = fname.to_str()
+                        && let Some(stem) = s.strip_suffix(".cas")
+                        && stem != "default"
+                        && dedicated_stems.len() < MAX_TENANT_CACHE_ENTRIES
+                    {
+                        dedicated_stems.insert(stem.to_string());
+                    }
+                }
+            }
+        }
+
+        let default_candidate = tenant_dir.join("default.cas");
+        let default_meta_opt = std::fs::metadata(&default_candidate)
+            .ok()
+            .filter(std::fs::Metadata::is_file);
+        let mut borrow = cache.borrow_mut();
+        let prev_default = borrow
+            .by_dir
+            .get(tenant_dir)
+            .and_then(|snap| snap.default_bundle.clone());
+        let mut transient_default_err = false;
+        let default_bundle = match default_meta_opt {
+            Some(ref dmeta) => {
+                if let Some(pair) =
+                    load_or_reuse_canonical_cas_bundle(&mut borrow, &default_candidate, dmeta)
+                {
+                    Some(pair)
+                } else {
+                    transient_default_err = true;
+                    prev_default
+                }
+            }
+            None => None,
+        };
+
+        let result_pair = default_bundle
+            .as_ref()
+            .map(|(bc, cas)| (std::sync::Arc::clone(bc), std::sync::Arc::clone(cas)));
+
+        if !transient_default_err {
+            if borrow.by_dir.len() >= 64 && !borrow.by_dir.contains_key(tenant_dir) {
+                borrow.by_dir.clear();
+            }
+            borrow.by_dir.insert(
+                tenant_dir.to_path_buf(),
+                TenantDirSnapshot {
+                    dedicated_stems,
+                    default_bundle,
+                    verified_gen: cur_gen,
+                    last_stat_check: std::time::Instant::now(),
+                },
+            );
+        }
+
+        result_pair
     })
 }

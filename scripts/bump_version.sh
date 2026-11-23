@@ -63,10 +63,11 @@ FILES=(
     "README.md"
     "tests/README.md"
     "tests/frameworks/README.md"
-    docs/general/*.md
-    docs/guides/*.md
-    docs/system/*.md
+    "tests/case_studies/README.md"
 )
+while IFS= read -r doc_file; do
+    FILES+=("$doc_file")
+done < <(find docs -type f -name '*.md' | sort)
 
 for f in "${FILES[@]}"; do
     if [[ -f "$f" ]]; then
