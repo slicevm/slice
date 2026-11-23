@@ -20,6 +20,10 @@
 //! - [`preludes`]: Sharded JavaScript micro-preludes (`00_ultra_core.js` .. `19_process_cli.js`), Aho-Corasick shard
 //!   detector ([`js_preludes`]), compile-time minifier ([`js_minifier`]), and lazy `node:*` built-ins ([`node_builtins`]).
 
+#![deny(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod bindings;
 pub mod intrinsics;
 pub mod isolate;
@@ -64,9 +68,9 @@ pub use outbound_http::{
     ChunkedBodyDecoder, MAX_OUTBOUND_BODY_BYTES, MAX_OUTBOUND_HEADER_BYTES,
     clear_outbound_conn_pool, clear_outbound_conn_pool_for_tenant,
     fetch_reactor_slab_acquire_count, fetch_reactor_slab_available_count,
-    fetch_reactor_slab_in_use_count, is_valid_http_header_name, is_valid_http_header_value,
-    is_valid_request_target, outbound_pool_reuse_count, parse_chunked_body,
-    register_custom_root_cert_der, reset_fetch_slab_telemetry,
+    fetch_reactor_slab_in_use_count, find_http_header_end_from, is_valid_http_header_name,
+    is_valid_http_header_value, is_valid_request_target, outbound_pool_reuse_count,
+    parse_chunked_body, register_custom_root_cert_der, reset_fetch_slab_telemetry,
 };
 pub use parser_and_compiler::{
     compile_source_to_bytecode, disassemble_bytecode, is_tier0_slicesnp_compatible_ast,
@@ -85,7 +89,8 @@ pub use websocket::{
     WS_OPCODE_CLOSE, WS_OPCODE_CONTINUATION, WS_OPCODE_PING, WS_OPCODE_PONG, WS_OPCODE_TEXT,
     apply_websocket_mask_in_place, build_close_frame_payload, clear_thread_websocket_state,
     compute_websocket_accept_key, decode_websocket_frame, drain_server_ws_outbox,
-    encode_websocket_frame, parse_close_frame_payload, read_websocket_message_from_stream,
+    encode_websocket_close_frame, encode_websocket_frame, parse_close_frame_payload,
+    read_websocket_message_from_stream,
 };
 pub use workers::{
     prewarm_worker_pool_sync, reset_worker_pool_telemetry, speculative_prewarm_worker_pool,

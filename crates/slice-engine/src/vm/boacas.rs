@@ -5,6 +5,7 @@
 //! and execution hooks for the `EXPER_BOACAS` architecture.
 
 use crate::boa_realm::{BOA_VIOLATION, WarmBoaRealm, ensure_realm_shards};
+use crate::isolate::exec_boa::cache_loaded_rc_bundle_u64;
 use crate::js_preludes::detect_shards_and_boacas_flags;
 use crate::parser_and_compiler::extract_slice_rc_key;
 use std::sync::OnceLock;
@@ -305,7 +306,6 @@ pub(crate) fn eval_boacas_on_realm(
     header: &BoaCasHeader,
     precompiled_slice: &[u8],
     fallback_js_bytes: &[u8],
-    _full_contiguous_payload: &[u8],
     is_http_req: bool,
     is_cold_bare_realm: bool,
 ) -> (boa_engine::JsResult<boa_engine::JsValue>, bool) {
@@ -348,25 +348,7 @@ pub(crate) fn eval_boacas_on_realm(
                 && res.is_ok()
                 && BOA_VIOLATION.with(|v| v.borrow().is_none())
             {
-                let mut hex_buf = [0u8; 16];
-                let _ = std::io::Write::write_fmt(
-                    &mut (&mut hex_buf[..]),
-                    format_args!("{:016x}", header.rc_key),
-                );
-                if let Ok(hex_str) = std::str::from_utf8(&hex_buf) {
-                    let global = realm.ctx.global_object();
-                    if let Ok(rc_val) =
-                        global.get(boa_engine::js_string!("__slice_rc"), &mut realm.ctx)
-                        && let Some(rc_obj) = rc_val.as_object()
-                        && let Ok(val) = rc_obj.get(boa_engine::js_string!(hex_str), &mut realm.ctx)
-                        && let Some(obj) = val.as_object()
-                    {
-                        realm.loaded_bundles.insert(header.rc_key, obj.clone());
-                        realm
-                            .loaded_bundle_fused_specs
-                            .insert(header.rc_key, fused_spec);
-                    }
-                }
+                cache_loaded_rc_bundle_u64(realm, header.rc_key, Some(fused_spec));
             }
             return (res, true);
         }
@@ -395,21 +377,7 @@ pub(crate) fn eval_boacas_on_realm(
             .ctx
             .eval(boa_engine::Source::from_bytes(fallback_js_bytes));
         if res.is_ok() && BOA_VIOLATION.with(|v| v.borrow().is_none()) {
-            let mut hex_buf = [0u8; 16];
-            let _ = std::io::Write::write_fmt(
-                &mut (&mut hex_buf[..]),
-                format_args!("{:016x}", header.rc_key),
-            );
-            if let Ok(hex_str) = std::str::from_utf8(&hex_buf) {
-                let global = realm.ctx.global_object();
-                if let Ok(rc_val) = global.get(boa_engine::js_string!("__slice_rc"), &mut realm.ctx)
-                    && let Some(rc_obj) = rc_val.as_object()
-                    && let Ok(val) = rc_obj.get(boa_engine::js_string!(hex_str), &mut realm.ctx)
-                    && let Some(obj) = val.as_object()
-                {
-                    realm.loaded_bundles.insert(header.rc_key, obj.clone());
-                }
-            }
+            cache_loaded_rc_bundle_u64(realm, header.rc_key, None);
         }
         (res, true)
     } else {

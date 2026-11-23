@@ -1,7 +1,7 @@
 //! WebAssembly <-> JavaScript value conversions (`ToWebAssemblyValue` / `ToJSValue` / `ToBigInt64`)
 //! and WebIDL descriptor range/type parsers.
 
-use super::linking::ensure_func_js_wrapper;
+use super::globals_and_tables::ensure_func_js_wrapper;
 use super::store::{WASM_STATE, WasmStoreData, with_store_and_entities};
 use boa_engine::{Context, JsBigInt, JsNativeError, JsResult, JsValue, js_string};
 use wasmi::{AsContext, ExternRef, Nullable, Ref, RefType, StoreContext, Val, ValType};
@@ -145,7 +145,12 @@ pub(crate) fn wasm_ref_to_js_val(r: Ref, context: &mut Context) -> JsResult<JsVa
         Ref::Func(Nullable::Null) | Ref::Extern(Nullable::Null) => Ok(JsValue::null()),
         Ref::Func(Nullable::Val(func)) => {
             let fn_id = with_store_and_entities(|store_ctx, entities| {
-                super::linking::register_or_find_func(func, None, store_ctx.as_context(), entities)
+                super::globals_and_tables::register_or_find_func(
+                    func,
+                    None,
+                    store_ctx.as_context(),
+                    entities,
+                )
             });
             let fn_obj = ensure_func_js_wrapper(fn_id, context)?;
             Ok(fn_obj.into())

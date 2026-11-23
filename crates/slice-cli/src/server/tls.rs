@@ -19,7 +19,8 @@ pub(crate) fn decode_pem_blocks(raw: &[u8]) -> Vec<(String, Vec<u8>)> {
             }
         } else if trimmed.starts_with("-----END ") {
             if let Some(label) = cur_label.take() {
-                let der = decode_base64_simple(&b64_buf);
+                let clean = b64_buf.split('=').next().unwrap_or(&b64_buf);
+                let der = slice_engine::base64_decode(clean);
                 if !der.is_empty() {
                     blocks.push((label, der));
                 }
@@ -30,30 +31,6 @@ pub(crate) fn decode_pem_blocks(raw: &[u8]) -> Vec<(String, Vec<u8>)> {
         }
     }
     blocks
-}
-
-pub(crate) fn decode_base64_simple(s: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
-    let mut buf: u32 = 0;
-    let mut bits: u32 = 0;
-    for b in s.bytes() {
-        let val = match b {
-            b'A'..=b'Z' => b - b'A',
-            b'a'..=b'z' => b - b'a' + 26,
-            b'0'..=b'9' => b - b'0' + 52,
-            b'+' | b'-' => 62,
-            b'/' | b'_' => 63,
-            b'=' => break,
-            _ => continue,
-        };
-        buf = (buf << 6) | (val as u32);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((buf >> bits) & 0xFF) as u8);
-        }
-    }
-    out
 }
 
 pub(crate) fn load_tls_server_config(

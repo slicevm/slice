@@ -41,7 +41,7 @@ pub struct MappedCasArchive {
 impl std::ops::Deref for MappedCasArchive {
     type Target = MappedCasInner;
 
-    #[inline]
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
@@ -275,6 +275,7 @@ impl MappedCasInner {
     /// (`"./sub/dep.ts"`, `"../shared/util.ts"`), TypeScript `.js`->`.ts` stripped stems,
     /// and directory `/index` modules while rejecting `static:/`, `manifest:/`, and `..`
     /// path traversal above the archive root.
+    #[inline]
     pub fn resolve_specifier_from<'a>(
         &'a self,
         referrer_specifier: Option<&str>,
@@ -351,7 +352,11 @@ impl MappedCasInner {
         let Some(bytes) = self.mmap.get(start..end) else {
             return "";
         };
-        simdutf8::basic::from_utf8(bytes).unwrap_or("")
+        if bytes.len() <= 128 {
+            core::str::from_utf8(bytes).unwrap_or("")
+        } else {
+            simdutf8::basic::from_utf8(bytes).unwrap_or("")
+        }
     }
 
     /// Returns a zero-copy slice to the pre-compiled bytecode directly from the `mmap` region.

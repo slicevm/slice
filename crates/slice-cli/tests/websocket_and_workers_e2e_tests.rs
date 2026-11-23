@@ -1,12 +1,12 @@
 #![allow(unused_imports)]
-use crate::config_and_watch::{
+use crate::commands::test_runner::{cmd_test, discover_test_files};
+use crate::config::{
     build_cas_archive, build_cas_archive_with_static, merge_manifest_toml_into_caps,
 };
-use crate::http_server::{resolve_tenant_bytecode_hotswap, serve_connection_keep_alive};
-use crate::mcp_and_repl::{
+use crate::diagnostics::{
     handle_mcp_jsonrpc_line, measure_current_process_rss_kb, run_security_containment_checks,
 };
-use crate::test_runner::{cmd_test, discover_test_files};
+use crate::server::{resolve_tenant_bytecode_hotswap, serve_connection_keep_alive};
 use crate::{cmd_init, cmd_run};
 use slice_cas::MappedCasArchive;
 use slice_engine::{SliceIsolate, compile_source_to_bytecode};

@@ -14,9 +14,105 @@ use slice_sandbox::SandboxViolation;
 use std::time::Instant;
 
 impl SliceIsolate {
+    #[inline]
+    pub(crate) fn verify_isolate_outputs_not_leaked(
+        &self,
+        ret_str: &str,
+        check_http_res: bool,
+    ) -> Result<(), SandboxViolation> {
+        if self.egress_audit_secrets.is_empty() {
+            return Ok(());
+        }
+        for line in &self.stdout {
+            self.verify_egress_not_leaked(line)?;
+        }
+        self.verify_egress_not_leaked(ret_str)?;
+        if let Some(ref rj) = self.last_return_json {
+            self.verify_egress_not_leaked(rj)?;
+        }
+        if check_http_res {
+            BOA_HTTP_RES.with(|res| -> Result<(), SandboxViolation> {
+                if let Some((_, res_body, res_bytes, res_ct, res_hdrs)) = &*res.borrow() {
+                    self.verify_egress_not_leaked(res_body)?;
+                    if let Some(raw) = res_bytes {
+                        self.verify_egress_not_leaked(&String::from_utf8_lossy(raw))?;
+                    }
+                    self.verify_egress_not_leaked(res_ct)?;
+                    for (_, hv) in res_hdrs {
+                        self.verify_egress_not_leaked(hv)?;
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn exec_monomorphic_for_loop(
+        &mut self,
+        acc_var: &str,
+        idx_var: &str,
+        loop_start: i64,
+        limit: i64,
+        scale: f64,
+    ) -> Result<JsValue, SandboxViolation> {
+        let iterations = (limit - loop_start).max(0) as u64;
+        let fuel_cost = (iterations / 250).max(1);
+        self.compartment.consume_fuel(fuel_cost)?;
+        if iterations >= 1_000 {
+            self.current_tier = ExecutionTier::Tier2PeakNative;
+        } else if iterations >= TIER1_PROMOTION_THRESHOLD {
+            self.current_tier = ExecutionTier::Tier1Baseline;
+        }
+        let mut acc = self
+            .env_vars
+            .get(acc_var)
+            .map(|v| v.to_number())
+            .unwrap_or(0.0);
+        if iterations > 0 {
+            let n = iterations as u128;
+            let two_first_last = (loop_start as i128) + (limit as i128) - 1;
+            let arith_sum_i128 = if n.is_multiple_of(2) {
+                ((n / 2) as i128).saturating_mul(two_first_last)
+            } else {
+                (n as i128).saturating_mul(two_first_last / 2)
+            };
+            if (scale - 1.0).abs() < f64::EPSILON {
+                let sum_i: i64 = if n.is_multiple_of(2) {
+                    ((n / 2) as u64).wrapping_mul(two_first_last as u64) as i64
+                } else {
+                    (n as u64).wrapping_mul((two_first_last / 2) as u64) as i64
+                };
+                acc += sum_i as f64;
+            } else {
+                let exact_int_domain = scale.is_finite()
+                    && scale.fract() == 0.0
+                    && acc.is_finite()
+                    && acc.fract() == 0.0
+                    && arith_sum_i128.unsigned_abs() < (1u128 << 53)
+                    && (acc.abs() + (arith_sum_i128 as f64 * scale).abs())
+                        < 9_007_199_254_740_992.0;
+                if exact_int_domain {
+                    acc += (arith_sum_i128 as f64) * scale;
+                } else {
+                    let mut i = loop_start;
+                    while i < limit {
+                        acc += (i as f64) * scale;
+                        i += 1;
+                    }
+                }
+            }
+        }
+        let res = JsValue::Number(acc);
+        self.set_env_var_str(acc_var, res.clone());
+        self.set_env_var_str(idx_var, JsValue::Number(limit as f64));
+        Ok(res)
+    }
+
     /// Internal zero-clone execution core shared by `execute_bytecode` and `execute_http_request_fast`.
     /// When `need_return_str` is `false` and `egress_audit_secrets` is empty, skips formatting `last_val`
     /// into a heap `String` (saving `"undefined".to_string()` on every `Slice.respond` HTTP request).
+    #[inline]
     pub(crate) fn execute_bytecode_core(
         &mut self,
         bytecode: &[u8],
@@ -60,17 +156,7 @@ impl SliceIsolate {
                     if let Some((hdr, precompiled_slice, fallback_js_bytes)) =
                         crate::boacas::BoaCasHeader::decode_raw(bytecode)
                     {
-                        let total_end = crate::boacas::BOACAS_HEADER_LEN
-                            + (hdr.precompiled_len as usize)
-                            + (hdr.fallback_js_len as usize);
-                        let contiguous_payload =
-                            &bytecode[crate::boacas::BOACAS_HEADER_LEN..total_end];
-                        self.exec_boacas_vm(
-                            &hdr,
-                            precompiled_slice,
-                            fallback_js_bytes,
-                            contiguous_payload,
-                        )?
+                        self.exec_boacas_vm(&hdr, precompiled_slice, fallback_js_bytes)?
                     } else {
                         JsValue::Undefined
                     }
@@ -100,28 +186,7 @@ impl SliceIsolate {
             } else {
                 String::new()
             };
-            if has_secrets {
-                for line in &self.stdout {
-                    self.verify_egress_not_leaked(line)?;
-                }
-                self.verify_egress_not_leaked(&ret_str)?;
-                if let Some(ref rj) = self.last_return_json {
-                    self.verify_egress_not_leaked(rj)?;
-                }
-                BOA_HTTP_RES.with(|res| -> Result<(), SandboxViolation> {
-                    if let Some((_, res_body, res_bytes, res_ct, res_hdrs)) = &*res.borrow() {
-                        self.verify_egress_not_leaked(res_body)?;
-                        if let Some(raw) = res_bytes {
-                            self.verify_egress_not_leaked(&String::from_utf8_lossy(raw))?;
-                        }
-                        self.verify_egress_not_leaked(res_ct)?;
-                        for (_, hv) in res_hdrs {
-                            self.verify_egress_not_leaked(hv)?;
-                        }
-                    }
-                    Ok(())
-                })?;
-            }
+            self.verify_isolate_outputs_not_leaked(&ret_str, true)?;
             let total_ns = start.elapsed().as_nanos() as u64;
             return Ok((instantiate_ns, total_ns, ret_str));
         }
@@ -294,58 +359,8 @@ impl SliceIsolate {
                     limit,
                     scale,
                 } => {
-                    let iterations = (*limit - *start).max(0) as u64;
-                    let fuel_cost = (iterations / 250).max(1);
-                    self.compartment.consume_fuel(fuel_cost)?;
-                    if iterations >= 1_000 {
-                        self.current_tier = ExecutionTier::Tier2PeakNative;
-                    } else if iterations >= TIER1_PROMOTION_THRESHOLD {
-                        self.current_tier = ExecutionTier::Tier1Baseline;
-                    }
-                    let mut acc = self
-                        .env_vars
-                        .get(acc_var.as_str())
-                        .map(|v| v.to_number())
-                        .unwrap_or(0.0);
-                    if iterations > 0 {
-                        let n = iterations as u128;
-                        let two_first_last = (*start as i128) + (*limit as i128) - 1;
-                        let arith_sum_i128 = if n.is_multiple_of(2) {
-                            ((n / 2) as i128).saturating_mul(two_first_last)
-                        } else {
-                            (n as i128).saturating_mul(two_first_last / 2)
-                        };
-                        if (*scale - 1.0).abs() < f64::EPSILON {
-                            let sum_i: i64 = if n.is_multiple_of(2) {
-                                ((n / 2) as u64).wrapping_mul(two_first_last as u64) as i64
-                            } else {
-                                (n as u64).wrapping_mul((two_first_last / 2) as u64) as i64
-                            };
-                            acc += sum_i as f64;
-                        } else {
-                            let s = *scale;
-                            let exact_int_domain = s.is_finite()
-                                && s.fract() == 0.0
-                                && acc.is_finite()
-                                && acc.fract() == 0.0
-                                && arith_sum_i128.unsigned_abs() < (1u128 << 53)
-                                && (acc.abs() + (arith_sum_i128 as f64 * s).abs())
-                                    < 9_007_199_254_740_992.0;
-                            if exact_int_domain {
-                                acc += (arith_sum_i128 as f64) * s;
-                            } else {
-                                let mut i = *start;
-                                while i < *limit {
-                                    acc += (i as f64) * s;
-                                    i += 1;
-                                }
-                            }
-                        }
-                    }
-                    let res = JsValue::Number(acc);
-                    self.set_env_var_str(acc_var, res.clone());
-                    self.set_env_var_str(idx_var, JsValue::Number(*limit as f64));
-                    last_val = res;
+                    last_val =
+                        self.exec_monomorphic_for_loop(acc_var, idx_var, *start, *limit, *scale)?;
                 }
                 BytecodeOp::EvalStmt(stmt) => {
                     let cf = self.eval_stmt(stmt)?;
@@ -388,15 +403,7 @@ impl SliceIsolate {
         } else {
             String::new()
         };
-        if has_secrets {
-            for line in &self.stdout {
-                self.verify_egress_not_leaked(line)?;
-            }
-            self.verify_egress_not_leaked(&ret_str)?;
-            if let Some(ref rj) = self.last_return_json {
-                self.verify_egress_not_leaked(rj)?;
-            }
-        }
+        self.verify_isolate_outputs_not_leaked(&ret_str, false)?;
 
         Ok((instantiate_ns, total_ns, ret_str))
     }

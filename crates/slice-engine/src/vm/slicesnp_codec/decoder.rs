@@ -95,22 +95,22 @@ pub(crate) struct SnpCursor<'a> {
 }
 
 impl<'a> SnpCursor<'a> {
-    #[inline]
+    #[inline(always)]
     pub(crate) fn new(buf: &'a [u8]) -> Self {
         Self { buf, pos: 0 }
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn is_empty(&self) -> bool {
         self.pos >= self.buf.len()
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn remaining(&self) -> usize {
         self.buf.len().saturating_sub(self.pos)
     }
 
-    #[inline]
+    #[inline(always)]
     fn read_bytes(&mut self, len: usize) -> Option<&'a [u8]> {
         let end = self.pos.checked_add(len)?;
         let slice = self.buf.get(self.pos..end)?;
@@ -118,7 +118,7 @@ impl<'a> SnpCursor<'a> {
         Some(slice)
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn read_u8(&mut self) -> Option<u8> {
         let b = *self.buf.get(self.pos)?;
         self.pos += 1;
@@ -134,13 +134,13 @@ impl<'a> SnpCursor<'a> {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn read_u32(&mut self) -> Option<u32> {
         let raw: [u8; 4] = self.read_bytes(4)?.try_into().ok()?;
         Some(u32::from_le_bytes(raw))
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn read_u32_len(&mut self) -> Option<usize> {
         let count = usize::try_from(self.read_u32()?).ok()?;
         if count > self.remaining() {
@@ -149,29 +149,33 @@ impl<'a> SnpCursor<'a> {
         Some(count)
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn read_u64(&mut self) -> Option<u64> {
         let raw: [u8; 8] = self.read_bytes(8)?.try_into().ok()?;
         Some(u64::from_le_bytes(raw))
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn read_i64(&mut self) -> Option<i64> {
         let raw: [u8; 8] = self.read_bytes(8)?.try_into().ok()?;
         Some(i64::from_le_bytes(raw))
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn read_f64(&mut self) -> Option<f64> {
         let raw: [u8; 8] = self.read_bytes(8)?.try_into().ok()?;
         Some(f64::from_le_bytes(raw))
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn read_str(&mut self) -> Option<&'a str> {
         let len = self.read_u32_len()?;
         let bytes = self.read_bytes(len)?;
-        simdutf8::basic::from_utf8(bytes).ok()
+        if bytes.len() <= 128 {
+            core::str::from_utf8(bytes).ok()
+        } else {
+            simdutf8::basic::from_utf8(bytes).ok()
+        }
     }
 
     #[inline]

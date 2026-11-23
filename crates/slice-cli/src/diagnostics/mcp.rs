@@ -82,6 +82,51 @@ fn push_string_or_array_arg(args: &serde_json::Value, key: &str, out: &mut Vec<S
     }
 }
 
+fn parse_mcp_sandbox_eval_options(args: &serde_json::Value) -> slice_engine::SandboxEvalOptions {
+    let mut opts = slice_engine::SandboxEvalOptions {
+        tenant_id: args
+            .get("tenantId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        fuel: args.get("fuel").and_then(|v| v.as_u64()),
+        memory_bytes: ["memory", "memoryBytes", "maxMemoryBytes"]
+            .iter()
+            .find_map(|k| args.get(*k).and_then(|v| v.as_u64()))
+            .map(|m| usize::try_from(m).unwrap_or(usize::MAX)),
+        deterministic_seed: args.get("deterministicSeed").and_then(|v| v.as_u64()),
+        checkpoints: ["checkpoints", "allowCheckpoints"]
+            .iter()
+            .find_map(|k| args.get(*k).and_then(|v| v.as_bool())),
+        max_checkpoints: args
+            .get("maxCheckpoints")
+            .and_then(|v| v.as_u64())
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+        ..Default::default()
+    };
+    for (keys, target) in [
+        (
+            &["allowRead", "readPrefixes", "fsRead"][..],
+            &mut opts.allow_read,
+        ),
+        (
+            &["allowWrite", "writePrefixes", "fsWrite"][..],
+            &mut opts.allow_write,
+        ),
+        (&["allowNet", "netHosts"][..], &mut opts.allow_net),
+        (&["allowExec", "execBinaries"][..], &mut opts.allow_exec),
+        (&["allowEnv", "envKeys"][..], &mut opts.allow_env),
+        (
+            &["auditSecret", "auditSecrets"][..],
+            &mut opts.audit_secrets,
+        ),
+    ] {
+        for key in keys {
+            push_string_or_array_arg(args, key, target);
+        }
+    }
+    opts
+}
+
 pub(crate) fn cmd_mcp(args: &[String]) -> Result<()> {
     let mut smoke_test = false;
     let mut i = 0;
@@ -344,37 +389,7 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
             match tool_name {
                 "slice_eval_ts" => {
                     let code = args.get("code").and_then(|c| c.as_str()).unwrap_or("");
-                    let mut opts = slice_engine::SandboxEvalOptions::default();
-                    if let Some(f) = args.get("fuel").and_then(|v| v.as_u64()) {
-                        opts.fuel = Some(f);
-                    }
-                    if let Some(m) = args
-                        .get("memory")
-                        .or_else(|| args.get("memoryBytes"))
-                        .and_then(|v| v.as_u64())
-                    {
-                        opts.memory_bytes = Some(usize::try_from(m).unwrap_or(usize::MAX));
-                    }
-                    push_string_or_array_arg(&args, "allowRead", &mut opts.allow_read);
-                    push_string_or_array_arg(&args, "allowWrite", &mut opts.allow_write);
-                    push_string_or_array_arg(&args, "allowNet", &mut opts.allow_net);
-                    push_string_or_array_arg(&args, "allowExec", &mut opts.allow_exec);
-                    push_string_or_array_arg(&args, "allowEnv", &mut opts.allow_env);
-                    push_string_or_array_arg(&args, "auditSecret", &mut opts.audit_secrets);
-                    push_string_or_array_arg(&args, "auditSecrets", &mut opts.audit_secrets);
-                    if let Some(seed) = args.get("deterministicSeed").and_then(|v| v.as_u64()) {
-                        opts.deterministic_seed = Some(seed);
-                    }
-                    if let Some(cp) = args
-                        .get("checkpoints")
-                        .or_else(|| args.get("allowCheckpoints"))
-                        .and_then(|v| v.as_bool())
-                    {
-                        opts.checkpoints = Some(cp);
-                    }
-                    if let Some(max_cp) = args.get("maxCheckpoints").and_then(|v| v.as_u64()) {
-                        opts.max_checkpoints = Some(u32::try_from(max_cp).unwrap_or(u32::MAX));
-                    }
+                    let opts = parse_mcp_sandbox_eval_options(&args);
                     // Strictly attenuate per-call fuel, memory, and checkpoint limits against
                     // the host MCP isolate's configured ceilings (never raise fuel_limit,
                     // memory_limit_bytes, or reset session checkpoints_taken).
@@ -385,6 +400,8 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                     isolate.sync_live_kv_memory();
                     let payload = serde_json::json!({
                         "ok": outcome.ok,
+                        "exitCode": outcome.exit_code,
+                        "processExited": outcome.process_exited,
                         "value": outcome.return_value,
                         "returnValue": outcome.return_value,
                         "returnJson": outcome.return_json,

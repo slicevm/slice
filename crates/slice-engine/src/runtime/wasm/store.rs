@@ -1,7 +1,7 @@
 //! Shared per-isolate `wasmi::Store`, `SliceWasmLimiter`, re-entrant execution guards,
 //! and JavaScript WebAssembly error/wrapper constructors.
 
-use super::linking::{ManagedWasmFunc, ManagedWasmGlobal, ManagedWasmTable};
+use super::globals_and_tables::{ManagedWasmFunc, ManagedWasmGlobal, ManagedWasmTable};
 use super::memory::ManagedWasmMemory;
 use super::{
     MAX_WASM_INSTANCES_PER_THREAD, MAX_WASM_MEMORY_PAGES, WASM_PAGE_BYTES, global_wasm_engine,
@@ -14,6 +14,7 @@ use boa_engine::{Context, JsError, JsNativeError, JsObject, JsResult, JsValue, j
 use rustc_hash::FxHashMap;
 use slice_sandbox::SandboxViolation;
 use std::cell::{Cell, RefCell};
+use std::marker::PhantomData;
 use wasmi::errors::{HostError, MemoryError, TableError};
 use wasmi::{AsContextMut, Caller, ResourceLimiter, Store, StoreContextMut};
 use wasmi_core::LimiterError;
@@ -254,50 +255,52 @@ impl WasmThreadState {
 
 thread_local! {
     pub(crate) static WASM_STATE: RefCell<WasmThreadState> = RefCell::new(WasmThreadState::default());
-    static ACTIVE_BOA_CTX_PTR: Cell<*mut Context> = const { Cell::new(std::ptr::null_mut()) };
+    pub(super) static ACTIVE_BOA_CTX_PTR: Cell<*mut Context> = const { Cell::new(std::ptr::null_mut()) };
     static ACTIVE_CALLER_PTR: Cell<*mut Caller<'static, WasmStoreData>> = const { Cell::new(std::ptr::null_mut()) };
     static PENDING_HOST_JS_ERROR: RefCell<Option<JsError>> = const { RefCell::new(None) };
 }
 
-pub(crate) struct ActiveBoaCtxGuard {
+pub(crate) struct ActiveBoaCtxGuard<'a> {
     prev_ctx: *mut Context,
+    _marker: PhantomData<*mut &'a mut Context>,
 }
 
-impl ActiveBoaCtxGuard {
+impl<'a> ActiveBoaCtxGuard<'a> {
     #[inline]
-    pub(crate) fn enter(ctx: &mut Context) -> Self {
-        let prev_ctx = ACTIVE_BOA_CTX_PTR.with(|p| p.replace(ctx as *mut Context));
-        Self { prev_ctx }
+    pub(crate) fn enter(ctx: &'a mut Context) -> Self {
+        let prev_ctx = ACTIVE_BOA_CTX_PTR.with(|p| p.replace(std::ptr::from_mut(ctx)));
+        Self {
+            prev_ctx,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl Drop for ActiveBoaCtxGuard {
+impl Drop for ActiveBoaCtxGuard<'_> {
     #[inline]
     fn drop(&mut self) {
         ACTIVE_BOA_CTX_PTR.with(|p| p.set(self.prev_ctx));
     }
 }
 
-#[inline]
-pub(crate) fn active_boa_ctx_ptr() -> *mut Context {
-    ACTIVE_BOA_CTX_PTR.with(|p| p.get())
-}
-
-pub(crate) struct ActiveCallerGuard {
+pub(crate) struct ActiveCallerGuard<'a> {
     prev_caller: *mut Caller<'static, WasmStoreData>,
+    _marker: PhantomData<*mut &'a mut Caller<'a, WasmStoreData>>,
 }
 
-impl ActiveCallerGuard {
+impl<'a> ActiveCallerGuard<'a> {
     #[inline]
-    pub(crate) fn enter(caller: &mut Caller<'_, WasmStoreData>) -> Self {
-        let raw =
-            (caller as *mut Caller<'_, WasmStoreData>).cast::<Caller<'static, WasmStoreData>>();
+    pub(crate) fn enter(caller: &'a mut Caller<'_, WasmStoreData>) -> Self {
+        let raw = std::ptr::from_mut(caller).cast::<Caller<'static, WasmStoreData>>();
         let prev_caller = ACTIVE_CALLER_PTR.with(|p| p.replace(raw));
-        Self { prev_caller }
+        Self {
+            prev_caller,
+            _marker: PhantomData,
+        }
     }
 }
 
-impl Drop for ActiveCallerGuard {
+impl Drop for ActiveCallerGuard<'_> {
     #[inline]
     fn drop(&mut self) {
         ACTIVE_CALLER_PTR.with(|p| p.set(self.prev_caller));
@@ -316,28 +319,49 @@ pub(crate) fn take_pending_host_js_error() -> Option<JsError> {
     PENDING_HOST_JS_ERROR.with(|slot| slot.borrow_mut().take())
 }
 
+#[allow(unsafe_code)]
+fn try_with_active_caller<R>(f: impl FnOnce(StoreContextMut<'_, WasmStoreData>) -> R) -> Option<R> {
+    let caller_ptr = ACTIVE_CALLER_PTR.with(|p| p.replace(std::ptr::null_mut()));
+    if caller_ptr.is_null() {
+        return None;
+    }
+    struct RestoreCaller(*mut Caller<'static, WasmStoreData>);
+    impl Drop for RestoreCaller {
+        #[inline]
+        fn drop(&mut self) {
+            ACTIVE_CALLER_PTR.with(|p| p.set(self.0));
+        }
+    }
+    let _restore = RestoreCaller(caller_ptr);
+    // SAFETY:
+    // 1. `ACTIVE_CALLER_PTR` is only set by `ActiveCallerGuard::enter` (`!Send + !Sync`,
+    //    `PhantomData<*mut &'a mut Caller<'a, WasmStoreData>>`) from a live exclusive `&mut Caller`
+    //    on the current thread's call stack and restored on `Drop` before `'a` ends.
+    // 2. Atomically replacing `ACTIVE_CALLER_PTR` with `null_mut()` before dereferencing ensures
+    //    no nested call can create an aliasing `&mut Caller` while `caller` is live; `_restore`
+    //    reinstalls `caller_ptr` only after `caller` and `f` finish.
+    let caller = unsafe { &mut *caller_ptr };
+    Some(f(caller.as_context_mut()))
+}
+
 /// Borrows both the active `StoreContextMut` (either the re-entrant host `Caller` or the
 /// top-level `root_store`) and `WasmEntities` simultaneously without holding `WASM_STATE` across
 /// Wasm bytecode execution.
 pub(crate) fn with_store_and_entities<R>(
     f: impl FnOnce(StoreContextMut<'_, WasmStoreData>, &mut WasmEntities) -> R,
 ) -> R {
-    let caller_ptr = ACTIVE_CALLER_PTR.with(|p| p.replace(std::ptr::null_mut()));
-    if !caller_ptr.is_null() {
-        struct RestoreCaller(*mut Caller<'static, WasmStoreData>);
-        impl Drop for RestoreCaller {
-            fn drop(&mut self) {
-                ACTIVE_CALLER_PTR.with(|p| p.set(self.0));
-            }
-        }
-        let _restore = RestoreCaller(caller_ptr);
-        let caller = unsafe { &mut *caller_ptr };
-        return WASM_STATE.with(|st| {
+    let mut f_opt = Some(f);
+    if let Some(res) = try_with_active_caller(|store_ctx| {
+        let cb = f_opt.take().expect("callback present");
+        WASM_STATE.with(|st| {
             let mut s = st.borrow_mut();
-            f(caller.as_context_mut(), &mut s.entities)
-        });
+            cb(store_ctx, &mut s.entities)
+        })
+    }) {
+        return res;
     }
 
+    let cb = f_opt.take().expect("callback present");
     WASM_STATE.with(|st| {
         let mut s = st.borrow_mut();
         s.ensure_root_store();
@@ -347,7 +371,7 @@ pub(crate) fn with_store_and_entities<R>(
             ..
         } = &mut *s;
         let store = root_store.as_mut().expect("root_store initialized");
-        f(store.as_context_mut(), entities)
+        cb(store.as_context_mut(), entities)
     })
 }
 
@@ -389,21 +413,17 @@ impl Drop for RootStoreCheckoutGuard {
 pub(crate) fn exec_wasm_with_store<R>(
     f: impl FnOnce(StoreContextMut<'_, WasmStoreData>) -> R,
 ) -> R {
-    let caller_ptr = ACTIVE_CALLER_PTR.with(|p| p.replace(std::ptr::null_mut()));
-    if !caller_ptr.is_null() {
-        struct RestoreCaller(*mut Caller<'static, WasmStoreData>);
-        impl Drop for RestoreCaller {
-            fn drop(&mut self) {
-                ACTIVE_CALLER_PTR.with(|p| p.set(self.0));
-            }
-        }
-        let _restore = RestoreCaller(caller_ptr);
-        let caller = unsafe { &mut *caller_ptr };
-        return f(caller.as_context_mut());
+    let mut f_opt = Some(f);
+    if let Some(res) = try_with_active_caller(|store_ctx| {
+        let cb = f_opt.take().expect("callback present");
+        cb(store_ctx)
+    }) {
+        return res;
     }
 
+    let cb = f_opt.take().expect("callback present");
     let mut guard = RootStoreCheckoutGuard::checkout();
-    f(guard.as_mut().as_context_mut())
+    cb(guard.as_mut().as_context_mut())
 }
 
 /// Clears all per-turn Wasm instances, linear memories, globals, tables, functions, and imported

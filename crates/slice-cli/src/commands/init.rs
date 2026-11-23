@@ -1,329 +1,25 @@
+//! `slice init` project scaffolding command (`default` and `sveltekit` templates).
+
+#[cfg(test)]
+pub(crate) use super::init_templates::DEFAULT_SLICE_D_TS;
+use super::init_templates::{
+    DEFAULT_SAMPLE_INDEX_TS, DEFAULT_SAMPLE_TEST_TS, DEFAULT_SLICE_D_TS as SLICE_D_TS_TEMPLATE,
+    DEFAULT_TSCONFIG_JSON, SVELTEKIT_ADAPTER_SLICE_JS, SVELTEKIT_API_ITEMS_SERVER_JS,
+    SVELTEKIT_APP_HTML, SVELTEKIT_HOOKS_SERVER_JS, SVELTEKIT_PAGE_SERVER_JS, SVELTEKIT_PAGE_SVELTE,
+    SVELTEKIT_VITE_CONFIG_JS, format_sveltekit_manifest_toml, format_sveltekit_package_json,
+};
 use anyhow::Result;
 use slice_sandbox::SliceManifest;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub(crate) const DEFAULT_SLICE_D_TS: &str = r#"// Slice (Nexus-JS) Ambient TypeScript Declarations (`slice.d.ts`)
-// Automatically included by `tsconfig.json` for IDE IntelliSense and `tsc --noEmit`.
-
-declare var process: {
-    env: Record<string, string | undefined>;
-    argv: string[];
-    exitCode?: number;
-    readonly platform: string;
-    readonly arch: string;
-    cwd(): string;
-    exit(code?: number): never;
-};
-
-declare function env(key: string): string;
-
-declare namespace WinterTC {
-    function route(method: string, url: string): string;
-}
-
-declare namespace Slice {
-    interface HttpRequestSnapshot {
-        method: string;
-        path: string;
-        query: string;
-        tenantId: string;
-        body: string;
-        headers: Record<string, string>;
+fn write_if_missing(path: &Path, content: &str) -> Result<()> {
+    if !path.exists() {
+        std::fs::write(path, content)?;
     }
-
-    interface SandboxEvalOptions {
-        tenantId?: string;
-        fuel?: number;
-        memoryBytes?: number;
-        allowRead?: string[];
-        allowWrite?: string[];
-        allowNet?: string[];
-        allowExec?: string[];
-        allowEnv?: string[];
-        deterministicSeed?: number;
-        auditSecret?: string;
-        auditSecrets?: string[];
-        checkpoints?: boolean;
-        maxCheckpoints?: number;
-    }
-
-    interface SandboxEvalOutcome {
-        ok: boolean;
-        returnValue: string;
-        returnJson: string | null;
-        stdout: string[];
-        fuelUsed: number;
-        memoryUsedBytes: number;
-        peakMemoryBytes: number;
-        spawnTimeNs: number;
-        compileTimeNs: number;
-        execTimeNs: number;
-        totalTimeUs: number;
-        checkpointsTaken: number;
-        restoresPerformed: number;
-        restoreTimeNs: number;
-        violation: string | null;
-        error: string | null;
-    }
-
-    interface SseStreamController {
-        send(event: { event?: string; data: unknown; id?: string; retry?: number }): void;
-        close(): void;
-    }
-
-    interface TcpSocketOptions {
-        secureTransport?: "off" | "on" | "starttls";
-        allowHalfOpen?: boolean;
-    }
-
-    interface TcpSocket {
-        readonly readable: ReadableStream<Uint8Array>;
-        readonly writable: WritableStream<Uint8Array>;
-        readonly closed: Promise<void>;
-        close(): Promise<void>;
-        startTls(): TcpSocket;
-    }
-
-    namespace kv {
-        function get(key: string): string | null;
-        function set(key: string, value: string, ttlMs?: number): boolean;
-        function del(key: string): boolean;
-        function incr(key: string, delta?: number): number;
-    }
-
-    function request(): HttpRequestSnapshot;
-    function respond(status: number, body: string, contentType?: string, headers?: Record<string, string>): void;
-    function waitUntil(task: Promise<unknown> | (() => unknown)): void;
-    function streamSSE(callback: (stream: SseStreamController) => void | Promise<void>): Response;
-    function evalSandbox(code: string, options?: SandboxEvalOptions): SandboxEvalOutcome;
-    function checkpoint(): number;
-    function restore(snapshotId: number): boolean;
-    function releaseCheckpoint(snapshotId: number): boolean;
-    function connect(address: string | { hostname: string; port: number }, options?: TcpSocketOptions): TcpSocket;
+    Ok(())
 }
 
-declare module "slice:test" {
-    export interface SliceMatchers<T = unknown> {
-        toBe(expected: T): void;
-        toEqual(expected: unknown): void;
-        toContain(substring: string): void;
-        toBeTruthy(): void;
-        toBeFalsy(): void;
-        toBeGreaterThan(n: number): void;
-        toBeLessThan(n: number): void;
-        toThrow(expectedSubstring?: string): void;
-        toViolate(expectedViolationType?: string): void;
-        toStayWithinFuel(maxFuel: number): void;
-        toStayWithinMemory(maxBytes: number): void;
-    }
-    export function describe(suiteName: string, fn: () => void | Promise<void>): void;
-    export function test(specName: string, fn: () => void | Promise<void>): void;
-    export function it(specName: string, fn: () => void | Promise<void>): void;
-    export function expect<T = unknown>(actual: T): SliceMatchers<T>;
-}
-
-declare module "slice:jsx" {
-    export type VNode = {
-        type: string | ((props: Record<string, unknown>) => unknown);
-        props: Record<string, unknown>;
-    };
-    export const Fragment: unique symbol;
-    export function jsx(type: VNode["type"] | symbol, props: Record<string, unknown>, key?: string | number): VNode;
-    export function jsxs(type: VNode["type"] | symbol, props: Record<string, unknown>, key?: string | number): VNode;
-    export function renderToString(node: unknown): string;
-    export function escapeHtml(raw: string): string;
-    export function raw(trustedHtml: string): { __slice_raw_html: string };
-}
-
-declare module "slice:jsx/jsx-runtime" {
-    export { Fragment, jsx, jsxs, renderToString, escapeHtml, raw } from "slice:jsx";
-    export namespace JSX {
-        type Element = unknown;
-        interface IntrinsicElements {
-            [elemName: string]: Record<string, unknown>;
-        }
-    }
-}
-
-declare module "cloudflare:sockets" {
-    export function connect(
-        address: string | { hostname: string; port: number },
-        options?: Slice.TcpSocketOptions
-    ): Slice.TcpSocket;
-}
-
-declare module "*.wasm" {
-    const wasmBytes: Uint8Array;
-    export default wasmBytes;
-}
-
-declare interface URLPatternComponentResult {
-    input: string;
-    groups: Record<string, string | undefined>;
-}
-
-declare interface URLPatternResult {
-    inputs: unknown[];
-    protocol: URLPatternComponentResult;
-    username: URLPatternComponentResult;
-    password: URLPatternComponentResult;
-    hostname: URLPatternComponentResult;
-    port: URLPatternComponentResult;
-    pathname: URLPatternComponentResult;
-    search: URLPatternComponentResult;
-    hash: URLPatternComponentResult;
-}
-
-declare interface URLPatternInit {
-    protocol?: string;
-    username?: string;
-    password?: string;
-    hostname?: string;
-    port?: string;
-    pathname?: string;
-    search?: string;
-    hash?: string;
-    baseURL?: string;
-}
-
-declare class URLPattern {
-    readonly protocol: string;
-    readonly username: string;
-    readonly password: string;
-    readonly hostname: string;
-    readonly port: string;
-    readonly pathname: string;
-    readonly search: string;
-    readonly hash: string;
-    readonly hasRegExpGroups: boolean;
-    constructor(input?: string | URLPatternInit, baseURL?: string | { ignoreCase?: boolean }, options?: { ignoreCase?: boolean });
-    test(input?: string | URLPatternInit, baseURL?: string): boolean;
-    exec(input?: string | URLPatternInit, baseURL?: string): URLPatternResult | null;
-}
-
-declare class CompressionStream {
-    readonly readable: ReadableStream<Uint8Array>;
-    readonly writable: WritableStream<Uint8Array>;
-    constructor(format: "gzip" | "deflate" | "deflate-raw");
-}
-
-declare class DecompressionStream {
-    readonly readable: ReadableStream<Uint8Array>;
-    readonly writable: WritableStream<Uint8Array>;
-    constructor(format: "gzip" | "deflate" | "deflate-raw");
-}
-
-declare module "node:async_hooks" {
-    export class AsyncLocalStorage<T = unknown> {
-        run<R>(store: T, callback: (...args: any[]) => R, ...args: any[]): R;
-        exit<R>(callback: (...args: any[]) => R, ...args: any[]): R;
-        getStore(): T | undefined;
-        enterWith(store: T): void;
-        disable(): void;
-        static bind<F extends (...args: any[]) => any>(fn: F): F;
-        static snapshot(): <R>(fn: (...args: any[]) => R, ...args: any[]) => R;
-    }
-    export class AsyncResource {
-        constructor(type: string, opts?: { triggerAsyncId?: number });
-        runInAsyncScope<T, R>(fn: (this: T, ...args: any[]) => R, thisArg?: T, ...args: any[]): R;
-        bind<F extends (...args: any[]) => any>(fn: F, thisArg?: any): F;
-        static bind<F extends (...args: any[]) => any>(fn: F, type?: string, thisArg?: any): F;
-        asyncId(): number;
-        triggerAsyncId(): number;
-        emitDestroy(): this;
-    }
-}
-"#;
-
-pub(crate) const DEFAULT_TSCONFIG_JSON: &str = r#"{
-  "compilerOptions": {
-    "target": "ES2024",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
-    "noEmit": true,
-    "strict": true,
-    "skipLibCheck": true,
-    "jsx": "react-jsx",
-    "jsxImportSource": "slice:jsx",
-    "types": []
-  },
-  "include": ["src/**/*", "tests/**/*", "slice.d.ts"]
-}
-"#;
-
-pub(crate) const SVELTEKIT_ADAPTER_SLICE_JS: &str = r#"import fs from 'node:fs';
-import path from 'node:path';
-
-/**
- * @sveltejs/kit Adapter for Slice Runtime (`@slicevm/adapter-sveltekit`)
- * Supports SvelteKit 3 (`generateServerInstance`) and SvelteKit 2 (`generateManifest`).
- * Emits:
- *   - `build/client/` (static assets & immutable client chunks for `--static`)
- *   - `build/server/` (SvelteKit SSR server chunks + server instance)
- *   - `build/slice-entry.js` (WinterTC `export default { fetch }` entrypoint)
- */
-export default function adapterSlice(options = {}) {
-    const out = options.out || 'build';
-    return {
-        name: '@slicevm/adapter-sveltekit',
-        async adapt(builder) {
-            const tmp = builder.getBuildDirectory('adapter-slice');
-            builder.rimraf(out);
-            builder.rimraf(tmp);
-            builder.mkdirp(tmp);
-            builder.mkdirp(`${out}/client`);
-            builder.mkdirp(`${out}/server`);
-
-            builder.writeClient(`${out}/client`);
-            builder.writePrerendered(`${out}/client`);
-            builder.copy(builder.getServerDirectory(), `${out}/server`);
-
-            let entryHeader;
-            if (typeof builder.generateServerInstance === 'function') {
-                builder.generateServerInstance(`${out}/server/instance.js`, {
-                    serverDirectory: `${out}/server`
-                });
-                entryHeader = `import { server } from './server/instance.js';\n`;
-            } else {
-                const manifestStr = builder.generateManifest({ relativePath: '.' });
-                fs.writeFileSync(
-                    `${out}/server/manifest.js`,
-                    `export const manifest = ${manifestStr};\n`
-                );
-                entryHeader = `import { Server } from './server/index.js';\nimport { manifest } from './server/manifest.js';\nconst server = new Server(manifest);\n`;
-            }
-
-            const entryCode = `${entryHeader}
-let initPromise = null;
-
-export default {
-    async fetch(request, env, ctx) {
-        if (!initPromise) {
-            initPromise = server.init({ env: env || (typeof process !== 'undefined' && process.env) || {} });
-        }
-        await initPromise;
-        return await server.respond(request, {
-            getClientAddress() {
-                return request.headers.get('x-forwarded-for') || '127.0.0.1';
-            },
-            platform: {
-                env,
-                ctx,
-                Slice: typeof Slice !== 'undefined' ? Slice : undefined
-            }
-        });
-    }
-};
-`;
-            fs.writeFileSync(path.join(out, 'slice-entry.js'), entryCode);
-            builder.log.minor(`Wrote Slice WinterTC entrypoint to ${out}/slice-entry.js and client assets to ${out}/client`);
-        }
-    };
-}
-"#;
-
-fn init_sveltekit_template(target_dir: &std::path::Path, project_name: &str) -> Result<()> {
+fn init_sveltekit_template(target_dir: &Path, project_name: &str) -> Result<()> {
     std::fs::create_dir_all(
         target_dir
             .join("src")
@@ -333,171 +29,37 @@ fn init_sveltekit_template(target_dir: &std::path::Path, project_name: &str) -> 
     )?;
 
     let manifest_path = target_dir.join("slice.toml");
-    if !manifest_path.exists() {
-        let toml_content = format!(
-            r#"[package]
-name = "{project_name}"
-version = "0.1.0"
-entrypoint = "./build/slice-entry.js"
-
-[server]
-static_dir = "./build/client"
-
-[limits]
-fuel = 50_000_000
-memory_mb = 64
-
-[capabilities]
-allow_env = ["NODE_ENV", "ORIGIN", "PORT"]
-"#
-        );
-        std::fs::write(&manifest_path, toml_content)?;
-    }
+    write_if_missing(
+        &manifest_path,
+        &format_sveltekit_manifest_toml(project_name),
+    )?;
 
     let dts_path = target_dir.join("slice.d.ts");
-    if !dts_path.exists() {
-        std::fs::write(&dts_path, DEFAULT_SLICE_D_TS)?;
-    }
+    write_if_missing(&dts_path, SLICE_D_TS_TEMPLATE)?;
 
     let pkg_path = target_dir.join("package.json");
-    if !pkg_path.exists() {
-        let pkg_json = format!(
-            r#"{{
-  "name": "{project_name}",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "scripts": {{
-    "dev": "vite dev",
-    "build": "vite build",
-    "pack": "slice pack ./build/slice-entry.js ./build/app.cas --static=./build/client",
-    "serve": "slice serve ./build/app.cas"
-  }},
-  "devDependencies": {{
-    "@sveltejs/kit": "^3.1.1",
-    "@sveltejs/vite-plugin-svelte": "^7.3.1",
-    "svelte": "^5.57.3",
-    "vite": "^8.3.7"
-  }}
-}}
-"#
-        );
-        std::fs::write(&pkg_path, pkg_json)?;
-    }
+    write_if_missing(&pkg_path, &format_sveltekit_package_json(project_name))?;
 
     let adapter_path = target_dir.join("adapter-slice.js");
-    if !adapter_path.exists() {
-        std::fs::write(&adapter_path, SVELTEKIT_ADAPTER_SLICE_JS)?;
-    }
+    write_if_missing(&adapter_path, SVELTEKIT_ADAPTER_SLICE_JS)?;
 
     let vite_cfg_path = target_dir.join("vite.config.js");
-    if !vite_cfg_path.exists() {
-        let vite_cfg = r#"import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vite';
-import adapterSlice from './adapter-slice.js';
-
-export default defineConfig({
-    plugins: [
-        sveltekit({
-            adapter: adapterSlice({ out: 'build' })
-        })
-    ]
-});
-"#;
-        std::fs::write(&vite_cfg_path, vite_cfg)?;
-    }
+    write_if_missing(&vite_cfg_path, SVELTEKIT_VITE_CONFIG_JS)?;
 
     let app_html_path = target_dir.join("src").join("app.html");
-    if !app_html_path.exists() {
-        let app_html = r#"<!doctype html>
-<html lang="en">
-    <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>SvelteKit on Slice Runtime</title>
-        %sveltekit.head%
-    </head>
-    <body data-sveltekit-preload-data="hover">
-        <div style="display: contents">%sveltekit.body%</div>
-    </body>
-</html>
-"#;
-        std::fs::write(&app_html_path, app_html)?;
-    }
+    write_if_missing(&app_html_path, SVELTEKIT_APP_HTML)?;
 
     let hooks_path = target_dir.join("src").join("hooks.server.js");
-    if !hooks_path.exists() {
-        let hooks_js = r#"/** @type {import('@sveltejs/kit').Handle} */
-export async function handle({ event, resolve }) {
-    event.locals.requestId = 'req-slice-edge';
-    const response = await resolve(event);
-    response.headers.set('x-powered-by', 'SvelteKit-on-Slice');
-    return response;
-}
-
-/** @type {import('@sveltejs/kit').HandleServerError} */
-export function handleError({ status, error }) {
-    if (status !== 404 && error?.status !== 404) {
-        console.error(error);
-    }
-}
-"#;
-        std::fs::write(&hooks_path, hooks_js)?;
-    }
+    write_if_missing(&hooks_path, SVELTEKIT_HOOKS_SERVER_JS)?;
 
     let page_srv_path = target_dir
         .join("src")
         .join("routes")
         .join("+page.server.js");
-    if !page_srv_path.exists() {
-        let page_srv = r#"/** @type {import('./$types').PageServerLoad} */
-export async function load({ url, cookies, locals }) {
-    const visitor = url.searchParams.get('name') || 'Edge Developer';
-    const theme = cookies.get('theme') || 'light';
-    const hits = typeof Slice !== 'undefined' && Slice.kv
-        ? Slice.kv.incr('sveltekit_page_views', 1)
-        : 1;
-
-    return {
-        title: 'SvelteKit 3 + Svelte 5 SSR on Slice',
-        visitor,
-        theme,
-        requestId: locals.requestId || 'none',
-        hits,
-        runtime: 'Slice WinterTC Isolate'
-    };
-}
-
-/** @type {import('./$types').Actions} */
-export const actions = {
-    setTheme: async ({ request, cookies }) => {
-        const form = await request.formData();
-        const theme = String(form.get('theme') || 'dark');
-        cookies.set('theme', theme, { path: '/', httpOnly: true });
-        return { success: true, theme };
-    }
-};
-"#;
-        std::fs::write(&page_srv_path, page_srv)?;
-    }
+    write_if_missing(&page_srv_path, SVELTEKIT_PAGE_SERVER_JS)?;
 
     let page_svelte_path = target_dir.join("src").join("routes").join("+page.svelte");
-    if !page_svelte_path.exists() {
-        let page_svelte = r#"<script>
-    let { data, form } = $props();
-</script>
-
-<main data-theme={data.theme}>
-    <h1>{data.title}</h1>
-    <p class="greeting">Hello, <strong>{data.visitor}</strong>!</p>
-    <p class="stats">Runtime: <code>{data.runtime}</code> | Request ID: <code>{data.requestId}</code> | Theme: <code>{data.theme}</code> | KV Page Views: <span id="hits">{data.hits}</span></p>
-    {#if form?.success}
-        <p class="action-result">Updated theme to: <strong>{form.theme}</strong></p>
-    {/if}
-</main>
-"#;
-        std::fs::write(&page_svelte_path, page_svelte)?;
-    }
+    write_if_missing(&page_svelte_path, SVELTEKIT_PAGE_SVELTE)?;
 
     let api_srv_path = target_dir
         .join("src")
@@ -505,36 +67,7 @@ export const actions = {
         .join("api")
         .join("items")
         .join("+server.js");
-    if !api_srv_path.exists() {
-        let api_srv = r#"import { json } from '@sveltejs/kit';
-
-/** @type {import('./$types').RequestHandler} */
-export async function GET({ url }) {
-    const tag = url.searchParams.get('tag') || 'all';
-    const count = typeof Slice !== 'undefined' && Slice.kv
-        ? Slice.kv.incr('sveltekit_api_calls', 1)
-        : 1;
-
-    return json({
-        ok: true,
-        framework: 'SvelteKit',
-        tag,
-        count,
-        items: ['slice-cas', 'slice-engine', 'slice-sandbox']
-    });
-}
-
-/** @type {import('./$types').RequestHandler} */
-export async function POST({ request }) {
-    const body = await request.json();
-    return json({
-        created: true,
-        received: body
-    }, { status: 201 });
-}
-"#;
-        std::fs::write(&api_srv_path, api_srv)?;
-    }
+    write_if_missing(&api_srv_path, SVELTEKIT_API_ITEMS_SERVER_JS)?;
 
     println!(
         "Initialized Slice SvelteKit (SvelteKit 3 + Svelte 5) project '{}' in {}",
@@ -584,79 +117,24 @@ pub(crate) fn cmd_init(args: &[String]) -> Result<()> {
     }
 
     let manifest_path = target_dir.join("slice.toml");
-    if !manifest_path.exists() {
-        std::fs::write(
-            &manifest_path,
-            SliceManifest::default_template(project_name),
-        )?;
-    }
+    write_if_missing(
+        &manifest_path,
+        &SliceManifest::default_template(project_name),
+    )?;
 
     let dts_path = target_dir.join("slice.d.ts");
-    if !dts_path.exists() {
-        std::fs::write(&dts_path, DEFAULT_SLICE_D_TS)?;
-    }
+    write_if_missing(&dts_path, SLICE_D_TS_TEMPLATE)?;
 
     let tsconfig_path = target_dir.join("tsconfig.json");
-    if !tsconfig_path.exists() {
-        std::fs::write(&tsconfig_path, DEFAULT_TSCONFIG_JSON)?;
-    }
+    write_if_missing(&tsconfig_path, DEFAULT_TSCONFIG_JSON)?;
 
     let entry_path = target_dir.join("src").join("index.ts");
-    if !entry_path.exists() {
-        let sample_ts = r#"// Slice (Nexus-JS) WinterTC Edge MicroVM Entrypoint
-export interface ServiceStatus {
-    status: string;
-    stage: string;
-    runtime: string;
-    method: string;
-    url: string;
-}
-
-export function buildStatus(method: string, url: string): ServiceStatus {
-    const stage = process.env.SERVICE_STAGE ?? "production";
-    const runtime = process.env.RUNTIME_ENGINE ?? "Slice-NexusJS";
-    return {
-        status: "ok",
-        stage,
-        runtime,
-        method,
-        url,
-    };
-}
-
-export function handleRequest(request: Request): Response {
-    return Response.json(buildStatus(request.method, request.url));
-}
-
-export default {
-    fetch: handleRequest,
-};
-
-console.log(JSON.stringify(buildStatus("CLI", "https://edge.slice.local/api/v1/status")));
-"#;
-        std::fs::write(&entry_path, sample_ts)?;
-    }
+    write_if_missing(&entry_path, DEFAULT_SAMPLE_INDEX_TS)?;
 
     let tests_dir = target_dir.join("tests");
     std::fs::create_dir_all(&tests_dir)?;
     let test_path = tests_dir.join("index.test.ts");
-    if !test_path.exists() {
-        let sample_test_ts = r#"import { describe, test, expect } from "slice:test";
-import { handleRequest } from "../src/index.ts";
-
-describe("WinterTC Edge Handler", () => {
-    test("returns 200 JSON service status", async () => {
-        const req = new Request("https://edge.slice.local/api/v1/status", { method: "GET" });
-        const res = handleRequest(req);
-        expect(res.status).toBe(200);
-        const body = await res.json();
-        expect(body.status).toBe("ok");
-        expect(body.method).toBe("GET");
-    });
-});
-"#;
-        std::fs::write(&test_path, sample_test_ts)?;
-    }
+    write_if_missing(&test_path, DEFAULT_SAMPLE_TEST_TS)?;
 
     println!(
         "Initialized Slice (Nexus-JS) project '{}' in {}",

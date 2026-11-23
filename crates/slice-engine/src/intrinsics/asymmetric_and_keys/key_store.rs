@@ -3,20 +3,16 @@
 use crate::intrinsics::symmetric_and_kdf::AesExpandedKey;
 
 /// Cached pre-expanded cryptographic key entry stored in the isolate-local / tenant-scoped slot table.
-#[allow(dead_code, clippy::large_enum_variant)]
 pub(crate) enum CachedCryptoKeyMaterial {
     AesGcm {
-        less_safe: ring::aead::LessSafeKey,
+        less_safe: Box<ring::aead::LessSafeKey>,
         raw: Vec<u8>,
     },
     AesCbc {
-        expanded: AesExpandedKey,
-        raw: Vec<u8>,
+        expanded: Box<AesExpandedKey>,
     },
     Hmac {
-        ring_key: ring::hmac::Key,
-        hash_alg: String,
-        raw: Vec<u8>,
+        ring_key: Box<ring::hmac::Key>,
     },
     Ed25519Private {
         seed: [u8; 32],
@@ -35,7 +31,6 @@ pub(crate) enum CachedCryptoKeyMaterial {
     EcdsaPrivate {
         curve: String,
         pkcs8: Vec<u8>,
-        d_bytes: Vec<u8>,
         pub_bytes: Vec<u8>,
     },
     EcdsaPublic {

@@ -162,14 +162,30 @@ impl RegisteredBufferPool {
     }
 
     /// Acquires the most recently released (cache-warm) slab slot and returns `(slot_idx, &mut [u8])`.
-    #[inline]
+    #[inline(always)]
     pub fn acquire(&mut self) -> Option<(u16, &mut [u8])> {
-        let idx = self.acquire_slot()?;
-        let ptr = self.slot_mut_ptr(idx as usize);
-        // SAFETY: `acquire_slot` returned a valid non-in-flight `idx < slot_count`, `buf_size <= stride`,
-        // and `&mut self` holds exclusive access to the slab for the returned borrow lifetime.
-        let slice = unsafe { core::slice::from_raw_parts_mut(ptr, self.buf_size) };
-        Some((idx, slice))
+        while self.free_len > 0 {
+            self.free_len -= 1;
+            let idx = self.free_stack[self.free_len];
+            let slot = idx as usize;
+            if slot >= self.slot_count || self.in_flight[slot] {
+                continue;
+            }
+            self.in_use[slot] = true;
+            // SAFETY: `slot < self.slot_count` and `!self.in_flight[slot]` were verified above,
+            // `self.buf_size <= self.stride` (`slot * stride + buf_size <= slab capacity`), and
+            // `&mut self` holds exclusive access to the slab for the returned borrow lifetime.
+            let slice = unsafe {
+                let ptr = if self.stride == 0 {
+                    self.slab.ptr.as_ptr()
+                } else {
+                    self.slab.ptr.as_ptr().add(slot * self.stride)
+                };
+                core::slice::from_raw_parts_mut(ptr, self.buf_size)
+            };
+            return Some((idx, slice));
+        }
+        None
     }
 
     /// Acquires a slab slot index without borrowing the buffer slice.
@@ -179,7 +195,7 @@ impl RegisteredBufferPool {
             self.free_len -= 1;
             let idx = self.free_stack[self.free_len];
             let slot = idx as usize;
-            if self.in_flight[slot] {
+            if slot >= self.slot_count || self.in_flight[slot] {
                 continue;
             }
             self.in_use[slot] = true;
@@ -234,10 +250,10 @@ impl RegisteredBufferPool {
     }
 
     /// Releases an active slab slot back onto the cache-warm LIFO free stack (no-op if `in_flight` or free).
-    #[inline]
+    #[inline(always)]
     pub fn release(&mut self, idx: u16) {
         let slot = idx as usize;
-        if slot < self.in_use.len() && self.in_use[slot] && !self.in_flight[slot] {
+        if slot < self.slot_count && self.in_use[slot] && !self.in_flight[slot] {
             self.in_use[slot] = false;
             self.free_stack[self.free_len] = idx;
             self.free_len += 1;

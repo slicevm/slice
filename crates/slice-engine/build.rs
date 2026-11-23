@@ -1,7 +1,8 @@
 //! Compile-time JavaScript prelude minifier for `slice-engine`.
 //!
-//! Reads the human-readable `.js` prelude sources in `src/preludes/*.js`, minifies them
-//! deterministically via `src/js_minifier.rs`, and emits `$OUT_DIR/minified_preludes.rs`.
+//! Reads the human-readable `.js` prelude sources in `src/preludes/*.js`, concatenates any
+//! multi-part prelude shards in order, minifies them deterministically via `src/preludes/js_minifier.rs`,
+//! and emits `$OUT_DIR/minified_preludes.rs`.
 
 #[path = "src/preludes/js_minifier.rs"]
 mod js_minifier;
@@ -11,54 +12,66 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-const PRELUDE_SPECS: &[(&str, &str)] = &[
-    ("ULTRA_CORE_PRELUDE", "src/preludes/00_ultra_core.js"),
-    ("WEB_FETCH_URL_PRELUDE", "src/preludes/01_web_fetch_url.js"),
+const PRELUDE_SPECS: &[(&str, &[&str])] = &[
+    ("ULTRA_CORE_PRELUDE", &["src/preludes/00_ultra_core.js"]),
+    (
+        "WEB_FETCH_URL_PRELUDE",
+        &[
+            "src/preludes/01a_url_search_params.js",
+            "src/preludes/01b_url.js",
+        ],
+    ),
     (
         "ENCODING_EVENTS_PRELUDE",
-        "src/preludes/02_encoding_events.js",
+        &["src/preludes/02_encoding_events.js"],
     ),
     (
         "STREAMS_FORMDATA_PRELUDE",
-        "src/preludes/03_streams_formdata.js",
+        &["src/preludes/03_streams_formdata.js"],
     ),
     (
         "WEBCRYPTO_CLONE_PRELUDE",
-        "src/preludes/04_webcrypto_clone.js",
+        &["src/preludes/04_webcrypto_clone.js"],
     ),
-    ("FULL_BUFFER_PRELUDE", "src/preludes/05_full_buffer.js"),
-    ("CONSOLE_EXT_PRELUDE", "src/preludes/06_console_ext.js"),
-    ("WEBSOCKET_PRELUDE", "src/preludes/07_websocket.js"),
+    ("FULL_BUFFER_PRELUDE", &["src/preludes/05_full_buffer.js"]),
+    ("CONSOLE_EXT_PRELUDE", &["src/preludes/06_console_ext.js"]),
+    ("WEBSOCKET_PRELUDE", &["src/preludes/07_websocket.js"]),
     (
         "WORKERS_SOCKETS_PRELUDE",
-        "src/preludes/08_workers_sockets.js",
+        &["src/preludes/08_workers_sockets.js"],
     ),
-    ("WASM_PRELUDE", "src/preludes/09_wasm.js"),
+    ("WASM_PRELUDE", &["src/preludes/09_wasm.js"]),
     (
         "OUTBOUND_FETCH_SSE_PRELUDE",
-        "src/preludes/10_outbound_fetch_sse.js",
+        &["src/preludes/10_outbound_fetch_sse.js"],
     ),
     (
         "FETCH_HEADERS_REQ_RES_PRELUDE",
-        "src/preludes/11_fetch_headers_req_res.js",
+        &[
+            "src/preludes/11a_headers_and_body.js",
+            "src/preludes/11b_request_and_response.js",
+        ],
     ),
-    ("URL_PATTERN_PRELUDE", "src/preludes/12_url_pattern.js"),
-    ("DOM_EVENTS_PRELUDE", "src/preludes/13_dom_events.js"),
+    ("URL_PATTERN_PRELUDE", &["src/preludes/12_url_pattern.js"]),
+    ("DOM_EVENTS_PRELUDE", &["src/preludes/13_dom_events.js"]),
     (
         "TRANSFORM_COMPRESSION_STREAMS_PRELUDE",
-        "src/preludes/14_transform_compression_streams.js",
+        &["src/preludes/14_transform_compression_streams.js"],
     ),
-    ("BLOB_FORMDATA_PRELUDE", "src/preludes/15_blob_formdata.js"),
+    (
+        "BLOB_FORMDATA_PRELUDE",
+        &["src/preludes/15_blob_formdata.js"],
+    ),
     (
         "STRUCTURED_CLONE_PRELUDE",
-        "src/preludes/16_structured_clone.js",
+        &["src/preludes/16_structured_clone.js"],
     ),
     (
         "BUFFER_BINARY_RW_PRELUDE",
-        "src/preludes/17_buffer_binary_rw.js",
+        &["src/preludes/17_buffer_binary_rw.js"],
     ),
-    ("INTL_PRELUDE", "src/preludes/18_intl.js"),
-    ("PROCESS_CLI_PRELUDE", "src/preludes/19_process_cli.js"),
+    ("INTL_PRELUDE", &["src/preludes/18_intl.js"]),
+    ("PROCESS_CLI_PRELUDE", &["src/preludes/19_process_cli.js"]),
 ];
 
 fn main() {
@@ -76,11 +89,17 @@ fn main() {
     )
     .unwrap();
 
-    for &(const_name, rel_path) in PRELUDE_SPECS {
-        println!("cargo:rerun-if-changed={}", rel_path);
-        let full_path = manifest_dir.join(rel_path);
-        let raw_src = fs::read_to_string(&full_path)
-            .unwrap_or_else(|e| panic!("Failed to read prelude {}: {}", full_path.display(), e));
+    for &(const_name, rel_paths) in PRELUDE_SPECS {
+        let mut raw_parts = Vec::with_capacity(rel_paths.len());
+        for &rel_path in rel_paths {
+            println!("cargo:rerun-if-changed={}", rel_path);
+            let full_path = manifest_dir.join(rel_path);
+            let part_src = fs::read_to_string(&full_path).unwrap_or_else(|e| {
+                panic!("Failed to read prelude {}: {}", full_path.display(), e)
+            });
+            raw_parts.push(part_src);
+        }
+        let raw_src = raw_parts.join("\n");
         let minified = js_minifier::minify_js_source(&raw_src);
         writeln!(
             out_file,

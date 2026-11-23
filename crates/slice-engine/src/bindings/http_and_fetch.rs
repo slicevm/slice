@@ -1,9 +1,12 @@
 //! Inbound HTTP Request/Response Bridge (`__slice_http_*`) and Outbound `fetch` (`Shard 10`) Host Bindings.
 
-use crate::bindings::helpers::active_tenant_id_or_default;
+use crate::bindings::helpers::{
+    active_tenant_id_or_default, bytes_to_js_uint8_array, extract_buffer_source_bytes,
+    js_string_to_utf8_bytes, record_boa_violation_once,
+};
 use crate::boa_realm::{
     BOA_ACTIVE_TENANT, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_FETCH_MOCKS, BOA_HTTP_REQ,
-    BOA_HTTP_RES, BOA_VIOLATION, BOA_WS_UPGRADED, DIRTY_FETCH_MOCK, mark_subsystem_dirty,
+    BOA_HTTP_RES, BOA_WS_UPGRADED, DIRTY_FETCH_MOCK, mark_subsystem_dirty,
 };
 use crate::event_loop::enqueue_async_fetch;
 use crate::outbound_http::{
@@ -140,7 +143,7 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
                 } else {
                     borrow.body.as_bytes()
                 };
-                crate::bindings::helpers::bytes_to_js_uint8_array(bytes, context)
+                bytes_to_js_uint8_array(bytes, context)
             })
         }),
     );
@@ -189,8 +192,7 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
                 .unwrap_or(200);
             let (body, body_bytes) = match args.get(1) {
                 Some(val) if val.as_object().is_some() => {
-                    let bytes =
-                        crate::bindings::helpers::extract_buffer_source_bytes(val, context)?;
+                    let bytes = extract_buffer_source_bytes(val, context)?;
                     (String::new(), Some(bytes))
                 }
                 Some(val) => {
@@ -212,7 +214,6 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
 
-            // Egress DLP inspection across response body, Content-Type, and serialized response headers.
             let has_secrets = BOA_EGRESS_SECRETS.with(|s| !s.borrow().is_empty());
             if has_secrets {
                 let tenant_id = active_tenant_id_or_default();
@@ -234,11 +235,7 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
                 });
                 if let Err(violation) = dlp_res {
                     let msg = violation.to_string();
-                    BOA_VIOLATION.with(|v| {
-                        if v.borrow().is_none() {
-                            *v.borrow_mut() = Some(violation);
-                        }
-                    });
+                    record_boa_violation_once(violation);
                     return Err(JsNativeError::error().with_message(msg).into());
                 }
             }
@@ -260,7 +257,6 @@ fn extract_fetch_body_bytes(
     arg: Option<&boa_engine::JsValue>,
     context: &mut boa_engine::Context,
 ) -> boa_engine::JsResult<Vec<u8>> {
-    use boa_engine::string::JsStrVariant;
     let Some(v) = arg else {
         return Ok(Vec::new());
     };
@@ -268,35 +264,98 @@ fn extract_fetch_body_bytes(
         return Ok(Vec::new());
     }
     if v.as_object().is_some() {
-        return crate::bindings::helpers::extract_buffer_source_bytes(v, context);
+        return extract_buffer_source_bytes(v, context);
     }
     let js_s = v.to_string(context)?;
-    match js_s.as_str().variant() {
-        JsStrVariant::Latin1(bytes) => {
-            if bytes.is_ascii() {
-                return Ok(bytes.to_vec());
-            }
-            let mut out = Vec::with_capacity(bytes.len() * 2);
-            for &b in bytes {
-                if b < 0x80 {
-                    out.push(b);
-                } else {
-                    out.push(0xC0 | (b >> 6));
-                    out.push(0x80 | (b & 0x3F));
-                }
-            }
-            Ok(out)
-        }
-        JsStrVariant::Utf16(units) => {
-            let mut out = Vec::with_capacity(units.len() * 3);
-            for item in char::decode_utf16(units.iter().copied()) {
-                let ch = item.unwrap_or(char::REPLACEMENT_CHARACTER);
-                let mut buf = [0u8; 4];
-                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-            }
-            Ok(out)
-        }
+    Ok(js_string_to_utf8_bytes(&js_s))
+}
+
+enum OutboundFetchPreflight {
+    ImmediateJson(String),
+    Miss {
+        url: String,
+        method: String,
+        headers_json: String,
+        body: Vec<u8>,
+        redirect_mode: String,
+        tenant_id: String,
+        cassette_key: String,
+    },
+}
+
+fn preflight_outbound_fetch(
+    args: &[boa_engine::JsValue],
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsResult<OutboundFetchPreflight> {
+    let url = args
+        .first()
+        .map(|v| v.to_string(context))
+        .transpose()?
+        .map(|s| s.to_std_string_escaped())
+        .unwrap_or_default();
+    let method = args
+        .get(1)
+        .map(|v| v.to_string(context))
+        .transpose()?
+        .map(|s| s.to_std_string_escaped().to_ascii_uppercase())
+        .unwrap_or_else(|| "GET".to_string());
+    let headers_json = args
+        .get(2)
+        .map(|v| v.to_string(context))
+        .transpose()?
+        .map(|s| s.to_std_string_escaped())
+        .unwrap_or_else(|| "[]".to_string());
+    let body = extract_fetch_body_bytes(args.get(3), context)?;
+    let redirect_mode = args
+        .get(4)
+        .map(|v| v.to_string(context))
+        .transpose()?
+        .map(|s| s.to_std_string_escaped())
+        .unwrap_or_else(|| "follow".to_string());
+
+    let Some(parts) = parse_outbound_http_url(&url) else {
+        let err_json =
+            serde_json::json!({ "__error": format!("Invalid outbound URL: {}", url) }).to_string();
+        return Ok(OutboundFetchPreflight::ImmediateJson(err_json));
+    };
+
+    if let Err(err_msg) = check_boa_outbound_fetch_ocap_and_dlp(&parts, &url, &headers_json, &body)
+    {
+        let err_json = serde_json::json!({ "__error": err_msg }).to_string();
+        return Ok(OutboundFetchPreflight::ImmediateJson(err_json));
     }
+
+    let method_url_key = format!("{} {}", method, url);
+    if let Some(mock_json) = BOA_FETCH_MOCKS.with(|m| {
+        let map = m.borrow();
+        map.get(&method_url_key)
+            .or_else(|| map.get(&url))
+            .or_else(|| {
+                url.split_once('?').and_then(|(base, _)| {
+                    map.get(&format!("{} {}", method, base))
+                        .or_else(|| map.get(base))
+                })
+            })
+            .cloned()
+    }) {
+        return Ok(OutboundFetchPreflight::ImmediateJson(mock_json));
+    }
+
+    let cassette_key = format!("fetch_cassette:{}:{}", method, url);
+    let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+    if let Some(cassette_json) = edge_kv_get(&tenant_id, &cassette_key) {
+        return Ok(OutboundFetchPreflight::ImmediateJson(cassette_json));
+    }
+
+    Ok(OutboundFetchPreflight::Miss {
+        url,
+        method,
+        headers_json,
+        body,
+        redirect_mode,
+        tenant_id,
+        cassette_key,
+    })
 }
 
 pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engine::Context) {
@@ -308,7 +367,7 @@ pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engin
     {
         return;
     }
-    crate::bindings::wintertc_and_buffer::register_buffer_host_functions(ctx);
+    crate::bindings::wintertc::register_buffer_host_functions(ctx);
 
     let _ = ctx.register_global_builtin_callable(
         js_string!("__slice_mock_fetch"),
@@ -340,67 +399,29 @@ pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engin
         js_string!("__slice_fetch_sync"),
         5,
         NativeFunction::from_fn_ptr(|_this, args, context| {
-            let url = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            let method = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped().to_ascii_uppercase())
-                .unwrap_or_else(|| "GET".to_string());
-            let headers_json = args
-                .get(2)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_else(|| "[]".to_string());
-            let body = extract_fetch_body_bytes(args.get(3), context)?;
-            let redirect_mode = args
-                .get(4)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_else(|| "follow".to_string());
-
-            let Some(parts) = parse_outbound_http_url(&url) else {
-                let err_json =
-                    serde_json::json!({ "__error": format!("Invalid outbound URL: {}", url) })
-                        .to_string();
-                return Ok(BoaVal::from(js_string!(err_json)));
-            };
-
-            if let Err(err_msg) =
-                check_boa_outbound_fetch_ocap_and_dlp(&parts, &url, &headers_json, &body)
-            {
-                let err_json = serde_json::json!({ "__error": err_msg }).to_string();
-                return Ok(BoaVal::from(js_string!(err_json)));
-            }
-
-            let method_url_key = format!("{} {}", method, url);
-            if let Some(mock_json) = BOA_FETCH_MOCKS.with(|m| {
-                let map = m.borrow();
-                map.get(&method_url_key)
-                    .or_else(|| map.get(&url))
-                    .or_else(|| {
-                        url.split_once('?').and_then(|(base, _)| {
-                            map.get(&format!("{} {}", method, base))
-                                .or_else(|| map.get(base))
-                        })
-                    })
-                    .cloned()
-            }) {
-                return Ok(BoaVal::from(js_string!(mock_json)));
-            }
-
-            let cassette_key = format!("fetch_cassette:{}:{}", method, url);
-            let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-            if let Some(cassette_json) = edge_kv_get(&tenant_id, &cassette_key) {
-                return Ok(BoaVal::from(js_string!(cassette_json)));
-            }
+            let (url, method, headers_json, body, redirect_mode, tenant_id, cassette_key) =
+                match preflight_outbound_fetch(args, context)? {
+                    OutboundFetchPreflight::ImmediateJson(json) => {
+                        return Ok(BoaVal::from(js_string!(json)));
+                    }
+                    OutboundFetchPreflight::Miss {
+                        url,
+                        method,
+                        headers_json,
+                        body,
+                        redirect_mode,
+                        tenant_id,
+                        cassette_key,
+                    } => (
+                        url,
+                        method,
+                        headers_json,
+                        body,
+                        redirect_mode,
+                        tenant_id,
+                        cassette_key,
+                    ),
+                };
 
             let req_headers: Vec<(String, String)> =
                 serde_json::from_str(&headers_json).unwrap_or_default();
@@ -429,69 +450,10 @@ pub(crate) fn register_shard10_outbound_fetch_host_functions(ctx: &mut boa_engin
         js_string!("__slice_fetch_try_fast"),
         5,
         NativeFunction::from_fn_ptr(|_this, args, context| {
-            let url = args
-                .first()
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_default();
-            let method = args
-                .get(1)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped().to_ascii_uppercase())
-                .unwrap_or_else(|| "GET".to_string());
-            let headers_json = args
-                .get(2)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_else(|| "[]".to_string());
-            let body = extract_fetch_body_bytes(args.get(3), context)?;
-            let _redirect_mode = args
-                .get(4)
-                .map(|v| v.to_string(context))
-                .transpose()?
-                .map(|s| s.to_std_string_escaped())
-                .unwrap_or_else(|| "follow".to_string());
-
-            let Some(parts) = parse_outbound_http_url(&url) else {
-                let err_json =
-                    serde_json::json!({ "__error": format!("Invalid outbound URL: {}", url) })
-                        .to_string();
-                return Ok(BoaVal::from(js_string!(err_json)));
-            };
-
-            if let Err(err_msg) =
-                check_boa_outbound_fetch_ocap_and_dlp(&parts, &url, &headers_json, &body)
-            {
-                let err_json = serde_json::json!({ "__error": err_msg }).to_string();
-                return Ok(BoaVal::from(js_string!(err_json)));
+            match preflight_outbound_fetch(args, context)? {
+                OutboundFetchPreflight::ImmediateJson(json) => Ok(BoaVal::from(js_string!(json))),
+                OutboundFetchPreflight::Miss { .. } => Ok(BoaVal::from(js_string!(""))),
             }
-
-            let method_url_key = format!("{} {}", method, url);
-            if let Some(mock_json) = BOA_FETCH_MOCKS.with(|m| {
-                let map = m.borrow();
-                map.get(&method_url_key)
-                    .or_else(|| map.get(&url))
-                    .or_else(|| {
-                        url.split_once('?').and_then(|(base, _)| {
-                            map.get(&format!("{} {}", method, base))
-                                .or_else(|| map.get(base))
-                        })
-                    })
-                    .cloned()
-            }) {
-                return Ok(BoaVal::from(js_string!(mock_json)));
-            }
-
-            let cassette_key = format!("fetch_cassette:{}:{}", method, url);
-            let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-            if let Some(cassette_json) = edge_kv_get(&tenant_id, &cassette_key) {
-                return Ok(BoaVal::from(js_string!(cassette_json)));
-            }
-
-            Ok(BoaVal::from(js_string!("")))
         }),
     );
 

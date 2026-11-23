@@ -14,7 +14,7 @@ pub struct Sha256State {
 }
 
 impl Sha256State {
-    #[inline]
+    #[inline(always)]
     pub(crate) fn new() -> Self {
         Self {
             h: [
@@ -27,16 +27,30 @@ impl Sha256State {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn compress_block(h: &mut [u32; 8], chunk: &[u8; 64]) {
         if !Self::try_compress_block_sha_ni(h, chunk) {
             Self::compress_block_soft(h, chunk);
         }
     }
 
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cold]
+    #[inline(never)]
+    fn detect_and_cache_sha_ni(slot: &std::sync::atomic::AtomicU8) -> bool {
+        let detected = std::arch::is_x86_feature_detected!("sha")
+            && std::arch::is_x86_feature_detected!("sse4.1")
+            && std::arch::is_x86_feature_detected!("ssse3");
+        slot.store(
+            if detected { 1 } else { 2 },
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        detected
+    }
+
     /// Compresses `chunk` into `h` using x86 `SHA-NI` instructions if supported by the host CPU,
     /// returning `true` on hardware execution or `false` (leaving `h` untouched) when unavailable.
-    #[inline]
+    #[inline(always)]
     pub fn try_compress_block_sha_ni(h: &mut [u32; 8], chunk: &[u8; 64]) -> bool {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
@@ -47,14 +61,7 @@ impl Sha256State {
             } else if status == 2 {
                 false
             } else {
-                let detected = std::arch::is_x86_feature_detected!("sha")
-                    && std::arch::is_x86_feature_detected!("sse4.1")
-                    && std::arch::is_x86_feature_detected!("ssse3");
-                SHA_NI_STATUS.store(
-                    if detected { 1 } else { 2 },
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                detected
+                Self::detect_and_cache_sha_ni(&SHA_NI_STATUS)
             };
             if use_sha_ni {
                 // SAFETY: `sha`, `sse4.1`, and `ssse3` CPU features were verified via `is_x86_feature_detected!`.
@@ -368,7 +375,7 @@ impl Sha256State {
         h[7] = h[7].wrapping_add(hh);
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn update(&mut self, mut data: &[u8]) {
         self.total_len += data.len() as u64;
         if self.buf_len > 0 {
@@ -395,7 +402,7 @@ impl Sha256State {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn finalize(mut self) -> [u8; 32] {
         let bit_len = self.total_len * 8;
         self.buf[self.buf_len] = 0x80;

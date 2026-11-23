@@ -1,3 +1,5 @@
+//! Time-Travel Test Suite (`slice test`) with sub-5us VFS + KV checkpoint rollbacks.
+
 use super::run::LAST_CLI_EXIT_CODE;
 use crate::config::{
     OsNativeFileWatcher, ResolvedExecutionConfig, install_ctrlc_handler,
@@ -5,7 +7,7 @@ use crate::config::{
     skip_runtime_flag_with_separate_value,
 };
 use anyhow::{Context, Result, bail};
-use slice_engine::{SliceIsolate, compile_source_to_bytecode};
+use slice_engine::{ExecutionMetrics, SliceIsolate, compile_source_to_bytecode};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -65,6 +67,89 @@ pub(crate) fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>> {
     }
     walk_tests(target, 0, &mut found);
     Ok(found)
+}
+
+struct SingleTestFileOutcome {
+    bundled: String,
+    metrics: ExecutionMetrics,
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+    rollbacks: usize,
+    results: Vec<serde_json::Value>,
+    non_report_stdout: Vec<String>,
+}
+
+fn execute_single_test_file(
+    test_file: &Path,
+    tenant_id: &str,
+    base_cfg: &ResolvedExecutionConfig,
+    filter_opt: Option<&str>,
+    deterministic_seed: Option<u64>,
+) -> Result<SingleTestFileOutcome> {
+    let mut file_cfg = base_cfg.clone();
+    let raw_test = std::fs::read_to_string(test_file)
+        .with_context(|| format!("Failed to read test file {}", test_file.display()))?;
+    file_cfg.apply_inline_directives(&raw_test, test_file.parent())?;
+    let bundled = slice_cas::bundle_entrypoint_with_deps(test_file)?;
+    let filter_js = match filter_opt {
+        Some(flt) => format!(
+            "globalThis.__slice_test_filter = {};",
+            serde_json::to_string(flt).unwrap_or_else(|_| "\"\"".to_string())
+        ),
+        None => "globalThis.__slice_test_filter = \"\";".to_string(),
+    };
+    let wrapped_js = format!(
+        "{}\nSlice.resetTests();\n{}\nconsole.log(\"__SLICE_TEST_REPORT__:\" + JSON.stringify(Slice.testSummary()));\n",
+        filter_js, bundled
+    );
+    let bytecode = compile_source_to_bytecode(&wrapped_js);
+
+    let mut isolate = SliceIsolate::spawn(
+        tenant_id,
+        1,
+        file_cfg.caps,
+        file_cfg.fuel_limit,
+        file_cfg.mem_limit,
+    );
+    isolate.set_deterministic_seed(deterministic_seed.or(file_cfg.deterministic_seed));
+    for sec in &file_cfg.audit_secrets {
+        isolate.add_egress_audit_secret(sec.clone());
+    }
+    let metrics = isolate.execute_bytecode(&bytecode, None)?;
+
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+    let mut rollbacks = 0usize;
+    let mut results = Vec::new();
+    let mut non_report_stdout = Vec::new();
+
+    for line in &metrics.stdout {
+        if let Some(report_json) = line.strip_prefix("__SLICE_TEST_REPORT__:") {
+            let parsed: serde_json::Value = serde_json::from_str(report_json)?;
+            passed += parsed["passed"].as_u64().unwrap_or(0) as usize;
+            failed += parsed["failed"].as_u64().unwrap_or(0) as usize;
+            skipped += parsed["skipped"].as_u64().unwrap_or(0) as usize;
+            rollbacks += parsed["checkpointsRestored"].as_u64().unwrap_or(0) as usize;
+            if let Some(arr) = parsed["results"].as_array() {
+                results.extend(arr.iter().cloned());
+            }
+        } else {
+            non_report_stdout.push(line.clone());
+        }
+    }
+
+    Ok(SingleTestFileOutcome {
+        bundled,
+        metrics,
+        passed,
+        failed,
+        skipped,
+        rollbacks,
+        results,
+        non_report_stdout,
+    })
 }
 
 pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
@@ -139,53 +224,30 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
     let mut all_results: Vec<serde_json::Value> = Vec::new();
 
     for test_file in &test_files {
-        let mut file_cfg = exec_cfg.clone();
-        let raw_test = std::fs::read_to_string(test_file)
-            .with_context(|| format!("Failed to read test file {}", test_file.display()))?;
-        file_cfg.apply_inline_directives(&raw_test, test_file.parent())?;
-        let bundled = slice_cas::bundle_entrypoint_with_deps(test_file)?;
-        let filter_js = match &filter_opt {
-            Some(flt) => format!(
-                "globalThis.__slice_test_filter = {};",
-                serde_json::to_string(flt).unwrap_or_else(|_| "\"\"".to_string())
-            ),
-            None => "globalThis.__slice_test_filter = \"\";".to_string(),
-        };
-        let wrapped_js = format!(
-            "{}\nSlice.resetTests();\n{}\nconsole.log(\"__SLICE_TEST_REPORT__:\" + JSON.stringify(Slice.testSummary()));\n",
-            filter_js, bundled
-        );
-        let bytecode = compile_source_to_bytecode(&wrapped_js);
-
-        let mut isolate = SliceIsolate::spawn(
+        let outcome = execute_single_test_file(
+            test_file,
             "slice-test-runner",
-            1,
-            file_cfg.caps,
-            file_cfg.fuel_limit,
-            file_cfg.mem_limit,
-        );
-        isolate.set_deterministic_seed(deterministic_seed.or(file_cfg.deterministic_seed));
-        for sec in &file_cfg.audit_secrets {
-            isolate.add_egress_audit_secret(sec.clone());
-        }
-        let metrics = isolate.execute_bytecode(&bytecode, None)?;
-        if let Some(code) = metrics.exit_code
+            &exec_cfg,
+            filter_opt.as_deref(),
+            deterministic_seed,
+        )?;
+        if let Some(code) = outcome.metrics.exit_code
             && code != 0
         {
             LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
         }
-        if metrics.return_value.starts_with("Uncaught ") {
-            if metrics.exit_code.is_none() {
+        if outcome.metrics.return_value.starts_with("Uncaught ") {
+            if outcome.metrics.exit_code.is_none() {
                 LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
             }
             let mapped = slice_cas::map_bundled_error_location_with_offset(
-                &bundled,
-                &metrics.return_value,
+                &outcome.bundled,
+                &outcome.metrics.return_value,
                 2,
             );
             bail!("Uncaught error in {}: {}", test_file.display(), mapped);
         }
-        if let Some(code) = metrics.exit_code
+        if let Some(code) = outcome.metrics.exit_code
             && code != 0
         {
             bail!(
@@ -195,46 +257,39 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
             );
         }
 
-        for line in &metrics.stdout {
-            if let Some(report_json) = line.strip_prefix("__SLICE_TEST_REPORT__:") {
-                let parsed: serde_json::Value = serde_json::from_str(report_json)?;
-                let p = parsed["passed"].as_u64().unwrap_or(0) as usize;
-                let f = parsed["failed"].as_u64().unwrap_or(0) as usize;
-                let s = parsed["skipped"].as_u64().unwrap_or(0) as usize;
-                let rb = parsed["checkpointsRestored"].as_u64().unwrap_or(0) as usize;
-                total_passed += p;
-                total_failed += f;
-                total_skipped += s;
-                total_rollbacks += rb;
-                if let Some(arr) = parsed["results"].as_array() {
-                    for r in arr {
-                        if !json_output {
-                            let status = if r["passed"].as_bool().unwrap_or(false) {
-                                "PASS"
-                            } else {
-                                "FAIL"
-                            };
-                            let full_name = r["fullName"].as_str().unwrap_or("test");
-                            let dur_us = r["durationUs"].as_u64().unwrap_or(1);
-                            let snap_id = r["checkpointId"].as_u64().unwrap_or(0);
-                            println!(
-                                "  [{}] {} ({} us, VFS+KV Rollback #{})",
-                                status, full_name, dur_us, snap_id
-                            );
-                            if let Some(err_str) = r["error"].as_str() {
-                                let mapped_err = slice_cas::map_bundled_error_location_with_offset(
-                                    &bundled, err_str, 2,
-                                );
-                                println!("         -> {}", mapped_err);
-                            }
-                        }
-                        all_results.push(r.clone());
-                    }
-                }
-            } else if !json_output {
+        if !json_output {
+            for line in &outcome.non_report_stdout {
                 println!("{}", line);
             }
+            for r in &outcome.results {
+                let status = if r["passed"].as_bool().unwrap_or(false) {
+                    "PASS"
+                } else {
+                    "FAIL"
+                };
+                let full_name = r["fullName"].as_str().unwrap_or("test");
+                let dur_us = r["durationUs"].as_u64().unwrap_or(1);
+                let snap_id = r["checkpointId"].as_u64().unwrap_or(0);
+                println!(
+                    "  [{}] {} ({} us, VFS+KV Rollback #{})",
+                    status, full_name, dur_us, snap_id
+                );
+                if let Some(err_str) = r["error"].as_str() {
+                    let mapped_err = slice_cas::map_bundled_error_location_with_offset(
+                        &outcome.bundled,
+                        err_str,
+                        2,
+                    );
+                    println!("         -> {}", mapped_err);
+                }
+            }
         }
+
+        total_passed += outcome.passed;
+        total_failed += outcome.failed;
+        total_skipped += outcome.skipped;
+        total_rollbacks += outcome.rollbacks;
+        all_results.extend(outcome.results);
     }
 
     let elapsed_ms = suite_start.elapsed().as_secs_f64() * 1_000.0;
@@ -287,62 +342,21 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
                 }
             };
             for test_file in &discovered {
-                let run_one: Result<(usize, usize)> = (|| {
-                    let mut file_cfg = exec_cfg.clone();
-                    let raw_test = std::fs::read_to_string(test_file).with_context(|| {
-                        format!("Failed to read test file {}", test_file.display())
-                    })?;
-                    file_cfg.apply_inline_directives(&raw_test, test_file.parent())?;
-                    let bundled = slice_cas::bundle_entrypoint_with_deps(test_file)?;
-                    let filter_js = match &filter_opt {
-                        Some(flt) => format!(
-                            "globalThis.__slice_test_filter = {};",
-                            serde_json::to_string(flt).unwrap_or_else(|_| "\"\"".to_string())
-                        ),
-                        None => "globalThis.__slice_test_filter = \"\";".to_string(),
-                    };
-                    let wrapped_js = format!(
-                        "{}\nSlice.resetTests();\n{}\nconsole.log(\"__SLICE_TEST_REPORT__:\" + JSON.stringify(Slice.testSummary()));\n",
-                        filter_js, bundled
-                    );
-                    let bytecode = compile_source_to_bytecode(&wrapped_js);
-                    let mut isolate = SliceIsolate::spawn(
-                        "slice-test-watch",
-                        1,
-                        file_cfg.caps,
-                        file_cfg.fuel_limit,
-                        file_cfg.mem_limit,
-                    );
-                    isolate
-                        .set_deterministic_seed(deterministic_seed.or(file_cfg.deterministic_seed));
-                    for sec in &file_cfg.audit_secrets {
-                        isolate.add_egress_audit_secret(sec.clone());
-                    }
-                    let metrics = isolate
-                        .execute_bytecode(&bytecode, None)
-                        .map_err(|v| anyhow::anyhow!("Sandbox containment violation: {}", v))?;
-                    let mut p = 0usize;
-                    let mut f = 0usize;
-                    if metrics.return_value.starts_with("Uncaught ")
-                        || metrics.exit_code.is_some_and(|c| c != 0)
-                    {
-                        f += 1;
-                    }
-                    for line in &metrics.stdout {
-                        if let Some(report_json) = line.strip_prefix("__SLICE_TEST_REPORT__:")
-                            && let Ok(parsed) =
-                                serde_json::from_str::<serde_json::Value>(report_json)
+                match execute_single_test_file(
+                    test_file,
+                    "slice-test-watch",
+                    &exec_cfg,
+                    filter_opt.as_deref(),
+                    deterministic_seed,
+                ) {
+                    Ok(outcome) => {
+                        rerun_passed += outcome.passed;
+                        rerun_failed += outcome.failed;
+                        if outcome.metrics.return_value.starts_with("Uncaught ")
+                            || outcome.metrics.exit_code.is_some_and(|c| c != 0)
                         {
-                            p += parsed["passed"].as_u64().unwrap_or(0) as usize;
-                            f += parsed["failed"].as_u64().unwrap_or(0) as usize;
+                            rerun_failed += 1;
                         }
-                    }
-                    Ok((p, f))
-                })();
-                match run_one {
-                    Ok((p, f)) => {
-                        rerun_passed += p;
-                        rerun_failed += f;
                     }
                     Err(err) => {
                         rerun_failed += 1;

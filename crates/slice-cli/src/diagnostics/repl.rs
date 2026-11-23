@@ -1,7 +1,22 @@
-use crate::config::load_manifest_or_default;
+use crate::config::ResolvedExecutionConfig;
 use anyhow::Result;
 use slice_engine::{SliceIsolate, compile_source_to_bytecode};
 use std::io::Write;
+
+fn spawn_repl_isolate(exec_cfg: &ResolvedExecutionConfig) -> SliceIsolate {
+    let mut isolate = SliceIsolate::spawn(
+        "repl-tenant",
+        1,
+        exec_cfg.caps.clone(),
+        exec_cfg.fuel_limit,
+        exec_cfg.mem_limit,
+    );
+    isolate.set_deterministic_seed(exec_cfg.deterministic_seed);
+    for sec in &exec_cfg.audit_secrets {
+        isolate.add_egress_audit_secret(sec.clone());
+    }
+    isolate
+}
 
 pub(crate) fn cmd_repl() -> Result<()> {
     println!(
@@ -9,8 +24,8 @@ pub(crate) fn cmd_repl() -> Result<()> {
         env!("CARGO_PKG_VERSION")
     );
     println!("Commands: :help, :metrics, :caps, :vars, :reset, :quit");
-    let (caps, fuel_limit, mem_limit) = load_manifest_or_default()?;
-    let mut isolate = SliceIsolate::spawn("repl-tenant", 1, caps.clone(), fuel_limit, mem_limit);
+    let exec_cfg = ResolvedExecutionConfig::from_cli_args(&[])?;
+    let mut isolate = spawn_repl_isolate(&exec_cfg);
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
 
@@ -49,8 +64,7 @@ pub(crate) fn cmd_repl() -> Result<()> {
                 continue;
             }
             ":reset" | ".clear" => {
-                isolate =
-                    SliceIsolate::spawn("repl-tenant", 1, caps.clone(), fuel_limit, mem_limit);
+                isolate = spawn_repl_isolate(&exec_cfg);
                 println!("Compartment reset (fresh SES intrinsics & fuel counter).");
                 continue;
             }

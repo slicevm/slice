@@ -136,28 +136,6 @@ impl Drop for ActiveHttpReqGuard {
     }
 }
 
-#[inline]
-fn format_uncaught_http_error_json(raw_err: &str) -> String {
-    let mut out = String::with_capacity(raw_err.len() + 16);
-    out.push_str(r#"{"error":""#);
-    for ch in raw_err.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                use std::fmt::Write as _;
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push_str(r#""}"#);
-    out
-}
-
 impl SliceIsolate {
     /// Executes an HTTP request inside this `SliceIsolate` with zero-copy request metadata
     /// (`HttpRequestContext`), custom status/content-type response capture (`Slice.respond`),
@@ -193,7 +171,7 @@ impl SliceIsolate {
                     (
                         500,
                         Cow::Borrowed("application/json"),
-                        format_uncaught_http_error_json(&metrics.return_value),
+                        slice_sandbox::format_json_error_body(&metrics.return_value),
                         None,
                         Vec::new(),
                     )
@@ -226,7 +204,10 @@ impl SliceIsolate {
 
         let mut metrics = self.execute_bytecode(bytecode, cas)?;
         let (status_code, body) = if metrics.return_value.starts_with("Uncaught ") {
-            (500, format_uncaught_http_error_json(&metrics.return_value))
+            (
+                500,
+                slice_sandbox::format_json_error_body(&metrics.return_value),
+            )
         } else if !metrics.stdout.is_empty() {
             (200, metrics.stdout.join("\n"))
         } else {
@@ -246,6 +227,7 @@ impl SliceIsolate {
 
     /// Zero-clone HTTP request dispatcher for `slice serve` worker loops.
     /// Avoids cloning `tenant_id`, `stdout`, `"application/json"`, and `"undefined"` on every request.
+    #[inline]
     pub fn execute_http_request_fast(
         &mut self,
         bytecode: &[u8],
@@ -273,7 +255,7 @@ impl SliceIsolate {
                     (
                         500,
                         Cow::Borrowed("application/json"),
-                        format_uncaught_http_error_json(&ret_str),
+                        slice_sandbox::format_json_error_body(&ret_str),
                         None,
                         Vec::new(),
                     )
@@ -308,7 +290,7 @@ impl SliceIsolate {
         let (_instantiate_ns, total_time_ns, ret_str) =
             self.execute_bytecode_core(bytecode, cas, false)?;
         let (status_code, body) = if ret_str.starts_with("Uncaught ") {
-            (500, format_uncaught_http_error_json(&ret_str))
+            (500, slice_sandbox::format_json_error_body(&ret_str))
         } else if !self.stdout.is_empty() {
             (200, self.stdout.join("\n"))
         } else {
@@ -347,7 +329,7 @@ impl SliceIsolate {
             call_realm_ctl(&mut realm, REALM_CTL_SYNC_ENV, true);
         }
         if self.deterministic_seed.is_some() {
-            crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
+            crate::isolate::exec_boa::ensure_realm_det_funcs(&mut realm);
             call_realm_ctl(&mut realm, REALM_CTL_SET_DET_MODE, true);
         }
 
@@ -405,7 +387,7 @@ impl SliceIsolate {
             call_realm_ctl(&mut realm, REALM_CTL_SYNC_ENV, true);
         }
         if self.deterministic_seed.is_some() {
-            crate::host_bindings::register_deterministic_host_functions(&mut realm.ctx);
+            crate::isolate::exec_boa::ensure_realm_det_funcs(&mut realm);
             call_realm_ctl(&mut realm, REALM_CTL_SET_DET_MODE, true);
         }
 

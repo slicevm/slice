@@ -1,12 +1,12 @@
 #![allow(unused_imports)]
-use crate::config_and_watch::{
+use crate::commands::test_runner::{cmd_test, discover_test_files};
+use crate::config::{
     build_cas_archive, build_cas_archive_with_static, merge_manifest_toml_into_caps,
 };
-use crate::http_server::{resolve_tenant_bytecode_hotswap, serve_connection_keep_alive};
-use crate::mcp_and_repl::{
+use crate::diagnostics::{
     handle_mcp_jsonrpc_line, measure_current_process_rss_kb, run_security_containment_checks,
 };
-use crate::test_runner::{cmd_test, discover_test_files};
+use crate::server::{resolve_tenant_bytecode_hotswap, serve_connection_keep_alive};
 use crate::{cmd_init, cmd_run};
 use slice_cas::MappedCasArchive;
 use slice_engine::{SliceIsolate, compile_source_to_bytecode};
@@ -619,7 +619,7 @@ describe("Ledger Time-Travel Suite", () => {
 
 #[test]
 fn test_issue_6_mcp_fuel_violation_does_not_poison_subsequent_calls() {
-    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use crate::diagnostics::handle_mcp_jsonrpc_line;
     use slice_engine::SliceIsolate;
     use slice_sandbox::CapabilityToken;
 
@@ -666,7 +666,7 @@ fn test_issue_6_mcp_fuel_violation_does_not_poison_subsequent_calls() {
 
 #[test]
 fn test_issue_7_mcp_and_eval_sandbox_uncaught_exceptions_and_syntax_errors_report_error() {
-    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use crate::diagnostics::handle_mcp_jsonrpc_line;
     use slice_engine::{SandboxEvalOptions, SliceIsolate};
     use slice_sandbox::CapabilityToken;
 
@@ -712,7 +712,7 @@ fn test_issue_7_mcp_and_eval_sandbox_uncaught_exceptions_and_syntax_errors_repor
 
 #[test]
 fn test_issue_8_mcp_allow_net_honored_and_attenuated() {
-    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use crate::diagnostics::handle_mcp_jsonrpc_line;
     use slice_engine::SliceIsolate;
     use slice_sandbox::CapabilityToken;
 
@@ -742,8 +742,8 @@ fn test_issue_8_mcp_allow_net_honored_and_attenuated() {
 
 #[test]
 fn test_issue_9_audit_egress_auto_not_treated_as_literal_secret() {
-    use crate::config_and_watch::ResolvedExecutionConfig;
-    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use crate::config::ResolvedExecutionConfig;
+    use crate::diagnostics::handle_mcp_jsonrpc_line;
     use slice_engine::SliceIsolate;
 
     let args = vec![
@@ -791,7 +791,7 @@ fn test_issue_9_audit_egress_auto_not_treated_as_literal_secret() {
 
 #[test]
 fn test_issue_10_top_level_await_in_eval_sandbox_and_mcp() {
-    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use crate::diagnostics::handle_mcp_jsonrpc_line;
     use slice_engine::{SandboxEvalOptions, SliceIsolate};
     use slice_sandbox::CapabilityToken;
 
@@ -832,7 +832,7 @@ fn test_issue_10_top_level_await_in_eval_sandbox_and_mcp() {
 
 #[test]
 fn test_issue_11_memory_cap_enforced_and_fuel_scales_with_work() {
-    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use crate::diagnostics::handle_mcp_jsonrpc_line;
     use slice_engine::{SandboxEvalOptions, SliceIsolate};
     use slice_sandbox::CapabilityToken;
 
@@ -881,7 +881,7 @@ fn test_issue_11_memory_cap_enforced_and_fuel_scales_with_work() {
 #[test]
 fn test_issue_15_mcp_honors_audit_egress_env_dotenv_and_deterministic_seed() {
     use crate::config::ResolvedExecutionConfig;
-    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use crate::diagnostics::handle_mcp_jsonrpc_line;
     use slice_engine::SliceIsolate;
 
     let tmp_dir = std::env::temp_dir().join(format!("slice_issue15_{}", std::process::id()));
@@ -956,7 +956,7 @@ fn test_issue_15_mcp_honors_audit_egress_env_dotenv_and_deterministic_seed() {
 
 #[test]
 fn test_issue_16_mcp_multiple_audit_secrets_deterministic_seed_and_schema_sync() {
-    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use crate::diagnostics::handle_mcp_jsonrpc_line;
     use slice_engine::SliceIsolate;
     use slice_sandbox::CapabilityToken;
 
@@ -1021,8 +1021,8 @@ fn test_issue_16_mcp_multiple_audit_secrets_deterministic_seed_and_schema_sync()
 
 #[test]
 fn test_mcp_persistent_kv_memory_accounting_checkpoint_caps_and_bounded_lines() {
+    use crate::diagnostics::handle_mcp_jsonrpc_line;
     use crate::diagnostics::mcp::{McpLineRead, read_bounded_mcp_line};
-    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
     use slice_engine::SliceIsolate;
     use slice_sandbox::CapabilityToken;
     use std::io::Cursor;
@@ -1445,7 +1445,7 @@ Slice.serve((req) => {
 #[test]
 fn test_tenant_id_kv_namespace_isolation_bounded_cas_cache_and_embedded_static_cas() {
     use crate::cmd_serve;
-    use crate::http_server::{clear_tenant_cas_cache, sanitize_tenant_id, tenant_cas_cache_len};
+    use crate::server::{clear_tenant_cas_cache, sanitize_tenant_id, tenant_cas_cache_len};
     use std::borrow::Cow;
     use std::sync::Arc;
 
@@ -1805,7 +1805,7 @@ fn test_issue_105_tenant_url_prefix_slicing_non_ascii_wire_guard_and_host_bind()
 
 #[test]
 fn test_issue_99_mcp_monotonic_fuel_memory_and_checkpoint_quotas() {
-    use crate::mcp_and_repl::handle_mcp_jsonrpc_line;
+    use crate::diagnostics::handle_mcp_jsonrpc_line;
     use slice_engine::SliceIsolate;
     use slice_sandbox::CapabilityToken;
 

@@ -55,23 +55,15 @@ pub(crate) fn eval_cas_require_module(
         return cas_miss_sentinel(context);
     }
 
-    let (archive_ptr, referrer) = match BOA_ACTIVE_CAS.with(|slot| {
+    let (archive, referrer) = match BOA_ACTIVE_CAS.with(|slot| {
         let borrow = slot.borrow();
         let state = borrow.as_ref()?;
-        Some((state.archive_ptr, state.referrer_stack.last().cloned()))
+        Some((state.archive.clone(), state.referrer_stack.last().cloned()))
     }) {
         Some(pair) => pair,
         None => return cas_miss_sentinel(context),
     };
 
-    if archive_ptr.is_null() {
-        return cas_miss_sentinel(context);
-    }
-
-    // SAFETY: `ActiveCasArchiveGuard` binds `archive_ptr` to the stack-pinned `&MappedCasArchive`
-    // in `execute_bytecode_core` and clears/restores `BOA_ACTIVE_CAS` before that stack frame
-    // returns, unwinds, or enters a nested `Slice.evalSandbox` isolate.
-    let archive = unsafe { &*archive_ptr };
     let Some(entry) = archive.resolve_specifier_from(referrer.as_deref(), spec) else {
         return cas_miss_sentinel(context);
     };

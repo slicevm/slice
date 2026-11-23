@@ -15,92 +15,7 @@ use rustc_hash::FxHashMap;
 /// Magic header for deferred compile-time syntax errors (`SLICEERR` + UTF-8 error text).
 pub const SLICEERR_MAGIC: &[u8; 8] = b"SLICEERR";
 
-fn update_backtick_state_on_line(line: &str, mut in_backtick: bool) -> bool {
-    let bytes = line.as_bytes();
-    let len = bytes.len();
-    let mut i = 0usize;
-    while i < len {
-        let b = bytes[i];
-        if b == b'\\' {
-            i += 2;
-            continue;
-        }
-        if in_backtick {
-            if b == b'`' {
-                in_backtick = false;
-            }
-            i += 1;
-            continue;
-        }
-        if b == b'\'' || b == b'"' {
-            let q = b;
-            let mut j = i + 1;
-            let mut found_close = None;
-            while j < len {
-                if bytes[j] == b'\\' {
-                    j += 2;
-                    continue;
-                }
-                if bytes[j] == q {
-                    found_close = Some(j);
-                    break;
-                }
-                j += 1;
-            }
-            if let Some(close_idx) = found_close {
-                i = close_idx + 1;
-                continue;
-            }
-        } else if b == b'`' {
-            in_backtick = true;
-        }
-        i += 1;
-    }
-    in_backtick
-}
-
-/// Compacts a JavaScript payload before embedding it into a `SLICEBOA` bytecode buffer:
-/// - Preserves the `var __slice_modules = {};//__SLICE_RC:<16-hex>` header on line 1 at exact byte offset 21.
-/// - Preserves multi-line backtick template literals verbatim (`in_backtick`).
-/// - Strips leading/trailing indentation whitespace, blank lines, and `// #slice-source:` / `//` comment lines
-///   from the `SLICEBOA` bytecode slot while keeping the `.cas` archive's `source` slot human-readable.
-pub(crate) fn compact_js_for_boa_bytecode(js: &str) -> String {
-    let mut out = String::with_capacity(js.len());
-    let mut in_backtick = false;
-    for (idx, line) in js.lines().enumerate() {
-        if idx == 0 && line.starts_with("var __slice_modules =") {
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        }
-        if in_backtick {
-            out.push_str(line);
-            out.push('\n');
-            if line.as_bytes().contains(&b'`') {
-                in_backtick = update_backtick_state_on_line(line, in_backtick);
-            }
-            continue;
-        }
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("// #slice-source: ") {
-            if rest.bytes().filter(|&b| b == b'|').count() >= 2 {
-                out.push_str("//@sm:");
-                out.push_str(rest);
-                out.push('\n');
-            }
-            continue;
-        }
-        if trimmed.is_empty() || trimmed.starts_with("//") {
-            continue;
-        }
-        out.push_str(trimmed);
-        out.push('\n');
-        if trimmed.as_bytes().contains(&b'`') {
-            in_backtick = update_backtick_state_on_line(trimmed, in_backtick);
-        }
-    }
-    out
-}
+pub(crate) use slice_cas::{compact_js_for_boa_bytecode, extract_slice_rc_key};
 
 /// Compiles JavaScript/TypeScript source into a compact binary `SLICEBC\x01`, `SLICEBOA`, or `SLICESNP` bytecode buffer.
 /// Combines **Oxc** production TypeScript transpilation, **Tier-1 `SLICEBC\x01` Precompiled Boa `CodeBlock`**
@@ -470,18 +385,4 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
         static_exports,
     };
     encode_slicesnp_v2(&module)
-}
-
-#[inline]
-pub(crate) fn extract_slice_rc_key(js_code: &str) -> Option<(u64, &[u8; 16])> {
-    const PREFIX: &[u8] = b"{\nvar __slice_modules = {};//__SLICE_RC:";
-    let bytes = js_code.as_bytes();
-    if bytes.len() >= PREFIX.len() + 16 && bytes.starts_with(PREFIX) {
-        let hex_slice = &js_code[PREFIX.len()..PREFIX.len() + 16];
-        let hex_arr: &[u8; 16] = bytes[PREFIX.len()..PREFIX.len() + 16].try_into().ok()?;
-        let key_u64 = u64::from_str_radix(hex_slice, 16).ok()?;
-        Some((key_u64, hex_arr))
-    } else {
-        None
-    }
 }
