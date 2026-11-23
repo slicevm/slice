@@ -1,6 +1,7 @@
 use super::run::LAST_CLI_EXIT_CODE;
 use crate::config::{
     OsNativeFileWatcher, ResolvedExecutionConfig, install_ctrlc_handler,
+    is_known_slice_runtime_flag, match_non_empty_flag_value, parse_strict_u64,
     skip_runtime_flag_with_separate_value,
 };
 use anyhow::{Context, Result, bail};
@@ -86,14 +87,21 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
             }
             break;
         }
+        if let Some(f) = match_non_empty_flag_value(args, &mut i, "--filter")? {
+            filter_opt = Some(f.to_string());
+            i += 1;
+            continue;
+        }
         if skip_runtime_flag_with_separate_value(args, &mut i)? {
             continue;
         }
         let arg = &args[i];
-        if let Some(f) = arg.strip_prefix("--filter=") {
-            filter_opt = Some(f.to_string());
-        } else if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
-            deterministic_seed = Some(seed_str.parse().unwrap_or(20261024));
+        if let Some(seed_str) = arg.strip_prefix("--deterministic=") {
+            let seed = parse_strict_u64(seed_str)
+                .with_context(|| format!("Invalid --deterministic seed integer: {:?}", seed_str))?;
+            deterministic_seed = Some(seed);
+        } else if arg == "--deterministic" {
+            deterministic_seed = Some(42);
         } else if arg == "--no-deterministic" {
             deterministic_seed = None;
         } else if arg == "--json" {
@@ -105,6 +113,8 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
             watch_once = true;
         } else if !arg.starts_with('-') && target_opt.is_none() {
             target_opt = Some(arg.clone());
+        } else if arg.starts_with('-') && !is_known_slice_runtime_flag(arg) {
+            bail!("Unknown option for 'slice test': {}", arg);
         }
         i += 1;
     }
@@ -266,47 +276,83 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<()> {
             let reload_start = Instant::now();
             let mut rerun_passed = 0usize;
             let mut rerun_failed = 0usize;
-            for test_file in &discover_test_files(target_path)? {
-                let mut file_cfg = exec_cfg.clone();
-                let raw_test = std::fs::read_to_string(test_file)
-                    .with_context(|| format!("Failed to read test file {}", test_file.display()))?;
-                file_cfg.apply_inline_directives(&raw_test, test_file.parent())?;
-                let bundled = slice_cas::bundle_entrypoint_with_deps(test_file)?;
-                let filter_js = match &filter_opt {
-                    Some(flt) => format!(
-                        "globalThis.__slice_test_filter = {};",
-                        serde_json::to_string(flt).unwrap_or_else(|_| "\"\"".to_string())
-                    ),
-                    None => "globalThis.__slice_test_filter = \"\";".to_string(),
-                };
-                let wrapped_js = format!(
-                    "{}\nSlice.resetTests();\n{}\nconsole.log(\"__SLICE_TEST_REPORT__:\" + JSON.stringify(Slice.testSummary()));\n",
-                    filter_js, bundled
-                );
-                let bytecode = compile_source_to_bytecode(&wrapped_js);
-                let mut isolate = SliceIsolate::spawn(
-                    "slice-test-watch",
-                    1,
-                    file_cfg.caps,
-                    file_cfg.fuel_limit,
-                    file_cfg.mem_limit,
-                );
-                isolate.set_deterministic_seed(deterministic_seed.or(file_cfg.deterministic_seed));
-                for sec in &file_cfg.audit_secrets {
-                    isolate.add_egress_audit_secret(sec.clone());
+            let discovered = match discover_test_files(target_path) {
+                Ok(list) => list,
+                Err(err) => {
+                    if watch_once {
+                        return Err(err);
+                    }
+                    eprintln!("[Slice Test Watch Error] {:#}", err);
+                    continue;
                 }
-                let metrics = isolate.execute_bytecode(&bytecode, None)?;
-                if metrics.return_value.starts_with("Uncaught ")
-                    || metrics.exit_code.is_some_and(|c| c != 0)
-                {
-                    rerun_failed += 1;
-                }
-                for line in &metrics.stdout {
-                    if let Some(report_json) = line.strip_prefix("__SLICE_TEST_REPORT__:")
-                        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(report_json)
+            };
+            for test_file in &discovered {
+                let run_one: Result<(usize, usize)> = (|| {
+                    let mut file_cfg = exec_cfg.clone();
+                    let raw_test = std::fs::read_to_string(test_file).with_context(|| {
+                        format!("Failed to read test file {}", test_file.display())
+                    })?;
+                    file_cfg.apply_inline_directives(&raw_test, test_file.parent())?;
+                    let bundled = slice_cas::bundle_entrypoint_with_deps(test_file)?;
+                    let filter_js = match &filter_opt {
+                        Some(flt) => format!(
+                            "globalThis.__slice_test_filter = {};",
+                            serde_json::to_string(flt).unwrap_or_else(|_| "\"\"".to_string())
+                        ),
+                        None => "globalThis.__slice_test_filter = \"\";".to_string(),
+                    };
+                    let wrapped_js = format!(
+                        "{}\nSlice.resetTests();\n{}\nconsole.log(\"__SLICE_TEST_REPORT__:\" + JSON.stringify(Slice.testSummary()));\n",
+                        filter_js, bundled
+                    );
+                    let bytecode = compile_source_to_bytecode(&wrapped_js);
+                    let mut isolate = SliceIsolate::spawn(
+                        "slice-test-watch",
+                        1,
+                        file_cfg.caps,
+                        file_cfg.fuel_limit,
+                        file_cfg.mem_limit,
+                    );
+                    isolate
+                        .set_deterministic_seed(deterministic_seed.or(file_cfg.deterministic_seed));
+                    for sec in &file_cfg.audit_secrets {
+                        isolate.add_egress_audit_secret(sec.clone());
+                    }
+                    let metrics = isolate
+                        .execute_bytecode(&bytecode, None)
+                        .map_err(|v| anyhow::anyhow!("Sandbox containment violation: {}", v))?;
+                    let mut p = 0usize;
+                    let mut f = 0usize;
+                    if metrics.return_value.starts_with("Uncaught ")
+                        || metrics.exit_code.is_some_and(|c| c != 0)
                     {
-                        rerun_passed += parsed["passed"].as_u64().unwrap_or(0) as usize;
-                        rerun_failed += parsed["failed"].as_u64().unwrap_or(0) as usize;
+                        f += 1;
+                    }
+                    for line in &metrics.stdout {
+                        if let Some(report_json) = line.strip_prefix("__SLICE_TEST_REPORT__:")
+                            && let Ok(parsed) =
+                                serde_json::from_str::<serde_json::Value>(report_json)
+                        {
+                            p += parsed["passed"].as_u64().unwrap_or(0) as usize;
+                            f += parsed["failed"].as_u64().unwrap_or(0) as usize;
+                        }
+                    }
+                    Ok((p, f))
+                })();
+                match run_one {
+                    Ok((p, f)) => {
+                        rerun_passed += p;
+                        rerun_failed += f;
+                    }
+                    Err(err) => {
+                        rerun_failed += 1;
+                        if !json_output {
+                            eprintln!(
+                                "[Slice Test Watch Error] {}: {:#}",
+                                test_file.display(),
+                                err
+                            );
+                        }
                     }
                 }
             }

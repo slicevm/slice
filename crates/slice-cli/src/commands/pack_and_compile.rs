@@ -1,5 +1,7 @@
-use crate::config::build_cas_archive_with_static;
-use anyhow::{Result, bail};
+use crate::config::{
+    build_cas_archive_with_static, match_non_empty_flag_path, match_non_empty_flag_value,
+};
+use anyhow::{Context, Result, bail};
 use slice_cas::{MappedCasArchive, embed_cas_into_executable};
 use slice_engine::{compile_source_to_bytecode, disassemble_bytecode};
 use slice_io::CompletionRingEngine;
@@ -115,24 +117,42 @@ pub(crate) fn cmd_info() -> Result<()> {
 }
 
 pub(crate) fn cmd_pack(args: &[String]) -> Result<()> {
-    if args.len() < 2 {
-        bail!(
-            "Usage: slice pack <input_file_or_dir> <output.cas> [--entry=./index.ts] [--static=./public]"
-        );
-    }
-    let input_path = Path::new(&args[0]);
-    let output_path = Path::new(&args[1]);
+    let mut positionals: Vec<&str> = Vec::new();
     let mut entrypoint = String::from("./index.ts");
     let mut static_dir_opt: Option<PathBuf> = None;
-
     let mut exper_override: Option<bool> = None;
 
-    for arg in &args[2..] {
-        if let Some(e) = arg.strip_prefix("--entry=") {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--" {
+            for rem in &args[i + 1..] {
+                positionals.push(rem.as_str());
+            }
+            break;
+        }
+        if let Some(e) = match_non_empty_flag_value(args, &mut i, "--entry")? {
             entrypoint = e.to_string();
-        } else if let Some(sd) = arg.strip_prefix("--static=") {
-            static_dir_opt = Some(PathBuf::from(sd));
-        } else if arg == "--boacas" || arg == "--exper-boacas" {
+            i += 1;
+            continue;
+        }
+        if let Some(sd) = match_non_empty_flag_path(args, &mut i, "--static")? {
+            static_dir_opt = Some(sd);
+            i += 1;
+            continue;
+        }
+        if let Some(t_str) = match_non_empty_flag_value(args, &mut i, "--tier")? {
+            let t = slice_sandbox::parse_tier_setting(t_str).with_context(|| {
+                format!(
+                    "Invalid --tier value {:?} (expected 0/tier0, 1/tier1, or 2/tier2)",
+                    t_str
+                )
+            })?;
+            slice_engine::set_tier_override(t);
+            i += 1;
+            continue;
+        }
+        let arg = &args[i];
+        if arg == "--boacas" || arg == "--exper-boacas" {
             exper_override = Some(true);
         } else if arg == "--no-boacas" || arg == "--no-exper-boacas" {
             exper_override = Some(false);
@@ -140,13 +160,30 @@ pub(crate) fn cmd_pack(args: &[String]) -> Result<()> {
             .strip_prefix("--boacas=")
             .or_else(|| arg.strip_prefix("--exper-boacas="))
         {
-            exper_override = slice_sandbox::parse_bool_setting(b_str);
-        } else if let Some(t_str) = arg.strip_prefix("--tier=")
-            && let Some(t) = slice_sandbox::parse_tier_setting(t_str)
-        {
-            slice_engine::set_tier_override(t);
+            let b = slice_sandbox::parse_bool_setting(b_str)
+                .with_context(|| format!("Invalid --boacas boolean value: {:?}", b_str))?;
+            exper_override = Some(b);
+        } else if arg.starts_with('-') {
+            bail!("Unknown option for 'slice pack': {}", arg);
+        } else {
+            positionals.push(arg.as_str());
         }
+        i += 1;
     }
+
+    if positionals.len() < 2 {
+        bail!(
+            "Usage: slice pack <input_file_or_dir> <output.cas> [--entry=./index.ts] [--static=./public]"
+        );
+    }
+    if positionals.len() > 2 {
+        bail!(
+            "Unexpected extra positional argument {:?} for 'slice pack'",
+            positionals[2]
+        );
+    }
+    let input_path = Path::new(positionals[0]);
+    let output_path = Path::new(positionals[1]);
     if let Some(ov) = exper_override {
         slice_engine::set_exper_boacas_override(Some(ov));
     }
@@ -172,48 +209,84 @@ pub(crate) fn cmd_pack(args: &[String]) -> Result<()> {
 }
 
 pub(crate) fn cmd_compile(args: &[String]) -> Result<()> {
-    if args.is_empty() {
-        bail!(
-            "Usage: slice compile <input_script_or_dir_or_cas> [-o <output_binary>] [--entry=./index.ts] [--static=./public]"
-        );
-    }
-    let input_path = Path::new(&args[0]);
+    let mut input_opt: Option<&str> = None;
     let mut output_bin: Option<PathBuf> = None;
     let mut entrypoint = String::from("./index.ts");
     let mut static_dir_opt: Option<PathBuf> = None;
-
     let mut exper_override: Option<bool> = None;
 
-    let mut i = 1;
+    let mut i = 0;
     while i < args.len() {
-        if args[i] == "-o" || args[i] == "--output" {
-            if i + 1 < args.len() {
-                output_bin = Some(PathBuf::from(&args[i + 1]));
-                i += 2;
-                continue;
+        if args[i] == "--" {
+            if let Some(first_rem) = args.get(i + 1)
+                && input_opt.is_none()
+            {
+                input_opt = Some(first_rem.as_str());
             }
-        } else if let Some(out) = args[i].strip_prefix("-o=") {
-            output_bin = Some(PathBuf::from(out));
-        } else if let Some(e) = args[i].strip_prefix("--entry=") {
+            break;
+        }
+        if let Some(out) = match_non_empty_flag_path(args, &mut i, "-o")? {
+            output_bin = Some(out);
+            i += 1;
+            continue;
+        }
+        if let Some(out) = match_non_empty_flag_path(args, &mut i, "--output")? {
+            output_bin = Some(out);
+            i += 1;
+            continue;
+        }
+        if let Some(e) = match_non_empty_flag_value(args, &mut i, "--entry")? {
             entrypoint = e.to_string();
-        } else if let Some(sd) = args[i].strip_prefix("--static=") {
-            static_dir_opt = Some(PathBuf::from(sd));
-        } else if args[i] == "--boacas" || args[i] == "--exper-boacas" {
-            exper_override = Some(true);
-        } else if args[i] == "--no-boacas" || args[i] == "--no-exper-boacas" {
-            exper_override = Some(false);
-        } else if let Some(b_str) = args[i]
-            .strip_prefix("--boacas=")
-            .or_else(|| args[i].strip_prefix("--exper-boacas="))
-        {
-            exper_override = slice_sandbox::parse_bool_setting(b_str);
-        } else if let Some(t_str) = args[i].strip_prefix("--tier=")
-            && let Some(t) = slice_sandbox::parse_tier_setting(t_str)
-        {
+            i += 1;
+            continue;
+        }
+        if let Some(sd) = match_non_empty_flag_path(args, &mut i, "--static")? {
+            static_dir_opt = Some(sd);
+            i += 1;
+            continue;
+        }
+        if let Some(t_str) = match_non_empty_flag_value(args, &mut i, "--tier")? {
+            let t = slice_sandbox::parse_tier_setting(t_str).with_context(|| {
+                format!(
+                    "Invalid --tier value {:?} (expected 0/tier0, 1/tier1, or 2/tier2)",
+                    t_str
+                )
+            })?;
             slice_engine::set_tier_override(t);
+            i += 1;
+            continue;
+        }
+        let arg = &args[i];
+        if arg == "--boacas" || arg == "--exper-boacas" {
+            exper_override = Some(true);
+        } else if arg == "--no-boacas" || arg == "--no-exper-boacas" {
+            exper_override = Some(false);
+        } else if let Some(b_str) = arg
+            .strip_prefix("--boacas=")
+            .or_else(|| arg.strip_prefix("--exper-boacas="))
+        {
+            let b = slice_sandbox::parse_bool_setting(b_str)
+                .with_context(|| format!("Invalid --boacas boolean value: {:?}", b_str))?;
+            exper_override = Some(b);
+        } else if arg.starts_with('-') {
+            bail!("Unknown option for 'slice compile': {}", arg);
+        } else if input_opt.is_none() {
+            input_opt = Some(arg.as_str());
+        } else {
+            bail!(
+                "Unexpected extra positional argument {:?} for 'slice compile'",
+                arg
+            );
         }
         i += 1;
     }
+
+    let Some(input_raw) = input_opt else {
+        bail!(
+            "Usage: slice compile <input_script_or_dir_or_cas> [-o <output_binary>] [--entry=./index.ts] [--static=./public]"
+        );
+    };
+    let input_path = Path::new(input_raw);
     if let Some(ov) = exper_override {
         slice_engine::set_exper_boacas_override(Some(ov));
     }
@@ -262,10 +335,24 @@ pub(crate) fn cmd_compile(args: &[String]) -> Result<()> {
 }
 
 pub(crate) fn cmd_inspect(args: &[String]) -> Result<()> {
-    if args.is_empty() {
-        bail!("Usage: slice inspect <archive.cas | script.ts>");
+    let mut target_opt: Option<&str> = None;
+    for arg in args {
+        if arg.starts_with('-') {
+            bail!("Unknown option for 'slice inspect': {}", arg);
+        }
+        if target_opt.is_none() {
+            target_opt = Some(arg.as_str());
+        } else {
+            bail!(
+                "Unexpected extra positional argument {:?} for 'slice inspect'",
+                arg
+            );
+        }
     }
-    let path = Path::new(&args[0]);
+    let Some(target_raw) = target_opt else {
+        bail!("Usage: slice inspect <archive.cas | script.ts>");
+    };
+    let path = Path::new(target_raw);
     if path.extension().and_then(|e| e.to_str()) == Some("cas") {
         let archive = MappedCasArchive::open(path)?;
         println!("=========================================================================");

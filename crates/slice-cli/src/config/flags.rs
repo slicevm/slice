@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 /// Zero-allocation parser that extracts ASCII digits from `raw` (ignoring underscores, spaces, or
 /// unit suffixes) into a `u64`. Returns `None` if no digits are present or if overflow occurs.
+#[cfg(any(test, target_os = "linux"))]
 #[inline]
 pub(crate) fn parse_u64_digits(raw: &str) -> Option<u64> {
     let mut acc: u64 = 0;
@@ -18,14 +19,119 @@ pub(crate) fn parse_u64_digits(raw: &str) -> Option<u64> {
     if saw_digit { Some(acc) } else { None }
 }
 
-/// Returns `true` when `arg` is a Slice runtime flag that accepts a space-separated value token
-/// (`--config <path>`, `--env-file <path>`, `--audit-egress-file <path>`, `--audit-egress <spec>`,
-/// `--trace <path>`).
+/// Strict unsigned integer parser (`u64`) allowing optional `_` digit separators (`50_000_000`)
+/// and surrounding quotes/whitespace, while rejecting any non-digit characters or unit suffixes.
+#[inline]
+pub(crate) fn parse_strict_u64(raw: &str) -> Option<u64> {
+    let s = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    if s.is_empty() {
+        return None;
+    }
+    let mut acc: u64 = 0;
+    let mut saw_digit = false;
+    for &b in s.as_bytes() {
+        if b.is_ascii_digit() {
+            saw_digit = true;
+            acc = acc.checked_mul(10)?.checked_add((b - b'0') as u64)?;
+        } else if b == b'_' {
+            if !saw_digit {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+    if saw_digit { Some(acc) } else { None }
+}
+
+/// Unit-aware byte-size parser supporting plain byte counts (`1048576`, `65_536`) as well as
+/// case-insensitive `B`, `K`/`KB`/`KiB`, `M`/`MB`/`MiB`, and `G`/`GB`/`GiB` suffixes (`16MB`,
+/// `64KB`, `2GiB`). Rejects malformed numbers, unknown suffixes, and `usize` overflow.
+#[inline]
+pub(crate) fn parse_byte_size_usize(raw: &str) -> Option<usize> {
+    let s = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    if s.is_empty() {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut idx = 0;
+    let mut count: u64 = 0;
+    let mut saw_digit = false;
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        if b.is_ascii_digit() {
+            saw_digit = true;
+            count = count.checked_mul(10)?.checked_add((b - b'0') as u64)?;
+            idx += 1;
+        } else if b == b'_' {
+            if !saw_digit {
+                return None;
+            }
+            idx += 1;
+        } else {
+            break;
+        }
+    }
+    if !saw_digit {
+        return None;
+    }
+    let suffix = s[idx..].trim();
+    let multiplier: u64 = if suffix.is_empty()
+        || suffix.eq_ignore_ascii_case("b")
+        || suffix.eq_ignore_ascii_case("bytes")
+    {
+        1
+    } else if suffix.eq_ignore_ascii_case("k")
+        || suffix.eq_ignore_ascii_case("kb")
+        || suffix.eq_ignore_ascii_case("kib")
+    {
+        1024
+    } else if suffix.eq_ignore_ascii_case("m")
+        || suffix.eq_ignore_ascii_case("mb")
+        || suffix.eq_ignore_ascii_case("mib")
+    {
+        1024 * 1024
+    } else if suffix.eq_ignore_ascii_case("g")
+        || suffix.eq_ignore_ascii_case("gb")
+        || suffix.eq_ignore_ascii_case("gib")
+    {
+        1024 * 1024 * 1024
+    } else {
+        return None;
+    };
+    let total = count.checked_mul(multiplier)?;
+    usize::try_from(total).ok()
+}
+
+/// Returns `true` when `arg` is a Slice runtime/server flag that always takes a separate value
+/// token (`--flag <value>`). Boolean/dual flags (`--checkpoints`, `--deterministic`, `--boacas`)
+/// are intentionally excluded so `slice run --checkpoints app.ts` never consumes `app.ts`.
 #[inline]
 pub(crate) fn runtime_flag_takes_separate_value(arg: &str) -> bool {
     matches!(
         arg,
-        "--config" | "--env-file" | "--audit-egress-file" | "--audit-egress" | "--trace"
+        "--config"
+            | "--env-file"
+            | "--audit-egress-file"
+            | "--audit-egress"
+            | "--trace"
+            | "--allow-read"
+            | "--allow-write"
+            | "--allow-net"
+            | "--allow-exec"
+            | "--allow-env"
+            | "--fuel"
+            | "--memory"
+            | "--memory-kb"
+            | "--memory-mb"
+            | "--max-checkpoints"
+            | "--tier"
+            | "--port"
+            | "--host"
+            | "--workers"
+            | "--static"
+            | "--tls-cert"
+            | "--tls-key"
     )
 }
 
@@ -114,17 +220,14 @@ pub(crate) fn is_known_slice_runtime_flag(arg: &str) -> bool {
             | "--no-trust-directives"
             | "--no-directives"
             | "--untrusted"
-            | "--config"
-            | "--env-file"
-            | "--audit-egress-file"
-            | "--audit-egress"
-            | "--trace"
-    ) || arg.starts_with("--allow-")
+    ) || runtime_flag_takes_separate_value(arg)
+        || arg.starts_with("--allow-")
         || arg.starts_with("--config=")
         || arg.starts_with("--trust-directives=")
         || arg.starts_with("--fuel=")
         || arg.starts_with("--memory=")
         || arg.starts_with("--memory-kb=")
+        || arg.starts_with("--memory-mb=")
         || arg.starts_with("--tier=")
         || arg.starts_with("--boacas=")
         || arg.starts_with("--exper-boacas=")

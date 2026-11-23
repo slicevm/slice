@@ -89,8 +89,11 @@ impl SliceIsolate {
             let has_secrets = !self.egress_audit_secrets.is_empty();
             let has_custom_http_res =
                 !need_return_str && BOA_HTTP_RES.with(|res| res.borrow().is_some());
+            let is_uncaught_val =
+                matches!(&last_val, JsValue::Str(s) if s.starts_with("Uncaught "));
             let ret_str = if need_return_str
                 || has_secrets
+                || is_uncaught_val
                 || (!has_custom_http_res && self.stdout.is_empty())
             {
                 last_val.to_string()

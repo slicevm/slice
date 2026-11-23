@@ -127,11 +127,12 @@ Let's scaffold, run, watch, test, and serve a new TypeScript edge project in 5 s
 slice init ./hello-slice
 cd ./hello-slice
 ```
-This creates four files:
+This creates five files:
 - `slice.toml`: Your declarative security policy, resource limits, and entrypoint configuration.
-- `slice.d.ts`: Complete ambient TypeScript type declarations for `Slice.*` (`kv`, `evalSandbox`, `checkpoint`, `restore`, `connect`, `mockFetch`, `mockSocket`, `mockWebSocket`), `WinterTC.*`, `slice:test`, `slice:jsx`, and `cloudflare:sockets`.
+- `slice.d.ts`: Complete ambient TypeScript type declarations for `Slice.*` (`kv`, `evalSandbox`, `checkpoint`, `restore`, `connect`, `mockFetch`, `mockSocket`, `mockWebSocket`), `process`, `WinterTC.*`, `slice:test`, `slice:jsx`, and `cloudflare:sockets`.
 - `tsconfig.json`: Pre-configured `"moduleResolution": "bundler"`, `"jsxImportSource": "slice:jsx"`, and `"noEmit": true` for instant IDE IntelliSense and `tsc --noEmit`.
-- `src/index.ts`: Your TypeScript entrypoint.
+- `src/index.ts`: Your WinterTC (`export default { fetch }`) TypeScript entrypoint.
+- `tests/index.test.ts`: A starter `slice:test` test suite ready for `slice test`.
 
 *(To scaffold a full-stack SvelteKit 3 + Svelte 5 SSR project with `@slicevm/adapter-sveltekit`, pass `--template=sveltekit`: `slice init ./my-app --template=sveltekit`.)*
 
@@ -355,7 +356,7 @@ console.log("Running with self-contained inline directives!");
 | **Warm Realm Pool** | `false` (`true` in `serve`) | `[engine] warm = true` | `// @slice-warm: true` | `SLICE_WARM=1` | `--warm` / `--no-warm` |
 | **Deterministic Seed** | Disabled (`None`) | `[engine] deterministic_seed = 42` | `// @slice-deterministic: 42` | `SLICE_DETERMINISTIC_SEED=42` | `--deterministic[=42]` / `--no-deterministic` |
 | **CPU Fuel Limit** | `50_000_000` | `[limits] fuel = 50_000_000` | `// @slice-fuel: 50_000_000` | `SLICE_FUEL=50000000` | `--fuel=50000000` |
-| **Memory Cage** | `16 MB` CLI (`4096 KB` in bare `SliceManifest`) | `[limits] memory_kb = 16384` (`memory_mb`) | `// @slice-memory-kb: 16384` (`memory-mb`) | `SLICE_MEMORY_KB=16384` (`SLICE_MEMORY`) | `--memory=16777216` / `--memory-kb=16384` |
+| **Memory Cage** | `16 MB` CLI (`4096 KB` in bare `SliceManifest`) | `[limits] memory_kb = 16384` (`memory_mb`) | `// @slice-memory-kb: 16384` (`memory-mb`) | `SLICE_MEMORY=16MB` (`SLICE_MEMORY_KB=16384`) | `--memory=16MB` (`KB`/`KiB`/`MB`/`MiB`/`GB`/`GiB` or bytes) / `--memory-kb=16384` |
 | **VFS Read Prefixes** | `[]` (Zero access) | `[capabilities] allow_read = [...]` | `// @slice-allow-read: ["/tmp"]` | `SLICE_ALLOW_READ=/tmp,./data` | `--allow-read=/tmp` |
 | **VFS Write Prefixes** | `[]` (Zero access) | `[capabilities] allow_write = [...]` | `// @slice-allow-write: ["/tmp"]` | `SLICE_ALLOW_WRITE=/tmp` | `--allow-write=/tmp` |
 | **Network Hosts** | `[]` (Zero access) | `[capabilities] allow_net = [...]` | `// @slice-allow-net: ["host:443"]` | `SLICE_ALLOW_NET=host:443` | `--allow-net=host:443` |
@@ -421,8 +422,8 @@ Executes a `.ts`/`.tsx`/`.js`/`.jsx` file, a project folder (with `package.json`
 | `--no-checkpoints` / `--max-checkpoints=<N>` | Disable guest `Slice.checkpoint()` / `Slice.restore()` calls or cap the maximum number of guest checkpoints allowed per evaluation. |
 | `--trust-directives` / `--no-trust-directives` | Allow (or forbid, default) top-of-file `// @slice-...` directives to grant additive OCap permissions and raise resource ceilings. |
 | `--no-directives` / `--untrusted` | Completely ignore all top-of-file `// @slice-...` inline source directives in the entrypoint. |
-| `--fuel=<u64>` | Set maximum CPU instruction fuel budget (default: `50,000,000`). |
-| `--memory=<bytes>` / `--memory-kb=<kb>` | Set maximum per-isolate memory ceiling in bytes or kilobytes (default: `16,777,216` bytes / `16,384` KB when no `slice.toml` is present). |
+| `--fuel=<u64>` | Set maximum CPU instruction fuel budget (default: `50,000,000`; all value flags accept both `--flag=<val>` and `--flag <val>`). |
+| `--memory=<size>` / `--memory-kb=<kb>` / `--memory-mb=<mb>` | Set maximum per-isolate memory ceiling in bytes or with `KB`/`KiB`/`MB`/`MiB`/`GB`/`GiB` suffixes (e.g. `--memory=16MB`; default: `16,777,216` bytes / `16,384` KB when no `slice.toml` is present). |
 | `--tier=<tier1\|tier0\|auto>` | Override execution tier (`tier1` default, `tier0` for SLICESNP snapshot VM, or `auto`). |
 | `--boacas` / `--no-boacas` | Enable (default) or disable Precompiled Boa `CodeBlock` (`SLICEBC\x01`) bytecode execution. |
 | `--warm` / `--no-warm` | Pre-warm the thread-local `BOA_CONTEXT_POOL` and `__slice_rc` bundle closure before measurement. |

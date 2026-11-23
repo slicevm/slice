@@ -27,7 +27,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -37,14 +37,17 @@ jobs:
       - name: Cache Cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Verify Rust formatting
+        run: cargo fmt --all -- --check
+
       - name: Check workspace targets
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --locked
 
       - name: Run Clippy linter
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run workspace unit tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
   smoke-e2e:
     name: Runtime E2E Smoke Suite (Linux)
@@ -52,7 +55,7 @@ jobs:
     needs: check-and-test
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -61,13 +64,16 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build Slice CLI binary
-        run: cargo build --bin slice
+        run: cargo build --locked --bin slice
 
-      - name: Verify Slice info, doctor, and 5-vector security containment
+      - name: Verify Slice info, doctor, 5-vector security containment, and slice init E2E
         run: |
           ./target/debug/slice info
           ./target/debug/slice doctor
           ./target/debug/slice verify-security
+          ./target/debug/slice mcp --smoke-test
+          ./target/debug/slice init /tmp/slice-init-smoke
+          (cd /tmp/slice-init-smoke && "$GITHUB_WORKSPACE/target/debug/slice" run && "$GITHUB_WORKSPACE/target/debug/slice" test)
 
       - name: Verify TypeScript static check and CAS packing
         run: |

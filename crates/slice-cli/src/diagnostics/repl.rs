@@ -87,7 +87,9 @@ pub(crate) fn cmd_repl() -> Result<()> {
                 for line_out in &isolate.stdout[prev_stdout_len..] {
                     println!("{}", line_out);
                 }
-                if isolate.stdout.len() == prev_stdout_len {
+                if metrics.return_value.starts_with("Uncaught ") {
+                    println!("{}", metrics.return_value);
+                } else if isolate.stdout.len() == prev_stdout_len {
                     println!("=> {}", metrics.return_value);
                 }
             }

@@ -1,5 +1,6 @@
 use crate::commands::unique_temp_cas_path;
-use anyhow::{Result, bail};
+use crate::config::{match_non_empty_flag_value, parse_strict_u64};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use slice_cas::{CasBuilder, MappedCasArchive};
 use slice_engine::{SliceIsolate, compile_source_to_bytecode};
@@ -85,13 +86,21 @@ pub(crate) fn cmd_doctor() -> Result<()> {
         rss_kb,
         rss_kb as f64 / 1024.0
     );
-    let blocked = run_security_containment_checks()?;
+    let blocked_res = run_security_containment_checks();
+    pkey_domain.release();
+    let blocked = blocked_res?;
     println!(
-        "  [OK] OCap / SES Security Audit  : {}/5 Attack Vectors Blocked",
+        "  [{}] OCap / SES Security Audit  : {}/5 Attack Vectors Blocked",
+        if blocked == 5 { "OK" } else { "FAIL" },
         blocked
     );
     println!("=========================================================================");
-    pkey_domain.release();
+    if blocked != 5 {
+        bail!(
+            "Doctor security containment audit failed: expected 5/5 blocked vectors, got {}/5",
+            blocked
+        );
+    }
     Ok(())
 }
 
@@ -99,12 +108,29 @@ pub(crate) fn cmd_microvm_bench(args: &[String]) -> Result<()> {
     let mut tenant_count: usize = 1_000;
     let mut json_only = false;
 
-    for arg in args {
-        if let Some(n) = arg.strip_prefix("--tenants=") {
-            tenant_count = n.parse().unwrap_or(1_000).max(1);
-        } else if arg == "--json" {
-            json_only = true;
+    let mut i = 0;
+    while i < args.len() {
+        if let Some(n_str) = match_non_empty_flag_value(args, &mut i, "--tenants")? {
+            let parsed = parse_strict_u64(n_str)
+                .and_then(|n| usize::try_from(n).ok())
+                .filter(|&n| n >= 1)
+                .with_context(|| {
+                    format!(
+                        "Invalid --tenants count {:?} (expected integer >= 1)",
+                        n_str
+                    )
+                })?;
+            tenant_count = parsed;
+            i += 1;
+            continue;
         }
+        let arg = &args[i];
+        if arg == "--json" {
+            json_only = true;
+        } else {
+            bail!("Unknown option for 'slice microvm-bench': {}", arg);
+        }
+        i += 1;
     }
 
     let tenant_ts_workload = r#"
