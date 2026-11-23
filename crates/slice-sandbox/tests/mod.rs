@@ -2,3 +2,4 @@ mod manifest_and_dotenv_tests;
 mod ocap_and_vfs_tests;
 mod sandbox_security_and_perf_tests;
 mod ssrf_and_network_tests;
+mod wave4_ocap_ssrf_vfs_manifest_tests;

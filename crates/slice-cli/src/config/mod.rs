@@ -13,8 +13,8 @@ pub(crate) use flags::{
     skip_runtime_flag_with_separate_value,
 };
 pub(crate) use secrets_and_env::{
-    apply_dotenv_file_to_caps_and_dlp, load_audit_egress_file, maybe_register_sensitive_env_dlp,
-    register_audit_egress_spec,
+    apply_dotenv_file_to_caps_and_dlp, apply_dotenv_file_with_precedence, load_audit_egress_file,
+    maybe_register_sensitive_env_dlp, register_audit_egress_spec,
 };
 pub(crate) use watcher::OsNativeFileWatcher;
 #[cfg(test)]
@@ -193,7 +193,7 @@ impl ResolvedExecutionConfig {
         if let Some((raw, manifest_base)) = loaded_manifest_opt {
             let m = SliceManifest::parse_toml(&raw);
             fuel_limit = m.fuel_limit;
-            mem_limit = m.memory_limit_kb * 1024;
+            mem_limit = m.memory_limit_kb.saturating_mul(1024);
             if let Some(w) = m.warm_pool {
                 warm_pool = w;
             }
@@ -312,6 +312,17 @@ impl ResolvedExecutionConfig {
                     }
                 }
             }
+            if let Some(v) = find_slice_env("SLICE_ENV_FILE") {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    apply_dotenv_file_with_precedence(
+                        Path::new(trimmed),
+                        &mut caps,
+                        &mut audit_secrets,
+                        true,
+                    )?;
+                }
+            }
             if let Some(v) = find_slice_env("SLICE_ALLOW_ENV") {
                 for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     if let Some((k, val)) = item.split_once('=') {
@@ -324,12 +335,6 @@ impl ResolvedExecutionConfig {
                         maybe_register_sensitive_env_dlp(item, &env_val, &mut audit_secrets);
                         caps = caps.with_env(item, env_val);
                     }
-                }
-            }
-            if let Some(v) = find_slice_env("SLICE_ENV_FILE") {
-                let trimmed = v.trim();
-                if !trimmed.is_empty() {
-                    env_files.push(PathBuf::from(trimmed));
                 }
             }
             if let Some(v) = find_slice_env("SLICE_AUDIT_EGRESS_FILE") {
@@ -428,6 +433,7 @@ impl ResolvedExecutionConfig {
         }
 
         // 3. Apply explicit CLI inline flags (highest precedence, fail-closed on empty/missing file paths)
+        let mut cli_allow_env_overrides: Vec<(String, String)> = Vec::new();
         let mut arg_idx = 0;
         while arg_idx < args.len() {
             if args[arg_idx] == "--" {
@@ -471,19 +477,15 @@ impl ResolvedExecutionConfig {
                 }
             } else if let Some(bins) = arg.strip_prefix("--allow-exec=") {
                 for b in bins.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                    if !caps.allowed_exec_binaries.contains(&b.to_string()) {
-                        caps = caps.with_exec_binary(b);
-                    }
+                    caps = caps.with_exec_binary(b);
                 }
             } else if let Some(kv) = arg.strip_prefix("--allow-env=") {
                 if let Some((k, v)) = kv.split_once('=') {
-                    maybe_register_sensitive_env_dlp(k, v, &mut audit_secrets);
-                    caps = caps.with_env(k, v);
+                    cli_allow_env_overrides.push((k.to_string(), v.to_string()));
                 } else {
                     let k = kv.trim();
                     let v = std::env::var(k).unwrap_or_default();
-                    maybe_register_sensitive_env_dlp(k, &v, &mut audit_secrets);
-                    caps = caps.with_env(k, v);
+                    cli_allow_env_overrides.push((k.to_string(), v));
                 }
             } else if arg == "--no-checkpoints" {
                 caps = caps.with_checkpoints(false);
@@ -598,7 +600,11 @@ impl ResolvedExecutionConfig {
         }
 
         for ef in &env_files {
-            apply_dotenv_file_to_caps_and_dlp(ef, &mut caps, &mut audit_secrets)?;
+            apply_dotenv_file_with_precedence(ef, &mut caps, &mut audit_secrets, true)?;
+        }
+        for (k, v) in cli_allow_env_overrides {
+            maybe_register_sensitive_env_dlp(&k, &v, &mut audit_secrets);
+            caps = caps.with_env(k, v);
         }
         for sf in &audit_egress_files {
             load_audit_egress_file(sf, &mut audit_secrets)?;
@@ -658,71 +664,80 @@ impl ResolvedExecutionConfig {
         base_dir: Option<&Path>,
     ) -> Result<()> {
         let mut m = SliceManifest::parse_toml(raw_toml);
-        if self.cli_checkpoints_override.is_some() {
-            m.capabilities.allow_checkpoints = self.caps.allow_checkpoints;
+        if self.has_explicit_config {
+            // Explicit `--config=<path>` is authoritative: embedded `.cas` manifests must NEVER
+            // widen host-governed capabilities, limits, or `.env` files. Only literal `audit_egress`
+            // DLP tokens are registered as monotonic defensive restrictions.
+            for sec in m.audit_egress {
+                if !sec.trim().eq_ignore_ascii_case("auto") {
+                    register_audit_egress_spec(&sec, None, &self.caps, &mut self.audit_secrets)?;
+                }
+            }
+            return Ok(());
         }
-        if self.cli_max_checkpoints_override.is_some() {
-            m.capabilities.max_checkpoints = self.caps.max_checkpoints;
+        if let Some(cp_override) = self.cli_checkpoints_override {
+            m.capabilities.set_checkpoints(cp_override);
         }
-        if !self.has_explicit_config {
-            if self.cli_fuel_override.is_none() {
-                self.fuel_limit = m.fuel_limit;
-            }
-            if self.cli_mem_override.is_none() {
-                self.mem_limit = m.memory_limit_kb * 1024;
-            }
-            if self.cli_boacas_override.is_none()
-                && let Some(b) = m.exper_boacas
+        if let Some(max_cp_override) = self.cli_max_checkpoints_override {
+            m.capabilities.set_max_checkpoints(Some(max_cp_override));
+        }
+        if self.cli_fuel_override.is_none() {
+            self.fuel_limit = m.fuel_limit;
+        }
+        if self.cli_mem_override.is_none() {
+            self.mem_limit = m.memory_limit_kb.saturating_mul(1024);
+        }
+        if self.cli_boacas_override.is_none()
+            && let Some(b) = m.exper_boacas
+        {
+            apply_boacas_override(Some(b));
+        }
+        if self.cli_tier_override.is_none()
+            && let Some(t) = m.tier
+        {
+            apply_tier_override(Some(t));
+        }
+        if self.cli_warm_override.is_none()
+            && let Some(w) = m.warm_pool
+        {
+            self.warm_pool = w;
+        }
+        if self.cli_det_override.is_none()
+            && let Some(s) = m.deterministic_seed
+        {
+            self.deterministic_seed = Some(s);
+        }
+        if self.cli_port_override.is_none()
+            && let Some(p) = m.server_port
+        {
+            self.server_port = Some(p);
+        }
+        if self.cli_workers_override.is_none()
+            && let Some(w) = m.server_workers
+        {
+            self.server_workers = Some(w);
+        }
+        if let Some(dir) = base_dir {
+            if self.cli_static_override.is_none()
+                && let Some(ref sd) = m.static_dir
             {
-                apply_boacas_override(Some(b));
+                self.static_dir = Some(dir.join(sd));
             }
-            if self.cli_tier_override.is_none()
-                && let Some(t) = m.tier
+            if self.cli_tls_cert_override.is_none()
+                && let Some(ref tc) = m.tls_cert
             {
-                apply_tier_override(Some(t));
+                self.tls_cert = Some(dir.join(tc));
             }
-            if self.cli_warm_override.is_none()
-                && let Some(w) = m.warm_pool
+            if self.cli_tls_key_override.is_none()
+                && let Some(ref tk) = m.tls_key
             {
-                self.warm_pool = w;
+                self.tls_key = Some(dir.join(tk));
             }
-            if self.cli_det_override.is_none()
-                && let Some(s) = m.deterministic_seed
-            {
-                self.deterministic_seed = Some(s);
-            }
-            if self.cli_port_override.is_none()
-                && let Some(p) = m.server_port
-            {
-                self.server_port = Some(p);
-            }
-            if self.cli_workers_override.is_none()
-                && let Some(w) = m.server_workers
-            {
-                self.server_workers = Some(w);
-            }
-            if let Some(dir) = base_dir {
-                if self.cli_static_override.is_none()
-                    && let Some(ref sd) = m.static_dir
-                {
-                    self.static_dir = Some(dir.join(sd));
-                }
-                if self.cli_tls_cert_override.is_none()
-                    && let Some(ref tc) = m.tls_cert
-                {
-                    self.tls_cert = Some(dir.join(tc));
-                }
-                if self.cli_tls_key_override.is_none()
-                    && let Some(ref tk) = m.tls_key
-                {
-                    self.tls_key = Some(dir.join(tk));
-                }
-            }
-            if self.cli_trust_directives_override.is_none()
-                && let Some(td) = m.trust_directives
-            {
-                self.trust_directives = td;
-            }
+        }
+        if self.cli_trust_directives_override.is_none()
+            && let Some(td) = m.trust_directives
+        {
+            self.trust_directives = td;
         }
         merge_parsed_manifest_into_caps_and_dlp(
             m,
@@ -803,22 +818,16 @@ impl ResolvedExecutionConfig {
 
         if self.trust_directives {
             for r in dirs.allow_read {
-                if !self.caps.allowed_read_prefixes.contains(&r) {
-                    self.caps.allowed_read_prefixes.push(r);
-                }
+                self.caps.push_read_prefix(&r);
             }
             for w in dirs.allow_write {
-                if !self.caps.allowed_write_prefixes.contains(&w) {
-                    self.caps.allowed_write_prefixes.push(w);
-                }
+                self.caps.push_write_prefix(&w);
             }
             for nh in dirs.allow_net {
-                self.caps.allowed_net_hosts.insert(nh);
+                self.caps.insert_net_host(&nh);
             }
             for eb in dirs.allow_exec {
-                if !self.caps.allowed_exec_binaries.contains(&eb) {
-                    self.caps.allowed_exec_binaries.push(eb);
-                }
+                self.caps = std::mem::take(&mut self.caps).with_exec_binary(eb);
             }
             if self.cli_checkpoints_override.is_none()
                 && let Some(b) = dirs.allow_checkpoints
@@ -832,6 +841,11 @@ impl ResolvedExecutionConfig {
                 self.caps.set_max_checkpoints(Some(max_cp));
             }
             for (k, v) in dirs.allow_env {
+                maybe_register_sensitive_env_dlp(&k, &v, &mut self.audit_secrets);
+                self.caps.allowed_env_keys.entry(k).or_insert(v);
+            }
+            for k in dirs.allow_env_inherit {
+                let v = std::env::var(&k).unwrap_or_default();
                 maybe_register_sensitive_env_dlp(&k, &v, &mut self.audit_secrets);
                 self.caps.allowed_env_keys.entry(k).or_insert(v);
             }
@@ -864,95 +878,38 @@ impl ResolvedExecutionConfig {
                 };
                 self.tls_key = Some(p);
             }
-        } else {
-            // Untrusted mode (default): monotonic capability attenuation only (never widens host caps)
-            if !dirs.allow_read.is_empty() && !self.caps.allowed_read_prefixes.is_empty() {
-                let narrowed: Vec<String> = dirs
-                    .allow_read
-                    .into_iter()
-                    .filter(|r| {
-                        self.caps
-                            .allowed_read_prefixes
-                            .iter()
-                            .any(|p| slice_sandbox::vfs_prefix_matches(r, p))
-                    })
-                    .collect();
-                if !narrowed.is_empty() {
-                    self.caps.allowed_read_prefixes = narrowed;
-                }
-            }
-            if !dirs.allow_write.is_empty() && !self.caps.allowed_write_prefixes.is_empty() {
-                let narrowed: Vec<String> = dirs
-                    .allow_write
-                    .into_iter()
-                    .filter(|w| {
-                        self.caps
-                            .allowed_write_prefixes
-                            .iter()
-                            .any(|p| slice_sandbox::vfs_prefix_matches(w, p))
-                    })
-                    .collect();
-                if !narrowed.is_empty() {
-                    self.caps.allowed_write_prefixes = narrowed;
-                }
-            }
-            if !dirs.allow_net.is_empty() && !self.caps.allowed_net_hosts.is_empty() {
-                let narrowed: Vec<String> = dirs
-                    .allow_net
-                    .into_iter()
-                    .filter(|nh| {
-                        !slice_sandbox::is_cloud_metadata_ssrf_target(nh)
-                            && (self.caps.allowed_net_hosts.contains(nh)
-                                || self.caps.allowed_net_hosts.contains("*"))
-                    })
-                    .collect();
-                if !narrowed.is_empty() {
-                    self.caps.allowed_net_hosts.clear();
-                    for nh in narrowed {
-                        self.caps.allowed_net_hosts.insert(nh);
-                    }
-                }
-            }
-            if !dirs.allow_exec.is_empty() && !self.caps.allowed_exec_binaries.is_empty() {
-                let narrowed: Vec<String> = dirs
-                    .allow_exec
-                    .into_iter()
-                    .filter(|eb| {
-                        self.caps
-                            .allowed_exec_binaries
-                            .iter()
-                            .any(|allowed| slice_sandbox::exec_binary_matches(eb, allowed))
-                    })
-                    .collect();
-                if !narrowed.is_empty() {
-                    self.caps.allowed_exec_binaries = narrowed;
-                }
-            }
-            if !dirs.allow_env.is_empty() && !self.caps.allowed_env_keys.is_empty() {
-                let narrowed: rustc_hash::FxHashMap<String, String> = dirs
-                    .allow_env
-                    .into_iter()
-                    .filter_map(|(k, _)| {
-                        self.caps
-                            .allowed_env_keys
-                            .get(&k)
-                            .map(|host_val| (k, host_val.clone()))
-                    })
-                    .collect();
-                if !narrowed.is_empty() {
-                    self.caps.allowed_env_keys = narrowed;
-                }
-            }
-            if dirs.allow_checkpoints == Some(false) {
-                self.caps.set_checkpoints(false);
-            }
-            if let Some(max_cp) = dirs.max_checkpoints {
-                let clamped = match self.caps.max_checkpoints {
-                    Some(existing) => existing.min(max_cp),
-                    None => max_cp,
-                };
-                self.caps.set_max_checkpoints(Some(clamped));
-            }
+        } else if !dirs.allow_read.is_empty()
+            || !dirs.allow_write.is_empty()
+            || !dirs.allow_net.is_empty()
+            || !dirs.allow_exec.is_empty()
+            || !dirs.allow_env.is_empty()
+            || !dirs.allow_env_inherit.is_empty()
+            || dirs.allow_checkpoints == Some(false)
+            || dirs.max_checkpoints.is_some()
+        {
+            // Untrusted mode (default): canonical monotonic OCap attenuation (`parent & requested`)
+            let mut requested_env_keys: Vec<String> = dirs
+                .allow_env
+                .into_iter()
+                .map(|(k, _)| k)
+                .chain(dirs.allow_env_inherit)
+                .collect();
+            requested_env_keys.dedup();
+
+            self.caps = self
+                .caps
+                .attenuate(&slice_sandbox::CapabilityAttenuationRequest {
+                    allow_read: (!dirs.allow_read.is_empty()).then_some(dirs.allow_read.as_slice()),
+                    allow_write: (!dirs.allow_write.is_empty())
+                        .then_some(dirs.allow_write.as_slice()),
+                    allow_net: (!dirs.allow_net.is_empty()).then_some(dirs.allow_net.as_slice()),
+                    allow_exec: (!dirs.allow_exec.is_empty()).then_some(dirs.allow_exec.as_slice()),
+                    allow_env: (!requested_env_keys.is_empty())
+                        .then_some(requested_env_keys.as_slice()),
+                    allow_checkpoints: (dirs.allow_checkpoints == Some(false)).then_some(false),
+                    max_checkpoints: dirs.max_checkpoints,
+                    consumed_checkpoints: 0,
+                });
         }
         Ok(())
     }
@@ -985,7 +942,11 @@ pub(crate) fn load_manifest_or_default() -> Result<(CapabilityToken, u64, usize)
         let raw = std::fs::read_to_string(manifest_path)
             .with_context(|| format!("Failed to read manifest {}", manifest_path.display()))?;
         let m = SliceManifest::parse_toml(&raw);
-        return Ok((m.capabilities, m.fuel_limit, m.memory_limit_kb * 1024));
+        return Ok((
+            m.capabilities,
+            m.fuel_limit,
+            m.memory_limit_kb.saturating_mul(1024),
+        ));
     }
     Ok((
         CapabilityToken::pure_compute(),
@@ -1019,22 +980,16 @@ pub(crate) fn merge_parsed_manifest_into_caps_and_dlp(
     audit_secrets: &mut Vec<String>,
 ) -> Result<()> {
     for r in m.capabilities.allowed_read_prefixes {
-        if !caps.allowed_read_prefixes.contains(&r) {
-            caps.allowed_read_prefixes.push(r);
-        }
+        caps.push_read_prefix(&r);
     }
     for w in m.capabilities.allowed_write_prefixes {
-        if !caps.allowed_write_prefixes.contains(&w) {
-            caps.allowed_write_prefixes.push(w);
-        }
+        caps.push_write_prefix(&w);
     }
     for nh in m.capabilities.allowed_net_hosts {
-        caps.allowed_net_hosts.insert(nh);
+        caps.insert_net_host(&nh);
     }
     for eb in m.capabilities.allowed_exec_binaries {
-        if !caps.allowed_exec_binaries.contains(&eb) {
-            caps.allowed_exec_binaries.push(eb);
-        }
+        *caps = std::mem::take(caps).with_exec_binary(eb);
     }
     if !m.capabilities.allow_checkpoints {
         caps.allow_checkpoints = false;

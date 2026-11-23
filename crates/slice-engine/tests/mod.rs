@@ -9,6 +9,7 @@ mod wasm_vfs_and_module_resolution_tests;
 mod wave1_cage_ses_unwind_tests;
 mod wave2_slicesnp_and_multiblob_cas_tests;
 mod wave3_boa_ic_crypto_wintertc_tests;
+mod wave4_dlp_and_attenuation_tests;
 mod web_primitives_and_case_studies_tests;
 mod websocket_and_prelude_tests;
 mod wintertc_fetch_and_timetravel_tests;

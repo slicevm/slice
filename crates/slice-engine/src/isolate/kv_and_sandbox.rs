@@ -9,7 +9,7 @@ use crate::state_and_kv::{
     restore_tenant_state, snapshot_tenant_tree_kv,
 };
 use serde::{Deserialize, Serialize};
-use slice_sandbox::{CapabilityToken, SandboxViolation};
+use slice_sandbox::SandboxViolation;
 use std::time::Instant;
 
 /// Options for spawning an attenuated nested child sandbox via `Slice.evalSandbox(code, opts)`.
@@ -231,96 +231,21 @@ impl SliceIsolate {
             .saturating_sub(parent_effective_used);
         let child_fuel = opts.fuel.unwrap_or(parent_rem_fuel).min(parent_rem_fuel);
 
-        // Attenuate child CapabilityToken strictly against parent's capabilities (zero escalation)
-        let mut child_caps = CapabilityToken::pure_compute();
-        let parent_reads = &self.compartment.capabilities.allowed_read_prefixes;
-        if !opts.allow_read.is_empty() {
-            for req_prefix in &opts.allow_read {
-                if !slice_sandbox::is_rejected_vfs_candidate(req_prefix)
-                    && parent_reads
-                        .iter()
-                        .any(|p| slice_sandbox::vfs_prefix_matches(req_prefix, p))
-                {
-                    child_caps = child_caps.with_read_prefix(req_prefix.clone());
-                }
-            }
-        } else {
-            for p in parent_reads {
-                child_caps = child_caps.with_read_prefix(p.clone());
-            }
-        }
-
-        let parent_writes = &self.compartment.capabilities.allowed_write_prefixes;
-        if !opts.allow_write.is_empty() {
-            for req_prefix in &opts.allow_write {
-                if !slice_sandbox::is_rejected_vfs_candidate(req_prefix)
-                    && parent_writes
-                        .iter()
-                        .any(|p| slice_sandbox::vfs_prefix_matches(req_prefix, p))
-                {
-                    child_caps = child_caps.with_write_prefix(req_prefix.clone());
-                }
-            }
-        } else {
-            for p in parent_writes {
-                child_caps = child_caps.with_write_prefix(p.clone());
-            }
-        }
-
-        let parent_nets = &self.compartment.capabilities.allowed_net_hosts;
-        if !opts.allow_net.is_empty() {
-            for req_host in &opts.allow_net {
-                if !slice_sandbox::is_cloud_metadata_ssrf_target(req_host)
-                    && self.compartment.verify_net_connect(req_host).is_ok()
-                {
-                    child_caps = child_caps.with_net_host(req_host.clone());
-                }
-            }
-        } else {
-            for h in parent_nets {
-                child_caps = child_caps.with_net_host(h.clone());
-            }
-        }
-
-        let parent_execs = &self.compartment.capabilities.allowed_exec_binaries;
-        if !opts.allow_exec.is_empty() {
-            for req_bin in &opts.allow_exec {
-                if self.compartment.verify_exec_binary(req_bin).is_ok() {
-                    child_caps = child_caps.with_exec_binary(req_bin.clone());
-                }
-            }
-        } else {
-            for eb in parent_execs {
-                child_caps = child_caps.with_exec_binary(eb.clone());
-            }
-        }
-
-        if !opts.allow_env.is_empty() {
-            let parent_envs = &self.compartment.capabilities.allowed_env_keys;
-            for req_key in &opts.allow_env {
-                if let Some(val) = parent_envs.get(req_key) {
-                    child_caps = child_caps.with_env(req_key.clone(), val.clone());
-                }
-            }
-        }
-
-        let parent_allow_cp = self.compartment.capabilities.allow_checkpoints;
-        let child_allow_cp =
-            parent_allow_cp && opts.checkpoints.unwrap_or(true) && opts.max_checkpoints != Some(0);
-        let parent_rem_cp = self
-            .compartment
-            .capabilities
-            .max_checkpoints
-            .map(|m| m.saturating_sub(self.checkpoints_taken));
-        let child_max_cp = match (parent_rem_cp, opts.max_checkpoints) {
-            (Some(p), Some(c)) => Some(p.min(c)),
-            (Some(p), None) => Some(p),
-            (None, Some(c)) => Some(c),
-            (None, None) => None,
-        };
-        child_caps = child_caps
-            .with_checkpoints(child_allow_cp)
-            .with_max_checkpoints(child_max_cp);
+        // Attenuate child CapabilityToken strictly against parent's capabilities via canonical OCap lattice
+        let child_caps =
+            self.compartment
+                .capabilities
+                .attenuate(&slice_sandbox::CapabilityAttenuationRequest {
+                    allow_read: (!opts.allow_read.is_empty()).then_some(opts.allow_read.as_slice()),
+                    allow_write: (!opts.allow_write.is_empty())
+                        .then_some(opts.allow_write.as_slice()),
+                    allow_net: (!opts.allow_net.is_empty()).then_some(opts.allow_net.as_slice()),
+                    allow_exec: (!opts.allow_exec.is_empty()).then_some(opts.allow_exec.as_slice()),
+                    allow_env: Some(opts.allow_env.as_slice()),
+                    allow_checkpoints: opts.checkpoints,
+                    max_checkpoints: opts.max_checkpoints,
+                    consumed_checkpoints: self.checkpoints_taken,
+                });
 
         let explicit_sub_tenant = opts
             .tenant_id

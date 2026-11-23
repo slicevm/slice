@@ -116,23 +116,38 @@ pub(crate) fn register_audit_egress_spec(
     Ok(())
 }
 
-/// Fail-closed `.env` file reader that grants `KEY=VALUE` environment variables in `caps` and
-/// auto-registers sensitive credentials (`*_SECRET*`, `*_TOKEN*`, `*_KEY*`, `*_PASSWORD*`, `*_PRIVATE*`)
-/// into `audit_secrets`.
-pub(crate) fn apply_dotenv_file_to_caps_and_dlp(
+/// Fail-closed `.env` file reader that grants `KEY=VALUE` environment variables in `caps`
+/// (preserving any higher-precedence keys already set unless `override_existing` is `true`) and
+/// auto-registers sensitive credentials (`*_SECRET*`, `*_TOKEN*`, `*_KEY*`, `*_PASSWORD*`,
+/// `*_PRIVATE*`, `*_CREDENTIAL*`, `*_AUTH*`) into `audit_secrets`.
+pub(crate) fn apply_dotenv_file_with_precedence(
     dotenv_path: &Path,
     caps: &mut CapabilityToken,
     audit_secrets: &mut Vec<String>,
+    override_existing: bool,
 ) -> Result<usize> {
     let raw = std::fs::read_to_string(dotenv_path)
         .with_context(|| format!("Failed to read --env-file {}", dotenv_path.display()))?;
     let (pairs, secrets) = slice_sandbox::parse_dotenv_content(&raw);
     for (k, v) in pairs {
-        caps.allowed_env_keys.insert(k, v);
+        if override_existing {
+            caps.allowed_env_keys.insert(k, v);
+        } else {
+            caps.allowed_env_keys.entry(k).or_insert(v);
+        }
     }
     let count = secrets.len();
     for sec in secrets {
         push_unique_audit_secret(audit_secrets, sec);
     }
     Ok(count)
+}
+
+#[inline]
+pub(crate) fn apply_dotenv_file_to_caps_and_dlp(
+    dotenv_path: &Path,
+    caps: &mut CapabilityToken,
+    audit_secrets: &mut Vec<String>,
+) -> Result<usize> {
+    apply_dotenv_file_with_precedence(dotenv_path, caps, audit_secrets, false)
 }

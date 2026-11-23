@@ -30,7 +30,11 @@ pub fn is_sensitive_env_key(key: &str) -> bool {
     if contains_ascii_ignore_case(b, b"PUBLIC_KEY")
         || contains_ascii_ignore_case(b, b"PUBLISHABLE_KEY")
     {
-        return false;
+        return contains_ascii_ignore_case(b, b"SECRET")
+            || contains_ascii_ignore_case(b, b"PRIVATE")
+            || contains_ascii_ignore_case(b, b"PASSWORD")
+            || contains_ascii_ignore_case(b, b"PASSWD")
+            || contains_ascii_ignore_case(b, b"CREDENTIAL");
     }
     contains_ascii_ignore_case(b, b"SECRET")
         || contains_ascii_ignore_case(b, b"TOKEN")
@@ -39,6 +43,7 @@ pub fn is_sensitive_env_key(key: &str) -> bool {
         || contains_ascii_ignore_case(b, b"PASSWD")
         || contains_ascii_ignore_case(b, b"PRIVATE")
         || contains_ascii_ignore_case(b, b"CREDENTIAL")
+        || contains_ascii_ignore_case(b, b"AUTH")
 }
 
 /// Unescapes double-quoted `.env` string values in a single pass (`SBX-PERF-03`).

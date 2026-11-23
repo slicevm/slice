@@ -155,7 +155,7 @@ static_dir = "./public"
     assert_eq!(m.memory_limit_kb, 32 * 1024);
     assert_eq!(
         m.capabilities.allowed_read_prefixes,
-        vec!["/app".to_string(), "./data".to_string()]
+        vec!["/app".to_string(), "data".to_string()]
     );
     assert_eq!(
         m.capabilities.allowed_write_prefixes,
