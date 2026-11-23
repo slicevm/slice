@@ -184,3 +184,35 @@ console.log("guest-eval-sandbox-ok");
     assert_eq!(p_after["processExited"], serde_json::json!(false));
     assert_eq!(p_after["returnValue"], serde_json::json!("42"));
 }
+
+#[test]
+fn test_wave6_deterministic_nested_eval_sandbox_preserves_ses_baseline() {
+    // Runs on a fresh thread so the outer isolate boots a cold bare realm in deterministic mode
+    // (matching `slice test`), invokes nested `Slice.evalSandbox(...)`, and verifies that
+    // `SavedIsolateContextGuard` preserves `BOA_SES_BASELINE_SIGS` without false `Math` SES errors.
+    let handle = std::thread::spawn(|| {
+        let mut iso = SliceIsolate::spawn(
+            "slice-test-runner",
+            1,
+            CapabilityToken::pure_compute(),
+            20_000_000,
+            16 * 1024 * 1024,
+        );
+        iso.set_deterministic_seed(Some(20261024));
+        let src = r#"
+const r1 = Math.random();
+const child = Slice.evalSandbox("1 + 2", { tenantId: "nested-child" });
+if (!child.ok || child.returnValue !== "3") {
+    throw new Error("nested child failed: " + JSON.stringify(child));
+}
+console.log(JSON.stringify({ r1, childOk: child.ok }));
+"#;
+        let bc = slice_engine::compile_source_to_bytecode(src);
+        let metrics = iso
+            .execute_bytecode(&bc, None)
+            .expect("deterministic outer isolate with nested evalSandbox must pass SES check");
+        assert_eq!(metrics.stdout.len(), 1);
+        assert!(metrics.stdout[0].contains("\"childOk\":true"));
+    });
+    handle.join().expect("fresh thread test must succeed");
+}
