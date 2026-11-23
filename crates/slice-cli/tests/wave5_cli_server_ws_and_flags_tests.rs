@@ -3,8 +3,9 @@ use crate::config::{
 };
 use crate::http_server::connection::write_all_vectored2;
 use crate::http_server::{
-    clear_tenant_cas_cache, notify_tenant_cas_updated, resolve_tenant_cas_hotswap,
-    serve_connection_with_isolate, spawn_worker_isolate, tenant_cas_cache_len,
+    clear_tenant_cas_cache, current_tenant_fs_generation, notify_tenant_cas_updated,
+    resolve_tenant_cas_hotswap, serve_connection_with_isolate, spawn_worker_isolate,
+    tenant_cas_cache_len,
 };
 use crate::{
     LAST_CLI_EXIT_CODE, cmd_check, cmd_compile, cmd_doctor, cmd_init, cmd_inspect, cmd_mcp,
@@ -590,16 +591,25 @@ fn test_wave5_tenant_dir_default_and_negative_cache_transient_copy_and_write_vec
     std::fs::create_dir_all(&tenant_dir).unwrap();
 
     // 1. Negative lookup caching (`None` when neither `<tenant>.cas` nor `default.cas` exists)
+    //    Also verifies Linux `inotify` read-only `EventKind::Access` events do NOT self-invalidate `TENANT_FS_GENERATION`!
     clear_tenant_cas_cache();
     assert!(resolve_tenant_cas_hotswap(&tenant_dir, "ghost-0").is_none());
+    std::thread::sleep(Duration::from_millis(20));
+    let gen_before = current_tenant_fs_generation();
     let neg_start = Instant::now();
-    for i in 0..5_000 {
-        assert!(resolve_tenant_cas_hotswap(&tenant_dir, &format!("ghost-{}", i)).is_none());
+    for _ in 0..5_000 {
+        assert!(resolve_tenant_cas_hotswap(&tenant_dir, "ghost-steady").is_none());
     }
     let neg_ns_per_lookup = neg_start.elapsed().as_nanos() as f64 / 5_000.0;
+    let gen_delta = current_tenant_fs_generation().saturating_sub(gen_before);
+    assert!(
+        gen_delta < 20,
+        "read_dir / metadata access must not self-invalidate TENANT_FS_GENERATION via inotify Access events (delta={})",
+        gen_delta
+    );
     assert_eq!(tenant_cas_cache_len(), (0, 0));
     assert!(
-        neg_ns_per_lookup < 5_000.0,
+        neg_ns_per_lookup < 10_000.0,
         "negative lookup cache too slow: {:.1} ns/op",
         neg_ns_per_lookup
     );

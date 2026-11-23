@@ -444,7 +444,9 @@ fn ensure_tenant_dir_watched(tenant_dir: &Path) {
     use notify::{RecursiveMode, Watcher};
     let reg = TENANT_DIR_WATCHERS.get_or_init(|| {
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if res.is_ok() {
+            if let Ok(ev) = res
+                && !matches!(ev.kind, notify::EventKind::Access(_))
+            {
                 TENANT_FS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
             }
         })
@@ -511,6 +513,11 @@ pub(crate) fn tenant_cas_cache_len() -> (usize, usize) {
         let borrow = c.borrow();
         (borrow.by_tenant.len(), borrow.by_canonical_path.len())
     })
+}
+
+#[cfg(test)]
+pub(crate) fn current_tenant_fs_generation() -> u64 {
+    TENANT_FS_GENERATION.load(std::sync::atomic::Ordering::Acquire)
 }
 
 #[cfg(test)]
