@@ -2,3 +2,4 @@ mod bundler_and_resolver_tests;
 mod cas_archive_and_static_tests;
 mod cas_security_and_perf_tests;
 mod oxc_transpiler_and_ast_tests;
+mod wave2_cas_and_compiler_tests;

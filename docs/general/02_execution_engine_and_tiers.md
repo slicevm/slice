@@ -26,9 +26,10 @@ Whenever you run a script or bundle (`slice run`, `slice serve`, `slice test`, o
 |         |       - Cold Start: Single-digit milliseconds (0 runtime JS lexing/parsing!)          |
 |         |       - Warm Pool (--warm / slice serve): Sub-millisecond (~0.02 - 0.25 us spawn)     |
 |         |                                                                                       |
-|         +---> [Tier 0: SLICESNP Snapshot VM] (`Tier0LLIntSnapshot`)                             |
-|         |       - Used for: Lightweight scalar routing, arithmetic, env(), static exports       |
-|         |       - Cold Start: ~1 microsecond P50 | Memory: 4.0 KB                               |
+|         +---> [Tier 0: SLICESNPv2 Binary LLInt VM] (`Tier0LLIntSnapshot`)                     |
+|         |       - Used for: Lightweight scalar routing, arithmetic, env(), static exports,      |
+|         |         and multi-hundred-module Tier-0 `.cas` trees (`<= 128 KiB`)                   |
+|         |       - Cold Start: ~0.7 us P50 | Memory: 4.0 KB | Zero-copy binary cursor            |
 |         |                                                                                       |
 |         +---> [Tier 2: Peak Native SIMD & Typed Kernels] (`Tier2PeakNative`)                    |
 |                 - Used when: Your code runs typed `: number` loops, SHA-256 / HMAC-SHA256,      |
@@ -112,7 +113,7 @@ Output:
 =========================================================================
   0000  CONST_NUM       %acc <- 0
   0001  MONO_FOR_T2     %acc += (%i in 0..10000) * 3
-  0002  AST_EXEC        ExprStmt(Call { callee: Member { object: Ident("console"), property: "log" }, args: [Ident("acc")] })
+  0002  STDOUT_VAR      console.log(%acc)
 =========================================================================
 149985000
 [Slice Telemetry] Tier: Tier2PeakNative | Instantiate: 14.20 us | Exec: 1.20 us | Total: 15.40 us | Memory: 4096 B | Stat Syscalls: 0

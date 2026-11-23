@@ -13,6 +13,7 @@
 pub(crate) mod exec_ast;
 pub(crate) mod exec_boa;
 pub(crate) mod exec_bytecode;
+pub(crate) mod exec_llint;
 pub(crate) mod http_and_ws;
 pub(crate) mod kv_and_sandbox;
 pub mod state_and_kv;
@@ -24,6 +25,7 @@ use crate::parser_and_compiler::compile_source_to_bytecode;
 use crate::state_and_kv::verify_egress_secrets_slice;
 use crate::value_and_ast::{ExecutionTier, JsValue};
 use anyhow::{Result, bail};
+use compact_str::CompactString;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use slice_sandbox::{CapabilityToken, SandboxViolation, TenantCompartment};
@@ -69,7 +71,7 @@ pub struct SliceIsolate {
     pub compartment: TenantCompartment,
     pub cas_modules_resolved: usize,
     pub current_tier: ExecutionTier,
-    pub(crate) env_vars: FxHashMap<String, JsValue>,
+    pub(crate) env_vars: FxHashMap<CompactString, JsValue>,
     pub stdout: Vec<String>,
     pub deterministic_seed: Option<u64>,
     pub(crate) det_prng_state: u64,

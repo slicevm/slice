@@ -3,5 +3,6 @@
 mod cli_security_and_perf_tests;
 mod frameworks_wasm_and_config_tests;
 mod server_and_mcp_tests;
+mod wave2_cli_cas_serve_and_bench_tests;
 mod websocket_and_workers_e2e_tests;
 mod wintertc_and_node_e2e_tests;

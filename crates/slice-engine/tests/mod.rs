@@ -7,6 +7,7 @@ mod isolate_security_and_perf_tests;
 mod tier0_boacas_and_core_tests;
 mod wasm_vfs_and_module_resolution_tests;
 mod wave1_cage_ses_unwind_tests;
+mod wave2_slicesnp_and_multiblob_cas_tests;
 mod web_primitives_and_case_studies_tests;
 mod websocket_and_prelude_tests;
 mod wintertc_fetch_and_timetravel_tests;

@@ -3,4 +3,5 @@
 pub mod boacas;
 pub mod numeric_vm;
 pub mod parser_and_compiler;
+pub mod slicesnp_codec;
 pub mod value_and_ast;

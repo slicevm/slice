@@ -23,8 +23,8 @@ pub use ast_walker::{
     walk_ast_call_expressions, walk_ast_expressions, wrap_top_level_await_script,
 };
 pub use builtins_and_ids::{
-    canonical_mod_id, clear_canonical_mod_id_cache, format_exports_lhs, is_builtin_module,
-    is_jsx_runtime_builtin, is_valid_js_identifier, normalize_builtin_specifier,
+    VIRTUAL_NO_FS_DIR, canonical_mod_id, clear_canonical_mod_id_cache, format_exports_lhs,
+    is_builtin_module, is_jsx_runtime_builtin, is_valid_js_identifier, normalize_builtin_specifier,
     resolve_spec_and_record,
 };
 pub use cjs_rewrites::{

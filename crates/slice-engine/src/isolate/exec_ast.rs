@@ -84,7 +84,7 @@ impl SliceIsolate {
                 if self.pending_tier0_throw.is_some() {
                     return Ok(ControlFlow::None(JsValue::Undefined));
                 }
-                self.env_vars.insert(name.clone(), val.clone());
+                self.set_env_var_str(name, val.clone());
                 Ok(ControlFlow::None(val))
             }
             Stmt::ImportCas { .. } => Ok(ControlFlow::None(JsValue::Undefined)),
@@ -97,7 +97,7 @@ impl SliceIsolate {
                 };
                 js_fn.compiled_numeric = crate::numeric_vm::try_compile_numeric_func(&js_fn);
                 let func = JsValue::Function(Box::new(js_fn));
-                self.env_vars.insert(name.clone(), func.clone());
+                self.set_env_var_str(name, func.clone());
                 Ok(ControlFlow::None(func))
             }
             Stmt::If {
@@ -140,7 +140,10 @@ impl SliceIsolate {
                 body,
             } => {
                 let saved_for_init = if let Some(Stmt::VarDecl { name, .. }) = init.as_deref() {
-                    Some((name.clone(), self.env_vars.get(name).cloned()))
+                    Some((
+                        compact_str::CompactString::new(name),
+                        self.env_vars.get(name.as_str()).cloned(),
+                    ))
                 } else {
                     None
                 };
@@ -179,7 +182,7 @@ impl SliceIsolate {
                     if let Some(prev) = prev_opt {
                         self.env_vars.insert(k, prev);
                     } else {
-                        self.env_vars.remove(&k);
+                        self.env_vars.remove(k.as_str());
                     }
                 }
                 loop_res
@@ -203,12 +206,15 @@ impl SliceIsolate {
     }
 
     pub(crate) fn eval_block(&mut self, stmts: &[Stmt]) -> Result<ControlFlow, SandboxViolation> {
-        let mut saved_outer: Vec<(String, Option<JsValue>)> = Vec::new();
+        let mut saved_outer: Vec<(compact_str::CompactString, Option<JsValue>)> = Vec::new();
         for s in stmts {
             if let Stmt::VarDecl { name, .. } = s
-                && !saved_outer.iter().any(|(k, _)| k == name)
+                && !saved_outer.iter().any(|(k, _)| k.as_str() == name.as_str())
             {
-                saved_outer.push((name.clone(), self.env_vars.get(name).cloned()));
+                saved_outer.push((
+                    compact_str::CompactString::new(name),
+                    self.env_vars.get(name.as_str()).cloned(),
+                ));
             }
         }
         let mut last = JsValue::Undefined;
@@ -241,7 +247,7 @@ impl SliceIsolate {
             if let Some(prev) = prev_opt {
                 self.env_vars.insert(k, prev);
             } else {
-                self.env_vars.remove(&k);
+                self.env_vars.remove(k.as_str());
             }
         }
         if returned_early {
@@ -260,7 +266,7 @@ impl SliceIsolate {
             Expr::Literal(v) => Ok(v.clone()),
             Expr::Ident(name) => Ok(self
                 .env_vars
-                .get(name)
+                .get(name.as_str())
                 .cloned()
                 .unwrap_or(JsValue::Undefined)),
             Expr::Unary { op, expr: inner } => {
@@ -297,14 +303,14 @@ impl SliceIsolate {
                 let final_val = if let Some(bin_op) = op {
                     let prev = self
                         .env_vars
-                        .get(name)
+                        .get(name.as_str())
                         .cloned()
                         .unwrap_or(JsValue::Undefined);
                     self.eval_assign_op(*bin_op, prev, rhs)?
                 } else {
                     rhs
                 };
-                self.env_vars.insert(name.clone(), final_val.clone());
+                self.set_env_var_str(name, final_val.clone());
                 Ok(final_val)
             }
             Expr::PropAssign {
@@ -314,7 +320,7 @@ impl SliceIsolate {
             } => {
                 self.compartment.verify_property_mutation(target_chain)?;
                 let val = self.eval_expr(value)?;
-                if let Some(JsValue::Object(map)) = self.env_vars.get_mut(target_chain) {
+                if let Some(JsValue::Object(map)) = self.env_vars.get_mut(target_chain.as_str()) {
                     map.insert(prop.clone(), val.clone());
                 }
                 Ok(val)
@@ -335,11 +341,11 @@ impl SliceIsolate {
             } => {
                 let prev = self
                     .env_vars
-                    .get(name)
+                    .get(name.as_str())
                     .map(|v| v.to_number())
                     .unwrap_or(f64::NAN);
                 let next = if *increment { prev + 1.0 } else { prev - 1.0 };
-                self.env_vars.insert(name.clone(), JsValue::Number(next));
+                self.set_env_var_str(name, JsValue::Number(next));
                 Ok(JsValue::Number(if *prefix { next } else { prev }))
             }
             Expr::Ternary {
@@ -580,7 +586,9 @@ impl SliceIsolate {
         }
 
         if let Expr::Ident(fn_name) = callee {
-            if let Some(user_fn @ JsValue::Function(_)) = self.env_vars.get(fn_name).cloned() {
+            if let Some(user_fn @ JsValue::Function(_)) =
+                self.env_vars.get(fn_name.as_str()).cloned()
+            {
                 return self.invoke_function_val(&user_fn, &eval_args);
             }
             if let Some(res) = self.eval_ident_builtin_call(fn_name, &eval_args)? {
@@ -761,14 +769,14 @@ impl SliceIsolate {
                 if added_bytes > 0 {
                     self.compartment.alloc_memory(added_bytes)?;
                 }
-                if let Some(JsValue::Array(vec)) = self.env_vars.get_mut(var_name) {
+                if let Some(JsValue::Array(vec)) = self.env_vars.get_mut(var_name.as_str()) {
                     for item in eval_args {
                         vec.push(item.clone());
                     }
                     return Ok(Some(JsValue::Number(vec.len() as f64)));
                 }
             } else if property == "pop"
-                && let Some(JsValue::Array(vec)) = self.env_vars.get_mut(var_name)
+                && let Some(JsValue::Array(vec)) = self.env_vars.get_mut(var_name.as_str())
             {
                 return Ok(Some(vec.pop().unwrap_or(JsValue::Undefined)));
             }
@@ -1001,14 +1009,14 @@ impl SliceIsolate {
             collect_local_var_names(&func.body, &func.params, &mut local_names);
             let mut saved = Vec::with_capacity(func.params.len() + local_names.len());
             for (idx, param_name) in func.params.iter().enumerate() {
-                let prev = self.env_vars.get(param_name).cloned();
-                saved.push((param_name.clone(), prev));
+                let prev = self.env_vars.get(param_name.as_str()).cloned();
+                saved.push((compact_str::CompactString::new(param_name), prev));
                 let arg_val = args.get(idx).cloned().unwrap_or(JsValue::Undefined);
-                self.env_vars.insert(param_name.clone(), arg_val);
+                self.set_env_var_str(param_name, arg_val);
             }
             for local_name in local_names {
-                let prev = self.env_vars.get(&local_name).cloned();
-                saved.push((local_name, prev));
+                let prev = self.env_vars.get(local_name.as_str()).cloned();
+                saved.push((compact_str::CompactString::new(&local_name), prev));
             }
 
             let block_res = self.eval_block(&func.body);
@@ -1018,7 +1026,7 @@ impl SliceIsolate {
                 if let Some(prev) = prev_opt {
                     self.env_vars.insert(var_name, prev);
                 } else {
-                    self.env_vars.remove(&var_name);
+                    self.env_vars.remove(var_name.as_str());
                 }
             }
 

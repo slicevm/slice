@@ -424,13 +424,15 @@ fn test_single_pass_ts_transpile_live_mutable_exports_and_streaming_exe_pack() {
     }
 
     // Also verify `base_exe_path == output_exe_path` works safely via sibling staging file
+    // and strips the prior SLICEEXE payload so re-packing is byte-idempotent (`inplace_size == total_size`).
     let inplace_size = crate::embed_cas_into_executable(&out_exe, &cas_path, &out_exe).unwrap();
-    assert!(inplace_size > total_size);
+    assert_eq!(inplace_size, total_size);
     let inplace_bytes = std::fs::read(&out_exe).unwrap();
     let tail2 = &inplace_bytes[inplace_bytes.len() - 24..];
     assert_eq!(&tail2[16..24], b"SLICEEXE");
     let cas_offset2 = u64::from_le_bytes(tail2[0..8].try_into().unwrap()) as usize;
     let cas_len2 = u64::from_le_bytes(tail2[8..16].try_into().unwrap()) as usize;
+    assert_eq!(cas_offset2, cas_offset);
     {
         let embedded_inplace =
             crate::MappedCasArchive::open_from_offset(&out_exe, cas_offset2, cas_len2).unwrap();

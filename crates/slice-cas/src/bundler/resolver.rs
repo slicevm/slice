@@ -657,6 +657,9 @@ fn resolve_tsconfig_paths(from_dir: &Path, spec: &str) -> Option<PathBuf> {
 }
 
 pub fn resolve_module_specifier(from_dir: &Path, spec: &str) -> Option<PathBuf> {
+    if from_dir == Path::new(crate::linker::VIRTUAL_NO_FS_DIR) {
+        return None;
+    }
     if spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/') {
         return try_file_with_extensions(&from_dir.join(spec));
     }

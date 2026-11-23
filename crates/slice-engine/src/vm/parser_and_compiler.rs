@@ -1,6 +1,7 @@
 //! Recursive-Descent ECMAScript/TypeScript Lexer, Parser, `SLICESNP`/`SLICEBOA` Compiler, and Disassembler.
 
-use crate::boa_realm::SNP_MODULE_CACHE;
+pub(crate) use crate::slicesnp_codec::decode_slicesnp_cached;
+use crate::slicesnp_codec::{decode_slicesnp_module, encode_slicesnp_v2};
 use crate::value_and_ast::{
     BinOp, BytecodeModule, BytecodeOp, Expr, JsFunction, JsValue, SNAPSHOT_MAGIC, Stmt, UnaryOp,
 };
@@ -1342,11 +1343,15 @@ pub fn is_tier0_slicesnp_compatible_ast(source: &str) -> bool {
     analyze_tier0_slicesnp_ast(source).0
 }
 
+/// Maximum ASCII source byte size eligible for Tier-0 `SLICESNP\x02` compilation (`128 KiB`,
+/// accommodating multi-hundred-module `.cas` entrypoints while bounding lexer work).
+const MAX_TIER0_SLICESNP_SOURCE_BYTES: usize = 131_072;
+
 #[inline]
 fn can_attempt_tier0_slicesnp(source: &str) -> bool {
     let src_bytes = source.as_bytes();
     source.is_ascii()
-        && src_bytes.len() <= 4096
+        && src_bytes.len() <= MAX_TIER0_SLICESNP_SOURCE_BYTES
         && memchr::memmem::find(src_bytes, b"var __slice_modules =").is_none()
         && memchr::memmem::find(src_bytes, b"__slice_").is_none()
         && memchr::memmem::find(src_bytes, b"node:").is_none()
@@ -1995,7 +2000,24 @@ fn analyze_tier0_slicesnp_program(program: &oxc::ast::ast::Program<'_>) -> (bool
                 .argument
                 .as_ref()
                 .is_none_or(|arg| is_supported_expr(arg, in_function_depth)),
-            Statement::ImportDeclaration(_) => in_function_depth == 0,
+            Statement::ImportDeclaration(imp) => {
+                in_function_depth == 0
+                    && !slice_cas::is_builtin_module(imp.source.value.as_str())
+                    && !slice_cas::is_jsx_runtime_builtin(imp.source.value.as_str())
+                    && imp.specifiers.as_ref().is_none_or(|specs| {
+                        specs.iter().all(|s| match s {
+                            oxc::ast::ast::ImportDeclarationSpecifier::ImportSpecifier(named) => {
+                                named.imported.name() == named.local.name
+                            }
+                            oxc::ast::ast::ImportDeclarationSpecifier::ImportDefaultSpecifier(
+                                _,
+                            ) => true,
+                            oxc::ast::ast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(
+                                _,
+                            ) => false,
+                        })
+                    })
+            }
             Statement::ExportDeclaration(exp) => match &exp.declaration {
                 Declaration::VariableDeclaration(vd) => {
                     is_supported_var_decl(vd, in_function_depth)
@@ -2396,10 +2418,8 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
             if tier_ov == Some(0) {
                 forced_tier0_needs_boa_ast =
                     Some(program_has_tier0_unsupported_mutation_syntax(program));
-            } else if raw_source.is_ascii() && raw_source.len() <= 4096 {
+            } else if can_attempt_tier0_slicesnp(raw_source) {
                 cached_tier0 = Some(analyze_tier0_slicesnp_program(program));
-            } else {
-                cached_tier0 = Some((false, false));
             }
         },
     ) {
@@ -2452,10 +2472,29 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
     };
 
     if route_to_tier1_boa || (tokens_opt.is_none() && !has_direct_intrinsic_attack) {
+        let esm_lowered: std::borrow::Cow<'_, str> =
+            if slice_cas::needs_unbundled_esm_lowering(&source) {
+                std::borrow::Cow::Owned(slice_cas::lower_unbundled_esm(&source))
+            } else {
+                source
+            };
+        // If `lower_unbundled_esm` produced a self-contained `var __slice_modules =` RC bundle
+        // (`export default ...`), return it directly without wrapping in an outer TLA IIFE.
+        if esm_lowered.starts_with("var __slice_modules =") {
+            let compacted = compact_js_for_boa_bytecode(&esm_lowered);
+            if use_boacas {
+                return crate::boacas::pack_boacas_container(&compacted);
+            }
+            let mut bytes = Vec::with_capacity(12 + compacted.len());
+            bytes.extend_from_slice(b"SLICEBOA{\n");
+            bytes.extend_from_slice(compacted.trim_end().as_bytes());
+            bytes.extend_from_slice(b"\n}");
+            return bytes;
+        }
         let boa_source: std::borrow::Cow<'_, str> =
-            match slice_cas::wrap_top_level_await_script(&source) {
+            match slice_cas::wrap_top_level_await_script(&esm_lowered) {
                 Some(wrapped) => std::borrow::Cow::Owned(wrapped),
-                None => source,
+                None => esm_lowered,
             };
         if use_boacas {
             return crate::boacas::pack_boacas_container(&boa_source);
@@ -2604,6 +2643,29 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
                 });
                 continue;
             }
+            Stmt::ExprStmt(Expr::Assign {
+                name,
+                op: Some(BinOp::Add),
+                value,
+            }) if !is_tier0_guarded_proto_target(name) => {
+                if let Expr::Ident(src) = value.as_ref() {
+                    ops.push(BytecodeOp::AddAssignVar {
+                        dst: name.clone(),
+                        src: src.clone(),
+                    });
+                    continue;
+                }
+            }
+            Stmt::ExprStmt(Expr::Call { callee, args }) if args.len() == 1 => {
+                if let (Expr::Member { object, property }, Expr::Ident(var)) =
+                    (callee.as_ref(), &args[0])
+                    && matches!(object.as_ref(), Expr::Ident(obj) if obj == "console")
+                    && matches!(property.as_str(), "log" | "info" | "warn" | "error")
+                {
+                    ops.push(BytecodeOp::ConsoleLogVar { var: var.clone() });
+                    continue;
+                }
+            }
             Stmt::While {
                 cond: Expr::Literal(JsValue::Bool(true)),
                 body,
@@ -2624,60 +2686,7 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
         ops,
         static_exports,
     };
-    let mut bytes = Vec::with_capacity(256);
-    bytes.extend_from_slice(SNAPSHOT_MAGIC);
-    let payload = serde_json::to_vec(&module).unwrap_or_default();
-    bytes.extend_from_slice(&payload);
-    bytes
-}
-
-thread_local! {
-    static SNP_LAST_HIT: std::cell::RefCell<(usize, usize, Option<std::sync::Arc<BytecodeModule>>)> =
-        const { std::cell::RefCell::new((0, 0, None)) };
-}
-
-#[inline]
-pub(crate) fn decode_slicesnp_cached(bytecode: &[u8]) -> std::sync::Arc<BytecodeModule> {
-    if bytecode.len() < 8 || &bytecode[0..8] != SNAPSHOT_MAGIC {
-        return std::sync::Arc::new(BytecodeModule {
-            ops: Vec::new(),
-            static_exports: FxHashMap::default(),
-        });
-    }
-    let ptr = bytecode.as_ptr() as usize;
-    let len = bytecode.len();
-    if let Some(hit) = SNP_LAST_HIT.with(|slot| {
-        let b = slot.borrow();
-        if b.0 == ptr && b.1 == len {
-            b.2.as_ref().map(std::sync::Arc::clone)
-        } else {
-            None
-        }
-    }) {
-        return hit;
-    }
-    use std::hash::{Hash, Hasher};
-    let mut hasher = rustc_hash::FxHasher::default();
-    bytecode[8..].hash(&mut hasher);
-    let key = hasher.finish();
-    let module = SNP_MODULE_CACHE.with(|cache| {
-        if let Some(existing) = cache.borrow().get(&key) {
-            return std::sync::Arc::clone(existing);
-        }
-        let parsed = serde_json::from_slice(&bytecode[8..]).unwrap_or(BytecodeModule {
-            ops: Vec::new(),
-            static_exports: FxHashMap::default(),
-        });
-        let arc_mod = std::sync::Arc::new(parsed);
-        cache
-            .borrow_mut()
-            .insert(key, std::sync::Arc::clone(&arc_mod));
-        arc_mod
-    });
-    SNP_LAST_HIT.with(|slot| {
-        *slot.borrow_mut() = (ptr, len, Some(std::sync::Arc::clone(&module)));
-    });
-    module
+    encode_slicesnp_v2(&module)
 }
 
 #[inline]
@@ -2719,7 +2728,7 @@ pub fn disassemble_bytecode(bytecode: &[u8]) -> Result<Vec<String>> {
     if bytecode.len() < 8 || &bytecode[0..8] != SNAPSHOT_MAGIC {
         bail!("Invalid SLICESNP bytecode header");
     }
-    let module: BytecodeModule = serde_json::from_slice(&bytecode[8..])?;
+    let module = decode_slicesnp_module(bytecode)?;
     let mut lines = Vec::with_capacity(module.ops.len() + 2);
     for (idx, op) in module.ops.iter().enumerate() {
         let formatted = match op {
@@ -2789,6 +2798,12 @@ pub fn disassemble_bytecode(bytecode: &[u8]) -> Result<Vec<String>> {
             }
             BytecodeOp::ConsoleLog { expr } => {
                 format!("{:04}  STDOUT_EMIT     print(%{})", idx, expr)
+            }
+            BytecodeOp::ConsoleLogVar { var } => {
+                format!("{:04}  STDOUT_VAR      console.log(%{})", idx, var)
+            }
+            BytecodeOp::AddAssignVar { dst, src } => {
+                format!("{:04}  ADD_ASSIGN      %{} += %{}", idx, dst, src)
             }
             BytecodeOp::ReturnVar { var } => {
                 format!("{:04}  RET_VAL         return %{}", idx, var)

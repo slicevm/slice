@@ -1,4 +1,4 @@
-use super::resolve_tenant_bytecode_hotswap;
+use super::resolve_tenant_cas_hotswap;
 use super::tls::ServerConnStream;
 use anyhow::Result;
 use slice_engine::SliceIsolate;
@@ -286,6 +286,7 @@ pub(crate) fn spawn_worker_isolate(
     isolate
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn serve_connection_keep_alive_with_tls_and_secrets(
     tcp_stream: TcpStream,
@@ -316,6 +317,7 @@ pub(crate) fn serve_connection_keep_alive_with_tls_and_secrets(
         slot_id,
         &mut isolate,
         bytecode,
+        None,
         tenant_dir_opt,
         static_assets_opt,
         fuel_limit,
@@ -333,6 +335,7 @@ pub(crate) fn serve_connection_with_isolate(
     mut slot_id: u32,
     isolate: &mut SliceIsolate,
     bytecode: &[u8],
+    cas_archive_opt: Option<&slice_cas::MappedCasArchive>,
     tenant_dir_opt: Option<&Path>,
     static_assets_opt: Option<&slice_cas::StaticAssetTable>,
     fuel_limit: u64,
@@ -918,14 +921,17 @@ pub(crate) fn serve_connection_with_isolate(
         slot_id = slot_id.wrapping_add(1);
         isolate.reset_for_request(tenant_id, slot_id, fuel_limit, mem_limit);
 
-        let dynamic_bc =
-            tenant_dir_opt.and_then(|td| resolve_tenant_bytecode_hotswap(td, tenant_id));
-        let active_bytecode: &[u8] = dynamic_bc
-            .as_deref()
-            .map(|v| v.as_slice())
+        let dynamic_cas = tenant_dir_opt.and_then(|td| resolve_tenant_cas_hotswap(td, tenant_id));
+        let active_bytecode: &[u8] = dynamic_cas
+            .as_ref()
+            .map(|(bc, _)| bc.as_slice())
             .unwrap_or(bytecode);
+        let active_cas: Option<&slice_cas::MappedCasArchive> = dynamic_cas
+            .as_ref()
+            .map(|(_, cas)| cas.as_ref())
+            .or(cas_archive_opt);
 
-        match isolate.execute_http_request_fast(active_bytecode, None, &req_ctx) {
+        match isolate.execute_http_request_fast(active_bytecode, active_cas, &req_ctx) {
             Ok(outcome) => {
                 // Only enter RFC 6455 Server-Side WebSocket Upgrade when the handler explicitly upgraded (`101`).
                 if is_ws_upgrade
