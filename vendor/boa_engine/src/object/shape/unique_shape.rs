@@ -83,6 +83,7 @@ impl UniqueShape {
     pub(crate) fn insert_property_transition(&self, key: TransitionKey) -> Self {
         let mut property_table = self.property_table().borrow_mut();
         property_table.insert(key.property_key, key.attributes);
+        self.inner.id.set(super::next_shape_id());
         self.clone()
     }
 

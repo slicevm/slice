@@ -644,6 +644,9 @@ fn decode_codeblock<'a>(
     let mut mapped_arguments_binding_indices = thin_vec::ThinVec::with_capacity(mapped_len);
     for _ in 0..mapped_len {
         let v = read_u32(src, pos)?;
+        if v != u32::MAX && v >= register_count {
+            return None;
+        }
         mapped_arguments_binding_indices.push(if v == u32::MAX { None } else { Some(v) });
     }
 
@@ -711,12 +714,18 @@ fn decode_codeblock<'a>(
     let handler_len = read_bounded_len(src, pos, 12)?;
     let mut handlers = thin_vec::ThinVec::with_capacity(handler_len);
     for _ in 0..handler_len {
-        let start = crate::vm::opcode::Address::new(read_u32(src, pos)?);
-        let end = crate::vm::opcode::Address::new(read_u32(src, pos)?);
+        let start_raw = read_u32(src, pos)?;
+        let end_raw = read_u32(src, pos)?;
         let environment_count = read_u32(src, pos)?;
+        if start_raw > end_raw
+            || (end_raw as usize) >= bc_len
+            || environment_count > MAX_SLICEBC_COLLECTION_LEN as u32
+        {
+            return None;
+        }
         handlers.push(crate::vm::Handler {
-            start,
-            end,
+            start: crate::vm::opcode::Address::new(start_raw),
+            end: crate::vm::opcode::Address::new(end_raw),
             environment_count,
         });
     }
@@ -758,7 +767,14 @@ fn decode_codeblock<'a>(
     let glex_len = read_bounded_len(src, pos, 4)?;
     let mut glex_vec = Vec::with_capacity(glex_len);
     for _ in 0..glex_len {
-        glex_vec.push(read_u32(src, pos)?);
+        let idx = read_u32(src, pos)?;
+        if !matches!(
+            constants.get(idx as usize),
+            Some(crate::vm::Constant::String(_))
+        ) {
+            return None;
+        }
+        glex_vec.push(idx);
     }
 
     let gfn_len = read_bounded_len(src, pos, 8)?;
@@ -766,6 +782,15 @@ fn decode_codeblock<'a>(
     for _ in 0..gfn_len {
         let name_index = read_u32(src, pos)?;
         let function_index = read_u32(src, pos)?;
+        if !matches!(
+            constants.get(name_index as usize),
+            Some(crate::vm::Constant::String(_))
+        ) || !matches!(
+            constants.get(function_index as usize),
+            Some(crate::vm::Constant::Function(_))
+        ) {
+            return None;
+        }
         gfn_vec.push(crate::vm::GlobalFunctionBinding {
             name_index,
             function_index,
@@ -775,7 +800,14 @@ fn decode_codeblock<'a>(
     let gvar_len = read_bounded_len(src, pos, 4)?;
     let mut gvar_vec = Vec::with_capacity(gvar_len);
     for _ in 0..gvar_len {
-        gvar_vec.push(read_u32(src, pos)?);
+        let idx = read_u32(src, pos)?;
+        if !matches!(
+            constants.get(idx as usize),
+            Some(crate::vm::Constant::String(_))
+        ) {
+            return None;
+        }
+        gvar_vec.push(idx);
     }
 
     Some(Gc::new(CodeBlock {

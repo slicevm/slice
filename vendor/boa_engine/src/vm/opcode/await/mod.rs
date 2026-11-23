@@ -94,19 +94,29 @@ impl Await {
                         context,
                     );
                 }
-                let mut r#gen = GeneratorContext::from_current(context, None);
+                let r#gen = GeneratorContext::from_current(context, None);
                 let realm = context.realm().clone();
                 let job = PromiseJob::with_realm(
                     move |context| {
-                        let async_generator = r#gen.async_generator_object()?;
-                        r#gen.resume(Some(arg), resume_kind, context);
-                        if let Some(async_generator) = async_generator {
-                            async_generator
-                                .downcast_mut::<AsyncGenerator>()
-                                .js_expect("must be async generator")?
-                                .context = Some(r#gen);
+                        let mut arg_opt = Some(arg);
+                        let mut gen_opt = Some(r#gen);
+                        let mut resume_once = |context: &mut Context| -> JsResult<JsValue> {
+                            let mut r#gen = gen_opt.take().js_expect("settled await runs once")?;
+                            let async_generator = r#gen.async_generator_object()?;
+                            r#gen.resume(arg_opt.take(), resume_kind, context);
+                            if let Some(async_generator) = async_generator {
+                                async_generator
+                                    .downcast_mut::<AsyncGenerator>()
+                                    .js_expect("must be async generator")?
+                                    .context = Some(r#gen);
+                            }
+                            Ok(JsValue::undefined())
+                        };
+                        if context.host_hooks().has_active_job_context() {
+                            let hooks = context.host_hooks();
+                            return hooks.run_with_empty_job_context(&mut resume_once, context);
                         }
-                        Ok(JsValue::undefined())
+                        resume_once(context)
                     },
                     realm,
                 );
