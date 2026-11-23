@@ -5,11 +5,12 @@ use super::{
     BOA_CHECKPOINT_CAP, BOA_CHECKPOINT_STATS, BOA_CUSTOM_ARGV, BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS,
     BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, BOA_EXEC_DIRTY, BOA_FETCH_MOCKS,
     BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION,
-    BOA_LAST_EXIT_CODE, BOA_NET_HOSTS, BOA_PROCESS_EXIT, BOA_SES_INTL_SIG_PAIR, BOA_STDOUT,
-    BOA_UNCAUGHT_ERROR, BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
-    BOA_WS_UPGRADED, BoaFsCaps, CapturedBoaHttpRes, DIRTY_ALS, DIRTY_FETCH_MOCK, DIRTY_SOCKETS,
-    DIRTY_WASM, DIRTY_WEBSOCKET, EXEC_DIRTY_ARGV, EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT,
-    EXEC_DIRTY_REJECTIONS, EXEC_DIRTY_UNCAUGHT, SesIntlSigDelta,
+    BOA_LAST_EXIT_CODE, BOA_NET_HOSTS, BOA_PROCESS_EXIT, BOA_SES_BASELINE_SIGS,
+    BOA_SES_INTL_SIG_PAIR, BOA_STDOUT, BOA_UNCAUGHT_ERROR, BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION,
+    BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, BoaFsCaps, CapturedBoaHttpRes, DIRTY_ALS,
+    DIRTY_FETCH_MOCK, DIRTY_SOCKETS, DIRTY_WASM, DIRTY_WEBSOCKET, EXEC_DIRTY_ARGV,
+    EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS, EXEC_DIRTY_UNCAUGHT,
+    SES_INTRINSIC_COUNT, SesIntlSigDelta, SesProtoSig,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use slice_sandbox::SandboxViolation;
@@ -52,6 +53,7 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_uncaught_error: Option<String>,
     pub(crate) saved_ev_loop: Option<crate::event_loop::SavedEventLoopSnapshot>,
     pub(crate) saved_wasm_state: Option<crate::wasm::WasmThreadState>,
+    pub(crate) saved_ses_baseline_sigs: Option<[SesProtoSig; SES_INTRINSIC_COUNT]>,
     pub(crate) saved_ses_intl_pair: Option<SesIntlSigDelta>,
 }
 
@@ -133,6 +135,7 @@ impl SavedIsolateContextGuard {
         };
         let saved_ev_loop = crate::event_loop::save_and_reset_event_loop_state();
         let saved_wasm_state = crate::wasm::take_thread_wasm_state_if_nonempty();
+        let saved_ses_baseline_sigs = BOA_SES_BASELINE_SIGS.with(|s| s.replace(None));
         let saved_ses_intl_pair = BOA_SES_INTL_SIG_PAIR.with(|p| p.replace(None));
 
         Self {
@@ -168,6 +171,7 @@ impl SavedIsolateContextGuard {
             saved_uncaught_error,
             saved_ev_loop,
             saved_wasm_state,
+            saved_ses_baseline_sigs,
             saved_ses_intl_pair,
         }
     }
@@ -247,6 +251,7 @@ impl Drop for SavedIsolateContextGuard {
         BOA_HTTP_RES.with(|res| *res.borrow_mut() = self.saved_http_res.take());
         BOA_WS_UPGRADED.with(|w| w.set(self.saved_ws_upgraded));
         BOA_WAIT_UNTIL_COUNT.with(|c| c.set(self.saved_wait_until_count));
+        BOA_SES_BASELINE_SIGS.with(|s| s.set(self.saved_ses_baseline_sigs));
         BOA_SES_INTL_SIG_PAIR.with(|p| p.set(self.saved_ses_intl_pair));
     }
 }
