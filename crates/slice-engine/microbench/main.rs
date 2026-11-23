@@ -932,6 +932,49 @@ fn bench_wave3_v0135_promise_and_wintertc_router(c: &mut Criterion) {
         },
     );
 
+    let closed_stream_src = r#"
+(async function() {
+    let sum = 0;
+    for (let i = 0; i < 40; i++) {
+        const rsJson = new ReadableStream({
+            start(c) {
+                c.enqueue('{"idx":' + i + ',"ok":');
+                c.enqueue('true}');
+                c.close();
+            }
+        });
+        const obj = await new Response(rsJson).json();
+        const rsText = new ReadableStream({
+            start(c) {
+                c.enqueue("chunk-a-");
+                c.enqueue("chunk-b");
+                c.close();
+            }
+        });
+        const txt = await new Response(rsText).text();
+        sum += obj.idx + txt.length;
+    }
+    if (sum !== 780 + 40 * 15) throw new Error("closed stream bench mismatch: " + sum);
+})();
+"#;
+    let closed_stream_bc = compile_source_to_bytecode(closed_stream_src);
+    group.bench_function("closed_stream_response_json_and_text_40x", |b| {
+        SliceIsolate::prewarm_boa_pool(1);
+        b.iter(|| {
+            let mut iso = SliceIsolate::spawn(
+                "bench-closed-stream",
+                1,
+                CapabilityToken::pure_compute(),
+                50_000_000,
+                16 * 1024 * 1024,
+            );
+            let out = iso
+                .execute_bytecode(black_box(&closed_stream_bc), None)
+                .expect("closed stream bench");
+            black_box(out.highest_tier_reached)
+        });
+    });
+
     group.finish();
 }
 

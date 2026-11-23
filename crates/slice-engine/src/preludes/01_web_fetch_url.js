@@ -352,6 +352,12 @@
     if (!(n >= 0 && n <= 65535)) return null;
     return String(n);
   }
+  function __urlAuthorityPrefix(u) {
+    if (u._isFastUrl) return u._r.slice(0, u._pi);
+    if (!u._hasNetLoc) return null;
+    var auth = u._user ? (u._pass ? u._user + ":" + u._pass + "@" : u._user + "@") : "";
+    return u._proto + "//" + auth + u._host;
+  }
   function __rebuildUrlHref(u) {
     var p = u._proto;
     var defP = __defaultUrlPort(p);
@@ -361,12 +367,13 @@
       u._origin = p + "//" + u._host;
       var auth = u._user ? (u._pass ? u._user + ":" + u._pass + "@" : u._user + "@") : "";
       u._href = p + "//" + auth + u._host + u._path + u._search + u._hash;
-    } else if (p === "file:") {
+    } else if (u._hasNetLoc) {
       u._origin = "null";
-      u._href = "file://" + u._host + u._path + u._search + u._hash;
+      var authN = (p !== "file:" && u._user) ? (u._pass ? u._user + ":" + u._pass + "@" : u._user + "@") : "";
+      u._href = p + "//" + authN + u._host + u._path + u._search + u._hash;
     } else {
       u._origin = "null";
-      u._href = p + (u._host ? "//" + u._host : "") + u._path + u._search + u._hash;
+      u._href = p + u._path + u._search + u._hash;
     }
   }
   function __syncExistingSp(u) {
@@ -384,6 +391,7 @@
         var fpci = fh.lastIndexOf(":");
         var fHasPort = fpci !== -1 && fh.indexOf("]") < fpci;
         u._proto = parsed._rs === 7 ? "http:" : "https:";
+        u._hasNetLoc = true;
         u._user = "";
         u._pass = "";
         u._hostname = fHasPort ? fh.slice(0, fpci) : fh;
@@ -396,6 +404,7 @@
         u._href = parsed._r;
       } else {
         u._proto = parsed._proto;
+        u._hasNetLoc = parsed._hasNetLoc;
         u._user = parsed._user;
         u._pass = parsed._pass;
         u._hostname = parsed._hostname;
@@ -699,14 +708,20 @@
     if (base !== undefined) {
       var b = (base && base._isSliceUrl) ? base : new URL(typeof base === "string" ? base : String(base));
       if (!__hasRfc3986Scheme(raw)) {
-        if (raw === "") raw = b.href;
-        else if (raw.indexOf("//") === 0) raw = b.protocol + raw;
-        else if (raw.charCodeAt(0) === 47) raw = b.origin + raw;
-        else if (raw.charCodeAt(0) === 63) raw = b.origin + b.pathname + raw;
-        else if (raw.charCodeAt(0) === 35) raw = b.origin + b.pathname + b.search + raw;
-        else {
-          var dir = b.pathname.slice(0, b.pathname.lastIndexOf("/") + 1) || "/";
-          raw = b.origin + dir + raw;
+        if (raw === "") {
+          raw = b.href;
+        } else if (raw.indexOf("//") === 0) {
+          raw = b.protocol + raw;
+        } else {
+          var bAuth = __urlAuthorityPrefix(b);
+          if (bAuth === null) throw new TypeError("Invalid URL: " + input);
+          if (raw.charCodeAt(0) === 47) raw = bAuth + raw;
+          else if (raw.charCodeAt(0) === 63) raw = bAuth + b.pathname + raw;
+          else if (raw.charCodeAt(0) === 35) raw = bAuth + b.pathname + b.search + raw;
+          else {
+            var dir = b.pathname.slice(0, b.pathname.lastIndexOf("/") + 1) || "/";
+            raw = bAuth + dir + raw;
+          }
         }
       }
     }
@@ -727,6 +742,7 @@
         var proto0 = raw.slice(0, ci0 + 1).toLowerCase();
         if (proto0 !== "http:" && proto0 !== "https:" && proto0 !== "ws:" && proto0 !== "wss:" && proto0 !== "file:" && proto0 !== "ftp:" && raw.charCodeAt(ci0 + 1) !== 47) {
           this._proto = proto0;
+          this._hasNetLoc = false;
           this._user = "";
           this._pass = "";
           this._hostname = "";
@@ -744,10 +760,11 @@
       throw new TypeError("Invalid URL: " + input);
     }
     this._proto = raw.slice(0, si + 1).toLowerCase();
+    this._hasNetLoc = true;
     var rest = raw.slice(si + 3);
     var pi = rest.indexOf("/");
     var authHost = pi === -1 ? rest : rest.slice(0, pi);
-    var pathRaw = pi === -1 ? "/" : rest.slice(pi);
+    var pathRaw = pi === -1 ? (__isSpecialUrlProto(this._proto) ? "/" : "") : rest.slice(pi);
     var ai = authHost.indexOf("@"), hostPort = authHost;
     this._user = "";
     this._pass = "";
@@ -775,7 +792,7 @@
       this._hostname = hostPort.toLowerCase();
       this._port = "";
     }
-    this._path = __normP(pathRaw);
+    this._path = (!__isSpecialUrlProto(this._proto) && pathRaw === "") ? "" : __normP(pathRaw);
     this._hash = hash === "#" ? "" : hash;
     this._search = search === "?" ? "" : search;
     this._sp = null;
@@ -889,6 +906,7 @@
     u._isFastUrl = false;
     Object.setPrototypeOf(u, URL.prototype);
     u._proto = proto;
+    u._hasNetLoc = true;
     u._user = "";
     u._pass = "";
     u._hostname = hostname;

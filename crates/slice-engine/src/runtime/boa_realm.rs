@@ -340,6 +340,11 @@ impl Drop for AlsSnapGuard {
     }
 }
 
+thread_local! {
+    static BOA_ALS_MASK_STACK: std::cell::RefCell<Vec<boa_engine::JsValue>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 pub(crate) struct SliceHostHooks;
 
 impl boa_engine::context::HostHooks for SliceHostHooks {
@@ -349,16 +354,16 @@ impl boa_engine::context::HostHooks for SliceHostHooks {
     }
 
     #[inline]
-    fn run_with_empty_job_context(
-        &self,
-        f: &mut dyn FnMut(&mut boa_engine::Context) -> boa_engine::JsResult<boa_engine::JsValue>,
-        context: &mut boa_engine::Context,
-    ) -> boa_engine::JsResult<boa_engine::JsValue> {
-        if !BOA_ALS_ACTIVE.with(|a| a.get()) {
-            return f(context);
+    fn enter_empty_job_context(&self) {
+        let prev = BOA_ALS_SNAP.with(|s| s.replace(boa_engine::JsValue::undefined()));
+        BOA_ALS_MASK_STACK.with(|st| st.borrow_mut().push(prev));
+    }
+
+    #[inline]
+    fn exit_empty_job_context(&self) {
+        if let Some(prev) = BOA_ALS_MASK_STACK.with(|st| st.borrow_mut().pop()) {
+            BOA_ALS_SNAP.with(|s| *s.borrow_mut() = prev);
         }
-        let _guard = AlsSnapGuard::enter(boa_engine::JsValue::undefined());
-        f(context)
     }
 
     fn make_job_callback(

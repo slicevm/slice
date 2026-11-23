@@ -466,15 +466,7 @@
     this._used = false;
   }
 
-  function __isFastHeadersObj(oh) {
-    return (
-      !oh ||
-      (typeof oh === "object" &&
-        !Array.isArray(oh) &&
-        (oh._isHeaders ||
-          !(typeof Symbol !== "undefined" && Symbol.iterator && typeof oh[Symbol.iterator] === "function")))
-    );
-  }
+  var __symIter = (typeof Symbol !== "undefined" && Symbol.iterator) || null;
 
   function Request(input, init) {
     if (input === "__SLICE_LIVE_REQ__") {
@@ -491,7 +483,7 @@
     if (
       fastUrl !== null &&
       (o.body === undefined || o.body === null || typeof o.body === "string") &&
-      __isFastHeadersObj(oh)
+      (!oh || (typeof oh === "object" && !Array.isArray(oh) && (oh._isHeaders || !(__symIter && typeof oh[__symIter] === "function"))))
     ) {
       var rawMFast = o.method;
       var fastMethod = rawMFast
@@ -641,7 +633,7 @@
     var oh = o.headers;
     if (
       (body === undefined || body === null || typeof body === "string") &&
-      __isFastHeadersObj(oh)
+      (!oh || (typeof oh === "object" && !Array.isArray(oh) && (oh._isHeaders || !(__symIter && typeof oh[__symIter] === "function"))))
     ) {
       var isInitStr = typeof body === "string";
       var rInit = new __FastRes(st, stText, isInitStr ? body : null, "");
@@ -1038,7 +1030,7 @@
         (jSt | 0) === jSt &&
         jSt >= 200 &&
         jSt <= 599 &&
-        __isFastHeadersObj(jOh)
+        (!jOh || (typeof jOh === "object" && !Array.isArray(jOh) && (jOh._isHeaders || !(__symIter && typeof jOh[__symIter] === "function"))))
       ) {
         var rJson = new __FastRes(
           jSt,

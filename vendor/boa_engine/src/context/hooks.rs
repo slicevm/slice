@@ -79,17 +79,15 @@ pub trait HostHooks {
         false
     }
 
-    /// Executes `f` with an empty host continuation snapshot when `f` was queued while
-    /// [`Self::has_active_job_context`] returned `false`, isolating pre-existing continuations from
-    /// synchronous context mutations (such as `als.enterWith(...)`) entered before microtasks drain.
+    /// Pushes an empty host continuation snapshot before resuming a pre-existing settled `Await`
+    /// continuation when [`Self::has_active_job_context`] became `true` synchronously after the
+    /// `await` suspended (e.g. `als.enterWith(...)`). Paired with [`Self::exit_empty_job_context`].
     #[inline]
-    fn run_with_empty_job_context(
-        &self,
-        f: &mut dyn FnMut(&mut Context) -> JsResult<JsValue>,
-        context: &mut Context,
-    ) -> JsResult<JsValue> {
-        f(context)
-    }
+    fn enter_empty_job_context(&self) {}
+
+    /// Restores the host continuation snapshot saved by [`Self::enter_empty_job_context`].
+    #[inline]
+    fn exit_empty_job_context(&self) {}
 
     /// [`HostCallJobCallback ( jobCallback, V, argumentsList )`][spec]
     ///

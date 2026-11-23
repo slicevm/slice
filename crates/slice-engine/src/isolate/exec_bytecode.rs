@@ -176,7 +176,13 @@ impl SliceIsolate {
                             archive.resolve_specifier_from(entry_referrer, specifier)
                     {
                         let mut active_hashes = Vec::new();
-                        self.bind_tier0_cas_entry(archive, entry, dst, &mut active_hashes)?;
+                        if !self.bind_tier0_cas_entry(archive, entry, dst, &mut active_hashes)? {
+                            return self.promote_tier0_cas_to_tier1_boa(
+                                archive,
+                                start,
+                                need_return_str,
+                            );
+                        }
                     }
                 }
                 BytecodeOp::AddNum { dst, lhs, rhs } => {
