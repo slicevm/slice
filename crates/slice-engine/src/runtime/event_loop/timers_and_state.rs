@@ -71,6 +71,7 @@ pub(super) struct CompletedAsyncFetch {
     pub(super) id: u32,
     pub(super) result: Result<String, String>,
     pub(super) violation: Option<SandboxViolation>,
+    pub(super) ocap_denial: Option<SandboxViolation>,
     pub(super) reused_conns: u64,
 }
 

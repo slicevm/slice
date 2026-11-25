@@ -38,6 +38,8 @@ pub struct SandboxEvalOptions {
     pub checkpoints: Option<bool>,
     #[serde(default)]
     pub max_checkpoints: Option<u32>,
+    #[serde(default, alias = "wallClockMs", alias = "maxWallClockMs")]
+    pub timeout_ms: Option<u64>,
 }
 
 /// Structured result returned by `Slice.evalSandbox(code, opts)` and `slice mcp` `slice_eval_ts`.
@@ -52,6 +54,8 @@ pub struct SandboxEvalOutcome {
     pub return_json: Option<String>,
     pub error: Option<String>,
     pub violation: Option<String>,
+    #[serde(default)]
+    pub denied_capabilities: Vec<String>,
     pub fuel_used: u64,
     pub memory_used_bytes: usize,
     pub peak_memory_bytes: usize,
@@ -285,6 +289,14 @@ impl SliceIsolate {
         let mut child_iso =
             SliceIsolate::spawn(child_tenant.clone(), 99, child_caps, child_fuel, child_mem);
         child_iso.capture_return_json = true;
+        let effective_timeout = match (self.max_wall_clock_ms, opts.timeout_ms) {
+            (Some(p), Some(c)) => Some(p.min(c)),
+            (Some(p), None) => Some(p),
+            (None, Some(c)) => Some(c),
+            (None, None) => None,
+        };
+        child_iso.set_wall_clock_limit_ms(effective_timeout);
+        child_iso.interrupt_flag = self.interrupt_flag.clone();
         if let Some(seed) = opts.deterministic_seed.or(self.deterministic_seed) {
             child_iso.set_deterministic_seed(Some(seed));
         }
@@ -375,15 +387,6 @@ impl SliceIsolate {
                         .memory_used_bytes
                         .saturating_sub(persisted_delta.unsigned_abs())
                         .max(parent_baseline);
-                } else {
-                    let net_mem_used = metrics.memory_used_bytes.saturating_sub(4096);
-                    if net_mem_used > 0 && pre_child_kv_bytes == 0 && pre_shared_vfs_bytes == 0 {
-                        self.compartment.memory_used_bytes = self
-                            .compartment
-                            .memory_used_bytes
-                            .saturating_add(net_mem_used)
-                            .min(self.compartment.memory_limit_bytes);
-                    }
                 }
                 let is_uncaught = metrics.return_value.starts_with("Uncaught ");
                 let nonzero_exit = metrics.exit_code.is_some_and(|code| code != 0);
@@ -411,6 +414,7 @@ impl SliceIsolate {
                     return_json,
                     error,
                     violation: None,
+                    denied_capabilities: metrics.denied_capabilities,
                     fuel_used: metrics.fuel_consumed,
                     memory_used_bytes: metrics.memory_used_bytes,
                     peak_memory_bytes: metrics.memory_used_bytes,
@@ -446,6 +450,7 @@ impl SliceIsolate {
                     return_json: None,
                     error: None,
                     violation: Some(violation.to_string()),
+                    denied_capabilities: std::mem::take(&mut child_iso.denied_capabilities),
                     fuel_used: child_iso.compartment.fuel_consumed,
                     memory_used_bytes: child_iso.compartment.memory_used_bytes,
                     peak_memory_bytes: child_iso.compartment.memory_used_bytes,

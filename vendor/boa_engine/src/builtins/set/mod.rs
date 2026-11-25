@@ -286,7 +286,7 @@ impl Set {
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-set.prototype.add
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/add
-    pub(crate) fn add(this: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    pub(crate) fn add(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         // 1. Let S be the this value.
         // 2. Perform ? RequireInternalSlot(S, [[SetData]]).
         let set = this
@@ -303,7 +303,15 @@ impl Set {
         //   a. If e is not empty and SameValueZero(e, value) is true, then
         //     i. Return S.
         // 5. Append value to S.[[SetData]].
-        set.borrow_mut().data_mut().add(value.clone());
+        let is_new = {
+            let mut s = set.borrow_mut();
+            let prev_len = s.data().len();
+            s.data_mut().add(value.clone());
+            s.data().len() > prev_len
+        };
+        if is_new {
+            context.charge_heap_bytes(32)?;
+        }
 
         Ok(this.clone())
         // 6. Return S.

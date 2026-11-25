@@ -280,6 +280,20 @@ fn parse_sandbox_eval_options_arg(
             }
         }
 
+        for tk in [
+            js_string!("timeoutMs"),
+            js_string!("wallClockMs"),
+            js_string!("maxWallClockMs"),
+        ] {
+            if obj.has_own_property(tk.clone(), context)? {
+                let v = obj.get(tk, context)?;
+                if let Some(n) = v.as_number().filter(|n| n.is_finite()) {
+                    opts.timeout_ms = Some(n.max(0.0) as u64);
+                    break;
+                }
+            }
+        }
+
         let (allow_read, deny_read) = read_js_string_array_prop(
             &obj,
             &[
@@ -385,6 +399,13 @@ fn sandbox_outcome_to_js_object(
         Some(s) => BoaVal::from(js_string!(s)),
         None => BoaVal::null(),
     };
+    let denied_caps_arr = boa_engine::object::builtins::JsArray::from_iter(
+        outcome
+            .denied_capabilities
+            .into_iter()
+            .map(|entry| BoaVal::from(js_string!(entry))),
+        context,
+    );
     let exit_code_val = match outcome.exit_code {
         Some(c) => BoaVal::from(c),
         None => BoaVal::null(),
@@ -404,6 +425,7 @@ fn sandbox_outcome_to_js_object(
         .property(js_string!("returnJson"), ret_json_val, attr)
         .property(js_string!("error"), err_val, attr)
         .property(js_string!("violation"), viol_val, attr)
+        .property(js_string!("deniedCapabilities"), denied_caps_arr, attr)
         .property(js_string!("fuelUsed"), outcome.fuel_used as f64, attr)
         .property(
             js_string!("memoryUsedBytes"),

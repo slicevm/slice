@@ -120,6 +120,9 @@ impl SliceIsolate {
         need_return_str: bool,
     ) -> Result<(u64, u64, String), SandboxViolation> {
         let start = Instant::now();
+        self.active_wall_deadline = self
+            .max_wall_clock_ms
+            .map(|ms| start + std::time::Duration::from_millis(ms));
         let _pkru_guard = self.compartment.pkey_domain.enter_domain();
 
         // Deferred compile-time SyntaxError container (`SLICEERR` + exact 1-based line/col message)
@@ -435,6 +438,7 @@ impl SliceIsolate {
             restore_time_ns: self.restore_time_ns,
             exit_code: self.last_exit_code,
             process_exited: self.last_process_exited,
+            denied_capabilities: self.denied_capabilities.clone(),
         })
     }
 

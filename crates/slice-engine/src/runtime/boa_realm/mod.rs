@@ -20,8 +20,8 @@ pub(crate) use tls_state::{
     ActiveBoaHttpReq, ActiveCasArchiveGuard, BOA_ACTIVE_CAPS, BOA_ACTIVE_CAS,
     BOA_ACTIVE_SOURCE_FUSED_SPEC, BOA_ACTIVE_SOURCE_PTR_LEN, BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE,
     BOA_ALS_SNAP, BOA_CHECKPOINT_CAP, BOA_CHECKPOINT_STATS, BOA_CONTEXT_POOL, BOA_CUSTOM_ARGV,
-    BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS,
-    BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES,
+    BOA_DENIED_CAPABILITIES, BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP,
+    BOA_EXEC_BINS, BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES,
     BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_LAST_EXIT_CODE, BOA_NET_HOSTS,
     BOA_PROCESS_EXIT, BOA_SES_BASELINE_SIGS, BOA_SES_INTL_SIG_PAIR, BOA_STDOUT, BOA_TRACE_ENABLED,
     BOA_TRACE_EVENTS, BOA_UNCAUGHT_ERROR, BOA_UNHANDLED_REJECTIONS, BOA_VFS_OWNER_TENANT,
@@ -34,7 +34,8 @@ pub(crate) use tls_state::{
     REALM_CTL_RESET_FS_WATCHERS, REALM_CTL_RESET_MT, REALM_CTL_RESET_WU, REALM_CTL_SET_DET_MODE,
     REALM_CTL_SET_NEXT_TICK, REALM_CTL_SYNC_ENV, SES_INTRINSIC_COUNT, SesIntlSigDelta, SesProtoSig,
     WarmBoaRealm, has_process_exit, has_uncaught_error, mark_exec_dirty, mark_subsystem_dirty,
-    set_child_proc_violation, set_last_exit_code, set_process_exit, set_uncaught_error,
+    record_boa_ocap_denial, set_child_proc_violation, set_last_exit_code, set_process_exit,
+    set_uncaught_error,
 };
 pub use trace_and_sourcemap::ChromeTraceEvent;
 pub(crate) use trace_and_sourcemap::{

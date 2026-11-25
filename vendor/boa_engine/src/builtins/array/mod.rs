@@ -334,6 +334,7 @@ impl Array {
                 .with_message("array exceeded max size")
                 .into());
         }
+        context.charge_heap_bytes(96)?;
 
         // Fast path:
         if prototype.is_none() {
@@ -635,6 +636,8 @@ impl Array {
             //     ...
             //     f. Set k to k + 1.
             for k in 0..len {
+                context.charge_fuel(1)?;
+                context.charge_heap_bytes(16)?;
                 // a. Let Pk be ! ToString(𝔽(k)).
                 // b. Let kValue be ? Get(arrayLike, Pk).
                 let k_value = array_like.get(k, context)?;
@@ -679,6 +682,8 @@ impl Array {
         //     ...
         //     ix. Set k to k + 1.
         for k in 0..9_007_199_254_740_991_u64 {
+            context.charge_fuel(1)?;
+            context.charge_heap_bytes(16)?;
             // iii. Let next be ? IteratorStepValue(iteratorRecord).
             let Some(next) = iterator_record.step_value(context)? else {
                 // iv. If next is done, then
@@ -2774,12 +2779,15 @@ impl Array {
         F: Fn(&JsValue, &JsValue, &mut Context) -> JsResult<Ordering>,
     {
         // 1. Let items be a new empty List.
-        // doesn't matter if it clamps since it's just a best-effort optimization
-        let mut items = Vec::with_capacity(len as usize);
+        // Charge proportional heap bytes before allocating `items` to bound OOM DoS.
+        let est_bytes = (len as usize).saturating_mul(size_of::<JsValue>());
+        context.charge_heap_bytes(est_bytes)?;
+        let mut items = Vec::with_capacity((len as usize).min(4096));
 
         // 2. Let k be 0.
         // 3. Repeat, while k < len,
         for i in 0..len {
+            context.charge_fuel(1)?;
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. If holes is skip-holes, then
             let read = if skip_holes {
@@ -3476,6 +3484,7 @@ fn compare_array_elements(
     comparefn: Option<&JsObject>,
     context: &mut Context,
 ) -> JsResult<Ordering> {
+    context.charge_fuel(1)?;
     match (x.is_undefined(), y.is_undefined()) {
         // 1. If x and y are both undefined, return +0𝔽.
         (true, true) => return Ok(Ordering::Equal),

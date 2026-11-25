@@ -1,8 +1,9 @@
 //! `process.env` OCap Accessors, Event-Loop Timer Scheduling, HTTP Context Probes, and `process` Control.
 
-use crate::bindings::helpers::record_boa_violation_once;
+use crate::bindings::helpers::ocap_denied_js_error;
 use crate::boa_realm::{
     BOA_ACTIVE_TENANT, BOA_ENV_MAP, BOA_HTTP_REQ, BOA_KV_MEM_BUDGET, BOA_WAIT_UNTIL_COUNT,
+    record_boa_ocap_denial,
 };
 use crate::event_loop::{
     cancel_timer, refresh_timer, schedule_immediate, schedule_timer, set_timer_ref,
@@ -27,11 +28,13 @@ pub(super) fn register_env_timers_process_host_functions(ctx: &mut boa_engine::C
                 Some(v) => Ok(BoaVal::from(js_string!(v))),
                 None => {
                     let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-                    record_boa_violation_once(SandboxViolation::EnvAccessDenied {
+                    let violation = SandboxViolation::EnvAccessDenied {
                         tenant_id: tenant,
                         key,
-                    });
-                    Ok(BoaVal::from(js_string!("")))
+                    };
+                    let msg = violation.to_string();
+                    record_boa_ocap_denial(violation);
+                    Err(ocap_denied_js_error("ERR_SLICE_ENV_DENIED", &msg, context))
                 }
             }
         }),

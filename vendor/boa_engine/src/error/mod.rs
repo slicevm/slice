@@ -314,6 +314,20 @@ pub enum RuntimeLimitError {
     /// Error for reaching the maximum stack size
     #[error("reached the maximum stack size on this execution")]
     StackSize,
+    /// Error for exceeding the configured guest heap memory ceiling.
+    #[error("exceeded guest heap memory limit ({requested} > {limit} bytes)")]
+    MemoryLimit {
+        /// Cumulative bytes requested/allocated.
+        requested: usize,
+        /// Configured heap byte ceiling.
+        limit: usize,
+    },
+    /// Error for exceeding the configured wall-clock execution deadline.
+    #[error("exceeded maximum wall-clock execution time")]
+    WallClock,
+    /// Error when execution was interrupted externally via an interrupt handle.
+    #[error("execution interrupted by host")]
+    Interrupted,
 }
 
 /// Internal panic error.

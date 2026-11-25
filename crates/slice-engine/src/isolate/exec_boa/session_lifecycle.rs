@@ -5,19 +5,19 @@ use super::{
 };
 use crate::boa_realm::{
     BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_CHECKPOINT_CAP, BOA_CHECKPOINT_STATS, BOA_CONTEXT_POOL,
-    BOA_CUSTOM_ARGV, BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP,
-    BOA_EXEC_BINS, BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_RES,
-    BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_LAST_EXIT_CODE, BOA_NET_HOSTS,
-    BOA_PROCESS_EXIT, BOA_SES_INTL_SIG_PAIR, BOA_STDOUT, BOA_UNCAUGHT_ERROR,
-    BOA_UNHANDLED_REJECTIONS, BOA_VFS_OWNER_TENANT, BOA_VFS_STATE, BOA_VIOLATION,
-    BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, CHECKPOINT_SLAB, DIRTY_FETCH_MOCK, DIRTY_SOCKETS,
-    DIRTY_VFS, DIRTY_WASM, DIRTY_WEBSOCKET, DIRTY_WORKERS, EXEC_DIRTY_ARGV, EXEC_DIRTY_CHILD_PROC,
-    EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS, EXEC_DIRTY_UNCAUGHT, REALM_CTL_RESET_FS_WATCHERS,
-    REALM_CTL_RESET_WU, REALM_CTL_SET_DET_MODE, REALM_CTL_SET_NEXT_TICK, REALM_CTL_SYNC_ENV,
-    WarmBoaRealm, acquire_warm_boa_realm, call_realm_ctl, create_bare_boa_realm,
-    create_warm_boa_realm, ensure_realm_shards, ensure_vfs_tenant_affinity,
-    first_ses_proto_sig_mismatch_idx, mark_exec_dirty, release_prewarmed_boa_realm,
-    try_acquire_pooled_boa_realm, vfs_owner_namespace,
+    BOA_CUSTOM_ARGV, BOA_DENIED_CAPABILITIES, BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS,
+    BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, BOA_EXEC_DIRTY, BOA_FETCH_MOCKS,
+    BOA_FUEL_BUDGET, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION,
+    BOA_LAST_EXIT_CODE, BOA_NET_HOSTS, BOA_PROCESS_EXIT, BOA_SES_INTL_SIG_PAIR, BOA_STDOUT,
+    BOA_UNCAUGHT_ERROR, BOA_UNHANDLED_REJECTIONS, BOA_VFS_OWNER_TENANT, BOA_VFS_STATE,
+    BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, CHECKPOINT_SLAB, DIRTY_FETCH_MOCK,
+    DIRTY_SOCKETS, DIRTY_VFS, DIRTY_WASM, DIRTY_WEBSOCKET, DIRTY_WORKERS, EXEC_DIRTY_ARGV,
+    EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS, EXEC_DIRTY_UNCAUGHT,
+    REALM_CTL_RESET_FS_WATCHERS, REALM_CTL_RESET_WU, REALM_CTL_SET_DET_MODE,
+    REALM_CTL_SET_NEXT_TICK, REALM_CTL_SYNC_ENV, WarmBoaRealm, acquire_warm_boa_realm,
+    call_realm_ctl, create_bare_boa_realm, create_warm_boa_realm, ensure_realm_shards,
+    ensure_vfs_tenant_affinity, first_ses_proto_sig_mismatch_idx, mark_exec_dirty,
+    release_prewarmed_boa_realm, try_acquire_pooled_boa_realm, vfs_owner_namespace,
 };
 use crate::boacas::{
     BOACAS_FLAG_HAS_KV_SANDBOX, BOACAS_FLAG_HAS_SEMVER_FAST, BOACAS_FLAG_HAS_WORKER,
@@ -90,6 +90,7 @@ fn scrub_after_prewarm(realm: &mut WarmBoaRealm, prewarm_flags: (bool, bool, boo
     BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
     BOA_UNCAUGHT_ERROR.with(|e| *e.borrow_mut() = None);
     BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
+    BOA_DENIED_CAPABILITIES.with(|d| d.borrow_mut().clear());
     BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
     BOA_VFS_STATE.with(|v| v.borrow_mut().clear());
     BOA_VFS_OWNER_TENANT.with(|o| o.borrow_mut().clear());
@@ -340,6 +341,7 @@ impl SliceIsolate {
             }
             if (stale_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
                 BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
+                BOA_DENIED_CAPABILITIES.with(|d| d.borrow_mut().clear());
             }
             if (stale_exec_dirty & EXEC_DIRTY_ARGV) != 0 {
                 BOA_CUSTOM_ARGV.with(|a| *a.borrow_mut() = None);
@@ -490,12 +492,15 @@ impl SliceIsolate {
             .compartment
             .fuel_limit
             .saturating_sub(self.compartment.fuel_consumed);
+        let baseline = self.compartment.memory_used_bytes.min(4096);
+        let remaining_heap = self.compartment.memory_limit_bytes.saturating_sub(baseline);
         BOA_FUEL_BUDGET.with(|f| f.set((0, remaining_fuel.max(1))));
-        realm
-            .ctx
-            .runtime_limits_mut()
-            .set_loop_iteration_limit(remaining_fuel);
-        realm.ctx.runtime_limits_mut().set_recursion_limit(512);
+        let limits = realm.ctx.runtime_limits_mut();
+        limits.set_loop_iteration_limit(remaining_fuel);
+        limits.set_heap_bytes_limit(remaining_heap);
+        limits.set_wall_clock_limit_ms(self.max_wall_clock_ms);
+        limits.set_recursion_limit(512);
+        realm.ctx.set_interrupt_flag(self.interrupt_flag.clone());
     }
 
     #[inline]

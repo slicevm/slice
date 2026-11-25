@@ -6,6 +6,7 @@ use crate::bindings::fs::classify_and_cow::{
     normalize_host_readlink_target, resolve_effective_vfs_path, resolve_or_js_err,
 };
 use crate::bindings::fs::state::{PathEntry, VfsEntryKind, dir_child_prefix, is_vfs_root_path};
+use crate::bindings::helpers::{last_ocap_violation_message, ocap_denied_js_error};
 use crate::boa_realm::{
     BOA_DET_STATE, BOA_VFS_STATE, check_boa_fs_read_ocap, check_boa_fs_write_ocap,
     has_boa_fs_read_ocap, norm_vfs_path,
@@ -27,19 +28,31 @@ pub(super) fn register_fs_path_dir_stat_host_functions(ctx: &mut boa_engine::Con
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             if !check_boa_fs_read_ocap(&path) {
-                return Ok(BoaVal::from(false));
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             let allow_host = !is_host_unc_blocked(&path);
             let resolved = match resolve_effective_vfs_path(&path, true, allow_host) {
                 Ok(res) => res,
                 Err(SymlinkResolveError::ReadOcapDenied(denied)) => {
                     let _ = check_boa_fs_read_ocap(&denied);
-                    return Ok(BoaVal::from(false));
+                    return Err(ocap_denied_js_error(
+                        "ERR_SLICE_FS_DENIED",
+                        last_ocap_violation_message(),
+                        context,
+                    ));
                 }
                 Err(SymlinkResolveError::Loop) => return Ok(BoaVal::from(false)),
             };
             if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
-                return Ok(BoaVal::from(false));
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             if resolved.has_file_ancestor {
                 return Ok(BoaVal::from(false));
@@ -64,15 +77,27 @@ pub(super) fn register_fs_path_dir_stat_host_functions(ctx: &mut boa_engine::Con
                 .unwrap_or_default();
             let recursive = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(false);
             if !check_boa_fs_write_ocap(&path) {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             let allow_host = !is_host_unc_blocked(&path);
             let Some(resolved) = resolve_or_js_err(&path, recursive, allow_host, "mkdir", context)?
             else {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             };
             if resolved.traversed_symlink && !check_boa_fs_write_ocap(&resolved.norm) {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             if resolved.has_file_ancestor {
                 return Ok(BoaVal::from(-20));
@@ -106,15 +131,27 @@ pub(super) fn register_fs_path_dir_stat_host_functions(ctx: &mut boa_engine::Con
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             if !check_boa_fs_read_ocap(&path) {
-                return Ok(BoaVal::from(js_string!("[]")));
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             let allow_host = !is_host_unc_blocked(&path);
             let Some(resolved) = resolve_or_js_err(&path, true, allow_host, "scandir", context)?
             else {
-                return Ok(BoaVal::from(js_string!("[]")));
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             };
             if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
-                return Ok(BoaVal::from(js_string!("[]")));
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             let norm_dir = resolved.norm;
             let prefix = dir_child_prefix(&norm_dir);
@@ -173,17 +210,29 @@ pub(super) fn register_fs_path_dir_stat_host_functions(ctx: &mut boa_engine::Con
                 .unwrap_or_default();
             let follow_final = args.get(1).and_then(|v| v.as_boolean()).unwrap_or(true);
             if !check_boa_fs_read_ocap(&path) {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             let allow_host = !is_host_unc_blocked(&path);
             let syscall = if follow_final { "stat" } else { "lstat" };
             let Some(resolved) =
                 resolve_or_js_err(&path, follow_final, allow_host, syscall, context)?
             else {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             };
             if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             if resolved.has_file_ancestor {
                 return Ok(BoaVal::null());
@@ -275,15 +324,27 @@ pub(super) fn register_fs_path_dir_stat_host_functions(ctx: &mut boa_engine::Con
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             if !check_boa_fs_read_ocap(&path) {
-                return Ok(BoaVal::from(0));
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             let allow_host = !is_host_unc_blocked(&path);
             let Some(resolved) = resolve_or_js_err(&path, true, allow_host, "stat", context)?
             else {
-                return Ok(BoaVal::from(0));
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             };
             if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
-                return Ok(BoaVal::from(0));
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             if resolved.has_file_ancestor {
                 return Ok(BoaVal::from(-1.0));
@@ -342,19 +403,31 @@ pub(super) fn register_fs_path_dir_stat_host_functions(ctx: &mut boa_engine::Con
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             if !check_boa_fs_read_ocap(&path) {
-                return Ok(BoaVal::from(false));
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             let allow_host = !is_host_unc_blocked(&path);
             let resolved = match resolve_effective_vfs_path(&path, true, allow_host) {
                 Ok(res) => res,
                 Err(SymlinkResolveError::ReadOcapDenied(denied)) => {
                     let _ = check_boa_fs_read_ocap(&denied);
-                    return Ok(BoaVal::from(false));
+                    return Err(ocap_denied_js_error(
+                        "ERR_SLICE_FS_DENIED",
+                        last_ocap_violation_message(),
+                        context,
+                    ));
                 }
                 Err(SymlinkResolveError::Loop) => return Ok(BoaVal::from(false)),
             };
             if resolved.traversed_symlink && !check_boa_fs_read_ocap(&resolved.norm) {
-                return Ok(BoaVal::from(false));
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             if resolved.has_file_ancestor {
                 return Ok(BoaVal::from(false));
@@ -393,16 +466,28 @@ pub(super) fn register_fs_path_dir_stat_host_functions(ctx: &mut boa_engine::Con
             }
             let full_path = format!("{}{}", prefix, suffix);
             if !check_boa_fs_write_ocap(&full_path) {
-                return Ok(BoaVal::from(js_string!("")));
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             let allow_host = !is_host_unc_blocked(&full_path);
             let Some(resolved) =
                 resolve_or_js_err(&full_path, false, allow_host, "mkdtemp", context)?
             else {
-                return Ok(BoaVal::from(js_string!("")));
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             };
             if resolved.traversed_symlink && !check_boa_fs_write_ocap(&resolved.norm) {
-                return Ok(BoaVal::from(js_string!("")));
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             let ret_path = if resolved.traversed_symlink {
                 resolved.norm.clone()

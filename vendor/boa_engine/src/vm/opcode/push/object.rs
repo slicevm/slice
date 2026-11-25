@@ -1,5 +1,5 @@
 use crate::{
-    Context,
+    Context, JsResult,
     builtins::OrdinaryObject,
     vm::opcode::{Operation, RegisterOperand},
 };
@@ -13,13 +13,15 @@ pub(crate) struct StoreEmptyObject;
 
 impl StoreEmptyObject {
     #[inline(always)]
-    pub(crate) fn operation(dst: RegisterOperand, context: &mut Context) {
+    pub(crate) fn operation(dst: RegisterOperand, context: &mut Context) -> JsResult<()> {
+        context.charge_heap_bytes(96)?;
         let o = context
             .intrinsics()
             .templates()
             .ordinary_object()
             .create(OrdinaryObject, Vec::default());
         context.vm.set_register(dst.into(), o.into());
+        Ok(())
     }
 }
 

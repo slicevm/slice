@@ -255,7 +255,7 @@ impl Map {
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-map.prototype.set
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/set
-    pub(crate) fn set(this: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    pub(crate) fn set(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         let value = args.get_or_undefined(1);
 
         // 1. Let M be the this value.
@@ -275,7 +275,15 @@ impl Map {
         //       i. Set p.[[Value]] to value.
         // 5. Let p be the Record { [[Key]]: key, [[Value]]: value }.
         // 6. Append p to M.[[MapData]].
-        map.borrow_mut().data_mut().insert(key, value.clone());
+        let is_new = {
+            let mut m = map.borrow_mut();
+            let prev_len = m.data().len();
+            m.data_mut().insert(key, value.clone());
+            m.data().len() > prev_len
+        };
+        if is_new {
+            context.charge_heap_bytes(48)?;
+        }
 
         // 7. Return M.
         Ok(this.clone())

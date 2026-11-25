@@ -1,6 +1,9 @@
 //! Shared Buffer Extraction, JS TypedArray Builders, Crypto Helpers, and Sandbox Budget Accounting.
 
-use crate::boa_realm::{BOA_ACTIVE_TENANT, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_VIOLATION};
+use crate::boa_realm::{
+    BOA_ACTIVE_TENANT, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION,
+    BOA_VIOLATION,
+};
 use crate::intrinsics::{
     hmac_md5_bytes, hmac_sha1_bytes, hmac_sha256_bytes, hmac_sha384_bytes, hmac_sha512_bytes,
     md5_bytes, sha1_bytes, sha256_bytes, sha384_bytes, sha512_bytes,
@@ -608,4 +611,41 @@ pub(crate) fn active_tenant_id_or_default() -> String {
             b.clone()
         }
     })
+}
+
+/// Returns the formatted message of the most recent catchable OCap capability denial recorded on
+/// this thread (e.g. `FsReadDenied`, `FsWriteDenied`, `NetAccessDenied`, `ExecDenied`).
+#[cold]
+#[inline(never)]
+pub(crate) fn last_ocap_violation_message() -> String {
+    BOA_LAST_CHILD_PROC_VIOLATION.with(|v| {
+        v.borrow()
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "Sandbox capability denied".to_string())
+    })
+}
+
+/// Builds a catchable JS `Error` with a stable `err.code` property (such as `ERR_SLICE_FS_DENIED`,
+/// `ERR_SLICE_NET_DENIED`, `ERR_SLICE_EXEC_DENIED`, `ERR_SLICE_ENV_DENIED`, or
+/// `ERR_SLICE_CHECKPOINT_DENIED`) for OCap capability denials (`#179`).
+#[cold]
+#[inline(never)]
+pub(crate) fn ocap_denied_js_error(
+    code: &str,
+    message: impl AsRef<str>,
+    context: &mut boa_engine::Context,
+) -> boa_engine::JsError {
+    use boa_engine::{JsNativeError, JsValue, js_string};
+
+    let err_obj = JsNativeError::error()
+        .with_message(message.as_ref().to_owned())
+        .into_opaque(context);
+    let _ = err_obj.set(
+        js_string!("code"),
+        JsValue::from(js_string!(code)),
+        false,
+        context,
+    );
+    boa_engine::JsError::from_opaque(err_obj.into())
 }

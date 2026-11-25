@@ -47,10 +47,12 @@ interface SandboxEvalOptions {
     checkpoints?: boolean;
     /** Maximum number of guest checkpoints allowed during evaluation (attenuated by parent) */
     maxCheckpoints?: number;
+    /** Optional wall-clock execution deadline in milliseconds (clamped by parent; aborts with WallClockExceeded) */
+    timeoutMs?: number;
 }
 
 interface SandboxEvalOutcome {
-    /** true if execution succeeded without any OCap, SES, Fuel, Memory, uncaught JS error, or non-zero exitCode */
+    /** true if execution succeeded without any OCap, SES, Fuel, Memory, WallClock, uncaught JS error, or non-zero exitCode */
     ok: boolean;
     /** Explicit exit status set via `process.exit(code)` or `process.exitCode`, otherwise `null` */
     exitCode: number | null;
@@ -66,7 +68,7 @@ interface SandboxEvalOutcome {
     fuelUsed: number;
     /** Memory bytes used by the child */
     memoryUsedBytes: number;
-    /** Peak memory bytes used by the child */
+    /** Peak memory bytes used by the child (including ordinary JS object/array/Map/Set allocations) */
     peakMemoryBytes: number;
     /** Isolate instantiation time in nanoseconds */
     spawnTimeNs: number;
@@ -82,12 +84,19 @@ interface SandboxEvalOutcome {
     restoresPerformed: number;
     /** Total wall-clock time spent inside `Slice.restore()` in nanoseconds */
     restoreTimeNs: number;
-    /** Human-readable sandbox violation message if an OCap/SES/Fuel/Memory trap occurred, otherwise `null` */
+    /** Human-readable sandbox violation message if an OCap/SES/Fuel/Memory/WallClock trap occurred, otherwise `null` */
     violation: string | null;
+    /** Audit log of denied OCap capability attempts (including denials caught by guest try/catch or .catch()) */
+    deniedCapabilities: string[];
     /** Uncaught JavaScript exception or SyntaxError message if `ok === false` due to a JS error, otherwise `null` */
     error: string | null;
 }
 ```
+
+### 1.1b Catchable OCap Capability Denials vs. Uncatchable Resource/Integrity Traps
+Slice distinguishes between **capability denials** and **resource/integrity traps**:
+- **OCap Capability Denials** (`node:fs`, `fetch()`, `node:child_process`, `env()`, `Slice.checkpoint()` when disabled) throw/reject a catchable JS `Error` with a stable `err.code` (`ERR_SLICE_FS_DENIED`, `ERR_SLICE_NET_DENIED`, `ERR_SLICE_EXEC_DENIED`, `ERR_SLICE_ENV_DENIED`, `ERR_SLICE_CHECKPOINT_DENIED`). If caught by guest code, execution continues with fallback logic while every denied attempt is recorded in `outcome.deniedCapabilities` (and `SliceIsolate::denied_capabilities()`). If uncaught (including unhandled `fetch()` rejections), the denial is promoted to `outcome.violation` (`ok: false`).
+- **Resource, Integrity, and Exfiltration Traps** (`CpuFuelExhausted`, `MemoryCeilingExceeded`, `WallClockExceeded`, `ExecutionInterrupted`, `IntrinsicMutationBlocked`, `EgressSecretLeakBlocked`, SSRF Cloud Metadata Shield, and `maxCheckpoints` ceilings) are **always uncatchable immediate-abort traps** that bypass guest `try/catch` blocks.
 
 ### 1.2 How Strict Capability Attenuation Works (No Privilege Escalation)
 A child sandbox spawned via `Slice.evalSandbox` can **never** escalate privileges beyond its parent isolate:

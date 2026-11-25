@@ -1,4 +1,3 @@
-use crate::error::RuntimeLimitError;
 use crate::{Context, JsResult, vm::opcode::Operation};
 
 /// `IncrementLoopIteration` implements the Opcode Operation for `Opcode::IncrementLoopIteration`.
@@ -11,10 +10,7 @@ pub(crate) struct IncrementLoopIteration;
 impl IncrementLoopIteration {
     #[inline(always)]
     pub(crate) fn operation((): (), context: &mut Context) -> JsResult<()> {
-        if !context.vm.runtime_limits.check_and_increment_loop_iteration() {
-            return Err(RuntimeLimitError::LoopIteration.into());
-        }
-        Ok(())
+        context.charge_fuel(1)
     }
 }
 

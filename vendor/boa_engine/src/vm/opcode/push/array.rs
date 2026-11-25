@@ -14,13 +14,15 @@ pub(crate) struct StoreNewArray;
 
 impl StoreNewArray {
     #[inline(always)]
-    pub(crate) fn operation(array: RegisterOperand, context: &mut Context) {
+    pub(crate) fn operation(array: RegisterOperand, context: &mut Context) -> JsResult<()> {
+        context.charge_heap_bytes(96)?;
         let value = context
             .intrinsics()
             .templates()
             .array()
             .create(Array, Vec::from([JsValue::new(0)]));
         context.vm.set_register(array.into(), value.into());
+        Ok(())
     }
 }
 
@@ -51,6 +53,7 @@ impl PushValueToArray {
             .js_expect("should be an object")?;
 
         // Fast path: push directly to dense indexed storage.
+        context.charge_heap_bytes(16)?;
         {
             let mut o_mut = o.borrow_mut();
             let len = o_mut.properties().storage[0].as_i32();
@@ -126,6 +129,8 @@ impl PushIteratorToArray {
             .pop()
             .js_expect("iterator stack should have at least an iterator")?;
         while let Some(next) = iterator.step_value(context)? {
+            context.charge_fuel(1)?;
+            context.charge_heap_bytes(16)?;
             Array::push(&array, &[next], context)?;
         }
         Ok(())
