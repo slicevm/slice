@@ -1157,21 +1157,48 @@ impl RegExp {
 
         // 13.b. Let inputIndex be the index into input of the character that was obtained from element lastIndex of S.
         // 13.c. Let r be matcher(input, inputIndex).
-        let r: Option<regress::Match> = match (full_unicode, input.as_str().variant()) {
-            (true | false, JsStrVariant::Latin1(_)) => {
-                // TODO: Currently regress does not support latin1 encoding.
-                let input = input.to_vec();
+        let max_regex_steps = context
+            .runtime_limits()
+            .remaining_loop_iterations()
+            .saturating_mul(16);
+        let remaining_wall_ns = context.runtime_limits().remaining_wall_clock_ns();
+        let interrupt_flag = context.vm.interrupt_flag.clone();
+        let (r, consumed_steps, abort_reason) = regress::budget::with_step_budget(
+            max_regex_steps,
+            remaining_wall_ns,
+            interrupt_flag,
+            || match (full_unicode, input.as_str().variant()) {
+                (true | false, JsStrVariant::Latin1(_)) => {
+                    // TODO: Currently regress does not support latin1 encoding.
+                    let input = input.to_vec();
 
-                // NOTE: We can use the faster ucs2 variant since there will never be two byte unicode.
-                matcher.find_from_ucs2(&input, last_index as usize).next()
-            }
-            (true, JsStrVariant::Utf16(input)) => {
-                matcher.find_from_utf16(input, last_index as usize).next()
-            }
-            (false, JsStrVariant::Utf16(input)) => {
-                matcher.find_from_ucs2(input, last_index as usize).next()
-            }
-        };
+                    // NOTE: We can use the faster ucs2 variant since there will never be two byte unicode.
+                    matcher.find_from_ucs2(&input, last_index as usize).next()
+                }
+                (true, JsStrVariant::Utf16(input)) => {
+                    matcher.find_from_utf16(input, last_index as usize).next()
+                }
+                (false, JsStrVariant::Utf16(input)) => {
+                    matcher.find_from_ucs2(input, last_index as usize).next()
+                }
+            },
+        );
+        if let Some(reason) = abort_reason {
+            return match reason {
+                regress::budget::RegressAbort::Fuel => {
+                    Err(crate::error::RuntimeLimitError::LoopIteration.into())
+                }
+                regress::budget::RegressAbort::WallClock => {
+                    Err(crate::error::RuntimeLimitError::WallClock.into())
+                }
+                regress::budget::RegressAbort::Interrupted => {
+                    Err(crate::error::RuntimeLimitError::Interrupted.into())
+                }
+            };
+        }
+        if consumed_steps > 0 {
+            context.charge_fuel((consumed_steps / 16).max(1))?;
+        }
 
         let Some(match_value) = r else {
             // d. If r is failure, then

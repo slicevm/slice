@@ -1531,3 +1531,141 @@ fn test_issue_180_builtin_fuel_memory_wallclock_and_interrupt_metering() {
         int_err
     );
 }
+
+#[test]
+fn test_issue_183_regex_backtracking_fuel_wallclock_and_interrupt() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "issue-183-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        100_000_000,
+        32 * 1024 * 1024,
+    );
+
+    // 1. Fuel limit bounds catastrophic backtracking and cannot be caught by guest try/catch
+    let t0 = std::time::Instant::now();
+    let fuel_trap = parent.eval_sandbox(
+        r#"
+        try {
+            /^(a+)+$/.test("a".repeat(28) + "b");
+        } catch (_e) {
+            console.log("ESCAPED_REGEX_FUEL");
+        }
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(1_000),
+            ..Default::default()
+        },
+    );
+    assert!(
+        t0.elapsed().as_millis() < 500,
+        "regex fuel trap took too long: {:?}",
+        t0.elapsed()
+    );
+    assert!(
+        !fuel_trap.ok
+            && fuel_trap.stdout.is_empty()
+            && fuel_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("fuel limit"),
+        "expected uncatchable CpuFuelExhausted on ReDoS, got: {:?}",
+        fuel_trap
+    );
+
+    // 2. Wall-clock deadline (`timeoutMs`) bounds catastrophic backtracking even with huge fuel
+    let t1 = std::time::Instant::now();
+    let wall_trap = parent.eval_sandbox(
+        r#"/^(a+)+$/.test("a".repeat(28) + "b");"#,
+        SandboxEvalOptions {
+            fuel: Some(50_000_000),
+            timeout_ms: Some(80),
+            ..Default::default()
+        },
+    );
+    assert!(
+        t1.elapsed().as_millis() < 1_000,
+        "regex wall-clock trap took too long: {:?}",
+        t1.elapsed()
+    );
+    assert!(
+        !wall_trap.ok
+            && wall_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("WallClockExceeded"),
+        "expected WallClockExceeded on ReDoS, got: {:?}",
+        wall_trap
+    );
+
+    // 3. String.prototype.replace with catastrophic backtracking also traps
+    let replace_trap = parent.eval_sandbox(
+        r#"("a".repeat(28) + "b").replace(/^(a+)+$/, "x");"#,
+        SandboxEvalOptions {
+            fuel: Some(1_000),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !replace_trap.ok
+            && replace_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("fuel limit"),
+        "expected CpuFuelExhausted on String.prototype.replace ReDoS, got: {:?}",
+        replace_trap
+    );
+
+    // 4. Cross-thread IsolateInterruptHandle::interrupt() aborts catastrophic backtracking
+    let mut iso = SliceIsolate::spawn(
+        "issue-183-interrupt",
+        2,
+        CapabilityToken::pure_compute(),
+        u64::MAX / 2,
+        16 * 1024 * 1024,
+    );
+    iso.set_wall_clock_limit_ms(Some(2_000));
+    let handle = iso.interrupt_handle();
+    let bc = compile_source_to_bytecode(r#"/^(a+)+$/.test("a".repeat(28) + "b");"#);
+    let t2 = std::time::Instant::now();
+    let interrupter = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        handle.interrupt();
+    });
+    let int_err = iso
+        .execute_bytecode(&bc, None)
+        .expect_err("interrupt handle must abort catastrophic regex backtracking");
+    interrupter.join().unwrap();
+    assert!(
+        t2.elapsed().as_millis() < 1_000,
+        "regex interrupt took too long: {:?}",
+        t2.elapsed()
+    );
+    assert!(
+        matches!(int_err, SandboxViolation::ExecutionInterrupted { .. }),
+        "expected ExecutionInterrupted, got: {:?}",
+        int_err
+    );
+
+    // 5. Normal regexes continue to work cleanly
+    let ok_res = parent.eval_sandbox(
+        r#"
+        const m = /^\d{4}-\d{2}-\d{2}$/.test("2026-11-25");
+        const r = "hello world".replace(/(\w+)/g, "[$1]");
+        return JSON.stringify({ m, r });
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            ..Default::default()
+        },
+    );
+    assert!(ok_res.ok, "normal regexes must succeed: {:?}", ok_res);
+    let parsed: serde_json::Value = serde_json::from_str(&ok_res.return_value).unwrap();
+    assert_eq!(parsed["m"], true);
+    assert_eq!(parsed["r"], "[hello] [world]");
+}
