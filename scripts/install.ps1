@@ -14,7 +14,7 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 $ReleaseExe = Join-Path $RootDir "target\release\slice.exe"
 if (-not $SkipBuild) {
-    Write-Host "Compiling Slice v0.14.1 release binary..."
+    Write-Host "Compiling Slice v0.14.2 release binary..."
     cargo build --release --locked
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
@@ -25,6 +25,6 @@ if (-not $SkipBuild) {
 
 $DestExe = Join-Path $InstallDir "slice.exe"
 Copy-Item -Force $ReleaseExe $DestExe
-Write-Host "Installed Slice v0.14.1 to $DestExe"
+Write-Host "Installed Slice v0.14.2 to $DestExe"
 & $DestExe info
 
