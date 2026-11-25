@@ -39,7 +39,8 @@ pub use compiler::{
     strip_typescript_raw_with_ext,
 };
 pub use linker::{
-    has_top_level_await, is_builtin_module, is_jsx_runtime_builtin, wrap_top_level_await_script,
+    has_top_level_await, is_builtin_module, is_jsx_runtime_builtin, program_has_top_level_return,
+    wrap_top_level_await_script, wrap_top_level_return_script,
 };
 
 #[cfg(test)]

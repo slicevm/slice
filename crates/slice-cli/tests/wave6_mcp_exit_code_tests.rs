@@ -3,6 +3,19 @@ use crate::diagnostics::handle_mcp_jsonrpc_line;
 use slice_engine::{SandboxEvalOptions, SliceIsolate, compile_source_to_bytecode};
 use slice_sandbox::CapabilityToken;
 
+fn parse_mcp_call(req: &str, iso: &mut SliceIsolate) -> (bool, serde_json::Value) {
+    let raw = handle_mcp_jsonrpc_line(req, iso).expect("MCP response expected");
+    let envelope: serde_json::Value = serde_json::from_str(&raw).expect("valid MCP JSON");
+    let is_error = envelope["result"]["isError"]
+        .as_bool()
+        .expect("isError bool");
+    let text = envelope["result"]["content"][0]["text"]
+        .as_str()
+        .expect("content[0].text");
+    let payload: serde_json::Value = serde_json::from_str(text).expect("payload JSON");
+    (is_error, payload)
+}
+
 #[test]
 fn test_issue_172_eval_sandbox_and_mcp_exit_code_and_process_exited_e2e() {
     // 0. Verify `slice.d.ts` ambient declaration advertises `exitCode` and `processExited`
@@ -111,19 +124,6 @@ console.log("guest-eval-sandbox-ok");
     );
 
     // 3. MCP JSON-RPC `slice_eval_ts` (`handle_mcp_jsonrpc_line`)
-    let parse_mcp_call = |req: &str, iso: &mut SliceIsolate| -> (bool, serde_json::Value) {
-        let raw = handle_mcp_jsonrpc_line(req, iso).expect("MCP response expected");
-        let envelope: serde_json::Value = serde_json::from_str(&raw).expect("valid MCP JSON");
-        let is_error = envelope["result"]["isError"]
-            .as_bool()
-            .expect("isError bool");
-        let text = envelope["result"]["content"][0]["text"]
-            .as_str()
-            .expect("content[0].text");
-        let payload: serde_json::Value = serde_json::from_str(text).expect("payload JSON");
-        (is_error, payload)
-    };
-
     let (err_1p1, p_1p1) = parse_mcp_call(
         r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slice_eval_ts","arguments":{"code":"1 + 1"}}}"#,
         &mut isolate,
@@ -215,4 +215,152 @@ console.log(JSON.stringify({ r1, childOk: child.ok }));
         assert!(metrics.stdout[0].contains("\"childOk\":true"));
     });
     handle.join().expect("fresh thread test must succeed");
+}
+
+#[test]
+fn test_issue_176_top_level_return_and_return_await_parity_across_tiers_and_entrypoints() {
+    // Zero-overhead invariant: functions containing `return` without a top-level `return`
+    // must NOT be wrapped by `wrap_top_level_return_script`.
+    assert!(
+        slice_cas::wrap_top_level_return_script("function f(x: number) { return x + 1; } f(41);")
+            .is_none()
+    );
+    assert!(slice_cas::has_top_level_await(
+        "async function m() { return 7 }\nreturn await m();"
+    ));
+
+    let cases: [(&str, &str, &str); 6] = [
+        ("a_t0_return", "const a = 21 * 2;\nreturn a;", "42"),
+        (
+            "b_class_return",
+            "class A { v = 42 }\nreturn new A().v;",
+            "42",
+        ),
+        (
+            "c_async_return",
+            "async function m() { return 7 }\nreturn await m();",
+            "7",
+        ),
+        (
+            "d_async_expr",
+            "async function m() { return 7 }\nawait m();",
+            "7",
+        ),
+        (
+            "e_early_branch_return_stops_trailing_throw",
+            "class Box { v: number; constructor(v: number) { this.v = v; } }\nif (true) { return new Box(99).v; }\nthrow new Error('unreachable');",
+            "99",
+        ),
+        (
+            "f_branch_fallthrough_preserves_last_expr",
+            "class Box { v: number; constructor(v: number) { this.v = v; } }\nif (false) { return 0; }\nnew Box(55).v;",
+            "55",
+        ),
+    ];
+
+    // 1. Direct MCP `slice_eval_ts` + `SliceIsolate::eval_sandbox` + repeated warm reuse
+    let mut host = SliceIsolate::spawn(
+        "issue-176-mcp-host",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        16 * 1024 * 1024,
+    );
+    for (name, code, expected_val) in cases {
+        for run_idx in 0..2 {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": run_idx + 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "slice_eval_ts",
+                    "arguments": { "code": code }
+                }
+            });
+            let (is_err, payload) = parse_mcp_call(&req.to_string(), &mut host);
+            assert!(
+                !is_err,
+                "case {name} (run {run_idx}) failed in slice mcp: {payload}"
+            );
+            assert_eq!(payload["ok"], serde_json::json!(true), "case {name}");
+            assert_eq!(
+                payload["returnValue"],
+                serde_json::json!(expected_val),
+                "case {name}"
+            );
+        }
+    }
+
+    // 2. Realistic complex script from #176: class + generator + async main() + `return await main()`
+    let complex_ts = r#"
+class Helper {
+    base: number;
+    constructor(base: number) { this.base = base; }
+    *seq() { yield this.base; yield this.base + 1; yield this.base + 2; }
+}
+async function main() {
+    const h = new Helper(10);
+    const items = Array.from(h.seq());
+    return { sum: items.reduce((a, b) => a + b, 0), items };
+}
+return await main();
+"#;
+    let complex_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 99,
+        "method": "tools/call",
+        "params": {
+            "name": "slice_eval_ts",
+            "arguments": { "code": complex_ts }
+        }
+    });
+    let (complex_err, complex_payload) = parse_mcp_call(&complex_req.to_string(), &mut host);
+    assert!(
+        !complex_err,
+        "complex #176 script failed: {complex_payload}"
+    );
+    assert_eq!(complex_payload["ok"], serde_json::json!(true));
+    assert_eq!(
+        complex_payload["returnJson"],
+        serde_json::json!("{\"items\":[10,11,12],\"sum\":33}")
+    );
+
+    // 3. Bundled `slice run` path (`bundle_entrypoint_with_deps`) for both class & async return
+    let tmp_dir =
+        std::env::temp_dir().join(format!("slice_issue_176_bundle_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    for (fname, src) in [
+        (
+            "b_class_return.ts",
+            "class A { v = 42 }\nconsole.log('b=' + new A().v);\nreturn new A().v;\n",
+        ),
+        (
+            "c_async_return.ts",
+            "async function m() { return 7 }\nconst r = await m();\nconsole.log('c=' + r);\nreturn await m();\n",
+        ),
+    ] {
+        let fpath = tmp_dir.join(fname);
+        std::fs::write(&fpath, src).unwrap();
+        let bundled = slice_cas::bundle_entrypoint_with_deps(&fpath)
+            .unwrap_or_else(|e| panic!("bundle {fname} failed: {e}"));
+        let bc = slice_engine::compile_source_to_bytecode(&bundled);
+        let mut iso = SliceIsolate::spawn(
+            "issue-176-run",
+            1,
+            CapabilityToken::pure_compute(),
+            20_000_000,
+            16 * 1024 * 1024,
+        );
+        let m = iso
+            .execute_bytecode(&bc, None)
+            .unwrap_or_else(|e| panic!("exec {fname} failed: {e}"));
+        assert!(
+            !m.return_value.starts_with("Uncaught "),
+            "{fname} returned uncaught error: {}",
+            m.return_value
+        );
+        assert_eq!(m.stdout.len(), 1, "{fname} expected stdout");
+    }
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

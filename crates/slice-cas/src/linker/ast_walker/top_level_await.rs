@@ -124,6 +124,22 @@ fn detect_top_level_await_and_last_expr_span(code: &str) -> Option<Option<(usize
                         .as_ref()
                         .is_some_and(|f| f.body.iter().any(stmt_has_tla))
             }
+            Statement::ReturnStatement(rs) => rs.argument.as_ref().is_some_and(expr_has_tla),
+            Statement::ThrowStatement(ts) => expr_has_tla(&ts.argument),
+            Statement::DoWhileStatement(dw) => expr_has_tla(&dw.test) || stmt_has_tla(&dw.body),
+            Statement::ForInStatement(fi) => expr_has_tla(&fi.right) || stmt_has_tla(&fi.body),
+            Statement::SwitchStatement(sw) => {
+                expr_has_tla(&sw.discriminant)
+                    || sw.cases.iter().any(|c| {
+                        c.test.as_ref().is_some_and(expr_has_tla)
+                            || c.consequent.iter().any(stmt_has_tla)
+                    })
+            }
+            Statement::LabeledStatement(ls) => stmt_has_tla(&ls.body),
+            Statement::WithStatement(ws) => expr_has_tla(&ws.object) || stmt_has_tla(&ws.body),
+            Statement::ExportDefaultDeclaration(exp) => {
+                exp.declaration.as_expression().is_some_and(expr_has_tla)
+            }
             Statement::ExportDeclaration(exp) => match &exp.declaration {
                 Declaration::VariableDeclaration(vd) => vd
                     .declarations
@@ -146,6 +162,116 @@ fn detect_top_level_await_and_last_expr_span(code: &str) -> Option<Option<(usize
             None
         };
     Some(last_expr_span)
+}
+
+/// Returns `true` if `program` contains any top-level `return` statement outside nested
+/// functions, arrows, methods, or class bodies (including inside top-level `if`/`try`/`for`/block
+/// control-flow statements).
+#[inline]
+pub fn program_has_top_level_return(program: &oxc::ast::ast::Program<'_>) -> bool {
+    fn stmt_has_top_level_return(stmt: &oxc::ast::ast::Statement<'_>) -> bool {
+        use oxc::ast::ast::Statement;
+        match stmt {
+            Statement::ReturnStatement(_) => true,
+            Statement::BlockStatement(bs) => bs.body.iter().any(stmt_has_top_level_return),
+            Statement::IfStatement(ifs) => {
+                stmt_has_top_level_return(&ifs.consequent)
+                    || ifs
+                        .alternate
+                        .as_ref()
+                        .is_some_and(stmt_has_top_level_return)
+            }
+            Statement::ForStatement(fs) => stmt_has_top_level_return(&fs.body),
+            Statement::ForInStatement(fi) => stmt_has_top_level_return(&fi.body),
+            Statement::ForOfStatement(fo) => stmt_has_top_level_return(&fo.body),
+            Statement::WhileStatement(ws) => stmt_has_top_level_return(&ws.body),
+            Statement::DoWhileStatement(dw) => stmt_has_top_level_return(&dw.body),
+            Statement::SwitchStatement(sw) => sw
+                .cases
+                .iter()
+                .any(|c| c.consequent.iter().any(stmt_has_top_level_return)),
+            Statement::TryStatement(ts) => {
+                ts.block.body.iter().any(stmt_has_top_level_return)
+                    || ts
+                        .handler
+                        .as_ref()
+                        .is_some_and(|h| h.body.body.iter().any(stmt_has_top_level_return))
+                    || ts
+                        .finalizer
+                        .as_ref()
+                        .is_some_and(|f| f.body.iter().any(stmt_has_top_level_return))
+            }
+            Statement::LabeledStatement(ls) => stmt_has_top_level_return(&ls.body),
+            Statement::WithStatement(ws) => stmt_has_top_level_return(&ws.body),
+            _ => false,
+        }
+    }
+
+    program.body.iter().any(stmt_has_top_level_return)
+}
+
+/// When `code` contains a top-level `return` statement outside nested functions (without top-level
+/// `await`), wraps it in a synchronous IIFE `(function() { ... })()` while preserving any trailing
+/// `ExpressionStatement` fallthrough completion value so Tier-1 Boa matches Tier-0 and CJS modules.
+pub fn wrap_top_level_return_script(code: &str) -> Option<String> {
+    use oxc::ast::ast::Statement;
+
+    memchr::memmem::find(code.as_bytes(), b"return")?;
+
+    let allocator = oxc::allocator::Allocator::default();
+    let parse_opts = oxc::parser::ParseOptions {
+        allow_return_outside_function: true,
+        ..Default::default()
+    };
+    let parsed_mod = oxc::parser::Parser::new(
+        &allocator,
+        code,
+        oxc::span::SourceType::ts().with_module(true),
+    )
+    .with_options(parse_opts)
+    .parse();
+    let program = if parsed_mod.diagnostics.is_empty() {
+        parsed_mod.program
+    } else {
+        let parsed_script = oxc::parser::Parser::new(
+            &allocator,
+            code,
+            oxc::span::SourceType::ts().with_module(false),
+        )
+        .with_options(parse_opts)
+        .parse();
+        if !parsed_script.diagnostics.is_empty() {
+            return None;
+        }
+        parsed_script.program
+    };
+
+    if !program_has_top_level_return(&program) {
+        return None;
+    }
+
+    let last_expr_span = if let Some(Statement::ExpressionStatement(es)) = program.body.last() {
+        Some((es.span.start as usize, es.span.end as usize))
+    } else {
+        None
+    };
+
+    let mut out = String::with_capacity(code.len() + 32);
+    out.push_str("(function() {\n");
+    if let Some((start, end)) = last_expr_span {
+        if start <= end && end <= code.len() {
+            out.push_str(&code[..start]);
+            out.push_str("return ");
+            out.push_str(&code[start..end]);
+            out.push_str(&code[end..]);
+        } else {
+            out.push_str(code);
+        }
+    } else {
+        out.push_str(code);
+    }
+    out.push_str("\n})()\n");
+    Some(out)
 }
 
 /// When `code` contains a top-level `await`, wraps it into an async IIFE that preserves

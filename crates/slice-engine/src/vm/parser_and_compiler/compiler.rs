@@ -108,11 +108,13 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
     }
     let mut cached_tier0: Option<(bool, bool)> = None;
     let mut forced_tier0_needs_boa_ast: Option<bool> = None;
+    let mut ast_has_top_level_return: Option<bool> = None;
     let source = match slice_cas::compile_ts_or_js_checked_with_ast_hook(
         raw_source,
         true,
         false,
         |program| {
+            ast_has_top_level_return = Some(slice_cas::program_has_top_level_return(program));
             if tier_ov == Some(0) {
                 forced_tier0_needs_boa_ast =
                     Some(program_has_tier0_unsupported_mutation_syntax(program));
@@ -190,9 +192,14 @@ fn compile_source_to_bytecode_inner(raw_source: &str, allow_boacas_aot: bool) ->
             return bytes;
         }
         let boa_source: std::borrow::Cow<'_, str> =
-            match slice_cas::wrap_top_level_await_script(&esm_lowered) {
-                Some(wrapped) => std::borrow::Cow::Owned(wrapped),
-                None => esm_lowered,
+            if let Some(wrapped) = slice_cas::wrap_top_level_await_script(&esm_lowered) {
+                std::borrow::Cow::Owned(wrapped)
+            } else if ast_has_top_level_return != Some(false)
+                && let Some(wrapped) = slice_cas::wrap_top_level_return_script(&esm_lowered)
+            {
+                std::borrow::Cow::Owned(wrapped)
+            } else {
+                esm_lowered
             };
         if use_boacas {
             return crate::boacas::pack_boacas_container(&boa_source);
