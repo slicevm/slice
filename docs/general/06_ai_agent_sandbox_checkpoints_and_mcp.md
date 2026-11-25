@@ -225,11 +225,11 @@ Slice ships with a built-in **Model Context Protocol (`2024-11-05` JSON-RPC 2.0)
 When your AI assistant connects to `slice mcp`, it discovers 4 tools via `tools/list`:
 
 #### 1. `slice_eval_ts`
-Compiles and executes TypeScript or JavaScript (including top-level `await`) inside a capability-attenuated `SliceIsolate`. Capability arguments (`allowRead`, `allowWrite`, `allowNet`, `allowExec`, `allowEnv`) accept either a string (comma-separated) or an array of strings (`string[]`), and resource/checkpoint parameters (`fuel`, `memory`, `checkpoints`, `maxCheckpoints`) can only **attenuate** (narrow) the host `slice mcp` session's configured `--fuel`, `--memory`, and `--max-checkpoints` ceilings - never raise or bypass them.
+Compiles and executes TypeScript or JavaScript (including top-level `await`, top-level `return`, and `return await ...` uniformly across Tier-0, Tier-1, `slice run`, `Slice.evalSandbox`, and `slice mcp`) inside a capability-attenuated `SliceIsolate`. Capability arguments (`allowRead`, `allowWrite`, `allowNet`, `allowExec`, `allowEnv`) accept either a string (comma-separated) or an array of strings (`string[]`), and resource/checkpoint parameters (`fuel`, `memory`, `checkpoints`, `maxCheckpoints`) can only **attenuate** (narrow) the host `slice mcp` session's configured `--fuel`, `--memory`, and `--max-checkpoints` ceilings - never raise or bypass them.
 - **Input Arguments:**
   ```json
   {
-    "code": "const items: number[] = [10, 20, 30]; await Promise.resolve(items.reduce((a, b) => a + b, 0))",
+    "code": "const items: number[] = [10, 20, 30]; return await Promise.resolve(items.reduce((a, b) => a + b, 0));",
     "fuel": 500000,
     "memory": 4194304,
     "allowRead": ["/workspace"],
@@ -241,6 +241,7 @@ Compiles and executes TypeScript or JavaScript (including top-level `await`) ins
   }
   ```
 - **Returns:** JSON `SandboxEvalOutcome` (`ok`, `exitCode`, `processExited`, `stdout`, `returnValue`, `returnJson`, `fuelUsed`, `memoryUsedBytes`, `peakMemoryBytes`, `spawnTimeNs`, `compileTimeNs`, `execTimeNs`, `totalTimeUs`, `checkpointsTaken`, `restoresPerformed`, `restoreTimeNs`, `violation`, `error`; non-zero `exitCode` sets `ok: false` and MCP `isError: true`).
+  - Note: `returnValue` (and Rust `ExecutionMetrics::return_value`) is a display string whose object formatting depends on the execution tier (for example `{ a: 1 }` on Tier-0 vs JS `ToString` `[object Object]` on Tier-1). Always read `returnJson` (or Rust `SliceIsolate::last_return_json()`) for a tier-independent structured JSON result.
 
 #### 2. `slice_kv_set`
 Stores a key-value pair inside the MCP host's sharded `Slice.kv` store so the agent can persist intermediate plans or results across tool calls.

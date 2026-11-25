@@ -44,6 +44,10 @@ pub struct ExecutionMetrics {
     pub cas_modules_resolved: usize,
     pub os_stat_syscalls: usize,
     pub stdout: Vec<String>,
+    /// Display string of the script's completion value. Note that object formatting depends on
+    /// execution tier (e.g. `{ a: 1 }` on Tier-0 vs JS `ToString` `[object Object]` on Tier-1);
+    /// use [`SliceIsolate::set_capture_return_json`] + [`SliceIsolate::last_return_json`] when
+    /// reading structured JSON values across tiers.
     pub return_value: String,
     #[serde(default)]
     pub checkpoints_taken: u32,
@@ -145,7 +149,9 @@ impl SliceIsolate {
         self.capture_return_json = enable;
     }
 
-    /// Returns the captured JSON representation of the last evaluated expression, if available.
+    /// Returns the canonical JSON representation of the last evaluated expression, if captured
+    /// (`set_capture_return_json(true)`). Prefer this over `ExecutionMetrics::return_value` when
+    /// reading structured object/array results consistently across Tier-0 and Tier-1.
     #[inline]
     pub fn last_return_json(&self) -> Option<&str> {
         self.last_return_json.as_deref()

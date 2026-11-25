@@ -17,7 +17,10 @@ pub use scoped_ident_walker::{
     collect_expr_identifier_edits, collect_live_import_reference_edits,
     collect_top_level_cjs_reference_edits,
 };
-pub use top_level_await::{has_top_level_await, wrap_top_level_await_script};
+pub use top_level_await::{
+    has_top_level_await, program_has_top_level_return, wrap_top_level_await_script,
+    wrap_top_level_return_script,
+};
 
 pub fn collect_binding_pattern_names(
     pat: &oxc::ast::ast::BindingPattern<'_>,

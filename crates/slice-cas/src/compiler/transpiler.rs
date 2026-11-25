@@ -21,22 +21,78 @@ use std::borrow::Cow;
 use std::path::Path;
 
 /// Extracts any top-level `return <expr>;` spans directly from an already-parsed Oxc `Program`
-/// (`allow_return_outside_function: true`). Returns an empty `SmallVec` for the 99.9%+ common case
-/// where `return` statements only appear inside functions, methods, or arrow bodies.
+/// (`allow_return_outside_function: true`), including inside top-level control-flow blocks
+/// (`if`/`try`/`for`/`switch`/`while`/blocks) without descending into functions or classes.
+/// Returns an empty `SmallVec` for the 99.9%+ common case where `return` only appears inside functions.
 fn extract_top_level_return_spans(
     program: &oxc::ast::ast::Program<'_>,
     source: &str,
 ) -> smallvec::SmallVec<[(usize, usize, bool); 4]> {
+    fn visit_stmt(
+        stmt: &oxc::ast::ast::Statement<'_>,
+        source: &str,
+        out: &mut smallvec::SmallVec<[(usize, usize, bool); 4]>,
+    ) {
+        use oxc::ast::ast::Statement;
+        match stmt {
+            Statement::ReturnStatement(ret) => {
+                let start = ret.span.start as usize;
+                let has_arg = ret.argument.is_some();
+                if start + 6 <= source.len() && &source[start..start + 6] == "return" {
+                    out.push((start, start + 6, has_arg));
+                }
+            }
+            Statement::BlockStatement(bs) => {
+                for s in &bs.body {
+                    visit_stmt(s, source, out);
+                }
+            }
+            Statement::IfStatement(ifs) => {
+                visit_stmt(&ifs.consequent, source, out);
+                if let Some(alt) = &ifs.alternate {
+                    visit_stmt(alt, source, out);
+                }
+            }
+            Statement::ForStatement(fs) => visit_stmt(&fs.body, source, out),
+            Statement::ForInStatement(fi) => visit_stmt(&fi.body, source, out),
+            Statement::ForOfStatement(fo) => visit_stmt(&fo.body, source, out),
+            Statement::WhileStatement(ws) => visit_stmt(&ws.body, source, out),
+            Statement::DoWhileStatement(dw) => visit_stmt(&dw.body, source, out),
+            Statement::SwitchStatement(sw) => {
+                for case in &sw.cases {
+                    for s in &case.consequent {
+                        visit_stmt(s, source, out);
+                    }
+                }
+            }
+            Statement::TryStatement(ts) => {
+                for s in &ts.block.body {
+                    visit_stmt(s, source, out);
+                }
+                if let Some(h) = &ts.handler {
+                    for s in &h.body.body {
+                        visit_stmt(s, source, out);
+                    }
+                }
+                if let Some(f) = &ts.finalizer {
+                    for s in &f.body {
+                        visit_stmt(s, source, out);
+                    }
+                }
+            }
+            Statement::LabeledStatement(ls) => visit_stmt(&ls.body, source, out),
+            Statement::WithStatement(ws) => visit_stmt(&ws.body, source, out),
+            _ => {}
+        }
+    }
+
     let mut top_ret_spans: smallvec::SmallVec<[(usize, usize, bool); 4]> =
         smallvec::SmallVec::new();
+    if memchr::memmem::find(source.as_bytes(), b"return").is_none() {
+        return top_ret_spans;
+    }
     for stmt in &program.body {
-        if let oxc::ast::ast::Statement::ReturnStatement(ret) = stmt {
-            let start = ret.span.start as usize;
-            let has_arg = ret.argument.is_some();
-            if start + 6 <= source.len() && &source[start..start + 6] == "return" {
-                top_ret_spans.push((start, start + 6, has_arg));
-            }
-        }
+        visit_stmt(stmt, source, &mut top_ret_spans);
     }
     top_ret_spans
 }
