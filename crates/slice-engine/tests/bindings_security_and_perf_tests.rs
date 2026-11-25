@@ -1669,3 +1669,112 @@ fn test_issue_183_regex_backtracking_fuel_wallclock_and_interrupt() {
     assert_eq!(parsed["m"], true);
     assert_eq!(parsed["r"], "[hello] [world]");
 }
+
+#[test]
+fn test_issue_184_arraybuffer_typedarray_buffer_metering() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "issue-184-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        32 * 1024 * 1024,
+    );
+
+    // 1. ArrayBuffer / BigInt64Array / Buffer.alloc / ArrayBuffer.transfer enforce memoryBytes (uncatchable)
+    for (label, code) in [
+        (
+            "ArrayBuffer",
+            r#"try { new ArrayBuffer(2 * 1024 * 1024); } catch (_e) { console.log("ESCAPED"); }"#,
+        ),
+        ("BigInt64Array", r#"new BigInt64Array(200_000);"#),
+        ("Buffer.alloc", r#"Buffer.alloc(2 * 1024 * 1024);"#),
+        (
+            "ArrayBuffer.transfer",
+            r#"new ArrayBuffer(1).transfer(2 * 1024 * 1024);"#,
+        ),
+    ] {
+        let out = parent.eval_sandbox(
+            code,
+            SandboxEvalOptions {
+                fuel: Some(5_000_000),
+                memory_bytes: Some(512 * 1024),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !out.ok
+                && out.stdout.is_empty()
+                && out
+                    .violation
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("exceeded memory ceiling"),
+            "{} must trap uncatchable MemoryCeilingExceeded under 512 KB, got: {:?}",
+            label,
+            out
+        );
+    }
+
+    // 2. TypedArray bulk ops (fill, sort) charge fuel and trap under tight budget
+    let fill_trap = parent.eval_sandbox(
+        r#"new Uint8Array(200_000).fill(7);"#,
+        SandboxEvalOptions {
+            fuel: Some(1_000),
+            memory_bytes: Some(4 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !fill_trap.ok
+            && fill_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("fuel limit"),
+        "TypedArray.fill must trap CpuFuelExhausted, got: {:?}",
+        fill_trap
+    );
+
+    let sort_trap = parent.eval_sandbox(
+        r#"new Uint8Array(50_000).sort();"#,
+        SandboxEvalOptions {
+            fuel: Some(5_000),
+            memory_bytes: Some(4 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !sort_trap.ok
+            && sort_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("fuel limit"),
+        "TypedArray.sort must trap CpuFuelExhausted, got: {:?}",
+        sort_trap
+    );
+
+    // 3. Normal Buffer / TypedArray usage succeeds cleanly
+    let ok_res = parent.eval_sandbox(
+        r#"
+        const b = Buffer.alloc(64, 0x41);
+        const u = new Uint8Array([3, 1, 2]).sort();
+        return JSON.stringify({ len: b.length, sorted: Array.from(u) });
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            memory_bytes: Some(2 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        ok_res.ok,
+        "normal Buffer/TypedArray must succeed: {:?}",
+        ok_res
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&ok_res.return_value).unwrap();
+    assert_eq!(parsed["len"], 64);
+    assert_eq!(parsed["sorted"], serde_json::json!([1, 2, 3]));
+}

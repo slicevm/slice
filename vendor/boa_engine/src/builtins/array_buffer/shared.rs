@@ -573,9 +573,14 @@ pub(crate) fn create_shared_byte_data_block(
 
     // 1. Let db be a new Shared Data Block value consisting of size bytes. If it is impossible to
     //    create such a Shared Data Block, throw a RangeError exception.
-    let size = size.try_into().map_err(|e| {
+    let size: usize = size.try_into().map_err(|e| {
         JsNativeError::range().with_message(format!("couldn't allocate the data block: {e}"))
     })?;
+
+    context.charge_heap_bytes(size)?;
+    if size > 4096 {
+        context.charge_fuel((size as u64) / 64)?;
+    }
 
     if size == 0 {
         // Must ensure we don't allocate a zero-sized buffer.
