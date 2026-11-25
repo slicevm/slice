@@ -59,6 +59,8 @@ pub struct ExecutionMetrics {
     pub exit_code: Option<i32>,
     #[serde(default)]
     pub process_exited: bool,
+    #[serde(default)]
+    pub denied_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +69,32 @@ pub(crate) enum ControlFlow {
     Return(JsValue),
     Break,
     Continue,
+}
+
+/// Thread-safe handle allowing an embedder to interrupt a running [`SliceIsolate`] from another thread.
+#[derive(Debug, Clone)]
+pub struct IsolateInterruptHandle {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl IsolateInterruptHandle {
+    /// Signals the associated [`SliceIsolate`] to abort execution with `SandboxViolation::ExecutionInterrupted`.
+    #[inline]
+    pub fn interrupt(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Returns `true` if `interrupt()` has been called on this handle.
+    #[inline]
+    pub fn is_interrupted(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Clears a previously set interrupt signal before reusing the isolate.
+    #[inline]
+    pub fn reset(&self) {
+        self.flag.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 /// Polyglot Tiered Isolate executing within a hardware- and OCap-protected Compartment.
@@ -92,6 +120,10 @@ pub struct SliceIsolate {
     pub(crate) last_process_exited: bool,
     pub(crate) pending_tier0_throw: Option<String>,
     pub(crate) process_argv: Vec<String>,
+    pub max_wall_clock_ms: Option<u64>,
+    pub(crate) active_wall_deadline: Option<std::time::Instant>,
+    pub(crate) interrupt_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub denied_capabilities: Vec<String>,
 }
 
 impl SliceIsolate {
@@ -133,6 +165,64 @@ impl SliceIsolate {
             last_process_exited: false,
             pending_tier0_throw: None,
             process_argv: Vec::new(),
+            max_wall_clock_ms: None,
+            active_wall_deadline: None,
+            interrupt_flag: None,
+            denied_capabilities: Vec::new(),
+        }
+    }
+
+    /// Amortized wall-clock deadline and cross-thread interrupt check for Tier-0 loops.
+    /// Costs a single bitwise AND on 1,023 out of 1,024 iterations.
+    #[inline(always)]
+    pub(crate) fn check_tier0_deadline_and_interrupt(
+        &self,
+        iters: u64,
+    ) -> Result<(), SandboxViolation> {
+        if (iters & 0x03FF) != 0 {
+            return Ok(());
+        }
+        if let Some(ref flag) = self.interrupt_flag
+            && flag.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(SandboxViolation::ExecutionInterrupted {
+                tenant_id: self.compartment.tenant_id.clone(),
+            });
+        }
+        if let Some(deadline) = self.active_wall_deadline
+            && std::time::Instant::now() >= deadline
+        {
+            return Err(SandboxViolation::WallClockExceeded {
+                tenant_id: self.compartment.tenant_id.clone(),
+                limit_ms: self.max_wall_clock_ms.unwrap_or(0),
+            });
+        }
+        Ok(())
+    }
+
+    /// Returns the audit log of denied OCap capability attempts observed during the most recent
+    /// execution (including denials caught by guest `try/catch` or `.catch()`).
+    #[inline]
+    pub fn denied_capabilities(&self) -> &[String] {
+        &self.denied_capabilities
+    }
+
+    /// Configures an optional wall-clock execution deadline in milliseconds (`None` = disabled).
+    /// When exceeded, execution aborts with `SandboxViolation::WallClockExceeded`.
+    #[inline]
+    pub fn set_wall_clock_limit_ms(&mut self, timeout_ms: Option<u64>) {
+        self.max_wall_clock_ms = timeout_ms;
+    }
+
+    /// Returns a thread-safe [`IsolateInterruptHandle`] that can abort this isolate's execution
+    /// from another thread with `SandboxViolation::ExecutionInterrupted`.
+    #[inline]
+    pub fn interrupt_handle(&mut self) -> IsolateInterruptHandle {
+        let flag = self
+            .interrupt_flag
+            .get_or_insert_with(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        IsolateInterruptHandle {
+            flag: std::sync::Arc::clone(flag),
         }
     }
 
@@ -310,6 +400,7 @@ impl SliceIsolate {
         self.last_exec_check_ses = false;
         self.last_exit_code = None;
         self.last_process_exited = false;
+        self.denied_capabilities.clear();
         if let Some(s) = self.deterministic_seed {
             self.det_prng_state = s ^ 0x9E37_79B9_7F4A_7C15;
             self.det_clock_ms = 1_700_000_000_000;

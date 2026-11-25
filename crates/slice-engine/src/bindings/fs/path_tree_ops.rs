@@ -7,7 +7,8 @@ use crate::bindings::fs::classify_and_cow::{
 };
 use crate::bindings::fs::state::{PathEntry, VfsEntryKind, dir_child_prefix, is_vfs_root_path};
 use crate::bindings::helpers::{
-    release_isolate_memory, trip_isolate_oom_limits, try_adjust_isolate_memory_ctx,
+    last_ocap_violation_message, ocap_denied_js_error, release_isolate_memory,
+    trip_isolate_oom_limits, try_adjust_isolate_memory_ctx,
 };
 use crate::boa_realm::{BOA_VFS_STATE, check_boa_fs_read_ocap, check_boa_fs_write_ocap};
 use std::sync::Arc;
@@ -35,7 +36,11 @@ pub(super) fn register_fs_path_tree_host_functions(ctx: &mut boa_engine::Context
                 || !check_boa_fs_write_ocap(&old_p)
                 || !check_boa_fs_write_ocap(&new_p)
             {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             let allow_host_old = !is_host_unc_blocked(&old_p);
             let allow_host_new = !is_host_unc_blocked(&new_p);
@@ -44,19 +49,31 @@ pub(super) fn register_fs_path_tree_host_functions(ctx: &mut boa_engine::Context
             let Some(res_old) =
                 resolve_or_js_err(&old_p, false, allow_host_old, "rename", context)?
             else {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             };
             let Some(res_new) =
                 resolve_or_js_err(&new_p, false, allow_host_new, "rename", context)?
             else {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             };
             if (res_old.traversed_symlink
                 && (!check_boa_fs_read_ocap(&res_old.norm)
                     || !check_boa_fs_write_ocap(&res_old.norm)))
                 || (res_new.traversed_symlink && !check_boa_fs_write_ocap(&res_new.norm))
             {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             if res_old.has_file_ancestor || res_new.has_file_ancestor {
                 return Ok(BoaVal::from(-20)); // ENOTDIR
@@ -273,14 +290,26 @@ pub(super) fn register_fs_path_tree_host_functions(ctx: &mut boa_engine::Context
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
             if !check_boa_fs_write_ocap(&path) {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             let allow_host = !is_host_unc_blocked(&path);
             let Some(resolved) = resolve_or_js_err(&path, false, allow_host, "rm", context)? else {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             };
             if resolved.traversed_symlink && !check_boa_fs_write_ocap(&resolved.norm) {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             let norm = resolved.norm;
             let prefix = dir_child_prefix(&norm);

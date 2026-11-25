@@ -43,6 +43,7 @@ declare namespace Slice {
         auditSecrets?: string[];
         checkpoints?: boolean;
         maxCheckpoints?: number;
+        timeoutMs?: number;
     }
 
     interface SandboxEvalOutcome {
@@ -63,6 +64,7 @@ declare namespace Slice {
         restoresPerformed: number;
         restoreTimeNs: number;
         violation: string | null;
+        deniedCapabilities: string[];
         error: string | null;
     }
 

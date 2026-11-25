@@ -2751,15 +2751,20 @@ run();
     assert_eq!(out["closedEbadf"], true);
     assert_eq!(out["fhReadStr"], "Hello FD!");
 
-    // Verify OCap FsReadDenied still traps cleanly even if guest code wraps readFileSync in try/catch
-    let ocap_bypass_attempt = r#"
+    // Verify OCap FsReadDenied is catchable with ERR_SLICE_FS_DENIED + denied_capabilities audit
+    // when caught by guest code, and promotes to SandboxViolation::FsReadDenied when uncaught (#179).
+    let ocap_caught_attempt = r#"
 import fs from "node:fs";
+let caughtCode = "";
 try {
     fs.readFileSync("/etc/passwd");
-} catch (_e) {}
+} catch (e: any) {
+    caughtCode = String(e && e.code || "");
+}
+caughtCode
 "#;
-    let ocap_bc = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
-        ocap_bypass_attempt,
+    let ocap_caught_bc = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        ocap_caught_attempt,
         true,
     ));
     let mut iso_no_fs = SliceIsolate::spawn(
@@ -2769,7 +2774,31 @@ try {
         5_000_000,
         8 * 1024 * 1024,
     );
-    let err = iso_no_fs.execute_bytecode(&ocap_bc, None).unwrap_err();
+    let m_caught = iso_no_fs.execute_bytecode(&ocap_caught_bc, None).unwrap();
+    assert_eq!(m_caught.return_value, "ERR_SLICE_FS_DENIED");
+    assert!(
+        m_caught
+            .denied_capabilities
+            .iter()
+            .any(|d| d.contains("lacks filesystem read authority")),
+        "expected denied_capabilities audit entry, got: {:?}",
+        m_caught.denied_capabilities
+    );
+
+    let ocap_uncaught_bc = compile_source_to_bytecode(&slice_cas::strip_typescript_and_normalize(
+        r#"import fs from "node:fs"; fs.readFileSync("/etc/passwd");"#,
+        true,
+    ));
+    let mut iso_uncaught = SliceIsolate::spawn(
+        "wave2-fs-ocap-guard-uncaught",
+        1,
+        CapabilityToken::pure_compute().with_read_prefix("/tmp"),
+        5_000_000,
+        8 * 1024 * 1024,
+    );
+    let err = iso_uncaught
+        .execute_bytecode(&ocap_uncaught_bc, None)
+        .unwrap_err();
     assert!(
         matches!(err, SandboxViolation::FsReadDenied { .. }),
         "Expected FsReadDenied, got {:?}",

@@ -65,4 +65,14 @@ pub enum SandboxViolation {
         "Egress DLP Violation (EGRESS_SECRET_LEAK_BLOCKED): Compartment '{tenant_id}' blocked from exfiltrating a registered audit secret"
     )]
     EgressSecretLeakBlocked { tenant_id: String },
+
+    #[error(
+        "Resource Cage Exhausted (WallClockExceeded): Compartment '{tenant_id}' exceeded wall-clock deadline ({limit_ms} ms)"
+    )]
+    WallClockExceeded { tenant_id: String, limit_ms: u64 },
+
+    #[error(
+        "Execution Interrupted: Compartment '{tenant_id}' was interrupted by host interrupt handle"
+    )]
+    ExecutionInterrupted { tenant_id: String },
 }

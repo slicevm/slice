@@ -2,15 +2,15 @@
 
 use super::{
     ActiveBoaHttpReq, BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP,
-    BOA_CHECKPOINT_CAP, BOA_CHECKPOINT_STATS, BOA_CUSTOM_ARGV, BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS,
-    BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, BOA_EXEC_DIRTY, BOA_FETCH_MOCKS,
-    BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION,
-    BOA_LAST_EXIT_CODE, BOA_NET_HOSTS, BOA_PROCESS_EXIT, BOA_SES_BASELINE_SIGS,
-    BOA_SES_INTL_SIG_PAIR, BOA_STDOUT, BOA_UNCAUGHT_ERROR, BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION,
-    BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, BoaFsCaps, CapturedBoaHttpRes, DIRTY_ALS,
-    DIRTY_FETCH_MOCK, DIRTY_SOCKETS, DIRTY_WASM, DIRTY_WEBSOCKET, EXEC_DIRTY_ARGV,
-    EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS, EXEC_DIRTY_UNCAUGHT,
-    SES_INTRINSIC_COUNT, SesIntlSigDelta, SesProtoSig,
+    BOA_CHECKPOINT_CAP, BOA_CHECKPOINT_STATS, BOA_CUSTOM_ARGV, BOA_DENIED_CAPABILITIES,
+    BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS,
+    BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES,
+    BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_LAST_EXIT_CODE, BOA_NET_HOSTS,
+    BOA_PROCESS_EXIT, BOA_SES_BASELINE_SIGS, BOA_SES_INTL_SIG_PAIR, BOA_STDOUT, BOA_UNCAUGHT_ERROR,
+    BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, BoaFsCaps,
+    CapturedBoaHttpRes, DIRTY_ALS, DIRTY_FETCH_MOCK, DIRTY_SOCKETS, DIRTY_WASM, DIRTY_WEBSOCKET,
+    EXEC_DIRTY_ARGV, EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS,
+    EXEC_DIRTY_UNCAUGHT, SES_INTRINSIC_COUNT, SesIntlSigDelta, SesProtoSig,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use slice_sandbox::SandboxViolation;
@@ -30,6 +30,7 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_env_map: FxHashMap<String, String>,
     pub(crate) saved_exec_bins: Vec<String>,
     pub(crate) saved_last_cp_violation: Option<SandboxViolation>,
+    pub(crate) saved_denied_capabilities: Vec<String>,
     pub(crate) saved_fetch_mocks: Option<FxHashMap<String, String>>,
     pub(crate) saved_ws_mocks: Option<FxHashMap<String, String>>,
     pub(crate) saved_sock_mocks: Option<FxHashMap<String, String>>,
@@ -69,11 +70,15 @@ impl SavedIsolateContextGuard {
             BOA_EGRESS_SECRETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
         let saved_env_map = BOA_ENV_MAP.with(|m| std::mem::take(&mut *m.borrow_mut()));
         let saved_exec_bins = BOA_EXEC_BINS.with(|b| std::mem::take(&mut *b.borrow_mut()));
-        let saved_last_cp_violation = if (saved_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
-            BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take())
-        } else {
-            None
-        };
+        let (saved_last_cp_violation, saved_denied_capabilities) =
+            if (saved_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
+                (
+                    BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take()),
+                    BOA_DENIED_CAPABILITIES.with(|d| std::mem::take(&mut *d.borrow_mut())),
+                )
+            } else {
+                (None, Vec::new())
+            };
         let saved_fetch_mocks = BOA_FETCH_MOCKS.with(|m| {
             let b = m.borrow();
             if b.is_empty() { None } else { Some(b.clone()) }
@@ -148,6 +153,7 @@ impl SavedIsolateContextGuard {
             saved_env_map,
             saved_exec_bins,
             saved_last_cp_violation,
+            saved_denied_capabilities,
             saved_fetch_mocks,
             saved_ws_mocks,
             saved_sock_mocks,
@@ -218,6 +224,9 @@ impl Drop for SavedIsolateContextGuard {
         if (union_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
             BOA_LAST_CHILD_PROC_VIOLATION
                 .with(|v| *v.borrow_mut() = self.saved_last_cp_violation.take());
+            BOA_DENIED_CAPABILITIES.with(|d| {
+                *d.borrow_mut() = std::mem::take(&mut self.saved_denied_capabilities);
+            });
         }
         if let Some(fm) = self.saved_fetch_mocks.take() {
             BOA_FETCH_MOCKS.with(|m| *m.borrow_mut() = fm);

@@ -150,6 +150,14 @@
     return JSON.stringify(req.headers._toPairs());
   }
 
+  function __mkFetchErr(msg) {
+    var e = new Error(msg);
+    if (typeof msg === "string" && msg.indexOf("NetAccessDenied:") === 0) {
+      e.code = "ERR_SLICE_NET_DENIED";
+    }
+    return e;
+  }
+
   function __doFetch(input, init) {
     var req = new Request(input, init);
     var sig = (init && init.signal) || req.signal || null;
@@ -160,7 +168,7 @@
     var raw = JSON.parse(
       __slice_fetch_sync(req.url, req.method, __reqHeadersJson(req), reqBody, req.redirect || "follow")
     );
-    if (raw.__error) throw new Error(raw.__error);
+    if (raw.__error) throw __mkFetchErr(raw.__error);
     return __wireToResponse(raw, req.url);
   }
 
@@ -176,7 +184,7 @@
         var fast = __slice_fetch_try_fast(req.url, req.method, hdrs, reqBodyVal, req.redirect || "follow");
         if (fast !== "") {
           var raw = JSON.parse(fast);
-          if (raw.__error) return Promise.reject(new Error(raw.__error));
+          if (raw.__error) return Promise.reject(__mkFetchErr(raw.__error));
           return Promise.resolve(__wireToResponse(raw, req.url));
         }
         return new Promise(function(res, rej) {
@@ -200,7 +208,7 @@
               settled = true;
               var raw2 = JSON.parse(rawStr);
               if (raw2.__error) {
-                rej(new Error(raw2.__error));
+                rej(__mkFetchErr(raw2.__error));
                 return;
               }
               res(__wireToResponse(raw2, req.url));

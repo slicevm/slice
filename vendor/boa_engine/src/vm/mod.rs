@@ -82,6 +82,7 @@ pub struct Vm {
     /// This eliminates the conversion between [`crate::JsNativeError`] and [`crate::JsValue`] if not needed.
     pub(crate) pending_exception: Option<JsError>,
     pub(crate) runtime_limits: RuntimeLimits,
+    pub(crate) interrupt_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 
     /// This is used to assign a native (rust) function as the active function,
     /// because we don't push a frame for them.
@@ -430,6 +431,7 @@ impl Vm {
             return_value: JsValue::undefined(),
             pending_exception: None,
             runtime_limits: RuntimeLimits::default(),
+            interrupt_flag: None,
             native_active_function: None,
             host_call_depth: 0,
             shadow_stack: ShadowStack::default(),
@@ -1025,8 +1027,35 @@ impl Context {
         CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
     }
 
+    /// Installs or clears an external thread-safe interrupt flag polled at amortized fuel boundaries.
+    #[inline]
+    pub fn set_interrupt_flag(&mut self, flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
+        self.vm.interrupt_flag = flag;
+    }
+
+    /// Charges `units` of execution fuel against `RuntimeLimits` and checks amortized wall-clock
+    /// and external host interrupt flags.
+    #[inline(always)]
+    pub fn charge_fuel(&mut self, units: u64) -> JsResult<()> {
+        let crossed_4k = self.vm.runtime_limits.charge_fuel_units(units)?;
+        if crossed_4k
+            && let Some(ref flag) = self.vm.interrupt_flag
+            && flag.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(RuntimeLimitError::Interrupted.into());
+        }
+        Ok(())
+    }
+
+    /// Charges `bytes` against the guest heap memory ceiling in `RuntimeLimits`.
+    #[inline(always)]
+    pub fn charge_heap_bytes(&mut self, bytes: usize) -> JsResult<()> {
+        self.vm.runtime_limits.charge_heap_bytes(bytes)?;
+        Ok(())
+    }
+
     /// Checks if we haven't exceeded the defined runtime limits.
-    pub(crate) fn check_runtime_limits(&self) -> JsResult<()> {
+    pub(crate) fn check_runtime_limits(&mut self) -> JsResult<()> {
         // Must throw if the number of recursive calls exceeds the defined limit.
         //
         // `host_call_depth` accounts for nested host calls that re-enter the VM by invoking
@@ -1040,6 +1069,7 @@ impl Context {
         if self.vm.runtime_limits.stack_size_limit() <= self.vm.stack.stack.len() {
             return Err(RuntimeLimitError::StackSize.into());
         }
+        self.charge_fuel(1)?;
 
         Ok(())
     }

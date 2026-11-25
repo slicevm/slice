@@ -2,7 +2,7 @@
 
 use super::OutboundUrlParts;
 use crate::bindings::helpers::{active_tenant_id_or_default, record_boa_violation_once};
-use crate::boa_realm::{BOA_EGRESS_SECRETS, BOA_NET_HOSTS};
+use crate::boa_realm::{BOA_EGRESS_SECRETS, BOA_NET_HOSTS, record_boa_ocap_denial};
 use crate::state_and_kv::verify_egress_secrets_slice;
 use slice_sandbox::{
     SandboxViolation, check_net_host_grant, is_cloud_metadata_clean_host, is_cloud_metadata_ip,
@@ -67,7 +67,7 @@ pub(crate) fn check_boa_outbound_fetch_ocap_and_dlp(
         || (wildcard_grant && !is_private_or_loopback_clean_host(&parts.hostname));
 
     if !permitted {
-        record_boa_violation_once(SandboxViolation::NetAccessDenied {
+        record_boa_ocap_denial(SandboxViolation::NetAccessDenied {
             tenant_id,
             host: parts.host_port.clone(),
         });

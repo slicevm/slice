@@ -4,8 +4,8 @@ mod portable_shell;
 mod runner;
 
 use crate::bindings::helpers::{
-    active_tenant_id_or_default, consume_crypto_kdf_fuel, trip_isolate_oom_limits,
-    try_consume_isolate_memory_ctx,
+    active_tenant_id_or_default, consume_crypto_kdf_fuel, ocap_denied_js_error,
+    trip_isolate_oom_limits, try_consume_isolate_memory_ctx,
 };
 use crate::boa_realm::{BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, check_boa_fs_read_ocap};
 use crate::intrinsics::{base64_decode, base64_encode};
@@ -172,7 +172,7 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                 };
                 let msg = violation.to_string();
                 crate::boa_realm::set_child_proc_violation(violation);
-                return Err(JsNativeError::error().with_message(msg).into());
+                return Err(ocap_denied_js_error("ERR_SLICE_EXEC_DENIED", &msg, context));
             }
 
             // Verify `opts.cwd` (and any VFS/host symlink hops) against the tenant's `FsRead` capability.
@@ -188,7 +188,7 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                     };
                     let msg = violation.to_string();
                     crate::boa_realm::set_child_proc_violation(violation);
-                    return Err(JsNativeError::error().with_message(msg).into());
+                    return Err(ocap_denied_js_error("ERR_SLICE_FS_DENIED", &msg, context));
                 }
                 match crate::bindings::fs::resolve_effective_vfs_path(cwd_dir, true, true) {
                     Ok(res) => {
@@ -199,7 +199,7 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                             };
                             let msg = violation.to_string();
                             crate::boa_realm::set_child_proc_violation(violation);
-                            return Err(JsNativeError::error().with_message(msg).into());
+                            return Err(ocap_denied_js_error("ERR_SLICE_FS_DENIED", &msg, context));
                         }
                         Some(res.norm)
                     }
@@ -211,7 +211,7 @@ pub(crate) fn register_child_process_host_functions(ctx: &mut boa_engine::Contex
                         };
                         let msg = violation.to_string();
                         crate::boa_realm::set_child_proc_violation(violation);
-                        return Err(JsNativeError::error().with_message(msg).into());
+                        return Err(ocap_denied_js_error("ERR_SLICE_FS_DENIED", &msg, context));
                     }
                     Err(crate::bindings::fs::SymlinkResolveError::Loop) => {
                         return Err(JsNativeError::error()

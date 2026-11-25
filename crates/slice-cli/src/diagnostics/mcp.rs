@@ -101,6 +101,9 @@ fn parse_mcp_sandbox_eval_options(args: &serde_json::Value) -> slice_engine::San
             .get("maxCheckpoints")
             .and_then(|v| v.as_u64())
             .map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+        timeout_ms: ["timeoutMs", "wallClockMs", "maxWallClockMs"]
+            .iter()
+            .find_map(|k| args.get(*k).and_then(|v| v.as_u64())),
         ..Default::default()
     };
     for (keys, target) in [

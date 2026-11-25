@@ -15,6 +15,7 @@ use super::{MAX_CONCURRENT_FETCH_WAIT, MAX_EVENT_LOOP_TICKS};
 use crate::boa_realm::{
     BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, BOA_EGRESS_SECRETS,
     BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VIOLATION, has_process_exit, has_uncaught_error,
+    record_boa_ocap_denial,
 };
 use crate::outbound_http::{execute_outbound_fetch_with_redirects, record_outbound_pool_reuses};
 use boa_engine::{Context, JsObject, JsValue};
@@ -215,6 +216,9 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
             let mut loop_st = st.borrow_mut();
             while let Ok(done) = loop_st.fetch_rx.try_recv() {
                 record_outbound_pool_reuses(done.reused_conns);
+                if let Some(ocap_v) = done.ocap_denial {
+                    record_boa_ocap_denial(ocap_v);
+                }
                 if let Some(v) = done.violation
                     && worker_violation.is_none()
                 {
@@ -415,6 +419,9 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
             match recv_opt {
                 Ok(done) => {
                     record_outbound_pool_reuses(done.reused_conns);
+                    if let Some(ocap_v) = done.ocap_denial {
+                        record_boa_ocap_denial(ocap_v);
+                    }
                     if let Some(v) = done.violation {
                         BOA_VIOLATION.with(|slot| *slot.borrow_mut() = Some(v));
                         clear_event_loop_state();

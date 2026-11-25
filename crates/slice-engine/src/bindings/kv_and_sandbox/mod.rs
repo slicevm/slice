@@ -3,10 +3,10 @@
 mod sandbox_eval;
 
 use crate::bindings::helpers::{
-    record_boa_violation_once, record_isolate_memory_violation, release_isolate_memory,
-    trip_isolate_oom_limits, try_adjust_isolate_memory_ctx,
+    ocap_denied_js_error, record_boa_violation_once, record_isolate_memory_violation,
+    release_isolate_memory, trip_isolate_oom_limits, try_adjust_isolate_memory_ctx,
 };
-use crate::boa_realm::{BOA_ACTIVE_TENANT, BOA_KV_MEM_BUDGET};
+use crate::boa_realm::{BOA_ACTIVE_TENANT, BOA_KV_MEM_BUDGET, record_boa_ocap_denial};
 use crate::event_loop::{clear_event_loop_state, drive_event_loop_to_completion};
 use crate::state_and_kv::{
     checkpoint_tenant_state, edge_kv_del_bytes, edge_kv_get, edge_kv_incr_checked,
@@ -159,17 +159,27 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             let (allow_cp, max_cp) = crate::boa_realm::BOA_CHECKPOINT_CAP.with(|c| c.get());
             let (taken, restored, restore_ns) =
                 crate::boa_realm::BOA_CHECKPOINT_STATS.with(|s| s.get());
-            if !allow_cp || taken >= max_cp {
+            if !allow_cp {
                 let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-                let reason = if !allow_cp {
-                    "guest checkpoints are disabled for this compartment".to_string()
-                } else {
-                    format!(
-                        "exceeded max_checkpoints limit ({} > {})",
-                        taken.saturating_add(1),
-                        max_cp
-                    )
+                let violation = SandboxViolation::CheckpointDenied {
+                    tenant_id: tenant,
+                    reason: "guest checkpoints are disabled for this compartment".to_string(),
                 };
+                let msg = violation.to_string();
+                record_boa_ocap_denial(violation);
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_CHECKPOINT_DENIED",
+                    &msg,
+                    context,
+                ));
+            }
+            if taken >= max_cp {
+                let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
+                let reason = format!(
+                    "exceeded max_checkpoints limit ({} > {})",
+                    taken.saturating_add(1),
+                    max_cp
+                );
                 record_boa_violation_once(SandboxViolation::CheckpointDenied {
                     tenant_id: tenant,
                     reason,
@@ -194,15 +204,18 @@ pub(crate) fn register_kv_and_sandbox_host_functions(ctx: &mut boa_engine::Conte
             let (allow_cp, _) = crate::boa_realm::BOA_CHECKPOINT_CAP.with(|c| c.get());
             if !allow_cp {
                 let tenant = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-                record_boa_violation_once(SandboxViolation::CheckpointDenied {
+                let violation = SandboxViolation::CheckpointDenied {
                     tenant_id: tenant,
                     reason: "guest checkpoints/restores are disabled for this compartment"
                         .to_string(),
-                });
-                context.runtime_limits_mut().set_loop_iteration_limit(1);
-                return Err(boa_engine::JsNativeError::error()
-                    .with_message("SandboxViolation: CheckpointDenied")
-                    .into());
+                };
+                let msg = violation.to_string();
+                record_boa_ocap_denial(violation);
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_CHECKPOINT_DENIED",
+                    &msg,
+                    context,
+                ));
             }
             let id = args
                 .first()

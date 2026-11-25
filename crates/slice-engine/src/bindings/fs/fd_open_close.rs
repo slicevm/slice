@@ -6,7 +6,8 @@ use crate::bindings::fs::classify_and_cow::{
 };
 use crate::bindings::fs::state::{InodeId, OpenFd, PathEntry, VfsEntryKind};
 use crate::bindings::helpers::{
-    release_isolate_memory, try_adjust_isolate_memory_ctx, try_consume_isolate_memory_ctx,
+    last_ocap_violation_message, ocap_denied_js_error, release_isolate_memory,
+    try_adjust_isolate_memory_ctx, try_consume_isolate_memory_ctx,
 };
 use crate::boa_realm::{
     BOA_DET_STATE, BOA_VFS_STATE, DIRTY_VFS, check_boa_fs_read_ocap, check_boa_fs_write_ocap,
@@ -190,10 +191,18 @@ pub(super) fn register_fs_fd_open_close_host_functions(ctx: &mut boa_engine::Con
             };
             let needs_write = fl.writable || fl.create || fl.trunc || fl.append;
             if fl.readable && !check_boa_fs_read_ocap(&path) {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             if needs_write && !check_boa_fs_write_ocap(&path) {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             }
             mark_subsystem_dirty(DIRTY_VFS);
 
@@ -204,14 +213,26 @@ pub(super) fn register_fs_fd_open_close_host_functions(ctx: &mut boa_engine::Con
             if fl.create && fl.excl {
                 let Some(res_lstat) = resolve_or_js_err(&path, false, allow_host, "open", context)?
                 else {
-                    return Ok(BoaVal::undefined());
+                    return Err(ocap_denied_js_error(
+                        "ERR_SLICE_FS_DENIED",
+                        last_ocap_violation_message(),
+                        context,
+                    ));
                 };
                 if res_lstat.traversed_symlink {
                     if fl.readable && !check_boa_fs_read_ocap(&res_lstat.norm) {
-                        return Ok(BoaVal::undefined());
+                        return Err(ocap_denied_js_error(
+                            "ERR_SLICE_FS_DENIED",
+                            last_ocap_violation_message(),
+                            context,
+                        ));
                     }
                     if needs_write && !check_boa_fs_write_ocap(&res_lstat.norm) {
-                        return Ok(BoaVal::undefined());
+                        return Err(ocap_denied_js_error(
+                            "ERR_SLICE_FS_DENIED",
+                            last_ocap_violation_message(),
+                            context,
+                        ));
                     }
                 }
                 if res_lstat.has_file_ancestor {
@@ -228,14 +249,26 @@ pub(super) fn register_fs_fd_open_close_host_functions(ctx: &mut boa_engine::Con
 
             let Some(resolved) = resolve_or_js_err(&path, true, allow_host, "open", context)?
             else {
-                return Ok(BoaVal::undefined());
+                return Err(ocap_denied_js_error(
+                    "ERR_SLICE_FS_DENIED",
+                    last_ocap_violation_message(),
+                    context,
+                ));
             };
             if resolved.traversed_symlink {
                 if fl.readable && !check_boa_fs_read_ocap(&resolved.norm) {
-                    return Ok(BoaVal::undefined());
+                    return Err(ocap_denied_js_error(
+                        "ERR_SLICE_FS_DENIED",
+                        last_ocap_violation_message(),
+                        context,
+                    ));
                 }
                 if needs_write && !check_boa_fs_write_ocap(&resolved.norm) {
-                    return Ok(BoaVal::undefined());
+                    return Err(ocap_denied_js_error(
+                        "ERR_SLICE_FS_DENIED",
+                        last_ocap_violation_message(),
+                        context,
+                    ));
                 }
             }
             if resolved.has_file_ancestor {

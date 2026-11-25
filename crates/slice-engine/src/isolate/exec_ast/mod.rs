@@ -116,6 +116,7 @@ impl SliceIsolate {
                 while self.eval_expr(cond)?.is_truthy() {
                     iters += 1;
                     self.compartment.consume_fuel(1)?;
+                    self.check_tier0_deadline_and_interrupt(iters)?;
                     if iters == TIER1_PROMOTION_THRESHOLD {
                         self.current_tier = ExecutionTier::Tier1Baseline;
                     } else if iters == 10_000 {
@@ -158,6 +159,7 @@ impl SliceIsolate {
                         }
                         iters += 1;
                         self.compartment.consume_fuel(1)?;
+                        self.check_tier0_deadline_and_interrupt(iters)?;
                         if iters == TIER1_PROMOTION_THRESHOLD {
                             self.current_tier = ExecutionTier::Tier1Baseline;
                         } else if iters == 10_000 {

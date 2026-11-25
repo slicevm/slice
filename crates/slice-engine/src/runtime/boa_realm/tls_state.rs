@@ -217,6 +217,8 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     pub(crate) static BOA_LAST_CHILD_PROC_VIOLATION: std::cell::RefCell<Option<SandboxViolation>> =
         const { std::cell::RefCell::new(None) };
+    pub(crate) static BOA_DENIED_CAPABILITIES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     pub(crate) static BOA_FETCH_MOCKS: std::cell::RefCell<FxHashMap<String, String>> =
         std::cell::RefCell::new(FxHashMap::default());
     pub(crate) static CHECKPOINT_SLAB: std::cell::RefCell<FxHashMap<u64, StateCheckpoint>> =
@@ -284,9 +286,26 @@ pub(crate) fn set_uncaught_error(err: String) {
 }
 
 #[inline]
-pub(crate) fn set_child_proc_violation(violation: SandboxViolation) {
+pub(crate) fn record_boa_ocap_denial(violation: SandboxViolation) {
     mark_exec_dirty(EXEC_DIRTY_CHILD_PROC);
-    BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = Some(violation));
+    let msg = violation.to_string();
+    BOA_DENIED_CAPABILITIES.with(|list| {
+        let mut v = list.borrow_mut();
+        if v.len() < 64 {
+            v.push(msg);
+        }
+    });
+    BOA_LAST_CHILD_PROC_VIOLATION.with(|slot| {
+        let mut b = slot.borrow_mut();
+        if b.is_none() {
+            *b = Some(violation);
+        }
+    });
+}
+
+#[inline]
+pub(crate) fn set_child_proc_violation(violation: SandboxViolation) {
+    record_boa_ocap_denial(violation);
 }
 
 #[inline]

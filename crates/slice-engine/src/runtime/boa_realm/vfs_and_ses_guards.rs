@@ -1,8 +1,8 @@
 //! OCap VFS Read/Write Guards, Tenant VFS Affinity, and SES Prototype Shape Fingerprints.
 
 use super::{
-    BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_VFS_OWNER_TENANT, BOA_VFS_STATE, BOA_VIOLATION,
-    DIRTY_VFS, SES_INTRINSIC_COUNT, SesProtoSig, WarmBoaRealm, mark_subsystem_dirty,
+    BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_VFS_OWNER_TENANT, BOA_VFS_STATE, DIRTY_VFS,
+    SES_INTRINSIC_COUNT, SesProtoSig, WarmBoaRealm, mark_subsystem_dirty, record_boa_ocap_denial,
 };
 use slice_sandbox::SandboxViolation;
 
@@ -14,14 +14,9 @@ pub(crate) fn norm_vfs_path(p: &str) -> String {
 #[cold]
 #[inline(never)]
 pub(crate) fn record_boa_fs_violation(tenant_id: &str, path: &str) -> bool {
-    BOA_VIOLATION.with(|v| {
-        let mut slot = v.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(SandboxViolation::FsReadDenied {
-                tenant_id: tenant_id.to_string(),
-                path: path.to_string(),
-            });
-        }
+    record_boa_ocap_denial(SandboxViolation::FsReadDenied {
+        tenant_id: tenant_id.to_string(),
+        path: path.to_string(),
     });
     false
 }
@@ -29,14 +24,9 @@ pub(crate) fn record_boa_fs_violation(tenant_id: &str, path: &str) -> bool {
 #[cold]
 #[inline(never)]
 pub(crate) fn record_boa_fs_write_violation(tenant_id: &str, path: &str) -> bool {
-    BOA_VIOLATION.with(|v| {
-        let mut slot = v.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(SandboxViolation::FsWriteDenied {
-                tenant_id: tenant_id.to_string(),
-                path: path.to_string(),
-            });
-        }
+    record_boa_ocap_denial(SandboxViolation::FsWriteDenied {
+        tenant_id: tenant_id.to_string(),
+        path: path.to_string(),
     });
     false
 }

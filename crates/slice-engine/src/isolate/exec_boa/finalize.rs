@@ -3,12 +3,12 @@
 
 use super::BoaSessionFlags;
 use crate::boa_realm::{
-    BOA_CHECKPOINT_STATS, BOA_CUSTOM_ARGV, BOA_DIRTY_SUBSYSTEMS, BOA_EXEC_DIRTY, BOA_FUEL_BUDGET,
-    BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION,
-    BOA_LAST_EXIT_CODE, BOA_PROCESS_EXIT, BOA_SES_INTL_SIG_PAIR, BOA_UNCAUGHT_ERROR,
-    BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT, DIRTY_PROCESS, EXEC_DIRTY_ARGV,
-    EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS, EXEC_DIRTY_UNCAUGHT,
-    REALM_CTL_DISPATCH_HTTP_BRIDGE, REALM_CTL_RESET_MT, REALM_CTL_RESET_WU,
+    BOA_CHECKPOINT_STATS, BOA_CUSTOM_ARGV, BOA_DENIED_CAPABILITIES, BOA_DIRTY_SUBSYSTEMS,
+    BOA_EXEC_DIRTY, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET,
+    BOA_LAST_CHILD_PROC_VIOLATION, BOA_LAST_EXIT_CODE, BOA_PROCESS_EXIT, BOA_SES_INTL_SIG_PAIR,
+    BOA_UNCAUGHT_ERROR, BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
+    DIRTY_PROCESS, EXEC_DIRTY_ARGV, EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS,
+    EXEC_DIRTY_UNCAUGHT, REALM_CTL_DISPATCH_HTTP_BRIDGE, REALM_CTL_RESET_MT, REALM_CTL_RESET_WU,
     REALM_CTL_SET_NEXT_TICK, SES_PROTO_NAMES, WarmBoaRealm, call_realm_ctl,
     first_ses_proto_sig_mismatch_idx, has_process_exit, has_uncaught_error, release_warm_boa_realm,
 };
@@ -30,15 +30,63 @@ impl SliceIsolate {
         check_ses: bool,
         mut eval_res: boa_engine::JsResult<boa_engine::JsValue>,
     ) -> Result<JsValue, SandboxViolation> {
-        if eval_res.is_err()
-            && (BOA_EXEC_DIRTY.with(|c| c.get()) & EXEC_DIRTY_CHILD_PROC) != 0
-            && let Some(cp_v) = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take())
+        if let Err(ref err) = eval_res
+            && let Some(boa_engine::EngineError::RuntimeLimit(rl)) = err.as_engine()
         {
-            BOA_VIOLATION.with(|v| {
-                if v.borrow().is_none() {
-                    *v.borrow_mut() = Some(cp_v);
+            let tenant_id = self.compartment.tenant_id.clone();
+            let violation = match *rl {
+                boa_engine::RuntimeLimitError::LoopIteration => {
+                    self.compartment.fuel_consumed = self.compartment.fuel_limit;
+                    Some(SandboxViolation::CpuFuelExhausted {
+                        tenant_id,
+                        limit: self.compartment.fuel_limit,
+                    })
                 }
-            });
+                boa_engine::RuntimeLimitError::MemoryLimit { requested, .. } => {
+                    let baseline = flags.initial_mem_used.min(4096);
+                    Some(SandboxViolation::MemoryCeilingExceeded {
+                        tenant_id,
+                        requested: requested.saturating_add(baseline),
+                        limit: self.compartment.memory_limit_bytes,
+                    })
+                }
+                boa_engine::RuntimeLimitError::WallClock => {
+                    Some(SandboxViolation::WallClockExceeded {
+                        tenant_id,
+                        limit_ms: self.max_wall_clock_ms.unwrap_or(0),
+                    })
+                }
+                boa_engine::RuntimeLimitError::Interrupted => {
+                    Some(SandboxViolation::ExecutionInterrupted { tenant_id })
+                }
+                _ => None,
+            };
+            if let Some(v) = violation {
+                BOA_VIOLATION.with(|slot| {
+                    if slot.borrow().is_none() {
+                        *slot.borrow_mut() = Some(v);
+                    }
+                });
+            }
+        }
+
+        if let Err(ref err) = eval_res
+            && (BOA_EXEC_DIRTY.with(|c| c.get()) & EXEC_DIRTY_CHILD_PROC) != 0
+        {
+            let err_msg = err.to_string();
+            let is_ocap_err = err_msg.contains("OCap Violation")
+                || err_msg.contains("Slice Sandbox Violation")
+                || err_msg.contains("NetAccessDenied:")
+                || err_msg.contains("ERR_SLICE_");
+            if is_ocap_err
+                && let Some(cp_v) = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take())
+            {
+                BOA_VIOLATION.with(|v| {
+                    if v.borrow().is_none() {
+                        *v.borrow_mut() = Some(cp_v);
+                    }
+                });
+            }
         }
 
         if has_process_exit() {
@@ -85,11 +133,15 @@ impl SliceIsolate {
         clear_event_loop_state();
 
         let loop_iters = realm.ctx.runtime_limits().loop_iterations_executed();
-        realm
-            .ctx
-            .runtime_limits_mut()
-            .set_loop_iteration_limit(u64::MAX);
-        realm.ctx.runtime_limits_mut().set_recursion_limit(512);
+        let peak_boa_heap = realm.ctx.runtime_limits().peak_heap_bytes();
+        {
+            let limits = realm.ctx.runtime_limits_mut();
+            limits.set_loop_iteration_limit(u64::MAX);
+            limits.disable_heap_bytes_limit();
+            limits.set_wall_clock_limit_ms(None);
+            limits.set_recursion_limit(512);
+        }
+        realm.ctx.set_interrupt_flag(None);
 
         let mut final_val = match eval_res {
             Ok(mut val) => {
@@ -143,7 +195,7 @@ impl SliceIsolate {
         self.restores_performed = cp_restored;
         self.restore_time_ns = cp_restore_ns;
 
-        let pending_violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
+        let mut pending_violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
         if let Some(
             [
                 (pre_str, post_str),
@@ -188,17 +240,23 @@ impl SliceIsolate {
         }
 
         let final_exec_dirty = BOA_EXEC_DIRTY.with(|c| c.replace(0));
-        let (exit_code_opt, uncaught_err_opt) = if final_exec_dirty == 0 {
+        let (exit_code_opt, uncaught_err_opt, last_ocap_violation) = if final_exec_dirty == 0 {
             self.last_exit_code = None;
             self.last_process_exited = false;
-            (None, None)
+            self.denied_capabilities.clear();
+            (None, None, None)
         } else {
             if (final_exec_dirty & EXEC_DIRTY_ARGV) != 0 {
                 BOA_CUSTOM_ARGV.with(|a| *a.borrow_mut() = None);
             }
-            if (final_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
-                BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
-            }
+            let last_ocap = if (final_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
+                self.denied_capabilities =
+                    BOA_DENIED_CAPABILITIES.with(|d| std::mem::take(&mut *d.borrow_mut()));
+                BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take())
+            } else {
+                self.denied_capabilities.clear();
+                None
+            };
             let (exit_opt, process_exited) = if (final_exec_dirty & EXEC_DIRTY_EXIT) != 0 {
                 // Drain BOTH cells unconditionally so calling `process.exit(code)` after setting
                 // `process.exitCode = other` never leaves `BOA_LAST_EXIT_CODE` stale on the thread.
@@ -221,8 +279,18 @@ impl SliceIsolate {
             if (final_exec_dirty & EXEC_DIRTY_REJECTIONS) != 0 {
                 BOA_UNHANDLED_REJECTIONS.with(|u| u.borrow_mut().clear());
             }
-            (exit_opt, err_opt)
+            (exit_opt, err_opt, last_ocap)
         };
+        if pending_violation.is_none()
+            && let Some(ref err_str) = uncaught_err_opt
+            && (err_str.contains("OCap Violation")
+                || err_str.contains("Slice Sandbox Violation")
+                || err_str.contains("NetAccessDenied:")
+                || err_str.contains("ERR_SLICE_"))
+            && let Some(ocap_v) = last_ocap_violation
+        {
+            pending_violation = Some(ocap_v);
+        }
 
         let wu_queued = BOA_WAIT_UNTIL_COUNT.with(|c| c.get());
         let clear_wu_and_release = |mut r: WarmBoaRealm| {
@@ -252,9 +320,10 @@ impl SliceIsolate {
         let initial_net_used = initial_mem_used.saturating_sub(baseline_mem_used);
         if let Some(mut violation) = pending_violation {
             let final_net_used = BOA_KV_MEM_BUDGET.with(|m| m.replace((0, usize::MAX)).0);
-            if final_net_used > initial_net_used {
+            let combined_peak = final_net_used.max(peak_boa_heap);
+            if combined_peak > initial_net_used {
                 self.compartment.memory_used_bytes =
-                    baseline_mem_used.saturating_add(final_net_used);
+                    baseline_mem_used.saturating_add(combined_peak);
             }
             if let SandboxViolation::CpuFuelExhausted { ref mut limit, .. } = violation
                 && *limit == 0
@@ -280,16 +349,17 @@ impl SliceIsolate {
             return Err(v);
         }
         let final_net_used = BOA_KV_MEM_BUDGET.with(|m| m.replace((0, usize::MAX)).0);
-        if final_net_used > initial_net_used {
-            let added = final_net_used - initial_net_used;
+        let combined_used = final_net_used.max(peak_boa_heap);
+        if combined_used > initial_net_used {
+            let added = combined_used - initial_net_used;
             if let Err(v) = self.compartment.alloc_memory(added) {
                 self.compartment.memory_used_bytes =
-                    baseline_mem_used.saturating_add(final_net_used);
+                    baseline_mem_used.saturating_add(combined_used);
                 clear_wu_and_release(realm);
                 return Err(v);
             }
         } else {
-            self.compartment.memory_used_bytes = baseline_mem_used.saturating_add(final_net_used);
+            self.compartment.memory_used_bytes = baseline_mem_used.saturating_add(combined_used);
         }
 
         self.last_return_json = None;

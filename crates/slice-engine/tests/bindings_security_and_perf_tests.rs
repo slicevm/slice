@@ -451,10 +451,18 @@ fn test_default_pure_compute_fs_deny_by_default_across_all_surfaces() {
         5_000_000,
         4 * 1024 * 1024,
     );
-    let fast_err = http_iso
+    let fast_out = http_iso
         .execute_http_request_fast(&http_bc, None, &req)
-        .expect_err("execute_http_request_fast with pure_compute() must trap FsReadDenied");
-    assert!(matches!(fast_err, SandboxViolation::FsReadDenied { .. }));
+        .expect("caught FsReadDenied in guest try/catch must return fallback response with audit log (#179)");
+    assert_eq!(fast_out.response_body, "empty");
+    assert!(
+        http_iso
+            .denied_capabilities()
+            .iter()
+            .any(|d| d.contains("lacks filesystem read authority")),
+        "expected FsReadDenied to be recorded in denied_capabilities audit log, got: {:?}",
+        http_iso.denied_capabilities()
+    );
 
     // 4. Win32 device namespace and UNC share candidates are rejected even when "/" is granted
     let broad_caps = CapabilityToken::pure_compute()
@@ -1159,4 +1167,367 @@ fn test_issue_142_host_symlink_vfs_cow_coherence_and_ocap_containment() {
     }
 
     let _ = std::fs::remove_dir_all(&base_dir);
+}
+
+#[test]
+fn test_issue_179_uniform_catchable_ocap_denials_with_audit_and_uncatchable_traps() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "issue-179-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        32 * 1024 * 1024,
+    );
+
+    // 1. C1: Denied fetch() is catchable with ERR_SLICE_NET_DENIED + deniedCapabilities audit
+    let c1_caught = parent.eval_sandbox(
+        r#"
+        let code = "";
+        let caught = false;
+        try {
+            await fetch("https://example.com");
+        } catch (e: any) {
+            caught = true;
+            code = String(e && e.code || "");
+        }
+        return JSON.stringify({ caught, code });
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            ..Default::default()
+        },
+    );
+    assert!(
+        c1_caught.ok,
+        "caught denied fetch must succeed with ok=true, got: {:?}",
+        c1_caught
+    );
+    let c1_v: serde_json::Value = serde_json::from_str(&c1_caught.return_value).unwrap();
+    assert_eq!(c1_v["caught"], true);
+    assert_eq!(c1_v["code"], "ERR_SLICE_NET_DENIED");
+    assert!(
+        c1_caught
+            .denied_capabilities
+            .iter()
+            .any(|d| d.contains("lacks outbound network authority")),
+        "expected NetAccessDenied in denied_capabilities, got: {:?}",
+        c1_caught.denied_capabilities
+    );
+
+    // C1 uncaught promotes to SandboxViolation::NetAccessDenied
+    let c1_uncaught = parent.eval_sandbox(
+        r#"await fetch("https://example.com");"#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            ..Default::default()
+        },
+    );
+    assert!(!c1_uncaught.ok);
+    assert!(
+        c1_uncaught
+            .violation
+            .as_deref()
+            .unwrap_or("")
+            .contains("lacks outbound network authority"),
+        "uncaught denied fetch must report NetAccessDenied violation, got: {:?}",
+        c1_uncaught
+    );
+
+    // 2. C2: Denied fs.readFileSync and fs.promises.readFile are catchable with ERR_SLICE_FS_DENIED
+    let c2_caught = parent.eval_sandbox(
+        r#"
+        import * as fs from "node:fs";
+        let syncCode = "";
+        let asyncCode = "";
+        try { fs.readFileSync("/etc/passwd", "utf8"); } catch (e: any) { syncCode = String(e && e.code || ""); }
+        try { await fs.promises.readFile("/etc/passwd", "utf8"); } catch (e: any) { asyncCode = String(e && e.code || ""); }
+        return JSON.stringify({ syncCode, asyncCode });
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            ..Default::default()
+        },
+    );
+    assert!(
+        c2_caught.ok,
+        "caught denied fs reads must succeed with ok=true, got: {:?}",
+        c2_caught
+    );
+    let c2_v: serde_json::Value = serde_json::from_str(&c2_caught.return_value).unwrap();
+    assert_eq!(c2_v["syncCode"], "ERR_SLICE_FS_DENIED");
+    assert_eq!(c2_v["asyncCode"], "ERR_SLICE_FS_DENIED");
+    assert!(
+        c2_caught.denied_capabilities.len() >= 2,
+        "expected both denied fs reads in audit log, got: {:?}",
+        c2_caught.denied_capabilities
+    );
+
+    // 3. C3: Denied execSync is catchable with ERR_SLICE_EXEC_DENIED + deniedCapabilities audit
+    let c3_caught = parent.eval_sandbox(
+        r#"
+        import { execSync } from "node:child_process";
+        let code = "";
+        try { execSync("whoami"); } catch (e: any) { code = String(e && e.code || ""); }
+        return code;
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            ..Default::default()
+        },
+    );
+    assert!(
+        c3_caught.ok,
+        "caught execSync must succeed: {:?}",
+        c3_caught
+    );
+    assert_eq!(c3_caught.return_value, "ERR_SLICE_EXEC_DENIED");
+    assert!(
+        c3_caught
+            .denied_capabilities
+            .iter()
+            .any(|d| d.contains("lacks exec authority")),
+        "expected ExecDenied in denied_capabilities, got: {:?}",
+        c3_caught.denied_capabilities
+    );
+
+    // 4. Denied env() and disabled Slice.checkpoint() are catchable with stable codes
+    let c4_caught = parent.eval_sandbox(
+        r#"
+        let envCode = "";
+        let cpCode = "";
+        try { env("UNGRANTED_SECRET"); } catch (e: any) { envCode = String(e && e.code || ""); }
+        try { Slice.checkpoint(); } catch (e: any) { cpCode = String(e && e.code || ""); }
+        return JSON.stringify({ envCode, cpCode });
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            checkpoints: Some(false),
+            ..Default::default()
+        },
+    );
+    assert!(
+        c4_caught.ok,
+        "caught env/checkpoint must succeed: {:?}",
+        c4_caught
+    );
+    let c4_v: serde_json::Value = serde_json::from_str(&c4_caught.return_value).unwrap();
+    assert_eq!(c4_v["envCode"], "ERR_SLICE_ENV_DENIED");
+    assert_eq!(c4_v["cpCode"], "ERR_SLICE_CHECKPOINT_DENIED");
+
+    // 5. Resource / Integrity / SSRF traps remain strictly UNCATCHABLE (bypass guest catch)
+    let fuel_trap = parent.eval_sandbox(
+        r#"
+        try { while (true) {} } catch (_e) { console.log("ESCAPED_FUEL_CATCH"); }
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(2_000),
+            ..Default::default()
+        },
+    );
+    assert!(!fuel_trap.ok);
+    assert!(
+        fuel_trap.stdout.is_empty(),
+        "uncatchable fuel trap must NOT run guest catch block: {:?}",
+        fuel_trap.stdout
+    );
+    assert!(
+        fuel_trap
+            .violation
+            .as_deref()
+            .unwrap_or("")
+            .contains("fuel limit"),
+        "expected CpuFuelExhausted violation, got: {:?}",
+        fuel_trap
+    );
+
+    let ssrf_trap = parent.eval_sandbox(
+        r#"
+        try {
+            await fetch("http://169.254.169.254/latest/meta-data/");
+        } catch (_e) {
+            console.log("ESCAPED_SSRF_CATCH");
+        }
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !ssrf_trap.ok
+            && ssrf_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("SSRF_METADATA_BLOCKED"),
+        "SSRF Cloud Metadata Shield must remain an uncatchable fatal violation: {:?}",
+        ssrf_trap
+    );
+}
+
+#[test]
+fn test_issue_180_builtin_fuel_memory_wallclock_and_interrupt_metering() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "issue-180-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        100_000_000,
+        64 * 1024 * 1024,
+    );
+
+    // 1. A1/A3: Built-in Array.from + Array.prototype.sort MUST charge fuel and trap under tight budget
+    let sort_trap = parent.eval_sandbox(
+        r#"
+        const d = Array.from({ length: 100000 }, (_, i) => (i * 1103515245 + 12345) >>> 0);
+        const s = [...d].sort((a, b) => a - b);
+        return s.length;
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(5_000),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !sort_trap.ok
+            && sort_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("fuel limit"),
+        "Array.from + sort must trap CpuFuelExhausted under fuel=5000, got: {:?}",
+        sort_trap
+    );
+
+    // Smaller built-in workload succeeds and reports proportional fuel (> 2000 for 2000 items)
+    let sort_ok = parent.eval_sandbox(
+        r#"
+        const d = Array.from({ length: 2000 }, (_, i) => (i * 1103515245 + 12345) >>> 0);
+        const s = [...d].sort((a, b) => a - b);
+        return s.length;
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(5_000_000),
+            ..Default::default()
+        },
+    );
+    assert!(
+        sort_ok.ok,
+        "2000-element Array.from + sort should succeed: {:?}",
+        sort_ok
+    );
+    assert_eq!(sort_ok.return_value, "2000");
+    assert!(
+        sort_ok.fuel_used > 2_000,
+        "built-in Array.from + sort must charge proportional fuel, got: {}",
+        sort_ok.fuel_used
+    );
+
+    // 2. B1/B2: Ordinary JS object/array/Map heap allocations MUST enforce memory ceiling and report real peakMemoryBytes
+    let oom_trap = parent.eval_sandbox(
+        r#"
+        const a: any[] = [];
+        for (let i = 0; i < 200000; i++) {
+            a.push({ x: i, y: i * 2 });
+        }
+        return a.length;
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(50_000_000),
+            memory_bytes: Some(512 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !oom_trap.ok
+            && oom_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("exceeded memory ceiling"),
+        "200k object allocations must trap MemoryCeilingExceeded under 512 KB, got: {:?}",
+        oom_trap
+    );
+    assert!(
+        oom_trap.peak_memory_bytes > 50_000,
+        "peakMemoryBytes must reflect metered JS heap allocations, got: {}",
+        oom_trap.peak_memory_bytes
+    );
+
+    // Map/Set heap metering also enforces ceiling
+    let map_oom = parent.eval_sandbox(
+        r#"
+        const m = new Map();
+        for (let i = 0; i < 50000; i++) m.set(i, i);
+        return m.size;
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(50_000_000),
+            memory_bytes: Some(256 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !map_oom.ok
+            && map_oom
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("exceeded memory ceiling"),
+        "50k Map entries must trap MemoryCeilingExceeded under 256 KB, got: {:?}",
+        map_oom
+    );
+
+    // 3. Wall-clock deadline (`timeoutMs`) aborts long-running compute with WallClockExceeded
+    let wall_trap = parent.eval_sandbox(
+        r#"
+        let x = 1;
+        for (let i = 0; i < 50_000_000; i++) {
+            x = ((x * 33) ^ i) & 0x0fffffff;
+        }
+        return x;
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(100_000_000),
+            timeout_ms: Some(25),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !wall_trap.ok
+            && wall_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("WallClockExceeded"),
+        "timeoutMs=25 must trap WallClockExceeded, got: {:?}",
+        wall_trap
+    );
+
+    // 4. Cross-thread `IsolateInterruptHandle::interrupt()` aborts with ExecutionInterrupted
+    let mut iso = SliceIsolate::spawn(
+        "issue-180-interrupt",
+        2,
+        CapabilityToken::pure_compute(),
+        100_000_000,
+        16 * 1024 * 1024,
+    );
+    let handle = iso.interrupt_handle();
+    let bc = compile_source_to_bytecode("let n = 0; while (true) { n++; }");
+    let interrupter = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        handle.interrupt();
+    });
+    let int_err = iso
+        .execute_bytecode(&bc, None)
+        .expect_err("interrupt_handle().interrupt() must abort infinite loop");
+    interrupter.join().unwrap();
+    assert!(
+        matches!(int_err, SandboxViolation::ExecutionInterrupted { .. }),
+        "expected ExecutionInterrupted, got: {:?}",
+        int_err
+    );
 }

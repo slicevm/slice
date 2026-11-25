@@ -5,8 +5,9 @@ use super::timers_and_state::{
     QueuedAsyncFetch,
 };
 use crate::boa_realm::{
-    BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DET_STATE, BOA_EGRESS_SECRETS,
-    BOA_KV_MEM_BUDGET, BOA_NET_HOSTS, BOA_VIOLATION, DIRTY_EVENT_LOOP, mark_subsystem_dirty,
+    BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DENIED_CAPABILITIES, BOA_DET_STATE,
+    BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_NET_HOSTS,
+    BOA_VIOLATION, DIRTY_EVENT_LOOP, mark_subsystem_dirty,
 };
 use crate::outbound_http::{
     execute_outbound_fetch_with_redirects, outbound_pool_reuse_count, reset_fetch_slab_telemetry,
@@ -104,6 +105,8 @@ impl FetchReactorPool {
                 BOA_EGRESS_SECRETS.with(|s| *s.borrow_mut() = job.egress_secrets);
                 BOA_KV_MEM_BUDGET.with(|m| m.set(job.mem_budget));
                 BOA_VIOLATION.with(|v| *v.borrow_mut() = None);
+                BOA_LAST_CHILD_PROC_VIOLATION.with(|v| *v.borrow_mut() = None);
+                BOA_DENIED_CAPABILITIES.with(|d| d.borrow_mut().clear());
                 let reuse_before = outbound_pool_reuse_count();
 
                 let result = execute_outbound_fetch_with_redirects(
@@ -114,12 +117,15 @@ impl FetchReactorPool {
                     &job.redirect_mode,
                 );
                 let violation = BOA_VIOLATION.with(|v| v.borrow_mut().take());
+                let ocap_denial = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take());
+                BOA_DENIED_CAPABILITIES.with(|d| d.borrow_mut().clear());
                 let reused_conns = outbound_pool_reuse_count().saturating_sub(reuse_before);
 
                 let _ = job.tx.send(CompletedAsyncFetch {
                     id: job.id,
                     result,
                     violation,
+                    ocap_denial,
                     reused_conns,
                 });
             }
