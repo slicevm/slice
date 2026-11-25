@@ -1,7 +1,7 @@
 # Slice
 
 [![CI](https://github.com/slicevm/slice/actions/workflows/ci.yml/badge.svg)](https://github.com/slicevm/slice/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.14.1-blue)](https://github.com/slicevm/slice/releases)
+[![Version](https://img.shields.io/badge/version-v0.14.2-blue)](https://github.com/slicevm/slice/releases)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green)](./LICENSE-MIT)
 [![Benchmarks](https://img.shields.io/badge/benchmarks-33%20workloads-brightgreen)](./tests/reports/latest.md)
@@ -165,18 +165,18 @@ workers = 8
 ## Benchmarks at a Glance
 
 <!-- BENCHMARK_SUMMARY_START -->
-Across **33 real-world TypeScript apps, frameworks (`Hono`, `UnJS`, `Express`, `SvelteKit 3`), and agent case studies**, Slice (`v0.14.0`) beats **Deno (`v2.9.8`)** on **33/33**, **Node.js (`v27.0.0-alpha.0.0.0`)** on **33/33**, **Bun (`v1.4.4`)** on **33/33** cold one-shot runs, and **all 3 runtimes on 33/33 workloads in `--warm` pooled execution**.
+Across **33 real-world TypeScript apps, frameworks (`Hono`, `UnJS`, `Express`, `SvelteKit 3`), and agent case studies**, Slice (`v0.14.2`) beats **Deno (`v2.9.8`)** on **33/33**, **Node.js (`v27.0.0-alpha.0.1.1`)** on **33/33**, **Bun (`v1.4.5`)** on **33/33** cold one-shot runs, and **all 3 runtimes on 33/33 workloads in `--warm` pooled execution**.
 
-| Metric (`Linux x86_64`) | Slice (`v0.14.0`) | Bun (`v1.4.4`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha.0.0.0`) |
+| Metric (`Linux x86_64`) | Slice (`v0.14.2`) | Bun (`v1.4.5`) | Deno (`v2.9.8`) | Node.js (`v27.0.0-alpha.0.1.1`) |
 | :--- | :---: | :---: | :---: | :---: |
-| **Isolate Cold Start (`P50` / `P99`)** | **`0.84 us` / `0.92 us`** | Process / VM | Process / VM | Process / VM |
-| **1,000-Tenant Swarm (Boot + Exec)** | **`1.02 ms` (`8.38 MB` RSS)** | `> 5,000 ms` | `> 15,000 ms` | `> 30,000 ms` |
-| **HTTP/1.1 Keep-Alive (`16k` Reqs)** | **`161,478 req/s`** (Tier-0) / **`157,571 req/s`** (Tier-1) | `100,858 req/s` | `101,131 req/s` | `57,467 req/s` |
-| **33-Workload Cold `.cas` Total** | **`417.6 ms`** (`1.65x` Bun / `6.50x` Node) | `688.1 ms` | `1,746.6 ms` | `2,716.3 ms` |
-| **33-Workload `--warm` Pooled Total** | **`137.6 ms`** (`5.00x` Bun / `19.74x` Node) | `688.1 ms` | `1,746.6 ms` | `2,716.3 ms` |
-| **Peak Memory (`Max RSS` Range)** | **`13.38 - 21.59 MB`** | `25.85 - 41.00 MB` | `45.89 - 62.48 MB` | `69.78 - 93.50 MB` |
+| **Isolate Cold Start (`P50` / `P99`)** | **`0.81 us` / `1.48 us`** | Process / VM | Process / VM | Process / VM |
+| **1,000-Tenant Swarm (Boot + Exec)** | **`1.02 ms` (`8.25 MB` RSS)** | `> 5,000 ms` | `> 15,000 ms` | `> 30,000 ms` |
+| **HTTP/1.1 Keep-Alive (`16k` Reqs)** | **`163,475 req/s`** (Tier-0) / **`154,290 req/s`** (Tier-1) | `96,504 req/s` | `96,672 req/s` | `56,207 req/s` |
+| **33-Workload Cold `.cas` Total** | **`417.2 ms`** (`1.75x` Bun / `5.99x` Node) | `728.5 ms` | `1,734.8 ms` | `2,500.2 ms` |
+| **33-Workload `--warm` Pooled Total** | **`139.0 ms`** (`5.24x` Bun / `17.99x` Node) | `728.5 ms` | `1,734.8 ms` | `2,500.2 ms` |
+| **Peak Memory (`Max RSS` Range)** | **`13.88 - 21.84 MB`** | `36.00 - 49.63 MB` | `46.23 - 62.90 MB` | `69.47 - 92.10 MB` |
 
-Full 33-workload breakdown, per-app latency and RSS tables, and run provenance (`baa0178`, `2026-11-23T19:27:13Z`): **[`tests/reports/latest.md`](./tests/reports/latest.md)** (archive: [`bench_v0.14.0_20261123_192713Z_baa0178.md`](./tests/reports/bench_v0.14.0_20261123_192713Z_baa0178.md)).
+Full 33-workload breakdown, per-app latency and RSS tables, and run provenance (`d9b9f44`, `2026-11-25T05:43:42Z`): **[`tests/reports/latest.md`](./tests/reports/latest.md)** (archive: [`bench_v0.14.2_20261125_054342Z_d9b9f44.md`](./tests/reports/bench_v0.14.2_20261125_054342Z_d9b9f44.md)).
 <!-- BENCHMARK_SUMMARY_END -->
 
 To reproduce the full Linux `x86_64` Docker benchmark suite locally and regenerate [`tests/reports/latest.md`](./tests/reports/latest.md):
