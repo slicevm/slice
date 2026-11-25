@@ -1853,3 +1853,108 @@ fn test_issue_185_string_builtin_fuel_and_memory_metering() {
     assert_eq!(parsed["b"], "0007");
     assert_eq!(parsed["c"], "a,b,c");
 }
+
+#[test]
+fn test_issue_186_sparse_array_builtin_fuel_memory_and_recursion() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "issue-186-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        32 * 1024 * 1024,
+    );
+
+    // 1. Sparse Array.join pre-allocation & loop must trap MemoryCeilingExceeded or CpuFuelExhausted
+    let join_trap = parent.eval_sandbox(
+        r#"try { new Array(5_000_000).join("x"); } catch (_e) { console.log("ESCAPED"); }"#,
+        SandboxEvalOptions {
+            fuel: Some(10_000),
+            memory_bytes: Some(512 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !join_trap.ok && join_trap.stdout.is_empty() && join_trap.violation.is_some(),
+        "sparse Array.join must trap uncatchably, got: {:?}",
+        join_trap
+    );
+
+    // 2. Sparse Array fill, reverse, indexOf, includes, and sparse forEach holes trap fuel
+    for (label, code) in [
+        ("fill", r#"new Array(5_000_000).fill(0);"#),
+        (
+            "reverse",
+            r#"Array.prototype.reverse.call({ length: 5_000_000 });"#,
+        ),
+        (
+            "indexOf",
+            r#"Array.prototype.indexOf.call({ length: 5_000_000 }, 1);"#,
+        ),
+        (
+            "includes",
+            r#"Array.prototype.includes.call({ length: 5_000_000 }, 1);"#,
+        ),
+        (
+            "sparse forEach",
+            r#"new Array(5_000_000).forEach(() => {});"#,
+        ),
+        ("concat sparse", r#"[].concat(new Array(5_000_000));"#),
+    ] {
+        let out = parent.eval_sandbox(
+            code,
+            SandboxEvalOptions {
+                fuel: Some(2_000),
+                memory_bytes: Some(2 * 1024 * 1024),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !out.ok && out.violation.is_some(),
+            "sparse Array.{} must trap fuel/memory, got: {:?}",
+            label,
+            out
+        );
+    }
+
+    // 3. Self-referential Array.flat(Infinity) must not overflow the Rust stack
+    let flat_res = parent.eval_sandbox(
+        r#"
+        const a: any[] = [];
+        a.push(a);
+        a.flat(Infinity);
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(50_000),
+            memory_bytes: Some(2 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        flat_res.ok || flat_res.violation.is_some() || flat_res.error.is_some(),
+        "circular flat(Infinity) must complete safely without stack overflow"
+    );
+
+    // 4. Normal dense Array operations succeed cleanly
+    let ok_res = parent.eval_sandbox(
+        r#"
+        const a = [1, 2, 3, 4].map(x => x * 2).filter(x => x > 2);
+        return JSON.stringify({ joined: a.join("-"), rev: a.toReversed(), has6: a.includes(6) });
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            memory_bytes: Some(2 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        ok_res.ok,
+        "normal dense array ops must succeed: {:?}",
+        ok_res
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&ok_res.return_value).unwrap();
+    assert_eq!(parsed["joined"], "4-6-8");
+    assert_eq!(parsed["rev"], serde_json::json!([8, 6, 4]));
+    assert_eq!(parsed["has6"], true);
+}

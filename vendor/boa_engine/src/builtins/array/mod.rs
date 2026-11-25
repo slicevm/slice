@@ -636,6 +636,9 @@ impl Array {
             //     ...
             //     f. Set k to k + 1.
             for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
                 context.charge_fuel(1)?;
                 context.charge_heap_bytes(16)?;
                 // a. Let Pk be ! ToString(𝔽(k)).
@@ -871,6 +874,9 @@ impl Array {
                 }
                 // iv. Repeat, while k < len,
                 for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
                     // 1. Let P be ! ToString(𝔽(k)).
                     // 2. Let exists be ? HasProperty(E, P).
                     // 3. If exists is true, then
@@ -1017,6 +1023,9 @@ impl Array {
         // 4. Let k be 0.
         // 5. Repeat, while k < len,
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             let pk = k;
             // b. Let kPresent be ? HasProperty(O, Pk).
@@ -1064,12 +1073,21 @@ impl Array {
         };
 
         // 5. Let R be the empty String.
-        let mut r = Vec::with_capacity(len as usize + len.saturating_sub(1) as usize);
+        let mut r = Vec::with_capacity(((len as usize).saturating_mul(2)).min(4096));
+        let mut total_str_bytes: usize = 0;
+        let mut charged_bytes: usize = 0;
         // 6. Let k be 0.
         // 7. Repeat, while k < len,
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. If k > 0, set R to the string-concatenation of R and sep.
             if k > 0 {
+                total_str_bytes = total_str_bytes.saturating_add(separator.len());
                 r.push(separator.clone());
             }
             // b. Let element be ? Get(O, ! ToString(𝔽(k))).
@@ -1080,9 +1098,17 @@ impl Array {
             } else {
                 element.to_string(context)?
             };
+            total_str_bytes = total_str_bytes.saturating_add(next.len());
             // d. Set R to the string-concatenation of R and next.
             r.push(next.clone());
+            if total_str_bytes.saturating_sub(charged_bytes) >= 4096 {
+                context.charge_heap_bytes(total_str_bytes - charged_bytes)?;
+                charged_bytes = total_str_bytes;
+            }
             // e. Set k to k + 1.
+        }
+        if total_str_bytes > charged_bytes && total_str_bytes > 256 {
+            context.charge_heap_bytes(total_str_bytes - charged_bytes)?;
         }
         // 8. Return R.
         Ok(js_string!(&r[..]).into())
@@ -1146,6 +1172,9 @@ impl Array {
         let mut lower = 0;
         // 5. Repeat, while lower ≠ middle,
         while lower != middle {
+            if (lower & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let upper be len - lower - 1.
             let upper = len - lower - 1;
             // Skipped: b. Let upperP be ! ToString(𝔽(upper)).
@@ -1216,6 +1245,12 @@ impl Array {
         // 4. Let k be 0.
         // 5. Repeat, while k < len,
         for i in 0..len {
+            if (i & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+                if i > 0 {
+                    context.charge_heap_bytes(1024)?;
+                }
+            }
             // a. Let from be ! ToString(𝔽(len - k - 1)).
             let from = len - i - 1;
 
@@ -1296,6 +1331,9 @@ impl Array {
         // 5. Let k be 1.
         // 6. Repeat, while k < len,
         for k in 1..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let from be ! ToString(𝔽(k)).
             let from = k;
             // b. Let to be ! ToString(𝔽(k - 1)).
@@ -1357,6 +1395,9 @@ impl Array {
             let mut k = len;
             // c. Repeat, while k > 0,
             while k > 0 {
+                if (k & 0x3F) == 0 {
+                    context.charge_fuel(1)?;
+                }
                 // i. Let from be ! ToString(𝔽(k - 1)).
                 let from = k - 1;
                 // ii. Let to be ! ToString(𝔽(k + argCount - 1)).
@@ -1423,6 +1464,9 @@ impl Array {
         // 4. Let k be 0.
         // 5. Repeat, while k < len,
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kPresent be ? HasProperty(O, Pk).
             // c. If kPresent is true, then
@@ -1476,6 +1520,9 @@ impl Array {
         // 5. Let k be 0.
         // 6. Repeat, while k < len,
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let k_present be ? HasProperty(O, Pk).
             // c. If k_present is true, then
@@ -1551,6 +1598,9 @@ impl Array {
 
         // 10. Repeat, while k < len,
         while k < len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let kPresent be ? HasProperty(O, ! ToString(𝔽(k))).
             // b. If kPresent is true, then
             // b.i. Let elementK be ? Get(O, ! ToString(𝔽(k))).
@@ -1625,6 +1675,9 @@ impl Array {
 
         // 8. Repeat, while k ≥ 0,
         while k >= 0 {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let kPresent be ? HasProperty(O, ! ToString(𝔽(k))).
             // b. If kPresent is true, then
             // b.i. Let elementK be ? Get(O, ! ToString(𝔽(k))).
@@ -1938,6 +1991,9 @@ impl Array {
 
         // 6. Repeat, while R(sourceIndex) < sourceLen
         while source_index < source_len {
+            if (source_index & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let P be ToString(sourceIndex)
             let p = source_index;
 
@@ -1969,9 +2025,9 @@ impl Array {
                     // For `should_flatten` to be true, element must be an object.
                     let element = element.as_object().js_expect("must be an object")?;
 
-                    // 1. If depth is +Infinity let newDepth be +Infinity
+                    // 1. If depth is +Infinity cap at VM recursion limit to prevent native stack overflow
                     let new_depth = if depth == u64::MAX {
-                        u64::MAX
+                        context.runtime_limits().recursion_limit() as u64
                     // 2. Else, let newDepth be depth - 1
                     } else {
                         depth - 1
@@ -2054,6 +2110,12 @@ impl Array {
 
         // 11. Repeat, while k < final,
         while k < final_ {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+                if k > 0 {
+                    context.charge_heap_bytes(1024)?;
+                }
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             let pk = k;
             // b. Perform ? Set(O, Pk, value, true).
@@ -2125,6 +2187,9 @@ impl Array {
 
         // 10. Repeat, while k < len,
         while k < len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let elementK be ? Get(O, ! ToString(𝔽(k))).
             let element_k = o.get(k, context)?;
             // b. If SameValueZero(searchElement, elementK) is true, return true.
@@ -2226,6 +2291,10 @@ impl Array {
                 }
             };
             if let Some((count, indexed)) = fast_sliced {
+                if count > 64 {
+                    context.charge_heap_bytes(count.saturating_mul(16))?;
+                    context.charge_fuel((count as u64) / 64)?;
+                }
                 return Ok(context
                     .intrinsics()
                     .templates()
@@ -2263,6 +2332,12 @@ impl Array {
         let mut n: u64 = 0;
         // 14. Repeat, while k < final,
         while k < final_ {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+                if k > 0 {
+                    context.charge_heap_bytes(1024)?;
+                }
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             let pk = k;
             // b. Let kPresent be ? HasProperty(O, Pk).
@@ -2346,6 +2421,9 @@ impl Array {
         // 5. Let k be 0.
         // 6. Repeat, while k < len,
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. If k > 0, then
             if k > 0 {
                 // i. Set R to the string-concatenation of R and separator.
@@ -2467,6 +2545,9 @@ impl Array {
         // 13. Let k be 0.
         // 14. Repeat, while k < actualDeleteCount,
         for k in 0..actual_delete_count {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let from be ! ToString(𝔽(actualStart + k)).
             // b. If ? HasProperty(O, from) is true, then
             // b.i. Let fromValue be ? Get(O, from).
@@ -2489,6 +2570,9 @@ impl Array {
                 // a. Set k to actualStart.
                 // b. Repeat, while k < (len - actualDeleteCount),
                 for k in actual_start..(len - actual_delete_count) {
+                    if (k & 0x3F) == 0 {
+                        context.charge_fuel(1)?;
+                    }
                     // i. Let from be ! ToString(𝔽(k + actualDeleteCount)).
                     let from = k + actual_delete_count;
 
@@ -2605,6 +2689,12 @@ impl Array {
         let mut i = 0;
         // 16. Repeat, while i < actualStart,
         while i < actual_start {
+            if (i & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+                if i > 0 {
+                    context.charge_heap_bytes(1024)?;
+                }
+            }
             //     a. Let Pi be ! ToString(𝔽(i)).
             //     b. Let iValue be ? Get(O, Pi).
             let value = o.get(i, context)?;
@@ -2633,6 +2723,12 @@ impl Array {
 
         // 18. Repeat, while i < newLen,
         while i < new_len {
+            if (i & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+                if i > 0 {
+                    context.charge_heap_bytes(1024)?;
+                }
+            }
             //     a. Let Pi be ! ToString(𝔽(i)).
             //     b. Let from be ! ToString(𝔽(r)).
             //     c. Let fromValue be ? Get(O, from).
@@ -2744,6 +2840,9 @@ impl Array {
         // 4. Let k be 0.
         // 5. Repeat, while k < len,
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kPresent be ? HasProperty(O, Pk).
             // c. If kPresent is true, then
@@ -2787,6 +2886,12 @@ impl Array {
         // 2. Let k be 0.
         // 3. Repeat, while k < len,
         for i in 0..len {
+            if (i & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+                if i > 0 {
+                    context.charge_heap_bytes(1024)?;
+                }
+            }
             context.charge_fuel(1)?;
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. If holes is skip-holes, then
@@ -3024,6 +3129,9 @@ impl Array {
 
         // 9. Repeat, while k < len,
         while k < len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             let pk = k;
             // b. Let kPresent be ? HasProperty(O, Pk).
@@ -3118,6 +3226,9 @@ impl Array {
 
         // 9. Repeat, while k ≥ 0,
         while k >= 0 {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             let pk = k;
             // b. Let kPresent be ? HasProperty(O, Pk).
@@ -3199,6 +3310,9 @@ impl Array {
 
         // 18. Repeat, while count > 0,
         while count > 0 {
+            if (count & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let fromKey be ! ToString(𝔽(from)).
             let from_key = from;
 
@@ -3345,6 +3459,9 @@ impl Array {
         // 8. Let k be 0.
         // 9. Repeat, while k < len,
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             let from_value = if k == actual_index {
                 // b. If k is actualIndex, let fromValue be value.
