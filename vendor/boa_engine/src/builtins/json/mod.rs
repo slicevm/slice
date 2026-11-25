@@ -483,6 +483,10 @@ impl Json {
         let reviver_obj = args.get_or_undefined(1).as_callable();
 
         // 2-10. Parse JSON text directly per ECMA-404 & ECMAScript 25.5.1.
+        if js_str.len() > 4096 {
+            context.charge_transient_heap_bytes(js_str.len())?;
+            context.charge_fuel((js_str.len() as u64) / 64)?;
+        }
         let (unfiltered, source_tree) = match js_str.as_str().variant() {
             boa_string::JsStrVariant::Latin1(bytes) => {
                 if reviver_obj.is_some() {
@@ -1863,6 +1867,7 @@ impl Json {
             arr_template_shape_addr: usize,
             verified_obj_shape_addr: &mut usize,
             to_json_key: &PropertyKey,
+            budget: &mut (u64, u64, usize, usize),
         ) -> JsResult<FastStatus> {
             match val.variant() {
                 JsVariant::Null => {
@@ -1891,6 +1896,17 @@ impl Json {
                 JsVariant::Undefined | JsVariant::Symbol(_) => Ok(FastStatus::UndefinedOrSkipped),
                 JsVariant::BigInt(_) => Ok(FastStatus::Fallback),
                 JsVariant::Object(obj) => {
+                    budget.0 = budget.0.saturating_add(1);
+                    if budget.0 > budget.1 {
+                        return Err(crate::error::RuntimeLimitError::LoopIteration.into());
+                    }
+                    if buf.len() > budget.2 {
+                        return Err(crate::error::RuntimeLimitError::MemoryLimit {
+                            requested: buf.len(),
+                            limit: budget.3,
+                        }
+                        .into());
+                    }
                     let borrow = obj.borrow();
                     let props = borrow.properties();
                     let shape_addr = props.shape.to_addr_usize();
@@ -1931,6 +1947,22 @@ impl Json {
                         };
                         match &props.indexed_properties {
                             IndexedProperties::DenseI32(vec) if vec.len() == arr_len => {
+                                if vec.len() > 64 {
+                                    budget.0 = budget.0.saturating_add((vec.len() / 64) as u64);
+                                    if budget.0 > budget.1 {
+                                        return Err(
+                                            crate::error::RuntimeLimitError::LoopIteration.into(),
+                                        );
+                                    }
+                                    let est = buf.len().saturating_add(vec.len().saturating_mul(2));
+                                    if est > budget.2 {
+                                        return Err(crate::error::RuntimeLimitError::MemoryLimit {
+                                            requested: est,
+                                            limit: budget.3,
+                                        }
+                                        .into());
+                                    }
+                                }
                                 buf.push(b'[');
                                 for (idx, &v) in vec.iter().enumerate() {
                                     if idx > 0 {
@@ -1942,6 +1974,22 @@ impl Json {
                                 return Ok(FastStatus::Written);
                             }
                             IndexedProperties::DenseF64(vec) if vec.len() == arr_len => {
+                                if vec.len() > 64 {
+                                    budget.0 = budget.0.saturating_add((vec.len() / 64) as u64);
+                                    if budget.0 > budget.1 {
+                                        return Err(
+                                            crate::error::RuntimeLimitError::LoopIteration.into(),
+                                        );
+                                    }
+                                    let est = buf.len().saturating_add(vec.len().saturating_mul(2));
+                                    if est > budget.2 {
+                                        return Err(crate::error::RuntimeLimitError::MemoryLimit {
+                                            requested: est,
+                                            limit: budget.3,
+                                        }
+                                        .into());
+                                    }
+                                }
                                 buf.push(b'[');
                                 for (idx, &v) in vec.iter().enumerate() {
                                     if idx > 0 {
@@ -1969,6 +2017,7 @@ impl Json {
                                         arr_template_shape_addr,
                                         verified_obj_shape_addr,
                                         to_json_key,
+                                        budget,
                                     ) {
                                         Ok(FastStatus::Written) => {}
                                         Ok(FastStatus::UndefinedOrSkipped) => {
@@ -2065,6 +2114,7 @@ impl Json {
                                     arr_template_shape_addr,
                                     verified_obj_shape_addr,
                                     to_json_key,
+                                    budget,
                                 )? {
                                     FastStatus::Written => {
                                         first = false;
@@ -2112,6 +2162,13 @@ impl Json {
         let mut all_ascii = true;
         let mut stack = Vec::with_capacity(8);
         let mut verified_obj_shape_addr = 0usize;
+        let limits = context.runtime_limits();
+        let mut budget = (
+            0u64,
+            limits.remaining_loop_iterations(),
+            limits.remaining_heap_bytes(),
+            limits.heap_bytes_limit(),
+        );
 
         match write_val(
             value,
@@ -2123,8 +2180,15 @@ impl Json {
             arr_template_shape_addr,
             &mut verified_obj_shape_addr,
             &to_json_key,
+            &mut budget,
         )? {
             FastStatus::Written => {
+                if buf.len() > 4096 {
+                    context.charge_transient_heap_bytes(buf.len())?;
+                }
+                if budget.0 > 64 {
+                    context.charge_fuel(budget.0)?;
+                }
                 if all_ascii {
                     Ok(Some(JsValue::new(JsString::from(
                         boa_string::JsStr::latin1(&buf),
@@ -2525,13 +2589,27 @@ impl Json {
         };
 
         // 5. Let partial be a new empty List.
-        let mut partial = Vec::with_capacity(len as usize);
+        let mut partial = Vec::with_capacity((len as usize).min(4096));
 
         // 7. Let index be 0.
         let mut index = 0;
 
         // 8. Repeat, while index < len,
         while index < len {
+            if (index & 0x3F) == 0 {
+                if let Err(e) = context.charge_fuel(1) {
+                    let removed = state.stack_set.remove(value);
+                    debug_assert!(removed);
+                    return Err(e);
+                }
+                if index > 0
+                    && let Err(e) = context.charge_heap_bytes(512)
+                {
+                    let removed = state.stack_set.remove(value);
+                    debug_assert!(removed);
+                    return Err(e);
+                }
+            }
             // a. Let strP be ? SerializeJSONProperty(state, ! ToString(𝔽(index)), value).
             let str_p = Self::serialize_json_property(state, index.into(), value, context);
             let str_p = match str_p {

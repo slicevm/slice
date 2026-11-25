@@ -214,6 +214,77 @@ impl JsBigInt {
         Ok(Self::new(x.inner.as_ref().clone().pow(y)))
     }
 
+    /// Context-metered `x ** y` enforcing guest heap and fuel limits before allocation.
+    #[inline]
+    pub(crate) fn pow_checked(
+        x: &Self,
+        y: &Self,
+        context: &mut crate::Context,
+    ) -> JsResult<Self> {
+        let y_uint = y
+            .inner
+            .to_biguint()
+            .ok_or_else(|| JsNativeError::range().with_message("BigInt negative exponent"))?;
+        let x_bits = x.inner.bits();
+        if x_bits > 1 {
+            let num_bits = (x_bits as f64
+                * y_uint.to_f64().expect("Unable to convert from BigUInt to f64"))
+            .floor()
+                + 1f64;
+            if num_bits > 1_000_000_000f64 {
+                return Err(JsNativeError::range()
+                    .with_message("Maximum BigInt size exceeded")
+                    .into());
+            }
+            let est_bytes = (num_bits / 8.0) as usize;
+            if est_bytes > 256 {
+                context.charge_heap_bytes(est_bytes)?;
+                context.charge_fuel((est_bytes as u64) / 16)?;
+            }
+        }
+        Self::pow(x, y)
+    }
+
+    /// Context-metered `x << y` enforcing guest heap and fuel limits before allocation.
+    #[inline]
+    pub(crate) fn shift_left_checked(
+        x: &Self,
+        y: &Self,
+        context: &mut crate::Context,
+    ) -> JsResult<Self> {
+        if let Some(n) = y.inner.to_i32()
+            && n > 0
+            && !x.is_zero()
+        {
+            let est_bytes = (x.inner.bits() as usize).saturating_add(n as usize) / 8;
+            if est_bytes > 256 {
+                context.charge_heap_bytes(est_bytes)?;
+                context.charge_fuel((est_bytes as u64) / 16)?;
+            }
+        }
+        Self::shift_left(x, y)
+    }
+
+    /// Context-metered `x >> y` enforcing guest heap and fuel limits before allocation.
+    #[inline]
+    pub(crate) fn shift_right_checked(
+        x: &Self,
+        y: &Self,
+        context: &mut crate::Context,
+    ) -> JsResult<Self> {
+        if let Some(n) = y.inner.to_i32()
+            && n < 0
+            && !x.is_zero()
+        {
+            let est_bytes = (x.inner.bits() as usize).saturating_add(n.unsigned_abs() as usize) / 8;
+            if est_bytes > 256 {
+                context.charge_heap_bytes(est_bytes)?;
+                context.charge_fuel((est_bytes as u64) / 16)?;
+            }
+        }
+        Self::shift_right(x, y)
+    }
+
     /// Performs the `>>` operation.
     #[inline]
     pub fn shift_right(x: &Self, y: &Self) -> JsResult<Self> {

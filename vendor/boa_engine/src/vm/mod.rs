@@ -1054,6 +1054,27 @@ impl Context {
         Ok(())
     }
 
+    /// Charges `bytes` against the guest heap memory ceiling when `bytes` exceeds the streaming
+    /// transient threshold (`min(64 KiB, heap_bytes_limit / 8)`), otherwise verifies that `bytes`
+    /// fits within the remaining heap budget without permanently depleting the monotonic counter
+    /// during sustained chunked streaming I/O.
+    #[inline(always)]
+    pub fn charge_transient_heap_bytes(&mut self, bytes: usize) -> JsResult<()> {
+        let limits = self.vm.runtime_limits;
+        let threshold = (limits.heap_bytes_limit() / 8).min(64 * 1024);
+        if bytes > threshold {
+            self.charge_heap_bytes(bytes)
+        } else if bytes > limits.remaining_heap_bytes() {
+            Err(RuntimeLimitError::MemoryLimit {
+                requested: limits.heap_bytes_allocated().saturating_add(bytes),
+                limit: limits.heap_bytes_limit(),
+            }
+            .into())
+        } else {
+            Ok(())
+        }
+    }
+
     /// Checks if we haven't exceeded the defined runtime limits.
     pub(crate) fn check_runtime_limits(&mut self) -> JsResult<()> {
         // Must throw if the number of recursive calls exceeds the defined limit.

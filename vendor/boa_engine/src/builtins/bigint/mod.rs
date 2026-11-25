@@ -178,6 +178,12 @@ impl BigInt {
     ) -> JsResult<JsValue> {
         // 1. Let x be ? thisBigIntValue(this value).
         let x = Self::this_bigint_value(this)?;
+        let bits = x.as_inner().bits();
+        if bits > 1024 {
+            let est_chars = (bits / 3) as usize;
+            context.charge_heap_bytes(est_chars)?;
+            context.charge_fuel((bits / 64).saturating_mul((bits / 1024).max(1)))?;
+        }
 
         let radix = args.get_or_undefined(0);
 

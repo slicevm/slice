@@ -1958,3 +1958,156 @@ fn test_issue_186_sparse_array_builtin_fuel_memory_and_recursion() {
     assert_eq!(parsed["rev"], serde_json::json!([8, 6, 4]));
     assert_eq!(parsed["has6"], true);
 }
+
+#[test]
+fn test_issue_187_bigint_json_object_and_codec_metering() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "issue-187-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        32 * 1024 * 1024,
+    );
+
+    // 1. BigInt shift / pow / toString blowup must trap uncatchably under tight memory/fuel
+    for (label, code) in [
+        (
+            "bigint shl",
+            r#"try { const x = 1n << 10_000_000n; } catch (_e) { console.log("ESCAPED"); }"#,
+        ),
+        (
+            "bigint pow",
+            r#"try { const x = 3n ** 10_000_000n; } catch (_e) { console.log("ESCAPED"); }"#,
+        ),
+        (
+            "bigint toString",
+            r#"try { const x = (1n << 200_000n).toString(); } catch (_e) { console.log("ESCAPED"); }"#,
+        ),
+    ] {
+        let res = parent.eval_sandbox(
+            code,
+            SandboxEvalOptions {
+                fuel: Some(10_000),
+                memory_bytes: Some(64 * 1024),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !res.ok && res.stdout.is_empty() && res.violation.is_some(),
+            "{} must trap uncatchably, got: {:?}",
+            label,
+            res
+        );
+    }
+
+    // 2. JSON.stringify on sparse arrays and non-circular exponential DAGs must trap
+    for (label, code) in [
+        (
+            "json sparse array",
+            r#"try { JSON.stringify(new Array(5_000_000)); } catch (_e) { console.log("ESCAPED"); }"#,
+        ),
+        (
+            "json exponential DAG",
+            r#"
+            try {
+                let a: any = [1];
+                for (let i = 0; i < 24; i++) a = [a, a];
+                JSON.stringify(a);
+            } catch (_e) {
+                console.log("ESCAPED");
+            }
+            "#,
+        ),
+    ] {
+        let res = parent.eval_sandbox(
+            code,
+            SandboxEvalOptions {
+                fuel: Some(50_000),
+                memory_bytes: Some(256 * 1024),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !res.ok && res.stdout.is_empty() && res.violation.is_some(),
+            "{} must trap uncatchably, got: {:?}",
+            label,
+            res
+        );
+    }
+
+    // 3. Object.entries / Object.keys on large typed array must trap
+    let obj_trap = parent.eval_sandbox(
+        r#"
+        const u = new Uint8Array(200_000);
+        Object.entries(u);
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(50_000),
+            memory_bytes: Some(512 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !obj_trap.ok && obj_trap.violation.is_some(),
+        "Object.entries on large Uint8Array must trap memory/fuel, got: {:?}",
+        obj_trap
+    );
+
+    // 4. Native codecs (btoa / TextEncoder / TextDecoder) must charge heap + fuel on large payloads
+    for (label, code) in [
+        ("btoa", r#"const s = "a".repeat(200_000); btoa(s);"#),
+        (
+            "TextEncoder",
+            r#"const s = "a".repeat(200_000); new TextEncoder().encode(s);"#,
+        ),
+        (
+            "TextDecoder",
+            r#"const u = new Uint8Array(200_000); new TextDecoder().decode(u);"#,
+        ),
+    ] {
+        let res = parent.eval_sandbox(
+            code,
+            SandboxEvalOptions {
+                fuel: Some(500_000),
+                memory_bytes: Some(256 * 1024),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !res.ok && res.violation.is_some(),
+            "{} must trap memory ceiling, got: {:?}",
+            label,
+            res
+        );
+    }
+
+    // 5. Normal BigInt, JSON, Object, and codec operations succeed cleanly
+    let ok_res = parent.eval_sandbox(
+        r#"
+        const big = (2n ** 64n).toString();
+        const j = JSON.parse(JSON.stringify({ a: 1, b: [2, 3] }));
+        const entries = Object.entries({ x: 10, y: 20 }).length;
+        const b64 = atob(btoa("hello-slice"));
+        const rt = new TextDecoder().decode(new TextEncoder().encode("utf8-ok"));
+        return JSON.stringify({ big, sum: j.a + j.b[0] + j.b[1], entries, b64, rt });
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            memory_bytes: Some(2 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        ok_res.ok,
+        "normal BigInt/JSON/Object/codec ops must succeed: {:?}",
+        ok_res
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&ok_res.return_value).unwrap();
+    assert_eq!(parsed["big"], "18446744073709551616");
+    assert_eq!(parsed["sum"], 6);
+    assert_eq!(parsed["entries"], 2);
+    assert_eq!(parsed["b64"], "hello-slice");
+    assert_eq!(parsed["rt"], "utf8-ok");
+}
