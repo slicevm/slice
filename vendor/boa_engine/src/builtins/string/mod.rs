@@ -493,6 +493,12 @@ impl String {
 
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
+        if string.len() > 256 {
+            context.charge_heap_bytes(string.len())?;
+            if string.len() > 4096 {
+                context.charge_fuel((string.len() as u64) / 64)?;
+            }
+        }
 
         // 3. Let position be ? ToIntegerOrInfinity(pos).
         let position = args.get_or_undefined(0).to_integer_or_infinity(context)?;
@@ -571,6 +577,12 @@ impl String {
 
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
+        if string.len() > 256 {
+            context.charge_heap_bytes(string.len())?;
+            if string.len() > 4096 {
+                context.charge_fuel((string.len() as u64) / 64)?;
+            }
+        }
 
         // 3. Let position be ? ToIntegerOrInfinity(pos).
         let position = args.get_or_undefined(0).to_integer_or_infinity(context)?;
@@ -614,6 +626,12 @@ impl String {
 
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
+        if string.len() > 256 {
+            context.charge_heap_bytes(string.len())?;
+            if string.len() > 4096 {
+                context.charge_fuel((string.len() as u64) / 64)?;
+            }
+        }
 
         // 3. Let position be ? ToIntegerOrInfinity(pos).
         let position = args.get_or_undefined(0).to_integer_or_infinity(context)?;
@@ -659,8 +677,16 @@ impl String {
         // 4. For each element next of args, do
         for arg in args {
             // a. Let nextString be ? ToString(next).
+            let next_str = arg.to_string(context)?;
+            let next_len = string.len().saturating_add(next_str.len());
+            if next_len > 256 {
+                context.charge_heap_bytes(next_len)?;
+                if next_len > 4096 {
+                    context.charge_fuel((next_len as u64) / 64)?;
+                }
+            }
             // b. Set R to the string-concatenation of R and nextString.
-            string = js_string!(&string, &arg.to_string(context)?);
+            string = js_string!(&string, &next_str);
         }
 
         // 5. Return R.
@@ -688,6 +714,12 @@ impl String {
 
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
+        if string.len() > 256 {
+            context.charge_heap_bytes(string.len())?;
+            if string.len() > 4096 {
+                context.charge_fuel((string.len() as u64) / 64)?;
+            }
+        }
 
         // 3. Let n be ? ToIntegerOrInfinity(count).
         let n = args.get_or_undefined(0).to_integer_or_infinity(context)?;
@@ -732,6 +764,13 @@ impl String {
         }
 
         let n = n as usize;
+        let est_bytes = n.saturating_mul(len);
+        if est_bytes > 256 {
+            context.charge_heap_bytes(est_bytes)?;
+        }
+        if n > 4096 {
+            context.charge_fuel((n as u64) / 64)?;
+        }
 
         // Charge each repetition against the VM loop-iteration limit.
         let mut result = Vec::with_capacity(n);
@@ -764,6 +803,12 @@ impl String {
 
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
+        if string.len() > 256 {
+            context.charge_heap_bytes(string.len())?;
+            if string.len() > 4096 {
+                context.charge_fuel((string.len() as u64) / 64)?;
+            }
+        }
 
         // 3. Let len be the length of S.
         let len = string.len() as i64;
@@ -830,6 +875,12 @@ impl String {
 
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
+        if string.len() > 256 {
+            context.charge_heap_bytes(string.len())?;
+            if string.len() > 4096 {
+                context.charge_fuel((string.len() as u64) / 64)?;
+            }
+        }
 
         let search_string = args.get_or_undefined(0);
 
@@ -900,6 +951,12 @@ impl String {
 
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
+        if string.len() > 256 {
+            context.charge_heap_bytes(string.len())?;
+            if string.len() > 4096 {
+                context.charge_fuel((string.len() as u64) / 64)?;
+            }
+        }
 
         let search_str = match args.get_or_undefined(0) {
             // 3. Let isRegExp be ? IsRegExp(searchString).
@@ -966,6 +1023,12 @@ impl String {
 
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
+        if string.len() > 256 {
+            context.charge_heap_bytes(string.len())?;
+            if string.len() > 4096 {
+                context.charge_fuel((string.len() as u64) / 64)?;
+            }
+        }
 
         let search_str = match args.get_or_undefined(0) {
             // 3. Let isRegExp be ? IsRegExp(searchString).
@@ -1195,6 +1258,10 @@ impl String {
         while let Some(p) = position {
             // a. Append position to the end of matchPositions.
             match_positions.push(p);
+            if (match_positions.len() & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+                context.charge_heap_bytes(512)?;
+            }
 
             // b. Set position to ! StringIndexOf(string, searchString, position + advanceBy).
             position = string.index_of(search_string.as_str(), p + advance_by);
@@ -1204,10 +1271,14 @@ impl String {
         let mut end_of_last_match = 0;
 
         // 13. Let result be the empty String.
-        let mut result = Vec::with_capacity(string.len());
+        let mut result = Vec::with_capacity(string.len().min(4096));
+        let mut charged_bytes: usize = 0;
 
         // 14. For each element p of matchPositions, do
-        for p in match_positions {
+        for (idx, p) in match_positions.into_iter().enumerate() {
+            if (idx & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let preserved be the substring of string from endOfLastMatch to p.
             let preserved = string.get_expect(end_of_last_match..p);
 
@@ -1246,6 +1317,11 @@ impl String {
             // d. Set result to the string-concatenation of result, preserved, and replacement.
             result.extend(preserved.iter());
             result.extend(replacement.iter());
+            let cur_bytes = result.len().saturating_mul(2);
+            if cur_bytes.saturating_sub(charged_bytes) >= 4096 {
+                context.charge_heap_bytes(cur_bytes - charged_bytes)?;
+                charged_bytes = cur_bytes;
+            }
 
             // e. Set endOfLastMatch to p + searchLength.
             end_of_last_match = p + search_length;
@@ -1255,6 +1331,10 @@ impl String {
         if end_of_last_match < string.len() {
             // a. Set result to the string-concatenation of result and the substring of string from endOfLastMatch.
             result.extend(string.get_expect(end_of_last_match..).iter());
+        }
+        let final_bytes = result.len().saturating_mul(2);
+        if final_bytes > charged_bytes && final_bytes > 256 {
+            context.charge_heap_bytes(final_bytes - charged_bytes)?;
         }
 
         // 16. Return result.
@@ -1284,6 +1364,12 @@ impl String {
 
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
+        if string.len() > 256 {
+            context.charge_heap_bytes(string.len())?;
+            if string.len() > 4096 {
+                context.charge_fuel((string.len() as u64) / 64)?;
+            }
+        }
 
         // 3. Let searchStr be ? ToString(searchString).
         let search_str = args.get_or_undefined(0).to_string(context)?;
@@ -1356,6 +1442,12 @@ impl String {
 
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
+        if string.len() > 256 {
+            context.charge_heap_bytes(string.len())?;
+            if string.len() > 4096 {
+                context.charge_fuel((string.len() as u64) / 64)?;
+            }
+        }
 
         // 3. Let searchStr be ? ToString(searchString).
         let search_str = args.get_or_undefined(0).to_string(context)?;
@@ -1576,9 +1668,20 @@ impl String {
             if r == 0 { q } else { q + 1 }
         };
 
+        let out_bytes = (int_max_length as usize).saturating_mul(2);
+        if out_bytes > 256 {
+            context.charge_heap_bytes(out_bytes)?;
+        }
+        if repetitions > 64 {
+            context.charge_fuel(repetitions / 64)?;
+        }
+
         let mut truncated_string_filler = Vec::with_capacity(fill_len as usize);
         let filler_slice = filler.to_vec();
-        for _ in 0..repetitions {
+        for i in 0..repetitions {
+            if (i & 0xFF) == 0 && i > 0 {
+                context.charge_fuel(1)?;
+            }
             let remaining = fill_len as usize - truncated_string_filler.len();
             if remaining >= filler_slice.len() {
                 truncated_string_filler.extend_from_slice(&filler_slice);
@@ -1742,6 +1845,12 @@ impl String {
 
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
+        if string.len() > 256 {
+            context.charge_heap_bytes(string.len())?;
+            if string.len() > 4096 {
+                context.charge_fuel((string.len() as u64) / 64)?;
+            }
+        }
 
         // 3. Let sText be ! StringToCodePoints(S).
         // 4. Let upperText be the result of toUppercase(sText), according to
@@ -1903,6 +2012,12 @@ impl String {
 
         // 2. Let S be ? ToString(O).
         let string = this.to_string(context)?;
+        if string.len() > 256 {
+            context.charge_heap_bytes(string.len())?;
+            if string.len() > 4096 {
+                context.charge_fuel((string.len() as u64) / 64)?;
+            }
+        }
 
         // 3. Let len be the length of S.
         let len = string.len() as i64;
@@ -2000,6 +2115,10 @@ impl String {
             // a. Let head be the substring of S from 0 to lim.
             // b. Let codeUnits be a List consisting of the sequence of code units that are the elements of head.
             let head_str = this_str.get(..lim).unwrap_or(this_str);
+            if head_str.len() > 64 {
+                context.charge_heap_bytes(head_str.len().saturating_mul(32))?;
+                context.charge_fuel((head_str.len() as u64) / 64)?;
+            }
             let head = head_str
                 .iter()
                 .map(|code| js_string!(std::slice::from_ref(&code)).into());
@@ -2027,6 +2146,10 @@ impl String {
             // a. Let T be the substring of S from i to j.
             // b. Append T as the last element of substrings.
             substrings.push(this_str.slice(i, index));
+            if (substrings.len() & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+                context.charge_heap_bytes(1024)?;
+            }
 
             // c. If the number of elements of substrings is lim, return ! CreateArrayFromList(substrings).
             if substrings.len() == lim {
@@ -2204,6 +2327,12 @@ impl String {
             }
         };
 
+        if s.len() > 256 {
+            context.charge_heap_bytes(s.len().saturating_mul(2))?;
+            if s.len() > 4096 {
+                context.charge_fuel((s.len() as u64) / 64)?;
+            }
+        }
         let s = s.iter().collect::<Vec<_>>();
 
         let result = match normalization {
@@ -2212,6 +2341,9 @@ impl String {
             Normalization::Nfkc => normalizers.nfkc.as_borrowed().normalize_utf16(&s),
             Normalization::Nfkd => normalizers.nfkd.as_borrowed().normalize_utf16(&s),
         };
+        if result.len() > s.len() && result.len() > 256 {
+            context.charge_heap_bytes((result.len() - s.len()).saturating_mul(2))?;
+        }
 
         // 7. Return ns.
         Ok(js_string!(&result[..]).into())

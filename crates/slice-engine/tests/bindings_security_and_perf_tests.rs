@@ -1778,3 +1778,78 @@ fn test_issue_184_arraybuffer_typedarray_buffer_metering() {
     assert_eq!(parsed["len"], 64);
     assert_eq!(parsed["sorted"], serde_json::json!([1, 2, 3]));
 }
+
+#[test]
+fn test_issue_185_string_builtin_fuel_and_memory_metering() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "issue-185-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        32 * 1024 * 1024,
+    );
+
+    // 1. String.repeat doubling, padStart, replaceAll amplification, and split("") enforce memoryBytes
+    for (label, code) in [
+        (
+            "repeat doubling",
+            r#"let s = "a"; for (let i = 0; i < 22; i++) s = s.repeat(2);"#,
+        ),
+        (
+            "padStart",
+            r#"try { "".padStart(2_000_000, "x"); } catch (_e) { console.log("ESCAPED"); }"#,
+        ),
+        (
+            "replaceAll amplification",
+            r#"("a".repeat(2_000)).replaceAll("", "x".repeat(500));"#,
+        ),
+        ("split empty sep", r#"("a".repeat(30_000)).split("");"#),
+        (
+            "concat doubling",
+            r#"let s = "a"; for (let i = 0; i < 22; i++) s = s.concat(s);"#,
+        ),
+    ] {
+        let out = parent.eval_sandbox(
+            code,
+            SandboxEvalOptions {
+                fuel: Some(5_000_000),
+                memory_bytes: Some(512 * 1024),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !out.ok
+                && out.stdout.is_empty()
+                && out
+                    .violation
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("exceeded memory ceiling"),
+            "{} must trap uncatchable MemoryCeilingExceeded under 512 KB, got: {:?}",
+            label,
+            out
+        );
+    }
+
+    // 2. Normal string operations succeed cleanly
+    let ok_res = parent.eval_sandbox(
+        r#"
+        const a = "ab".repeat(3);
+        const b = "7".padStart(4, "0");
+        const c = "a-b-c".replaceAll("-", "_").split("_").join(",");
+        return JSON.stringify({ a, b, c });
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            memory_bytes: Some(2 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(ok_res.ok, "normal string ops must succeed: {:?}", ok_res);
+    let parsed: serde_json::Value = serde_json::from_str(&ok_res.return_value).unwrap();
+    assert_eq!(parsed["a"], "ababab");
+    assert_eq!(parsed["b"], "0007");
+    assert_eq!(parsed["c"], "a,b,c");
+}
