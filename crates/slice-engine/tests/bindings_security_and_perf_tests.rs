@@ -2111,3 +2111,101 @@ fn test_issue_187_bigint_json_object_and_codec_metering() {
     assert_eq!(parsed["b64"], "hello-slice");
     assert_eq!(parsed["rt"], "utf8-ok");
 }
+
+#[test]
+fn test_issue_199_refused_ocap_calls_report_current_violation_message() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "issue-199-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        32 * 1024 * 1024,
+    );
+
+    // 1. Network refusal -> FS read (/etc/hostname) -> FS read (/etc/passwd) -> FS write (/tmp/x)
+    //    -> exec refusal -> FS read (/etc/hosts): every error must report its OWN message.
+    let res = parent.eval_sandbox(
+        r#"
+        const out: Array<{ code: string; msg: string }> = [];
+        try { await fetch("https://example.com/"); } catch (e: any) { out.push({ code: e.code, msg: e.message }); }
+        try { require("fs").readFileSync("/etc/hostname", "utf8"); } catch (e: any) { out.push({ code: e.code, msg: e.message }); }
+        try { require("fs").readFileSync("/etc/passwd", "utf8"); } catch (e: any) { out.push({ code: e.code, msg: e.message }); }
+        try { require("fs").writeFileSync("/tmp/x", "y"); } catch (e: any) { out.push({ code: e.code, msg: e.message }); }
+        try { require("child_process").execSync("id"); } catch (e: any) { out.push({ code: e.code, msg: e.message }); }
+        try { require("fs").readFileSync("/etc/hosts", "utf8"); } catch (e: any) { out.push({ code: e.code, msg: e.message }); }
+        return JSON.stringify(out);
+        "#,
+        SandboxEvalOptions::default(),
+    );
+    assert!(res.ok, "caught OCap refusals must complete: {:?}", res);
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&res.return_value).unwrap();
+    assert_eq!(entries.len(), 6);
+    assert_eq!(entries[0]["code"], "ERR_SLICE_NET_DENIED");
+    assert!(entries[0]["msg"].as_str().unwrap().contains("example.com"));
+    assert_eq!(entries[1]["code"], "ERR_SLICE_FS_DENIED");
+    assert!(
+        entries[1]["msg"]
+            .as_str()
+            .unwrap()
+            .contains("lacks filesystem read authority for path '/etc/hostname'"),
+        "got: {:?}",
+        entries[1]
+    );
+    assert_eq!(entries[2]["code"], "ERR_SLICE_FS_DENIED");
+    assert!(
+        entries[2]["msg"]
+            .as_str()
+            .unwrap()
+            .contains("lacks filesystem read authority for path '/etc/passwd'"),
+        "got: {:?}",
+        entries[2]
+    );
+    assert_eq!(entries[3]["code"], "ERR_SLICE_FS_DENIED");
+    assert!(
+        entries[3]["msg"]
+            .as_str()
+            .unwrap()
+            .contains("lacks filesystem write authority for path '/tmp/x'"),
+        "got: {:?}",
+        entries[3]
+    );
+    assert_eq!(entries[4]["code"], "ERR_SLICE_EXEC_DENIED");
+    assert!(
+        entries[4]["msg"]
+            .as_str()
+            .unwrap()
+            .contains("lacks exec authority")
+    );
+    assert_eq!(entries[5]["code"], "ERR_SLICE_FS_DENIED");
+    assert!(
+        entries[5]["msg"]
+            .as_str()
+            .unwrap()
+            .contains("lacks filesystem read authority for path '/etc/hosts'"),
+        "got: {:?}",
+        entries[5]
+    );
+
+    // 2. Caught refusal #1 (fetch) followed by UNCAUGHT refusal #2 (fs.readFileSync) must report
+    //    FsReadDenied as the fatal violation, NOT the earlier caught NetAccessDenied.
+    let uncaught = parent.eval_sandbox(
+        r#"
+        try { await fetch("https://example.com/"); } catch (_e) {}
+        require("fs").readFileSync("/etc/passwd", "utf8");
+        "#,
+        SandboxEvalOptions::default(),
+    );
+    assert!(
+        !uncaught.ok,
+        "uncaught FS refusal must fail: {:?}",
+        uncaught
+    );
+    let viol = uncaught.violation.as_deref().unwrap_or("");
+    assert!(
+        viol.contains("lacks filesystem read authority for path '/etc/passwd'"),
+        "fatal violation must reflect the uncaught FS denial, got: {:?}",
+        uncaught
+    );
+}

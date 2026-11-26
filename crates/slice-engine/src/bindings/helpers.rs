@@ -1,8 +1,7 @@
 //! Shared Buffer Extraction, JS TypedArray Builders, Crypto Helpers, and Sandbox Budget Accounting.
 
 use crate::boa_realm::{
-    BOA_ACTIVE_TENANT, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION,
-    BOA_VIOLATION,
+    BOA_ACTIVE_TENANT, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_LAST_OCAP_VIOLATION, BOA_VIOLATION,
 };
 use crate::intrinsics::{
     hmac_md5_bytes, hmac_sha1_bytes, hmac_sha256_bytes, hmac_sha384_bytes, hmac_sha512_bytes,
@@ -618,7 +617,7 @@ pub(crate) fn active_tenant_id_or_default() -> String {
 #[cold]
 #[inline(never)]
 pub(crate) fn last_ocap_violation_message() -> String {
-    BOA_LAST_CHILD_PROC_VIOLATION.with(|v| {
+    BOA_LAST_OCAP_VIOLATION.with(|v| {
         v.borrow()
             .as_ref()
             .map(ToString::to_string)

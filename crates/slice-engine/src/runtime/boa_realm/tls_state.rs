@@ -215,7 +215,7 @@ thread_local! {
         std::cell::RefCell::new(FxHashMap::default());
     pub(crate) static BOA_EXEC_BINS: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };
-    pub(crate) static BOA_LAST_CHILD_PROC_VIOLATION: std::cell::RefCell<Option<SandboxViolation>> =
+    pub(crate) static BOA_LAST_OCAP_VIOLATION: std::cell::RefCell<Option<SandboxViolation>> =
         const { std::cell::RefCell::new(None) };
     pub(crate) static BOA_DENIED_CAPABILITIES: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };
@@ -295,11 +295,8 @@ pub(crate) fn record_boa_ocap_denial(violation: SandboxViolation) {
             v.push(msg);
         }
     });
-    BOA_LAST_CHILD_PROC_VIOLATION.with(|slot| {
-        let mut b = slot.borrow_mut();
-        if b.is_none() {
-            *b = Some(violation);
-        }
+    BOA_LAST_OCAP_VIOLATION.with(|slot| {
+        *slot.borrow_mut() = Some(violation);
     });
 }
 

@@ -5,7 +5,7 @@ use super::{
     BOA_CHECKPOINT_CAP, BOA_CHECKPOINT_STATS, BOA_CUSTOM_ARGV, BOA_DENIED_CAPABILITIES,
     BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS,
     BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES,
-    BOA_KV_MEM_BUDGET, BOA_LAST_CHILD_PROC_VIOLATION, BOA_LAST_EXIT_CODE, BOA_NET_HOSTS,
+    BOA_KV_MEM_BUDGET, BOA_LAST_EXIT_CODE, BOA_LAST_OCAP_VIOLATION, BOA_NET_HOSTS,
     BOA_PROCESS_EXIT, BOA_SES_BASELINE_SIGS, BOA_SES_INTL_SIG_PAIR, BOA_STDOUT, BOA_UNCAUGHT_ERROR,
     BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, BoaFsCaps,
     CapturedBoaHttpRes, DIRTY_ALS, DIRTY_FETCH_MOCK, DIRTY_SOCKETS, DIRTY_WASM, DIRTY_WEBSOCKET,
@@ -73,7 +73,7 @@ impl SavedIsolateContextGuard {
         let (saved_last_cp_violation, saved_denied_capabilities) =
             if (saved_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
                 (
-                    BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take()),
+                    BOA_LAST_OCAP_VIOLATION.with(|v| v.borrow_mut().take()),
                     BOA_DENIED_CAPABILITIES.with(|d| std::mem::take(&mut *d.borrow_mut())),
                 )
             } else {
@@ -222,8 +222,7 @@ impl Drop for SavedIsolateContextGuard {
         BOA_ENV_MAP.with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_env_map));
         BOA_EXEC_BINS.with(|b| *b.borrow_mut() = std::mem::take(&mut self.saved_exec_bins));
         if (union_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
-            BOA_LAST_CHILD_PROC_VIOLATION
-                .with(|v| *v.borrow_mut() = self.saved_last_cp_violation.take());
+            BOA_LAST_OCAP_VIOLATION.with(|v| *v.borrow_mut() = self.saved_last_cp_violation.take());
             BOA_DENIED_CAPABILITIES.with(|d| {
                 *d.borrow_mut() = std::mem::take(&mut self.saved_denied_capabilities);
             });

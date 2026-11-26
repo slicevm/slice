@@ -5,7 +5,7 @@ use super::BoaSessionFlags;
 use crate::boa_realm::{
     BOA_CHECKPOINT_STATS, BOA_CUSTOM_ARGV, BOA_DENIED_CAPABILITIES, BOA_DIRTY_SUBSYSTEMS,
     BOA_EXEC_DIRTY, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES, BOA_KV_MEM_BUDGET,
-    BOA_LAST_CHILD_PROC_VIOLATION, BOA_LAST_EXIT_CODE, BOA_PROCESS_EXIT, BOA_SES_INTL_SIG_PAIR,
+    BOA_LAST_EXIT_CODE, BOA_LAST_OCAP_VIOLATION, BOA_PROCESS_EXIT, BOA_SES_INTL_SIG_PAIR,
     BOA_UNCAUGHT_ERROR, BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT,
     DIRTY_PROCESS, EXEC_DIRTY_ARGV, EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS,
     EXEC_DIRTY_UNCAUGHT, REALM_CTL_DISPATCH_HTTP_BRIDGE, REALM_CTL_RESET_MT, REALM_CTL_RESET_WU,
@@ -79,7 +79,7 @@ impl SliceIsolate {
                 || err_msg.contains("NetAccessDenied:")
                 || err_msg.contains("ERR_SLICE_");
             if is_ocap_err
-                && let Some(cp_v) = BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take())
+                && let Some(cp_v) = BOA_LAST_OCAP_VIOLATION.with(|v| v.borrow_mut().take())
             {
                 BOA_VIOLATION.with(|v| {
                     if v.borrow().is_none() {
@@ -252,7 +252,7 @@ impl SliceIsolate {
             let last_ocap = if (final_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
                 self.denied_capabilities =
                     BOA_DENIED_CAPABILITIES.with(|d| std::mem::take(&mut *d.borrow_mut()));
-                BOA_LAST_CHILD_PROC_VIOLATION.with(|v| v.borrow_mut().take())
+                BOA_LAST_OCAP_VIOLATION.with(|v| v.borrow_mut().take())
             } else {
                 self.denied_capabilities.clear();
                 None
