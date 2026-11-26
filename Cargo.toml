@@ -39,7 +39,7 @@ notify = { version = "8.2", default-features = false, features = ["macos_kqueue"
 memchr = "2.8"
 aho-corasick = "1.1"
 compact_str = "0.10"
-parking_lot = "0.12"
+parking_lot = "0.13"
 cow-utils = "0.1"
 smallvec = { version = "1.16", features = ["union", "const_generics", "const_new"] }
 itoa = "1.0"
