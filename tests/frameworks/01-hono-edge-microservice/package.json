@@ -6,7 +6,7 @@
   "main": "./src/index.ts",
   "dependencies": {
     "cookie": "0.6.0",
-    "hono": "4.6.20",
+    "hono": "4.13.16",
     "ms": "2.1.3"
   }
 }
