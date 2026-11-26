@@ -288,11 +288,11 @@ pub(crate) fn set_uncaught_error(err: String) {
 #[inline]
 pub(crate) fn record_boa_ocap_denial(violation: SandboxViolation) {
     mark_exec_dirty(EXEC_DIRTY_CHILD_PROC);
-    let msg = violation.to_string();
+    let summary = violation.capability_denial_summary();
     BOA_DENIED_CAPABILITIES.with(|list| {
         let mut v = list.borrow_mut();
         if v.len() < 64 {
-            v.push(msg);
+            v.push(summary);
         }
     });
     BOA_LAST_OCAP_VIOLATION.with(|slot| {

@@ -364,3 +364,85 @@ return await main();
     }
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+#[test]
+fn test_issue_200_mcp_eval_ts_includes_denied_capabilities_and_issue_198_e2e() {
+    let mut isolate = SliceIsolate::spawn(
+        "issue-200-mcp-host",
+        200,
+        CapabilityToken::pure_compute(),
+        5_000_000,
+        16 * 1024 * 1024,
+    );
+
+    // 1. Issue #200: Caught fetch + caught fs refusal must be visible in `deniedCapabilities`
+    //    without leaking internal compartment names.
+    let req_denied = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2001,
+        "method": "tools/call",
+        "params": {
+            "name": "slice_eval_ts",
+            "arguments": {
+                "code": "try { await fetch('https://example.com/'); } catch (_e) {}\ntry { require('fs').readFileSync('/etc/hostname', 'utf8'); } catch (_e) {}\nreturn { a: 1 };"
+            }
+        }
+    })
+    .to_string();
+    let (is_err, payload) = parse_mcp_call(&req_denied, &mut isolate);
+    assert!(!is_err, "caught refusals must succeed: {payload}");
+    assert_eq!(payload["ok"], serde_json::json!(true));
+    assert!(payload["violation"].is_null());
+    assert_eq!(payload["returnJson"], serde_json::json!("{\"a\":1}"));
+    let denied = payload["deniedCapabilities"]
+        .as_array()
+        .expect("deniedCapabilities array must be present in slice_eval_ts result");
+    assert_eq!(
+        denied.len(),
+        2,
+        "expected 2 denied capabilities: {denied:?}"
+    );
+    assert_eq!(
+        denied[0],
+        serde_json::json!("lacks outbound network authority for host 'example.com:443'")
+    );
+    assert_eq!(
+        denied[1],
+        serde_json::json!("lacks filesystem read authority for path '/etc/hostname'")
+    );
+
+    // 2. Clean run has empty `deniedCapabilities` array
+    let req_clean = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2002,
+        "method": "tools/call",
+        "params": {
+            "name": "slice_eval_ts",
+            "arguments": { "code": "return 21 * 2;" }
+        }
+    })
+    .to_string();
+    let (is_err_clean, clean_payload) = parse_mcp_call(&req_clean, &mut isolate);
+    assert!(!is_err_clean);
+    assert_eq!(clean_payload["deniedCapabilities"], serde_json::json!([]));
+
+    // 3. Issue #198 E2E through `slice mcp`: string literal containing `require(` with top-level return
+    let req_198 = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2003,
+        "method": "tools/call",
+        "params": {
+            "name": "slice_eval_ts",
+            "arguments": {
+                "code": "const r = { \"require(fs)\": 1 };\nreturn JSON.stringify(r);"
+            }
+        }
+    })
+    .to_string();
+    let (is_err_198, payload_198) = parse_mcp_call(&req_198, &mut isolate);
+    assert!(!is_err_198, "issue #198 MCP call failed: {payload_198}");
+    assert_eq!(
+        payload_198["value"],
+        serde_json::json!("{\"require(fs)\":1}")
+    );
+}

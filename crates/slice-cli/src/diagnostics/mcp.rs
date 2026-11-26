@@ -401,28 +401,19 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                     let outcome = isolate.eval_sandbox(code, opts);
                     isolate.compartment.fuel_consumed = 0;
                     isolate.sync_live_kv_memory();
-                    let payload = serde_json::json!({
-                        "ok": outcome.ok,
-                        "exitCode": outcome.exit_code,
-                        "processExited": outcome.process_exited,
-                        "value": outcome.return_value,
-                        "returnValue": outcome.return_value,
-                        "returnJson": outcome.return_json,
-                        "error": outcome.error,
-                        "violation": outcome.violation,
-                        "stdout": outcome.stdout,
-                        "fuelUsed": outcome.fuel_used,
-                        "memoryUsedBytes": outcome.memory_used_bytes,
-                        "peakMemoryBytes": outcome.peak_memory_bytes,
-                        "spawnTimeNs": outcome.spawn_time_ns,
-                        "compileTimeNs": outcome.compile_time_ns,
-                        "execTimeNs": outcome.exec_time_ns,
-                        "timeUs": outcome.total_time_us,
-                        "totalTimeUs": outcome.total_time_us,
-                        "checkpointsTaken": outcome.checkpoints_taken,
-                        "restoresPerformed": outcome.restores_performed,
-                        "restoreTimeNs": outcome.restore_time_ns
-                    });
+                    let mut payload = serde_json::to_value(&outcome)
+                        .unwrap_or_else(|_| serde_json::json!({ "ok": outcome.ok }));
+                    if let Some(obj) = payload.as_object_mut() {
+                        // Preserve legacy MCP field aliases alongside canonical `SandboxEvalOutcome` keys.
+                        obj.insert(
+                            "value".to_string(),
+                            serde_json::Value::String(outcome.return_value.clone()),
+                        );
+                        obj.insert(
+                            "timeUs".to_string(),
+                            serde_json::json!(outcome.total_time_us),
+                        );
+                    }
                     serde_json::json!({
                         "content": [{ "type": "text", "text": payload.to_string() }],
                         "isError": !outcome.ok
