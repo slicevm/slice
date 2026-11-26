@@ -1,6 +1,6 @@
 # Slice (Nexus-JS): Developer How-To Guides (`docs/guides/`)
 
-This directory contains practical step-by-step developer guides, production deployment how-tos, and ecosystem integration recipes for Slice (`v0.14.4`):
+This directory contains practical step-by-step developer guides, production deployment how-tos, and ecosystem integration recipes for Slice (`v0.14.5`):
 
 ## Available Guides
 
