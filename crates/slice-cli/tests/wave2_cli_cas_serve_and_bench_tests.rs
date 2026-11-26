@@ -196,8 +196,9 @@ export default {
 "#,
         compile_source_to_bytecode,
     );
-    // Ensure distinct file size & wait past 50ms stat TTL so hot-swap triggers deterministically
-    std::thread::sleep(std::time::Duration::from_millis(65));
+    // Ensure distinct file size & wait past the 250ms TENANT_STAT_TTL so hot-swap triggers
+    // deterministically even if the async OS inotify/FSEvents callback has not fired yet.
+    std::thread::sleep(std::time::Duration::from_millis(275));
     b_v2.write_to_file(&alpha_cas)
         .expect("in-place overwrite of cached tenant .cas must not hit os error 1224");
 
