@@ -184,7 +184,7 @@ where
                 for prop in &obj.properties {
                     match prop {
                         ObjectPropertyKind::ObjectProperty(p) => {
-                            if p.computed
+                            if p.key.is_computed()
                                 && let Some(ke) = p.key.as_expression()
                             {
                                 walk_expr(ke, visit);

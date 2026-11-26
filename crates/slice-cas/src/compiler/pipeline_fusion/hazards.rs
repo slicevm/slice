@@ -85,7 +85,7 @@ pub(super) fn expr_contains_fusion_hazard(expr: &Expression<'_>, src: &str) -> b
             .any(|e| expr_contains_fusion_hazard(e, src)),
         Expression::ObjectExpression(obj) => obj.properties.iter().any(|prop| match prop {
             ObjectPropertyKind::ObjectProperty(p) => {
-                (p.computed
+                (p.key.is_computed()
                     && p.key
                         .as_expression()
                         .is_some_and(|e| expr_contains_fusion_hazard(e, src)))
@@ -194,7 +194,7 @@ pub(super) fn expr_has_observable_side_effect(expr: &Expression<'_>) -> bool {
         Expression::ObjectExpression(obj) => obj.properties.iter().any(|prop| match prop {
             ObjectPropertyKind::ObjectProperty(p) => {
                 p.kind != PropertyKind::Init
-                    || (p.computed
+                    || (p.key.is_computed()
                         && p.key
                             .as_expression()
                             .is_some_and(expr_has_observable_side_effect))

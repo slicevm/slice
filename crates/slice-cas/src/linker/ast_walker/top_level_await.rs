@@ -73,7 +73,7 @@ fn detect_top_level_await_and_last_expr_span(code: &str) -> Option<Option<(usize
             }),
             Expression::ObjectExpression(obj) => obj.properties.iter().any(|prop| match prop {
                 ObjectPropertyKind::ObjectProperty(p) => {
-                    (p.computed && p.key.as_expression().is_some_and(expr_has_tla))
+                    (p.key.is_computed() && p.key.as_expression().is_some_and(expr_has_tla))
                         || expr_has_tla(&p.value)
                 }
                 ObjectPropertyKind::SpreadProperty(sp) => expr_has_tla(&sp.argument),

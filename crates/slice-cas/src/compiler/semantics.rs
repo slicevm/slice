@@ -146,7 +146,7 @@ pub fn analyze_typescript_semantics(source: &str) -> TypeDirectedHints {
                 && let Some(ta) = &prop.type_annotation
                 && let Some(kind) = classify_ts_type_ast(&ta.type_annotation)
             {
-                fields.push((fname.to_string(), kind.to_string()));
+                fields.push((fname.display().to_string(), kind.to_string()));
             }
         }
         if !fields.is_empty() {

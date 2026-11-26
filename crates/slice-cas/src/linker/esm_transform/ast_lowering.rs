@@ -92,7 +92,9 @@ pub(super) fn try_transform_esm_to_cjs_ast(
         if !has_bindable {
             continue;
         }
-        let spec = imp.source.value.as_str();
+        let Some(spec) = imp.source.value.as_str() else {
+            continue;
+        };
         if is_builtin_module(spec) || is_jsx_runtime_builtin(spec) {
             continue;
         }
@@ -150,7 +152,7 @@ pub(super) fn try_transform_esm_to_cjs_ast(
     let has_crypto_spec_import = parser_ret.program.body.iter().any(|stmt| {
         if let Statement::ImportDeclaration(imp) = stmt {
             !imp.import_kind.is_type()
-                && matches!(imp.source.value.as_str(), "crypto" | "node:crypto")
+                && matches!(imp.source.value.as_str(), Some("crypto" | "node:crypto"))
                 && imp.specifiers.as_ref().is_some_and(|s| !s.is_empty())
         } else {
             false
@@ -201,7 +203,9 @@ pub(super) fn try_transform_esm_to_cjs_ast(
                 if imp.import_kind.is_type() {
                     continue;
                 }
-                let spec = imp.source.value.as_str();
+                let Some(spec) = imp.source.value.as_str() else {
+                    continue;
+                };
                 if matches!(spec, "crypto" | "node:crypto")
                     && let (Some(scoping), Some(specs)) = (&crypto_scoping, &imp.specifiers)
                     && !specs.is_empty()
@@ -301,7 +305,9 @@ pub(super) fn try_transform_esm_to_cjs_ast(
                     continue;
                 }
                 has_any_esm_export = true;
-                let spec = exp_all.source.value.as_str();
+                let Some(spec) = exp_all.source.value.as_str() else {
+                    continue;
+                };
                 let resolved_id = resolve_spec_and_record(spec, from_dir, deps_out);
                 if let Some(exported) = &exp_all.exported {
                     let lhs = format_exports_lhs(exported.name().as_str());
@@ -425,7 +431,9 @@ pub(super) fn try_transform_esm_to_cjs_ast(
                     continue;
                 }
                 has_any_esm_export = true;
-                let spec_str = exp_from.source.value.as_str();
+                let Some(spec_str) = exp_from.source.value.as_str() else {
+                    continue;
+                };
                 let resolved_id = resolve_spec_and_record(spec_str, from_dir, deps_out);
                 let target_mut = if !is_builtin_module(spec_str) {
                     resolve_module_specifier(from_dir, spec_str)

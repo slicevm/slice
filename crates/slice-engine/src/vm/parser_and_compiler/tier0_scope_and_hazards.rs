@@ -27,7 +27,7 @@ pub(super) fn static_member_chain(expr: &Expression<'_>) -> Option<String> {
         Expression::ComputedMemberExpression(m) if !m.optional => {
             if let Expression::StringLiteral(s) = m.expression.get_inner_expression() {
                 let prefix = static_member_chain(&m.object)?;
-                Some(format!("{}.{}", prefix, s.value.as_str()))
+                Some(format!("{}.{}", prefix, s.value.display()))
             } else {
                 None
             }

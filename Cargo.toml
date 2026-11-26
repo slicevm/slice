@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 version = "0.14.5"
 edition = "2024"
-rust-version = "1.91.0"
+rust-version = "1.98.0"
 authors = ["Slice Runtime Team"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/slicevm/slice"
@@ -25,7 +25,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 thiserror = "2.0"
 libc = "0.2"
-oxc = { version = "=0.152.0", features = ["transformer", "codegen", "semantic", "ast_visit"] }
+oxc = { version = "=0.160.0", features = ["transformer", "codegen", "semantic", "ast_visit"] }
 boa_engine = { version = "0.22", default-features = false }
 rustc-hash = "2.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

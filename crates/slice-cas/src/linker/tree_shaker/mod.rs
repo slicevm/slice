@@ -58,7 +58,7 @@ pub(crate) fn is_any_require_call(expr: &oxc::ast::ast::Expression<'_>) -> Optio
     let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
         return None;
     };
-    Some(str_lit.value.to_string())
+    Some(str_lit.value.display().to_string())
 }
 
 pub(super) fn expr_contains_assignment(expr: &oxc::ast::ast::Expression<'_>) -> bool {
@@ -101,7 +101,8 @@ pub(super) fn expr_contains_assignment(expr: &oxc::ast::ast::Expression<'_>) -> 
         }
         Expression::ObjectExpression(obj) => obj.properties.iter().any(|p| match p {
             ObjectPropertyKind::ObjectProperty(op) => {
-                (op.computed && op.key.as_expression().is_some_and(expr_contains_assignment))
+                (op.key.is_computed()
+                    && op.key.as_expression().is_some_and(expr_contains_assignment))
                     || expr_contains_assignment(&op.value)
             }
             ObjectPropertyKind::SpreadProperty(sp) => expr_contains_assignment(&sp.argument),

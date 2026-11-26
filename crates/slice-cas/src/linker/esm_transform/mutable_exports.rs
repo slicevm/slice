@@ -125,8 +125,8 @@ pub(super) fn get_module_mutable_exports(path: &Path) -> FxHashSet<String> {
                 }
             }
             Statement::ExportFromDeclaration(exp_from) if !exp_from.export_kind.is_type() => {
-                let spec_str = exp_from.source.value.as_str();
-                if !is_builtin_module(spec_str)
+                if let Some(spec_str) = exp_from.source.value.as_str()
+                    && !is_builtin_module(spec_str)
                     && let Some(inner_path) = resolve_module_specifier(from_dir, spec_str)
                 {
                     let inner_mut = get_module_mutable_exports(&inner_path);
@@ -144,8 +144,8 @@ pub(super) fn get_module_mutable_exports(path: &Path) -> FxHashSet<String> {
             Statement::ExportAllDeclaration(exp_all)
                 if !exp_all.export_kind.is_type() && exp_all.exported.is_none() =>
             {
-                let spec_str = exp_all.source.value.as_str();
-                if !is_builtin_module(spec_str)
+                if let Some(spec_str) = exp_all.source.value.as_str()
+                    && !is_builtin_module(spec_str)
                     && let Some(inner_path) = resolve_module_specifier(from_dir, spec_str)
                 {
                     let inner_mut = get_module_mutable_exports(&inner_path);
