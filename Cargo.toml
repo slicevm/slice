@@ -25,17 +25,17 @@ serde_json = "1.0"
 anyhow = "1.0"
 thiserror = "2.0"
 libc = "0.2"
-oxc = { version = "=0.152.0", features = ["transformer", "codegen", "semantic", "ast_visit"] }
+oxc = { version = "=0.160.0", features = ["transformer", "codegen", "semantic", "ast_visit"] }
 boa_engine = { version = "0.22", default-features = false }
 rustc-hash = "2.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 ring = "0.17"
-x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets"] }
+x25519-dalek = { version = "3.0", default-features = false, features = ["static_secrets"] }
 webpki-roots = "1.0"
 rustls-pki-types = "1"
 wasmi = "2.0"
 wasmi_core = "2.0"
-notify = { version = "8.2", default-features = false, features = ["macos_kqueue"] }
+notify = { version = "9.0", default-features = false, features = ["macos_kqueue"] }
 memchr = "2.8"
 aho-corasick = "1.1"
 compact_str = "0.10"
