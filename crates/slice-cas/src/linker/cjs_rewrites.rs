@@ -95,10 +95,15 @@ pub fn rewrite_cjs_requires_ast(
 
     let allocator = oxc::allocator::Allocator::default();
     let source_type = oxc::span::SourceType::ts().with_module(true);
-    let parser_ret = oxc::parser::Parser::new(&allocator, snippet, source_type).parse();
+    let parse_opts = crate::compiler::diagnostics::default_oxc_parse_options();
+    let parser_ret = oxc::parser::Parser::new(&allocator, snippet, source_type)
+        .with_options(parse_opts)
+        .parse();
     if !parser_ret.diagnostics.is_empty() {
         let wrapped = format!("({});", snippet);
-        let retry_ret = oxc::parser::Parser::new(&allocator, &wrapped, source_type).parse();
+        let retry_ret = oxc::parser::Parser::new(&allocator, &wrapped, source_type)
+            .with_options(parse_opts)
+            .parse();
         if retry_ret.diagnostics.is_empty() {
             let scoping = oxc::semantic::SemanticBuilder::new()
                 .build(&retry_ret.program)
@@ -189,7 +194,9 @@ pub fn rewrite_require_ident_ast(source: &str) -> Option<String> {
 
     let allocator = oxc::allocator::Allocator::default();
     let source_type = oxc::span::SourceType::ts().with_module(true);
-    let parser_ret = oxc::parser::Parser::new(&allocator, source, source_type).parse();
+    let parser_ret = oxc::parser::Parser::new(&allocator, source, source_type)
+        .with_options(crate::compiler::diagnostics::default_oxc_parse_options())
+        .parse();
     if !parser_ret.diagnostics.is_empty() {
         return None;
     }
@@ -237,7 +244,9 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
 
     let allocator = oxc::allocator::Allocator::default();
     let source_type = oxc::span::SourceType::ts().with_module(true);
-    let parser_ret = oxc::parser::Parser::new(&allocator, code, source_type).parse();
+    let parser_ret = oxc::parser::Parser::new(&allocator, code, source_type)
+        .with_options(crate::compiler::diagnostics::default_oxc_parse_options())
+        .parse();
     if !parser_ret.diagnostics.is_empty() {
         return code.to_string();
     }

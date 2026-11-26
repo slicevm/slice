@@ -29,7 +29,9 @@ pub(super) fn try_transform_esm_to_cjs_ast(
 
     let allocator = oxc::allocator::Allocator::default();
     let source_type = oxc::span::SourceType::ts().with_module(true);
-    let parser_ret = oxc::parser::Parser::new(&allocator, js_code, source_type).parse();
+    let parser_ret = oxc::parser::Parser::new(&allocator, js_code, source_type)
+        .with_options(crate::compiler::diagnostics::default_oxc_parse_options())
+        .parse();
     if !parser_ret.diagnostics.is_empty() {
         return None;
     }
