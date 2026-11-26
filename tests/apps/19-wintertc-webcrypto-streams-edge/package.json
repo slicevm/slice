@@ -7,7 +7,7 @@
   "dependencies": {
     "bytes": "3.1.2",
     "cookie": "1.0.2",
-    "flatted": "3.3.1",
+    "flatted": "3.4.2",
     "ms": "2.1.3"
   }
 }
