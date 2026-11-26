@@ -35,7 +35,7 @@ webpki-roots = "1.0"
 rustls-pki-types = "1"
 wasmi = "2.0"
 wasmi_core = "2.0"
-notify = { version = "8.2", default-features = false, features = ["macos_kqueue"] }
+notify = { version = "9.0", default-features = false, features = ["macos_kqueue"] }
 memchr = "2.8"
 aho-corasick = "1.1"
 compact_str = "0.10"
