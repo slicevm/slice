@@ -196,6 +196,40 @@ impl RuntimeLimits {
         self.deadline_epoch_ns != 0 && monotonic_epoch_ns() >= self.deadline_epoch_ns
     }
 
+    /// Returns the remaining loop-iteration / fuel units before `RuntimeLimitError::LoopIteration`.
+    #[inline]
+    #[must_use]
+    pub(crate) const fn remaining_loop_iterations(&self) -> u64 {
+        self.loop_iteration
+            .saturating_sub(self.loop_iterations_executed)
+    }
+
+    /// Returns the configured guest heap byte ceiling.
+    #[inline]
+    #[must_use]
+    pub(crate) const fn heap_bytes_limit(&self) -> usize {
+        self.heap_bytes_limit
+    }
+
+    /// Returns the remaining guest heap bytes before `RuntimeLimitError::MemoryLimit`.
+    #[inline]
+    #[must_use]
+    pub(crate) const fn remaining_heap_bytes(&self) -> usize {
+        self.heap_bytes_limit
+            .saturating_sub(self.heap_bytes_allocated)
+    }
+
+    /// Returns the remaining nanoseconds before the active wall-clock deadline (`None` if disabled).
+    #[inline]
+    #[must_use]
+    pub(crate) fn remaining_wall_clock_ns(&self) -> Option<u64> {
+        if self.deadline_epoch_ns == 0 {
+            None
+        } else {
+            Some(self.deadline_epoch_ns.saturating_sub(monotonic_epoch_ns()))
+        }
+    }
+
     /// Get max backtrace limit for an exception.
     ///
     /// Default is 50.

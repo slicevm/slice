@@ -282,6 +282,10 @@ pub(super) fn register_fast_codecs_and_hash_host_functions(ctx: &mut boa_engine:
                 Some(s) => s.clone(),
                 None => first.to_string(context)?,
             };
+            if js_s.len() > 4096 {
+                context.charge_transient_heap_bytes(js_s.len())?;
+                context.charge_fuel((js_s.len() as u64) / 64)?;
+            }
             if let JsStrVariant::Latin1(bytes) = js_s.as_str().variant()
                 && bytes.is_ascii()
             {

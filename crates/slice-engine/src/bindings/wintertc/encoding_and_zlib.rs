@@ -69,6 +69,10 @@ pub(super) fn register_encoding_and_zlib_host_functions(ctx: &mut boa_engine::Co
                 return Ok(BoaVal::from(js_string!("")));
             };
             let js_s = first.to_string(context)?;
+            if js_s.len() > 4096 {
+                context.charge_transient_heap_bytes(js_s.len().saturating_mul(4) / 3)?;
+                context.charge_fuel((js_s.len() as u64) / 64)?;
+            }
             let res = match js_s.as_str().variant() {
                 JsStrVariant::Latin1(bytes) => Ok(base64_encode(bytes, false)),
                 JsStrVariant::Utf16(units) => whatwg_btoa_utf16(units),
@@ -89,6 +93,10 @@ pub(super) fn register_encoding_and_zlib_host_functions(ctx: &mut boa_engine::Co
                 return Ok(BoaVal::from(js_string!("")));
             };
             let js_s = first.to_string(context)?;
+            if js_s.len() > 4096 {
+                context.charge_transient_heap_bytes(js_s.len().saturating_mul(4) / 3)?;
+                context.charge_fuel((js_s.len() as u64) / 64)?;
+            }
             let decoded_res = match js_s.as_str().variant() {
                 JsStrVariant::Latin1(bytes) => whatwg_atob_bytes(bytes),
                 JsStrVariant::Utf16(units) => {
@@ -216,7 +224,13 @@ pub(super) fn register_encoding_and_zlib_host_functions(ctx: &mut boa_engine::Co
             )?;
 
             match res {
-                Ok(decoded) => Ok(BoaVal::from(js_string!(decoded))),
+                Ok(decoded) => {
+                    if decoded.len() > 4096 {
+                        context.charge_transient_heap_bytes(decoded.len())?;
+                        context.charge_fuel((decoded.len() as u64) / 64)?;
+                    }
+                    Ok(BoaVal::from(js_string!(decoded)))
+                }
                 Err(msg) => Err(JsNativeError::typ().with_message(msg).into()),
             }
         }),

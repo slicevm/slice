@@ -1531,3 +1531,583 @@ fn test_issue_180_builtin_fuel_memory_wallclock_and_interrupt_metering() {
         int_err
     );
 }
+
+#[test]
+fn test_issue_183_regex_backtracking_fuel_wallclock_and_interrupt() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "issue-183-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        100_000_000,
+        32 * 1024 * 1024,
+    );
+
+    // 1. Fuel limit bounds catastrophic backtracking and cannot be caught by guest try/catch
+    let t0 = std::time::Instant::now();
+    let fuel_trap = parent.eval_sandbox(
+        r#"
+        try {
+            /^(a+)+$/.test("a".repeat(28) + "b");
+        } catch (_e) {
+            console.log("ESCAPED_REGEX_FUEL");
+        }
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(1_000),
+            ..Default::default()
+        },
+    );
+    assert!(
+        t0.elapsed().as_millis() < 500,
+        "regex fuel trap took too long: {:?}",
+        t0.elapsed()
+    );
+    assert!(
+        !fuel_trap.ok
+            && fuel_trap.stdout.is_empty()
+            && fuel_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("fuel limit"),
+        "expected uncatchable CpuFuelExhausted on ReDoS, got: {:?}",
+        fuel_trap
+    );
+
+    // 2. Wall-clock deadline (`timeoutMs`) bounds catastrophic backtracking even with huge fuel
+    let t1 = std::time::Instant::now();
+    let wall_trap = parent.eval_sandbox(
+        r#"/^(a+)+$/.test("a".repeat(28) + "b");"#,
+        SandboxEvalOptions {
+            fuel: Some(50_000_000),
+            timeout_ms: Some(80),
+            ..Default::default()
+        },
+    );
+    assert!(
+        t1.elapsed().as_millis() < 1_000,
+        "regex wall-clock trap took too long: {:?}",
+        t1.elapsed()
+    );
+    assert!(
+        !wall_trap.ok
+            && wall_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("WallClockExceeded"),
+        "expected WallClockExceeded on ReDoS, got: {:?}",
+        wall_trap
+    );
+
+    // 3. String.prototype.replace with catastrophic backtracking also traps
+    let replace_trap = parent.eval_sandbox(
+        r#"("a".repeat(28) + "b").replace(/^(a+)+$/, "x");"#,
+        SandboxEvalOptions {
+            fuel: Some(1_000),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !replace_trap.ok
+            && replace_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("fuel limit"),
+        "expected CpuFuelExhausted on String.prototype.replace ReDoS, got: {:?}",
+        replace_trap
+    );
+
+    // 4. Cross-thread IsolateInterruptHandle::interrupt() aborts catastrophic backtracking
+    let mut iso = SliceIsolate::spawn(
+        "issue-183-interrupt",
+        2,
+        CapabilityToken::pure_compute(),
+        u64::MAX / 2,
+        16 * 1024 * 1024,
+    );
+    iso.set_wall_clock_limit_ms(Some(2_000));
+    let handle = iso.interrupt_handle();
+    let bc = compile_source_to_bytecode(r#"/^(a+)+$/.test("a".repeat(28) + "b");"#);
+    let t2 = std::time::Instant::now();
+    let interrupter = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        handle.interrupt();
+    });
+    let int_err = iso
+        .execute_bytecode(&bc, None)
+        .expect_err("interrupt handle must abort catastrophic regex backtracking");
+    interrupter.join().unwrap();
+    assert!(
+        t2.elapsed().as_millis() < 1_000,
+        "regex interrupt took too long: {:?}",
+        t2.elapsed()
+    );
+    assert!(
+        matches!(int_err, SandboxViolation::ExecutionInterrupted { .. }),
+        "expected ExecutionInterrupted, got: {:?}",
+        int_err
+    );
+
+    // 5. Normal regexes continue to work cleanly
+    let ok_res = parent.eval_sandbox(
+        r#"
+        const m = /^\d{4}-\d{2}-\d{2}$/.test("2026-11-25");
+        const r = "hello world".replace(/(\w+)/g, "[$1]");
+        return JSON.stringify({ m, r });
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            ..Default::default()
+        },
+    );
+    assert!(ok_res.ok, "normal regexes must succeed: {:?}", ok_res);
+    let parsed: serde_json::Value = serde_json::from_str(&ok_res.return_value).unwrap();
+    assert_eq!(parsed["m"], true);
+    assert_eq!(parsed["r"], "[hello] [world]");
+}
+
+#[test]
+fn test_issue_184_arraybuffer_typedarray_buffer_metering() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "issue-184-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        32 * 1024 * 1024,
+    );
+
+    // 1. ArrayBuffer / BigInt64Array / Buffer.alloc / ArrayBuffer.transfer enforce memoryBytes (uncatchable)
+    for (label, code) in [
+        (
+            "ArrayBuffer",
+            r#"try { new ArrayBuffer(2 * 1024 * 1024); } catch (_e) { console.log("ESCAPED"); }"#,
+        ),
+        ("BigInt64Array", r#"new BigInt64Array(200_000);"#),
+        ("Buffer.alloc", r#"Buffer.alloc(2 * 1024 * 1024);"#),
+        (
+            "ArrayBuffer.transfer",
+            r#"new ArrayBuffer(1).transfer(2 * 1024 * 1024);"#,
+        ),
+    ] {
+        let out = parent.eval_sandbox(
+            code,
+            SandboxEvalOptions {
+                fuel: Some(5_000_000),
+                memory_bytes: Some(512 * 1024),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !out.ok
+                && out.stdout.is_empty()
+                && out
+                    .violation
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("exceeded memory ceiling"),
+            "{} must trap uncatchable MemoryCeilingExceeded under 512 KB, got: {:?}",
+            label,
+            out
+        );
+    }
+
+    // 2. TypedArray bulk ops (fill, sort) charge fuel and trap under tight budget
+    let fill_trap = parent.eval_sandbox(
+        r#"new Uint8Array(200_000).fill(7);"#,
+        SandboxEvalOptions {
+            fuel: Some(1_000),
+            memory_bytes: Some(4 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !fill_trap.ok
+            && fill_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("fuel limit"),
+        "TypedArray.fill must trap CpuFuelExhausted, got: {:?}",
+        fill_trap
+    );
+
+    let sort_trap = parent.eval_sandbox(
+        r#"new Uint8Array(50_000).sort();"#,
+        SandboxEvalOptions {
+            fuel: Some(5_000),
+            memory_bytes: Some(4 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !sort_trap.ok
+            && sort_trap
+                .violation
+                .as_deref()
+                .unwrap_or("")
+                .contains("fuel limit"),
+        "TypedArray.sort must trap CpuFuelExhausted, got: {:?}",
+        sort_trap
+    );
+
+    // 3. Normal Buffer / TypedArray usage succeeds cleanly
+    let ok_res = parent.eval_sandbox(
+        r#"
+        const b = Buffer.alloc(64, 0x41);
+        const u = new Uint8Array([3, 1, 2]).sort();
+        return JSON.stringify({ len: b.length, sorted: Array.from(u) });
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            memory_bytes: Some(2 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        ok_res.ok,
+        "normal Buffer/TypedArray must succeed: {:?}",
+        ok_res
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&ok_res.return_value).unwrap();
+    assert_eq!(parsed["len"], 64);
+    assert_eq!(parsed["sorted"], serde_json::json!([1, 2, 3]));
+}
+
+#[test]
+fn test_issue_185_string_builtin_fuel_and_memory_metering() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "issue-185-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        32 * 1024 * 1024,
+    );
+
+    // 1. String.repeat doubling, padStart, replaceAll amplification, and split("") enforce memoryBytes
+    for (label, code) in [
+        (
+            "repeat doubling",
+            r#"let s = "a"; for (let i = 0; i < 22; i++) s = s.repeat(2);"#,
+        ),
+        (
+            "padStart",
+            r#"try { "".padStart(2_000_000, "x"); } catch (_e) { console.log("ESCAPED"); }"#,
+        ),
+        (
+            "replaceAll amplification",
+            r#"("a".repeat(2_000)).replaceAll("", "x".repeat(500));"#,
+        ),
+        ("split empty sep", r#"("a".repeat(30_000)).split("");"#),
+        (
+            "concat doubling",
+            r#"let s = "a"; for (let i = 0; i < 22; i++) s = s.concat(s);"#,
+        ),
+    ] {
+        let out = parent.eval_sandbox(
+            code,
+            SandboxEvalOptions {
+                fuel: Some(5_000_000),
+                memory_bytes: Some(512 * 1024),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !out.ok
+                && out.stdout.is_empty()
+                && out
+                    .violation
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("exceeded memory ceiling"),
+            "{} must trap uncatchable MemoryCeilingExceeded under 512 KB, got: {:?}",
+            label,
+            out
+        );
+    }
+
+    // 2. Normal string operations succeed cleanly
+    let ok_res = parent.eval_sandbox(
+        r#"
+        const a = "ab".repeat(3);
+        const b = "7".padStart(4, "0");
+        const c = "a-b-c".replaceAll("-", "_").split("_").join(",");
+        return JSON.stringify({ a, b, c });
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            memory_bytes: Some(2 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(ok_res.ok, "normal string ops must succeed: {:?}", ok_res);
+    let parsed: serde_json::Value = serde_json::from_str(&ok_res.return_value).unwrap();
+    assert_eq!(parsed["a"], "ababab");
+    assert_eq!(parsed["b"], "0007");
+    assert_eq!(parsed["c"], "a,b,c");
+}
+
+#[test]
+fn test_issue_186_sparse_array_builtin_fuel_memory_and_recursion() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "issue-186-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        32 * 1024 * 1024,
+    );
+
+    // 1. Sparse Array.join pre-allocation & loop must trap MemoryCeilingExceeded or CpuFuelExhausted
+    let join_trap = parent.eval_sandbox(
+        r#"try { new Array(5_000_000).join("x"); } catch (_e) { console.log("ESCAPED"); }"#,
+        SandboxEvalOptions {
+            fuel: Some(10_000),
+            memory_bytes: Some(512 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !join_trap.ok && join_trap.stdout.is_empty() && join_trap.violation.is_some(),
+        "sparse Array.join must trap uncatchably, got: {:?}",
+        join_trap
+    );
+
+    // 2. Sparse Array fill, reverse, indexOf, includes, and sparse forEach holes trap fuel
+    for (label, code) in [
+        ("fill", r#"new Array(5_000_000).fill(0);"#),
+        (
+            "reverse",
+            r#"Array.prototype.reverse.call({ length: 5_000_000 });"#,
+        ),
+        (
+            "indexOf",
+            r#"Array.prototype.indexOf.call({ length: 5_000_000 }, 1);"#,
+        ),
+        (
+            "includes",
+            r#"Array.prototype.includes.call({ length: 5_000_000 }, 1);"#,
+        ),
+        (
+            "sparse forEach",
+            r#"new Array(5_000_000).forEach(() => {});"#,
+        ),
+        ("concat sparse", r#"[].concat(new Array(5_000_000));"#),
+    ] {
+        let out = parent.eval_sandbox(
+            code,
+            SandboxEvalOptions {
+                fuel: Some(2_000),
+                memory_bytes: Some(2 * 1024 * 1024),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !out.ok && out.violation.is_some(),
+            "sparse Array.{} must trap fuel/memory, got: {:?}",
+            label,
+            out
+        );
+    }
+
+    // 3. Self-referential Array.flat(Infinity) must not overflow the Rust stack
+    let flat_res = parent.eval_sandbox(
+        r#"
+        const a: any[] = [];
+        a.push(a);
+        a.flat(Infinity);
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(50_000),
+            memory_bytes: Some(2 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        flat_res.ok || flat_res.violation.is_some() || flat_res.error.is_some(),
+        "circular flat(Infinity) must complete safely without stack overflow"
+    );
+
+    // 4. Normal dense Array operations succeed cleanly
+    let ok_res = parent.eval_sandbox(
+        r#"
+        const a = [1, 2, 3, 4].map(x => x * 2).filter(x => x > 2);
+        return JSON.stringify({ joined: a.join("-"), rev: a.toReversed(), has6: a.includes(6) });
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            memory_bytes: Some(2 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        ok_res.ok,
+        "normal dense array ops must succeed: {:?}",
+        ok_res
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&ok_res.return_value).unwrap();
+    assert_eq!(parsed["joined"], "4-6-8");
+    assert_eq!(parsed["rev"], serde_json::json!([8, 6, 4]));
+    assert_eq!(parsed["has6"], true);
+}
+
+#[test]
+fn test_issue_187_bigint_json_object_and_codec_metering() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "issue-187-parent",
+        1,
+        CapabilityToken::pure_compute(),
+        50_000_000,
+        32 * 1024 * 1024,
+    );
+
+    // 1. BigInt shift / pow / toString blowup must trap uncatchably under tight memory/fuel
+    for (label, code) in [
+        (
+            "bigint shl",
+            r#"try { const x = 1n << 10_000_000n; } catch (_e) { console.log("ESCAPED"); }"#,
+        ),
+        (
+            "bigint pow",
+            r#"try { const x = 3n ** 10_000_000n; } catch (_e) { console.log("ESCAPED"); }"#,
+        ),
+        (
+            "bigint toString",
+            r#"try { const x = (1n << 200_000n).toString(); } catch (_e) { console.log("ESCAPED"); }"#,
+        ),
+    ] {
+        let res = parent.eval_sandbox(
+            code,
+            SandboxEvalOptions {
+                fuel: Some(10_000),
+                memory_bytes: Some(64 * 1024),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !res.ok && res.stdout.is_empty() && res.violation.is_some(),
+            "{} must trap uncatchably, got: {:?}",
+            label,
+            res
+        );
+    }
+
+    // 2. JSON.stringify on sparse arrays and non-circular exponential DAGs must trap
+    for (label, code) in [
+        (
+            "json sparse array",
+            r#"try { JSON.stringify(new Array(5_000_000)); } catch (_e) { console.log("ESCAPED"); }"#,
+        ),
+        (
+            "json exponential DAG",
+            r#"
+            try {
+                let a: any = [1];
+                for (let i = 0; i < 24; i++) a = [a, a];
+                JSON.stringify(a);
+            } catch (_e) {
+                console.log("ESCAPED");
+            }
+            "#,
+        ),
+    ] {
+        let res = parent.eval_sandbox(
+            code,
+            SandboxEvalOptions {
+                fuel: Some(50_000),
+                memory_bytes: Some(256 * 1024),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !res.ok && res.stdout.is_empty() && res.violation.is_some(),
+            "{} must trap uncatchably, got: {:?}",
+            label,
+            res
+        );
+    }
+
+    // 3. Object.entries / Object.keys on large typed array must trap
+    let obj_trap = parent.eval_sandbox(
+        r#"
+        const u = new Uint8Array(200_000);
+        Object.entries(u);
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(50_000),
+            memory_bytes: Some(512 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !obj_trap.ok && obj_trap.violation.is_some(),
+        "Object.entries on large Uint8Array must trap memory/fuel, got: {:?}",
+        obj_trap
+    );
+
+    // 4. Native codecs (btoa / TextEncoder / TextDecoder) must charge heap + fuel on large payloads
+    for (label, code) in [
+        ("btoa", r#"const s = "a".repeat(200_000); btoa(s);"#),
+        (
+            "TextEncoder",
+            r#"const s = "a".repeat(200_000); new TextEncoder().encode(s);"#,
+        ),
+        (
+            "TextDecoder",
+            r#"const u = new Uint8Array(200_000); new TextDecoder().decode(u);"#,
+        ),
+    ] {
+        let res = parent.eval_sandbox(
+            code,
+            SandboxEvalOptions {
+                fuel: Some(500_000),
+                memory_bytes: Some(256 * 1024),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !res.ok && res.violation.is_some(),
+            "{} must trap memory ceiling, got: {:?}",
+            label,
+            res
+        );
+    }
+
+    // 5. Normal BigInt, JSON, Object, and codec operations succeed cleanly
+    let ok_res = parent.eval_sandbox(
+        r#"
+        const big = (2n ** 64n).toString();
+        const j = JSON.parse(JSON.stringify({ a: 1, b: [2, 3] }));
+        const entries = Object.entries({ x: 10, y: 20 }).length;
+        const b64 = atob(btoa("hello-slice"));
+        const rt = new TextDecoder().decode(new TextEncoder().encode("utf8-ok"));
+        return JSON.stringify({ big, sum: j.a + j.b[0] + j.b[1], entries, b64, rt });
+        "#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            memory_bytes: Some(2 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    assert!(
+        ok_res.ok,
+        "normal BigInt/JSON/Object/codec ops must succeed: {:?}",
+        ok_res
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&ok_res.return_value).unwrap();
+    assert_eq!(parsed["big"], "18446744073709551616");
+    assert_eq!(parsed["sum"], 6);
+    assert_eq!(parsed["entries"], 2);
+    assert_eq!(parsed["b64"], "hello-slice");
+    assert_eq!(parsed["rt"], "utf8-ok");
+}

@@ -224,7 +224,9 @@ impl JsValue {
                 }
             }
             (JsVariant::Float64(x), JsVariant::Integer32(y)) => Self::new(x.powi(y)),
-            (JsVariant::BigInt(a), JsVariant::BigInt(b)) => Self::new(JsBigInt::pow(&a, &b)?),
+            (JsVariant::BigInt(a), JsVariant::BigInt(b)) => {
+                Self::new(JsBigInt::pow_checked(&a, &b, context)?)
+            }
 
             // Slow path:
             (_, _) => match (self.to_numeric(context)?, other.to_numeric(context)?) {
@@ -235,7 +237,9 @@ impl JsValue {
                         Self::new(a.powf(b))
                     }
                 }
-                (Numeric::BigInt(ref a), Numeric::BigInt(ref b)) => Self::new(JsBigInt::pow(a, b)?),
+                (Numeric::BigInt(ref a), Numeric::BigInt(ref b)) => {
+                    Self::new(JsBigInt::pow_checked(a, b, context)?)
+                }
                 (_, _) => {
                     return Err(JsNativeError::typ()
                         .with_message("cannot mix BigInt and other types, use explicit conversions")
@@ -353,7 +357,7 @@ impl JsValue {
             }
 
             (JsVariant::BigInt(a), JsVariant::BigInt(b)) => {
-                Self::new(JsBigInt::shift_left(&a, &b)?)
+                Self::new(JsBigInt::shift_left_checked(&a, &b, context)?)
             }
 
             // Slow path:
@@ -362,7 +366,7 @@ impl JsValue {
                     Self::new(f64_to_int32(x).wrapping_shl(f64_to_uint32(y)))
                 }
                 (Numeric::BigInt(ref x), Numeric::BigInt(ref y)) => {
-                    Self::new(JsBigInt::shift_left(x, y)?)
+                    Self::new(JsBigInt::shift_left_checked(x, y, context)?)
                 }
                 (_, _) => {
                     return Err(JsNativeError::typ()
@@ -391,7 +395,7 @@ impl JsValue {
             }
 
             (JsVariant::BigInt(a), JsVariant::BigInt(b)) => {
-                Self::new(JsBigInt::shift_right(&a, &b)?)
+                Self::new(JsBigInt::shift_right_checked(&a, &b, context)?)
             }
 
             // Slow path:
@@ -400,7 +404,7 @@ impl JsValue {
                     Self::new(f64_to_int32(x).wrapping_shr(f64_to_uint32(y)))
                 }
                 (Numeric::BigInt(ref x), Numeric::BigInt(ref y)) => {
-                    Self::new(JsBigInt::shift_right(x, y)?)
+                    Self::new(JsBigInt::shift_right_checked(x, y, context)?)
                 }
                 (_, _) => {
                     return Err(JsNativeError::typ()

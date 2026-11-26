@@ -238,6 +238,9 @@ impl BuiltinTypedArray {
             // d. Let k be 0.
             // e. Repeat, while k < len,
             for (k, k_value) in values.iter().enumerate() {
+                if (k & 0x3F) == 0 {
+                    context.charge_fuel(1)?;
+                }
                 // i. Let Pk be ! ToString(𝔽(k)).
                 // ii. Let kValue be the first element of values and remove that element from values.
                 // iii. If mapping is true, then
@@ -274,6 +277,9 @@ impl BuiltinTypedArray {
         // 11. Let k be 0.
         // 12. Repeat, while k < len,
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ? Get(arrayLike, Pk).
             let k_value = array_like.get(k, context)?;
@@ -676,6 +682,9 @@ impl BuiltinTypedArray {
         // 6. Repeat, while k < len,
         let ta = ta.upcast();
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ! Get(O, Pk).
             let k_value = ta.get(k, context)?;
@@ -767,6 +776,9 @@ impl BuiltinTypedArray {
 
         let ta = ta.upcast();
         for k in start_index..end_index {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Perform ! Set(O, Pk, value, true).
             ta.set(k, value.clone(), true, context)
@@ -819,6 +831,9 @@ impl BuiltinTypedArray {
         // 8. Repeat, while k < len,
         let ta = ta.upcast();
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ! Get(O, Pk).
             let k_value = ta.get(k, context).js_expect("Get cannot fail here")?;
@@ -1035,6 +1050,9 @@ impl BuiltinTypedArray {
         // 6. Repeat, while k < len,
         let ta = ta.upcast();
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ! Get(O, Pk).
             let k_value = ta.get(k, context).js_expect("Get cannot fail here")?;
@@ -1210,12 +1228,16 @@ impl BuiltinTypedArray {
         };
 
         // 6. Let R be the empty String.
-        let mut r = Vec::with_capacity(len as usize);
+        let mut r = Vec::with_capacity((len as usize).min(4096));
 
         // 7. Let k be 0.
         // 8. Repeat, while k < len,
         let ta = ta.upcast();
+        let mut charged_bytes: usize = 0;
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. If k > 0, set R to the string-concatenation of R and sep.
             if k > 0 {
                 r.extend(sep.iter());
@@ -1229,6 +1251,15 @@ impl BuiltinTypedArray {
             if !element.is_undefined() {
                 r.extend(element.to_string(context)?.iter());
             }
+            let cur_bytes = r.len().saturating_mul(2);
+            if cur_bytes.saturating_sub(charged_bytes) >= 4096 {
+                context.charge_heap_bytes(cur_bytes - charged_bytes)?;
+                charged_bytes = cur_bytes;
+            }
+        }
+        let final_bytes = r.len().saturating_mul(2);
+        if final_bytes > charged_bytes {
+            context.charge_heap_bytes(final_bytes - charged_bytes)?;
         }
 
         // 9. Return R.
@@ -1390,6 +1421,9 @@ impl BuiltinTypedArray {
         // 6. Let k be 0.
         // 7. Repeat, while k < len,
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ! Get(O, Pk).
             let k_value = ta.get(k, context).js_expect("Get cannot fail here")?;
@@ -1585,6 +1619,9 @@ impl BuiltinTypedArray {
         let mut lower = 0;
         // 6. Repeat, while lower ≠ middle,
         while lower != middle {
+            if (lower & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let upper be len - lower - 1.
             let upper = len - lower - 1;
 
@@ -1633,6 +1670,9 @@ impl BuiltinTypedArray {
         // 6. Repeat, while k < length,
         let ta = ta.upcast();
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let from be ! ToString(𝔽(length - k - 1)).
             // b. Let Pk be ! ToString(𝔽(k)).
             // c. Let fromValue be ! Get(O, from).
@@ -2232,6 +2272,9 @@ impl BuiltinTypedArray {
         // 6. Repeat, while k < len,
         let ta = ta.upcast();
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ! Get(O, Pk).
             let k_value = ta.get(k, context).js_expect("Get cannot fail here")?;
@@ -2287,6 +2330,7 @@ impl BuiltinTypedArray {
         // 6. Let SortCompare be a new Abstract Closure with parameters (x, y) that captures comparefn and performs the following steps when called:
         let sort_compare =
             |x: &JsValue, y: &JsValue, context: &mut Context| -> JsResult<cmp::Ordering> {
+                context.charge_fuel(1)?;
                 // a. Return ? CompareTypedArrayElements(x, y, comparefn).
                 compare_typed_array_elements(x, y, compare_fn.as_ref(), context)
             };
@@ -2342,6 +2386,7 @@ impl BuiltinTypedArray {
         // 7. Let SortCompare be a new Abstract Closure with parameters (x, y) that captures comparefn and performs the following steps when called:
         let sort_compare =
             |x: &JsValue, y: &JsValue, context: &mut Context| -> JsResult<cmp::Ordering> {
+                context.charge_fuel(1)?;
                 // a. Return ? CompareTypedArrayElements(x, y, comparefn).
                 compare_typed_array_elements(x, y, compare_fn.as_ref(), context)
             };
@@ -2538,6 +2583,9 @@ impl BuiltinTypedArray {
         let mut r = Vec::with_capacity((len + len.saturating_sub(1)) as usize);
 
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             if k > 0 {
                 r.extend(separator.iter());
             }
@@ -2642,6 +2690,9 @@ impl BuiltinTypedArray {
         // 12. Repeat, while k < len,
         let ta = ta.upcast();
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             let value = if k == actual_index {
                 // b. If k is actualIndex, let fromValue be numericValue.
@@ -3157,6 +3208,9 @@ impl BuiltinTypedArray {
         // 3. Let k be 0.
         // 4. Repeat, while k < len,
         for k in 0..len {
+            if (k & 0x3F) == 0 {
+                context.charge_fuel(1)?;
+            }
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ? Get(arrayLike, Pk).
             let k_value = array_like.get(k, context)?;

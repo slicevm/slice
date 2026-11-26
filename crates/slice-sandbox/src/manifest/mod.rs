@@ -140,19 +140,23 @@ impl SliceManifest {
                     ("package", "entrypoint") => {
                         manifest.entrypoint = val.trim_matches('"').trim_matches('\'').to_string();
                     }
-                    ("limits", "fuel") => {
+                    ("limits", "fuel") | ("runtime", "fuel") | ("runtime", "fuel_limit") => {
                         if let Some(n) = parse_u64_ignoring_underscores(val) {
                             manifest.fuel_limit = n;
                         }
                     }
-                    ("limits", "memory_kb") => {
+                    ("limits", "memory_kb")
+                    | ("runtime", "memory_kb")
+                    | ("runtime", "memory_limit_kb") => {
                         if let Some(n) = parse_u64_ignoring_underscores(val) {
                             manifest.memory_limit_kb = usize::try_from(n)
                                 .unwrap_or(MAX_SAFE_MEMORY_KB)
                                 .min(MAX_SAFE_MEMORY_KB);
                         }
                     }
-                    ("limits", "memory_mb") => {
+                    ("limits", "memory_mb")
+                    | ("runtime", "memory_mb")
+                    | ("runtime", "memory_limit_mb") => {
                         if let Some(n) = parse_u64_ignoring_underscores(val) {
                             manifest.memory_limit_kb = usize::try_from(n)
                                 .unwrap_or(MAX_SAFE_MEMORY_KB)
@@ -160,7 +164,11 @@ impl SliceManifest {
                                 .min(MAX_SAFE_MEMORY_KB);
                         }
                     }
-                    ("limits", "memory_bytes") | ("limits", "memory") => {
+                    ("limits", "memory_bytes")
+                    | ("limits", "memory")
+                    | ("runtime", "memory_bytes")
+                    | ("runtime", "memory_limit_bytes")
+                    | ("runtime", "memory") => {
                         if let Some(bytes) = parse_byte_size_usize(val) {
                             manifest.memory_limit_kb = (bytes / 1024).clamp(1, MAX_SAFE_MEMORY_KB);
                         }

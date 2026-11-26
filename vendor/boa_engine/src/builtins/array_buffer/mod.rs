@@ -837,7 +837,35 @@ impl ArrayBuffer {
             // Should only truncate without reallocating.
             bytes.resize(new_len as usize, 0);
         } else {
-            bytes.resize(new_len as usize, 0);
+            if new_len > context.host_hooks().max_buffer_size(context) {
+                buf.borrow_mut().data_mut().data = Some(bytes);
+                return Err(JsNativeError::range()
+                    .with_message("cannot allocate a buffer that exceeds the maximum buffer size")
+                    .into());
+            }
+            let new_len_usize = match usize::try_from(new_len) {
+                Ok(n) => n,
+                Err(_) => {
+                    buf.borrow_mut().data_mut().data = Some(bytes);
+                    return Err(JsNativeError::range()
+                        .with_message("cannot allocate a buffer that exceeds the maximum buffer size")
+                        .into());
+                }
+            };
+            if new_len_usize > bytes.len() {
+                let delta = new_len_usize - bytes.len();
+                if let Err(err) = context.charge_heap_bytes(delta) {
+                    buf.borrow_mut().data_mut().data = Some(bytes);
+                    return Err(err);
+                }
+                if delta > 4096
+                    && let Err(err) = context.charge_fuel((delta as u64) / 64)
+                {
+                    buf.borrow_mut().data_mut().data = Some(bytes);
+                    return Err(err);
+                }
+            }
+            bytes.resize(new_len_usize, 0);
 
             // Realloc the vec to fit onto the new exact length.
             bytes.shrink_to_fit();
@@ -963,9 +991,14 @@ pub(crate) fn create_byte_data_block(
 
     // 1. Let db be a new Data Block value consisting of size bytes. If it is impossible to
     //    create such a Data Block, throw a RangeError exception.
-    let alloc_size = alloc_size.try_into().map_err(|e| {
+    let alloc_size: usize = alloc_size.try_into().map_err(|e| {
         JsNativeError::range().with_message(format!("couldn't allocate the data block: {e}"))
     })?;
+
+    context.charge_heap_bytes(alloc_size)?;
+    if alloc_size > 4096 {
+        context.charge_fuel((alloc_size as u64) / 64)?;
+    }
 
     let mut data_block = AlignedVec::<u8>::new(64);
     data_block.try_reserve_exact(alloc_size).map_err(|e| {

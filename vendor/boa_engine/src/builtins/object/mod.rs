@@ -981,6 +981,10 @@ impl OrdinaryObject {
                 // 3.a.ii. Let keys be ? from.[[OwnPropertyKeys]]().
                 let keys =
                     from.__own_property_keys__(&mut InternalMethodPropertyContext::new(context))?;
+                if keys.len() > 64 {
+                    context.charge_heap_bytes(keys.len().saturating_mul(16))?;
+                    context.charge_fuel((keys.len() as u64) / 16)?;
+                }
                 // 3.a.iii. For each element nextKey of keys, do
                 for key in keys {
                     // 3.a.iii.1. Let desc be ? from.[[GetOwnProperty]](nextKey).
@@ -1026,6 +1030,10 @@ impl OrdinaryObject {
 
         // 2. Let nameList be ? EnumerableOwnPropertyNames(obj, key).
         let name_list = obj.enumerable_own_property_names(PropertyNameKind::Key, context)?;
+        if name_list.len() > 64 {
+            context.charge_heap_bytes(name_list.len().saturating_mul(24))?;
+            context.charge_fuel((name_list.len() as u64) / 16)?;
+        }
 
         // 3. Return CreateArrayFromList(nameList).
         let result = Array::create_array_from_list(name_list, context);
@@ -1051,6 +1059,10 @@ impl OrdinaryObject {
 
         // 2. Let nameList be ? EnumerableOwnPropertyNames(obj, value).
         let name_list = obj.enumerable_own_property_names(PropertyNameKind::Value, context)?;
+        if name_list.len() > 64 {
+            context.charge_heap_bytes(name_list.len().saturating_mul(24))?;
+            context.charge_fuel((name_list.len() as u64) / 16)?;
+        }
 
         // 3. Return CreateArrayFromList(nameList).
         let result = Array::create_array_from_list(name_list, context);
@@ -1081,6 +1093,10 @@ impl OrdinaryObject {
         // 2. Let nameList be ? EnumerableOwnPropertyNames(obj, key+value).
         let name_list =
             obj.enumerable_own_property_names(PropertyNameKind::KeyAndValue, context)?;
+        if name_list.len() > 64 {
+            context.charge_heap_bytes(name_list.len().saturating_mul(48))?;
+            context.charge_fuel((name_list.len() as u64) / 16)?;
+        }
 
         // 3. Return CreateArrayFromList(nameList).
         let result = Array::create_array_from_list(name_list, context);
