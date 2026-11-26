@@ -9,7 +9,7 @@ INSTALL_DIR="${HOME}/.slice/bin"
 mkdir -p "$INSTALL_DIR"
 
 if [[ "${1:-}" != "--skip-build" ]]; then
-    echo "Compiling Slice v0.14.3 release binary..."
+    echo "Compiling Slice v0.14.4 release binary..."
     cargo build --release --locked
 elif [[ ! -f "$ROOT_DIR/target/release/slice" ]]; then
     echo "Error: --skip-build specified, but $ROOT_DIR/target/release/slice does not exist" >&2
@@ -19,6 +19,6 @@ fi
 cp -f "$ROOT_DIR/target/release/slice" "$INSTALL_DIR/slice"
 chmod +x "$INSTALL_DIR/slice"
 
-echo "Installed Slice v0.14.3 to $INSTALL_DIR/slice"
+echo "Installed Slice v0.14.4 to $INSTALL_DIR/slice"
 "$INSTALL_DIR/slice" info
 
