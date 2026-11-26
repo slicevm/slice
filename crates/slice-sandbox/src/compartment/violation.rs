@@ -76,3 +76,32 @@ pub enum SandboxViolation {
     )]
     ExecutionInterrupted { tenant_id: String },
 }
+
+impl SandboxViolation {
+    /// Returns a concise, compartment-name-free summary of an OCap capability denial for
+    /// `deniedCapabilities` audit logs across `SliceIsolate`, `Slice.evalSandbox`, and `slice mcp`.
+    #[must_use]
+    pub fn capability_denial_summary(&self) -> String {
+        match self {
+            Self::FsReadDenied { path, .. } => {
+                format!("lacks filesystem read authority for path '{path}'")
+            }
+            Self::FsWriteDenied { path, .. } => {
+                format!("lacks filesystem write authority for path '{path}'")
+            }
+            Self::NetAccessDenied { host, .. } => {
+                format!("lacks outbound network authority for host '{host}'")
+            }
+            Self::EnvAccessDenied { key, .. } => {
+                format!("lacks environment variable authority for key '{key}'")
+            }
+            Self::ExecDenied { binary, .. } => {
+                format!("lacks exec authority for binary '{binary}'")
+            }
+            Self::CheckpointDenied { reason, .. } => {
+                format!("checkpoint denied: {reason}")
+            }
+            _ => self.to_string(),
+        }
+    }
+}

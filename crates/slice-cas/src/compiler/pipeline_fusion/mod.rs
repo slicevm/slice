@@ -45,7 +45,9 @@ pub fn fuse_array_pipelines_ast(code: &str) -> String {
 
     let allocator = oxc::allocator::Allocator::default();
     let source_type = oxc::span::SourceType::mjs();
-    let parser_ret = oxc::parser::Parser::new(&allocator, code, source_type).parse();
+    let parser_ret = oxc::parser::Parser::new(&allocator, code, source_type)
+        .with_options(crate::compiler::diagnostics::default_oxc_parse_options())
+        .parse();
     if !parser_ret.diagnostics.is_empty() {
         return code.to_string();
     }

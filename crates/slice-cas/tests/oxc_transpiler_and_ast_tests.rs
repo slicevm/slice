@@ -585,3 +585,48 @@ fn test_issue_153_zero_codegen_pure_js_cow_borrowed_ts_detector_and_linear_line_
         "compute_source_line_map must be strictly O(N), took {elapsed:?}"
     );
 }
+
+#[test]
+fn test_issue_198_top_level_return_preserves_require_in_literals_and_comments() {
+    // 1. Top-level return with string literal, template literal, and comment containing `require(`
+    //    must preserve all literals/comments while still rewriting real global `require(...)` calls.
+    let src = r#"
+// comment mentioning require(fs)
+const r: Record<string, unknown> = { "require(fs)": `tpl require(path)` };
+const mod = require("node:path");
+return JSON.stringify({ r, hasJoin: typeof mod.join === "function" });
+"#;
+    let out = strip_typescript_and_normalize(src, true);
+    assert!(
+        out.contains(r#""require(fs)""#),
+        "string literal must not be rewritten, got:\n{out}"
+    );
+    assert!(
+        out.contains("`tpl require(path)`"),
+        "template literal must not be rewritten, got:\n{out}"
+    );
+    assert!(
+        out.contains(r#"__slice_cjs_require("node:path")"#),
+        "real global require() call must still be rewritten with top-level return, got:\n{out}"
+    );
+    assert!(
+        !out.contains(r#""__slice_cjs_require(fs)""#),
+        "string literal was corrupted into __slice_cjs_require:\n{out}"
+    );
+
+    // 2. Plain JS with top-level return and NO real require() call
+    let plain_js = "const r = { \"require(fs)\": 1 };\nreturn JSON.stringify(r);\n";
+    let out_js = strip_typescript_and_normalize(plain_js, false);
+    assert!(
+        out_js.contains(r#""require(fs)""#) && !out_js.contains("__slice_cjs_require("),
+        "plain JS literal with top-level return must be untouched:\n{out_js}"
+    );
+
+    // 3. Unparseable syntax must NEVER fall back to plain-text replacement
+    let broken = "const x = \"require(fs)\"; function ( {";
+    let out_broken = crate::compiler::rewrite_cjs_require(broken);
+    assert_eq!(
+        out_broken, broken,
+        "rewrite_cjs_require must not corrupt unparseable input via plain-text replace"
+    );
+}

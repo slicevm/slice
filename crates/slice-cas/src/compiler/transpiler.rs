@@ -597,7 +597,11 @@ pub fn rewrite_cjs_require(source: &str) -> String {
     if let Some(rewritten) = rewrite_require_ident_ast(source) {
         return rewritten;
     }
-    source.replace("require(", "__slice_cjs_require(")
+    // Never fall back to plain-text replacement: doing so corrupts string literals,
+    // template literals, comments, and shadowed identifiers. The runtime prelude
+    // already binds `globalThis.require = __slice_cjs_require`, so leaving unparsed
+    // source untouched is strictly safe.
+    source.to_string()
 }
 
 /// Validates JS/TS/JSX/TSX syntax using Oxc's parser (`oxc::parser::Parser`).
