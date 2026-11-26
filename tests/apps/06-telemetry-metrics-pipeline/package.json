@@ -6,7 +6,7 @@
   "main": "./src/index.ts",
   "dependencies": {
     "bytes": "3.1.2",
-    "flatted": "3.3.1"
+    "flatted": "3.4.2"
   }
 }
 

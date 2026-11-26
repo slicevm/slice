@@ -1,0 +1,28 @@
+version: 2
+updates:
+  # Shipped Rust workspace crates (Cargo.toml / Cargo.lock)
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+
+  # CI & release workflows (SHA-pinned GitHub Actions)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+
+  # Benchmark and framework fixtures under tests/ are not shipped with Slice;
+  # suppress automated Dependabot PR noise for these test-only npm packages.
+  - package-ecosystem: "npm"
+    directories:
+      - "/tests/**/*"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 0
