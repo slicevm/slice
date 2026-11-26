@@ -69,8 +69,12 @@ pub fn inline_cold_method_requires_ast(
                     if md.kind == MethodDefinitionKind::Constructor {
                         continue;
                     }
-                    let mname = md.key.name().unwrap_or_default();
-                    if is_hot_method_name(&mname) {
+                    let mname = md.key.name();
+                    if mname
+                        .as_ref()
+                        .and_then(|n| n.as_str())
+                        .is_some_and(is_hot_method_name)
+                    {
                         continue;
                     }
                     if let Some(body) = &md.value.body {
@@ -78,8 +82,12 @@ pub fn inline_cold_method_requires_ast(
                     }
                 }
                 ClassElement::PropertyDefinition(pd) => {
-                    let pname = pd.key.name().unwrap_or_default();
-                    if is_hot_method_name(&pname) {
+                    let pname = pd.key.name();
+                    if pname
+                        .as_ref()
+                        .and_then(|n| n.as_str())
+                        .is_some_and(is_hot_method_name)
+                    {
                         continue;
                     }
                     if let Some(Expression::ArrowFunctionExpression(arrow)) = &pd.value {

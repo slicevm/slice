@@ -102,7 +102,7 @@ fn try_collect_esm_default_interop_props(
             }
             for prop in &obj_pat.properties {
                 let key_name = prop.key.name()?;
-                props.insert(key_name.to_string());
+                props.insert(key_name.display().to_string());
             }
         }
     }
@@ -272,8 +272,8 @@ pub fn extract_module_require_summary(consumer_code: &str) -> ModuleRequireSumma
             && callee.name.as_str() == "require"
             && call.arguments.len() == 1
             && let Some(Argument::StringLiteral(str_lit)) = call.arguments.first()
+            && let Some(target) = str_lit.value.as_str()
         {
-            let target = str_lit.value.as_str();
             summary
                 .targets
                 .entry(target.to_string())
@@ -327,7 +327,7 @@ pub fn extract_module_require_summary(consumer_code: &str) -> ModuleRequireSumma
                                         entry.forces_all = true;
                                     }
                                 } else {
-                                    entry.used_props.insert(key_name.to_string());
+                                    entry.used_props.insert(key_name.display().to_string());
                                 }
                             } else {
                                 entry.forces_all = true;

@@ -314,7 +314,8 @@ fn is_supported_expr(expr: &Expression<'_>, in_function_depth: usize) -> bool {
                         && (slice_sandbox::is_frozen_intrinsic(&chain)
                             || slice_sandbox::is_frozen_intrinsic(&format!(
                                 "{}.{}",
-                                chain, prop_lit.value
+                                chain,
+                                prop_lit.value.display()
                             )))
                     {
                         return true;
@@ -351,7 +352,7 @@ fn is_supported_expr(expr: &Expression<'_>, in_function_depth: usize) -> bool {
         }),
         Expression::ObjectExpression(obj) => obj.properties.iter().all(|prop| match prop {
             ObjectPropertyKind::ObjectProperty(p) => {
-                if p.method || p.computed {
+                if p.method || p.key.is_computed() {
                     return false;
                 }
                 let key_ok = matches!(
@@ -506,8 +507,9 @@ fn is_supported_stmt(stmt: &Statement<'_>, in_function_depth: usize) -> bool {
             .is_none_or(|arg| is_supported_expr(arg, in_function_depth)),
         Statement::ImportDeclaration(imp) => {
             in_function_depth == 0
-                && !slice_cas::is_builtin_module(imp.source.value.as_str())
-                && !slice_cas::is_jsx_runtime_builtin(imp.source.value.as_str())
+                && imp.source.value.as_str().is_some_and(|spec| {
+                    !slice_cas::is_builtin_module(spec) && !slice_cas::is_jsx_runtime_builtin(spec)
+                })
                 && imp.specifiers.as_ref().is_none_or(|specs| {
                     specs.iter().all(|s| match s {
                         oxc::ast::ast::ImportDeclarationSpecifier::ImportSpecifier(named) => {

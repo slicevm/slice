@@ -123,8 +123,8 @@ pub fn rewrite_cjs_requires_ast(
                 let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
                     return;
                 };
-                if let Some(resolved) =
-                    try_resolve_cjs_spec(str_lit.value.as_str(), from_dir, deps_out)
+                if let Some(spec) = str_lit.value.as_str()
+                    && let Some(resolved) = try_resolve_cjs_spec(spec, from_dir, deps_out)
                 {
                     let start = (str_lit.span.start as usize).saturating_sub(1);
                     let end = (str_lit.span.end as usize).saturating_sub(1);
@@ -165,7 +165,9 @@ pub fn rewrite_cjs_requires_ast(
         let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
             return;
         };
-        if let Some(resolved) = try_resolve_cjs_spec(str_lit.value.as_str(), from_dir, deps_out) {
+        if let Some(spec) = str_lit.value.as_str()
+            && let Some(resolved) = try_resolve_cjs_spec(spec, from_dir, deps_out)
+        {
             edits.push((
                 str_lit.span.start as usize,
                 str_lit.span.end as usize,
@@ -326,8 +328,8 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
                 Some("utf8")
             } else if let Argument::StringLiteral(sl) = &inner_call.arguments[1] {
                 match sl.value.as_str() {
-                    "utf8" | "utf-8" => Some("utf8"),
-                    "base64" | "base64url" => Some("base64"),
+                    Some("utf8" | "utf-8") => Some("utf8"),
+                    Some("base64" | "base64url") => Some("base64"),
                     _ => None,
                 }
             } else {
@@ -337,7 +339,7 @@ pub fn rewrite_buffer_fast_paths_ast(code: &str) -> String {
             let to_enc = if call.arguments.is_empty() {
                 Some("utf8")
             } else if let Argument::StringLiteral(sl) = &call.arguments[0] {
-                Some(sl.value.as_str())
+                sl.value.as_str()
             } else {
                 None
             };
@@ -420,7 +422,9 @@ pub fn collect_require_edits_from_program(
         let Some(Argument::StringLiteral(str_lit)) = call.arguments.first() else {
             return;
         };
-        if let Some(resolved) = try_resolve_cjs_spec(str_lit.value.as_str(), from_dir, deps_out) {
+        if let Some(spec) = str_lit.value.as_str()
+            && let Some(resolved) = try_resolve_cjs_spec(spec, from_dir, deps_out)
+        {
             edits.push((
                 str_lit.span.start as usize,
                 str_lit.span.end as usize,
@@ -439,8 +443,9 @@ pub fn collect_require_edits_from_program(
             }
         }
         Expression::ImportExpression(imp_expr) => {
-            if let Expression::StringLiteral(str_lit) = imp_expr.source.without_parentheses() {
-                let spec = str_lit.value.as_str();
+            if let Expression::StringLiteral(str_lit) = imp_expr.source.without_parentheses()
+                && let Some(spec) = str_lit.value.as_str()
+            {
                 let is_builtin = is_builtin_module(spec) || is_jsx_runtime_builtin(spec);
                 let resolved_id = resolve_spec_and_record(spec, from_dir, deps_out);
                 let replacement = if is_builtin {

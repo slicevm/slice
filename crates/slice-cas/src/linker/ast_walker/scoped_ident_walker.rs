@@ -125,7 +125,7 @@ fn walk_pat(
     match pat {
         BindingPattern::ObjectPattern(obj) => {
             for p in &obj.properties {
-                if p.computed
+                if p.key.is_computed()
                     && let Some(ke) = p.key.as_expression()
                 {
                     walk_expr(ke, shadowed, live_map, edits);
@@ -194,7 +194,7 @@ fn walk_class(
     for el in &cls.body.body {
         match el {
             ClassElement::MethodDefinition(md) => {
-                if md.computed
+                if md.key.is_computed()
                     && let Some(ke) = md.key.as_expression()
                 {
                     walk_expr(ke, shadowed, live_map, edits);
@@ -202,7 +202,7 @@ fn walk_class(
                 walk_function_node(&md.value, false, shadowed, live_map, edits);
             }
             ClassElement::PropertyDefinition(pd) => {
-                if pd.computed
+                if pd.key.is_computed()
                     && let Some(ke) = pd.key.as_expression()
                 {
                     walk_expr(ke, shadowed, live_map, edits);
@@ -383,7 +383,7 @@ fn walk_expr(
                                 continue;
                             }
                         }
-                        if p.computed
+                        if p.key.is_computed()
                             && let Some(ke) = p.key.as_expression()
                         {
                             walk_expr(ke, shadowed, live_map, edits);

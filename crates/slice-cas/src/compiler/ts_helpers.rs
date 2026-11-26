@@ -264,7 +264,7 @@ pub(crate) fn lower_auto_accessors_in_js(js_code: &str) -> String {
             let key_src = {
                 let ks = acc.key.span().start as usize;
                 let ke = acc.key.span().end as usize;
-                if acc.computed {
+                if acc.key.is_computed() {
                     format!("[{}]", &self.src[ks..ke])
                 } else if matches!(acc.key, PropertyKey::PrivateIdentifier(_)) {
                     let raw = &self.src[ks..ke];
@@ -336,11 +336,11 @@ pub(crate) fn has_standalone_builtin_import_or_cjs_export(js_code: &str) -> bool
     .with_options(parse_opts)
     .parse();
     for stmt in &ret.program.body {
-        if let oxc::ast::ast::Statement::ImportDeclaration(imp) = stmt {
-            let spec = imp.source.value.as_str();
-            if is_builtin_module(spec) || is_jsx_runtime_builtin(spec) {
-                return true;
-            }
+        if let oxc::ast::ast::Statement::ImportDeclaration(imp) = stmt
+            && let Some(spec) = imp.source.value.as_str()
+            && (is_builtin_module(spec) || is_jsx_runtime_builtin(spec))
+        {
+            return true;
         }
     }
     false

@@ -51,7 +51,7 @@ fn match_exports_define_property_stmt(
     let desc_sp = desc_expr.span();
     let desc_src = &src[desc_sp.start as usize..desc_sp.end as usize];
     Some((
-        key_lit.value.to_string(),
+        key_lit.value.display().to_string(),
         extract_referenced_identifiers(desc_src),
     ))
 }
@@ -150,7 +150,7 @@ pub fn prune_and_minify_cjs_module_ast(
                 }
                 let all_static_named = obj.properties.iter().all(|p| match p {
                     oxc::ast::ast::ObjectPropertyKind::ObjectProperty(op) => {
-                        !op.computed && op.key.name().is_some()
+                        !op.key.is_computed() && op.key.name().is_some()
                     }
                     oxc::ast::ast::ObjectPropertyKind::SpreadProperty(_) => false,
                 });
@@ -165,7 +165,7 @@ pub fn prune_and_minify_cjs_module_ast(
                     let Some(k_name) = op.key.name() else {
                         return true;
                     };
-                    if used_set.contains(k_name.as_ref()) {
+                    if k_name.as_str().is_some_and(|s| used_set.contains(s)) {
                         return true;
                     }
                     let is_pure_droppable = op.kind == oxc::ast::ast::PropertyKind::Get
