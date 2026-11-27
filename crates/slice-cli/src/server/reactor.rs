@@ -39,6 +39,7 @@ struct ParkedConn {
     pending_write: Vec<u8>,
     write_offset: usize,
     close_after_write: bool,
+    registered_interest: Interest,
     last_active: Instant,
     slot_id: u32,
 }
@@ -52,6 +53,7 @@ impl ParkedConn {
             pending_write: Vec::new(),
             write_offset: 0,
             close_after_write: false,
+            registered_interest: Interest::READABLE,
             last_active: now,
             slot_id,
         }
@@ -124,7 +126,11 @@ impl ParkedConn {
 }
 
 /// Runs a single share-nothing non-blocking `NetReactor` worker thread.
-pub(crate) fn run_reactor_worker_loop(initial_slot: u32, shared: &AcceptWorkerShared) {
+pub(crate) fn run_reactor_worker_loop(
+    worker_idx: usize,
+    initial_slot: u32,
+    shared: &AcceptWorkerShared,
+) {
     let Ok(mut reactor) = NetReactor::new() else {
         return;
     };
@@ -153,6 +159,7 @@ pub(crate) fn run_reactor_worker_loop(initial_slot: u32, shared: &AcceptWorkerSh
     let mut free_slots: Vec<usize> = Vec::new();
     let mut events: Vec<ReadyEvent> = Vec::with_capacity(256);
     let mut last_sweep = Instant::now();
+    let mut listener_defer_since: Option<Instant> = None;
 
     while !shared.shutdown_flag.load(Ordering::Acquire) {
         let poll_timeout = Duration::from_millis(25);
@@ -163,8 +170,30 @@ pub(crate) fn run_reactor_worker_loop(initial_slot: u32, shared: &AcceptWorkerSh
 
         for &ev in &events {
             if ev.token == LISTENER_TOKEN {
-                // Drain non-blocking accept queue in a batch.
-                for _ in 0..64 {
+                // Least-connections fairness gate: on Linux epoll (LIFO wakeup), prevent one hot
+                // worker from greedily draining all incoming connections while sibling workers sit
+                // idle at fewer connections. Defer up to 5 ms so an idle sibling accepts first.
+                if shared.workers > 1 {
+                    let my_conns = shared.worker_conns[worker_idx].load(Ordering::Relaxed);
+                    let min_conns = shared
+                        .worker_conns
+                        .iter()
+                        .map(|c| c.load(Ordering::Relaxed))
+                        .min()
+                        .unwrap_or(0);
+                    if my_conns > min_conns {
+                        let since = *listener_defer_since.get_or_insert(now);
+                        if now.duration_since(since) < Duration::from_millis(5) {
+                            if events.len() == 1 {
+                                std::thread::yield_now();
+                            }
+                            continue;
+                        }
+                    }
+                }
+                listener_defer_since = None;
+                let accept_budget = if shared.workers > 1 { 1 } else { 64 };
+                for _ in 0..accept_budget {
                     match shared.listener.accept() {
                         Ok((stream, _)) => {
                             if shared.shutdown_flag.load(Ordering::Acquire) {
@@ -188,6 +217,8 @@ pub(crate) fn run_reactor_worker_loop(initial_slot: u32, shared: &AcceptWorkerSh
                             {
                                 conns[token] = None;
                                 free_slots.push(token);
+                            } else {
+                                shared.worker_conns[worker_idx].fetch_add(1, Ordering::Relaxed);
                             }
                         }
                         Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
@@ -266,17 +297,22 @@ pub(crate) fn run_reactor_worker_loop(initial_slot: u32, shared: &AcceptWorkerSh
                 } else {
                     Interest::READABLE
                 };
-                if reactor
+                if interest == conn.registered_interest {
+                    conns[token] = Some(conn);
+                } else if reactor
                     .reregister_stream(&conn.stream, token, interest)
                     .is_ok()
                 {
+                    conn.registered_interest = interest;
                     conns[token] = Some(conn);
                 } else {
                     let _ = reactor.deregister_stream(&conn.stream);
+                    shared.worker_conns[worker_idx].fetch_sub(1, Ordering::Relaxed);
                     free_slots.push(token);
                 }
             } else {
                 let _ = reactor.deregister_stream(&conn.stream);
+                shared.worker_conns[worker_idx].fetch_sub(1, Ordering::Relaxed);
                 free_slots.push(token);
             }
 
@@ -299,6 +335,7 @@ pub(crate) fn run_reactor_worker_loop(initial_slot: u32, shared: &AcceptWorkerSh
                     && now.duration_since(conn.last_active) >= IDLE_TIMEOUT
                 {
                     let _ = reactor.deregister_stream(&conn.stream);
+                    shared.worker_conns[worker_idx].fetch_sub(1, Ordering::Relaxed);
                     *entry = None;
                     free_slots.push(slot);
                 }
@@ -720,24 +757,21 @@ fn dispatch_buffered_http_requests(
                     }
                     write_buf.extend_from_slice(b"\r\n");
                     if !suppress_body {
-                        if !has_more_pipelined
-                            || body_bytes.len() > STATIC_COALESCE_MAX_BYTES
-                            || !keep_alive
-                        {
+                        if body_bytes.len() <= STATIC_COALESCE_MAX_BYTES {
+                            write_buf.extend_from_slice(body_bytes);
+                            if !has_more_pipelined || write_buf.len() >= 32768 || !keep_alive {
+                                if conn.write_or_queue(write_buf).is_err() {
+                                    return ConnStep::Close;
+                                }
+                                clear_and_trim_write_buf(write_buf);
+                            }
+                        } else {
                             if conn.write_or_queue(write_buf).is_err()
                                 || conn.write_or_queue(body_bytes).is_err()
                             {
                                 return ConnStep::Close;
                             }
                             clear_and_trim_write_buf(write_buf);
-                        } else {
-                            write_buf.extend_from_slice(body_bytes);
-                            if write_buf.len() >= 32768 {
-                                if conn.write_or_queue(write_buf).is_err() {
-                                    return ConnStep::Close;
-                                }
-                                clear_and_trim_write_buf(write_buf);
-                            }
                         }
                     } else if !has_more_pipelined || write_buf.len() >= 32768 || !keep_alive {
                         if conn.write_or_queue(write_buf).is_err() {
