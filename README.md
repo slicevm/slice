@@ -13,7 +13,7 @@ Run untrusted AI agent code, multi-tenant SaaS plugins, and full-stack edge serv
 [![Benchmarks](https://img.shields.io/badge/benchmarks-33%20workloads-brightgreen)](./tests/reports/latest.md)
 [![Docs](https://img.shields.io/badge/docs-index-informational)](./docs/README.md)
 
-[Quickstart](#30-second-quickstart) | [Use Cases](#built-for-three-workloads) | [Benchmarks](#benchmarks-at-a-glance) | [Security Model](#5-ring-zero-trust-security) | [Documentation](#documentation)
+[Quickstart](#30-second-quickstart) | [Slice Cloud](https://slicevm.com) | [Use Cases](#built-for-three-workloads) | [Benchmarks](#benchmarks-at-a-glance) | [Security Model](#5-ring-zero-trust-security) | [Documentation](#documentation)
 
 </div>
 
@@ -82,6 +82,10 @@ slice pack . ./app.cas
 slice run ./app.cas --warm --metrics
 slice compile . -o ./my-app
 ```
+
+### Run Hosted on Slice Cloud (`slicevm.com`)
+
+Want the same microsecond cold starts, zero-trust isolation, and `< 5 us` state rollbacks without managing servers? Deploy your Slice apps, AI agent sandboxes, and multi-tenant edge workloads directly on our hosted cloud at **[slicevm.com](https://slicevm.com)** -- same `.cas` bundles, same `slice.toml` security policies, zero infrastructure ops.
 
 ---
 
@@ -243,7 +247,8 @@ Full guides and architecture references live under [`docs/`](./docs/README.md):
 * **Try it in 60 seconds**: Run `slice verify-security` and `slice microvm-bench` to test containment and density locally.
 * **Report bugs or request features**: Open an issue on [GitHub Issues](https://github.com/slicevm/slice/issues).
 * **Report security findings privately**: Use [GitHub Private Vulnerability Reporting](https://github.com/slicevm/slice/security/advisories/new) -- see [`SECURITY.md`](./SECURITY.md).
-* **Follow releases**: Star the repository to track upcoming milestones (`v0.15.0` async C10K reactor + HTTP/2, `v0.16.0` Durable Objects + Landlock/seccomp-bpf).
+* **Deploy to the cloud**: Run your Slice workloads managed on **[slicevm.com](https://slicevm.com)** (Slice Cloud).
+* **Follow releases**: Star the repository to track upcoming milestones (`v0.15.0` virtual VFS mounts & artifacts, `Slice.ext` host extensions, C10K+ async reactor & live streaming, macOS builds, MCU embeddability; `v0.16.0` HTTP/2, Durable Objects, Landlock/seccomp-bpf).
 
 ## License
 
