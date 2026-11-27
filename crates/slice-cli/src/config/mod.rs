@@ -10,7 +10,7 @@ pub(crate) mod watcher;
 pub(crate) use cas_packager::build_cas_archive;
 pub(crate) use cas_packager::{build_cas_archive_with_static, unique_temp_cas_path};
 pub(crate) use ctrlc::install_ctrlc_handler;
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 pub(crate) use flags::parse_u64_digits;
 pub(crate) use flags::{
     is_known_slice_runtime_flag, match_non_empty_flag_path, match_non_empty_flag_value,

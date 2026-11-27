@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 /// Zero-allocation parser that extracts ASCII digits from `raw` (ignoring underscores, spaces, or
 /// unit suffixes) into a `u64`. Returns `None` if no digits are present or if overflow occurs.
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
 #[inline]
 pub(crate) fn parse_u64_digits(raw: &str) -> Option<u64> {
     let mut acc: u64 = 0;

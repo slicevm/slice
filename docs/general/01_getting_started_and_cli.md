@@ -12,27 +12,23 @@ Slice is engineered in 100% pure Rust with **zero external C/C++ compiler depend
 - **Rust Toolchain (`1.80+`):** Install via [rustup.rs](https://rustup.rs) (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` on Linux/macOS, or `rustup-init.exe` on Windows).
 - **Git:** To clone and pull updates from the repository.
 
-### 1.2 One-Step Installer Scripts (Recommended)
+### 1.2 One-Step Prebuilt Installer Scripts (Recommended)
 
-The repository includes automated installer scripts in [`scripts/install.ps1`](../../scripts/install.ps1) and [`scripts/install.sh`](../../scripts/install.sh) that build the optimized release binary (`lto = "fat"`, `opt-level = 3`), copy it to `~/.slice/bin`, and verify your installation.
+Prebuilt release binaries with SHA-256 verification are published on GitHub Releases for **Linux (`x86_64`)**, **macOS (`aarch64` Apple Silicon & `x86_64` Intel)**, and **Windows (`x86_64`)**. The installer scripts in [`scripts/install.sh`](../../scripts/install.sh) and [`scripts/install.ps1`](../../scripts/install.ps1) automatically download the matching archive, verify its `.sha256` checksum, and install `slice` to `~/.slice/bin` (pass `--from-source` / `-FromSource` to compile locally with Cargo):
+
+**Linux & macOS (Apple Silicon + Intel):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/slicevm/slice/main/scripts/install.sh | sh
+export PATH="$HOME/.slice/bin:$PATH"
+```
 
 **Windows (PowerShell):**
 ```powershell
-git clone https://github.com/slicevm/slice.git
-cd slice
-powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+irm https://raw.githubusercontent.com/slicevm/slice/main/scripts/install.ps1 | iex
 ```
 Add `$HOME\.slice\bin` to your user `PATH` if it is not already present:
 ```powershell
 [Environment]::SetEnvironmentVariable("Path", $env:Path + ";$HOME\.slice\bin", "User")
-```
-
-**Linux & macOS (Bash / Zsh):**
-```bash
-git clone https://github.com/slicevm/slice.git
-cd slice
-./scripts/install.sh
-export PATH="$HOME/.slice/bin:$PATH"
 ```
 
 ### 1.3 Manual Build with Cargo
