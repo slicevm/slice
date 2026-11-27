@@ -310,6 +310,56 @@ Note: Host extension calls are external side effects outside the VFS and `Slice.
 
 ---
 
+## 5d. Recipe 7: 32-Bit MCU & XIP SPI Flash Embedding (`from_static_bytes` + `SliceHostExtension`)
+
+For constrained embedded Linux and 32-bit microcontroller targets (such as ESP32-S3 with PSRAM, Raspberry Pi Pico 2, or ARM Cortex-A/R devices) where filesystem `mmap(2)` and on-device TypeScript compilation (`oxc`) are unavailable or undesirable:
+
+1. **Pre-compile `.cas` on the host** with `slice build app.ts -o app.cas` and embed it directly into firmware flash via `include_bytes!("../app.cas")`.
+2. **Disable `compiler` and `mmap` features in `slice-cas`** (`default-features = false`) so the target links only the zero-copy archive reader and `StaticAssetTable` with zero `oxc` or `memmap2` dependencies.
+3. **Mount the flash slice with `MappedCasArchive::from_static_bytes`**: both bytecode blobs and static assets borrow directly from `&'static [u8]` XIP flash with `0` bytes of RAM copy.
+4. **Expose hardware peripherals with `SliceHostExtension` + `HostExtensionAdapter`**: a thin synchronous byte-slice trait (`invoke(&self, target, op, input: &[u8], output: &mut Vec<u8>)`) that bridges GPIO/I2C/SPI/UART/BLE directly onto `Slice.ext.<namespace>.invoke(...)` under the same deny-by-default OCap `CapabilityToken` gate.
+
+```rust
+use slice_cas::MappedCasArchive;
+use slice_engine::{
+    ExtensionRegistry, HostExtensionAdapter, SliceHostExtension, SliceIsolate,
+};
+use slice_sandbox::CapabilityToken;
+use std::sync::Arc;
+
+// Pre-compiled on host via `slice build firmware.ts -o firmware.cas`
+static FLASH_CAS: &[u8] = include_bytes!("firmware.cas");
+
+struct GpioHost;
+impl SliceHostExtension for GpioHost {
+    fn invoke(&self, target: &str, op: u32, input: &[u8], out: &mut Vec<u8>) -> Result<u32, String> {
+        // Drive hardware peripheral synchronously using raw byte slices
+        let _ = (target, op);
+        out.extend_from_slice(input);
+        Ok(0)
+    }
+}
+
+fn boot_from_xip_flash() -> anyhow::Result<()> {
+    let archive = MappedCasArchive::from_static_bytes(FLASH_CAS)?;
+    let entry = archive.entrypoint_blob()?;
+    let bytecode = archive.get_bytecode_slice(entry);
+
+    let registry =
+        ExtensionRegistry::new().with(Arc::new(HostExtensionAdapter::new("gpio", GpioHost)));
+    let caps = CapabilityToken::pure_compute().with_extension("gpio");
+    let mut iso = SliceIsolate::spawn_with_extensions(
+        "mcu-0", 1, caps, 5_000_000, 2 * 1024 * 1024, registry,
+    );
+    let _metrics = iso.execute_bytecode(bytecode, None)?;
+    Ok(())
+}
+```
+
+All internal telemetry counters in `slice-cas` and `slice-engine` use `AtomicUsize` (and `boa_engine` uses `portable_atomic::AtomicU64`), eliminating `std::sync::atomic::AtomicU64` barriers on 32-bit targets.
+
+---
+
 ## 6. Running High-Density 1,000-Tenant MicroVM Swarms (`slice microvm-bench`)
 
 To test how your hardware handles spawning and executing 1,000 isolated tenant compartments concurrently, use the built-in `slice microvm-bench` command:

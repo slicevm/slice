@@ -34,6 +34,7 @@ pub(crate) struct AcceptWorkerShared {
     pub(crate) wake_ip: IpAddr,
     pub(crate) bound_port: u16,
     pub(crate) workers: usize,
+    pub(crate) worker_conns: Arc<Vec<AtomicUsize>>,
 }
 
 fn run_accept_worker_loop(initial_slot: u32, shared: &AcceptWorkerShared) {
@@ -373,6 +374,7 @@ Slice.respond(
         wake_ip,
         bound_port,
         workers,
+        worker_conns: Arc::new((0..workers).map(|_| AtomicUsize::new(0)).collect()),
     });
 
     let use_reactor = shared.tls_server_cfg.is_none();
@@ -381,7 +383,11 @@ Slice.respond(
         let worker_shared = Arc::clone(&shared);
         handles.push(std::thread::spawn(move || {
             if use_reactor {
-                super::reactor::run_reactor_worker_loop((worker_idx as u32) << 20, &worker_shared);
+                super::reactor::run_reactor_worker_loop(
+                    worker_idx,
+                    (worker_idx as u32) << 20,
+                    &worker_shared,
+                );
             } else {
                 run_accept_worker_loop((worker_idx as u32) << 20, &worker_shared);
             }
@@ -389,7 +395,7 @@ Slice.respond(
     }
 
     if use_reactor {
-        super::reactor::run_reactor_worker_loop(0, &shared);
+        super::reactor::run_reactor_worker_loop(0, 0, &shared);
     } else {
         run_accept_worker_loop(0, &shared);
     }

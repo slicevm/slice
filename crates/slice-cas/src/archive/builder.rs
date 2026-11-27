@@ -2,7 +2,7 @@
 
 use crate::archive::{
     CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION, CasBlobEntry, CasIndexHeader,
-    detect_static_mime_type, walk_sorted_non_symlink_files,
+    detect_static_mime_type, strip_single_module_ext, walk_sorted_non_symlink_files,
 };
 use crate::compiler::strip_typescript_and_normalize_with_ext;
 use anyhow::{Context, Result, bail};
@@ -10,16 +10,6 @@ use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-
-#[inline]
-pub(super) fn strip_single_module_ext(spec: &str) -> &str {
-    for ext in [".tsx", ".mts", ".cts", ".ts", ".jsx", ".mjs", ".cjs", ".js"] {
-        if let Some(stem) = spec.strip_suffix(ext) {
-            return stem;
-        }
-    }
-    spec
-}
 
 #[inline]
 fn is_ts_declaration_filename(name: &str) -> bool {

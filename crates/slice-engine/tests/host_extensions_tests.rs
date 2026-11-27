@@ -1,6 +1,7 @@
 use crate::{
     ExtCallCtx, ExtError, ExtFuture, ExtMethod, ExtResult, ExtValue, ExtensionRegistry,
-    SliceExtension, SliceIsolate, compile_source_to_bytecode,
+    HostExtensionAdapter, SliceExtension, SliceHostExtension, SliceIsolate,
+    compile_source_to_bytecode,
 };
 use slice_sandbox::{CapabilityToken, SandboxViolation};
 use std::collections::HashMap;
@@ -323,4 +324,78 @@ fn test_v0150_host_extensions_deny_bounds_dlp_determinism_checkpoint_and_timeout
         "expected WallClockExceeded, got {slow_err:?}"
     );
     assert!(start.elapsed() < Duration::from_secs(2));
+}
+
+struct MockGpioHost;
+
+impl SliceHostExtension for MockGpioHost {
+    fn invoke(
+        &self,
+        target: &str,
+        op: u32,
+        input: &[u8],
+        output: &mut Vec<u8>,
+    ) -> Result<u32, String> {
+        match (target, op) {
+            ("pin4", 1) => {
+                // Echo inverted bytes to verify zero-JSON byte-slice roundtrip
+                for &b in input {
+                    output.push(b ^ 0xFF);
+                }
+                Ok(0)
+            }
+            ("gpio", 0) => {
+                output.extend_from_slice(input);
+                Ok(42)
+            }
+            _ => Err(format!("unknown gpio op {target}:{op}")),
+        }
+    }
+}
+
+#[test]
+fn test_v0150_mcu_slice_host_extension_adapter_bytes_json_and_ocap() {
+    let adapter = HostExtensionAdapter::new("gpio", MockGpioHost);
+    let registry = ExtensionRegistry::new().with(Arc::new(adapter));
+
+    // 1. Granted gpio extension: test both JSON envelope and raw Uint8Array framing.
+    let bc = compile_source_to_bytecode(
+        r#"
+        const jsonRes = Slice.ext.gpio.invoke({ target: "pin4", op: 1, data: [0x01, 0x0F, 0xF0] });
+        const binRes = Slice.ext.gpio.invoke(new Uint8Array([10, 20, 30]));
+        JSON.stringify({
+            jsonStatus: jsonRes.status,
+            jsonBytes: jsonRes.bytes,
+            binRes: Array.from(binRes),
+        });
+        "#,
+    );
+    let mut iso = SliceIsolate::spawn_with_extensions(
+        "mcu-tenant",
+        1,
+        CapabilityToken::pure_compute().with_extension("gpio"),
+        10_000_000,
+        8 * 1024 * 1024,
+        registry.clone(),
+    );
+    let metrics = iso.execute_bytecode(&bc, None).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&metrics.return_value).unwrap();
+    assert_eq!(parsed["jsonStatus"], 0);
+    assert_eq!(parsed["jsonBytes"], serde_json::json!([0xFE, 0xF0, 0x0F]));
+    assert_eq!(parsed["binRes"], serde_json::json!([10, 20, 30]));
+
+    // 2. Deny-by-default when "gpio" capability is not granted.
+    let mut iso_denied = SliceIsolate::spawn_with_extensions(
+        "mcu-denied",
+        2,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        8 * 1024 * 1024,
+        registry,
+    );
+    let err = iso_denied.execute_bytecode(&bc, None).unwrap_err();
+    assert!(
+        matches!(err, SandboxViolation::ExtensionDenied { ref target, .. } if target == "gpio.invoke"),
+        "expected ExtensionDenied for gpio.invoke, got {err:?}"
+    );
 }

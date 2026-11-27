@@ -10,10 +10,8 @@ pub use root_shape::RootShape;
 pub use shared_shape::SharedShape;
 pub(crate) use unique_shape::UniqueShape;
 
-use std::{
-    fmt::Debug,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use portable_atomic::AtomicU64;
+use std::{fmt::Debug, sync::atomic::Ordering};
 
 use boa_gc::{Finalize, Trace};
 

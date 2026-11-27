@@ -12,17 +12,23 @@ autotests = false
 [lib]
 bench = false
 
+[features]
+default = ["full"]
+full = ["compiler", "mmap"]
+compiler = ["dep:oxc", "dep:aho-corasick", "dep:cow-utils"]
+mmap = ["dep:memmap2"]
+
 [dependencies]
 blake3.workspace = true
-memmap2.workspace = true
+memmap2 = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
-oxc.workspace = true
+oxc = { workspace = true, optional = true }
 rustc-hash.workspace = true
 memchr.workspace = true
-aho-corasick.workspace = true
-cow-utils.workspace = true
+aho-corasick = { workspace = true, optional = true }
+cow-utils = { workspace = true, optional = true }
 smallvec.workspace = true
 itoa.workspace = true
 simdutf8.workspace = true

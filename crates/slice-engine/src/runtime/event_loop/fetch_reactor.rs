@@ -16,7 +16,7 @@ use crate::state_and_kv::edge_kv_set;
 use boa_engine::{Context, JsObject, JsValue, js_string};
 use rustc_hash::FxHashSet;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, OnceLock};
 
@@ -44,7 +44,7 @@ pub(super) struct FetchReactorPool {
 }
 
 static FETCH_REACTOR_POOL: OnceLock<Arc<FetchReactorPool>> = OnceLock::new();
-static FETCH_REACTOR_REUSE_COUNT: AtomicU64 = AtomicU64::new(0);
+static FETCH_REACTOR_REUSE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FETCH_REACTOR_ACTIVE_THREADS: AtomicUsize = AtomicUsize::new(0);
 
 impl FetchReactorPool {
@@ -138,7 +138,7 @@ impl FetchReactorPool {
 /// Returns the number of times a concurrent `fetch()` reused an existing worker thread in
 /// `FetchReactorPool` instead of spawning a new OS thread.
 pub fn fetch_reactor_pool_reuse_count() -> u64 {
-    FETCH_REACTOR_REUSE_COUNT.load(Ordering::Relaxed)
+    FETCH_REACTOR_REUSE_COUNT.load(Ordering::Relaxed) as u64
 }
 
 /// Returns the number of active OS threads in `FetchReactorPool` (bounded by `MAX_FETCH_REACTOR_WORKERS = 16`).
