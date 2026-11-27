@@ -5,8 +5,7 @@ use super::policy_and_mock::{
     verify_socket_egress_dlp, verify_transient_socket_io_budget_and_fuel,
 };
 use super::{DEFAULT_SOCKET_TIMEOUT, SOCKET_IO_BUF, next_socket_handle_id};
-use crate::bindings::helpers::record_boa_violation_once;
-use crate::boa_realm::{BOA_ACTIVE_TENANT, BOA_NET_HOSTS};
+use crate::boa_realm::{BOA_ACTIVE_TENANT, BOA_NET_HOSTS, record_boa_ocap_denial};
 use crate::intrinsics::{base64_decode, base64_encode};
 use crate::outbound_http::resolve_and_verify_ssrf_socket_addrs;
 use rustc_hash::FxHashMap;
@@ -58,14 +57,13 @@ pub fn udp_socket_bind(family: &str, address: &str, port: u16) -> Result<String,
         });
     if !bind_permitted {
         let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-        record_boa_violation_once(SandboxViolation::NetAccessDenied {
+        let violation = SandboxViolation::NetAccessDenied {
             tenant_id,
             host: format!("udp://{}:{}", bind_host, port),
-        });
-        return Err(format!(
-            "SandboxViolation: UDP socket bind '{}:{}' denied by OCap allow_net policy",
-            bind_host, port
-        ));
+        };
+        let msg = violation.to_string();
+        record_boa_ocap_denial(violation);
+        return Err(msg);
     }
 
     let bind_spec = if is_v6 && !bind_host.starts_with('[') {

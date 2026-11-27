@@ -1120,8 +1120,8 @@ fn test_mcp_persistent_kv_memory_accounting_checkpoint_caps_and_bounded_lines() 
         cp_denied
     );
     assert!(
-        cp_denied.contains("CapabilityDenied: checkpoints")
-            && cp_denied.contains("checkpoint denied"),
+        cp_denied.contains("OCap Violation: checkpoint denied")
+            && !cp_denied.contains("Compartment '"),
         "got: {}",
         cp_denied
     );

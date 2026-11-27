@@ -127,6 +127,12 @@ fn parse_mcp_sandbox_eval_options(args: &serde_json::Value) -> slice_engine::San
             push_string_or_array_arg(args, key, target);
         }
     }
+    for key in ["allowPrivateNetworks", "allow_private_networks"] {
+        if let Some(b) = args.get(key).and_then(|v| v.as_bool()) {
+            opts.allow_private_networks = Some(b);
+            break;
+        }
+    }
     opts
 }
 
@@ -330,6 +336,7 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                             "allowRead": { "type": ["string", "array"], "description": "Optional allowed VFS read prefix(es) attenuated against server grants" },
                             "allowWrite": { "type": ["string", "array"], "description": "Optional allowed VFS write prefix(es) attenuated against server grants" },
                             "allowNet": { "type": ["string", "array"], "description": "Optional allowed network host(s) attenuated against server grants" },
+                            "allowPrivateNetworks": { "type": "boolean", "description": "Optional opt-in for DNS hostnames resolving to private/loopback IPs (attenuated against server --allow-private-networks; cloud metadata remains unconditionally blocked)" },
                             "allowExec": { "type": ["string", "array"], "description": "Optional allowed subprocess binary(ies) attenuated against server grants" },
                             "allowEnv": { "type": ["string", "array"], "description": "Optional allowed environment variable key(s) attenuated against server grants" },
                             "auditSecret": { "type": ["string", "array"], "description": "Optional secret(s) to guard against egress leakage" },

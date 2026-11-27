@@ -23,7 +23,7 @@ npx tsc --noEmit
 
 ## 2. Linting & Formatting with `oxlint` and `Biome`
 
-Because Slice uses the **Oxc (`v0.152.0`)** parser and compiler in `slice-cas`, pairing Slice with `oxlint` or `Biome` gives you an all-Rust toolchain from linter to bundler to runtime:
+Because Slice uses the **Oxc (`v0.160.0`)** parser and compiler in `slice-cas`, pairing Slice with `oxlint` or `Biome` gives you an all-Rust toolchain from linter to bundler to runtime:
 
 ```bash
 # Lint TypeScript/TSX with Oxc's linter (50-100x faster than ESLint):

@@ -209,6 +209,8 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     pub(crate) static BOA_NET_HOSTS: std::cell::RefCell<FxHashSet<String>> =
         std::cell::RefCell::new(FxHashSet::default());
+    pub(crate) static BOA_ALLOW_PRIVATE_NETS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
     pub(crate) static BOA_EGRESS_SECRETS: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };
     pub(crate) static BOA_ENV_MAP: std::cell::RefCell<FxHashMap<String, String>> =

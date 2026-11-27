@@ -38,6 +38,7 @@ fn test_wave4_capability_token_attenuate_port_lattice_and_wildcard_ssrf_containm
         allow_read: Some(&req_disjoint_read),
         allow_write: Some(&[]),
         allow_net: Some(&req_escalate_port),
+        allow_private_networks: None,
         allow_exec: Some(&["git".to_string()]),
         allow_env: Some(&req_env),
         allow_checkpoints: None,
@@ -431,4 +432,115 @@ export default 1;
     assert!(is_sensitive_env_key("PRIVATE_PUBLISHABLE_KEY_SEED"));
     assert!(!is_sensitive_env_key("NEXT_PUBLIC_KEY"));
     assert!(!is_sensitive_env_key("STRIPE_PUBLISHABLE_KEY"));
+}
+
+#[test]
+fn test_v0147_ssrf_ranges_loopback_private_net_attenuation_and_violation_display() {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    // 1. is_loopback_ip handles IPv4, IPv6, and IPv4-mapped IPv6 loopback strictly
+    assert!(is_loopback_ip(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+    assert!(is_loopback_ip(IpAddr::V4(Ipv4Addr::new(
+        127, 255, 255, 254
+    ))));
+    assert!(is_loopback_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    assert!(is_loopback_ip("::ffff:127.0.0.1".parse().unwrap()));
+    assert!(!is_loopback_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+    assert!(!is_loopback_ip(IpAddr::V4(Ipv4Addr::new(
+        169, 254, 169, 254
+    ))));
+    assert!(!is_loopback_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+
+    // 2. Extended RFC IPv6/IPv4 special-use ranges blocked by is_private_or_loopback_ip
+    for special in [
+        "192.88.99.1",
+        "fec0::1",
+        "100::1",
+        "2001:2::1",
+        "2001:10::1",
+        "2001:20::1",
+        "3fff::1",
+    ] {
+        let ip: IpAddr = special.parse().unwrap();
+        assert!(
+            is_private_or_loopback_ip(ip),
+            "expected special-use IP {special} to be classified as private/non-global"
+        );
+    }
+    assert!(!is_private_or_loopback_ip("1.1.1.1".parse().unwrap()));
+    assert!(!is_private_or_loopback_ip(
+        "2606:4700:4700::1111".parse().unwrap()
+    ));
+
+    // 3. Monotonic attenuation of allow_private_networks & manifest parsing
+    let parent_default = CapabilityToken::pure_compute().with_net_host("api.example.com");
+    assert!(!parent_default.allow_private_networks);
+    let escalated = parent_default.attenuate(&CapabilityAttenuationRequest {
+        allow_private_networks: Some(true),
+        ..Default::default()
+    });
+    assert!(
+        !escalated.allow_private_networks,
+        "child must never escalate allow_private_networks when parent is false"
+    );
+
+    let parent_private = parent_default.with_allow_private_networks(true);
+    assert!(
+        parent_private
+            .attenuate(&CapabilityAttenuationRequest::default())
+            .allow_private_networks
+    );
+    assert!(
+        !parent_private
+            .attenuate(&CapabilityAttenuationRequest {
+                allow_private_networks: Some(false),
+                ..Default::default()
+            })
+            .allow_private_networks
+    );
+
+    let m = SliceManifest::parse_toml(
+        "[capabilities]\nallow_net = [\"intranet.corp\"]\nallow_private_networks = true\n",
+    );
+    assert!(m.capabilities.allow_private_networks);
+
+    // 4. Issue #220: SandboxViolation::Display never leaks compartment names and uses one OCap prefix
+    let violations = [
+        SandboxViolation::FsReadDenied {
+            tenant_id: "secret-host-compartment".to_string(),
+            path: "/etc/hostname".to_string(),
+        },
+        SandboxViolation::FsWriteDenied {
+            tenant_id: "secret-host-compartment".to_string(),
+            path: "/tmp/x".to_string(),
+        },
+        SandboxViolation::NetAccessDenied {
+            tenant_id: "secret-host-compartment".to_string(),
+            host: "example.com:443".to_string(),
+        },
+        SandboxViolation::EnvAccessDenied {
+            tenant_id: "secret-host-compartment".to_string(),
+            key: "SECRET_KEY".to_string(),
+        },
+        SandboxViolation::ExecDenied {
+            tenant_id: "secret-host-compartment".to_string(),
+            binary: "/bin/sh".to_string(),
+        },
+        SandboxViolation::CheckpointDenied {
+            tenant_id: "secret-host-compartment".to_string(),
+            reason: "disabled".to_string(),
+        },
+    ];
+    for v in &violations {
+        let s = v.to_string();
+        assert!(
+            s.starts_with("OCap Violation: "),
+            "expected unified OCap Violation prefix, got: {s}"
+        );
+        assert!(
+            !s.contains("secret-host-compartment") && !s.contains("Compartment '"),
+            "violation Display must not leak host compartment name: {s}"
+        );
+        assert_eq!(v.tenant_id(), "secret-host-compartment");
+    }
 }

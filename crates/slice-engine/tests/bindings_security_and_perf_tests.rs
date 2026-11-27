@@ -1342,13 +1342,18 @@ fn test_issue_179_uniform_catchable_ocap_denials_with_audit_and_uncatchable_trap
         fuel_trap
     );
 
-    let ssrf_trap = parent.eval_sandbox(
+    // Issue #221: SSRF Cloud Metadata Shield raises a catchable ERR_SLICE_NET_DENIED error,
+    // records SSRF_METADATA_BLOCKED in deniedCapabilities, and preserves return value when caught,
+    // while promoting to a fatal ok:false violation when left uncaught.
+    let ssrf_caught = parent.eval_sandbox(
         r#"
+        let info = null;
         try {
             await fetch("http://169.254.169.254/latest/meta-data/");
-        } catch (_e) {
-            console.log("ESCAPED_SSRF_CATCH");
+        } catch (e: any) {
+            info = { code: e.code, msg: e.message };
         }
+        return info;
         "#,
         SandboxEvalOptions {
             fuel: Some(500_000),
@@ -1356,14 +1361,41 @@ fn test_issue_179_uniform_catchable_ocap_denials_with_audit_and_uncatchable_trap
         },
     );
     assert!(
-        !ssrf_trap.ok
-            && ssrf_trap
+        ssrf_caught.ok
+            && ssrf_caught
+                .denied_capabilities
+                .iter()
+                .any(|d| d.contains("SSRF_METADATA_BLOCKED"))
+            && ssrf_caught
+                .return_json
+                .as_deref()
+                .unwrap_or("")
+                .contains("ERR_SLICE_NET_DENIED")
+            && ssrf_caught
+                .return_json
+                .as_deref()
+                .unwrap_or("")
+                .contains("SSRF_METADATA_BLOCKED"),
+        "caught SSRF metadata refusal must return ok:true, preserve returnJson, and record deniedCapabilities: {:?}",
+        ssrf_caught
+    );
+
+    let ssrf_uncaught = parent.eval_sandbox(
+        r#"await fetch("http://169.254.169.254/latest/meta-data/");"#,
+        SandboxEvalOptions {
+            fuel: Some(500_000),
+            ..Default::default()
+        },
+    );
+    assert!(
+        !ssrf_uncaught.ok
+            && ssrf_uncaught
                 .violation
                 .as_deref()
                 .unwrap_or("")
                 .contains("SSRF_METADATA_BLOCKED"),
-        "SSRF Cloud Metadata Shield must remain an uncatchable fatal violation: {:?}",
-        ssrf_trap
+        "uncaught SSRF metadata refusal must promote to ok:false violation: {:?}",
+        ssrf_uncaught
     );
 }
 
@@ -2207,5 +2239,136 @@ fn test_issue_199_refused_ocap_calls_report_current_violation_message() {
         viol.contains("lacks filesystem read authority for path '/etc/passwd'"),
         "fatal violation must reflect the uncaught FS denial, got: {:?}",
         uncaught
+    );
+}
+
+#[test]
+fn test_v0147_issues_220_221_unified_refusal_format_catchable_metadata_and_sockets() {
+    use crate::isolate::SandboxEvalOptions;
+
+    let mut parent = SliceIsolate::spawn(
+        "secret-host-tenant-name",
+        77,
+        CapabilityToken::pure_compute(),
+        10_000_000,
+        32 * 1024 * 1024,
+    );
+
+    // 1. Issue #220 + #221: All refusal kinds (fetch, metadata SSRF, WebSocket, TCP socket,
+    //    fs read, fs write, exec, env, checkpoint) throw catchable errors with one unified
+    //    prefix (`OCap Violation: `), zero host compartment name leakage, stable `err.code`,
+    //    preserved return value (`ok: true`), and complete `deniedCapabilities` logging.
+    let outcome = parent.eval_sandbox(
+        r#"
+        const out: Record<string, { code: string; msg: string }> = {};
+        const probe = async (label: string, fn: () => unknown) => {
+            try {
+                await fn();
+                out[label] = { code: "ALLOWED", msg: "allowed" };
+            } catch (e: any) {
+                out[label] = { code: String(e?.code ?? ""), msg: String(e?.message ?? e) };
+            }
+        };
+        await probe("fetch", () => fetch("https://example.com/"));
+        await probe("meta_ip", () => fetch("http://169.254.169.254/latest/meta-data/"));
+        await probe("meta_gcp", () => fetch("http://metadata.google.internal/"));
+        await probe("meta_dec", () => fetch("http://2852039166/"));
+        await probe("meta_v6", () => fetch("http://[::ffff:169.254.169.254]/"));
+        await probe("ws", () => new WebSocket("ws://example.com:8080/ws"));
+        await probe("fs_read", () => require("fs").readFileSync("/etc/hostname", "utf8"));
+        await probe("fs_write", () => require("fs").writeFileSync("/tmp/x", "y"));
+        await probe("exec", () => require("child_process").execSync("ls"));
+        await probe("cp", () => Slice.checkpoint());
+        return out;
+        "#,
+        SandboxEvalOptions {
+            checkpoints: Some(false),
+            ..Default::default()
+        },
+    );
+
+    assert!(
+        outcome.ok,
+        "all caught refusals (including cloud metadata) must keep ok:true and returnJson: {:?}",
+        outcome
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(outcome.return_json.as_deref().unwrap_or("{}")).unwrap();
+
+    for (label, expected_code, expected_sub) in [
+        (
+            "fetch",
+            "ERR_SLICE_NET_DENIED",
+            "OCap Violation: lacks outbound network authority for host 'example.com:443'",
+        ),
+        (
+            "meta_ip",
+            "ERR_SLICE_NET_DENIED",
+            "OCap Violation: lacks outbound network authority for host 'SSRF_METADATA_BLOCKED:169.254.169.254:80'",
+        ),
+        (
+            "meta_gcp",
+            "ERR_SLICE_NET_DENIED",
+            "OCap Violation: lacks outbound network authority for host 'SSRF_METADATA_BLOCKED:metadata.google.internal:80'",
+        ),
+        (
+            "meta_dec",
+            "ERR_SLICE_NET_DENIED",
+            "OCap Violation: lacks outbound network authority for host 'SSRF_METADATA_BLOCKED:2852039166:80'",
+        ),
+        (
+            "meta_v6",
+            "ERR_SLICE_NET_DENIED",
+            "OCap Violation: lacks outbound network authority for host 'SSRF_METADATA_BLOCKED:[::ffff:169.254.169.254]:80'",
+        ),
+        (
+            "ws",
+            "ERR_SLICE_NET_DENIED",
+            "OCap Violation: lacks outbound network authority for host 'example.com:8080'",
+        ),
+        (
+            "fs_read",
+            "ERR_SLICE_FS_DENIED",
+            "OCap Violation: lacks filesystem read authority for path '/etc/hostname'",
+        ),
+        (
+            "fs_write",
+            "ERR_SLICE_FS_DENIED",
+            "OCap Violation: lacks filesystem write authority for path '/tmp/x'",
+        ),
+        (
+            "exec",
+            "ERR_SLICE_EXEC_DENIED",
+            "OCap Violation: lacks exec authority for binary '",
+        ),
+        (
+            "cp",
+            "ERR_SLICE_CHECKPOINT_DENIED",
+            "OCap Violation: checkpoint denied:",
+        ),
+    ] {
+        let code = parsed[label]["code"].as_str().unwrap_or("");
+        let msg = parsed[label]["msg"].as_str().unwrap_or("");
+        assert_eq!(
+            code, expected_code,
+            "wrong err.code for {label}: {parsed:?}"
+        );
+        assert!(
+            msg.starts_with(expected_sub),
+            "wrong unified err.message for {label}: got '{msg}', expected prefix '{expected_sub}'"
+        );
+        assert!(
+            !msg.contains("secret-host-tenant-name") && !msg.contains("Compartment '"),
+            "err.message for {label} leaked compartment name: '{msg}'"
+        );
+    }
+
+    assert!(
+        outcome
+            .denied_capabilities
+            .iter()
+            .any(|d| d.contains("SSRF_METADATA_BLOCKED:169.254.169.254:80")),
+        "metadata refusal must be recorded in deniedCapabilities: {:?}",
+        outcome.denied_capabilities
     );
 }

@@ -270,9 +270,22 @@ pub fn is_cloud_metadata_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Returns `true` if `ip` is a loopback address (`127.0.0.0/8`, `::1`, or an IPv6 address
+/// embedding an IPv4 loopback address such as `::ffff:127.0.0.1`).
+#[inline]
+pub fn is_loopback_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || extract_embedded_ipv4(v6).is_some_and(|embedded_v4| embedded_v4.is_loopback())
+        }
+    }
+}
+
 /// Returns `true` if `ip` is a cloud metadata IP, loopback, unspecified, link-local,
 /// RFC 1918 private, CGNAT, IETF protocol, TEST-NET, benchmark, multicast, reserved,
-/// unique local, or IPv6-embedded equivalent.
+/// unique local, deprecated site-local, or IPv6-embedded equivalent.
 #[inline]
 pub fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
     if is_cloud_metadata_ip(ip) {
@@ -290,6 +303,7 @@ pub fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
                 || v4.is_documentation()
                 || (octs[0] == 100 && (octs[1] & 0b1100_0000) == 64) // 100.64.0.0/10 CGNAT
                 || (octs[0] == 192 && octs[1] == 0 && octs[2] == 0) // 192.0.0.0/24 IETF Protocol
+                || (octs[0] == 192 && octs[1] == 88 && octs[2] == 99) // 192.88.99.0/24 6to4 Relay Anycast
                 || (octs[0] == 198 && (octs[1] == 18 || octs[1] == 19)) // 198.18.0.0/15 Benchmark
                 || octs[0] >= 240 // 240.0.0.0/4 Reserved for future use
         }
@@ -309,9 +323,15 @@ pub fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
-                || (segs[0] & 0xfe00) == 0xfc00 // fc00::/7 Unique Local
+                || (segs[0] & 0xfe00) == 0xfc00 // fc00::/7 Unique Local (RFC 4193)
                 || (segs[0] & 0xffc0) == 0xfe80 // fe80::/10 Link-Local
-                || (segs[0] == 0x2001 && segs[1] == 0x0db8) // 2001:db8::/32 Documentation
+                || (segs[0] & 0xffc0) == 0xfec0 // fec0::/10 Deprecated Site-Local (RFC 3879)
+                || (segs[0] == 0x0100 && segs[1] == 0 && segs[2] == 0 && segs[3] == 0) // 100::/64 Discard-Only (RFC 6666)
+                || (segs[0] == 0x2001 && segs[1] == 0x0002 && segs[2] == 0) // 2001:2::/48 Benchmarking (RFC 5180)
+                || (segs[0] == 0x2001
+                    && ((segs[1] & 0xfff0) == 0x0010 || (segs[1] & 0xfff0) == 0x0020)) // 2001:10::/28 & 2001:20::/28 ORCHID
+                || (segs[0] == 0x2001 && segs[1] == 0x0db8) // 2001:db8::/32 Documentation (RFC 3849)
+                || (segs[0] == 0x3fff && (segs[1] & 0xf000) == 0) // 3fff::/20 Documentation (RFC 9637)
         }
     }
 }

@@ -32,7 +32,8 @@ docker run --rm \
     -v "$REPORTS_DIR:/app/tests/reports" \
     slice-real-stack-bench
 
-echo "[3/3] Synchronizing summarized benchmark tables across README.md and docs/..."
+echo "[3/3] Synchronizing summarized benchmark tables and comparison HTML dashboard..."
 node tests/scripts/sync_doc_benchmarks.mjs
+node tests/scripts/generate_comparison_html.mjs
 
-echo "Done! Latest report: tests/reports/latest.md"
+echo "Done! Latest report: tests/reports/latest.md | Comparison dashboard: tests/reports/comparison.html"

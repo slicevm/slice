@@ -6,7 +6,7 @@ use std::env;
 
 pub(crate) fn print_usage() {
     println!(
-        "slice (Nexus-JS) v{} - Production MicroVM-Grade Edge Runtime",
+        "SliceVM Runtime v{} - Microsecond Zero-Trust JS/TS Runtime",
         env!("CARGO_PKG_VERSION")
     );
     println!();
@@ -53,12 +53,20 @@ pub(crate) fn print_usage() {
     println!(
         "  slice info                                     Display runtime architecture and active kernel rings"
     );
+    println!();
+    println!("Common Security & Capability Flags (run, test, serve, mcp):");
+    println!(
+        "  --allow-read=<paths>  --allow-write=<paths>  --allow-net=<hosts>  --allow-private-networks"
+    );
+    println!(
+        "  --allow-env=<keys>    --allow-exec=<bins>    --audit-egress=<sec> --fuel=<N> --memory=<bytes>"
+    );
 }
 
 pub(crate) fn cmd_info() -> Result<()> {
     let io_engine = CompletionRingEngine::new(64, true)?;
     println!(
-        "slice (Nexus-JS) v{} [{}-{}]",
+        "SliceVM Runtime v{} [{}-{}]",
         env!("CARGO_PKG_VERSION"),
         env::consts::OS,
         env::consts::ARCH
@@ -72,7 +80,7 @@ pub(crate) fn cmd_info() -> Result<()> {
         slice_cas::CAS_VERSION
     );
     println!(
-        "  TypeScript & JSX/TSX  : Oxc v0.152.0 AOT Compiler + Built-In SSR (`slice:jsx`) + Tree-Shaking"
+        "  TypeScript & JSX/TSX  : Oxc v0.160.0 AOT Compiler + Built-In SSR (`slice:jsx`) + Tree-Shaking"
     );
     println!(
         "  Execution Pipeline    : Tier-1 Precompiled Boa CodeBlock (`SLICEBC\\x01` Default) + Tier-2 SIMD + Tier-0 SLICESNP"

@@ -1988,14 +1988,14 @@ let unlistedBinBlocked = false;
 try {
     spawnSync("/usr/bin/curl", ["https://evil.example"]);
 } catch (e: any) {
-    unlistedBinBlocked = String(e && e.message || e).includes("[Slice Sandbox Violation] Subprocess execution denied");
+    unlistedBinBlocked = e && e.code === "ERR_SLICE_EXEC_DENIED" && String(e.message || e).includes("lacks exec authority for binary");
 }
 
 let pathSpoofBlocked = false;
 try {
     execFileSync("/tmp/evil/echo", ["spoof"]);
 } catch (e: any) {
-    pathSpoofBlocked = String(e && e.message || e).includes("[Slice Sandbox Violation] Subprocess execution denied");
+    pathSpoofBlocked = e && e.code === "ERR_SLICE_EXEC_DENIED" && String(e.message || e).includes("lacks exec authority for binary");
 }
 
 const subEscalation = Slice.evalSandbox(
@@ -2010,7 +2010,7 @@ console.log(JSON.stringify({
     leakedHostSecretVal: envOut.includes("CARGO_MANIFEST_DIR="),
     unlistedBinBlocked,
     pathSpoofBlocked,
-    subEscalationBlocked: !subEscalation.ok && String(subEscalation.violation || "").includes("Subprocess execution denied")
+    subEscalationBlocked: !subEscalation.ok && String(subEscalation.violation || "").includes("lacks exec authority for binary")
 }));
 "#;
     let bundled = slice_cas::strip_typescript_and_normalize(script, true);

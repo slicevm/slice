@@ -10,7 +10,7 @@ pub use authority::{
 };
 pub use ssrf::{
     is_cloud_metadata_clean_host, is_cloud_metadata_ip, is_cloud_metadata_ssrf_target,
-    is_private_or_loopback_clean_host, is_private_or_loopback_ip,
+    is_loopback_ip, is_private_or_loopback_clean_host, is_private_or_loopback_ip,
     is_private_or_loopback_ssrf_target, parse_nonstandard_ipv4,
 };
 

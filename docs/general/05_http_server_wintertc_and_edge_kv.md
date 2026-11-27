@@ -323,9 +323,9 @@ Remember to allowlist the upstream host in `slice.toml` (`allow_net = ["127.0.0.
 Suppose you run a SaaS platform where each customer (`tenant-alpha`, `tenant-beta`, `tenant-gamma`) has their own custom TypeScript workflow or storefront compiled into a `.cas` bundle:
 ```text
 ./tenants/
-  ├── default.cas
-  ├── tenant-alpha.cas
-  └── tenant-beta.cas
+  |-- default.cas
+  |-- tenant-alpha.cas
+  \-- tenant-beta.cas
 ```
 
 Start `slice serve` with `--tenant-dir=./tenants`:

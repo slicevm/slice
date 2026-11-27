@@ -60,7 +60,7 @@ Slice's zero-stat bundler ([`crates/slice-cas/src/lib.rs`](../../crates/slice-ca
 
 ## 2. Packing a Zero-Stat `.cas` Archive (`slice pack`)
 
-`slice pack` compiles your TypeScript code using **Oxc (`v0.152.0`)**, bundles all transitive local modules and `node_modules/` dependencies, tree-shakes unused barrel submodules, hashes every artifact with **BLAKE3-256**, and writes a single **64-byte cache-line aligned `.cas` file**.
+`slice pack` compiles your TypeScript code using **Oxc (`v0.160.0`)**, bundles all transitive local modules and `node_modules/` dependencies, tree-shakes unused barrel submodules, hashes every artifact with **BLAKE3-256**, and writes a single **64-byte cache-line aligned `.cas` file**.
 
 ### 2.1 Basic Usage
 ```bash
@@ -76,7 +76,7 @@ slice pack ./my-webapp ./webapp.cas --entry=./src/server.ts --static=./public
 
 ### 2.2 What Happens Inside `slice pack` (And Why It Makes Cold Starts So Fast)
 
-1. **Oxc (`v0.152.0`) Ahead-of-Time TypeScript Compilation & Comment Stripping:**
+1. **Oxc (`v0.160.0`) Ahead-of-Time TypeScript Compilation & Comment Stripping:**
    - All TypeScript types, interfaces, and JSDoc/license comments are stripped at build time.
 2. **Dense Integer Module IDs (`0..N-1`):**
    - Instead of resolving string paths like `"./node_modules/semver/classes/semver.js"` at runtime, Slice assigns every module a dense integer ID (`0`, `1`, `2`, ...) so internal `require()` calls are O(1) array lookups.

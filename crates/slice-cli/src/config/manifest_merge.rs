@@ -256,6 +256,7 @@ impl ResolvedExecutionConfig {
                     allow_write: (!dirs.allow_write.is_empty())
                         .then_some(dirs.allow_write.as_slice()),
                     allow_net: (!dirs.allow_net.is_empty()).then_some(dirs.allow_net.as_slice()),
+                    allow_private_networks: None,
                     allow_exec: (!dirs.allow_exec.is_empty()).then_some(dirs.allow_exec.as_slice()),
                     allow_env: (!requested_env_keys.is_empty())
                         .then_some(requested_env_keys.as_slice()),
@@ -321,6 +322,9 @@ pub(crate) fn merge_parsed_manifest_into_caps_and_dlp(
     }
     for nh in m.capabilities.allowed_net_hosts {
         caps.insert_net_host(&nh);
+    }
+    if m.capabilities.allow_private_networks {
+        caps.set_allow_private_networks(true);
     }
     for eb in m.capabilities.allowed_exec_binaries {
         *caps = std::mem::take(caps).with_exec_binary(eb);

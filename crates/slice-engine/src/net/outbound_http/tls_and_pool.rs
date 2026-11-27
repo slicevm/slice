@@ -146,6 +146,7 @@ impl Write for OutboundStream {
 struct PooledOutboundConn {
     proxy_key: String,
     is_https: bool,
+    allow_private_networks: bool,
     host_port: String,
     stream: OutboundStream,
     last_used: Instant,
@@ -292,6 +293,7 @@ pub(super) fn take_pooled_stream(
     tenant_id: &str,
     proxy_key: &str,
     is_https: bool,
+    allow_private_networks: bool,
     host_port: &str,
 ) -> Option<OutboundStream> {
     let now = Instant::now();
@@ -300,7 +302,10 @@ pub(super) fn take_pooled_stream(
     {
         vec.retain(|entry| now.duration_since(entry.last_used) < IDLE_CONN_TIMEOUT);
         if let Some(pos) = vec.iter().rposition(|e| {
-            e.proxy_key == proxy_key && e.is_https == is_https && e.host_port == host_port
+            e.proxy_key == proxy_key
+                && e.is_https == is_https
+                && e.allow_private_networks == allow_private_networks
+                && e.host_port == host_port
         }) {
             let entry = vec.swap_remove(pos);
             return Some(entry.stream);
@@ -313,6 +318,7 @@ pub(super) fn return_pooled_stream(
     tenant_id: String,
     proxy_key: String,
     is_https: bool,
+    allow_private_networks: bool,
     host_port: String,
     stream: OutboundStream,
 ) {
@@ -342,6 +348,7 @@ pub(super) fn return_pooled_stream(
         vec.push(PooledOutboundConn {
             proxy_key,
             is_https,
+            allow_private_networks,
             host_port,
             stream,
             last_used: now,

@@ -84,10 +84,14 @@ if ($Tags -eq "all" -or $Tags -match "(^|,)swarm(,|$)") {
     }
 }
 
-Write-Host "[4/4] Synchronizing summarized benchmark tables across README.md and docs/..."
+Write-Host "[4/4] Synchronizing summarized benchmark tables and comparison HTML dashboard..."
 node tests/scripts/sync_doc_benchmarks.mjs
 if ($LASTEXITCODE -ne 0) {
     throw "Doc benchmark sync failed with exit code $LASTEXITCODE"
 }
+node tests/scripts/generate_comparison_html.mjs
+if ($LASTEXITCODE -ne 0) {
+    throw "Comparison HTML generation failed with exit code $LASTEXITCODE"
+}
 
-Write-Host "Done! Latest report: tests/reports/latest.md"
+Write-Host "Done! Latest report: tests/reports/latest.md | Comparison dashboard: tests/reports/comparison.html"

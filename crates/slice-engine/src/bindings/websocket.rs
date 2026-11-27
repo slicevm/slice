@@ -59,6 +59,13 @@ pub(crate) fn register_shard7_websocket_host_functions(ctx: &mut boa_engine::Con
                 .unwrap_or_default();
             match ws_client_connect(&url, &protocols) {
                 Ok(json) => Ok(BoaVal::from(js_string!(json))),
+                Err(e) if e.starts_with("OCap Violation: lacks outbound network authority") => {
+                    Err(crate::bindings::helpers::ocap_denied_js_error(
+                        "ERR_SLICE_NET_DENIED",
+                        e,
+                        context,
+                    ))
+                }
                 Err(e) => Err(JsNativeError::error().with_message(e).into()),
             }
         }),
