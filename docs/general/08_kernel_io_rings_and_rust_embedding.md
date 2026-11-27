@@ -266,6 +266,50 @@ fn collect_guest_artifacts() {
 
 ---
 
+## 5c. Recipe 6: Registering Capability-Gated Host Extensions (`Slice.ext.<name>.<method>`)
+
+Embedders can expose typed synchronous or asynchronous Rust host functions directly to guest TypeScript without opening loopback HTTP sockets:
+
+```rust
+use slice_engine::{
+    ExtCallCtx, ExtMethod, ExtResult, ExtValue, ExtensionRegistry, SliceExtension, SliceIsolate,
+    compile_source_to_bytecode,
+};
+use slice_sandbox::CapabilityToken;
+use std::sync::Arc;
+
+struct KvStoreExt;
+const METHODS: &[ExtMethod] = &[
+    ExtMethod::sync("get").with_deterministic(true),
+    ExtMethod::r#async("put").with_allow_in_checkpoint(false),
+];
+
+impl SliceExtension for KvStoreExt {
+    fn name(&self) -> &'static str { "store" }
+    fn methods(&self) -> &'static [ExtMethod] { METHODS }
+    fn call(&self, ctx: &ExtCallCtx, method: &str, arg: ExtValue) -> ExtResult {
+        Ok(ExtValue::Json(serde_json::json!({ "tenant": ctx.tenant_id, "method": method, "arg": format!("{arg:?}") })))
+    }
+}
+
+fn run_with_host_extension() {
+    // Build once at host startup; cloning per isolate is a single Arc pointer copy.
+    let registry = ExtensionRegistry::new().with(Arc::new(KvStoreExt));
+    let caps = CapabilityToken::pure_compute().with_extension("store.get");
+    let bc = compile_source_to_bytecode(r#"JSON.stringify(Slice.ext.store.get("order:7"))"#);
+
+    let mut iso = SliceIsolate::spawn_with_extensions(
+        "tenant-1", 1, caps, 5_000_000, 16 * 1024 * 1024, registry.clone(),
+    );
+    let metrics = iso.execute_bytecode(&bc, None).unwrap();
+    println!("Extension result: {}", metrics.return_value);
+}
+```
+
+Note: Host extension calls are external side effects outside the VFS and `Slice.kv`; `Slice.restore()` does not undo them. Set `.with_allow_in_checkpoint(false)` on any method that must be refused inside checkpointed regions.
+
+---
+
 ## 6. Running High-Density 1,000-Tenant MicroVM Swarms (`slice microvm-bench`)
 
 To test how your hardware handles spawning and executing 1,000 isolated tenant compartments concurrently, use the built-in `slice microvm-bench` command:

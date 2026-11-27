@@ -10,7 +10,7 @@ pub mod violation;
 pub use exec::{exec_binary_matches, has_exec_shell_metachar};
 pub use pkey::{HardwareProtectionDomain, PkruDomainGuard, current_thread_pkru};
 pub use ses::is_frozen_intrinsic;
-pub use token::{CapabilityAttenuationRequest, CapabilityToken};
+pub use token::{CapabilityAttenuationRequest, CapabilityToken, extension_grant_matches};
 pub use violation::SandboxViolation;
 
 use crate::net::{check_net_host_grant, parse_net_connect_target};
@@ -129,6 +129,15 @@ impl TenantCompartment {
         SandboxViolation::ExecDenied {
             tenant_id: self.tenant_id.clone(),
             binary: binary.to_string(),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn trap_extension_denied(&self, target: &str) -> SandboxViolation {
+        SandboxViolation::ExtensionDenied {
+            tenant_id: self.tenant_id.clone(),
+            target: target.to_string(),
         }
     }
 
@@ -289,5 +298,24 @@ impl TenantCompartment {
             }
         }
         Err(self.trap_exec_denied(binary))
+    }
+
+    /// Verifies attenuated host extension capability (`ExtensionCap`) for `target`
+    /// (`"<ext>"` or `"<ext>.<method>"`). Deny-all by default.
+    #[inline]
+    pub fn verify_extension(&self, target: &str) -> Result<(), SandboxViolation> {
+        if self.capabilities.allowed_extensions.is_empty() {
+            return Err(self.trap_extension_denied(target));
+        }
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            return Err(self.trap_extension_denied(target));
+        }
+        for grant in &self.capabilities.allowed_extensions {
+            if extension_grant_matches(trimmed, grant) {
+                return Ok(());
+            }
+        }
+        Err(self.trap_extension_denied(target))
     }
 }

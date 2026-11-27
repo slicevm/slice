@@ -177,6 +177,12 @@ When CLI tools or AI Code-Mode agents use `node:child_process` (`execFileSync`, 
 4. **Ring 4 - Execution Timeout & `maxBuffer` Ceiling:** Enforces hard execution timeouts (killing timed-out subprocesses) and `maxBuffer` byte ceilings.
 5. **Ring 5 - CPU Fuel, Memory Accounting & Sub-Isolate Attenuation:** Subprocess output bytes are charged against the tenant's fuel and memory budgets, and `Slice.evalSandbox(code, { allowExec: [...] })` / `new Worker(url, { slice: { allowExec: [...] } })` enforce strict subset attenuation (`child.allowExec` intersected with `parent.allowExec`).
 
+### 4.5 Capability-Gated Host Extensions (`allow_ext`, `--allow-ext`, & `Slice.ext`)
+Rust embedders can register typed host functions (`SliceExtension` / `ExtensionRegistry`) reachable as `Slice.ext.<name>.<method>(arg)` without exposing loopback HTTP sockets:
+- **Deny-All by Default:** A guest can invoke an extension only when explicitly granted via `CapabilityToken::with_extension("store")` (or method-scoped `"store.get"`), `--allow-ext=store`, `SLICE_ALLOW_EXT=store`, or `[capabilities] allow_ext = ["store"]`. Wildcards (`"*"`) are never accepted. Ungranted or unknown calls throw catchable `ERR_SLICE_EXT_DENIED` (`OCap Violation: lacks extension authority for '<name>.<method>'`) and record in `deniedCapabilities`.
+- **Strict Sub-Sandbox Attenuation:** `Slice.evalSandbox` children inherit zero extensions by default and receive only the intersection of their requested `allowExt` with the parent's grants (supporting narrowing `"store"` -> `"store.get"`).
+- **Copies Only, Bounds, DLP, Determinism & Checkpoints:** Arguments and results cross strictly as copied JSON or bytes (`ExtValue::Json` / `ExtValue::Bytes`); `Slice.ext` and every method are frozen under SES; per-method `max_arg_bytes`, `max_result_bytes`, fuel (`base + per_byte`), memory ceiling, Ring 4 Egress DLP scanning, determinism guards (`deterministic: true` required under `deterministicSeed`), wall-clock deadline/interrupt cancellation, and optional checkpoint-region blocking (`allow_in_checkpoint: false`) are enforced automatically. Note that host extension side effects occur outside VFS/KV and are not undone by `Slice.restore()`.
+
 ---
 
 ## 5. Deterministic CPU Fuel, Byte-Level Memory & Checkpoint Cages (`--fuel`, `--memory`, `--no-checkpoints`, `--max-checkpoints`)

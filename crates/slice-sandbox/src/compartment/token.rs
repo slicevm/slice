@@ -26,6 +26,8 @@ pub struct CapabilityToken {
     #[serde(default)]
     pub allowed_exec_binaries: Vec<String>,
     #[serde(default)]
+    pub allowed_extensions: Vec<String>,
+    #[serde(default)]
     pub allow_private_networks: bool,
     #[serde(default = "default_allow_checkpoints")]
     pub allow_checkpoints: bool,
@@ -43,6 +45,7 @@ impl Default for CapabilityToken {
             allowed_net_hosts: FxHashSet::default(),
             allowed_env_keys: FxHashMap::default(),
             allowed_exec_binaries: Vec::new(),
+            allowed_extensions: Vec::new(),
             allow_private_networks: false,
             allow_checkpoints: true,
             max_checkpoints: None,
@@ -79,10 +82,29 @@ pub struct CapabilityAttenuationRequest<'a> {
     pub allow_net: Option<&'a [String]>,
     pub allow_private_networks: Option<bool>,
     pub allow_exec: Option<&'a [String]>,
+    pub allow_ext: Option<&'a [String]>,
     pub allow_env: Option<&'a [String]>,
     pub allow_checkpoints: Option<bool>,
     pub max_checkpoints: Option<u32>,
     pub consumed_checkpoints: u32,
+}
+
+/// Returns `true` if `grant` authorizes extension target `target`.
+///
+/// Whole-extension grants (e.g. `"store"`) authorize both `"store"` and any method `"store.<method>"`.
+/// Method-scoped grants (e.g. `"store.get"`) authorize only that exact method.
+/// Wildcards (`"*"`) are never authorized.
+#[inline]
+pub fn extension_grant_matches(target: &str, grant: &str) -> bool {
+    let t = target.trim();
+    let g = grant.trim();
+    if t.is_empty() || g.is_empty() || g == "*" || t == "*" {
+        return false;
+    }
+    if t == g {
+        return true;
+    }
+    !g.contains('.') && t.len() > g.len() + 1 && t.starts_with(g) && t.as_bytes()[g.len()] == b'.'
 }
 
 impl CapabilityToken {
@@ -163,6 +185,27 @@ impl CapabilityToken {
         }
     }
 
+    /// Grants access to a host extension (`"store"`) or a single method (`"store.get"`).
+    /// Wildcards (`"*"`) and invalid empty/dot-bounded names are ignored.
+    #[inline]
+    pub fn push_extension(&mut self, grant: impl Into<String>) {
+        let raw = grant.into();
+        let trimmed = raw.trim();
+        if trimmed.is_empty()
+            || trimmed == "*"
+            || trimmed.starts_with('.')
+            || trimmed.ends_with('.')
+            || trimmed.contains("..")
+            || trimmed.bytes().any(|b| b.is_ascii_whitespace() || b == 0)
+        {
+            return;
+        }
+        let owned = trimmed.to_string();
+        if !self.allowed_extensions.contains(&owned) {
+            self.allowed_extensions.push(owned);
+        }
+    }
+
     pub fn with_read_prefix(mut self, prefix: impl Into<String>) -> Self {
         let raw = prefix.into();
         self.push_read_prefix(&raw);
@@ -205,6 +248,12 @@ impl CapabilityToken {
 
     pub fn with_exec_binary(mut self, binary: impl Into<String>) -> Self {
         self.push_exec_binary(binary);
+        self
+    }
+
+    /// Grants access to a host extension (`"store"`) or a single method (`"store.get"`).
+    pub fn with_extension(mut self, grant: impl Into<String>) -> Self {
+        self.push_extension(grant);
         self
     }
 
@@ -400,6 +449,27 @@ impl CapabilityToken {
             }
             None => {
                 child.allowed_exec_binaries = self.allowed_exec_binaries.clone();
+            }
+        }
+
+        match req.allow_ext {
+            Some(requested) => {
+                for req_ext in requested {
+                    let trimmed = req_ext.trim();
+                    if trimmed.is_empty() || trimmed == "*" {
+                        continue;
+                    }
+                    if self
+                        .allowed_extensions
+                        .iter()
+                        .any(|parent_grant| extension_grant_matches(trimmed, parent_grant))
+                    {
+                        child.push_extension(trimmed);
+                    }
+                }
+            }
+            None => {
+                child.allowed_extensions = self.allowed_extensions.clone();
             }
         }
 

@@ -134,6 +134,10 @@ fn parse_mcp_sandbox_eval_options(args: &serde_json::Value) -> slice_engine::San
         ),
         (&["allowNet", "netHosts"][..], &mut opts.allow_net),
         (&["allowExec", "execBinaries"][..], &mut opts.allow_exec),
+        (
+            &["allowExt", "allowExtensions", "extensions"][..],
+            &mut opts.allow_ext,
+        ),
         (&["allowEnv", "envKeys"][..], &mut opts.allow_env),
         (
             &["auditSecret", "auditSecrets"][..],
@@ -375,6 +379,7 @@ pub(crate) fn handle_mcp_jsonrpc_line_with_artifacts_dir(
                             "allowNet": { "type": ["string", "array"], "description": "Optional allowed network host(s) attenuated against server grants" },
                             "allowPrivateNetworks": { "type": "boolean", "description": "Optional opt-in for DNS hostnames resolving to private/loopback IPs (attenuated against server --allow-private-networks; cloud metadata remains unconditionally blocked)" },
                             "allowExec": { "type": ["string", "array"], "description": "Optional allowed subprocess binary(ies) attenuated against server grants" },
+                            "allowExt": { "type": ["string", "array"], "description": "Optional allowed host extension(s) or method(s) (e.g. 'store' or 'store.get') attenuated against server grants" },
                             "allowEnv": { "type": ["string", "array"], "description": "Optional allowed environment variable key(s) attenuated against server grants" },
                             "auditSecret": { "type": ["string", "array"], "description": "Optional secret(s) to guard against egress leakage" },
                             "auditSecrets": { "type": ["string", "array"], "description": "Optional array of secrets to guard against egress leakage" },

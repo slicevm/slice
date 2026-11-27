@@ -61,7 +61,9 @@ pub(crate) fn print_usage() {
     println!(
         "  --allow-net=<hosts>   --allow-private-networks --allow-env=<keys>     --allow-exec=<bins>"
     );
-    println!("  --audit-egress=<sec>  --fuel=<N>             --memory=<bytes>         --json");
+    println!(
+        "  --allow-ext=<names>   --audit-egress=<sec>     --fuel=<N>  --memory=<bytes>  --json"
+    );
 }
 
 pub(crate) fn cmd_info() -> Result<()> {

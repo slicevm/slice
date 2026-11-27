@@ -19,6 +19,8 @@ pub(crate) struct BoaSessionFlags {
     pub(crate) has_egress_secrets: bool,
     pub(crate) has_env_keys: bool,
     pub(crate) has_exec_bins: bool,
+    pub(crate) has_extensions: bool,
+    pub(crate) has_deadline_or_interrupt: bool,
     pub(crate) is_worker: bool,
     pub(crate) initial_mem_used: usize,
 }

@@ -39,6 +39,7 @@ pub(crate) fn runtime_flag_takes_separate_value(arg: &str) -> bool {
             | "--artifacts-dir"
             | "--allow-net"
             | "--allow-exec"
+            | "--allow-ext"
             | "--allow-env"
             | "--fuel"
             | "--memory"

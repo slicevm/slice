@@ -39,6 +39,7 @@ declare namespace Slice {
         allowNet?: string[];
         allowPrivateNetworks?: boolean;
         allowExec?: string[];
+        allowExt?: string[];
         allowEnv?: string[];
         deterministicSeed?: number;
         auditSecret?: string;
@@ -104,6 +105,7 @@ declare namespace Slice {
     function restore(snapshotId: number): boolean;
     function releaseCheckpoint(snapshotId: number): boolean;
     function connect(address: string | { hostname: string; port: number }, options?: TcpSocketOptions): TcpSocket;
+    readonly ext: Readonly<Record<string, Readonly<Record<string, (arg?: unknown) => unknown>>>>;
 }
 
 declare module "slice:test" {

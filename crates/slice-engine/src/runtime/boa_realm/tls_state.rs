@@ -219,6 +219,14 @@ thread_local! {
         std::cell::RefCell::new(FxHashMap::default());
     pub(crate) static BOA_EXEC_BINS: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    pub(crate) static BOA_ALLOWED_EXTENSIONS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    pub(crate) static BOA_ACTIVE_EXTENSIONS: std::cell::RefCell<Option<crate::extensions::ExtensionRegistry>> =
+        const { std::cell::RefCell::new(None) };
+    pub(crate) static BOA_ACTIVE_DEADLINE: std::cell::Cell<Option<(std::time::Instant, u64)>> =
+        const { std::cell::Cell::new(None) };
+    pub(crate) static BOA_ACTIVE_INTERRUPT: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+        const { std::cell::RefCell::new(None) };
     pub(crate) static BOA_LAST_OCAP_VIOLATION: std::cell::RefCell<Option<SandboxViolation>> =
         const { std::cell::RefCell::new(None) };
     pub(crate) static BOA_DENIED_CAPABILITIES: std::cell::RefCell<Vec<String>> =

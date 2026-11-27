@@ -264,6 +264,7 @@ impl ResolvedExecutionConfig {
                     allow_net: (!dirs.allow_net.is_empty()).then_some(dirs.allow_net.as_slice()),
                     allow_private_networks: None,
                     allow_exec: (!dirs.allow_exec.is_empty()).then_some(dirs.allow_exec.as_slice()),
+                    allow_ext: None,
                     allow_env: (!requested_env_keys.is_empty())
                         .then_some(requested_env_keys.as_slice()),
                     allow_checkpoints: (dirs.allow_checkpoints == Some(false)).then_some(false),
@@ -337,6 +338,9 @@ pub(crate) fn merge_parsed_manifest_into_caps_and_dlp(
     }
     for eb in m.capabilities.allowed_exec_binaries {
         *caps = std::mem::take(caps).with_exec_binary(eb);
+    }
+    for ext in m.capabilities.allowed_extensions {
+        caps.push_extension(ext);
     }
     if !m.capabilities.allow_checkpoints {
         caps.allow_checkpoints = false;

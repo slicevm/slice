@@ -34,6 +34,8 @@ pub struct SandboxEvalOptions {
     pub allow_private_networks: Option<bool>,
     #[serde(default, alias = "execBinaries")]
     pub allow_exec: Vec<String>,
+    #[serde(default, alias = "allowExtensions", alias = "extensions")]
+    pub allow_ext: Vec<String>,
     #[serde(default, alias = "envKeys")]
     pub allow_env: Vec<String>,
     pub deterministic_seed: Option<u64>,
@@ -258,6 +260,7 @@ impl SliceIsolate {
                     allow_net: (!opts.allow_net.is_empty()).then_some(opts.allow_net.as_slice()),
                     allow_private_networks: opts.allow_private_networks,
                     allow_exec: (!opts.allow_exec.is_empty()).then_some(opts.allow_exec.as_slice()),
+                    allow_ext: Some(opts.allow_ext.as_slice()),
                     allow_env: Some(opts.allow_env.as_slice()),
                     allow_checkpoints: opts.checkpoints,
                     max_checkpoints: opts.max_checkpoints,
@@ -302,6 +305,7 @@ impl SliceIsolate {
         };
         let mut child_iso =
             SliceIsolate::spawn(child_tenant.clone(), 99, child_caps, child_fuel, child_mem);
+        child_iso.extensions = self.extensions.clone();
         child_iso.capture_return_json = true;
         let effective_timeout = match (self.max_wall_clock_ms, opts.timeout_ms) {
             (Some(p), Some(c)) => Some(p.min(c)),

@@ -19,6 +19,9 @@ pub enum SandboxViolation {
     #[error("OCap Violation: lacks exec authority for binary '{binary}'")]
     ExecDenied { tenant_id: String, binary: String },
 
+    #[error("OCap Violation: lacks extension authority for '{target}'")]
+    ExtensionDenied { tenant_id: String, target: String },
+
     #[error("SES Lockdown Violation: attempted to mutate frozen intrinsic '{intrinsic}'")]
     IntrinsicMutationBlocked {
         tenant_id: String,
@@ -70,6 +73,7 @@ impl SandboxViolation {
             | Self::NetAccessDenied { tenant_id, .. }
             | Self::EnvAccessDenied { tenant_id, .. }
             | Self::ExecDenied { tenant_id, .. }
+            | Self::ExtensionDenied { tenant_id, .. }
             | Self::IntrinsicMutationBlocked { tenant_id, .. }
             | Self::CpuFuelExhausted { tenant_id, .. }
             | Self::MemoryCeilingExceeded { tenant_id, .. }
@@ -100,6 +104,9 @@ impl SandboxViolation {
             }
             Self::ExecDenied { binary, .. } => {
                 format!("lacks exec authority for binary '{binary}'")
+            }
+            Self::ExtensionDenied { target, .. } => {
+                format!("lacks extension authority for '{target}'")
             }
             Self::CheckpointDenied { reason, .. } => {
                 format!("checkpoint denied: {reason}")

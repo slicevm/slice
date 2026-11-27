@@ -19,4 +19,5 @@ pub(crate) fn register_slice_native_host_functions(ctx: &mut boa_engine::Context
     crate::bindings::deterministic_and_os::register_core_os_host_functions(ctx);
     fast_codecs_and_hash::register_fast_codecs_and_hash_host_functions(ctx);
     env_timers_process::register_env_timers_process_host_functions(ctx);
+    crate::bindings::extensions::register_extension_host_functions(ctx);
 }
