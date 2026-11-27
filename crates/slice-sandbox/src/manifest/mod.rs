@@ -233,6 +233,13 @@ impl SliceManifest {
                             manifest.capabilities.push_exec_binary(item);
                         }
                     }
+                    ("capabilities", "allow_ext")
+                    | ("capabilities", "allow-ext")
+                    | ("capabilities", "allow_extensions") => {
+                        for item in parse_toml_string_array(val) {
+                            manifest.capabilities.push_extension(item);
+                        }
+                    }
                     ("capabilities", "allow_env") => {
                         for item in parse_toml_string_array(val) {
                             if let Some((k, v)) = item.split_once('=') {

@@ -1,8 +1,9 @@
 //! Nested Sandbox Execution Scope Guard (`SavedIsolateContextGuard`).
 
 use super::{
-    ActiveBoaHttpReq, BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_ALLOW_PRIVATE_NETS, BOA_ALS_ACTIVE,
-    BOA_ALS_SNAP, BOA_CHECKPOINT_CAP, BOA_CHECKPOINT_STATS, BOA_CUSTOM_ARGV,
+    ActiveBoaHttpReq, BOA_ACTIVE_CAPS, BOA_ACTIVE_DEADLINE, BOA_ACTIVE_EXTENSIONS,
+    BOA_ACTIVE_INTERRUPT, BOA_ACTIVE_TENANT, BOA_ALLOW_PRIVATE_NETS, BOA_ALLOWED_EXTENSIONS,
+    BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_CHECKPOINT_CAP, BOA_CHECKPOINT_STATS, BOA_CUSTOM_ARGV,
     BOA_DENIED_CAPABILITIES, BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP,
     BOA_EXEC_BINS, BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES,
     BOA_KV_MEM_BUDGET, BOA_LAST_EXIT_CODE, BOA_LAST_OCAP_VIOLATION, BOA_NET_HOSTS,
@@ -30,6 +31,10 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_egress_secrets: Vec<String>,
     pub(crate) saved_env_map: FxHashMap<String, String>,
     pub(crate) saved_exec_bins: Vec<String>,
+    pub(crate) saved_allowed_extensions: Vec<String>,
+    pub(crate) saved_extensions: Option<crate::extensions::ExtensionRegistry>,
+    pub(crate) saved_deadline: Option<(std::time::Instant, u64)>,
+    pub(crate) saved_interrupt: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) saved_last_cp_violation: Option<SandboxViolation>,
     pub(crate) saved_denied_capabilities: Vec<String>,
     pub(crate) saved_fetch_mocks: Option<FxHashMap<String, String>>,
@@ -72,6 +77,11 @@ impl SavedIsolateContextGuard {
             BOA_EGRESS_SECRETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
         let saved_env_map = BOA_ENV_MAP.with(|m| std::mem::take(&mut *m.borrow_mut()));
         let saved_exec_bins = BOA_EXEC_BINS.with(|b| std::mem::take(&mut *b.borrow_mut()));
+        let saved_allowed_extensions =
+            BOA_ALLOWED_EXTENSIONS.with(|e| std::mem::take(&mut *e.borrow_mut()));
+        let saved_extensions = BOA_ACTIVE_EXTENSIONS.with(|e| e.borrow_mut().take());
+        let saved_deadline = BOA_ACTIVE_DEADLINE.with(|d| d.replace(None));
+        let saved_interrupt = BOA_ACTIVE_INTERRUPT.with(|i| i.borrow_mut().take());
         let (saved_last_cp_violation, saved_denied_capabilities) =
             if (saved_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
                 (
@@ -155,6 +165,10 @@ impl SavedIsolateContextGuard {
             saved_egress_secrets,
             saved_env_map,
             saved_exec_bins,
+            saved_allowed_extensions,
+            saved_extensions,
+            saved_deadline,
+            saved_interrupt,
             saved_last_cp_violation,
             saved_denied_capabilities,
             saved_fetch_mocks,
@@ -225,6 +239,11 @@ impl Drop for SavedIsolateContextGuard {
             .with(|s| *s.borrow_mut() = std::mem::take(&mut self.saved_egress_secrets));
         BOA_ENV_MAP.with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_env_map));
         BOA_EXEC_BINS.with(|b| *b.borrow_mut() = std::mem::take(&mut self.saved_exec_bins));
+        BOA_ALLOWED_EXTENSIONS
+            .with(|e| *e.borrow_mut() = std::mem::take(&mut self.saved_allowed_extensions));
+        BOA_ACTIVE_EXTENSIONS.with(|e| *e.borrow_mut() = self.saved_extensions.take());
+        BOA_ACTIVE_DEADLINE.with(|d| d.set(self.saved_deadline));
+        BOA_ACTIVE_INTERRUPT.with(|i| *i.borrow_mut() = self.saved_interrupt.take());
         if (union_exec_dirty & EXEC_DIRTY_CHILD_PROC) != 0 {
             BOA_LAST_OCAP_VIOLATION.with(|v| *v.borrow_mut() = self.saved_last_cp_violation.take());
             BOA_DENIED_CAPABILITIES.with(|d| {

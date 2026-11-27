@@ -625,6 +625,42 @@
     testSummary: function() { return __tMod().summary(); },
     resetTests: function() { return __tMod().reset(); }
   };
+  var __sliceExtProxy = null;
+  var __sliceExtEmpty = Object.freeze(Object.create(null));
+  function __makeSliceExtNs(extName) {
+    return new Proxy(__sliceExtEmpty, {
+      get: function(_t, methodProp) {
+        if (typeof methodProp === "symbol") return undefined;
+        var m = String(methodProp);
+        return Object.freeze(function(arg) {
+          return __slice_ext_call(extName, m, arg);
+        });
+      },
+      set: function() { return false; },
+      defineProperty: function() { return false; },
+      deleteProperty: function() { return false; },
+      setPrototypeOf: function() { return false; }
+    });
+  }
+  Object.defineProperty(globalThis.Slice, "ext", {
+    get: function() {
+      if (__sliceExtProxy === null) {
+        __sliceExtProxy = new Proxy(__sliceExtEmpty, {
+          get: function(_t, extProp) {
+            if (typeof extProp === "symbol") return undefined;
+            return __makeSliceExtNs(String(extProp));
+          },
+          set: function() { return false; },
+          defineProperty: function() { return false; },
+          deleteProperty: function() { return false; },
+          setPrototypeOf: function() { return false; }
+        });
+      }
+      return __sliceExtProxy;
+    },
+    enumerable: true,
+    configurable: false
+  });
   globalThis.Deno = globalThis.Deno || { serve: globalThis.Slice.serve };
   globalThis.Bun = globalThis.Bun || { serve: globalThis.Slice.serve };
 

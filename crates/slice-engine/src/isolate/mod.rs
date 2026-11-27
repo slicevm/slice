@@ -125,6 +125,7 @@ pub struct SliceIsolate {
     pub max_wall_clock_ms: Option<u64>,
     pub(crate) active_wall_deadline: Option<std::time::Instant>,
     pub(crate) interrupt_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) extensions: Option<crate::extensions::ExtensionRegistry>,
     pub denied_capabilities: Vec<String>,
 }
 
@@ -170,8 +171,37 @@ impl SliceIsolate {
             max_wall_clock_ms: None,
             active_wall_deadline: None,
             interrupt_flag: None,
+            extensions: None,
             denied_capabilities: Vec::new(),
         }
+    }
+
+    /// Instantiates a fresh microVM-grade isolate with a shared [`crate::extensions::ExtensionRegistry`]
+    /// (`Arc`-cloned in `O(1)` with zero per-boot JS evaluation).
+    #[inline]
+    pub fn spawn_with_extensions(
+        tenant_id: impl Into<String>,
+        slot_id: u32,
+        capabilities: CapabilityToken,
+        fuel_limit: u64,
+        memory_limit_bytes: usize,
+        extensions: crate::extensions::ExtensionRegistry,
+    ) -> Self {
+        let mut iso = Self::spawn(
+            tenant_id,
+            slot_id,
+            capabilities,
+            fuel_limit,
+            memory_limit_bytes,
+        );
+        iso.extensions = Some(extensions);
+        iso
+    }
+
+    /// Attaches or clears a shared host [`crate::extensions::ExtensionRegistry`] on this isolate.
+    #[inline]
+    pub fn set_extensions(&mut self, extensions: Option<crate::extensions::ExtensionRegistry>) {
+        self.extensions = extensions;
     }
 
     /// Amortized wall-clock deadline and cross-thread interrupt check for Tier-0 loops.

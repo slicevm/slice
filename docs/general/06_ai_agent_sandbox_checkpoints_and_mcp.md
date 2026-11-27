@@ -39,6 +39,8 @@ interface SandboxEvalOptions {
     allowPrivateNetworks?: boolean;
     /** Allowed subprocess binaries (INTERSECTED with parent's allowed exec binaries!) */
     allowExec?: string[];
+    /** Allowed host extensions or methods (e.g. "store" or "store.get"; INTERSECTED with parent grants, deny-by-default) */
+    allowExt?: string[];
     /** Allowed environment variables (INTERSECTED with parent's allowed env keys!) */
     allowEnv?: string[];
     /** Optional deterministic seed for Math.random() and Date.now() inside the child */

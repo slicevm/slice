@@ -20,6 +20,7 @@ pub(crate) mod child_process;
 pub(crate) mod core;
 pub(crate) mod crypto;
 pub(crate) mod deterministic_and_os;
+pub(crate) mod extensions;
 pub(crate) mod fs;
 pub(crate) mod helpers;
 pub(crate) mod http_and_fetch;

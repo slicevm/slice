@@ -28,7 +28,7 @@ pub mod vfs;
 pub use compartment::{
     CapabilityAttenuationRequest, CapabilityToken, HardwareProtectionDomain, PkruDomainGuard,
     SandboxViolation, TenantCompartment, current_thread_pkru, exec_binary_matches,
-    has_exec_shell_metachar, is_frozen_intrinsic,
+    extension_grant_matches, has_exec_shell_metachar, is_frozen_intrinsic,
 };
 pub use dlp::{expand_egress_secret_variants, verify_egress_secrets_slice};
 pub use manifest::{

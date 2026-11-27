@@ -41,6 +41,7 @@ fn test_wave4_capability_token_attenuate_port_lattice_and_wildcard_ssrf_containm
         allow_net: Some(&req_escalate_port),
         allow_private_networks: None,
         allow_exec: Some(&["git".to_string()]),
+        allow_ext: None,
         allow_env: Some(&req_env),
         allow_checkpoints: None,
         max_checkpoints: Some(10),
@@ -599,5 +600,46 @@ virtual_mounts = ["/artifacts", "/work/scratch"]
     assert_eq!(
         manifest.capabilities.virtual_mounts,
         vec!["/artifacts".to_string(), "/work/scratch".to_string()]
+    );
+}
+
+#[test]
+fn test_v0150_extension_cap_attenuation_and_manifest_parsing() {
+    let parent = CapabilityToken::pure_compute()
+        .with_extension("store")
+        .with_extension("telemetry.emit")
+        .with_extension("*"); // wildcard must be ignored
+    assert_eq!(
+        parent.allowed_extensions,
+        vec!["store".to_string(), "telemetry.emit".to_string()]
+    );
+
+    let comp = TenantCompartment::new("ext-parent", 1, parent.clone(), 10_000, 65536);
+    assert!(comp.verify_extension("store.get").is_ok());
+    assert!(comp.verify_extension("store.put").is_ok());
+    assert!(comp.verify_extension("telemetry.emit").is_ok());
+    assert!(comp.verify_extension("telemetry.flush").is_err());
+    assert!(comp.verify_extension("unknown.call").is_err());
+
+    let req = [
+        "store.get".to_string(),
+        "telemetry".to_string(), // cannot widen telemetry.emit -> telemetry
+        "other".to_string(),
+        "*".to_string(),
+    ];
+    let child = parent.attenuate(&CapabilityAttenuationRequest {
+        allow_ext: Some(&req),
+        ..Default::default()
+    });
+    assert_eq!(child.allowed_extensions, vec!["store.get".to_string()]);
+    let child_comp = TenantCompartment::new("ext-child", 2, child, 10_000, 65536);
+    assert!(child_comp.verify_extension("store.get").is_ok());
+    assert!(child_comp.verify_extension("store.put").is_err());
+
+    let m =
+        SliceManifest::parse_toml("[capabilities]\nallow_ext = [\"store\", \"fn.call\", \"*\"]\n");
+    assert_eq!(
+        m.capabilities.allowed_extensions,
+        vec!["store".to_string(), "fn.call".to_string()]
     );
 }

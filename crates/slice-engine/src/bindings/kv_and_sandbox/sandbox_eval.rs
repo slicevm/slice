@@ -54,6 +54,9 @@ pub(super) fn register_sandbox_eval_and_syntax_host_functions(ctx: &mut boa_engi
                     parent_caps = parent_caps.with_exec_binary(eb.clone());
                 }
             }
+            for ext in &scope_guard.saved_allowed_extensions {
+                parent_caps = parent_caps.with_extension(ext.clone());
+            }
             let (parent_allow_cp, parent_max_cp) = scope_guard.saved_checkpoint_cap;
             parent_caps = parent_caps.with_checkpoints(parent_allow_cp);
             if parent_max_cp < u32::MAX {
@@ -75,6 +78,7 @@ pub(super) fn register_sandbox_eval_and_syntax_host_functions(ctx: &mut boa_engi
             );
             proxy_parent.compartment.memory_used_bytes = parent_used_mem.saturating_add(4096);
             proxy_parent.egress_audit_secrets = scope_guard.saved_egress_secrets.clone();
+            proxy_parent.extensions = scope_guard.saved_extensions.clone();
             let parent_tenant_for_trace = scope_guard.saved_tenant.clone();
             let outcome = if cfg!(debug_assertions) {
                 let vfs_owner = crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| o.borrow().clone());
@@ -363,6 +367,17 @@ fn parse_sandbox_eval_options_arg(
             context,
         )?;
         opts.allow_exec = allow_exec;
+
+        let (allow_ext, _) = read_js_string_array_prop(
+            &obj,
+            &[
+                js_string!("allowExt"),
+                js_string!("allowExtensions"),
+                js_string!("extensions"),
+            ],
+            context,
+        )?;
+        opts.allow_ext = allow_ext;
 
         let (allow_env, _) = read_js_string_array_prop(
             &obj,

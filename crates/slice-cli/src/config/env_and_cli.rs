@@ -241,6 +241,11 @@ impl ResolvedExecutionConfig {
                     }
                 }
             }
+            if let Some(v) = find_slice_env("SLICE_ALLOW_EXT") {
+                for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    cfg.caps.push_extension(item);
+                }
+            }
             if let Some(v) = find_slice_env("SLICE_ENV_FILE") {
                 let trimmed = v.trim();
                 if !trimmed.is_empty() {
@@ -462,6 +467,13 @@ impl ResolvedExecutionConfig {
             if let Some(bins) = match_non_empty_flag_value(args, &mut arg_idx, "--allow-exec")? {
                 for b in bins.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     cfg.caps = cfg.caps.with_exec_binary(b);
+                }
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(exts) = match_non_empty_flag_value(args, &mut arg_idx, "--allow-ext")? {
+                for ext in exts.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    cfg.caps.push_extension(ext);
                 }
                 arg_idx += 1;
                 continue;

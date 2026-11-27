@@ -4,7 +4,8 @@ use super::{
     BoaSessionFlags, cache_loaded_rc_bundle, ensure_realm_kv_sandbox, ensure_realm_semver_fast,
 };
 use crate::boa_realm::{
-    BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_ALLOW_PRIVATE_NETS, BOA_CHECKPOINT_CAP,
+    BOA_ACTIVE_CAPS, BOA_ACTIVE_DEADLINE, BOA_ACTIVE_EXTENSIONS, BOA_ACTIVE_INTERRUPT,
+    BOA_ACTIVE_TENANT, BOA_ALLOW_PRIVATE_NETS, BOA_ALLOWED_EXTENSIONS, BOA_CHECKPOINT_CAP,
     BOA_CHECKPOINT_STATS, BOA_CONTEXT_POOL, BOA_CUSTOM_ARGV, BOA_DENIED_CAPABILITIES,
     BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS,
     BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_RES, BOA_KV_MEM_BUDGET,
@@ -503,12 +504,37 @@ impl SliceIsolate {
             }
         });
 
+        let has_extensions = self.extensions.is_some()
+            || !self.compartment.capabilities.allowed_extensions.is_empty();
+        if has_extensions {
+            BOA_ACTIVE_EXTENSIONS.with(|r| *r.borrow_mut() = self.extensions.clone());
+            BOA_ALLOWED_EXTENSIONS.with(|e| {
+                let mut vec = e.borrow_mut();
+                vec.clear();
+                vec.extend_from_slice(&self.compartment.capabilities.allowed_extensions);
+            });
+        }
+        let has_deadline_or_interrupt =
+            self.max_wall_clock_ms.is_some() || self.interrupt_flag.is_some();
+        if has_deadline_or_interrupt {
+            let dl_pair = self.max_wall_clock_ms.map(|ms| {
+                (
+                    std::time::Instant::now() + std::time::Duration::from_millis(ms),
+                    ms,
+                )
+            });
+            BOA_ACTIVE_DEADLINE.with(|d| d.set(dl_pair));
+            BOA_ACTIVE_INTERRUPT.with(|i| *i.borrow_mut() = self.interrupt_flag.clone());
+        }
+
         BoaSessionFlags {
             has_fs_grants,
             has_net_hosts,
             has_egress_secrets,
             has_env_keys,
             has_exec_bins,
+            has_extensions,
+            has_deadline_or_interrupt,
             is_worker: crate::workers::is_worker_thread(),
             initial_mem_used: baseline_mem_used.saturating_add(initial_net_used),
         }
@@ -595,6 +621,20 @@ impl SliceIsolate {
                     set.shrink_to(16);
                 }
             });
+        }
+        if flags.has_extensions {
+            BOA_ACTIVE_EXTENSIONS.with(|r| *r.borrow_mut() = None);
+            BOA_ALLOWED_EXTENSIONS.with(|e| {
+                let mut vec = e.borrow_mut();
+                vec.clear();
+                if vec.capacity() > 64 {
+                    vec.shrink_to(16);
+                }
+            });
+        }
+        if flags.has_deadline_or_interrupt {
+            BOA_ACTIVE_DEADLINE.with(|d| d.set(None));
+            BOA_ACTIVE_INTERRUPT.with(|i| *i.borrow_mut() = None);
         }
         if has_next_tick {
             call_realm_ctl(realm, REALM_CTL_SET_NEXT_TICK, false);
