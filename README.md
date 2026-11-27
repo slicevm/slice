@@ -7,7 +7,7 @@
 Run untrusted AI agent code, multi-tenant SaaS plugins, and full-stack edge services in `< 1 us` cold starts and `13 - 22 MB` RSS -- with capability sandboxing, egress DLP, and `< 5 us` state rollbacks built into the runtime.
 
 [![CI](https://github.com/slicevm/slice/actions/workflows/ci.yml/badge.svg)](https://github.com/slicevm/slice/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.14.6-blue)](https://github.com/slicevm/slice/releases)
+[![Version](https://img.shields.io/badge/version-v0.14.7-blue)](https://github.com/slicevm/slice/releases)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-green)](./LICENSE-MIT)
 [![Benchmarks](https://img.shields.io/badge/benchmarks-33%20workloads-brightgreen)](./tests/reports/latest.md)
@@ -25,7 +25,7 @@ Modern JS runtimes were built to run trusted code in long-lived processes. When 
 
 **Slice removes that tax.** Built from scratch in 100% safe-boundary Rust, Slice combines sub-microsecond isolate boot, deterministic resource cages, and instant copy-on-write state rollbacks into a single ~7 MB binary.
 
-| Capability | Slice (`v0.14.6`) | Bun / Deno / Node.js | Containers / MicroVMs |
+| Capability | Slice (`v0.14.7`) | Bun / Deno / Node.js | Containers / MicroVMs |
 | :--- | :--- | :--- | :--- |
 | **Cold Start Latency** | **`0.85 us` P50** (`1.61 us` P99) | `15 - 80 ms` process boot | `100 - 500+ ms` VM boot |
 | **1,000-Tenant Density** | **`1.04 ms` total (`8.25 MB` RSS)** | `5,000 - 30,000+ ms` | Gigabytes of RAM |
