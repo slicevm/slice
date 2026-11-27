@@ -166,6 +166,12 @@ slice -p '({ runtime: "slice", version: process.version })'
 
 # Execute TypeScript piped over stdin (`slice -` or `slice run -`):
 echo 'console.log(2 + 2)' | slice -
+
+# Capture guest artifacts written to in-memory `/artifacts` into a host directory (with `--json` summary):
+slice run ./src/chart.ts --artifacts-dir=./out --json
+
+# Mount a virtual-only in-memory scratch directory with zero host filesystem visibility:
+slice run ./src/agent.ts --virtual-mount=/scratch
 ```
 
 ### Step 3: Live Development with `< 3 ms` Reloads (`slice run --watch`)

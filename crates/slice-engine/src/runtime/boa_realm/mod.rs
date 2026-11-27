@@ -47,6 +47,6 @@ pub(crate) use trace_and_sourcemap::{
 pub(crate) use vfs_and_ses_guards::{
     SES_PROTO_NAMES, capture_ses_proto_sigs, check_boa_fs_read_ocap, check_boa_fs_write_ocap,
     ensure_vfs_tenant_affinity, first_ses_proto_sig_mismatch_idx, has_any_boa_fs_read_ocap,
-    has_any_boa_fs_write_ocap, has_boa_fs_read_ocap, has_boa_fs_write_ocap, norm_vfs_path,
-    proto_sig, vfs_owner_namespace,
+    has_any_boa_fs_write_ocap, has_boa_fs_read_ocap, has_boa_fs_write_ocap, is_boa_fs_virtual_only,
+    norm_vfs_path, proto_sig, vfs_owner_namespace,
 };

@@ -57,6 +57,13 @@ OCap Violation: lacks filesystem read authority for path '/app/public/../../etc/
 ### 2.4 Copy-on-Write VFS Mutations (Host Disk Preservation)
 Even when `allow_write` is granted for a directory, `writeFileSync`, `appendFileSync`, `copyFileSync`, `renameSync`, `unlinkSync`, `rmSync`, and `openSync`/`writeSync` operate strictly inside the isolate's inode-backed in-memory copy-on-write VFS (`BOA_VFS_STATE`). Unlinking or removing a path records a VFS tombstone that masks any underlying host entry inside the isolate without deleting files from the host OS disk (keeping unlinked open file descriptors readable/writable until `closeSync`), and `Slice.checkpoint()` / `Slice.restore()` rolls VFS inodes, open FDs, tombstones, and memory budget accounting back in `< 5 us`.
 
+### 2.5 Virtual-Only In-Memory VFS Mounts (`virtual_mounts` / `--virtual-mount`)
+When an AI agent or untrusted script needs a scratch or output directory (such as `/artifacts` or `/scratch`) without **any** visibility into the host filesystem, configure a **virtual-only VFS mount**:
+- **CLI / Env / Manifest:** `--virtual-mount=/artifacts`, `SLICE_VIRTUAL_MOUNT=/artifacts`, or `[capabilities] virtual_mounts = ["/artifacts"]` in `slice.toml` (also automatically mounted for `/artifacts` when `--artifacts-dir=<dir>` or `slice mcp` `artifacts: true` is used).
+- **Zero Host Fall-Through:** Every mounted prefix is pre-seeded as an empty, `host_opaque` VFS directory. Even if a host directory exists at the exact same path, `existsSync`, `readdirSync`, `statSync`, `readFileSync`, and `realpathSync` **never** read from or write to the host OS.
+- **Monotonic Attenuation:** Child sandboxes (`Slice.evalSandbox` / `CapabilityToken::attenuate`) can narrow a virtual mount (e.g., `/artifacts` -> `/artifacts/sub`) but can never widen it or promote a virtual mount into a host `allow_read` or `allow_write` grant.
+- **Memory & Egress DLP Enforcement:** All bytes written to a virtual mount are metered against the tenant's `memory_limit_bytes`. When artifacts are drained via `SliceIsolate::drain_vfs`, `slice run --artifacts-dir`, or `slice mcp`, every file is scanned by Ring 4 Egress DLP (`--audit-egress` / `.env` Auto-DLP); matching files are dropped as `AuditedSecret` and recorded as `artifact:<path>` in `deniedCapabilities`.
+
 ---
 
 ## 3. Controlling Outbound Network Access (`allow_net`) & The Built-In SSRF Shield

@@ -1,3 +1,4 @@
+pub(crate) mod artifacts;
 pub(crate) mod init;
 pub(crate) mod init_templates;
 pub(crate) mod pack_and_compile;

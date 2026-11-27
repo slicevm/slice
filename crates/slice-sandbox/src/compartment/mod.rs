@@ -197,7 +197,9 @@ impl TenantCompartment {
     /// and strict directory-boundary matching.
     #[inline]
     pub fn verify_fs_read(&self, path: &str) -> Result<(), SandboxViolation> {
-        if vfs_path_matches_any_prefix(path, &self.capabilities.allowed_read_prefixes) {
+        if vfs_path_matches_any_prefix(path, &self.capabilities.allowed_read_prefixes)
+            || vfs_path_matches_any_prefix(path, &self.capabilities.virtual_mounts)
+        {
             Ok(())
         } else {
             Err(self.trap_fs_read(path))
@@ -208,7 +210,9 @@ impl TenantCompartment {
     /// and strict directory-boundary matching.
     #[inline]
     pub fn verify_fs_write(&self, path: &str) -> Result<(), SandboxViolation> {
-        if vfs_path_matches_any_prefix(path, &self.capabilities.allowed_write_prefixes) {
+        if vfs_path_matches_any_prefix(path, &self.capabilities.allowed_write_prefixes)
+            || vfs_path_matches_any_prefix(path, &self.capabilities.virtual_mounts)
+        {
             Ok(())
         } else {
             Err(self.trap_fs_write(path))

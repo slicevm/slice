@@ -18,7 +18,7 @@ pub(super) fn register_sandbox_eval_and_syntax_host_functions(ctx: &mut boa_engi
                 .transpose()?
                 .map(|s| s.to_std_string_escaped())
                 .unwrap_or_default();
-            let (opts, deny_read, deny_write, deny_net, deny_exec) =
+            let (opts, deny_read, deny_write, deny_virtual, deny_net, deny_exec) =
                 parse_sandbox_eval_options_arg(args.get(1), context)?;
 
             let scope_guard = SavedIsolateContextGuard::enter();
@@ -32,6 +32,11 @@ pub(super) fn register_sandbox_eval_and_syntax_host_functions(ctx: &mut boa_engi
             if !deny_write {
                 for w in &scope_guard.saved_caps.write_prefixes {
                     parent_caps = parent_caps.with_write_prefix(w.clone());
+                }
+            }
+            if !deny_virtual {
+                for vm in &scope_guard.saved_caps.virtual_mounts {
+                    parent_caps = parent_caps.with_virtual_mount(vm.clone());
                 }
             }
             if !deny_net {
@@ -210,10 +215,17 @@ fn read_js_string_array_prop(
 fn parse_sandbox_eval_options_arg(
     arg: Option<&boa_engine::JsValue>,
     context: &mut boa_engine::Context,
-) -> boa_engine::JsResult<(SandboxEvalOptions, bool, bool, bool, bool)> {
+) -> boa_engine::JsResult<(SandboxEvalOptions, bool, bool, bool, bool, bool)> {
     use boa_engine::js_string;
     let Some(val) = arg.filter(|v| !v.is_undefined() && !v.is_null()) else {
-        return Ok((SandboxEvalOptions::default(), false, false, false, false));
+        return Ok((
+            SandboxEvalOptions::default(),
+            false,
+            false,
+            false,
+            false,
+            false,
+        ));
     };
 
     if let Some(obj) = val.as_object() {
@@ -318,6 +330,13 @@ fn parse_sandbox_eval_options_arg(
         )?;
         opts.allow_write = allow_write;
 
+        let (virtual_mounts, deny_virtual) = read_js_string_array_prop(
+            &obj,
+            &[js_string!("virtualMounts"), js_string!("virtualMount")],
+            context,
+        )?;
+        opts.virtual_mounts = virtual_mounts;
+
         let (allow_net, deny_net) = read_js_string_array_prop(
             &obj,
             &[js_string!("allowNet"), js_string!("netHosts")],
@@ -352,15 +371,30 @@ fn parse_sandbox_eval_options_arg(
         )?;
         opts.allow_env = allow_env;
 
-        return Ok((opts, deny_read, deny_write, deny_net, deny_exec));
+        return Ok((
+            opts,
+            deny_read,
+            deny_write,
+            deny_virtual,
+            deny_net,
+            deny_exec,
+        ));
     }
 
     let opts_json = val.to_string(context)?.to_std_string_escaped();
     if opts_json == "{}" || opts_json.is_empty() {
-        Ok((SandboxEvalOptions::default(), false, false, false, false))
+        Ok((
+            SandboxEvalOptions::default(),
+            false,
+            false,
+            false,
+            false,
+            false,
+        ))
     } else if !opts_json.contains("[]") {
         Ok((
             serde_json::from_str::<SandboxEvalOptions>(&opts_json).unwrap_or_default(),
+            false,
             false,
             false,
             false,
@@ -378,12 +412,20 @@ fn parse_sandbox_eval_options_arg(
         };
         let dr = has_empty_arr(&["allowRead", "readPrefixes", "fsRead"]);
         let dw = has_empty_arr(&["allowWrite", "writePrefixes", "fsWrite"]);
+        let dv = has_empty_arr(&["virtualMounts", "virtualMount"]);
         let dn = has_empty_arr(&["allowNet", "netHosts"]);
         let de = has_empty_arr(&["allowExec", "execBinaries"]);
         let parsed: SandboxEvalOptions = serde_json::from_value(json_val).unwrap_or_default();
-        Ok((parsed, dr, dw, dn, de))
+        Ok((parsed, dr, dw, dv, dn, de))
     } else {
-        Ok((SandboxEvalOptions::default(), false, false, false, false))
+        Ok((
+            SandboxEvalOptions::default(),
+            false,
+            false,
+            false,
+            false,
+            false,
+        ))
     }
 }
 

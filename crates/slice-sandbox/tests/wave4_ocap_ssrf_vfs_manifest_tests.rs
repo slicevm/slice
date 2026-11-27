@@ -37,6 +37,7 @@ fn test_wave4_capability_token_attenuate_port_lattice_and_wildcard_ssrf_containm
     let child_escalate = parent_port_scoped.attenuate(&CapabilityAttenuationRequest {
         allow_read: Some(&req_disjoint_read),
         allow_write: Some(&[]),
+        virtual_mounts: None,
         allow_net: Some(&req_escalate_port),
         allow_private_networks: None,
         allow_exec: Some(&["git".to_string()]),
@@ -543,4 +544,60 @@ fn test_v0147_ssrf_ranges_loopback_private_net_attenuation_and_violation_display
         );
         assert_eq!(v.tenant_id(), "secret-host-compartment");
     }
+}
+
+#[test]
+fn test_v0150_virtual_mounts_attenuation_and_manifest_parsing() {
+    let parent = CapabilityToken::pure_compute()
+        .with_virtual_mount("/artifacts")
+        .with_virtual_mount("/scratch/work");
+    let comp = TenantCompartment::new("vm-parent", 1, parent.clone(), 10_000, 65536);
+
+    assert!(comp.verify_fs_read("/artifacts/report.png").is_ok());
+    assert!(comp.verify_fs_write("/artifacts/report.png").is_ok());
+    assert!(comp.verify_fs_read("/scratch/work/tmp.txt").is_ok());
+    assert!(comp.verify_fs_read("/etc/passwd").is_err());
+    assert!(comp.verify_fs_write("/tmp/outside.txt").is_err());
+
+    // Attenuation can narrow a virtual mount, never widen it, and never promote it to host read/write.
+    let req_narrow = [
+        "/artifacts/sub".to_string(),
+        "/artifacts/../../etc".to_string(),
+        "/other".to_string(),
+    ];
+    let req_host_escalate = ["/artifacts".to_string()];
+    let child = parent.attenuate(&CapabilityAttenuationRequest {
+        allow_read: Some(&req_host_escalate),
+        allow_write: Some(&req_host_escalate),
+        virtual_mounts: Some(&req_narrow),
+        ..Default::default()
+    });
+    assert!(
+        child.allowed_read_prefixes.is_empty(),
+        "virtual mount must never attenuate into host read grant"
+    );
+    assert!(
+        child.allowed_write_prefixes.is_empty(),
+        "virtual mount must never attenuate into host write grant"
+    );
+    assert_eq!(child.virtual_mounts, vec!["/artifacts/sub".to_string()]);
+
+    let child_comp = TenantCompartment::new("vm-child", 2, child, 10_000, 65536);
+    assert!(child_comp.verify_fs_write("/artifacts/sub/ok.txt").is_ok());
+    assert!(child_comp.verify_fs_write("/artifacts/top.txt").is_err());
+
+    // Manifest parsing for virtual_mount / virtual_mounts and [run] artifacts_dir
+    let toml_src = r#"
+[run]
+artifacts_dir = "./out/artifacts"
+
+[capabilities]
+virtual_mounts = ["/artifacts", "/work/scratch"]
+"#;
+    let manifest = SliceManifest::parse_toml(toml_src);
+    assert_eq!(manifest.artifacts_dir.as_deref(), Some("./out/artifacts"));
+    assert_eq!(
+        manifest.capabilities.virtual_mounts,
+        vec!["/artifacts".to_string(), "/work/scratch".to_string()]
+    );
 }

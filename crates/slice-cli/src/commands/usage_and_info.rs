@@ -56,11 +56,12 @@ pub(crate) fn print_usage() {
     println!();
     println!("Common Security & Capability Flags (run, test, serve, mcp):");
     println!(
-        "  --allow-read=<paths>  --allow-write=<paths>  --allow-net=<hosts>  --allow-private-networks"
+        "  --allow-read=<paths>  --allow-write=<paths>  --virtual-mount=<paths>  --artifacts-dir=<dir>"
     );
     println!(
-        "  --allow-env=<keys>    --allow-exec=<bins>    --audit-egress=<sec> --fuel=<N> --memory=<bytes>"
+        "  --allow-net=<hosts>   --allow-private-networks --allow-env=<keys>     --allow-exec=<bins>"
     );
+    println!("  --audit-egress=<sec>  --fuel=<N>             --memory=<bytes>         --json");
 }
 
 pub(crate) fn cmd_info() -> Result<()> {

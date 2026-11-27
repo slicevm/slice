@@ -35,6 +35,7 @@ declare namespace Slice {
         memoryBytes?: number;
         allowRead?: string[];
         allowWrite?: string[];
+        virtualMounts?: string[];
         allowNet?: string[];
         allowPrivateNetworks?: boolean;
         allowExec?: string[];

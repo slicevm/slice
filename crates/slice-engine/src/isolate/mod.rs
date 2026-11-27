@@ -17,9 +17,11 @@ pub(crate) mod exec_llint;
 pub(crate) mod http_and_ws;
 pub(crate) mod kv_and_sandbox;
 pub mod state_and_kv;
+pub(crate) mod vfs_drain;
 
 pub use self::http_and_ws::{HttpExecutionOutcome, HttpFastOutcome, HttpRequestContext};
 pub use self::kv_and_sandbox::{SandboxEvalOptions, SandboxEvalOutcome};
+pub use self::vfs_drain::{DrainLimits, DrainReport, DrainedFile, SkipReason, SkippedFile};
 
 use crate::parser_and_compiler::compile_source_to_bytecode;
 use crate::state_and_kv::verify_egress_secrets_slice;

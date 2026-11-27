@@ -53,6 +53,8 @@ pub struct SliceManifest {
     pub tls_key: Option<String>,
     #[serde(default)]
     pub trust_directives: Option<bool>,
+    #[serde(default)]
+    pub artifacts_dir: Option<String>,
 }
 
 impl Default for SliceManifest {
@@ -76,6 +78,7 @@ impl Default for SliceManifest {
             tls_cert: None,
             tls_key: None,
             trust_directives: None,
+            artifacts_dir: None,
         }
     }
 }
@@ -197,6 +200,21 @@ impl SliceManifest {
                     ("capabilities", "allow_write") => {
                         for item in parse_toml_string_array(val) {
                             manifest.capabilities.push_write_prefix(&item);
+                        }
+                    }
+                    ("capabilities", "virtual_mount")
+                    | ("capabilities", "virtual_mounts")
+                    | ("capabilities", "virtual-mount") => {
+                        for item in parse_toml_string_array(val) {
+                            manifest.capabilities.push_virtual_mount(&item);
+                        }
+                    }
+                    ("run", "artifacts_dir")
+                    | ("run", "artifacts-dir")
+                    | ("capabilities", "artifacts_dir") => {
+                        let d = val.trim_matches('"').trim_matches('\'').trim().to_string();
+                        if !d.is_empty() {
+                            manifest.artifacts_dir = Some(d);
                         }
                     }
                     ("capabilities", "allow_net") => {

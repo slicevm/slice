@@ -72,6 +72,7 @@ fn resolve_worker_script_source(specifier_or_code: &str, is_eval: bool) -> Resul
 
     if crate::bindings::fs::is_vfs_tombstoned(&resolved_norm)
         || crate::bindings::fs::is_host_unc_blocked(raw_path)
+        || crate::boa_realm::is_boa_fs_virtual_only(&resolved_norm)
     {
         return Err(format!(
             "WorkerError: Cannot read worker module '{}': file removed or blocked in VFS",
@@ -102,6 +103,7 @@ fn build_attenuated_worker_caps(
     let parent_token = CapabilityToken {
         allowed_read_prefixes: parent_caps.read_prefixes.clone(),
         allowed_write_prefixes: parent_caps.write_prefixes.clone(),
+        virtual_mounts: parent_caps.virtual_mounts.clone(),
         allowed_net_hosts: parent_net_hosts.clone(),
         allowed_env_keys: parent_env_map.clone(),
         allowed_exec_binaries: parent_execs,
@@ -112,6 +114,7 @@ fn build_attenuated_worker_caps(
     parent_token.attenuate(&slice_sandbox::CapabilityAttenuationRequest {
         allow_read: attenuation.and_then(|a| a.allow_read.as_deref()),
         allow_write: attenuation.and_then(|a| a.allow_write.as_deref()),
+        virtual_mounts: None,
         allow_net: attenuation.and_then(|a| a.allow_net.as_deref()),
         allow_private_networks: None,
         allow_exec: attenuation.and_then(|a| a.allow_exec.as_deref()),

@@ -35,6 +35,8 @@ pub(crate) fn runtime_flag_takes_separate_value(arg: &str) -> bool {
             | "--trace"
             | "--allow-read"
             | "--allow-write"
+            | "--virtual-mount"
+            | "--artifacts-dir"
             | "--allow-net"
             | "--allow-exec"
             | "--allow-env"
@@ -122,6 +124,7 @@ pub(crate) fn is_known_slice_runtime_flag(arg: &str) -> bool {
         "--quiet"
             | "-q"
             | "--metrics"
+            | "--json"
             | "--watch"
             | "--watch-once"
             | "--warm"
@@ -142,6 +145,8 @@ pub(crate) fn is_known_slice_runtime_flag(arg: &str) -> bool {
             | "--no-allow-private-networks"
     ) || runtime_flag_takes_separate_value(arg)
         || arg.starts_with("--allow-")
+        || arg.starts_with("--virtual-mount=")
+        || arg.starts_with("--artifacts-dir=")
         || arg.starts_with("--config=")
         || arg.starts_with("--trust-directives=")
         || arg.starts_with("--fuel=")

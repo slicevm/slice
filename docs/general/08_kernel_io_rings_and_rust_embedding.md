@@ -229,6 +229,43 @@ fn run_ai_agent_host() {
 
 ---
 
+## 5b. Recipe 5: Virtual-Only VFS Mounts & Post-Execution Artifact Drain (`drain_vfs`)
+
+For AI code-execution backends and cloud sandboxes that need to collect generated charts, CSVs, or build outputs without exposing any host directory, mount a virtual-only VFS prefix via `CapabilityToken::with_virtual_mount` and extract the files zero-copy after execution via `SliceIsolate::drain_vfs`:
+
+```rust
+use slice_engine::{DrainLimits, SliceIsolate, compile_source_to_bytecode};
+use slice_sandbox::CapabilityToken;
+
+fn collect_guest_artifacts() {
+    let caps = CapabilityToken::pure_compute().with_virtual_mount("/artifacts");
+    let bc = compile_source_to_bytecode(
+        r#"
+        import fs from "node:fs";
+        fs.writeFileSync("/artifacts/report.csv", "metric,value\nlatency_us,1.2\n");
+        "#,
+    );
+
+    let mut isolate = SliceIsolate::spawn("tenant-art", 1, caps, 5_000_000, 16 * 1024 * 1024);
+    isolate.add_egress_audit_secret("sk_live_never_export_me");
+
+    // Callable regardless of Ok or Err (e.g., OCap violation, fuel exhaustion, or timeout):
+    let _exec_result = isolate.execute_bytecode(&bc, None);
+    let report = isolate.drain_vfs("/artifacts", &DrainLimits::default());
+
+    for file in &report.files {
+        println!("Drained {} ({} bytes)", file.path, file.bytes.len());
+    }
+    for skipped in &report.skipped {
+        println!("Skipped {} ({:?})", skipped.path, skipped.reason);
+    }
+}
+```
+
+`drain_vfs` moves uniquely owned file buffers out of the VFS without cloning, releases their accounted memory budget, ignores empty directories, skips symlinks (`SkipReason::Symlink`), returns files in deterministic sorted order, and scans every file against Ring 4 Egress DLP (`SkipReason::AuditedSecret` + `artifact:<path>` in `isolate.denied_capabilities()`).
+
+---
+
 ## 6. Running High-Density 1,000-Tenant MicroVM Swarms (`slice microvm-bench`)
 
 To test how your hardware handles spawning and executing 1,000 isolated tenant compartments concurrently, use the built-in `slice microvm-bench` command:

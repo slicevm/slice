@@ -313,9 +313,13 @@ impl VfsState {
         total_freed
     }
 
-    /// Returns `true` when host filesystem fallback for `norm` is masked by a tombstone on `norm`,
-    /// a tombstone on an ancestor directory, or an ancestor `Directory { host_opaque: true }`.
+    /// Returns `true` when host filesystem fallback for `norm` is masked by a virtual-only mount,
+    /// a tombstone on `norm`, a tombstone on an ancestor directory, or an ancestor
+    /// `Directory { host_opaque: true }`.
     pub(crate) fn is_host_masked(&self, norm: &str) -> bool {
+        if crate::boa_realm::is_boa_fs_virtual_only(norm) {
+            return true;
+        }
         if self.paths.is_empty() {
             return false;
         }
@@ -372,6 +376,7 @@ impl VfsState {
                     let was_tombstoned = matches!(prev, Some(PathEntry::Tombstone));
                     let host_opaque = was_tombstoned
                         || (is_leaf && leaf_opaque_if_new)
+                        || crate::boa_realm::is_boa_fs_virtual_only(dir_path)
                         || (dir_path.starts_with("/tmp/")
                             && (!crate::boa_realm::has_any_boa_fs_read_ocap()
                                 || !std::path::Path::new(dir_path).exists()));

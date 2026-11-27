@@ -245,7 +245,10 @@ pub(crate) fn materialize_host_dir_into_vfs(
     vfs: &mut VfsState,
     host_dir: &str,
 ) -> Result<(), String> {
-    if !has_boa_fs_read_ocap(host_dir) {
+    if !has_boa_fs_read_ocap(host_dir)
+        || vfs.is_host_masked(host_dir)
+        || crate::boa_realm::is_boa_fs_virtual_only(host_dir)
+    {
         return Ok(());
     }
     let Ok(rd) = std::fs::read_dir(host_dir) else {
