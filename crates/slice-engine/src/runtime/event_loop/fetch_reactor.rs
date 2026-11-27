@@ -5,9 +5,9 @@ use super::timers_and_state::{
     QueuedAsyncFetch,
 };
 use crate::boa_realm::{
-    BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP, BOA_DENIED_CAPABILITIES, BOA_DET_STATE,
-    BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET, BOA_LAST_OCAP_VIOLATION, BOA_NET_HOSTS, BOA_VIOLATION,
-    DIRTY_EVENT_LOOP, mark_subsystem_dirty,
+    BOA_ACTIVE_TENANT, BOA_ALLOW_PRIVATE_NETS, BOA_ALS_ACTIVE, BOA_ALS_SNAP,
+    BOA_DENIED_CAPABILITIES, BOA_DET_STATE, BOA_EGRESS_SECRETS, BOA_KV_MEM_BUDGET,
+    BOA_LAST_OCAP_VIOLATION, BOA_NET_HOSTS, BOA_VIOLATION, DIRTY_EVENT_LOOP, mark_subsystem_dirty,
 };
 use crate::outbound_http::{
     execute_outbound_fetch_with_redirects, outbound_pool_reuse_count, reset_fetch_slab_telemetry,
@@ -32,6 +32,7 @@ pub(super) struct FetchReactorJob {
     pub(super) redirect_mode: String,
     pub(super) tenant_id: String,
     pub(super) net_hosts: FxHashSet<String>,
+    pub(super) allow_private_networks: bool,
     pub(super) egress_secrets: Vec<String>,
     pub(super) mem_budget: (usize, usize),
     pub(super) tx: Sender<CompletedAsyncFetch>,
@@ -102,6 +103,7 @@ impl FetchReactorPool {
             if let Some(job) = job {
                 BOA_ACTIVE_TENANT.with(|t| *t.borrow_mut() = job.tenant_id);
                 BOA_NET_HOSTS.with(|h| *h.borrow_mut() = job.net_hosts);
+                BOA_ALLOW_PRIVATE_NETS.with(|p| p.set(job.allow_private_networks));
                 BOA_EGRESS_SECRETS.with(|s| *s.borrow_mut() = job.egress_secrets);
                 BOA_KV_MEM_BUDGET.with(|m| m.set(job.mem_budget));
                 BOA_VIOLATION.with(|v| *v.borrow_mut() = None);

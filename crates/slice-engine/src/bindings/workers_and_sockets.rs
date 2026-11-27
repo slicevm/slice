@@ -68,6 +68,13 @@ pub(crate) fn register_shard8_workers_sockets_host_functions(ctx: &mut boa_engin
                 .unwrap_or_else(|| "off".to_string());
             match tcp_socket_connect(&host, port, &tls_mode) {
                 Ok(json) => Ok(BoaVal::from(js_string!(json))),
+                Err(e) if e.starts_with("OCap Violation: lacks outbound network authority") => {
+                    Err(crate::bindings::helpers::ocap_denied_js_error(
+                        "ERR_SLICE_NET_DENIED",
+                        e,
+                        context,
+                    ))
+                }
                 Err(e) => Err(JsNativeError::error().with_message(e).into()),
             }
         }),
@@ -102,6 +109,13 @@ pub(crate) fn register_shard8_workers_sockets_host_functions(ctx: &mut boa_engin
                 };
                 match res {
                     Ok(json) => Ok(BoaVal::from(js_string!(json))),
+                    Err(e) if e.starts_with("OCap Violation: lacks outbound network authority") => {
+                        Err(crate::bindings::helpers::ocap_denied_js_error(
+                            "ERR_SLICE_NET_DENIED",
+                            e,
+                            context,
+                        ))
+                    }
                     Err(e) => Err(JsNativeError::error().with_message(e).into()),
                 }
             }
@@ -197,6 +211,13 @@ pub(crate) fn register_shard8_workers_sockets_host_functions(ctx: &mut boa_engin
                 .unwrap_or(0);
             match udp_socket_bind(&fam, &addr, port) {
                 Ok(json) => Ok(BoaVal::from(js_string!(json))),
+                Err(e) if e.starts_with("OCap Violation: lacks outbound network authority") => {
+                    Err(crate::bindings::helpers::ocap_denied_js_error(
+                        "ERR_SLICE_NET_DENIED",
+                        e,
+                        context,
+                    ))
+                }
                 Err(e) => Err(JsNativeError::error().with_message(e).into()),
             }
         }),
@@ -231,6 +252,13 @@ pub(crate) fn register_shard8_workers_sockets_host_functions(ctx: &mut boa_engin
                     .unwrap_or(0);
                 match udp_socket_send(id, is_b64, &data, &host, port) {
                     Ok(json) => Ok(BoaVal::from(js_string!(json))),
+                    Err(e) if e.starts_with("OCap Violation: lacks outbound network authority") => {
+                        Err(crate::bindings::helpers::ocap_denied_js_error(
+                            "ERR_SLICE_NET_DENIED",
+                            e,
+                            context,
+                        ))
+                    }
                     Err(e) => Err(JsNativeError::error().with_message(e).into()),
                 }
             } else {
@@ -253,6 +281,13 @@ pub(crate) fn register_shard8_workers_sockets_host_functions(ctx: &mut boa_engin
                 };
                 match res {
                     Ok(json) => Ok(BoaVal::from(js_string!(json))),
+                    Err(e) if e.starts_with("OCap Violation: lacks outbound network authority") => {
+                        Err(crate::bindings::helpers::ocap_denied_js_error(
+                            "ERR_SLICE_NET_DENIED",
+                            e,
+                            context,
+                        ))
+                    }
                     Err(e) => Err(JsNativeError::error().with_message(e).into()),
                 }
             }
@@ -330,6 +365,13 @@ pub(crate) fn register_shard8_workers_sockets_host_functions(ctx: &mut boa_engin
                 .unwrap_or_else(|| "{}".to_string());
             match worker_spawn_with_context(&spec, &opts_json, Some(context)) {
                 Ok(id) => Ok(BoaVal::from(id as f64)),
+                Err(e) if e.starts_with("OCap Violation: lacks filesystem read authority") => {
+                    Err(crate::bindings::helpers::ocap_denied_js_error(
+                        "ERR_SLICE_FS_DENIED",
+                        e,
+                        context,
+                    ))
+                }
                 Err(e) => Err(JsNativeError::error().with_message(e).into()),
             }
         }),

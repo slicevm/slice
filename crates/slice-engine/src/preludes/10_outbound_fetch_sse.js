@@ -152,7 +152,11 @@
 
   function __mkFetchErr(msg) {
     var e = new Error(msg);
-    if (typeof msg === "string" && msg.indexOf("NetAccessDenied:") === 0) {
+    if (
+      typeof msg === "string" &&
+      (msg.indexOf("OCap Violation: lacks outbound network authority") === 0 ||
+        msg.indexOf("NetAccessDenied:") === 0)
+    ) {
       e.code = "ERR_SLICE_NET_DENIED";
     }
     return e;

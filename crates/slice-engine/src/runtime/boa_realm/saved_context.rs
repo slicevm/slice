@@ -1,10 +1,10 @@
 //! Nested Sandbox Execution Scope Guard (`SavedIsolateContextGuard`).
 
 use super::{
-    ActiveBoaHttpReq, BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_ALS_ACTIVE, BOA_ALS_SNAP,
-    BOA_CHECKPOINT_CAP, BOA_CHECKPOINT_STATS, BOA_CUSTOM_ARGV, BOA_DENIED_CAPABILITIES,
-    BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS,
-    BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES,
+    ActiveBoaHttpReq, BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_ALLOW_PRIVATE_NETS, BOA_ALS_ACTIVE,
+    BOA_ALS_SNAP, BOA_CHECKPOINT_CAP, BOA_CHECKPOINT_STATS, BOA_CUSTOM_ARGV,
+    BOA_DENIED_CAPABILITIES, BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP,
+    BOA_EXEC_BINS, BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_REQ, BOA_HTTP_RES,
     BOA_KV_MEM_BUDGET, BOA_LAST_EXIT_CODE, BOA_LAST_OCAP_VIOLATION, BOA_NET_HOSTS,
     BOA_PROCESS_EXIT, BOA_SES_BASELINE_SIGS, BOA_SES_INTL_SIG_PAIR, BOA_STDOUT, BOA_UNCAUGHT_ERROR,
     BOA_UNHANDLED_REJECTIONS, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, BoaFsCaps,
@@ -26,6 +26,7 @@ pub(crate) struct SavedIsolateContextGuard {
     pub(crate) saved_tenant: String,
     pub(crate) saved_caps: BoaFsCaps,
     pub(crate) saved_net_hosts: FxHashSet<String>,
+    pub(crate) saved_allow_private_nets: bool,
     pub(crate) saved_egress_secrets: Vec<String>,
     pub(crate) saved_env_map: FxHashMap<String, String>,
     pub(crate) saved_exec_bins: Vec<String>,
@@ -66,6 +67,7 @@ impl SavedIsolateContextGuard {
         let saved_tenant = BOA_ACTIVE_TENANT.with(|t| std::mem::take(&mut *t.borrow_mut()));
         let saved_caps = BOA_ACTIVE_CAPS.with(|c| std::mem::take(&mut *c.borrow_mut()));
         let saved_net_hosts = BOA_NET_HOSTS.with(|h| std::mem::take(&mut *h.borrow_mut()));
+        let saved_allow_private_nets = BOA_ALLOW_PRIVATE_NETS.with(|p| p.replace(false));
         let saved_egress_secrets =
             BOA_EGRESS_SECRETS.with(|s| std::mem::take(&mut *s.borrow_mut()));
         let saved_env_map = BOA_ENV_MAP.with(|m| std::mem::take(&mut *m.borrow_mut()));
@@ -149,6 +151,7 @@ impl SavedIsolateContextGuard {
             saved_tenant,
             saved_caps,
             saved_net_hosts,
+            saved_allow_private_nets,
             saved_egress_secrets,
             saved_env_map,
             saved_exec_bins,
@@ -217,6 +220,7 @@ impl Drop for SavedIsolateContextGuard {
         BOA_ACTIVE_TENANT.with(|t| *t.borrow_mut() = std::mem::take(&mut self.saved_tenant));
         BOA_ACTIVE_CAPS.with(|c| *c.borrow_mut() = std::mem::take(&mut self.saved_caps));
         BOA_NET_HOSTS.with(|h| *h.borrow_mut() = std::mem::take(&mut self.saved_net_hosts));
+        BOA_ALLOW_PRIVATE_NETS.with(|p| p.set(self.saved_allow_private_nets));
         BOA_EGRESS_SECRETS
             .with(|s| *s.borrow_mut() = std::mem::take(&mut self.saved_egress_secrets));
         BOA_ENV_MAP.with(|m| *m.borrow_mut() = std::mem::take(&mut self.saved_env_map));

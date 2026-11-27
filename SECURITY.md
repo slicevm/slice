@@ -30,8 +30,8 @@ We specifically welcome reports affecting any of Slice's **5 Isolation & Defense
 3. **Ring 3 - Deterministic CPU Fuel & Byte-Level Heap Cage Escape**:
    - Bypassing `max_cpu_fuel` via un-metered loops, native intrinsics, or regex/compression amplification (zip bombs, KDF memory exhaustion).
    - Allocating unbounded host memory outside the isolate's `max_memory_bytes` / `BOA_KV_MEM_BUDGET` ceiling.
-4. **Ring 4 - Cloud Metadata SSRF Shield & Egress DLP Bypass**:
-   - Reaching link-local or cloud metadata endpoints (`169.254.169.254`, `169.254.170.2`, `169.254.170.23`, `168.63.129.16`, `100.100.100.200`, `fd00:ec2::254`, `fd00:ec2::23`), loopback, or RFC-1918 private networks when `block_private_ips` / wildcard `allow_net = ["*"]` is active (including via IPv4-mapped IPv6, octal/leading-zero/hex/decimal IP literals, percent-encoded authority delimiters, or URL authority confusion).
+4. **Ring 4 - Resolved-IP SSRF Shield & Egress DLP Bypass**:
+   - Reaching link-local or cloud metadata endpoints (`169.254.169.254`, `169.254.170.2`, `169.254.170.23`, `168.63.129.16`, `100.100.100.200`, `fd00:ec2::254`, `fd00:ec2::23`), loopback, CGNAT, or RFC-1918/ULA private networks via any DNS hostname (whether under wildcard `allow_net = ["*"]` or an explicit hostname grant without `allow_private_networks = true`), including via DNS rebinding, HTTP redirects, IPv4-mapped IPv6, octal/leading-zero/hex/decimal IP literals, percent-encoded authority delimiters, or URL authority confusion.
    - Exfiltrating registered secrets (`--audit-egress` / `SliceIsolate::add_egress_audit_secret`) through `stdout`, HTTP responses, WebSockets, subprocess stdio, or raw sockets in raw, hex, URL/percent-encoded, or Base64/Base64URL (padded, unpadded, or byte-shifted) form.
 5. **Ring 5 - Cryptographic & Memory Safety Defects**:
    - Weak entropy in CSPRNG/UUID generation, timing side-channels in authentication tags, or memory safety issues in any `unsafe` hardware SIMD/MPK block.

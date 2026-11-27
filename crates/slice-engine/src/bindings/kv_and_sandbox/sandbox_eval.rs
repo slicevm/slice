@@ -38,6 +38,8 @@ pub(super) fn register_sandbox_eval_and_syntax_host_functions(ctx: &mut boa_engi
                 for nh in &scope_guard.saved_net_hosts {
                     parent_caps = parent_caps.with_net_host(nh.clone());
                 }
+                parent_caps =
+                    parent_caps.with_allow_private_networks(scope_guard.saved_allow_private_nets);
             }
             for (ek, ev) in &scope_guard.saved_env_map {
                 parent_caps = parent_caps.with_env(ek.clone(), ev.clone());
@@ -322,6 +324,19 @@ fn parse_sandbox_eval_options_arg(
             context,
         )?;
         opts.allow_net = allow_net;
+
+        for key in [
+            js_string!("allowPrivateNetworks"),
+            js_string!("allow_private_networks"),
+        ] {
+            if obj.has_own_property(key.clone(), context)? {
+                let v = obj.get(key, context)?;
+                if let Some(b) = v.as_boolean() {
+                    opts.allow_private_networks = Some(b);
+                    break;
+                }
+            }
+        }
 
         let (allow_exec, deny_exec) = read_js_string_array_prop(
             &obj,

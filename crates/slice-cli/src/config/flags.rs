@@ -138,6 +138,8 @@ pub(crate) fn is_known_slice_runtime_flag(arg: &str) -> bool {
             | "--no-trust-directives"
             | "--no-directives"
             | "--untrusted"
+            | "--allow-private-networks"
+            | "--no-allow-private-networks"
     ) || runtime_flag_takes_separate_value(arg)
         || arg.starts_with("--allow-")
         || arg.starts_with("--config=")

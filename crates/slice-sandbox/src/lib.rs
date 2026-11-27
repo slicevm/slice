@@ -40,9 +40,10 @@ pub use manifest::{
 pub use net::{
     ParsedHttpUrl, ParsedNetConnectTarget, canonicalize_net_grant_entry, check_net_host_grant,
     extract_clean_hostname, extract_clean_hostname_and_port, is_cloud_metadata_clean_host,
-    is_cloud_metadata_ip, is_cloud_metadata_ssrf_target, is_private_or_loopback_clean_host,
-    is_private_or_loopback_ip, is_private_or_loopback_ssrf_target, parse_http_authority_and_path,
-    parse_net_connect_target, parse_nonstandard_ipv4,
+    is_cloud_metadata_ip, is_cloud_metadata_ssrf_target, is_loopback_ip,
+    is_private_or_loopback_clean_host, is_private_or_loopback_ip,
+    is_private_or_loopback_ssrf_target, parse_http_authority_and_path, parse_net_connect_target,
+    parse_nonstandard_ipv4,
 };
 pub use vfs::{
     anchor_vfs_path_to_cwd, cached_normalized_cwd, is_abs_normalized_vfs_path,

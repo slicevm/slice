@@ -26,6 +26,8 @@ pub struct SandboxEvalOptions {
     pub allow_write: Vec<String>,
     #[serde(default, alias = "netHosts")]
     pub allow_net: Vec<String>,
+    #[serde(default, alias = "allow_private_networks")]
+    pub allow_private_networks: Option<bool>,
     #[serde(default, alias = "execBinaries")]
     pub allow_exec: Vec<String>,
     #[serde(default, alias = "envKeys")]
@@ -246,6 +248,7 @@ impl SliceIsolate {
                     allow_write: (!opts.allow_write.is_empty())
                         .then_some(opts.allow_write.as_slice()),
                     allow_net: (!opts.allow_net.is_empty()).then_some(opts.allow_net.as_slice()),
+                    allow_private_networks: opts.allow_private_networks,
                     allow_exec: (!opts.allow_exec.is_empty()).then_some(opts.allow_exec.as_slice()),
                     allow_env: Some(opts.allow_env.as_slice()),
                     allow_checkpoints: opts.checkpoints,

@@ -127,6 +127,12 @@ fn parse_mcp_sandbox_eval_options(args: &serde_json::Value) -> slice_engine::San
             push_string_or_array_arg(args, key, target);
         }
     }
+    for key in ["allowPrivateNetworks", "allow_private_networks"] {
+        if let Some(b) = args.get(key).and_then(|v| v.as_bool()) {
+            opts.allow_private_networks = Some(b);
+            break;
+        }
+    }
     opts
 }
 

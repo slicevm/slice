@@ -214,6 +214,11 @@ impl ResolvedExecutionConfig {
                     cfg.caps = cfg.caps.with_net_host(item);
                 }
             }
+            if let Some(v) = find_slice_env("SLICE_ALLOW_PRIVATE_NETWORKS")
+                && let Some(b) = slice_sandbox::parse_bool_setting(v)
+            {
+                cfg.caps.set_allow_private_networks(b);
+            }
             if let Some(v) = find_slice_env("SLICE_ALLOW_EXEC") {
                 for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     if !cfg.caps.allowed_exec_binaries.contains(&item.to_string()) {
@@ -404,6 +409,23 @@ impl ResolvedExecutionConfig {
             if let Some(hosts) = match_non_empty_flag_value(args, &mut arg_idx, "--allow-net")? {
                 for h in hosts.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     cfg.caps = cfg.caps.with_net_host(h);
+                }
+                arg_idx += 1;
+                continue;
+            }
+            if args[arg_idx] == "--allow-private-networks" {
+                cfg.caps.set_allow_private_networks(true);
+                arg_idx += 1;
+                continue;
+            }
+            if args[arg_idx] == "--no-allow-private-networks" {
+                cfg.caps.set_allow_private_networks(false);
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(v) = args[arg_idx].strip_prefix("--allow-private-networks=") {
+                if let Some(b) = slice_sandbox::parse_bool_setting(v) {
+                    cfg.caps.set_allow_private_networks(b);
                 }
                 arg_idx += 1;
                 continue;

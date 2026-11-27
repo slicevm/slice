@@ -978,7 +978,8 @@ fn test_issue_13_disable_checkpoints_and_max_checkpoints_attenuation() {
     assert!(
         no_cp_parent_outcome
             .return_value
-            .contains("CapabilityDenied: checkpoints"),
+            .contains("OCap Violation: checkpoint denied")
+            && !no_cp_parent_outcome.return_value.contains("Compartment '"),
         "Got: {}",
         no_cp_parent_outcome.return_value
     );

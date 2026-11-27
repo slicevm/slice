@@ -204,6 +204,12 @@ impl SliceManifest {
                             manifest.capabilities.insert_net_host(&item);
                         }
                     }
+                    ("capabilities", "allow_private_networks")
+                    | ("capabilities", "allow-private-networks") => {
+                        if let Some(b) = parse_bool_setting(val) {
+                            manifest.capabilities.set_allow_private_networks(b);
+                        }
+                    }
                     ("capabilities", "allow_exec") | ("capabilities", "allow-exec") => {
                         for item in parse_toml_string_array(val) {
                             manifest.capabilities.push_exec_binary(item);

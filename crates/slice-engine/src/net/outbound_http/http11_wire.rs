@@ -507,6 +507,7 @@ pub(super) fn execute_single_http11_hop(
     }
 
     let tenant_id = active_tenant_id_or_default();
+    let allow_private_networks = crate::boa_realm::BOA_ALLOW_PRIVATE_NETS.with(|p| p.get());
     let proxy_key = match dial_plan {
         OutboundHopDialPlan::Direct { .. } => "",
         OutboundHopDialPlan::HttpProxy { proxy_parts, .. }
@@ -517,6 +518,7 @@ pub(super) fn execute_single_http11_hop(
         &tenant_id,
         proxy_key,
         target_parts.is_https,
+        allow_private_networks,
         &target_parts.host_port,
     ) && let Ok(resp) = send_and_read_framed_http11(&mut pooled_stream, &req_buf, method)
     {
@@ -526,6 +528,7 @@ pub(super) fn execute_single_http11_hop(
                 tenant_id,
                 proxy_key.to_string(),
                 target_parts.is_https,
+                allow_private_networks,
                 target_parts.host_port.clone(),
                 pooled_stream,
             );
@@ -557,6 +560,7 @@ pub(super) fn execute_single_http11_hop(
             tenant_id,
             proxy_key.to_string(),
             target_parts.is_https,
+            allow_private_networks,
             target_parts.host_port.clone(),
             fresh_stream,
         );

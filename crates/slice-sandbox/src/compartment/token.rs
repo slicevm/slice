@@ -23,6 +23,8 @@ pub struct CapabilityToken {
     pub allowed_env_keys: FxHashMap<String, String>,
     #[serde(default)]
     pub allowed_exec_binaries: Vec<String>,
+    #[serde(default)]
+    pub allow_private_networks: bool,
     #[serde(default = "default_allow_checkpoints")]
     pub allow_checkpoints: bool,
     #[serde(default)]
@@ -38,6 +40,7 @@ impl Default for CapabilityToken {
             allowed_net_hosts: FxHashSet::default(),
             allowed_env_keys: FxHashMap::default(),
             allowed_exec_binaries: Vec::new(),
+            allow_private_networks: false,
             allow_checkpoints: true,
             max_checkpoints: None,
         }
@@ -70,6 +73,7 @@ pub struct CapabilityAttenuationRequest<'a> {
     pub allow_read: Option<&'a [String]>,
     pub allow_write: Option<&'a [String]>,
     pub allow_net: Option<&'a [String]>,
+    pub allow_private_networks: Option<bool>,
     pub allow_exec: Option<&'a [String]>,
     pub allow_env: Option<&'a [String]>,
     pub allow_checkpoints: Option<bool>,
@@ -148,6 +152,17 @@ impl CapabilityToken {
     pub fn with_net_host(mut self, host: impl Into<String>) -> Self {
         let raw = host.into();
         self.insert_net_host(&raw);
+        self
+    }
+
+    #[inline]
+    pub fn set_allow_private_networks(&mut self, enabled: bool) {
+        self.allow_private_networks = enabled;
+    }
+
+    #[inline]
+    pub fn with_allow_private_networks(mut self, enabled: bool) -> Self {
+        self.allow_private_networks = enabled;
         self
     }
 
@@ -357,6 +372,8 @@ impl CapabilityToken {
                 (None, None) => None,
             }
         };
+        child.allow_private_networks =
+            self.allow_private_networks && req.allow_private_networks.unwrap_or(true);
         child.allow_checkpoints = child_allow_cp;
         child.max_checkpoints = child_max_cp;
 

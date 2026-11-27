@@ -4,7 +4,7 @@ use super::MAX_SOCKET_IO_BYTES;
 use crate::bindings::helpers::{active_tenant_id_or_default, record_boa_violation_once};
 use crate::boa_realm::{
     BOA_ACTIVE_TENANT, BOA_EGRESS_SECRETS, BOA_FUEL_BUDGET, BOA_KV_MEM_BUDGET, BOA_NET_HOSTS,
-    DIRTY_SOCKETS, mark_subsystem_dirty,
+    DIRTY_SOCKETS, mark_subsystem_dirty, record_boa_ocap_denial,
 };
 use crate::intrinsics::base64_encode;
 use crate::outbound_http::OutboundUrlParts;
@@ -134,27 +134,25 @@ pub(super) fn verify_raw_socket_ocap(host: &str, port: u16) -> Result<bool, Stri
     let clean_host = extract_clean_hostname(&host.trim().to_ascii_lowercase());
     if clean_host.is_empty() {
         let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-        record_boa_violation_once(SandboxViolation::NetAccessDenied {
+        let violation = SandboxViolation::NetAccessDenied {
             tenant_id,
             host: format!("{}:{}", host.trim(), port),
-        });
-        return Err(format!(
-            "SocketError: Invalid or forbidden socket hostname '{}:{}'",
-            host, port
-        ));
+        };
+        let msg = violation.to_string();
+        record_boa_ocap_denial(violation);
+        return Err(msg);
     }
     let host_port = format_socket_host_port(&clean_host, port);
 
     if is_cloud_metadata_clean_host(&clean_host) {
         let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-        record_boa_violation_once(SandboxViolation::NetAccessDenied {
+        let violation = SandboxViolation::NetAccessDenied {
             tenant_id,
             host: format!("SSRF_METADATA_BLOCKED:{}", host_port),
-        });
-        return Err(format!(
-            "SSRF_SHIELD_BLOCKED: Raw socket connection to cloud metadata '{}' is forbidden",
-            host_port
-        ));
+        };
+        let msg = violation.to_string();
+        record_boa_ocap_denial(violation);
+        return Err(msg);
     }
 
     let (has_explicit_match, wildcard_public_match, has_wildcard_rule) = BOA_NET_HOSTS.with(|h| {
@@ -165,35 +163,28 @@ pub(super) fn verify_raw_socket_ocap(host: &str, port: u16) -> Result<bool, Stri
 
     if !has_explicit_match && !has_wildcard_rule {
         let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-        record_boa_violation_once(SandboxViolation::NetAccessDenied {
+        let violation = SandboxViolation::NetAccessDenied {
             tenant_id,
-            host: host_port.clone(),
-        });
-        return Err(format!(
-            "SandboxViolation: Raw socket connection to '{}' denied by OCap allow_net policy",
-            host_port
-        ));
+            host: host_port,
+        };
+        let msg = violation.to_string();
+        record_boa_ocap_denial(violation);
+        return Err(msg);
     }
 
     // Reject non-canonical IPv4 literals (octal 0177.0.0.1, hex 0x7f.0.0.1, dword 2130706433) unconditionally
-    if is_private_or_loopback_clean_host(&clean_host)
-        && !matches!(
-            clean_host.as_str(),
-            "127.0.0.1" | "localhost" | "::1" | "0.0.0.0"
-        )
-        && !clean_host.starts_with("10.")
-        && !clean_host.starts_with("192.168.")
-        && !clean_host.starts_with("172.")
-    {
+    let is_canonical_ip_or_localhost = clean_host.parse::<std::net::IpAddr>().is_ok()
+        || clean_host == "localhost"
+        || clean_host.ends_with(".localhost");
+    if is_private_or_loopback_clean_host(&clean_host) && !is_canonical_ip_or_localhost {
         let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-        record_boa_violation_once(SandboxViolation::NetAccessDenied {
+        let violation = SandboxViolation::NetAccessDenied {
             tenant_id,
             host: format!("SSRF_NON_CANONICAL_IP_BLOCKED:{}", host_port),
-        });
-        return Err(format!(
-            "SSRF_SHIELD_BLOCKED: Non-canonical IPv4/IPv6 socket literal '{}' blocked",
-            host_port
-        ));
+        };
+        let msg = violation.to_string();
+        record_boa_ocap_denial(violation);
+        return Err(msg);
     }
 
     // Under wildcard `--allow-net=*` without an explicit host grant, block privileged ports (< 1024 except 80/443)
@@ -201,25 +192,23 @@ pub(super) fn verify_raw_socket_ocap(host: &str, port: u16) -> Result<bool, Stri
     if !has_explicit_match {
         if port < 1024 && port != 80 && port != 443 {
             let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-            record_boa_violation_once(SandboxViolation::NetAccessDenied {
+            let violation = SandboxViolation::NetAccessDenied {
                 tenant_id,
-                host: host_port.clone(),
-            });
-            return Err(format!(
-                "SandboxViolation: Raw socket connection to privileged port '{}' requires explicit allow_net grant",
-                host_port
-            ));
+                host: host_port,
+            };
+            let msg = violation.to_string();
+            record_boa_ocap_denial(violation);
+            return Err(msg);
         }
         if !wildcard_public_match {
             let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
-            record_boa_violation_once(SandboxViolation::NetAccessDenied {
+            let violation = SandboxViolation::NetAccessDenied {
                 tenant_id,
                 host: format!("SSRF_BLOCKED:{}", host_port),
-            });
-            return Err(format!(
-                "SSRF_SHIELD_BLOCKED: Raw socket connection to internal/private target '{}' is forbidden under wildcard allow_net",
-                host_port
-            ));
+            };
+            let msg = violation.to_string();
+            record_boa_ocap_denial(violation);
+            return Err(msg);
         }
     }
 

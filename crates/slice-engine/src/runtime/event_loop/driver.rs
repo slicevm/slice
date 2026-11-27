@@ -155,13 +155,18 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                     res,
                     ctx,
                 );
-                let _ = ctx.run_jobs();
+                if !run_jobs_and_check_rejections(ctx) {
+                    clear_event_loop_state();
+                    return;
+                }
             } else {
                 // Concurrent Fan-Out Path (`Promise.all([fetch(...), ...])` or timer-raced `fetch`)
                 // Dispatches onto the bounded `FetchReactorPool` (max 16 reusable worker threads)
                 // backed by `slice-io::RegisteredBufferPool` 64 KB slabs.
                 let tenant_id = BOA_ACTIVE_TENANT.with(|t| t.borrow().clone());
                 let net_hosts: FxHashSet<String> = BOA_NET_HOSTS.with(|h| h.borrow().clone());
+                let allow_private_networks =
+                    crate::boa_realm::BOA_ALLOW_PRIVATE_NETS.with(|p| p.get());
                 let egress_secrets: Vec<String> = BOA_EGRESS_SECRETS.with(|s| s.borrow().clone());
                 let mem_budget = BOA_KV_MEM_BUDGET.with(|m| m.get());
                 let pool = FetchReactorPool::global();
@@ -201,6 +206,7 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                         redirect_mode,
                         tenant_id: t_id,
                         net_hosts: n_hosts,
+                        allow_private_networks,
                         egress_secrets: e_secrets,
                         mem_budget,
                         tx,
@@ -238,7 +244,10 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
             for (handle, result) in completed_list {
                 settle_completed_fetch(handle, result, ctx);
             }
-            let _ = ctx.run_jobs();
+            if !run_jobs_and_check_rejections(ctx) {
+                clear_event_loop_state();
+                return;
+            }
             continue;
         }
 
@@ -431,7 +440,10 @@ pub(crate) fn drive_event_loop_to_completion(ctx: &mut Context) {
                         .with(|st| st.borrow_mut().in_flight_fetches.remove(&done.id));
                     if let Some(handle) = handle_opt {
                         settle_completed_fetch(handle, done.result, ctx);
-                        let _ = ctx.run_jobs();
+                        if !run_jobs_and_check_rejections(ctx) {
+                            clear_event_loop_state();
+                            return;
+                        }
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {

@@ -42,17 +42,11 @@ fn resolve_worker_script_source(specifier_or_code: &str, is_eval: bool) -> Resul
 
     let raw_path = trimmed.strip_prefix("file://").unwrap_or(trimmed);
     if !check_boa_fs_read_ocap(raw_path) {
-        return Err(format!(
-            "SandboxViolation: Worker script read '{}' denied by OCap read policy",
-            raw_path
-        ));
+        return Err(crate::bindings::helpers::last_ocap_violation_message());
     }
     let norm = norm_vfs_path(raw_path);
     if norm != raw_path && !check_boa_fs_read_ocap(&norm) {
-        return Err(format!(
-            "SandboxViolation: Worker script read '{}' denied by OCap read policy",
-            norm
-        ));
+        return Err(crate::bindings::helpers::last_ocap_violation_message());
     }
 
     // 1. Resolve VFS + host symlinks with per-hop OCap containment
@@ -60,19 +54,13 @@ fn resolve_worker_script_source(specifier_or_code: &str, is_eval: bool) -> Resul
         Ok((_, Some(vfs_src))) => return Ok(String::from_utf8_lossy(&vfs_src).into_owned()),
         Ok((resolved_norm, None)) => {
             if !check_boa_fs_read_ocap(&resolved_norm) {
-                return Err(format!(
-                    "SandboxViolation: Worker script read '{}' denied by OCap read policy",
-                    resolved_norm
-                ));
+                return Err(crate::bindings::helpers::last_ocap_violation_message());
             }
             resolved_norm
         }
         Err(crate::bindings::fs::SymlinkResolveError::ReadOcapDenied(denied)) => {
             let _ = check_boa_fs_read_ocap(&denied);
-            return Err(format!(
-                "SandboxViolation: Worker script read '{}' denied by OCap read policy",
-                denied
-            ));
+            return Err(crate::bindings::helpers::last_ocap_violation_message());
         }
         Err(crate::bindings::fs::SymlinkResolveError::Loop) => {
             return Err(format!(
@@ -109,6 +97,7 @@ fn build_attenuated_worker_caps(
     let parent_execs = BOA_EXEC_BINS.with(|eb_cell| eb_cell.borrow().clone());
     let (parent_allow_cp, parent_max_cp_raw) =
         crate::boa_realm::BOA_CHECKPOINT_CAP.with(|c| c.get());
+    let parent_allow_private_nets = crate::boa_realm::BOA_ALLOW_PRIVATE_NETS.with(|p| p.get());
     let consumed_cp = crate::boa_realm::BOA_CHECKPOINT_STATS.with(|s| s.get().0);
     let parent_token = CapabilityToken {
         allowed_read_prefixes: parent_caps.read_prefixes.clone(),
@@ -116,6 +105,7 @@ fn build_attenuated_worker_caps(
         allowed_net_hosts: parent_net_hosts.clone(),
         allowed_env_keys: parent_env_map.clone(),
         allowed_exec_binaries: parent_execs,
+        allow_private_networks: parent_allow_private_nets,
         allow_checkpoints: parent_allow_cp,
         max_checkpoints: (parent_max_cp_raw < u32::MAX).then_some(parent_max_cp_raw),
     };
@@ -123,6 +113,7 @@ fn build_attenuated_worker_caps(
         allow_read: attenuation.and_then(|a| a.allow_read.as_deref()),
         allow_write: attenuation.and_then(|a| a.allow_write.as_deref()),
         allow_net: attenuation.and_then(|a| a.allow_net.as_deref()),
+        allow_private_networks: None,
         allow_exec: attenuation.and_then(|a| a.allow_exec.as_deref()),
         allow_env: attenuation.and_then(|a| a.allow_env.as_deref()),
         allow_checkpoints: attenuation.and_then(|a| a.checkpoints),

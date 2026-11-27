@@ -4,20 +4,20 @@ use super::{
     BoaSessionFlags, cache_loaded_rc_bundle, ensure_realm_kv_sandbox, ensure_realm_semver_fast,
 };
 use crate::boa_realm::{
-    BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_CHECKPOINT_CAP, BOA_CHECKPOINT_STATS, BOA_CONTEXT_POOL,
-    BOA_CUSTOM_ARGV, BOA_DENIED_CAPABILITIES, BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS,
-    BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS, BOA_EXEC_DIRTY, BOA_FETCH_MOCKS,
-    BOA_FUEL_BUDGET, BOA_HTTP_RES, BOA_KV_MEM_BUDGET, BOA_LAST_EXIT_CODE, BOA_LAST_OCAP_VIOLATION,
-    BOA_NET_HOSTS, BOA_PROCESS_EXIT, BOA_SES_INTL_SIG_PAIR, BOA_STDOUT, BOA_UNCAUGHT_ERROR,
-    BOA_UNHANDLED_REJECTIONS, BOA_VFS_OWNER_TENANT, BOA_VFS_STATE, BOA_VIOLATION,
-    BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED, CHECKPOINT_SLAB, DIRTY_FETCH_MOCK, DIRTY_SOCKETS,
-    DIRTY_VFS, DIRTY_WASM, DIRTY_WEBSOCKET, DIRTY_WORKERS, EXEC_DIRTY_ARGV, EXEC_DIRTY_CHILD_PROC,
-    EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS, EXEC_DIRTY_UNCAUGHT, REALM_CTL_RESET_FS_WATCHERS,
-    REALM_CTL_RESET_WU, REALM_CTL_SET_DET_MODE, REALM_CTL_SET_NEXT_TICK, REALM_CTL_SYNC_ENV,
-    WarmBoaRealm, acquire_warm_boa_realm, call_realm_ctl, create_bare_boa_realm,
-    create_warm_boa_realm, ensure_realm_shards, ensure_vfs_tenant_affinity,
-    first_ses_proto_sig_mismatch_idx, mark_exec_dirty, release_prewarmed_boa_realm,
-    try_acquire_pooled_boa_realm, vfs_owner_namespace,
+    BOA_ACTIVE_CAPS, BOA_ACTIVE_TENANT, BOA_ALLOW_PRIVATE_NETS, BOA_CHECKPOINT_CAP,
+    BOA_CHECKPOINT_STATS, BOA_CONTEXT_POOL, BOA_CUSTOM_ARGV, BOA_DENIED_CAPABILITIES,
+    BOA_DET_STATE, BOA_DIRTY_SUBSYSTEMS, BOA_EGRESS_SECRETS, BOA_ENV_MAP, BOA_EXEC_BINS,
+    BOA_EXEC_DIRTY, BOA_FETCH_MOCKS, BOA_FUEL_BUDGET, BOA_HTTP_RES, BOA_KV_MEM_BUDGET,
+    BOA_LAST_EXIT_CODE, BOA_LAST_OCAP_VIOLATION, BOA_NET_HOSTS, BOA_PROCESS_EXIT,
+    BOA_SES_INTL_SIG_PAIR, BOA_STDOUT, BOA_UNCAUGHT_ERROR, BOA_UNHANDLED_REJECTIONS,
+    BOA_VFS_OWNER_TENANT, BOA_VFS_STATE, BOA_VIOLATION, BOA_WAIT_UNTIL_COUNT, BOA_WS_UPGRADED,
+    CHECKPOINT_SLAB, DIRTY_FETCH_MOCK, DIRTY_SOCKETS, DIRTY_VFS, DIRTY_WASM, DIRTY_WEBSOCKET,
+    DIRTY_WORKERS, EXEC_DIRTY_ARGV, EXEC_DIRTY_CHILD_PROC, EXEC_DIRTY_EXIT, EXEC_DIRTY_REJECTIONS,
+    EXEC_DIRTY_UNCAUGHT, REALM_CTL_RESET_FS_WATCHERS, REALM_CTL_RESET_WU, REALM_CTL_SET_DET_MODE,
+    REALM_CTL_SET_NEXT_TICK, REALM_CTL_SYNC_ENV, WarmBoaRealm, acquire_warm_boa_realm,
+    call_realm_ctl, create_bare_boa_realm, create_warm_boa_realm, ensure_realm_shards,
+    ensure_vfs_tenant_affinity, first_ses_proto_sig_mismatch_idx, mark_exec_dirty,
+    release_prewarmed_boa_realm, try_acquire_pooled_boa_realm, vfs_owner_namespace,
 };
 use crate::boacas::{
     BOACAS_FLAG_HAS_KV_SANDBOX, BOACAS_FLAG_HAS_SEMVER_FAST, BOACAS_FLAG_HAS_WORKER,
@@ -46,6 +46,7 @@ fn setup_prewarm_caps(caps: &CapabilityToken) -> (bool, bool, bool, bool) {
     if has_net {
         BOA_NET_HOSTS.with(|h| *h.borrow_mut() = caps.allowed_net_hosts.clone());
     }
+    BOA_ALLOW_PRIVATE_NETS.with(|p| p.set(caps.allow_private_networks));
     let has_env = !caps.allowed_env_keys.is_empty();
     if has_env {
         BOA_ENV_MAP.with(|m| *m.borrow_mut() = caps.allowed_env_keys.clone());
@@ -69,6 +70,7 @@ fn scrub_after_prewarm(realm: &mut WarmBoaRealm, prewarm_flags: (bool, bool, boo
     if has_net {
         BOA_NET_HOSTS.with(|h| h.borrow_mut().clear());
     }
+    BOA_ALLOW_PRIVATE_NETS.with(|p| p.set(false));
     if has_env {
         call_realm_ctl(realm, REALM_CTL_SYNC_ENV, false);
         BOA_ENV_MAP.with(|m| m.borrow_mut().clear());
@@ -427,6 +429,9 @@ impl SliceIsolate {
                         .cloned(),
                 );
             }
+        });
+        BOA_ALLOW_PRIVATE_NETS.with(|p| {
+            p.set(self.compartment.capabilities.allow_private_networks);
         });
         let has_egress_secrets = !self.egress_audit_secrets.is_empty();
         BOA_EGRESS_SECRETS.with(|s| {
