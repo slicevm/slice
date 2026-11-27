@@ -31,6 +31,8 @@ interface SandboxEvalOptions {
     allowRead?: string[];
     /** Allowed VFS write path prefixes (INTERSECTED with parent's allowed write prefixes!) */
     allowWrite?: string[];
+    /** Virtual-only in-memory VFS mounts with zero host fall-through (INTERSECTED with parent's virtual mounts!) */
+    virtualMounts?: string[];
     /** Allowed outbound network hosts (INTERSECTED with parent's allowed network hosts!) */
     allowNet?: string[];
     /** Opt-in for DNS hostnames resolving to private/loopback IPs (attenuated by parent; cloud metadata remains unconditionally blocked) */
@@ -244,6 +246,8 @@ Compiles and executes TypeScript or JavaScript (including top-level `await`, top
     "fuel": 500000,
     "memory": 4194304,
     "allowRead": ["/workspace"],
+    "virtualMounts": ["/scratch"],
+    "artifacts": true,
     "allowNet": ["api.github.com:443"],
     "allowPrivateNetworks": false,
     "auditSecrets": ["sk_live_optional_extra_secret", "db_prod_secret"],
@@ -254,6 +258,12 @@ Compiles and executes TypeScript or JavaScript (including top-level `await`, top
   ```
 - **Returns:** JSON `SandboxEvalOutcome` (`ok`, `exitCode`, `processExited`, `stdout`, `returnValue`, `returnJson`, `deniedCapabilities`, `fuelUsed`, `memoryUsedBytes`, `peakMemoryBytes`, `spawnTimeNs`, `compileTimeNs`, `execTimeNs`, `totalTimeUs`, `checkpointsTaken`, `restoresPerformed`, `restoreTimeNs`, `violation`, `error`; non-zero `exitCode` sets `ok: false` and MCP `isError: true`).
   - Note: `returnValue` (and Rust `ExecutionMetrics::return_value`) is a display string whose object formatting depends on the execution tier (for example `{ a: 1 }` on Tier-0 vs JS `ToString` `[object Object]` on Tier-1). Always read `returnJson` (or Rust `SliceIsolate::last_return_json()`) for a tier-independent structured JSON result.
+- **Artifact Capture (`"artifacts": true`):** When `"artifacts": true` is passed to `slice_eval_ts`, Slice mounts an empty virtual-only `/artifacts` directory with zero host access and drains any files written there after execution (even on violation or timeout):
+  - The primary JSON `text` block includes `artifacts` (`name`, `size`, `contentType`, `sha256`, optional `hostPath`) and `skippedArtifacts` (`path`, `reason`).
+  - Safe raster images detected by magic bytes (`PNG`, `JPEG`, `GIF`, `WebP`, up to `1 MiB`) are appended as MCP `{ "type": "image", "data": "<base64>", "mimeType": "<mime>" }` blocks.
+  - UTF-8 text artifacts (`.txt`, `.csv`, `.json`, `.md`, `.svg`, `.html`, etc., up to `256 KiB`) are appended as MCP `{ "type": "resource", "resource": { "uri": "slice://artifacts/<path>", "mimeType": "<mime>", "text": "<utf8>" } }` blocks (SVG and HTML are never emitted as `image`).
+  - Binary or over-cap artifacts are safely written without symlink traversal when `slice mcp --artifacts-dir=<dir>` is configured and returned as MCP `resource_link` blocks (`file://...`).
+  - All drained artifacts are scanned by Ring 4 Egress DLP; files containing registered secrets are dropped (`reason: "auditedSecret"`) and logged in `deniedCapabilities` as `artifact:<path>`.
 
 #### 2. `slice_kv_set`
 Stores a key-value pair inside the MCP host's sharded `Slice.kv` store so the agent can persist intermediate plans or results across tool calls.

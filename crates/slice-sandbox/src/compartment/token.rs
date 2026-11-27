@@ -19,6 +19,8 @@ fn default_allow_checkpoints() -> bool {
 pub struct CapabilityToken {
     pub allowed_read_prefixes: Vec<String>,
     pub allowed_write_prefixes: Vec<String>,
+    #[serde(default)]
+    pub virtual_mounts: Vec<String>,
     pub allowed_net_hosts: FxHashSet<String>,
     pub allowed_env_keys: FxHashMap<String, String>,
     #[serde(default)]
@@ -37,6 +39,7 @@ impl Default for CapabilityToken {
         Self {
             allowed_read_prefixes: Vec::new(),
             allowed_write_prefixes: Vec::new(),
+            virtual_mounts: Vec::new(),
             allowed_net_hosts: FxHashSet::default(),
             allowed_env_keys: FxHashMap::default(),
             allowed_exec_binaries: Vec::new(),
@@ -72,6 +75,7 @@ fn is_already_canonical_net_grant(s: &str) -> bool {
 pub struct CapabilityAttenuationRequest<'a> {
     pub allow_read: Option<&'a [String]>,
     pub allow_write: Option<&'a [String]>,
+    pub virtual_mounts: Option<&'a [String]>,
     pub allow_net: Option<&'a [String]>,
     pub allow_private_networks: Option<bool>,
     pub allow_exec: Option<&'a [String]>,
@@ -118,6 +122,28 @@ impl CapabilityToken {
         }
     }
 
+    /// Registers a virtual-only VFS mount prefix (in-memory readable/writable directory with zero
+    /// host-disk fall-through). Wildcard `"*"`, root `"/"`, and rejected traversal/UNC/device
+    /// paths are ignored.
+    #[inline]
+    pub fn push_virtual_mount(&mut self, prefix: &str) {
+        let trimmed = prefix.trim();
+        if trimmed.is_empty()
+            || trimmed == "*"
+            || trimmed == "/"
+            || is_rejected_vfs_candidate(trimmed)
+        {
+            return;
+        }
+        let canon = normalize_vfs_path_lexical(trimmed);
+        if canon.is_empty() || canon == "/" {
+            return;
+        }
+        if !self.virtual_mounts.contains(&canon) {
+            self.virtual_mounts.push(canon);
+        }
+    }
+
     #[inline]
     pub fn insert_net_host(&mut self, host: &str) {
         if let Some(canon) = canonicalize_net_grant_entry(host) {
@@ -146,6 +172,12 @@ impl CapabilityToken {
     pub fn with_write_prefix(mut self, prefix: impl Into<String>) -> Self {
         let raw = prefix.into();
         self.push_write_prefix(&raw);
+        self
+    }
+
+    pub fn with_virtual_mount(mut self, prefix: impl Into<String>) -> Self {
+        let raw = prefix.into();
+        self.push_virtual_mount(&raw);
         self
     }
 
@@ -244,6 +276,36 @@ impl CapabilityToken {
             }
             None => {
                 child.allowed_write_prefixes = self.allowed_write_prefixes.clone();
+            }
+        }
+
+        // Virtual-only mounts attenuate strictly against parent's `virtual_mounts` (never widening
+        // into host `allowed_read_prefixes` / `allowed_write_prefixes`).
+        match req.virtual_mounts {
+            Some(requested) => {
+                for vm in requested {
+                    if !is_rejected_vfs_candidate(vm)
+                        && self
+                            .virtual_mounts
+                            .iter()
+                            .any(|p| vfs_prefix_matches(vm, p))
+                    {
+                        child.push_virtual_mount(vm);
+                    }
+                }
+            }
+            None => {
+                for pm in &self.virtual_mounts {
+                    let read_ok = req
+                        .allow_read
+                        .is_none_or(|r| r.iter().any(|rp| vfs_prefix_matches(pm, rp)));
+                    let write_ok = req
+                        .allow_write
+                        .is_none_or(|w| w.iter().any(|wp| vfs_prefix_matches(pm, wp)));
+                    if read_ok && write_ok {
+                        child.push_virtual_mount(pm);
+                    }
+                }
             }
         }
 

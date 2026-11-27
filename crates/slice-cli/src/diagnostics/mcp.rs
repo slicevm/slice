@@ -1,10 +1,19 @@
+use crate::commands::artifacts::{
+    ArtifactMetadata, detect_artifact_mime, detect_raster_image_magic, is_inline_text_mime,
+    path_to_file_uri, write_single_artifact_safely,
+};
 use crate::config::ResolvedExecutionConfig;
 use anyhow::Result;
 use slice_engine::SliceIsolate;
 use std::io::{BufRead, Write};
+use std::path::Path;
 
 /// Maximum allowed MCP JSON-RPC 2.0 request line length (`4 MB`) (`CLI-SEC-04`).
 pub(crate) const MAX_MCP_LINE_BYTES: usize = 4 * 1024 * 1024;
+/// Maximum byte size for inline MCP `image` content blocks (`1 MiB`).
+const MCP_INLINE_IMAGE_MAX_BYTES: usize = 1024 * 1024;
+/// Maximum byte size for inline UTF-8 MCP `resource` content blocks (`256 KiB`).
+const MCP_INLINE_TEXT_MAX_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum McpLineRead {
@@ -104,6 +113,10 @@ fn parse_mcp_sandbox_eval_options(args: &serde_json::Value) -> slice_engine::San
         timeout_ms: ["timeoutMs", "wallClockMs", "maxWallClockMs"]
             .iter()
             .find_map(|k| args.get(*k).and_then(|v| v.as_u64())),
+        artifacts: args
+            .get("artifacts")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         ..Default::default()
     };
     for (keys, target) in [
@@ -114,6 +127,10 @@ fn parse_mcp_sandbox_eval_options(args: &serde_json::Value) -> slice_engine::San
         (
             &["allowWrite", "writePrefixes", "fsWrite"][..],
             &mut opts.allow_write,
+        ),
+        (
+            &["virtualMounts", "virtualMount"][..],
+            &mut opts.virtual_mounts,
         ),
         (&["allowNet", "netHosts"][..], &mut opts.allow_net),
         (&["allowExec", "execBinaries"][..], &mut opts.allow_exec),
@@ -171,6 +188,7 @@ pub(crate) fn cmd_mcp(args: &[String]) -> Result<()> {
         isolate.add_egress_audit_secret(sec.clone());
     }
 
+    let artifacts_dir = exec_cfg.artifacts_dir;
     if smoke_test {
         let requests = [
             concat!(
@@ -190,7 +208,11 @@ pub(crate) fn cmd_mcp(args: &[String]) -> Result<()> {
         let mut saw_eval_42 = false;
         let mut saw_kv_ready = false;
         for (idx, req) in requests.iter().enumerate() {
-            let Some(resp) = handle_mcp_jsonrpc_line(req, &mut isolate) else {
+            let Some(resp) = handle_mcp_jsonrpc_line_with_artifacts_dir(
+                req,
+                &mut isolate,
+                artifacts_dir.as_deref(),
+            ) else {
                 anyhow::bail!("MCP smoke test request #{} produced no response", idx + 1);
             };
             println!("  -> {}", resp);
@@ -264,7 +286,11 @@ pub(crate) fn cmd_mcp(args: &[String]) -> Result<()> {
                     }
                 };
                 if !line_str.is_empty()
-                    && let Some(resp_json) = handle_mcp_jsonrpc_line(line_str, &mut isolate)
+                    && let Some(resp_json) = handle_mcp_jsonrpc_line_with_artifacts_dir(
+                        line_str,
+                        &mut isolate,
+                        artifacts_dir.as_deref(),
+                    )
                 {
                     writeln!(stdout, "{}", resp_json)?;
                     stdout.flush()?;
@@ -275,7 +301,16 @@ pub(crate) fn cmd_mcp(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) -> Option<String> {
+    handle_mcp_jsonrpc_line_with_artifacts_dir(line, isolate, None)
+}
+
+pub(crate) fn handle_mcp_jsonrpc_line_with_artifacts_dir(
+    line: &str,
+    isolate: &mut SliceIsolate,
+    artifacts_dir: Option<&Path>,
+) -> Option<String> {
     if line.len() > MAX_MCP_LINE_BYTES {
         return Some(
             serde_json::json!({
@@ -335,6 +370,8 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                             "memoryBytes": { "type": "integer", "description": "Optional memory ceiling in bytes (alias for memory), attenuated against the server --memory ceiling" },
                             "allowRead": { "type": ["string", "array"], "description": "Optional allowed VFS read prefix(es) attenuated against server grants" },
                             "allowWrite": { "type": ["string", "array"], "description": "Optional allowed VFS write prefix(es) attenuated against server grants" },
+                            "virtualMounts": { "type": ["string", "array"], "description": "Optional virtual-only in-memory VFS mount prefix(es) attenuated against server grants" },
+                            "artifacts": { "type": "boolean", "description": "When true, mounts an empty in-memory virtual /artifacts directory and returns files written there as MCP image/resource/resource_link content blocks (Ring 4 DLP scanned)" },
                             "allowNet": { "type": ["string", "array"], "description": "Optional allowed network host(s) attenuated against server grants" },
                             "allowPrivateNetworks": { "type": "boolean", "description": "Optional opt-in for DNS hostnames resolving to private/loopback IPs (attenuated against server --allow-private-networks; cloud metadata remains unconditionally blocked)" },
                             "allowExec": { "type": ["string", "array"], "description": "Optional allowed subprocess binary(ies) attenuated against server grants" },
@@ -410,6 +447,63 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                     isolate.sync_live_kv_memory();
                     let mut payload = serde_json::to_value(&outcome)
                         .unwrap_or_else(|_| serde_json::json!({ "ok": outcome.ok }));
+                    let mut extra_blocks: Vec<serde_json::Value> = Vec::new();
+                    if let Some(ref report) = outcome.drained_artifacts {
+                        let mut meta_list: Vec<ArtifactMetadata> =
+                            Vec::with_capacity(report.files.len());
+                        for file in &report.files {
+                            let mime = detect_artifact_mime(&file.path, &file.bytes);
+                            let sha256 = slice_engine::intrinsics::sha256_hex(&file.bytes);
+                            let mut host_path_str = None;
+                            if let Some(img_mime) = detect_raster_image_magic(&file.bytes)
+                                && file.bytes.len() <= MCP_INLINE_IMAGE_MAX_BYTES
+                            {
+                                let b64 = slice_engine::base64_encode(&file.bytes, false);
+                                extra_blocks.push(serde_json::json!({
+                                    "type": "image",
+                                    "data": b64,
+                                    "mimeType": img_mime
+                                }));
+                            } else if is_inline_text_mime(mime)
+                                && file.bytes.len() <= MCP_INLINE_TEXT_MAX_BYTES
+                                && let Ok(text) = std::str::from_utf8(&file.bytes)
+                            {
+                                extra_blocks.push(serde_json::json!({
+                                    "type": "resource",
+                                    "resource": {
+                                        "uri": format!("slice://artifacts/{}", file.path),
+                                        "mimeType": mime,
+                                        "text": text
+                                    }
+                                }));
+                            } else if let Some(dir) = artifacts_dir
+                                && let Ok(written_path) =
+                                    write_single_artifact_safely(dir, &file.path, &file.bytes)
+                            {
+                                extra_blocks.push(serde_json::json!({
+                                    "type": "resource_link",
+                                    "uri": path_to_file_uri(&written_path),
+                                    "name": file.path,
+                                    "mimeType": mime
+                                }));
+                                host_path_str = Some(written_path.to_string_lossy().into_owned());
+                            }
+                            meta_list.push(ArtifactMetadata {
+                                name: file.path.clone(),
+                                size: file.bytes.len(),
+                                content_type: mime.to_string(),
+                                sha256,
+                                host_path: host_path_str,
+                            });
+                        }
+                        if let Some(obj) = payload.as_object_mut() {
+                            obj.insert("artifacts".to_string(), serde_json::json!(meta_list));
+                            obj.insert(
+                                "skippedArtifacts".to_string(),
+                                serde_json::json!(report.skipped),
+                            );
+                        }
+                    }
                     if let Some(obj) = payload.as_object_mut() {
                         // Preserve legacy MCP field aliases alongside canonical `SandboxEvalOutcome` keys.
                         obj.insert(
@@ -421,8 +515,12 @@ pub(crate) fn handle_mcp_jsonrpc_line(line: &str, isolate: &mut SliceIsolate) ->
                             serde_json::json!(outcome.total_time_us),
                         );
                     }
+                    let mut content = Vec::with_capacity(1 + extra_blocks.len());
+                    content
+                        .push(serde_json::json!({ "type": "text", "text": payload.to_string() }));
+                    content.extend(extra_blocks);
                     serde_json::json!({
-                        "content": [{ "type": "text", "text": payload.to_string() }],
+                        "content": content,
                         "isError": !outcome.ok
                     })
                 }

@@ -61,17 +61,22 @@ fn execute_configured_cli_isolate<'a>(
     prewarm_bundle: bool,
     capture_return_json: bool,
     quiet: bool,
+    json_output: bool,
     error_source_fn: impl FnOnce() -> Cow<'a, str>,
 ) -> Result<(ExecutionMetrics, Option<String>)> {
+    let mut caps = exec_cfg.caps.clone();
+    if exec_cfg.artifacts_dir.is_some() {
+        caps.push_virtual_mount("/artifacts");
+    }
     let mut isolate = SliceIsolate::spawn(
         tenant_id,
         1,
-        exec_cfg.caps.clone(),
+        caps.clone(),
         exec_cfg.fuel_limit,
         exec_cfg.mem_limit,
     );
     isolate.set_deterministic_seed(exec_cfg.deterministic_seed);
-    if capture_return_json {
+    if capture_return_json || json_output {
         isolate.set_capture_return_json(true);
     }
     if let Some(argv) = argv_opt {
@@ -81,7 +86,7 @@ fn execute_configured_cli_isolate<'a>(
         isolate.add_egress_audit_secret(sec.clone());
     }
     if prewarm_bundle {
-        SliceIsolate::prewarm_boa_bundle_with_caps(bytecode, &exec_cfg.caps);
+        SliceIsolate::prewarm_boa_bundle_with_caps(bytecode, &caps);
         let snap = isolate.checkpoint();
         let _ = isolate.execute_bytecode(bytecode, archive_opt);
         isolate.restore(snap);
@@ -90,34 +95,112 @@ fn execute_configured_cli_isolate<'a>(
     if exec_cfg.trace_output_path.is_some() {
         isolate.enable_tracing(true);
     }
-    let metrics = isolate.execute_bytecode(bytecode, archive_opt)?;
+    let exec_res = isolate.execute_bytecode(bytecode, archive_opt);
+    let (written_artifacts, skipped_artifacts) =
+        if let Some(ref artifacts_dir) = exec_cfg.artifacts_dir {
+            let report = isolate.drain_vfs("/artifacts", &slice_engine::DrainLimits::default());
+            let written =
+                crate::commands::artifacts::write_drained_artifacts_to_dir(artifacts_dir, &report)?;
+            if !json_output && !quiet {
+                crate::commands::artifacts::print_artifacts_stderr_summary(
+                    artifacts_dir,
+                    &written,
+                    &report.skipped,
+                );
+            }
+            (written, report.skipped)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+    let mut metrics = match exec_res {
+        Ok(m) => m,
+        Err(violation) => {
+            if json_output {
+                LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
+                let payload = serde_json::json!({
+                    "ok": false,
+                    "exitCode": serde_json::Value::Null,
+                    "processExited": false,
+                    "stdout": Vec::<String>::new(),
+                    "returnValue": "undefined",
+                    "returnJson": serde_json::Value::Null,
+                    "error": serde_json::Value::Null,
+                    "violation": violation.to_string(),
+                    "deniedCapabilities": isolate.denied_capabilities(),
+                    "artifacts": written_artifacts,
+                    "skippedArtifacts": skipped_artifacts,
+                    "fuelUsed": isolate.compartment.fuel_consumed,
+                    "memoryUsedBytes": isolate.compartment.memory_used_bytes,
+                });
+                println!("{}", payload);
+            }
+            return Err(violation.into());
+        }
+    };
+    if isolate.denied_capabilities.len() > metrics.denied_capabilities.len() {
+        metrics
+            .denied_capabilities
+            .extend_from_slice(&isolate.denied_capabilities[metrics.denied_capabilities.len()..]);
+    }
     if let Some(ref trace_path) = exec_cfg.trace_output_path {
         let trace_json = isolate.export_chrome_trace_json(&metrics);
         isolate.enable_tracing(false);
         std::fs::write(trace_path, trace_json)
             .with_context(|| format!("Failed to write Chrome trace to {}", trace_path.display()))?;
     }
+    if let Some(code) = metrics.exit_code {
+        LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
+    }
+    let is_uncaught = metrics.return_value.starts_with("Uncaught ");
+    let mapped_error = if is_uncaught {
+        if metrics.exit_code.is_none() {
+            LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
+        }
+        let annotated = error_source_fn();
+        Some(slice_cas::map_bundled_error_location(
+            &annotated,
+            &metrics.return_value,
+        ))
+    } else {
+        None
+    };
+    let captured_json = if capture_return_json || json_output {
+        isolate.last_return_json().map(str::to_owned)
+    } else {
+        None
+    };
+    if json_output {
+        let ok = !is_uncaught && metrics.exit_code.unwrap_or(0) == 0;
+        let payload = serde_json::json!({
+            "ok": ok,
+            "exitCode": metrics.exit_code,
+            "processExited": metrics.process_exited,
+            "stdout": metrics.stdout,
+            "returnValue": metrics.return_value,
+            "returnJson": captured_json,
+            "error": mapped_error,
+            "violation": serde_json::Value::Null,
+            "deniedCapabilities": metrics.denied_capabilities,
+            "artifacts": written_artifacts,
+            "skippedArtifacts": skipped_artifacts,
+            "fuelUsed": metrics.fuel_consumed,
+            "memoryUsedBytes": metrics.memory_used_bytes,
+            "totalTimeUs": metrics.total_time_ns as f64 / 1_000.0,
+        });
+        println!("{}", payload);
+        if let Some(mapped) = mapped_error {
+            bail!("{}", mapped);
+        }
+        return Ok((metrics, captured_json));
+    }
     if !quiet {
         for line in &metrics.stdout {
             println!("{}", line);
         }
     }
-    if let Some(code) = metrics.exit_code {
-        LAST_CLI_EXIT_CODE.store(code, Ordering::Relaxed);
-    }
-    if metrics.return_value.starts_with("Uncaught ") {
-        if metrics.exit_code.is_none() {
-            LAST_CLI_EXIT_CODE.store(1, Ordering::Relaxed);
-        }
-        let annotated = error_source_fn();
-        let mapped = slice_cas::map_bundled_error_location(&annotated, &metrics.return_value);
+    if let Some(mapped) = mapped_error {
         bail!("{}", mapped);
     }
-    let captured_json = if capture_return_json {
-        isolate.last_return_json().map(str::to_owned)
-    } else {
-        None
-    };
     Ok((metrics, captured_json))
 }
 
@@ -250,6 +333,7 @@ pub(crate) fn run_embedded_standalone(archive: MappedCasArchive) -> Result<()> {
         false,
         false,
         quiet,
+        false,
         || Cow::Owned(archive.reconstruct_annotated_source(entry)),
     )?;
 
@@ -270,6 +354,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
     LAST_CLI_EXIT_CODE.store(0, Ordering::Relaxed);
     let mut quiet = false;
     let mut print_metrics = false;
+    let mut json_output = false;
     let mut watch_mode = false;
     let mut watch_once = false;
     let mut target_opt: Option<String> = None;
@@ -336,6 +421,8 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             quiet = true;
         } else if arg == "--metrics" {
             print_metrics = true;
+        } else if arg == "--json" {
+            json_output = true;
         } else if arg == "--watch" {
             watch_mode = true;
         } else if arg == "--watch-once" {
@@ -380,9 +467,10 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             false,
             print_result,
             quiet,
+            json_output,
             || Cow::Borrowed(raw_code.as_str()),
         )?;
-        if print_result && !m.process_exited && !quiet {
+        if print_result && !m.process_exited && !quiet && !json_output {
             if m.return_value == "[object Object]" {
                 println!(
                     "{}",
@@ -444,6 +532,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             false,
             false,
             quiet,
+            json_output,
             || Cow::Borrowed(stdin_src.as_str()),
         )?;
         return Ok(());
@@ -480,6 +569,7 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             exec_cfg.warm_pool,
             false,
             quiet,
+            json_output,
             || Cow::Owned(archive.reconstruct_annotated_source(entry)),
         )?;
         m
@@ -510,12 +600,13 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
             exec_cfg.warm_pool,
             false,
             quiet,
+            json_output,
             || Cow::Borrowed(bundled_source.as_str()),
         )?;
         m
     };
 
-    if print_metrics {
+    if print_metrics && !json_output {
         println!(
             "[Slice Telemetry] Tier: {:?} | Instantiate: {:.2} us | Exec: {:.2} us | Total: {:.2} us | Memory: {} B | Stat Syscalls: {}",
             metrics.highest_tier_reached,
@@ -544,6 +635,9 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
                 reload_cfg.apply_inline_directives(&raw_entry, entry_file.parent())?;
                 let bundled_source = slice_cas::bundle_entrypoint_with_deps(&entry_file)?;
                 let bytecode = compile_source_to_bytecode(&bundled_source);
+                if reload_cfg.artifacts_dir.is_some() {
+                    reload_cfg.caps.push_virtual_mount("/artifacts");
+                }
                 let mut isolate = SliceIsolate::spawn(
                     "tenant-cli-watch",
                     1,
@@ -555,8 +649,23 @@ pub(crate) fn cmd_run(args: &[String]) -> Result<()> {
                 for sec in &reload_cfg.audit_secrets {
                     isolate.add_egress_audit_secret(sec.clone());
                 }
-                let reload_metrics = isolate
-                    .execute_bytecode(&bytecode, None)
+                let exec_res = isolate.execute_bytecode(&bytecode, None);
+                if let Some(ref artifacts_dir) = reload_cfg.artifacts_dir {
+                    let report =
+                        isolate.drain_vfs("/artifacts", &slice_engine::DrainLimits::default());
+                    let written = crate::commands::artifacts::write_drained_artifacts_to_dir(
+                        artifacts_dir,
+                        &report,
+                    )?;
+                    if !quiet {
+                        crate::commands::artifacts::print_artifacts_stderr_summary(
+                            artifacts_dir,
+                            &written,
+                            &report.skipped,
+                        );
+                    }
+                }
+                let reload_metrics = exec_res
                     .map_err(|v| anyhow::anyhow!("Sandbox containment violation: {}", v))?;
                 Ok((bundled_source, reload_metrics))
             })();

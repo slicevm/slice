@@ -44,32 +44,56 @@ fn current_boa_tenant_or_default() -> String {
     })
 }
 
-/// Returns `true` when the active compartment has at least one `--allow-read` prefix configured.
+/// Returns `true` when the active compartment has at least one `--allow-read` or `--virtual-mount` prefix configured.
 #[inline]
 pub(crate) fn has_any_boa_fs_read_ocap() -> bool {
-    BOA_ACTIVE_CAPS.with(|c| !c.borrow().read_prefixes.is_empty())
+    BOA_ACTIVE_CAPS.with(|c| {
+        let caps = c.borrow();
+        !caps.read_prefixes.is_empty() || !caps.virtual_mounts.is_empty()
+    })
 }
 
-/// Returns `true` when the active compartment has at least one `--allow-write` prefix configured.
+/// Returns `true` when the active compartment has at least one `--allow-write` or `--virtual-mount` prefix configured.
 #[inline]
 pub(crate) fn has_any_boa_fs_write_ocap() -> bool {
-    BOA_ACTIVE_CAPS.with(|c| !c.borrow().write_prefixes.is_empty())
+    BOA_ACTIVE_CAPS.with(|c| {
+        let caps = c.borrow();
+        !caps.write_prefixes.is_empty() || !caps.virtual_mounts.is_empty()
+    })
 }
 
 /// Side-effect-free predicate checking whether the active compartment currently holds OCap read
 /// authority for `path` without recording a `SandboxViolation` when denied.
 #[inline]
 pub(crate) fn has_boa_fs_read_ocap(path: &str) -> bool {
-    BOA_ACTIVE_CAPS
-        .with(|c| slice_sandbox::vfs_path_matches_any_prefix(path, &c.borrow().read_prefixes))
+    BOA_ACTIVE_CAPS.with(|c| {
+        let caps = c.borrow();
+        slice_sandbox::vfs_path_matches_any_prefix(path, &caps.read_prefixes)
+            || slice_sandbox::vfs_path_matches_any_prefix(path, &caps.virtual_mounts)
+    })
 }
 
 /// Side-effect-free predicate checking whether the active compartment currently holds OCap write
 /// authority for `path` without recording a `SandboxViolation` when denied.
 #[inline]
 pub(crate) fn has_boa_fs_write_ocap(path: &str) -> bool {
-    BOA_ACTIVE_CAPS
-        .with(|c| slice_sandbox::vfs_path_matches_any_prefix(path, &c.borrow().write_prefixes))
+    BOA_ACTIVE_CAPS.with(|c| {
+        let caps = c.borrow();
+        slice_sandbox::vfs_path_matches_any_prefix(path, &caps.write_prefixes)
+            || slice_sandbox::vfs_path_matches_any_prefix(path, &caps.virtual_mounts)
+    })
+}
+
+/// Returns `true` when `path` lies inside an active virtual-only VFS mount (`--virtual-mount`),
+/// meaning host-disk fall-through (`std::fs::*`) MUST NEVER occur for `path`.
+/// Fast-path returns `false` with zero allocation when no virtual mounts are configured.
+#[inline]
+pub(crate) fn is_boa_fs_virtual_only(path: &str) -> bool {
+    BOA_ACTIVE_CAPS.with(|c| {
+        let caps = c.borrow();
+        !caps.virtual_mounts.is_empty()
+            && slice_sandbox::vfs_path_matches_any_prefix(path, &caps.virtual_mounts)
+    })
 }
 
 #[inline]

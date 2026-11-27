@@ -37,6 +37,7 @@ impl ResolvedExecutionConfig {
             server_port: None,
             server_workers: None,
             static_dir: None,
+            artifacts_dir: None,
             tls_cert: None,
             tls_key: None,
             trust_directives: false,
@@ -52,6 +53,7 @@ impl ResolvedExecutionConfig {
             cli_port_override: None,
             cli_workers_override: None,
             cli_static_override: None,
+            cli_artifacts_dir_override: None,
             cli_tls_cert_override: None,
             cli_tls_key_override: None,
             cli_trust_directives_override: None,
@@ -207,6 +209,19 @@ impl ResolvedExecutionConfig {
             if let Some(v) = find_slice_env("SLICE_ALLOW_WRITE") {
                 for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     cfg.caps = cfg.caps.with_write_prefix(item);
+                }
+            }
+            if let Some(v) = find_slice_env("SLICE_VIRTUAL_MOUNT") {
+                for item in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    cfg.caps.push_virtual_mount(item);
+                }
+            }
+            if let Some(v) = find_slice_env("SLICE_ARTIFACTS_DIR") {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    let p = PathBuf::from(trimmed);
+                    cfg.artifacts_dir = Some(p.clone());
+                    cfg.cli_artifacts_dir_override = Some(p);
                 }
             }
             if let Some(v) = find_slice_env("SLICE_ALLOW_NET") {
@@ -403,6 +418,20 @@ impl ResolvedExecutionConfig {
                 for p in prefixes.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     cfg.caps = cfg.caps.with_write_prefix(p);
                 }
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(mounts) = match_non_empty_flag_value(args, &mut arg_idx, "--virtual-mount")?
+            {
+                for m in mounts.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    cfg.caps.push_virtual_mount(m);
+                }
+                arg_idx += 1;
+                continue;
+            }
+            if let Some(ad) = match_non_empty_flag_path(args, &mut arg_idx, "--artifacts-dir")? {
+                cfg.artifacts_dir = Some(ad.clone());
+                cfg.cli_artifacts_dir_override = Some(ad);
                 arg_idx += 1;
                 continue;
             }

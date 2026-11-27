@@ -242,6 +242,7 @@ pub(crate) fn resolve_effective_vfs_path(
                                 && !host_masked_in_walk
                                 && prefix != "/tmp"
                                 && !is_vfs_root_path(prefix)
+                                && !crate::boa_realm::is_boa_fs_virtual_only(prefix)
                                 && (has_boa_fs_read_ocap(prefix) || has_boa_fs_write_ocap(prefix))
                             {
                                 match std::fs::symlink_metadata(prefix) {

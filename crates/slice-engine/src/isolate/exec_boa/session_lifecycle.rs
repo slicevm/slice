@@ -30,7 +30,9 @@ use slice_cas::extract_slice_rc_key;
 use slice_sandbox::CapabilityToken;
 
 fn setup_prewarm_caps(caps: &CapabilityToken) -> (bool, bool, bool, bool) {
-    let has_fs = !caps.allowed_read_prefixes.is_empty() || !caps.allowed_write_prefixes.is_empty();
+    let has_fs = !caps.allowed_read_prefixes.is_empty()
+        || !caps.allowed_write_prefixes.is_empty()
+        || !caps.virtual_mounts.is_empty();
     if has_fs {
         BOA_ACTIVE_CAPS.with(|c| {
             let mut dst = c.borrow_mut();
@@ -40,6 +42,8 @@ fn setup_prewarm_caps(caps: &CapabilityToken) -> (bool, bool, bool, bool) {
             dst.write_prefixes.clear();
             dst.write_prefixes
                 .extend_from_slice(&caps.allowed_write_prefixes);
+            dst.virtual_mounts.clear();
+            dst.virtual_mounts.extend_from_slice(&caps.virtual_mounts);
         });
     }
     let has_net = !caps.allowed_net_hosts.is_empty();
@@ -65,6 +69,7 @@ fn scrub_after_prewarm(realm: &mut WarmBoaRealm, prewarm_flags: (bool, bool, boo
             let mut dst = c.borrow_mut();
             dst.read_prefixes.clear();
             dst.write_prefixes.clear();
+            dst.virtual_mounts.clear();
         });
     }
     if has_net {
@@ -402,18 +407,36 @@ impl SliceIsolate {
                 .compartment
                 .capabilities
                 .allowed_write_prefixes
-                .is_empty();
+                .is_empty()
+            || !self.compartment.capabilities.virtual_mounts.is_empty();
         BOA_ACTIVE_CAPS.with(|c| {
             let mut caps = c.borrow_mut();
             caps.read_prefixes.clear();
             caps.write_prefixes.clear();
+            caps.virtual_mounts.clear();
             if has_fs_grants {
                 caps.read_prefixes
                     .extend_from_slice(&self.compartment.capabilities.allowed_read_prefixes);
                 caps.write_prefixes
                     .extend_from_slice(&self.compartment.capabilities.allowed_write_prefixes);
+                caps.virtual_mounts
+                    .extend_from_slice(&self.compartment.capabilities.virtual_mounts);
             }
         });
+        // Pre-seed every virtual-only mount prefix as an empty opaque VFS directory so
+        // guest code can write directly (e.g. `fs.writeFileSync("/artifacts/a.txt", ...)`)
+        // without calling `mkdirSync` first and with zero host-disk fall-through.
+        if !self.compartment.capabilities.virtual_mounts.is_empty() {
+            BOA_VFS_STATE.with(|v| {
+                let mut vfs = v.borrow_mut();
+                for mount in &self.compartment.capabilities.virtual_mounts {
+                    let norm_mount = crate::boa_realm::norm_vfs_path(mount);
+                    if !norm_mount.is_empty() && norm_mount != "/" {
+                        vfs.ensure_dir_with_ancestors(&norm_mount, true);
+                    }
+                }
+            });
+        }
         let has_net_hosts = !self.compartment.capabilities.allowed_net_hosts.is_empty();
         BOA_NET_HOSTS.with(|h| {
             let mut set = h.borrow_mut();
@@ -529,6 +552,10 @@ impl SliceIsolate {
                 caps.write_prefixes.clear();
                 if caps.write_prefixes.capacity() > 64 {
                     caps.write_prefixes.shrink_to(16);
+                }
+                caps.virtual_mounts.clear();
+                if caps.virtual_mounts.capacity() > 64 {
+                    caps.virtual_mounts.shrink_to(16);
                 }
             });
         }

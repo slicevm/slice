@@ -72,6 +72,7 @@ pub(crate) struct WarmBoaRealm {
 pub(crate) struct BoaFsCaps {
     pub(crate) read_prefixes: Vec<String>,
     pub(crate) write_prefixes: Vec<String>,
+    pub(crate) virtual_mounts: Vec<String>,
 }
 
 pub(crate) type CapturedBoaHttpRes = (u16, String, Option<Vec<u8>>, String, Vec<(String, String)>);
@@ -187,6 +188,7 @@ thread_local! {
             std::cell::RefCell::new(BoaFsCaps {
                 read_prefixes: Vec::new(),
                 write_prefixes: Vec::new(),
+                virtual_mounts: Vec::new(),
             })
         };
     pub(crate) static BOA_VIOLATION: std::cell::RefCell<Option<SandboxViolation>> =

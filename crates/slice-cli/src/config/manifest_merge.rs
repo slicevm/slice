@@ -76,6 +76,11 @@ impl ResolvedExecutionConfig {
             {
                 self.static_dir = Some(dir.join(sd));
             }
+            if self.cli_artifacts_dir_override.is_none()
+                && let Some(ref ad) = m.artifacts_dir
+            {
+                self.artifacts_dir = Some(dir.join(ad));
+            }
             if self.cli_tls_cert_override.is_none()
                 && let Some(ref tc) = m.tls_cert
             {
@@ -255,6 +260,7 @@ impl ResolvedExecutionConfig {
                     allow_read: (!dirs.allow_read.is_empty()).then_some(dirs.allow_read.as_slice()),
                     allow_write: (!dirs.allow_write.is_empty())
                         .then_some(dirs.allow_write.as_slice()),
+                    virtual_mounts: None,
                     allow_net: (!dirs.allow_net.is_empty()).then_some(dirs.allow_net.as_slice()),
                     allow_private_networks: None,
                     allow_exec: (!dirs.allow_exec.is_empty()).then_some(dirs.allow_exec.as_slice()),
@@ -319,6 +325,9 @@ pub(crate) fn merge_parsed_manifest_into_caps_and_dlp(
     }
     for w in m.capabilities.allowed_write_prefixes {
         caps.push_write_prefix(&w);
+    }
+    for vm in m.capabilities.virtual_mounts {
+        caps.push_virtual_mount(&vm);
     }
     for nh in m.capabilities.allowed_net_hosts {
         caps.insert_net_host(&nh);

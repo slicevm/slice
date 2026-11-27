@@ -24,6 +24,10 @@ pub struct SandboxEvalOptions {
     pub allow_read: Vec<String>,
     #[serde(default, alias = "writePrefixes", alias = "fsWrite")]
     pub allow_write: Vec<String>,
+    #[serde(default, alias = "virtualMount")]
+    pub virtual_mounts: Vec<String>,
+    #[serde(default)]
+    pub artifacts: bool,
     #[serde(default, alias = "netHosts")]
     pub allow_net: Vec<String>,
     #[serde(default, alias = "allow_private_networks")]
@@ -68,6 +72,8 @@ pub struct SandboxEvalOutcome {
     pub checkpoints_taken: u32,
     pub restores_performed: u32,
     pub restore_time_ns: u64,
+    #[serde(skip)]
+    pub drained_artifacts: Option<crate::isolate::DrainReport>,
     #[serde(skip)]
     pub(crate) net_persisted_delta_bytes: isize,
 }
@@ -240,13 +246,15 @@ impl SliceIsolate {
         let child_fuel = opts.fuel.unwrap_or(parent_rem_fuel).min(parent_rem_fuel);
 
         // Attenuate child CapabilityToken strictly against parent's capabilities via canonical OCap lattice
-        let child_caps =
+        let mut child_caps =
             self.compartment
                 .capabilities
                 .attenuate(&slice_sandbox::CapabilityAttenuationRequest {
                     allow_read: (!opts.allow_read.is_empty()).then_some(opts.allow_read.as_slice()),
                     allow_write: (!opts.allow_write.is_empty())
                         .then_some(opts.allow_write.as_slice()),
+                    virtual_mounts: (!opts.virtual_mounts.is_empty())
+                        .then_some(opts.virtual_mounts.as_slice()),
                     allow_net: (!opts.allow_net.is_empty()).then_some(opts.allow_net.as_slice()),
                     allow_private_networks: opts.allow_private_networks,
                     allow_exec: (!opts.allow_exec.is_empty()).then_some(opts.allow_exec.as_slice()),
@@ -255,6 +263,9 @@ impl SliceIsolate {
                     max_checkpoints: opts.max_checkpoints,
                     consumed_checkpoints: self.checkpoints_taken,
                 });
+        if opts.artifacts {
+            child_caps.push_virtual_mount("/artifacts");
+        }
 
         let explicit_sub_tenant = opts
             .tenant_id
@@ -332,6 +343,7 @@ impl SliceIsolate {
             .capabilities
             .allowed_write_prefixes
             .is_empty()
+            || !child_iso.compartment.capabilities.virtual_mounts.is_empty()
         {
             Some((
                 crate::boa_realm::BOA_VFS_OWNER_TENANT.with(|o| o.borrow().clone()),
@@ -344,6 +356,12 @@ impl SliceIsolate {
         let exec_start = Instant::now();
         let exec_res = child_iso.execute_bytecode(&bc, None);
         let exec_time_ns = (exec_start.elapsed().as_nanos() as u64).max(1);
+
+        let drained_artifacts = if opts.artifacts {
+            Some(child_iso.drain_vfs("/artifacts", &crate::isolate::DrainLimits::default()))
+        } else {
+            None
+        };
 
         if exec_res.is_err() {
             restore_or_clear_tenant_tree_kv(&child_tenant, saved_child_kv);
@@ -367,7 +385,12 @@ impl SliceIsolate {
             .restore_time_ns
             .saturating_add(child_iso.restore_time_ns);
         let outcome = match exec_res {
-            Ok(metrics) => {
+            Ok(mut metrics) => {
+                if child_iso.denied_capabilities.len() > metrics.denied_capabilities.len() {
+                    metrics.denied_capabilities.extend_from_slice(
+                        &child_iso.denied_capabilities[metrics.denied_capabilities.len()..],
+                    );
+                }
                 let _ = self.compartment.consume_fuel(metrics.fuel_consumed.max(1));
                 let post_child_kv_bytes = edge_kv_tenant_tree_bytes(&child_tenant);
                 let post_shared_vfs_bytes = if !has_isolated_sub_tenant {
@@ -428,6 +451,7 @@ impl SliceIsolate {
                     checkpoints_taken: child_iso.checkpoints_taken,
                     restores_performed: child_iso.restores_performed,
                     restore_time_ns: child_iso.restore_time_ns,
+                    drained_artifacts,
                     net_persisted_delta_bytes: persisted_delta,
                 }
             }
@@ -464,6 +488,7 @@ impl SliceIsolate {
                     checkpoints_taken: child_iso.checkpoints_taken,
                     restores_performed: child_iso.restores_performed,
                     restore_time_ns: child_iso.restore_time_ns,
+                    drained_artifacts,
                     net_persisted_delta_bytes: 0,
                 }
             }
