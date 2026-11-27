@@ -132,8 +132,8 @@ pub(crate) fn read_http_header_frame(
 
 /// Validates and parses the HTTP request line and up to 64 stack-allocated headers.
 /// Returns `Ok(None)` when a `400`/`413`/`431` error response has been written and closed.
-pub(crate) fn parse_request_headers<'a>(
-    stream: &mut ServerConnStream,
+pub(crate) fn parse_request_headers<'a, W: std::io::Write>(
+    stream: &mut W,
     hdr_bytes: &'a [u8],
     write_buf: &mut Vec<u8>,
 ) -> Result<Option<ParsedRequestHeaders<'a>>> {

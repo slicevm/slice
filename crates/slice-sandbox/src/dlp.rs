@@ -293,3 +293,68 @@ pub fn verify_egress_secrets_slice(
     }
     Ok(())
 }
+
+/// Stateful rolling-window Ring 4 Egress DLP scanner for incremental streaming responses
+/// (`ReadableStream` / `text/event-stream` SSE) (`#133`).
+///
+/// Retains the trailing `max_pattern_len - 1` bytes from each chunk so a secret (raw, hex,
+/// percent-encoded, Base64, or Base64URL) split across two adjacent `controller.enqueue()`
+/// boundaries is still detected in `O(chunk)` time.
+#[derive(Debug, Clone)]
+pub struct RollingEgressDlpScanner {
+    tenant_id: String,
+    secrets: Vec<String>,
+    overlap_len: usize,
+    tail: Vec<u8>,
+}
+
+impl RollingEgressDlpScanner {
+    /// Creates a new rolling DLP scanner for `tenant_id` and pre-expanded `secrets`.
+    pub fn new(tenant_id: impl Into<String>, secrets: Vec<String>) -> Self {
+        let max_len = secrets.iter().map(String::len).max().unwrap_or(0);
+        let overlap_len = max_len.saturating_sub(1).min(4096);
+        Self {
+            tenant_id: tenant_id.into(),
+            secrets,
+            overlap_len,
+            tail: Vec::new(),
+        }
+    }
+
+    /// Returns `true` when no secrets are registered (zero-cost fast path).
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.secrets.is_empty()
+    }
+
+    /// Scans `chunk` together with the rolling overlap window from the previous chunk.
+    pub fn scan_chunk(&mut self, chunk: &[u8]) -> Result<(), SandboxViolation> {
+        if self.secrets.is_empty() || chunk.is_empty() {
+            return Ok(());
+        }
+        let combined: std::borrow::Cow<'_, [u8]> = if self.tail.is_empty() {
+            std::borrow::Cow::Borrowed(chunk)
+        } else {
+            let mut buf = Vec::with_capacity(self.tail.len() + chunk.len());
+            buf.extend_from_slice(&self.tail);
+            buf.extend_from_slice(chunk);
+            std::borrow::Cow::Owned(buf)
+        };
+
+        let lossy = String::from_utf8_lossy(&combined);
+        verify_egress_secrets_slice(&self.tenant_id, &self.secrets, &lossy)?;
+
+        if !combined.is_ascii() {
+            let b64 = base64_encode_dlp(&combined, false);
+            verify_egress_secrets_slice(&self.tenant_id, &self.secrets, &b64)?;
+        }
+
+        if self.overlap_len > 0 {
+            let keep = combined.len().min(self.overlap_len);
+            let start = combined.len() - keep;
+            self.tail.clear();
+            self.tail.extend_from_slice(&combined[start..]);
+        }
+        Ok(())
+    }
+}

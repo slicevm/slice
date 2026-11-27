@@ -67,8 +67,9 @@ pub use extensions::{
 pub use intrinsics::{base64_decode, base64_encode};
 pub use isolate::{
     DrainLimits, DrainReport, DrainedFile, ExecutionMetrics, HttpExecutionOutcome, HttpFastOutcome,
-    HttpRequestContext, IsolateInterruptHandle, SandboxEvalOptions, SandboxEvalOutcome, SkipReason,
-    SkippedFile, SliceIsolate, run_source_isolated,
+    HttpRequestContext, IsolateInterruptHandle, LiveHttpStreamGuard, LiveHttpStreamWriter,
+    SandboxEvalOptions, SandboxEvalOutcome, SkipReason, SkippedFile, SliceIsolate,
+    run_source_isolated,
 };
 pub use outbound_http::{
     ChunkedBodyDecoder, MAX_OUTBOUND_BODY_BYTES, MAX_OUTBOUND_HEADER_BYTES,

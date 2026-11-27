@@ -622,7 +622,7 @@
     return false;
   }
 
-  function __finishSliceRes(r) {
+  function __finishSliceRes(r, liveReq) {
     var isNoBodyStatus = r.status === 101 || r.status === 204 || r.status === 304;
     if (r._h === null && !r._stream) {
       var ctFast = r._ct || (isNoBodyStatus ? "" : (r._u8 instanceof Uint8Array ? "application/octet-stream" : "text/plain;charset=UTF-8"));
@@ -655,6 +655,46 @@
     var hdrJson = h ? __resHdrJson(h) : "";
     if (r._stream) {
       var st = r._stream;
+      var hasLiveWire = typeof __slice_http_stream_is_supported === "function" && __slice_http_stream_is_supported();
+      if (hasLiveWire && !isNoBodyStatus) {
+        var started = __slice_http_stream_start(r.status, ct, hdrJson);
+        if (!started) {
+          if (liveReq && liveReq.signal && typeof liveReq.signal._fire === "function") {
+            liveReq.signal._fire(new DOMException("Client disconnected", "AbortError"));
+          }
+          if (typeof st.cancel === "function") st.cancel("client disconnected");
+          return;
+        }
+        var reader = st.getReader();
+        var pump = function() {
+          if (__slice_http_stream_is_disconnected()) {
+            if (liveReq && liveReq.signal && typeof liveReq.signal._fire === "function") {
+              liveReq.signal._fire(new DOMException("Client disconnected", "AbortError"));
+            }
+            reader.cancel("client disconnected");
+            return;
+          }
+          return reader.read().then(function(step) {
+            if (step.done) {
+              __slice_http_stream_end();
+              return;
+            }
+            var ok = __slice_http_stream_chunk(step.value);
+            if (!ok) {
+              if (liveReq && liveReq.signal && typeof liveReq.signal._fire === "function") {
+                liveReq.signal._fire(new DOMException("Client disconnected", "AbortError"));
+              }
+              reader.cancel("client disconnected");
+              return;
+            }
+            return pump();
+          }, function() {
+            __slice_http_stream_end();
+          });
+        };
+        pump();
+        return;
+      }
       if (typeof st._isAsyncPending === "function" && st._isAsyncPending()) {
         st._drainToBody(r).then(function() {
           var hs = r._h !== undefined && r._h !== null ? r._h : r.headers;
@@ -699,15 +739,16 @@
     if (!__slice_http_is_active()) return;
     var fn = typeof h.fetch === "function" ? h.fetch : (typeof h === "function" ? h : null);
     if (!fn) return;
+    var liveReq = __makeLiveReq();
     var res = fn.length <= 1
-      ? fn.call(h, __makeLiveReq())
-      : fn.call(h, __makeLiveReq(), globalThis.process.env, __slice_web_ctx);
+      ? fn.call(h, liveReq)
+      : fn.call(h, liveReq, globalThis.process.env, __slice_web_ctx);
     if (res) {
       if (res._isSliceRes) {
-        __finishSliceRes(res);
+        __finishSliceRes(res, liveReq);
       } else if (typeof res.then === "function") {
         res.then(function(r) {
-          if (r && r._isSliceRes) __finishSliceRes(r);
+          if (r && r._isSliceRes) __finishSliceRes(r, liveReq);
         });
       }
     }

@@ -220,3 +220,105 @@ fn test_v0150_mcp_artifacts_image_resource_dlp_and_resource_link() {
 
     let _ = std::fs::remove_dir_all(&mcp_art_dir);
 }
+
+#[test]
+fn test_v0150_nonblocking_reactor_serves_many_concurrent_keepalive_and_live_chunked_sse() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let script_dir = unique_temp_dir("reactor_e2e");
+    let script_path = script_dir.join("server.ts");
+    std::fs::write(
+        &script_path,
+        r#"
+        export default {
+            fetch(req: Request): Response {
+                const url = new URL(req.url);
+                if (url.pathname === "/sse") {
+                    const stream = new ReadableStream({
+                        start(controller) {
+                            controller.enqueue("data: first\n\n");
+                            controller.enqueue("data: second\n\n");
+                            controller.close();
+                        }
+                    });
+                    return new Response(stream, {
+                        status: 200,
+                        headers: { "content-type": "text/event-stream" }
+                    });
+                }
+                return Response.json({ ok: true, path: url.pathname });
+            }
+        };
+        "#,
+    )
+    .unwrap();
+
+    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let script_arg = script_path.to_string_lossy().into_owned();
+    let total_clients = 16usize;
+    let total_reqs = total_clients + 1;
+    let server_thread = std::thread::spawn(move || {
+        let args = vec![
+            script_arg,
+            "--host=127.0.0.1".to_string(),
+            format!("--port={port}"),
+            "--workers=2".to_string(),
+            format!("--max-requests={total_reqs}"),
+        ];
+        let _ = crate::server::cmd_serve(&args);
+    });
+
+    let mut conns = Vec::with_capacity(total_clients);
+    for _ in 0..40 {
+        if let Ok(s) = TcpStream::connect(("127.0.0.1", port)) {
+            let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+            conns.push(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(conns.len(), 1, "server failed to bind on port {port}");
+
+    for _ in 1..total_clients {
+        let s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+        conns.push(s);
+    }
+
+    for (idx, stream) in conns.iter_mut().enumerate().rev() {
+        let req =
+            format!("GET /ping/{idx} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).unwrap();
+    }
+    for (idx, mut stream) in conns.into_iter().enumerate() {
+        let mut resp = String::new();
+        stream.read_to_string(&mut resp).unwrap();
+        assert!(
+            resp.contains("HTTP/1.1 200 OK") && resp.contains(&format!("/ping/{idx}")),
+            "unexpected response for client {idx}: {resp}"
+        );
+    }
+
+    let mut sse_client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let _ = sse_client.set_read_timeout(Some(Duration::from_secs(5)));
+    sse_client
+        .write_all(b"GET /sse HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut sse_resp = String::new();
+    sse_client.read_to_string(&mut sse_resp).unwrap();
+    assert!(
+        sse_resp.contains("Transfer-Encoding: chunked"),
+        "expected chunked transfer encoding on live SSE: {sse_resp}"
+    );
+    assert!(sse_resp.contains("data: first\n\n"));
+    assert!(sse_resp.contains("data: second\n\n"));
+    assert!(sse_resp.ends_with("0\r\n\r\n"));
+
+    let _ = server_thread.join();
+    let _ = std::fs::remove_dir_all(&script_dir);
+}

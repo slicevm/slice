@@ -251,6 +251,159 @@ pub(crate) fn register_http_bridge_host_functions(ctx: &mut boa_engine::Context)
             Ok(BoaVal::undefined())
         }),
     );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_stream_is_supported"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let supported =
+                crate::isolate::http_and_ws::BOA_LIVE_HTTP_STREAM.with(|s| s.borrow().is_some());
+            Ok(BoaVal::from(supported))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_stream_is_disconnected"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            let disconnected = crate::isolate::http_and_ws::BOA_LIVE_HTTP_STREAM.with(|s| {
+                s.borrow()
+                    .as_ref()
+                    .is_some_and(|w| w.is_client_disconnected())
+            });
+            Ok(BoaVal::from(disconnected))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_stream_start"),
+        3,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let status = args
+                .first()
+                .and_then(|v| v.as_number())
+                .map(|n| n as u16)
+                .unwrap_or(200);
+            let content_type = args
+                .get(1)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let headers_json = args
+                .get(2)
+                .map(|v| v.to_string(context))
+                .transpose()?
+                .map(|s| s.to_std_string_escaped())
+                .unwrap_or_default();
+
+            let has_secrets = BOA_EGRESS_SECRETS.with(|s| !s.borrow().is_empty());
+            if has_secrets {
+                let tenant_id = active_tenant_id_or_default();
+                let (dlp_res, secrets_clone) = BOA_EGRESS_SECRETS.with(|s| {
+                    let egress_secrets = s.borrow();
+                    let res =
+                        verify_egress_secrets_slice(&tenant_id, &egress_secrets, &content_type)
+                            .and_then(|()| {
+                                verify_egress_secrets_slice(
+                                    &tenant_id,
+                                    &egress_secrets,
+                                    &headers_json,
+                                )
+                            });
+                    (res, egress_secrets.clone())
+                });
+                if let Err(violation) = dlp_res {
+                    let msg = violation.to_string();
+                    record_boa_violation_once(violation);
+                    return Err(JsNativeError::error().with_message(msg).into());
+                }
+                crate::isolate::http_and_ws::BOA_LIVE_STREAM_DLP.with(|d| {
+                    *d.borrow_mut() = Some(slice_sandbox::RollingEgressDlpScanner::new(
+                        tenant_id,
+                        secrets_clone,
+                    ));
+                });
+            }
+
+            let extra_headers: Vec<(String, String)> = if headers_json.is_empty() {
+                Vec::new()
+            } else {
+                serde_json::from_str(&headers_json).unwrap_or_default()
+            };
+            let ok = crate::isolate::http_and_ws::BOA_LIVE_HTTP_STREAM.with(|s| {
+                if let Some(ref mut writer) = *s.borrow_mut() {
+                    if writer
+                        .start_chunked(status, &content_type, &extra_headers)
+                        .is_ok()
+                    {
+                        crate::isolate::http_and_ws::BOA_LIVE_STREAM_ACTIVE.with(|a| a.set(true));
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            });
+            Ok(BoaVal::from(ok))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_stream_chunk"),
+        1,
+        NativeFunction::from_fn_ptr(|_this, args, context| {
+            let bytes: Vec<u8> = match args.first() {
+                Some(val) if val.is_undefined() || val.is_null() => return Ok(BoaVal::from(true)),
+                Some(val) if val.as_object().is_some() => {
+                    extract_buffer_source_bytes(val, context)?
+                }
+                Some(val) => {
+                    let s = val.to_string(context)?;
+                    js_string_to_utf8_bytes(&s)
+                }
+                None => return Ok(BoaVal::from(true)),
+            };
+            if bytes.is_empty() {
+                return Ok(BoaVal::from(true));
+            }
+            let dlp_err = crate::isolate::http_and_ws::BOA_LIVE_STREAM_DLP.with(|d| {
+                if let Some(ref mut scanner) = *d.borrow_mut() {
+                    scanner.scan_chunk(&bytes).err()
+                } else {
+                    None
+                }
+            });
+            if let Some(violation) = dlp_err {
+                let msg = violation.to_string();
+                record_boa_violation_once(violation);
+                crate::bindings::helpers::trip_isolate_oom_limits(context);
+                return Err(JsNativeError::error().with_message(msg).into());
+            }
+            let ok = crate::isolate::http_and_ws::BOA_LIVE_HTTP_STREAM.with(|s| {
+                if let Some(ref mut writer) = *s.borrow_mut() {
+                    writer.write_chunk(&bytes).is_ok()
+                } else {
+                    false
+                }
+            });
+            Ok(BoaVal::from(ok))
+        }),
+    );
+
+    let _ = ctx.register_global_builtin_callable(
+        js_string!("__slice_http_stream_end"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| {
+            crate::isolate::http_and_ws::BOA_LIVE_HTTP_STREAM.with(|s| {
+                if let Some(ref mut writer) = *s.borrow_mut() {
+                    let _ = writer.finish_chunked();
+                }
+            });
+            Ok(BoaVal::undefined())
+        }),
+    );
 }
 
 fn extract_fetch_body_bytes(
