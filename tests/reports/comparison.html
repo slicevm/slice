@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SliceVM Runtime - Cross-Release Benchmark Comparison</title>
+<style>
+  :root {
+    --bg: #0b0f17;
+    --panel: #131a26;
+    --panel-alt: #182132;
+    --border: #243147;
+    --text: #e6edf7;
+    --muted: #8fa3bf;
+    --accent: #38bdf8;
+    --accent-2: #818cf8;
+    --good: #34d399;
+    --warn: #fbbf24;
+    --bad: #f87171;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.5;
+  }
+  .wrap { max-width: 1360px; margin: 0 auto; padding: 28px 20px 64px; }
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 16px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 24px;
+  }
+  h1 { margin: 0; font-size: 26px; letter-spacing: 0.02em; }
+  .subtitle { color: var(--muted); font-size: 14px; margin-top: 4px; }
+  .meta-pill {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: 6px;
+    color: var(--muted);
+  }
+  .kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 14px;
+    margin-bottom: 26px;
+  }
+  .kpi {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .kpi-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .kpi-val { font-family: var(--mono); font-size: 24px; font-weight: 700; margin: 6px 0 4px; }
+  .kpi-sub { font-family: var(--mono); font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-family: var(--mono); font-size: 11px; font-weight: 600; }
+  .good { color: var(--good); background: rgba(52, 211, 153, 0.12); }
+  .warn { color: var(--warn); background: rgba(251, 191, 36, 0.14); }
+  .bad { color: var(--bad); background: rgba(248, 113, 113, 0.14); }
+  .neutral { color: var(--muted); background: rgba(143, 163, 191, 0.12); }
+  .charts-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(560px, 1fr));
+    gap: 18px;
+    margin-bottom: 28px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px;
+    margin-bottom: 22px;
+  }
+  .charts-grid .card { margin-bottom: 0; }
+  .card h2 { margin: 0 0 4px; font-size: 16px; }
+  .card .desc { margin: 0 0 12px; font-size: 13px; color: var(--muted); }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  svg.chart { width: 100%; height: auto; display: block; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-family: var(--mono); }
+  th, td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 600; background: var(--panel-alt); position: sticky; top: 0; }
+  tr:hover td { background: rgba(56, 189, 248, 0.04); }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; align-items: center; }
+  input, select {
+    background: var(--panel-alt);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+    font-family: var(--sans);
+  }
+  .table-scroll { overflow-x: auto; max-height: 520px; border: 1px solid var(--border); border-radius: 8px; }
+  .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(460px, 1fr)); gap: 18px; margin-bottom: 22px; }
+  .two-col .card { margin-bottom: 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>SliceVM Runtime -- Benchmark History &amp; Regression Dashboard</h1>
+      <div class="subtitle" id="headerSub">Comparing historical Linux x86_64 Docker + MicroVM benchmark snapshots</div>
+    </div>
+    <div class="meta-pill">Generated: 2026-11-27T03:46:28Z</div>
+  </header>
+
+  <section class="kpis" id="kpiGrid"></section>
+
+  <section class="charts-grid">
+    <div class="card">
+      <h2>33-Workload Total Latency (ms, lower is better)</h2>
+      <p class="desc">Cold .cas one-shot total, --warm pooled total, and standalone compiled binary total across releases.</p>
+      <div class="legend" id="legLatency"></div>
+      <div id="chartLatency"></div>
+    </div>
+    <div class="card">
+      <h2>HTTP/1.1 Keep-Alive Throughput (req/s, higher is better)</h2>
+      <p class="desc">16,000 requests on slice serve (Tier-0 CAS &amp; Tier-1 WinterTC) vs Bun, Deno, and Node.js.</p>
+      <div class="legend" id="legHttp"></div>
+      <div id="chartHttp"></div>
+    </div>
+    <div class="card">
+      <h2>Memory Footprint -- Peak RSS (MB, lower is better)</h2>
+      <p class="desc">Per-workload Peak RSS (Min / Avg / Max) and 1,000-Tenant MicroVM Swarm RSS across releases.</p>
+      <div class="legend" id="legRss"></div>
+      <div id="chartRss"></div>
+    </div>
+    <div class="card">
+      <h2>MicroVM Cold-Start &amp; 1,000-Tenant Swarm Latency</h2>
+      <p class="desc">Single isolate P50/P99 cold-start (us) and 1,000-tenant boot+exec swarm (ms).</p>
+      <div class="legend" id="legMicrovm"></div>
+      <div id="chartMicrovm"></div>
+    </div>
+  </section>
+
+  <section class="two-col">
+    <div class="card">
+      <h2>Latency Regression &amp; Speedup Watchdog (Latest vs Previous)</h2>
+      <p class="desc" id="watchdogLatDesc"></p>
+      <div class="table-scroll"><table id="tblWatchdogLat"></table></div>
+    </div>
+    <div class="card">
+      <h2>Memory (RSS MB) Delta Watchdog (Latest vs Previous)</h2>
+      <p class="desc" id="watchdogRssDesc"></p>
+      <div class="table-scroll"><table id="tblWatchdogRss"></table></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Release-by-Release Summary Matrix</h2>
+    <p class="desc">All canonical benchmark snapshots in tests/reports/ sorted by SemVer.</p>
+    <div class="table-scroll"><table id="tblSummary"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Per-Workload Historical Explorer</h2>
+    <div class="controls">
+      <input id="searchBox" type="search" placeholder="Filter workload id (e.g. hono, sveltekit, wasm, tot)...">
+      <select id="metricMode">
+        <option value="coldMs">Cold .cas Avg Latency (ms)</option>
+        <option value="warmMs">--warm Pooled Latency (ms)</option>
+      </select>
+      <select id="catFilter"><option value="all">All Categories</option></select>
+    </div>
+    <div class="table-scroll"><table id="tblWorkloads"></table></div>
+  </section>
+</div>
+
+<script>
+const REPORTS = [{"file":"bench_v0.10.12_20261112_020639Z_4c5089a.json","version":"0.10.12","commit":"4c5089a","timestampUtc":"2026-11-12T02:06:39Z","runtimes":{"slice":"v0.10.12","bun":"v1.4.4","deno":"v2.9.8","node":"v27.0.0-alpha.0.0.0"},"workloadCount":33,"coldTotMs":500.8,"warmTotMs":170.4,"binTotMs":526.8,"bunTotMs":696.7,"denoTotMs":1748.9,"nodeTotMs":2717.7,"rssMinMb":13.75,"rssAvgMb":16.81,"rssMaxMb":22.13,"tier0Rps":148865,"tier1Rps":154737,"bunRps":96712,"denoRps":100758,"nodeRps":57158,"coldP50Us":1.24,"coldP99Us":2.1,"swarm1000Ms":1.5,"swarm1000RssMb":19.69,"cas500ColdMs":3.408,"cas500MemUs":409.31,"kv1001Us":572.39,"tot3SandboxesUs":42.56,"workloads":[{"id":"01-fintech-checkout","category":"core_edge_crypto","coldMs":6.197,"warmMs":1.1,"bunMs":13.348,"denoMs":35.658,"nodeMs":59.811},{"id":"02-npm-ecosystem-suite","category":"npm_ast_disk","coldMs":14.246,"warmMs":3.899,"bunMs":20.988,"denoMs":52.586,"nodeMs":69.87},{"id":"03-disk-io-log-pipeline","category":"npm_ast_disk","coldMs":7.197,"warmMs":1.378,"bunMs":14.561,"denoMs":44.015,"nodeMs":60.874},{"id":"04-edge-api-gateway","category":"core_edge_crypto","coldMs":7.332,"warmMs":1.738,"bunMs":15.137,"denoMs":47.146,"nodeMs":63.466},{"id":"05-jwt-oauth-session-guard","category":"core_edge_crypto","coldMs":10.285,"warmMs":4.975,"bunMs":14.983,"denoMs":42.265,"nodeMs":62.265},{"id":"06-telemetry-metrics-pipeline","category":"npm_ast_disk","coldMs":12.826,"warmMs":4.382,"bunMs":16.89,"denoMs":46.254,"nodeMs":63.436},{"id":"07-graphql-ast-validator","category":"npm_ast_disk","coldMs":10.054,"warmMs":3.865,"bunMs":13.266,"denoMs":40.911,"nodeMs":59.861},{"id":"08-event-driven-state-journal","category":"npm_ast_disk","coldMs":11.443,"warmMs":4.77,"bunMs":16.013,"denoMs":45.838,"nodeMs":63.833},{"id":"09-wintertc-web-router","category":"wintertc_fetch_dlp","coldMs":15.519,"warmMs":9.479,"bunMs":14.539,"denoMs":48.802,"nodeMs":91.771},{"id":"10-fullstack-bff-microservice","category":"wintertc_fetch_dlp","coldMs":13.388,"warmMs":6.545,"bunMs":14.571,"denoMs":51.098,"nodeMs":89.527},{"id":"11-static-asset-cdn-edge","category":"wintertc_fetch_dlp","coldMs":10.93,"warmMs":3.999,"bunMs":13.501,"denoMs":48.508,"nodeMs":91.33},{"id":"12-ai-sse-token-streamer","category":"wintertc_fetch_dlp","coldMs":15.296,"warmMs":6.942,"bunMs":15.334,"denoMs":48.041,"nodeMs":89.299},{"id":"13-webhook-orchestrator-ssrf","category":"wintertc_fetch_dlp","coldMs":15.922,"warmMs":7.103,"bunMs":19.082,"denoMs":51.39,"nodeMs":112.929},{"id":"14-federated-api-mesh-dlp","category":"wintertc_fetch_dlp","coldMs":15.601,"warmMs":7.079,"bunMs":20.766,"denoMs":51.558,"nodeMs":107.861},{"id":"15-time-travel-test-suite","category":"realtime_workers_wasm","coldMs":14.828,"warmMs":4.894,"bunMs":24.396,"denoMs":68.179,"nodeMs":82.991},{"id":"16-dotenv-dlp-config-vault","category":"core_edge_crypto","coldMs":7.737,"warmMs":1.255,"bunMs":14.873,"denoMs":45.224,"nodeMs":65.018},{"id":"17-zero-trust-redirect-keepalive-mesh","category":"wintertc_fetch_dlp","coldMs":17.608,"warmMs":7.828,"bunMs":21.856,"denoMs":54.487,"nodeMs":113.958},{"id":"18-async-event-loop-fanout-scheduler","category":"wintertc_fetch_dlp","coldMs":29.524,"warmMs":17.348,"bunMs":32.481,"denoMs":70.418,"nodeMs":80.512},{"id":"19-wintertc-webcrypto-streams-edge","category":"wintertc_fetch_dlp","coldMs":8.378,"warmMs":1.322,"bunMs":14.097,"denoMs":49.351,"nodeMs":87.562},{"id":"20-node-compat-and-edge-router","category":"npm_ast_disk","coldMs":10.83,"warmMs":0.484,"bunMs":22.621,"denoMs":53.734,"nodeMs":73.692},{"id":"21-websocket-realtime-and-security-guard","category":"realtime_workers_wasm","coldMs":11.083,"warmMs":2.333,"bunMs":21.35,"denoMs":53.525,"nodeMs":120.536},{"id":"22-worker-threads-and-raw-sockets","category":"realtime_workers_wasm","coldMs":21.431,"warmMs":1.737,"bunMs":56.813,"denoMs":115.28,"nodeMs":106.594},{"id":"23-wasm-crypto-and-simd-kernel","category":"realtime_workers_wasm","coldMs":15.455,"warmMs":1.856,"bunMs":21.122,"denoMs":42.013,"nodeMs":59.8},{"id":"24-tsx-ssr-and-wasm-edge-pipeline","category":"realtime_workers_wasm","coldMs":8.681,"warmMs":1.73,"bunMs":18.43,"denoMs":44.119,"nodeMs":67.854},{"id":"frameworks/01-hono-edge-microservice","category":"frameworks","coldMs":16.171,"warmMs":5.59,"bunMs":19.635,"denoMs":53.182,"nodeMs":96.148},{"id":"frameworks/02-itty-router-unjs-nitro-stack","category":"frameworks","coldMs":17.377,"warmMs":8.9,"bunMs":19.125,"denoMs":46.091,"nodeMs":86.328},{"id":"frameworks/03-node-http-express-compat","category":"frameworks","coldMs":17.811,"warmMs":1.013,"bunMs":35.691,"denoMs":52.659,"nodeMs":83.756},{"id":"frameworks/04-sveltekit-edge-ssr","category":"frameworks","coldMs":33.504,"warmMs":14.704,"bunMs":51.401,"denoMs":74.88,"nodeMs":113.299},{"id":"case_studies/01-tot-autonomous-sre-agent","category":"case_studies","coldMs":33.655,"warmMs":13.077,"bunMs":27.983,"denoMs":72.009,"nodeMs":88.021},{"id":"case_studies/02-mcp-code-mode-orchestrator","category":"case_studies","coldMs":19.384,"warmMs":3.349,"bunMs":16.144,"denoMs":43.412,"nodeMs":68.456},{"id":"case_studies/03-multi-tenant-saas-plugin-mesh","category":"case_studies","coldMs":13.717,"warmMs":5.76,"bunMs":16.713,"denoMs":48.065,"nodeMs":85.559},{"id":"case_studies/04-wasm-zero-trust-cdr-pipeline","category":"case_studies","coldMs":19.798,"warmMs":1.419,"bunMs":18.914,"denoMs":44.462,"nodeMs":68.689},{"id":"case_studies/05-time-travel-chaos-fuzzer-payments","category":"case_studies","coldMs":17.561,"warmMs":8.515,"bunMs":20.039,"denoMs":63.785,"nodeMs":82.764}],"rss":[{"id":"App 2: NPM semver+ms+ini","sliceMb":13.99,"bunMb":29.38,"denoMb":45.95,"nodeMb":69.9},{"id":"App 6: Telemetry + Flatted","sliceMb":13.88,"bunMb":29.25,"denoMb":49.23,"nodeMb":71.4},{"id":"App 21: RFC 6455 WS + Sec","sliceMb":14.13,"bunMb":30.75,"denoMb":49.68,"nodeMb":93.5},{"id":"App 22: Workers + Sockets","sliceMb":22.13,"bunMb":40.1,"denoMb":62.29,"nodeMb":90.25},{"id":"App 23: Pure-Rust WASM","sliceMb":18.75,"bunMb":30.13,"denoMb":47.4,"nodeMb":78.48},{"id":"FW 1: Hono v4 Microservice","sliceMb":15.25,"bunMb":28.39,"denoMb":48.62,"nodeMb":87.03},{"id":"FW 2: itty-router + UnJS","sliceMb":14.38,"bunMb":31.25,"denoMb":47.37,"nodeMb":85.51},{"id":"App 24: WASM + SSR","sliceMb":13.75,"bunMb":30,"denoMb":47.24,"nodeMb":79.37},{"id":"FW 3: Express node:http","sliceMb":15.38,"bunMb":32.38,"denoMb":46.11,"nodeMb":78.51},{"id":"01-tot-autonomous-sre-agent","sliceMb":20.88,"bunMb":30.63,"denoMb":51.98,"nodeMb":83.76},{"id":"02-mcp-code-mode-orchestrator","sliceMb":17.88,"bunMb":27.5,"denoMb":45.71,"nodeMb":81.13},{"id":"03-multi-tenant-saas-plugin-mesh","sliceMb":14.75,"bunMb":25.85,"denoMb":48.95,"nodeMb":86.09},{"id":"04-wasm-zero-trust-cdr-pipeline","sliceMb":20,"bunMb":30.75,"denoMb":48.73,"nodeMb":78.38},{"id":"05-time-travel-chaos-fuzzer-payments","sliceMb":15.25,"bunMb":28.5,"denoMb":48.49,"nodeMb":79.65},{"id":"FW 4: SvelteKit 3 + Svelte 5","sliceMb":21.75,"bunMb":40.88,"denoMb":55.06,"nodeMb":83.79}]},{"file":"bench_v0.11.0_20261113_221039Z_1182dae.json","version":"0.11.0","commit":"1182dae","timestampUtc":"2026-11-13T22:10:39Z","runtimes":{"slice":"v0.11.0","bun":"v1.4.4","deno":"v2.9.8","node":"v27.0.0-alpha.0.0.0"},"workloadCount":33,"coldTotMs":519.3,"warmTotMs":181.5,"binTotMs":552.1,"bunTotMs":707.6,"denoTotMs":1768,"nodeTotMs":2777,"rssMinMb":13.25,"rssAvgMb":17.09,"rssMaxMb":22.88,"tier0Rps":153678,"tier1Rps":139049,"bunRps":92523,"denoRps":89111,"nodeRps":53925,"coldP50Us":1.26,"coldP99Us":1.74,"swarm1000Ms":1.48,"swarm1000RssMb":7.5,"cas500ColdMs":2.871,"cas500MemUs":8.31,"kv1001Us":573.07,"tot3SandboxesUs":43.78,"workloads":[{"id":"01-fintech-checkout","category":"core_edge_crypto","coldMs":6.427,"warmMs":1.113,"bunMs":13.291,"denoMs":36.85,"nodeMs":62.681},{"id":"02-npm-ecosystem-suite","category":"npm_ast_disk","coldMs":13.579,"warmMs":3.923,"bunMs":22.459,"denoMs":54.784,"nodeMs":70.653},{"id":"03-disk-io-log-pipeline","category":"npm_ast_disk","coldMs":7.658,"warmMs":1.286,"bunMs":14.446,"denoMs":44.422,"nodeMs":63.233},{"id":"04-edge-api-gateway","category":"core_edge_crypto","coldMs":8.117,"warmMs":1.674,"bunMs":15.186,"denoMs":42.368,"nodeMs":64.698},{"id":"05-jwt-oauth-session-guard","category":"core_edge_crypto","coldMs":10.415,"warmMs":4.553,"bunMs":14.918,"denoMs":45.405,"nodeMs":65.242},{"id":"06-telemetry-metrics-pipeline","category":"npm_ast_disk","coldMs":13.207,"warmMs":5.345,"bunMs":17.334,"denoMs":49.253,"nodeMs":67.924},{"id":"07-graphql-ast-validator","category":"npm_ast_disk","coldMs":8.893,"warmMs":3.752,"bunMs":13.14,"denoMs":42.538,"nodeMs":62.583},{"id":"08-event-driven-state-journal","category":"npm_ast_disk","coldMs":11.713,"warmMs":4.81,"bunMs":16.328,"denoMs":47.015,"nodeMs":65.736},{"id":"09-wintertc-web-router","category":"wintertc_fetch_dlp","coldMs":17.402,"warmMs":9.934,"bunMs":13.825,"denoMs":48.82,"nodeMs":87.056},{"id":"10-fullstack-bff-microservice","category":"wintertc_fetch_dlp","coldMs":14.43,"warmMs":7.263,"bunMs":14.755,"denoMs":48.716,"nodeMs":86.869},{"id":"11-static-asset-cdn-edge","category":"wintertc_fetch_dlp","coldMs":12.464,"warmMs":5.23,"bunMs":13.785,"denoMs":52.331,"nodeMs":89.813},{"id":"12-ai-sse-token-streamer","category":"wintertc_fetch_dlp","coldMs":16.259,"warmMs":7.57,"bunMs":15.842,"denoMs":51.139,"nodeMs":92.225},{"id":"13-webhook-orchestrator-ssrf","category":"wintertc_fetch_dlp","coldMs":16.939,"warmMs":6.688,"bunMs":19.921,"denoMs":52.67,"nodeMs":113.783},{"id":"14-federated-api-mesh-dlp","category":"wintertc_fetch_dlp","coldMs":16.169,"warmMs":8.232,"bunMs":21.851,"denoMs":53.889,"nodeMs":107.692},{"id":"15-time-travel-test-suite","category":"realtime_workers_wasm","coldMs":15.037,"warmMs":5.048,"bunMs":25.346,"denoMs":67.634,"nodeMs":84.844},{"id":"16-dotenv-dlp-config-vault","category":"core_edge_crypto","coldMs":7.998,"warmMs":1.345,"bunMs":15.057,"denoMs":46.082,"nodeMs":66.641},{"id":"17-zero-trust-redirect-keepalive-mesh","category":"wintertc_fetch_dlp","coldMs":19.519,"warmMs":8.726,"bunMs":22.249,"denoMs":54.84,"nodeMs":115.385},{"id":"18-async-event-loop-fanout-scheduler","category":"wintertc_fetch_dlp","coldMs":31.74,"warmMs":17.61,"bunMs":32.665,"denoMs":72.523,"nodeMs":84.565},{"id":"19-wintertc-webcrypto-streams-edge","category":"wintertc_fetch_dlp","coldMs":8.89,"warmMs":1.44,"bunMs":13.945,"denoMs":47.698,"nodeMs":87.074},{"id":"20-node-compat-and-edge-router","category":"npm_ast_disk","coldMs":10.805,"warmMs":0.544,"bunMs":22.844,"denoMs":56.282,"nodeMs":76.172},{"id":"21-websocket-realtime-and-security-guard","category":"realtime_workers_wasm","coldMs":11.324,"warmMs":2.215,"bunMs":20.276,"denoMs":52.96,"nodeMs":117.578},{"id":"22-worker-threads-and-raw-sockets","category":"realtime_workers_wasm","coldMs":22.598,"warmMs":4.042,"bunMs":65.097,"denoMs":113.759,"nodeMs":103.449},{"id":"23-wasm-crypto-and-simd-kernel","category":"realtime_workers_wasm","coldMs":16.628,"warmMs":1.017,"bunMs":21.303,"denoMs":43.637,"nodeMs":61.759},{"id":"24-tsx-ssr-and-wasm-edge-pipeline","category":"realtime_workers_wasm","coldMs":8.838,"warmMs":1.626,"bunMs":22.636,"denoMs":44.165,"nodeMs":68.298},{"id":"frameworks/01-hono-edge-microservice","category":"frameworks","coldMs":15.751,"warmMs":6.819,"bunMs":19.756,"denoMs":52.278,"nodeMs":93.366},{"id":"frameworks/02-itty-router-unjs-nitro-stack","category":"frameworks","coldMs":18.206,"warmMs":10.739,"bunMs":19.531,"denoMs":47.001,"nodeMs":131.841},{"id":"frameworks/03-node-http-express-compat","category":"frameworks","coldMs":17.108,"warmMs":1.038,"bunMs":35.556,"denoMs":52.67,"nodeMs":83.954},{"id":"frameworks/04-sveltekit-edge-ssr","category":"frameworks","coldMs":34.708,"warmMs":15.472,"bunMs":44.279,"denoMs":71.176,"nodeMs":112.306},{"id":"case_studies/01-tot-autonomous-sre-agent","category":"case_studies","coldMs":33.978,"warmMs":12.95,"bunMs":28.247,"denoMs":74.207,"nodeMs":88.475},{"id":"case_studies/02-mcp-code-mode-orchestrator","category":"case_studies","coldMs":19.513,"warmMs":3.515,"bunMs":16.513,"denoMs":44.305,"nodeMs":66.811},{"id":"case_studies/03-multi-tenant-saas-plugin-mesh","category":"case_studies","coldMs":14.436,"warmMs":6.259,"bunMs":16.136,"denoMs":47.668,"nodeMs":84.429},{"id":"case_studies/04-wasm-zero-trust-cdr-pipeline","category":"case_studies","coldMs":21.165,"warmMs":1.414,"bunMs":18.966,"denoMs":45.231,"nodeMs":67.024},{"id":"case_studies/05-time-travel-chaos-fuzzer-payments","category":"case_studies","coldMs":17.401,"warmMs":8.31,"bunMs":20.075,"denoMs":63.731,"nodeMs":82.889}],"rss":[{"id":"App 2: NPM semver+ms+ini","sliceMb":13.25,"bunMb":28.81,"denoMb":46.16,"nodeMb":69.4},{"id":"App 6: Telemetry + Flatted","sliceMb":14.38,"bunMb":29.25,"denoMb":49.99,"nodeMb":70.77},{"id":"App 21: RFC 6455 WS + Sec","sliceMb":14.38,"bunMb":31.12,"denoMb":49.62,"nodeMb":91.75},{"id":"App 22: Workers + Sockets","sliceMb":22.88,"bunMb":40.29,"denoMb":61.86,"nodeMb":90.91},{"id":"App 23: Pure-Rust WASM","sliceMb":18.88,"bunMb":30.13,"denoMb":47.77,"nodeMb":78.77},{"id":"FW 1: Hono v4 Microservice","sliceMb":15.5,"bunMb":30.13,"denoMb":48.08,"nodeMb":87.28},{"id":"FW 2: itty-router + UnJS","sliceMb":14.63,"bunMb":31.13,"denoMb":47.36,"nodeMb":85.39},{"id":"App 24: WASM + SSR","sliceMb":13.88,"bunMb":31.38,"denoMb":47.05,"nodeMb":79.12},{"id":"FW 3: Express node:http","sliceMb":15.37,"bunMb":32.63,"denoMb":46.28,"nodeMb":78.38},{"id":"01-tot-autonomous-sre-agent","sliceMb":21,"bunMb":30.75,"denoMb":52.07,"nodeMb":81.5},{"id":"02-mcp-code-mode-orchestrator","sliceMb":18.49,"bunMb":27.25,"denoMb":45.96,"nodeMb":80.75},{"id":"03-multi-tenant-saas-plugin-mesh","sliceMb":15.25,"bunMb":25.88,"denoMb":48.95,"nodeMb":85.25},{"id":"04-wasm-zero-trust-cdr-pipeline","sliceMb":20.5,"bunMb":30.5,"denoMb":48.8,"nodeMb":78.51},{"id":"05-time-travel-chaos-fuzzer-payments","sliceMb":15.63,"bunMb":28.38,"denoMb":48.23,"nodeMb":79.54},{"id":"FW 4: SvelteKit 3 + Svelte 5","sliceMb":22.38,"bunMb":40.88,"denoMb":55.21,"nodeMb":83.66}]},{"file":"bench_v0.12.0_20261115_020047Z_79e5c79.json","version":"0.12.0","commit":"79e5c79","timestampUtc":"2026-11-15T02:00:47Z","runtimes":{"slice":"v0.12.0","bun":"v1.4.4","deno":"v2.9.8","node":"v27.0.0-alpha.0.0.0"},"workloadCount":33,"coldTotMs":538,"warmTotMs":187.2,"binTotMs":561,"bunTotMs":718.8,"denoTotMs":1815.8,"nodeTotMs":2809.5,"rssMinMb":13.6,"rssAvgMb":17.35,"rssMaxMb":23.88,"tier0Rps":161024,"tier1Rps":147175,"bunRps":100687,"denoRps":97439,"nodeRps":55480,"coldP50Us":1.25,"coldP99Us":1.5,"swarm1000Ms":1.46,"swarm1000RssMb":8,"cas500ColdMs":2.72,"cas500MemUs":8.08,"kv1001Us":617.98,"tot3SandboxesUs":67.17,"workloads":[{"id":"01-fintech-checkout","category":"core_edge_crypto","coldMs":6.594,"warmMs":1.15,"bunMs":13.814,"denoMs":37.397,"nodeMs":61.351},{"id":"02-npm-ecosystem-suite","category":"npm_ast_disk","coldMs":14.991,"warmMs":4.061,"bunMs":22.147,"denoMs":54.986,"nodeMs":72.132},{"id":"03-disk-io-log-pipeline","category":"npm_ast_disk","coldMs":7.733,"warmMs":1.292,"bunMs":14.719,"denoMs":46.125,"nodeMs":65.092},{"id":"04-edge-api-gateway","category":"core_edge_crypto","coldMs":7.752,"warmMs":1.694,"bunMs":15.575,"denoMs":49.884,"nodeMs":66.945},{"id":"05-jwt-oauth-session-guard","category":"core_edge_crypto","coldMs":10.409,"warmMs":5.846,"bunMs":14.797,"denoMs":46.984,"nodeMs":64.394},{"id":"06-telemetry-metrics-pipeline","category":"npm_ast_disk","coldMs":13.504,"warmMs":5.872,"bunMs":17.446,"denoMs":49.753,"nodeMs":71.279},{"id":"07-graphql-ast-validator","category":"npm_ast_disk","coldMs":9.163,"warmMs":3.936,"bunMs":13.718,"denoMs":42.089,"nodeMs":63.959},{"id":"08-event-driven-state-journal","category":"npm_ast_disk","coldMs":11.989,"warmMs":5.159,"bunMs":16.672,"denoMs":47.872,"nodeMs":66.965},{"id":"09-wintertc-web-router","category":"wintertc_fetch_dlp","coldMs":17.471,"warmMs":9.966,"bunMs":17.812,"denoMs":50.607,"nodeMs":88.583},{"id":"10-fullstack-bff-microservice","category":"wintertc_fetch_dlp","coldMs":14.874,"warmMs":7.532,"bunMs":14.619,"denoMs":49.901,"nodeMs":88.01},{"id":"11-static-asset-cdn-edge","category":"wintertc_fetch_dlp","coldMs":12.207,"warmMs":5.149,"bunMs":14.288,"denoMs":55.396,"nodeMs":93.65},{"id":"12-ai-sse-token-streamer","category":"wintertc_fetch_dlp","coldMs":17.761,"warmMs":9.126,"bunMs":16.107,"denoMs":51.015,"nodeMs":93.105},{"id":"13-webhook-orchestrator-ssrf","category":"wintertc_fetch_dlp","coldMs":14.474,"warmMs":6.905,"bunMs":23.928,"denoMs":52.818,"nodeMs":117.088},{"id":"14-federated-api-mesh-dlp","category":"wintertc_fetch_dlp","coldMs":15.125,"warmMs":7.548,"bunMs":21.775,"denoMs":55.41,"nodeMs":117.475},{"id":"15-time-travel-test-suite","category":"realtime_workers_wasm","coldMs":19.029,"warmMs":5.043,"bunMs":25.745,"denoMs":69.866,"nodeMs":86.105},{"id":"16-dotenv-dlp-config-vault","category":"core_edge_crypto","coldMs":8.043,"warmMs":1.254,"bunMs":15.645,"denoMs":47.623,"nodeMs":67.869},{"id":"17-zero-trust-redirect-keepalive-mesh","category":"wintertc_fetch_dlp","coldMs":19.61,"warmMs":8.782,"bunMs":22.323,"denoMs":58.661,"nodeMs":114.197},{"id":"18-async-event-loop-fanout-scheduler","category":"wintertc_fetch_dlp","coldMs":32.217,"warmMs":16.974,"bunMs":33.24,"denoMs":74.653,"nodeMs":83.938},{"id":"19-wintertc-webcrypto-streams-edge","category":"wintertc_fetch_dlp","coldMs":9.839,"warmMs":2.29,"bunMs":14.271,"denoMs":47.248,"nodeMs":89.67},{"id":"20-node-compat-and-edge-router","category":"npm_ast_disk","coldMs":11.069,"warmMs":0.526,"bunMs":22.829,"denoMs":57.539,"nodeMs":77.686},{"id":"21-websocket-realtime-and-security-guard","category":"realtime_workers_wasm","coldMs":11.816,"warmMs":2.25,"bunMs":20.793,"denoMs":53.308,"nodeMs":119.462},{"id":"22-worker-threads-and-raw-sockets","category":"realtime_workers_wasm","coldMs":23.022,"warmMs":4.697,"bunMs":63.024,"denoMs":117.638,"nodeMs":103.763},{"id":"23-wasm-crypto-and-simd-kernel","category":"realtime_workers_wasm","coldMs":16.806,"warmMs":1.068,"bunMs":21.441,"denoMs":41.898,"nodeMs":64.1},{"id":"24-tsx-ssr-and-wasm-edge-pipeline","category":"realtime_workers_wasm","coldMs":9.168,"warmMs":1.486,"bunMs":19.707,"denoMs":45.677,"nodeMs":70.169},{"id":"frameworks/01-hono-edge-microservice","category":"frameworks","coldMs":16.505,"warmMs":7.24,"bunMs":20.024,"denoMs":54.588,"nodeMs":96.618},{"id":"frameworks/02-itty-router-unjs-nitro-stack","category":"frameworks","coldMs":22.222,"warmMs":9.069,"bunMs":19.741,"denoMs":48.296,"nodeMs":88.338},{"id":"frameworks/03-node-http-express-compat","category":"frameworks","coldMs":17.43,"warmMs":0.98,"bunMs":34.884,"denoMs":54.281,"nodeMs":86.15},{"id":"frameworks/04-sveltekit-edge-ssr","category":"frameworks","coldMs":36.096,"warmMs":15.188,"bunMs":43.345,"denoMs":71.581,"nodeMs":115.353},{"id":"case_studies/01-tot-autonomous-sre-agent","category":"case_studies","coldMs":37.112,"warmMs":15.04,"bunMs":29.768,"denoMs":74.089,"nodeMs":92.392},{"id":"case_studies/02-mcp-code-mode-orchestrator","category":"case_studies","coldMs":20.381,"warmMs":3.732,"bunMs":16.476,"denoMs":44.573,"nodeMs":73.309},{"id":"case_studies/03-multi-tenant-saas-plugin-mesh","category":"case_studies","coldMs":14.811,"warmMs":5.885,"bunMs":16.73,"denoMs":51.158,"nodeMs":90.206},{"id":"case_studies/04-wasm-zero-trust-cdr-pipeline","category":"case_studies","coldMs":19.402,"warmMs":1.423,"bunMs":20.01,"denoMs":47.529,"nodeMs":73.697},{"id":"case_studies/05-time-travel-chaos-fuzzer-payments","category":"case_studies","coldMs":19.39,"warmMs":9.005,"bunMs":21.42,"denoMs":65.316,"nodeMs":86.487}],"rss":[{"id":"App 2: NPM semver+ms+ini","sliceMb":13.6,"bunMb":28.88,"denoMb":46.22,"nodeMb":69.66},{"id":"App 6: Telemetry + Flatted","sliceMb":14.25,"bunMb":29.37,"denoMb":50,"nodeMb":71.03},{"id":"App 21: RFC 6455 WS + Sec","sliceMb":14.5,"bunMb":30.95,"denoMb":49.66,"nodeMb":93},{"id":"App 22: Workers + Sockets","sliceMb":23.88,"bunMb":40.54,"denoMb":61.47,"nodeMb":91.54},{"id":"App 23: Pure-Rust WASM","sliceMb":19.13,"bunMb":30.38,"denoMb":47.97,"nodeMb":78.02},{"id":"FW 1: Hono v4 Microservice","sliceMb":15.88,"bunMb":29.98,"denoMb":48.36,"nodeMb":87.03},{"id":"FW 2: itty-router + UnJS","sliceMb":14.88,"bunMb":31,"denoMb":47.74,"nodeMb":85.43},{"id":"App 24: WASM + SSR","sliceMb":14,"bunMb":30.13,"denoMb":47.84,"nodeMb":79.25},{"id":"FW 3: Express node:http","sliceMb":15.75,"bunMb":32.63,"denoMb":46.16,"nodeMb":78.39},{"id":"01-tot-autonomous-sre-agent","sliceMb":21.13,"bunMb":31.23,"denoMb":51.97,"nodeMb":83.51},{"id":"02-mcp-code-mode-orchestrator","sliceMb":18.88,"bunMb":27.25,"denoMb":45.5,"nodeMb":78.26},{"id":"03-multi-tenant-saas-plugin-mesh","sliceMb":15.5,"bunMb":25.75,"denoMb":48.63,"nodeMb":85.88},{"id":"04-wasm-zero-trust-cdr-pipeline","sliceMb":20.5,"bunMb":30.75,"denoMb":48.35,"nodeMb":78.38},{"id":"05-time-travel-chaos-fuzzer-payments","sliceMb":15.75,"bunMb":28.75,"denoMb":48.62,"nodeMb":79.75},{"id":"FW 4: SvelteKit 3 + Svelte 5","sliceMb":22.63,"bunMb":40.5,"denoMb":55.16,"nodeMb":83.65}]},{"file":"bench_v0.13.5_20261120_154956Z_0adaae5.json","version":"0.13.5","commit":"0adaae5","timestampUtc":"2026-11-20T15:49:56Z","runtimes":{"slice":"v0.13.5","bun":"v1.4.4","deno":"v2.9.8","node":"v27.0.0-alpha.0.0.0"},"workloadCount":33,"coldTotMs":395.4,"warmTotMs":149.4,"binTotMs":408.8,"bunTotMs":673.8,"denoTotMs":1701.3,"nodeTotMs":2639.2,"rssMinMb":13,"rssAvgMb":15.74,"rssMaxMb":21.25,"tier0Rps":161440,"tier1Rps":158435,"bunRps":106893,"denoRps":107744,"nodeRps":57221,"coldP50Us":1.05,"coldP99Us":3.19,"swarm1000Ms":1.32,"swarm1000RssMb":8,"cas500ColdMs":4.719,"cas500MemUs":4379.68,"kv1001Us":511.38,"tot3SandboxesUs":47.55,"workloads":[{"id":"01-fintech-checkout","category":"core_edge_crypto","coldMs":5.383,"warmMs":0.786,"bunMs":13.187,"denoMs":36.224,"nodeMs":59.242},{"id":"02-npm-ecosystem-suite","category":"npm_ast_disk","coldMs":11.157,"warmMs":3.335,"bunMs":21.101,"denoMs":52.65,"nodeMs":67.71},{"id":"03-disk-io-log-pipeline","category":"npm_ast_disk","coldMs":6.01,"warmMs":1.081,"bunMs":13.621,"denoMs":41.176,"nodeMs":61.071},{"id":"04-edge-api-gateway","category":"core_edge_crypto","coldMs":6.049,"warmMs":1.439,"bunMs":14.938,"denoMs":42.373,"nodeMs":60.823},{"id":"05-jwt-oauth-session-guard","category":"core_edge_crypto","coldMs":8.291,"warmMs":4.42,"bunMs":14.175,"denoMs":43.076,"nodeMs":60.689},{"id":"06-telemetry-metrics-pipeline","category":"npm_ast_disk","coldMs":10.835,"warmMs":5,"bunMs":16.606,"denoMs":45.515,"nodeMs":63.514},{"id":"07-graphql-ast-validator","category":"npm_ast_disk","coldMs":7.342,"warmMs":3.582,"bunMs":12.872,"denoMs":42.425,"nodeMs":59.083},{"id":"08-event-driven-state-journal","category":"npm_ast_disk","coldMs":6.189,"warmMs":1.108,"bunMs":15.559,"denoMs":44.381,"nodeMs":62.514},{"id":"09-wintertc-web-router","category":"wintertc_fetch_dlp","coldMs":12.816,"warmMs":7.035,"bunMs":13.997,"denoMs":46.306,"nodeMs":84.018},{"id":"10-fullstack-bff-microservice","category":"wintertc_fetch_dlp","coldMs":9.423,"warmMs":3.659,"bunMs":14.144,"denoMs":48.186,"nodeMs":83.155},{"id":"11-static-asset-cdn-edge","category":"wintertc_fetch_dlp","coldMs":8.489,"warmMs":2.933,"bunMs":13.153,"denoMs":47.86,"nodeMs":85.345},{"id":"12-ai-sse-token-streamer","category":"wintertc_fetch_dlp","coldMs":13.394,"warmMs":6.645,"bunMs":15.194,"denoMs":50.006,"nodeMs":87.218},{"id":"13-webhook-orchestrator-ssrf","category":"wintertc_fetch_dlp","coldMs":9.606,"warmMs":3.171,"bunMs":18.784,"denoMs":50.686,"nodeMs":109.354},{"id":"14-federated-api-mesh-dlp","category":"wintertc_fetch_dlp","coldMs":12.176,"warmMs":7.036,"bunMs":20.583,"denoMs":52.495,"nodeMs":106.385},{"id":"15-time-travel-test-suite","category":"realtime_workers_wasm","coldMs":11.454,"warmMs":3.646,"bunMs":24.488,"denoMs":66.216,"nodeMs":81.512},{"id":"16-dotenv-dlp-config-vault","category":"core_edge_crypto","coldMs":6.375,"warmMs":1.136,"bunMs":14.778,"denoMs":45.783,"nodeMs":66.435},{"id":"17-zero-trust-redirect-keepalive-mesh","category":"wintertc_fetch_dlp","coldMs":12.72,"warmMs":5.572,"bunMs":21.465,"denoMs":53.988,"nodeMs":109.449},{"id":"18-async-event-loop-fanout-scheduler","category":"wintertc_fetch_dlp","coldMs":27.555,"warmMs":17.266,"bunMs":32.239,"denoMs":69.723,"nodeMs":79.312},{"id":"19-wintertc-webcrypto-streams-edge","category":"wintertc_fetch_dlp","coldMs":8.173,"warmMs":1.482,"bunMs":13.641,"denoMs":43.183,"nodeMs":84.763},{"id":"20-node-compat-and-edge-router","category":"npm_ast_disk","coldMs":8.765,"warmMs":0.406,"bunMs":21.745,"denoMs":53.602,"nodeMs":73.345},{"id":"21-websocket-realtime-and-security-guard","category":"realtime_workers_wasm","coldMs":8.922,"warmMs":1.993,"bunMs":19.27,"denoMs":50.475,"nodeMs":114.344},{"id":"22-worker-threads-and-raw-sockets","category":"realtime_workers_wasm","coldMs":19.573,"warmMs":11.42,"bunMs":55.821,"denoMs":113.721,"nodeMs":100.168},{"id":"23-wasm-crypto-and-simd-kernel","category":"realtime_workers_wasm","coldMs":12.765,"warmMs":1.407,"bunMs":21.033,"denoMs":40.151,"nodeMs":59.822},{"id":"24-tsx-ssr-and-wasm-edge-pipeline","category":"realtime_workers_wasm","coldMs":6.882,"warmMs":1.331,"bunMs":18.506,"denoMs":41.675,"nodeMs":68.394},{"id":"frameworks/01-hono-edge-microservice","category":"frameworks","coldMs":12.648,"warmMs":5.047,"bunMs":19.501,"denoMs":50.45,"nodeMs":92.255},{"id":"frameworks/02-itty-router-unjs-nitro-stack","category":"frameworks","coldMs":15.193,"warmMs":8.865,"bunMs":18.693,"denoMs":46.488,"nodeMs":87.381},{"id":"frameworks/03-node-http-express-compat","category":"frameworks","coldMs":13.516,"warmMs":0.758,"bunMs":34.49,"denoMs":49.163,"nodeMs":80.879},{"id":"frameworks/04-sveltekit-edge-ssr","category":"frameworks","coldMs":27.95,"warmMs":14.375,"bunMs":42.762,"denoMs":66.959,"nodeMs":108.19},{"id":"case_studies/01-tot-autonomous-sre-agent","category":"case_studies","coldMs":26.251,"warmMs":12.365,"bunMs":27.452,"denoMs":70.894,"nodeMs":90.197},{"id":"case_studies/02-mcp-code-mode-orchestrator","category":"case_studies","coldMs":15.304,"warmMs":2.04,"bunMs":16.054,"denoMs":43.604,"nodeMs":65.154},{"id":"case_studies/03-multi-tenant-saas-plugin-mesh","category":"case_studies","coldMs":11.97,"warmMs":4.655,"bunMs":16.176,"denoMs":47.986,"nodeMs":81.774},{"id":"case_studies/04-wasm-zero-trust-cdr-pipeline","category":"case_studies","coldMs":13.688,"warmMs":1.904,"bunMs":18.809,"denoMs":42.385,"nodeMs":64.76},{"id":"case_studies/05-time-travel-chaos-fuzzer-payments","category":"case_studies","coldMs":8.524,"warmMs":2.519,"bunMs":18.971,"denoMs":61.54,"nodeMs":80.99}],"rss":[{"id":"App 2: NPM semver+ms+ini","sliceMb":13,"bunMb":29.5,"denoMb":45.84,"nodeMb":69.9},{"id":"App 6: Telemetry + Flatted","sliceMb":13.63,"bunMb":29.5,"denoMb":49.61,"nodeMb":71.28},{"id":"App 21: RFC 6455 WS + Sec","sliceMb":13.75,"bunMb":31.25,"denoMb":49.5,"nodeMb":92.63},{"id":"App 22: Workers + Sockets","sliceMb":19.63,"bunMb":40.33,"denoMb":62.21,"nodeMb":90.58},{"id":"App 23: Pure-Rust WASM","sliceMb":17.38,"bunMb":30.13,"denoMb":47.4,"nodeMb":78.89},{"id":"FW 1: Hono v4 Microservice","sliceMb":15,"bunMb":30.41,"denoMb":48.23,"nodeMb":86.66},{"id":"FW 2: itty-router + UnJS","sliceMb":14,"bunMb":31.13,"denoMb":47.74,"nodeMb":85.26},{"id":"App 24: WASM + SSR","sliceMb":13.88,"bunMb":29.63,"denoMb":47.46,"nodeMb":79},{"id":"FW 3: Express node:http","sliceMb":14.25,"bunMb":32.38,"denoMb":46.09,"nodeMb":78.39},{"id":"01-tot-autonomous-sre-agent","sliceMb":19,"bunMb":30.98,"denoMb":51.86,"nodeMb":81.63},{"id":"02-mcp-code-mode-orchestrator","sliceMb":16.32,"bunMb":27.13,"denoMb":45.7,"nodeMb":79.01},{"id":"03-multi-tenant-saas-plugin-mesh","sliceMb":14.13,"bunMb":25.75,"denoMb":48.5,"nodeMb":86.13},{"id":"04-wasm-zero-trust-cdr-pipeline","sliceMb":17.75,"bunMb":30.5,"denoMb":48.2,"nodeMb":78.63},{"id":"05-time-travel-chaos-fuzzer-payments","sliceMb":13.13,"bunMb":28.38,"denoMb":48.63,"nodeMb":79.78},{"id":"FW 4: SvelteKit 3 + Svelte 5","sliceMb":21.25,"bunMb":40.75,"denoMb":55.32,"nodeMb":83.79}]},{"file":"bench_v0.14.6_20261126_185600Z_144857c.json","version":"0.14.6","commit":"144857c","timestampUtc":"2026-11-26T18:56:00Z","runtimes":{"slice":"v0.14.6","bun":"v1.4.5","deno":"v2.9.8","node":"v27.0.0-alpha.0.1.1"},"workloadCount":33,"coldTotMs":419.6,"warmTotMs":135.1,"binTotMs":437.8,"bunTotMs":724.2,"denoTotMs":1720.8,"nodeTotMs":2486.2,"rssMinMb":13.63,"rssAvgMb":16.6,"rssMaxMb":22,"tier0Rps":159866,"tier1Rps":156501,"bunRps":98564,"denoRps":89842,"nodeRps":55136,"coldP50Us":0.85,"coldP99Us":1.61,"swarm1000Ms":1.04,"swarm1000RssMb":8.25,"cas500ColdMs":2.923,"cas500MemUs":107.08,"kv1001Us":520.11,"tot3SandboxesUs":55.16,"workloads":[{"id":"01-fintech-checkout","category":"core_edge_crypto","coldMs":5.309,"warmMs":0.925,"bunMs":14.754,"denoMs":35.291,"nodeMs":52.941},{"id":"02-npm-ecosystem-suite","category":"npm_ast_disk","coldMs":11.325,"warmMs":3.278,"bunMs":22.97,"denoMs":51.314,"nodeMs":64.329},{"id":"03-disk-io-log-pipeline","category":"npm_ast_disk","coldMs":5.989,"warmMs":1.099,"bunMs":15.386,"denoMs":42.391,"nodeMs":55.536},{"id":"04-edge-api-gateway","category":"core_edge_crypto","coldMs":6.456,"warmMs":1.296,"bunMs":16.197,"denoMs":41.651,"nodeMs":56.101},{"id":"05-jwt-oauth-session-guard","category":"core_edge_crypto","coldMs":8.795,"warmMs":4.688,"bunMs":15.896,"denoMs":44.479,"nodeMs":57.49},{"id":"06-telemetry-metrics-pipeline","category":"npm_ast_disk","coldMs":10.828,"warmMs":4.062,"bunMs":18.195,"denoMs":46.365,"nodeMs":59.253},{"id":"07-graphql-ast-validator","category":"npm_ast_disk","coldMs":7.808,"warmMs":3.481,"bunMs":14.447,"denoMs":42.009,"nodeMs":54.979},{"id":"08-event-driven-state-journal","category":"npm_ast_disk","coldMs":6.282,"warmMs":1.12,"bunMs":17.403,"denoMs":44.68,"nodeMs":58.871},{"id":"09-wintertc-web-router","category":"wintertc_fetch_dlp","coldMs":13.109,"warmMs":6.701,"bunMs":15.096,"denoMs":46.919,"nodeMs":79.259},{"id":"10-fullstack-bff-microservice","category":"wintertc_fetch_dlp","coldMs":10.354,"warmMs":3.806,"bunMs":15.909,"denoMs":46.79,"nodeMs":78.439},{"id":"11-static-asset-cdn-edge","category":"wintertc_fetch_dlp","coldMs":8.784,"warmMs":2.9,"bunMs":14.335,"denoMs":48.313,"nodeMs":80.76},{"id":"12-ai-sse-token-streamer","category":"wintertc_fetch_dlp","coldMs":13.355,"warmMs":6.273,"bunMs":16.317,"denoMs":49.385,"nodeMs":84.284},{"id":"13-webhook-orchestrator-ssrf","category":"wintertc_fetch_dlp","coldMs":9.779,"warmMs":3.232,"bunMs":20.395,"denoMs":52.247,"nodeMs":104.498},{"id":"14-federated-api-mesh-dlp","category":"wintertc_fetch_dlp","coldMs":12.976,"warmMs":7.169,"bunMs":22.343,"denoMs":52.364,"nodeMs":102.578},{"id":"15-time-travel-test-suite","category":"realtime_workers_wasm","coldMs":11.575,"warmMs":3.643,"bunMs":26.038,"denoMs":67.719,"nodeMs":78.595},{"id":"16-dotenv-dlp-config-vault","category":"core_edge_crypto","coldMs":6.486,"warmMs":1.185,"bunMs":15.972,"denoMs":45.702,"nodeMs":59.666},{"id":"17-zero-trust-redirect-keepalive-mesh","category":"wintertc_fetch_dlp","coldMs":13.172,"warmMs":5.602,"bunMs":23.018,"denoMs":54.551,"nodeMs":105.544},{"id":"18-async-event-loop-fanout-scheduler","category":"wintertc_fetch_dlp","coldMs":27.84,"warmMs":15.778,"bunMs":33.952,"denoMs":71.501,"nodeMs":73.376},{"id":"19-wintertc-webcrypto-streams-edge","category":"wintertc_fetch_dlp","coldMs":8.354,"warmMs":1.431,"bunMs":14.775,"denoMs":45.837,"nodeMs":81.956},{"id":"20-node-compat-and-edge-router","category":"npm_ast_disk","coldMs":8.977,"warmMs":0.43,"bunMs":23.503,"denoMs":54.191,"nodeMs":66.277},{"id":"21-websocket-realtime-and-security-guard","category":"realtime_workers_wasm","coldMs":9.092,"warmMs":2.077,"bunMs":21.29,"denoMs":51.36,"nodeMs":112.639},{"id":"22-worker-threads-and-raw-sockets","category":"realtime_workers_wasm","coldMs":28.412,"warmMs":2.438,"bunMs":57.597,"denoMs":111.442,"nodeMs":93.675},{"id":"23-wasm-crypto-and-simd-kernel","category":"realtime_workers_wasm","coldMs":12.887,"warmMs":1.381,"bunMs":21.713,"denoMs":40.437,"nodeMs":58.056},{"id":"24-tsx-ssr-and-wasm-edge-pipeline","category":"realtime_workers_wasm","coldMs":7.127,"warmMs":1.371,"bunMs":19.477,"denoMs":42.539,"nodeMs":60.273},{"id":"frameworks/01-hono-edge-microservice","category":"frameworks","coldMs":17.414,"warmMs":4.967,"bunMs":21.334,"denoMs":53.278,"nodeMs":88.381},{"id":"frameworks/02-itty-router-unjs-nitro-stack","category":"frameworks","coldMs":15.704,"warmMs":8.458,"bunMs":20.146,"denoMs":45.945,"nodeMs":81.95},{"id":"frameworks/03-node-http-express-compat","category":"frameworks","coldMs":13.988,"warmMs":0.881,"bunMs":35.934,"denoMs":51.221,"nodeMs":78.065},{"id":"frameworks/04-sveltekit-edge-ssr","category":"frameworks","coldMs":29.093,"warmMs":13.07,"bunMs":44.898,"denoMs":70.284,"nodeMs":105.098},{"id":"case_studies/01-tot-autonomous-sre-agent","category":"case_studies","coldMs":27.305,"warmMs":11.865,"bunMs":29.303,"denoMs":71.907,"nodeMs":79.738},{"id":"case_studies/02-mcp-code-mode-orchestrator","category":"case_studies","coldMs":15.878,"warmMs":1.995,"bunMs":17.065,"denoMs":43.26,"nodeMs":59.229},{"id":"case_studies/03-multi-tenant-saas-plugin-mesh","category":"case_studies","coldMs":12.631,"warmMs":4.447,"bunMs":17.434,"denoMs":47.701,"nodeMs":77.629},{"id":"case_studies/04-wasm-zero-trust-cdr-pipeline","category":"case_studies","coldMs":13.582,"warmMs":1.738,"bunMs":20.225,"denoMs":43.464,"nodeMs":60.16},{"id":"case_studies/05-time-travel-chaos-fuzzer-payments","category":"case_studies","coldMs":8.982,"warmMs":2.274,"bunMs":20.86,"denoMs":64.286,"nodeMs":76.571}],"rss":[{"id":"App 2: NPM semver+ms+ini","sliceMb":13.63,"bunMb":37.49,"denoMb":45.99,"nodeMb":68.82},{"id":"App 6: Telemetry + Flatted","sliceMb":13.88,"bunMb":38.75,"denoMb":49.37,"nodeMb":70.1},{"id":"App 21: RFC 6455 WS + Sec","sliceMb":14.25,"bunMb":36.98,"denoMb":49.39,"nodeMb":91.35},{"id":"App 22: Workers + Sockets","sliceMb":22,"bunMb":46.05,"denoMb":62.75,"nodeMb":88.99},{"id":"App 23: Pure-Rust WASM","sliceMb":18.63,"bunMb":37.13,"denoMb":47.28,"nodeMb":76.09},{"id":"FW 1: Hono v4 Microservice","sliceMb":16.75,"bunMb":39.49,"denoMb":48.99,"nodeMb":85.23},{"id":"FW 2: itty-router + UnJS","sliceMb":14.5,"bunMb":39.5,"denoMb":47.79,"nodeMb":84.36},{"id":"App 24: WASM + SSR","sliceMb":13.88,"bunMb":37.13,"denoMb":47.32,"nodeMb":76.73},{"id":"FW 3: Express node:http","sliceMb":14.88,"bunMb":40.63,"denoMb":45.47,"nodeMb":78.35},{"id":"01-tot-autonomous-sre-agent","sliceMb":20.38,"bunMb":40.75,"denoMb":51.5,"nodeMb":78.1},{"id":"02-mcp-code-mode-orchestrator","sliceMb":17.75,"bunMb":36.38,"denoMb":45.64,"nodeMb":76.45},{"id":"03-multi-tenant-saas-plugin-mesh","sliceMb":14.5,"bunMb":36.75,"denoMb":49,"nodeMb":84.23},{"id":"04-wasm-zero-trust-cdr-pipeline","sliceMb":18.5,"bunMb":38.47,"denoMb":48.71,"nodeMb":76.98},{"id":"05-time-travel-chaos-fuzzer-payments","sliceMb":13.63,"bunMb":38,"denoMb":48.24,"nodeMb":77.47},{"id":"FW 4: SvelteKit 3 + Svelte 5","sliceMb":21.84,"bunMb":48.38,"denoMb":55.49,"nodeMb":82.98}]}];
+
+function fmtNum(n, d = 1) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "-";
+  return Number(n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
+function deltaBadge(curr, prev, lowerIsBetter, unit = "") {
+  if (prev === undefined || prev === null || prev === 0) return '<span class="badge neutral">baseline</span>';
+  const diff = curr - prev;
+  const pct = (diff / prev) * 100;
+  const sign = diff > 0 ? "+" : "";
+  const isGood = lowerIsBetter ? diff <= 0 : diff >= 0;
+  const isFlat = Math.abs(pct) < 1.5;
+  const cls = isFlat ? "neutral" : (isGood ? "good" : (Math.abs(pct) < 5 ? "warn" : "bad"));
+  const diffStr = Math.abs(diff) >= 100 ? Math.round(diff).toLocaleString("en-US") : diff.toFixed(2);
+  return '<span class="badge ' + cls + '">' + sign + diffStr + unit + ' (' + sign + pct.toFixed(1) + '%)</span>';
+}
+
+function renderLegend(elId, series) {
+  document.getElementById(elId).innerHTML = series
+    .map((s) => '<span><i class="dot" style="background:' + s.color + '"></i>' + s.label + '</span>')
+    .join("");
+}
+
+function renderLineChart(elId, labels, series, unit) {
+  const W = 580, H = 240, PL = 58, PR = 20, PT = 16, PB = 34;
+  const plotW = W - PL - PR, plotH = H - PT - PB;
+  const allVals = series.flatMap((s) => s.values).filter((v) => typeof v === "number" && !Number.isNaN(v));
+  const minV = 0;
+  const maxV = Math.max(...allVals, 1) * 1.12;
+  const xStep = labels.length > 1 ? plotW / (labels.length - 1) : 0;
+  const xAt = (i) => (labels.length > 1 ? PL + i * xStep : PL + plotW / 2);
+  const yAt = (v) => PT + plotH - ((v - minV) / (maxV - minV)) * plotH;
+
+  let svg = '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '">';
+  for (let g = 0; g <= 4; g++) {
+    const val = minV + ((maxV - minV) * g) / 4;
+    const y = yAt(val);
+    svg += '<line x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (W - PR) + '" y2="' + y.toFixed(1) + '" stroke="#243147" stroke-dasharray="3 3"/>';
+    const lbl = maxV >= 1000 ? Math.round(val).toLocaleString("en-US") : val.toFixed(maxV < 10 ? 2 : 0);
+    svg += '<text x="' + (PL - 8) + '" y="' + (y + 4).toFixed(1) + '" fill="#8fa3bf" font-size="11" font-family="monospace" text-anchor="end">' + lbl + '</text>';
+  }
+  labels.forEach((lbl, i) => {
+    svg += '<text x="' + xAt(i).toFixed(1) + '" y="' + (H - 10) + '" fill="#8fa3bf" font-size="11" font-family="monospace" text-anchor="middle">' + lbl + '</text>';
+  });
+  for (const s of series) {
+    const pts = s.values.map((v, i) => xAt(i).toFixed(1) + "," + yAt(v).toFixed(1)).join(" ");
+    svg += '<polyline fill="none" stroke="' + s.color + '" stroke-width="2.5" stroke-dasharray="' + (s.dash || "") + '" points="' + pts + '"/>';
+    s.values.forEach((v, i) => {
+      const cx = xAt(i).toFixed(1), cy = yAt(v).toFixed(1);
+      svg += '<circle cx="' + cx + '" cy="' + cy + '" r="4" fill="' + s.color + '"><title>' + s.label + ' (' + labels[i] + '): ' + fmtNum(v, maxV < 20 ? 2 : 1) + unit + '</title></circle>';
+    });
+  }
+  svg += "</svg>";
+  document.getElementById(elId).innerHTML = svg;
+}
+
+(function init() {
+  if (!REPORTS.length) return;
+  const first = REPORTS[0];
+  const latest = REPORTS[REPORTS.length - 1];
+  const prev = REPORTS.length >= 2 ? REPORTS[REPORTS.length - 2] : null;
+  const labels = REPORTS.map((r) => "v" + r.version);
+
+  document.getElementById("headerSub").textContent =
+    "Tracking " + REPORTS.length + " releases (v" + first.version + " -> v" + latest.version + ") across " + latest.workloadCount + " real-world workloads";
+
+  const kpis = [
+    { label: "Cold .cas Total (33 Apps)", val: fmtNum(latest.coldTotMs, 1) + " ms", prev: prev?.coldTotMs, first: first.coldTotMs, lower: true, unit: " ms" },
+    { label: "--warm Pooled Total", val: fmtNum(latest.warmTotMs, 1) + " ms", prev: prev?.warmTotMs, first: first.warmTotMs, lower: true, unit: " ms" },
+    { label: "HTTP Keep-Alive Tier-0", val: fmtNum(latest.tier0Rps, 0) + " req/s", prev: prev?.tier0Rps, first: first.tier0Rps, lower: false, unit: "" },
+    { label: "HTTP Keep-Alive Tier-1", val: fmtNum(latest.tier1Rps, 0) + " req/s", prev: prev?.tier1Rps, first: first.tier1Rps, lower: false, unit: "" },
+    { label: "Isolate Cold-Start P50", val: fmtNum(latest.coldP50Us, 2) + " us", prev: prev?.coldP50Us, first: first.coldP50Us, lower: true, unit: " us" },
+    { label: "1,000-Tenant Swarm", val: fmtNum(latest.swarm1000Ms, 2) + " ms", prev: prev?.swarm1000Ms, first: first.swarm1000Ms, lower: true, unit: " ms" },
+    { label: "Avg Peak RSS (33 Apps)", val: fmtNum(latest.rssAvgMb, 2) + " MB", prev: prev?.rssAvgMb, first: first.rssAvgMb, lower: true, unit: " MB" },
+    { label: "Max Peak RSS (33 Apps)", val: fmtNum(latest.rssMaxMb, 2) + " MB", prev: prev?.rssMaxMb, first: first.rssMaxMb, lower: true, unit: " MB" }
+  ];
+
+  document.getElementById("kpiGrid").innerHTML = kpis.map((k) =>
+    '<div class="kpi"><div class="kpi-label">' + k.label + '</div>' +
+    '<div class="kpi-val">' + k.val + '</div>' +
+    '<div class="kpi-sub">' +
+      '<div>vs prev' + (prev ? " (v" + prev.version + ")" : "") + ": " + deltaBadge(parseFloat(k.val.replace(/,/g, "")), k.prev, k.lower, k.unit) + '</div>' +
+      '<div>vs v' + first.version + ": " + deltaBadge(parseFloat(k.val.replace(/,/g, "")), k.first, k.lower, k.unit) + '</div>' +
+    '</div></div>'
+  ).join("");
+
+  const latSeries = [
+    { label: "Cold .cas (ms)", color: "#38bdf8", values: REPORTS.map((r) => r.coldTotMs) },
+    { label: "--warm Pooled (ms)", color: "#34d399", values: REPORTS.map((r) => r.warmTotMs) },
+    { label: "Standalone Bin (ms)", color: "#818cf8", dash: "5 4", values: REPORTS.map((r) => r.binTotMs) }
+  ];
+  renderLegend("legLatency", latSeries);
+  renderLineChart("chartLatency", labels, latSeries, " ms");
+
+  const httpSeries = [
+    { label: "Slice Tier-0 CAS", color: "#38bdf8", values: REPORTS.map((r) => r.tier0Rps) },
+    { label: "Slice Tier-1 WinterTC", color: "#34d399", values: REPORTS.map((r) => r.tier1Rps) },
+    { label: "Bun", color: "#fbbf24", dash: "4 4", values: REPORTS.map((r) => r.bunRps) },
+    { label: "Deno", color: "#818cf8", dash: "4 4", values: REPORTS.map((r) => r.denoRps) },
+    { label: "Node.js", color: "#f87171", dash: "2 4", values: REPORTS.map((r) => r.nodeRps) }
+  ];
+  renderLegend("legHttp", httpSeries);
+  renderLineChart("chartHttp", labels, httpSeries, " req/s");
+
+  const rssSeries = [
+    { label: "Max Peak RSS (MB)", color: "#f87171", values: REPORTS.map((r) => r.rssMaxMb) },
+    { label: "Avg Peak RSS (MB)", color: "#38bdf8", values: REPORTS.map((r) => r.rssAvgMb) },
+    { label: "Min Peak RSS (MB)", color: "#34d399", values: REPORTS.map((r) => r.rssMinMb) },
+    { label: "1k-Tenant Swarm RSS (MB)", color: "#fbbf24", dash: "5 4", values: REPORTS.map((r) => r.swarm1000RssMb) }
+  ];
+  renderLegend("legRss", rssSeries);
+  renderLineChart("chartRss", labels, rssSeries, " MB");
+
+  const microSeries = [
+    { label: "Cold-Start P50 (us)", color: "#34d399", values: REPORTS.map((r) => r.coldP50Us) },
+    { label: "Cold-Start P99 (us)", color: "#38bdf8", values: REPORTS.map((r) => r.coldP99Us) },
+    { label: "1k-Tenant Swarm (ms)", color: "#fbbf24", values: REPORTS.map((r) => r.swarm1000Ms) }
+  ];
+  renderLegend("legMicrovm", microSeries);
+  renderLineChart("chartMicrovm", labels, microSeries, "");
+
+  // Watchdog tables
+  if (prev) {
+    document.getElementById("watchdogLatDesc").textContent =
+      "Comparing v" + prev.version + " -> v" + latest.version + " sorted by largest Cold .cas delta.";
+    const pMap = Object.fromEntries(prev.workloads.map((w) => [w.id, w]));
+    const latRows = latest.workloads
+      .map((w) => {
+        const pw = pMap[w.id];
+        return {
+          id: w.id,
+          prevCold: pw ? pw.coldMs : null,
+          currCold: w.coldMs,
+          dCold: pw ? w.coldMs - pw.coldMs : 0,
+          prevWarm: pw ? pw.warmMs : null,
+          currWarm: w.warmMs,
+          dWarm: pw ? w.warmMs - pw.warmMs : 0
+        };
+      })
+      .sort((a, b) => b.dCold - a.dCold);
+    document.getElementById("tblWatchdogLat").innerHTML =
+      "<thead><tr><th>Workload</th><th>Cold Prev</th><th>Cold Now</th><th>Cold Delta</th><th>Warm Delta</th></tr></thead><tbody>" +
+      latRows.map((r) =>
+        "<tr><td>" + r.id + "</td><td>" + fmtNum(r.prevCold, 2) + "</td><td>" + fmtNum(r.currCold, 2) + "</td><td>" +
+        deltaBadge(r.currCold, r.prevCold, true, " ms") + "</td><td>" + deltaBadge(r.currWarm, r.prevWarm, true, " ms") + "</td></tr>"
+      ).join("") + "</tbody>";
+
+    document.getElementById("watchdogRssDesc").textContent =
+      "Comparing v" + prev.version + " -> v" + latest.version + " sorted by largest Peak RSS (MB) increase.";
+    const prMap = Object.fromEntries(prev.rss.map((r) => [r.id, r]));
+    const rssRows = latest.rss
+      .map((r) => {
+        const pr = prMap[r.id];
+        return { id: r.id, prevMb: pr ? pr.sliceMb : null, currMb: r.sliceMb, dMb: pr ? r.sliceMb - pr.sliceMb : 0 };
+      })
+      .sort((a, b) => b.dMb - a.dMb);
+    document.getElementById("tblWatchdogRss").innerHTML =
+      "<thead><tr><th>Workload</th><th>RSS Prev (MB)</th><th>RSS Now (MB)</th><th>Delta</th></tr></thead><tbody>" +
+      rssRows.map((r) =>
+        "<tr><td>" + r.id + "</td><td>" + fmtNum(r.prevMb, 2) + "</td><td>" + fmtNum(r.currMb, 2) + "</td><td>" +
+        deltaBadge(r.currMb, r.prevMb, true, " MB") + "</td></tr>"
+      ).join("") + "</tbody>";
+  }
+
+  // Summary matrix
+  document.getElementById("tblSummary").innerHTML =
+    "<thead><tr><th>Version</th><th>Commit</th><th>Cold .cas</th><th>--warm</th><th>Tier-0 RPS</th><th>Tier-1 RPS</th><th>P50 (us)</th><th>Swarm (ms)</th><th>Swarm RSS</th><th>Avg RSS</th><th>Max RSS</th><th>500-Mod</th></tr></thead><tbody>" +
+    REPORTS.map((r) =>
+      "<tr><td>v" + r.version + "</td><td>" + r.commit + "</td><td>" + fmtNum(r.coldTotMs, 1) + " ms</td><td>" + fmtNum(r.warmTotMs, 1) + " ms</td><td>" +
+      fmtNum(r.tier0Rps, 0) + "</td><td>" + fmtNum(r.tier1Rps, 0) + "</td><td>" + fmtNum(r.coldP50Us, 2) + "</td><td>" + fmtNum(r.swarm1000Ms, 2) + "</td><td>" +
+      fmtNum(r.swarm1000RssMb, 2) + " MB</td><td>" + fmtNum(r.rssAvgMb, 2) + " MB</td><td>" + fmtNum(r.rssMaxMb, 2) + " MB</td><td>" + fmtNum(r.cas500ColdMs, 3) + " ms</td></tr>"
+    ).join("") + "</tbody>";
+
+  // Interactive workload explorer
+  const cats = [...new Set(latest.workloads.map((w) => w.category))].sort();
+  const catSel = document.getElementById("catFilter");
+  cats.forEach((c) => {
+    const opt = document.createElement("option");
+    opt.value = c;
+    opt.textContent = c;
+    catSel.appendChild(opt);
+  });
+
+  function renderWorkloadsTable() {
+    const q = document.getElementById("searchBox").value.trim().toLowerCase();
+    const mode = document.getElementById("metricMode").value;
+    const cat = catSel.value;
+    const wMaps = REPORTS.map((r) => Object.fromEntries(r.workloads.map((w) => [w.id, w])));
+    const rows = latest.workloads.filter((w) =>
+      (cat === "all" || w.category === cat) && (!q || w.id.toLowerCase().includes(q))
+    );
+    document.getElementById("tblWorkloads").innerHTML =
+      "<thead><tr><th>Workload</th>" + REPORTS.map((r) => "<th>v" + r.version + "</th>").join("") + "<th>Bun (latest)</th><th>Node (latest)</th></tr></thead><tbody>" +
+      rows.map((w) => {
+        const cols = wMaps.map((m) => "<td>" + (m[w.id] ? fmtNum(m[w.id][mode], 2) : "-") + "</td>").join("");
+        return "<tr><td>" + w.id + "</td>" + cols + "<td>" + fmtNum(w.bunMs, 2) + "</td><td>" + fmtNum(w.nodeMs, 2) + "</td></tr>";
+      }).join("") + "</tbody>";
+  }
+
+  document.getElementById("searchBox").addEventListener("input", renderWorkloadsTable);
+  document.getElementById("metricMode").addEventListener("change", renderWorkloadsTable);
+  catSel.addEventListener("change", renderWorkloadsTable);
+  renderWorkloadsTable();
+})();
+</script>
+</body>
+</html>
