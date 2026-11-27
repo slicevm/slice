@@ -317,21 +317,33 @@ fn process_readable_conn(
     conn: &mut ParkedConn,
     isolate: &mut SliceIsolate,
     shared: &AcceptWorkerShared,
-    read_buf: &mut [u8],
+    read_buf: &mut Vec<u8>,
     write_buf: &mut Vec<u8>,
 ) -> ConnStep {
-    // Load any previously parked partial bytes into the worker's reusable 64 KB buffer.
+    const MAX_TOTAL_READ: usize = MAX_REACTOR_HEADER_BYTES + MAX_REACTOR_BODY_BYTES + 16384;
     let mut filled = 0usize;
     if !conn.partial_read.is_empty() {
-        let copy_len = conn.partial_read.len().min(read_buf.len());
+        let need = conn.partial_read.len();
+        if need > read_buf.len() {
+            read_buf.resize(need.min(MAX_TOTAL_READ), 0);
+        }
+        let copy_len = need.min(read_buf.len());
         read_buf[..copy_len].copy_from_slice(&conn.partial_read[..copy_len]);
         filled = copy_len;
         conn.partial_read.clear();
     }
 
-    // Drain currently available non-blocking bytes from kernel socket buffer.
+    // Drain currently available non-blocking bytes from kernel socket buffer,
+    // growing `read_buf` on demand for large bodies (> 64 KB, up to 4 MB).
     let mut peer_eof = false;
-    while filled < read_buf.len() {
+    loop {
+        if filled == read_buf.len() {
+            if read_buf.len() >= MAX_TOTAL_READ {
+                break;
+            }
+            let next_len = (read_buf.len() + 65536).min(MAX_TOTAL_READ);
+            read_buf.resize(next_len, 0);
+        }
         match conn.stream.read(&mut read_buf[filled..]) {
             Ok(0) => {
                 peer_eof = true;
@@ -347,6 +359,10 @@ fn process_readable_conn(
     }
 
     if filled == 0 {
+        if read_buf.len() > 65536 {
+            read_buf.truncate(65536);
+            read_buf.shrink_to(65536);
+        }
         return if peer_eof {
             ConnStep::Close
         } else {
@@ -355,25 +371,42 @@ fn process_readable_conn(
     }
 
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        dispatch_buffered_http_requests(conn, isolate, shared, read_buf, &mut filled, write_buf)
+        dispatch_buffered_http_requests(
+            conn,
+            isolate,
+            shared,
+            read_buf.as_mut_slice(),
+            &mut filled,
+            write_buf,
+        )
     }));
 
-    match res {
+    let step = match res {
         Ok(step) => {
             if matches!(step, ConnStep::Keep) && filled > 0 {
-                if filled > MAX_REACTOR_HEADER_BYTES + MAX_REACTOR_BODY_BYTES {
-                    return ConnStep::Close;
+                if filled > MAX_TOTAL_READ {
+                    ConnStep::Close
+                } else {
+                    conn.partial_read.extend_from_slice(&read_buf[..filled]);
+                    if peer_eof && !conn.has_pending_write() {
+                        ConnStep::Close
+                    } else {
+                        step
+                    }
                 }
-                conn.partial_read.extend_from_slice(&read_buf[..filled]);
-            }
-            if peer_eof && filled == 0 && !conn.has_pending_write() {
+            } else if peer_eof && filled == 0 && !conn.has_pending_write() {
                 ConnStep::Close
             } else {
                 step
             }
         }
         Err(_) => ConnStep::Panicked,
+    };
+    if read_buf.len() > 65536 {
+        read_buf.truncate(65536);
+        read_buf.shrink_to(65536);
     }
+    step
 }
 
 fn dispatch_buffered_http_requests(
