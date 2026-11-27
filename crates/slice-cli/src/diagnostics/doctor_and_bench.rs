@@ -572,6 +572,19 @@ pub(crate) fn measure_current_process_rss_kb() -> u64 {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            && output.status.success()
+            && let Ok(text) = std::str::from_utf8(&output.stdout)
+            && let Some(kb) = crate::config::parse_u64_digits(text)
+        {
+            return kb;
+        }
+    }
+
     #[cfg(target_os = "windows")]
     #[allow(unsafe_code)]
     {
