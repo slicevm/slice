@@ -1,4 +1,5 @@
 pub(crate) mod connection;
+pub(crate) mod reactor;
 pub(crate) mod serve_cmd;
 pub(crate) mod tenant_hotswap;
 pub(crate) mod tls;

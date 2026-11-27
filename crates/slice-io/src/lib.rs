@@ -12,10 +12,13 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 #[allow(unsafe_code)]
+pub mod reactor;
+#[allow(unsafe_code)]
 pub mod ring;
 #[allow(unsafe_code)]
 pub mod slab;
 
+pub use reactor::{Interest, NetReactor, ReadyEvent};
 pub use ring::{
     CompletionRingEngine, DEFAULT_RING_ENTRIES, IoCompletion, IoSubmission, MAX_RING_ENTRIES,
     RingStatus,

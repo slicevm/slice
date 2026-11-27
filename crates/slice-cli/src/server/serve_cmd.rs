@@ -16,24 +16,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-struct AcceptWorkerShared {
-    listener: Arc<TcpListener>,
-    bytecode: Arc<Vec<u8>>,
-    cas_archive: Option<Arc<MappedCasArchive>>,
-    tenant_dir: Option<Arc<PathBuf>>,
-    static_table: Option<Arc<StaticAssetTable>>,
-    tls_server_cfg: Option<Arc<rustls::ServerConfig>>,
-    caps: CapabilityToken,
-    audit_secrets: Arc<Vec<String>>,
-    deterministic_seed: Option<u64>,
-    fuel_limit: u64,
-    mem_limit: usize,
-    max_requests_opt: Option<usize>,
-    req_counter: Arc<AtomicUsize>,
-    shutdown_flag: Arc<AtomicBool>,
-    wake_ip: IpAddr,
-    bound_port: u16,
-    workers: usize,
+pub(crate) struct AcceptWorkerShared {
+    pub(crate) listener: Arc<TcpListener>,
+    pub(crate) bytecode: Arc<Vec<u8>>,
+    pub(crate) cas_archive: Option<Arc<MappedCasArchive>>,
+    pub(crate) tenant_dir: Option<Arc<PathBuf>>,
+    pub(crate) static_table: Option<Arc<StaticAssetTable>>,
+    pub(crate) tls_server_cfg: Option<Arc<rustls::ServerConfig>>,
+    pub(crate) caps: CapabilityToken,
+    pub(crate) audit_secrets: Arc<Vec<String>>,
+    pub(crate) deterministic_seed: Option<u64>,
+    pub(crate) fuel_limit: u64,
+    pub(crate) mem_limit: usize,
+    pub(crate) max_requests_opt: Option<usize>,
+    pub(crate) req_counter: Arc<AtomicUsize>,
+    pub(crate) shutdown_flag: Arc<AtomicBool>,
+    pub(crate) wake_ip: IpAddr,
+    pub(crate) bound_port: u16,
+    pub(crate) workers: usize,
 }
 
 fn run_accept_worker_loop(initial_slot: u32, shared: &AcceptWorkerShared) {
@@ -98,7 +98,7 @@ fn run_accept_worker_loop(initial_slot: u32, shared: &AcceptWorkerShared) {
     }
 }
 
-fn wake_accept_workers(wake_ip: IpAddr, port: u16, workers: usize) {
+pub(crate) fn wake_accept_workers(wake_ip: IpAddr, port: u16, workers: usize) {
     let target = SocketAddr::new(wake_ip, port);
     for _ in 0..workers {
         let _ = TcpStream::connect_timeout(&target, std::time::Duration::from_millis(50));
@@ -375,15 +375,24 @@ Slice.respond(
         workers,
     });
 
+    let use_reactor = shared.tls_server_cfg.is_none();
     let mut handles = Vec::with_capacity(workers.saturating_sub(1));
     for worker_idx in 1..workers {
         let worker_shared = Arc::clone(&shared);
         handles.push(std::thread::spawn(move || {
-            run_accept_worker_loop((worker_idx as u32) << 20, &worker_shared);
+            if use_reactor {
+                super::reactor::run_reactor_worker_loop((worker_idx as u32) << 20, &worker_shared);
+            } else {
+                run_accept_worker_loop((worker_idx as u32) << 20, &worker_shared);
+            }
         }));
     }
 
-    run_accept_worker_loop(0, &shared);
+    if use_reactor {
+        super::reactor::run_reactor_worker_loop(0, &shared);
+    } else {
+        run_accept_worker_loop(0, &shared);
+    }
     for h in handles {
         let _ = h.join();
     }

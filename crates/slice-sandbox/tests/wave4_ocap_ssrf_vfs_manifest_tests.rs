@@ -643,3 +643,35 @@ fn test_v0150_extension_cap_attenuation_and_manifest_parsing() {
         vec!["store".to_string(), "fn.call".to_string()]
     );
 }
+
+#[test]
+fn test_v0150_rolling_egress_dlp_cross_chunk_secret_detection() {
+    let mut expanded = Vec::new();
+    expand_egress_secret_variants("sk_live_split_secret_42", &mut expanded);
+
+    // 1. Raw secret split across two adjacent chunks is detected
+    let mut scanner = RollingEgressDlpScanner::new("stream-tenant", expanded.clone());
+    assert!(scanner.scan_chunk(b"data: hello sk_live_split").is_ok());
+    let err = scanner.scan_chunk(b"_secret_42\n\n").unwrap_err();
+    assert!(matches!(
+        err,
+        SandboxViolation::EgressSecretLeakBlocked { .. }
+    ));
+
+    // 2. Base64-encoded secret split across two chunks is detected
+    let b64 = "c2tfbGl2ZV9zcGxpdF9zZWNyZXRfNDI=";
+    let (p1, p2) = b64.split_at(12);
+    let mut scanner_b64 = RollingEgressDlpScanner::new("stream-tenant", expanded.clone());
+    assert!(scanner_b64.scan_chunk(p1.as_bytes()).is_ok());
+    assert!(scanner_b64.scan_chunk(p2.as_bytes()).is_err());
+
+    // 3. Clean multi-chunk stream passes with zero false positives
+    let mut scanner_clean = RollingEgressDlpScanner::new("stream-tenant", expanded);
+    for chunk in [
+        b"data: chunk 1\n\n".as_slice(),
+        b"data: chunk 2\n\n",
+        b"data: done\n\n",
+    ] {
+        assert!(scanner_clean.scan_chunk(chunk).is_ok());
+    }
+}

@@ -25,6 +25,73 @@ pub struct HttpRequestContext<'a> {
     pub headers: &'a [(&'a str, &'a str)],
 }
 
+/// Host-provided incremental HTTP/1.1 chunked wire writer for live `ReadableStream` and SSE
+/// (`text/event-stream`) responses (`#133`).
+pub trait LiveHttpStreamWriter {
+    /// Writes the HTTP status line and headers (`Transfer-Encoding: chunked`).
+    /// Returns `Err` if the client socket disconnected.
+    fn start_chunked(
+        &mut self,
+        status: u16,
+        content_type: &str,
+        extra_headers: &[(String, String)],
+    ) -> Result<(), String>;
+
+    /// Writes a single RFC 9112 chunk (`<hex-len>\r\n<data>\r\n`) and flushes immediately.
+    /// Returns `Err` if the client socket disconnected.
+    fn write_chunk(&mut self, data: &[u8]) -> Result<(), String>;
+
+    /// Writes the terminating `0\r\n\r\n` chunk and flushes.
+    fn finish_chunked(&mut self) -> Result<(), String>;
+
+    /// Non-blocking probe returning `true` if the client peer has closed its TCP connection.
+    fn is_client_disconnected(&self) -> bool {
+        false
+    }
+}
+
+thread_local! {
+    pub(crate) static BOA_LIVE_HTTP_STREAM: std::cell::RefCell<Option<Box<dyn LiveHttpStreamWriter>>> =
+        std::cell::RefCell::new(None);
+    pub(crate) static BOA_LIVE_STREAM_ACTIVE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    pub(crate) static BOA_LIVE_STREAM_DLP: std::cell::RefCell<Option<slice_sandbox::RollingEgressDlpScanner>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// RAII guard installing a [`LiveHttpStreamWriter`] for the duration of a single HTTP request.
+pub struct LiveHttpStreamGuard {
+    prev: Option<Box<dyn LiveHttpStreamWriter>>,
+    prev_active: bool,
+}
+
+impl LiveHttpStreamGuard {
+    /// Installs `writer` on the current worker thread and resets live-stream state.
+    pub fn enter(writer: Box<dyn LiveHttpStreamWriter>) -> Self {
+        let prev = BOA_LIVE_HTTP_STREAM.with(|slot| slot.replace(Some(writer)));
+        let prev_active = BOA_LIVE_STREAM_ACTIVE.with(|a| a.replace(false));
+        BOA_LIVE_STREAM_DLP.with(|d| *d.borrow_mut() = None);
+        Self { prev, prev_active }
+    }
+
+    /// Returns `true` if the guest handler flushed its response incrementally on the wire.
+    #[inline]
+    pub fn was_streamed(&self) -> bool {
+        BOA_LIVE_STREAM_ACTIVE.with(|a| a.get())
+    }
+}
+
+impl Drop for LiveHttpStreamGuard {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        BOA_LIVE_HTTP_STREAM.with(|slot| {
+            let _ = slot.replace(prev);
+        });
+        BOA_LIVE_STREAM_ACTIVE.with(|a| a.set(self.prev_active));
+        BOA_LIVE_STREAM_DLP.with(|d| *d.borrow_mut() = None);
+    }
+}
+
 /// Structured outcome of executing a WinterTC HTTP request inside a `SliceIsolate`.
 #[derive(Debug, Clone)]
 pub struct HttpExecutionOutcome {
@@ -36,6 +103,7 @@ pub struct HttpExecutionOutcome {
     pub response_headers: Vec<(String, String)>,
     pub wait_until_count: usize,
     pub ws_upgraded: bool,
+    pub streamed_on_wire: bool,
 }
 
 impl HttpExecutionOutcome {
@@ -60,6 +128,7 @@ pub struct HttpFastOutcome {
     pub response_headers: Vec<(String, String)>,
     pub wait_until_count: usize,
     pub ws_upgraded: bool,
+    pub streamed_on_wire: bool,
 }
 
 impl HttpFastOutcome {
@@ -157,6 +226,7 @@ impl SliceIsolate {
             let custom_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
             let mut ws_upgraded = BOA_WS_UPGRADED.with(|w| w.replace(false));
             let wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.get());
+            let streamed_on_wire = BOA_LIVE_STREAM_ACTIVE.with(|a| a.get());
 
             let (status_code, content_type, response_body, response_body_bytes, response_headers) =
                 if let Some((st, mut body, body_bytes, ct, hdrs)) = custom_res {
@@ -199,6 +269,7 @@ impl SliceIsolate {
                 response_headers,
                 wait_until_count,
                 ws_upgraded,
+                streamed_on_wire,
             });
         }
 
@@ -222,6 +293,7 @@ impl SliceIsolate {
             response_headers: Vec::new(),
             wait_until_count: 0,
             ws_upgraded: false,
+            streamed_on_wire: false,
         })
     }
 
@@ -246,6 +318,7 @@ impl SliceIsolate {
             let custom_res = BOA_HTTP_RES.with(|res| res.borrow_mut().take());
             let mut ws_upgraded = BOA_WS_UPGRADED.with(|w| w.replace(false));
             let wait_until_count = BOA_WAIT_UNTIL_COUNT.with(|c| c.get());
+            let streamed_on_wire = BOA_LIVE_STREAM_ACTIVE.with(|a| a.get());
 
             let (status_code, content_type, response_body, response_body_bytes, response_headers) =
                 if let Some((st, body, body_bytes, ct, hdrs)) = custom_res {
@@ -284,6 +357,7 @@ impl SliceIsolate {
                 response_headers,
                 wait_until_count,
                 ws_upgraded,
+                streamed_on_wire,
             });
         }
 
@@ -306,6 +380,7 @@ impl SliceIsolate {
             response_headers: Vec::new(),
             wait_until_count: 0,
             ws_upgraded: false,
+            streamed_on_wire: false,
         })
     }
 

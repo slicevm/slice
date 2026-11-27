@@ -2,6 +2,7 @@
 
 pub(crate) mod body_reader;
 pub(crate) mod keep_alive;
+pub(crate) mod stream_writer;
 pub(crate) mod websocket;
 pub(crate) mod wire;
 

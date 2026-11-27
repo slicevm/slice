@@ -6,6 +6,7 @@ mod boacas_ic_and_header_tests;
 mod host_extensions_tests;
 mod intrinsics_security_and_perf_tests;
 mod isolate_security_and_perf_tests;
+mod live_streaming_and_dlp_tests;
 mod tier0_boacas_and_core_tests;
 mod virtual_vfs_and_drain_tests;
 mod wasm_vfs_and_module_resolution_tests;

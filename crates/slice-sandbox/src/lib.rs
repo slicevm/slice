@@ -30,7 +30,9 @@ pub use compartment::{
     SandboxViolation, TenantCompartment, current_thread_pkru, exec_binary_matches,
     extension_grant_matches, has_exec_shell_metachar, is_frozen_intrinsic,
 };
-pub use dlp::{expand_egress_secret_variants, verify_egress_secrets_slice};
+pub use dlp::{
+    RollingEgressDlpScanner, expand_egress_secret_variants, verify_egress_secrets_slice,
+};
 pub use manifest::{
     InlineDirectives, MIN_SENSITIVE_SECRET_LEN, SliceManifest, escape_json_string_into,
     format_json_error_body, is_auto_dlp_env_entry, is_sensitive_env_key, parse_bool_setting,

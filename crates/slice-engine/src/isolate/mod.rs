@@ -19,7 +19,10 @@ pub(crate) mod kv_and_sandbox;
 pub mod state_and_kv;
 pub(crate) mod vfs_drain;
 
-pub use self::http_and_ws::{HttpExecutionOutcome, HttpFastOutcome, HttpRequestContext};
+pub use self::http_and_ws::{
+    HttpExecutionOutcome, HttpFastOutcome, HttpRequestContext, LiveHttpStreamGuard,
+    LiveHttpStreamWriter,
+};
 pub use self::kv_and_sandbox::{SandboxEvalOptions, SandboxEvalOutcome};
 pub use self::vfs_drain::{DrainLimits, DrainReport, DrainedFile, SkipReason, SkippedFile};
 
