@@ -134,7 +134,7 @@ When deterministic mode is active:
 
 ## 4. Running the 33-Workload Docker Benchmark Suite (`tests/`)
 
-Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`](../../tests/README.md)) that tests **33 realistic multi-file TypeScript + `node_modules` applications, full-stack edge frameworks (`Hono`, `itty-router + UnJS`, `Express/Polka`, `SvelteKit 3 + Svelte 5`), and architectural case studies** against the latest official releases of **Bun**, **Deno**, and **Node.js**, verifying **100% byte-for-byte identical JSON output** across all 4 runtimes and automatically writing timestamped reports to [`tests/reports/`](../../tests/reports/latest.md).
+Slice includes a comprehensive Linux `x86_64` Docker benchmark suite ([`tests/`](../../tests/README.md)) that tests **33 realistic multi-file TypeScript + `node_modules` applications, full-stack edge frameworks (`Hono`, `itty-router + UnJS`, `Express/Polka`, `SvelteKit 3 + Svelte 5`), and architectural case studies** against the latest official releases of **Bun**, **Deno**, and **Node.js**, verifying **100% byte-for-byte identical JSON output** across all 4 runtimes and automatically writing timestamped reports to [`tests/reports/latest.md`](../../tests/reports/latest.md) plus a self-contained cross-release HTML comparison dashboard at [`tests/reports/comparison.html`](../../tests/reports/comparison.html) (`node tests/scripts/generate_comparison_html.mjs`).
 
 ```bash
 # Run the automated benchmark suite & doc sync (PowerShell or Bash)

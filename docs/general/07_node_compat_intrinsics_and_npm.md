@@ -274,7 +274,7 @@ console.groupEnd();
 ```
 
 ### 1.11 Built-In Native JSX / TSX & Edge SSR (`slice:jsx`)
-Slice compiles `.tsx` and `.jsx` files natively in Rust using Oxc (`v0.152.0`) and includes a built-in zero-dependency JSX/SSR runtime (`"slice:jsx"`, plus automatic fallback for `"react/jsx-runtime"`, `"preact/jsx-runtime"`, and `"hono/jsx"` when not installed in `node_modules/`):
+Slice compiles `.tsx` and `.jsx` files natively in Rust using Oxc (`v0.160.0`) and includes a built-in zero-dependency JSX/SSR runtime (`"slice:jsx"`, plus automatic fallback for `"react/jsx-runtime"`, `"preact/jsx-runtime"`, and `"hono/jsx"` when not installed in `node_modules/`):
 ```tsx
 import { renderToString, raw, Fragment } from "slice:jsx";
 
@@ -345,7 +345,7 @@ await sock.close();
 
 ### 1.14 5-Ring OCap `node:child_process` (`ExecCap`, Environment Sanitization & Output Egress DLP)
 Slice provides `node:child_process` (`execFileSync`, `spawnSync`, `execSync`, `spawn`, `exec`, `execFile`, `ChildProcess`) gated by 5-Ring `ExecCap` security (`--allow-exec`, `SLICE_ALLOW_EXEC`, `[capabilities] allow_exec`):
-- **Ring 1 (Deny-All by Default):** Unlisted binaries immediately trap with `[Slice Sandbox Violation] Subprocess execution denied`.
+- **Ring 1 (Deny-All by Default):** Unlisted binaries throw a catchable `ERR_SLICE_EXEC_DENIED` error (`OCap Violation: lacks exec authority for binary '<binary>'`), record the attempt in `deniedCapabilities`, and promote to `SandboxViolation::ExecDenied` if uncaught.
 - **Ring 2 (Environment Sanitization):** Child processes run with `env_clear()` and receive **only** the tenant's explicitly allowed environment variables (`--allow-env` / `.env`), never host ambient `std::env::vars()`.
 - **Ring 3 (Child Stdio Egress DLP):** Child `stdout` and `stderr` are scanned against `--audit-egress` and `.env` Auto-DLP secrets before JavaScript receives them.
 - **Ring 4 & 5 (`maxBuffer`, Timeout, & Fuel/Memory Accounting):** Enforces `maxBuffer` and execution timeouts while charging fuel and memory budgets.

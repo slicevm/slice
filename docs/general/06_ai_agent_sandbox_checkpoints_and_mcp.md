@@ -33,6 +33,8 @@ interface SandboxEvalOptions {
     allowWrite?: string[];
     /** Allowed outbound network hosts (INTERSECTED with parent's allowed network hosts!) */
     allowNet?: string[];
+    /** Opt-in for DNS hostnames resolving to private/loopback IPs (attenuated by parent; cloud metadata remains unconditionally blocked) */
+    allowPrivateNetworks?: boolean;
     /** Allowed subprocess binaries (INTERSECTED with parent's allowed exec binaries!) */
     allowExec?: string[];
     /** Allowed environment variables (INTERSECTED with parent's allowed env keys!) */
@@ -95,8 +97,8 @@ interface SandboxEvalOutcome {
 
 ### 1.1b Catchable OCap Capability Denials vs. Uncatchable Resource/Integrity Traps
 Slice distinguishes between **capability denials** and **resource/integrity traps**:
-- **OCap Capability Denials** (`node:fs`, `fetch()`, `node:child_process`, `env()`, `Slice.checkpoint()` when disabled) throw/reject a catchable JS `Error` with a stable `err.code` (`ERR_SLICE_FS_DENIED`, `ERR_SLICE_NET_DENIED`, `ERR_SLICE_EXEC_DENIED`, `ERR_SLICE_ENV_DENIED`, `ERR_SLICE_CHECKPOINT_DENIED`). If caught by guest code, execution continues with fallback logic while every denied attempt is recorded in `outcome.deniedCapabilities` (and `SliceIsolate::denied_capabilities()`). If uncaught (including unhandled `fetch()` rejections), the denial is promoted to `outcome.violation` (`ok: false`).
-- **Resource, Integrity, and Exfiltration Traps** (`CpuFuelExhausted`, `MemoryCeilingExceeded`, `WallClockExceeded`, `ExecutionInterrupted`, `IntrinsicMutationBlocked`, `EgressSecretLeakBlocked`, SSRF Cloud Metadata Shield, and `maxCheckpoints` ceilings) are **always uncatchable immediate-abort traps** that bypass guest `try/catch` blocks.
+- **OCap Capability Denials** (`node:fs`, `fetch()`, cloud metadata & resolved-IP SSRF blocks, `WebSocket`, raw TCP/TLS/UDP sockets, `Worker` script reads, `node:child_process`, `env()`, `Slice.checkpoint()` when disabled) throw/reject a catchable JS `Error` with a unified host-name-free message (`OCap Violation: lacks <kind> authority for <target>`) and stable `err.code` (`ERR_SLICE_FS_DENIED`, `ERR_SLICE_NET_DENIED`, `ERR_SLICE_EXEC_DENIED`, `ERR_SLICE_ENV_DENIED`, `ERR_SLICE_CHECKPOINT_DENIED`). If caught by guest code, execution continues with fallback logic while every denied attempt is recorded in `outcome.deniedCapabilities` (and `SliceIsolate::denied_capabilities()`). If uncaught (including unhandled `fetch()` rejections), the denial is promoted to `outcome.violation` (`ok: false`).
+- **Resource, Integrity, and Exfiltration Traps** (`CpuFuelExhausted`, `MemoryCeilingExceeded`, `WallClockExceeded`, `ExecutionInterrupted`, `IntrinsicMutationBlocked`, `EgressSecretLeakBlocked`, and `maxCheckpoints` ceilings) are **always uncatchable immediate-abort traps** that bypass guest `try/catch` blocks.
 
 ### 1.2 How Strict Capability Attenuation Works (No Privilege Escalation)
 A child sandbox spawned via `Slice.evalSandbox` can **never** escalate privileges beyond its parent isolate:
@@ -243,13 +245,14 @@ Compiles and executes TypeScript or JavaScript (including top-level `await`, top
     "memory": 4194304,
     "allowRead": ["/workspace"],
     "allowNet": ["api.github.com:443"],
+    "allowPrivateNetworks": false,
     "auditSecrets": ["sk_live_optional_extra_secret", "db_prod_secret"],
     "deterministicSeed": 42,
     "checkpoints": true,
     "maxCheckpoints": 8
   }
   ```
-- **Returns:** JSON `SandboxEvalOutcome` (`ok`, `exitCode`, `processExited`, `stdout`, `returnValue`, `returnJson`, `fuelUsed`, `memoryUsedBytes`, `peakMemoryBytes`, `spawnTimeNs`, `compileTimeNs`, `execTimeNs`, `totalTimeUs`, `checkpointsTaken`, `restoresPerformed`, `restoreTimeNs`, `violation`, `error`; non-zero `exitCode` sets `ok: false` and MCP `isError: true`).
+- **Returns:** JSON `SandboxEvalOutcome` (`ok`, `exitCode`, `processExited`, `stdout`, `returnValue`, `returnJson`, `deniedCapabilities`, `fuelUsed`, `memoryUsedBytes`, `peakMemoryBytes`, `spawnTimeNs`, `compileTimeNs`, `execTimeNs`, `totalTimeUs`, `checkpointsTaken`, `restoresPerformed`, `restoreTimeNs`, `violation`, `error`; non-zero `exitCode` sets `ok: false` and MCP `isError: true`).
   - Note: `returnValue` (and Rust `ExecutionMetrics::return_value`) is a display string whose object formatting depends on the execution tier (for example `{ a: 1 }` on Tier-0 vs JS `ToString` `[object Object]` on Tier-1). Always read `returnJson` (or Rust `SliceIsolate::last_return_json()`) for a tier-independent structured JSON result.
 
 #### 2. `slice_kv_set`

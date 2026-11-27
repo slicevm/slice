@@ -36,6 +36,7 @@ declare namespace Slice {
         allowRead?: string[];
         allowWrite?: string[];
         allowNet?: string[];
+        allowPrivateNetworks?: boolean;
         allowExec?: string[];
         allowEnv?: string[];
         deterministicSeed?: number;

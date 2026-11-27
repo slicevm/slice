@@ -137,7 +137,7 @@ This creates five files:
 *(To scaffold a full-stack SvelteKit 3 + Svelte 5 SSR project with `@slicevm/adapter-sveltekit`, pass `--template=sveltekit`: `slice init ./my-app --template=sveltekit`.)*
 
 ### Step 1b: Type-Checking (`tsc --noEmit`), Syntax Checking (`slice check`) & Linting (`oxlint` / `Biome`)
-At runtime and during `slice pack` / `slice compile`, Slice uses the native Rust **Oxc (`v0.152.0`)** compiler to transpile `.ts` and `.tsx` in microseconds without waiting for the TypeScript type-checker. For fast syntax checks, static type validation, linting, and code formatting in your IDE or CI pipeline:
+At runtime and during `slice pack` / `slice compile`, Slice uses the native Rust **Oxc (`v0.160.0`)** compiler to transpile `.ts` and `.tsx` in microseconds without waiting for the TypeScript type-checker. For fast syntax checks, static type validation, linting, and code formatting in your IDE or CI pipeline:
 ```bash
 # Instant native Oxc syntax check without executing code:
 slice check ./src/index.ts
@@ -275,8 +275,12 @@ allow_read = ["/tmp", "./config", "./public"]
 allow_write = ["/tmp"]
 
 # Allowed outbound network host:port endpoints for fetch() / Slice.fetchSync() / WebSockets / Sockets.
-# Use ["*"] to allow all public hosts (Cloud Metadata 169.254.169.254 and RFC1918 private IPs remain blocked!).
+# DNS hostnames resolving to loopback, RFC1918, CGNAT, ULA, or cloud metadata IPs are blocked by default.
 allow_net = ["api.stripe.com:443", "127.0.0.1:18095"]
+
+# Optional opt-in for DNS hostnames resolving to private/loopback/CGNAT/ULA IPs (default: false).
+# Cloud metadata endpoints remain unconditionally blocked even when true.
+# allow_private_networks = false
 
 # Allowed subprocess binaries for node:child_process (`ExecCap` - Deny-All by default).
 # Child processes receive ONLY tenant-attenuated environment variables and their stdout/stderr are scanned by Egress DLP.
@@ -360,6 +364,7 @@ console.log("Running with self-contained inline directives!");
 | **VFS Read Prefixes** | `[]` (Zero access) | `[capabilities] allow_read = [...]` | `// @slice-allow-read: ["/tmp"]` | `SLICE_ALLOW_READ=/tmp,./data` | `--allow-read=/tmp` |
 | **VFS Write Prefixes** | `[]` (Zero access) | `[capabilities] allow_write = [...]` | `// @slice-allow-write: ["/tmp"]` | `SLICE_ALLOW_WRITE=/tmp` | `--allow-write=/tmp` |
 | **Network Hosts** | `[]` (Zero access) | `[capabilities] allow_net = [...]` | `// @slice-allow-net: ["host:443"]` | `SLICE_ALLOW_NET=host:443` | `--allow-net=host:443` |
+| **Private Network DNS** | `false` (Blocked) | `[capabilities] allow_private_networks = true` | *(Host-only setting)* | `SLICE_ALLOW_PRIVATE_NETWORKS=1` (`0`) | `--allow-private-networks` / `--no-allow-private-networks` |
 | **Exec Binaries (`ExecCap`)** | `[]` (Deny-All) | `[capabilities] allow_exec = [...]` | `// @slice-allow-exec: ["/usr/bin/git"]` | `SLICE_ALLOW_EXEC=/usr/bin/git` | `--allow-exec=/usr/bin/git` |
 | **Guest Checkpoints** | `true` (`max = unlimited`; 64-slot FIFO slab) | `[capabilities] allow_checkpoints` / `max_checkpoints` | `// @slice-checkpoints: false` / `// @slice-max-checkpoints: 8` | `SLICE_CHECKPOINTS=0` / `SLICE_MAX_CHECKPOINTS=8` | `--no-checkpoints` / `--max-checkpoints=8` |
 | **Env Variables** | `{}` (Zero access) | `[capabilities.env] KEY = "VAL"` | `// @slice-allow-env: ["KEY=VAL"]` | `SLICE_ALLOW_ENV=KEY=VAL` | `--allow-env=KEY=VAL` |
@@ -606,7 +611,7 @@ slice(ses)> fib(20)
 slice(ses)> :metrics
 Tier: Tier2PeakNative | Fuel: 31/50000000 | Memory: 4096/16777216 B | PKEY: 0x1
 slice(ses)> Object.prototype.hacked = true
-[TRAP] OCap Violation: Compartment 'repl-tenant' attempted to mutate frozen SES intrinsic 'Object.prototype'
+[TRAP] SES Lockdown Violation: attempted to mutate frozen intrinsic 'Object.prototype'
 slice(ses)> :reset
 Compartment reset (fresh SES intrinsics & fuel counter).
 slice(ses)> :quit
@@ -622,6 +627,7 @@ Starts the built-in **JSON-RPC 2.0 Model Context Protocol (`2024-11-05`)** serve
 | `--allow-read=<prefix>` | Grant VFS read prefix to the MCP host compartment. |
 | `--allow-write=<prefix>` | Grant VFS write prefix to the MCP host compartment. |
 | `--allow-net=<host:port>` | Grant outbound network host to the MCP host compartment. |
+| `--allow-private-networks` | Allow DNS hostnames resolving to private/loopback IPs (cloud metadata remains unconditionally blocked). |
 | `--allow-exec=<binary>` | Grant `ExecCap` binary execution authority to the MCP host compartment. |
 | `--audit-egress=<secret\|auto>` / `--audit-egress-file=<path>` | Block raw, Base64, or Base64URL exfiltration of secrets across all MCP tool calls. |
 | `--no-checkpoints` / `--max-checkpoints=<N>` | Configure guest checkpoint limits for `slice_eval_ts` calls. |
