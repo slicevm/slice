@@ -62,7 +62,7 @@ pub use event_loop::{
 };
 pub use extensions::{
     ExtCallCtx, ExtError, ExtFuture, ExtMethod, ExtResult, ExtValue, ExtensionRegistry,
-    SliceExtension,
+    HostExtensionAdapter, SliceExtension, SliceHostExtension,
 };
 pub use intrinsics::{base64_decode, base64_encode};
 pub use isolate::{

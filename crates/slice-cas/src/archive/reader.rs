@@ -3,26 +3,79 @@
 
 use crate::archive::{CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION, CasBlobEntry, CasIndexHeader};
 use anyhow::{Context, Result, bail};
+#[cfg(feature = "mmap")]
 use memmap2::Mmap;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
 /// Maps an open `.cas` archive or `SLICEEXE` executable file handle into read-only virtual memory.
+#[cfg(feature = "mmap")]
 #[allow(unsafe_code)]
 fn map_readonly_cas_file(file: &File) -> std::io::Result<Mmap> {
     // SAFETY: `file` is an open read-only file descriptor referencing an immutable `.cas` archive
     // or standalone `SLICEEXE` binary image. `Mmap::map` creates a read-only virtual memory mapping
-    // (`PROT_READ`), and `MappedCasArchive::from_mmap_region` validates all header and blob byte
+    // (`PROT_READ`), and `MappedCasArchive::from_backing_region` validates all header and blob byte
     // offsets/lengths plus source UTF-8 validity once at open time. Callers that hot-swap `.cas`
     // files on disk (`--tenant-dir`) use `MappedCasArchive::open_detached` (anonymous mapping)
     // rather than file-backed `mmap`.
     unsafe { Mmap::map(file) }
 }
 
+/// Zero-copy backing store for a [`MappedCasArchive`] (`mmap`, XIP `&'static [u8]` SPI Flash, or `Arc<[u8]>`).
+#[derive(Clone)]
+pub enum CasBacking {
+    #[cfg(feature = "mmap")]
+    Mmap(Arc<Mmap>),
+    /// Execute-in-place (XIP) static byte slice (e.g. `include_bytes!` or SPI Flash partition)
+    /// requiring `0` bytes of SRAM/PSRAM copy on 32-bit microcontrollers (`#144`).
+    StaticSlice(&'static [u8]),
+    /// Shared heap-allocated byte slice (used when `mmap` is disabled or for detached loads).
+    SharedBytes(Arc<[u8]>),
+}
+
+impl std::fmt::Debug for CasBacking {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(feature = "mmap")]
+            Self::Mmap(m) => f.debug_tuple("CasBacking::Mmap").field(&m.len()).finish(),
+            Self::StaticSlice(s) => f
+                .debug_tuple("CasBacking::StaticSlice")
+                .field(&s.len())
+                .finish(),
+            Self::SharedBytes(b) => f
+                .debug_tuple("CasBacking::SharedBytes")
+                .field(&b.len())
+                .finish(),
+        }
+    }
+}
+
+impl CasBacking {
+    #[inline(always)]
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            #[cfg(feature = "mmap")]
+            Self::Mmap(m) => m.as_ref(),
+            Self::StaticSlice(s) => s,
+            Self::SharedBytes(b) => b.as_ref(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.as_bytes().len()
+    }
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.as_bytes().is_empty()
+    }
+}
+
 /// Shared immutable state backing a [`MappedCasArchive`].
 pub struct MappedCasInner {
-    mmap: Arc<Mmap>,
+    backing: CasBacking,
     pub header: CasIndexHeader,
     pub data_start_offset: usize,
     blobs_vec: Vec<CasBlobEntry>,
@@ -48,24 +101,25 @@ impl std::ops::Deref for MappedCasArchive {
 }
 
 impl MappedCasArchive {
-    /// Validates and constructs a `MappedCasArchive` from an already mapped `Arc<Mmap>` region
-    /// spanning `cas_offset..cas_offset + cas_len`.
+    /// Validates and constructs a `MappedCasArchive` from any [`CasBacking`] (`Mmap`, XIP
+    /// `&'static [u8]`, or `Arc<[u8]>`) spanning `cas_offset..cas_offset + cas_len`.
     ///
     /// Performs full bounds and UTF-8 validation on the CAS header and every `CasBlobEntry`
     /// once at open time so hot-path `get_source_slice` and `get_bytecode_slice` calls
     /// are guaranteed in-bounds and valid UTF-8 with zero runtime overhead.
-    fn from_mmap_region(
-        mmap: Arc<Mmap>,
+    fn from_backing_region(
+        backing: CasBacking,
         cas_offset: usize,
         cas_len: usize,
         display_label: &str,
     ) -> Result<Self> {
+        let raw_all = backing.as_bytes();
         let cas_end = cas_offset
             .checked_add(cas_len)
-            .filter(|&end| end <= mmap.len() && cas_len >= 32)
+            .filter(|&end| end <= raw_all.len() && cas_len >= 32)
             .with_context(|| format!("Invalid CAS archive offset/length in {}", display_label))?;
 
-        let slice = &mmap[cas_offset..cas_end];
+        let slice = &raw_all[cas_offset..cas_end];
         if &slice[0..8] != CAS_MAGIC {
             bail!("Invalid SLICE_CAS magic header in {}", display_label);
         }
@@ -119,7 +173,7 @@ impl MappedCasArchive {
                     )
                 })?;
 
-            if simdutf8::basic::from_utf8(&mmap[src_start..src_end]).is_err() {
+            if simdutf8::basic::from_utf8(&raw_all[src_start..src_end]).is_err() {
                 bail!(
                     "CAS blob '{}' contains invalid UTF-8 in source slice",
                     hash_key
@@ -146,7 +200,7 @@ impl MappedCasArchive {
                     )
                 })?;
             if bc_start < bc_end {
-                std::hint::black_box(mmap[bc_start]);
+                std::hint::black_box(raw_all[bc_start]);
             }
         }
 
@@ -174,7 +228,7 @@ impl MappedCasArchive {
 
         Ok(Self {
             inner: Arc::new(MappedCasInner {
-                mmap,
+                backing,
                 header,
                 data_start_offset,
                 blobs_vec,
@@ -184,54 +238,143 @@ impl MappedCasArchive {
         })
     }
 
-    /// Opens and memory-maps a `.cas` archive file with zero heap copies of module payloads.
+    /// Constructs a 100% zero-copy [`MappedCasArchive`] directly over a `'static` byte slice
+    /// (such as `include_bytes!("app.cas")` or an XIP SPI Flash memory-mapped partition),
+    /// using `0` bytes of heap/SRAM for the archive payload (`#144`).
+    pub fn from_static_bytes(raw: &'static [u8]) -> Result<Self> {
+        Self::from_backing_region(
+            CasBacking::StaticSlice(raw),
+            0,
+            raw.len(),
+            "<static-xip-cas>",
+        )
+    }
+
+    /// Constructs a zero-copy [`MappedCasArchive`] over a shared `Arc<[u8]>` byte buffer.
+    pub fn from_shared_bytes(raw: Arc<[u8]>) -> Result<Self> {
+        let len = raw.len();
+        Self::from_backing_region(CasBacking::SharedBytes(raw), 0, len, "<shared-bytes-cas>")
+    }
+
+    /// Opens and memory-maps a `.cas` archive file with zero heap copies of module payloads
+    /// (falls back to `CasBacking::SharedBytes` when the `mmap` Cargo feature is disabled).
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path)
-            .with_context(|| format!("Failed to open CAS archive {}", path.display()))?;
-        let mmap = map_readonly_cas_file(&file)?;
-        let len = mmap.len();
-        Self::from_mmap_region(Arc::new(mmap), 0, len, &path.display().to_string())
+        #[cfg(feature = "mmap")]
+        {
+            let file = File::open(path)
+                .with_context(|| format!("Failed to open CAS archive {}", path.display()))?;
+            let mmap = map_readonly_cas_file(&file)?;
+            let len = mmap.len();
+            Self::from_backing_region(
+                CasBacking::Mmap(Arc::new(mmap)),
+                0,
+                len,
+                &path.display().to_string(),
+            )
+        }
+        #[cfg(not(feature = "mmap"))]
+        {
+            let raw = std::fs::read(path)
+                .with_context(|| format!("Failed to read CAS archive {}", path.display()))?;
+            let len = raw.len();
+            Self::from_backing_region(
+                CasBacking::SharedBytes(Arc::from(raw)),
+                0,
+                len,
+                &path.display().to_string(),
+            )
+        }
     }
 
-    /// Constructs a `MappedCasArchive` inside an anonymous read-only memory mapping from raw bytes.
+    /// Constructs a `MappedCasArchive` from raw bytes (anonymous read-only `mmap` when `mmap`
+    /// feature is enabled; `CasBacking::SharedBytes` otherwise).
     pub fn from_bytes(raw: &[u8]) -> Result<Self> {
-        let mut anon = memmap2::MmapMut::map_anon(raw.len().max(1))
-            .context("Failed to allocate anonymous CAS memory mapping")?;
-        anon[..raw.len()].copy_from_slice(raw);
-        let mmap = anon
-            .make_read_only()
-            .context("Failed to mark anonymous CAS mapping read-only")?;
-        Self::from_mmap_region(Arc::new(mmap), 0, raw.len(), "<in-memory-cas>")
+        #[cfg(feature = "mmap")]
+        {
+            let mut anon = memmap2::MmapMut::map_anon(raw.len().max(1))
+                .context("Failed to allocate anonymous CAS memory mapping")?;
+            anon[..raw.len()].copy_from_slice(raw);
+            let mmap = anon
+                .make_read_only()
+                .context("Failed to mark anonymous CAS mapping read-only")?;
+            Self::from_backing_region(
+                CasBacking::Mmap(Arc::new(mmap)),
+                0,
+                raw.len(),
+                "<in-memory-cas>",
+            )
+        }
+        #[cfg(not(feature = "mmap"))]
+        {
+            Self::from_backing_region(
+                CasBacking::SharedBytes(Arc::from(raw)),
+                0,
+                raw.len(),
+                "<in-memory-cas>",
+            )
+        }
     }
 
-    /// Reads a `.cas` archive into an anonymous read-only mapping and closes the OS file handle
+    /// Reads a `.cas` archive into a detached buffer/mapping and closes the OS file handle
     /// immediately so Windows `--tenant-dir` hot-swapping can overwrite `<tenant>.cas` in-place
     /// without triggering `ERROR_USER_MAPPED_FILE` (`os error 1224`).
     pub fn open_detached(path: &Path) -> Result<Self> {
         let raw = std::fs::read(path)
             .with_context(|| format!("Failed to read CAS archive {}", path.display()))?;
-        let mut anon = memmap2::MmapMut::map_anon(raw.len().max(1)).with_context(|| {
-            format!(
-                "Failed to allocate anonymous CAS mapping for {}",
-                path.display()
+        #[cfg(feature = "mmap")]
+        {
+            let mut anon = memmap2::MmapMut::map_anon(raw.len().max(1)).with_context(|| {
+                format!(
+                    "Failed to allocate anonymous CAS mapping for {}",
+                    path.display()
+                )
+            })?;
+            anon[..raw.len()].copy_from_slice(&raw);
+            let mmap = anon.make_read_only()?;
+            Self::from_backing_region(
+                CasBacking::Mmap(Arc::new(mmap)),
+                0,
+                raw.len(),
+                &path.display().to_string(),
             )
-        })?;
-        anon[..raw.len()].copy_from_slice(&raw);
-        let mmap = anon.make_read_only()?;
-        Self::from_mmap_region(Arc::new(mmap), 0, raw.len(), &path.display().to_string())
+        }
+        #[cfg(not(feature = "mmap"))]
+        {
+            let len = raw.len();
+            Self::from_backing_region(
+                CasBacking::SharedBytes(Arc::from(raw)),
+                0,
+                len,
+                &path.display().to_string(),
+            )
+        }
     }
 
     /// Opens a `.cas` archive embedded at `cas_offset` inside a larger file (such as a standalone executable).
     pub fn open_from_offset(path: &Path, cas_offset: usize, cas_len: usize) -> Result<Self> {
-        let file = File::open(path)
-            .with_context(|| format!("Failed to open standalone binary {}", path.display()))?;
-        let mmap = map_readonly_cas_file(&file)?;
-        Self::from_mmap_region(
-            Arc::new(mmap),
-            cas_offset,
-            cas_len,
-            &path.display().to_string(),
-        )
+        #[cfg(feature = "mmap")]
+        {
+            let file = File::open(path)
+                .with_context(|| format!("Failed to open standalone binary {}", path.display()))?;
+            let mmap = map_readonly_cas_file(&file)?;
+            Self::from_backing_region(
+                CasBacking::Mmap(Arc::new(mmap)),
+                cas_offset,
+                cas_len,
+                &path.display().to_string(),
+            )
+        }
+        #[cfg(not(feature = "mmap"))]
+        {
+            let raw = std::fs::read(path)
+                .with_context(|| format!("Failed to read standalone binary {}", path.display()))?;
+            Self::from_backing_region(
+                CasBacking::SharedBytes(Arc::from(raw)),
+                cas_offset,
+                cas_len,
+                &path.display().to_string(),
+            )
+        }
     }
 
     /// Checks if the current running executable has an embedded `SLICEEXE` trailer by reading only
@@ -246,14 +389,29 @@ impl MappedCasArchive {
         };
         let cas_offset = usize::try_from(cas_offset_u64).context("SLICEEXE cas_offset overflow")?;
         let cas_len = usize::try_from(cas_len_u64).context("SLICEEXE cas_len overflow")?;
-        let mmap = map_readonly_cas_file(&file)?;
-        let archive = Self::from_mmap_region(
-            Arc::new(mmap),
-            cas_offset,
-            cas_len,
-            &exe_path.display().to_string(),
-        )?;
-        Ok(Some(archive))
+        #[cfg(feature = "mmap")]
+        {
+            let mmap = map_readonly_cas_file(&file)?;
+            let archive = Self::from_backing_region(
+                CasBacking::Mmap(Arc::new(mmap)),
+                cas_offset,
+                cas_len,
+                &exe_path.display().to_string(),
+            )?;
+            Ok(Some(archive))
+        }
+        #[cfg(not(feature = "mmap"))]
+        {
+            drop(file);
+            let raw = std::fs::read(&exe_path)?;
+            let archive = Self::from_backing_region(
+                CasBacking::SharedBytes(Arc::from(raw)),
+                cas_offset,
+                cas_len,
+                &exe_path.display().to_string(),
+            )?;
+            Ok(Some(archive))
+        }
     }
 }
 
@@ -324,7 +482,7 @@ impl MappedCasInner {
         if let Some(hit) = self.resolve_specifier(normalized_bare) {
             return Some(hit);
         }
-        let stripped = super::builder::strip_single_module_ext(normalized_bare);
+        let stripped = super::strip_single_module_ext(normalized_bare);
         if stripped != normalized_bare
             && let Some(hit) = self.resolve_specifier(stripped)
         {
@@ -349,7 +507,7 @@ impl MappedCasInner {
         let Some(end) = start.checked_add(src_len) else {
             return "";
         };
-        let Some(bytes) = self.mmap.get(start..end) else {
+        let Some(bytes) = self.backing.as_bytes().get(start..end) else {
             return "";
         };
         if bytes.len() <= 128 {
@@ -359,7 +517,7 @@ impl MappedCasInner {
         }
     }
 
-    /// Returns a zero-copy slice to the pre-compiled bytecode directly from the `mmap` region.
+    /// Returns a zero-copy slice to the pre-compiled bytecode directly from the backing region.
     #[inline]
     pub fn get_bytecode_slice<'a>(&'a self, entry: &CasBlobEntry) -> &'a [u8] {
         let Ok(bc_off) = usize::try_from(entry.bytecode_offset) else {
@@ -374,22 +532,22 @@ impl MappedCasInner {
         let Some(end) = start.checked_add(bc_len) else {
             return &[];
         };
-        self.mmap.get(start..end).unwrap_or(&[])
+        self.backing.as_bytes().get(start..end).unwrap_or(&[])
     }
 
-    /// Returns a clone of the underlying `Arc<Mmap>` and the validated `(start, end)` byte range
-    /// for `entry`'s bytecode/payload so callers can share zero-copy `mmap` slices across threads.
+    /// Returns a clone of the underlying [`CasBacking`] and the validated `(start, end)` byte range
+    /// for `entry`'s bytecode/payload so callers can share zero-copy slices across threads.
     #[inline]
     pub fn get_shared_bytecode_view(
         &self,
         entry: &CasBlobEntry,
-    ) -> Option<(Arc<Mmap>, usize, usize)> {
+    ) -> Option<(CasBacking, usize, usize)> {
         let bc_off = usize::try_from(entry.bytecode_offset).ok()?;
         let bc_len = usize::try_from(entry.bytecode_len).ok()?;
         let start = self.data_start_offset.checked_add(bc_off)?;
         let end = start.checked_add(bc_len)?;
-        if end <= self.mmap.len() {
-            Some((Arc::clone(&self.mmap), start, end))
+        if end <= self.backing.len() {
+            Some((self.backing.clone(), start, end))
         } else {
             None
         }
@@ -519,9 +677,9 @@ pub fn embed_cas_into_executable(
     output_exe_path: &Path,
 ) -> Result<u64> {
     use std::io::{BufReader, BufWriter, Write};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
+    static STAGING_SEQ: AtomicUsize = AtomicUsize::new(0);
 
     let parent_dir = output_exe_path
         .parent()

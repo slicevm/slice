@@ -190,3 +190,71 @@ fn test_mapped_cas_archive_arc_clone_and_rc_helpers() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_v0150_xip_static_and_shared_cas_backing_zero_copy() {
+    let temp_dir = std::env::temp_dir().join("slice_cas_xip_static_backing_test");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let public_dir = temp_dir.join("public");
+    std::fs::create_dir_all(&public_dir).unwrap();
+    std::fs::write(public_dir.join("index.html"), b"<h1>XIP Flash Asset</h1>").unwrap();
+
+    let cas_path = temp_dir.join("xip_bundle.cas");
+    let mut builder = CasBuilder::new("./main.ts");
+    builder.add_module(
+        "./main.ts",
+        PathBuf::from("main.ts"),
+        "export const greeting: string = 'hello-mcu';\n",
+        |_src| b"FAKE_BYTECODE_PAYLOAD_XIP".to_vec(),
+    );
+    builder.ingest_static_directory(&public_dir).unwrap();
+    builder.write_to_file(&cas_path).unwrap();
+
+    let raw_bytes = std::fs::read(&cas_path).unwrap();
+    let shared_arc: std::sync::Arc<[u8]> = raw_bytes.clone().into();
+    let shared_archive = MappedCasArchive::from_shared_bytes(shared_arc).unwrap();
+    let shared_entry = shared_archive.entrypoint_blob().unwrap();
+    assert!(
+        shared_archive
+            .get_source_slice(shared_entry)
+            .contains("hello-mcu")
+    );
+    assert_eq!(
+        shared_archive.get_bytecode_slice(shared_entry),
+        b"FAKE_BYTECODE_PAYLOAD_XIP"
+    );
+
+    // Simulate execute-in-place (XIP) memory-mapped SPI flash via &'static [u8].
+    let leaked_flash: &'static [u8] = Box::leak(raw_bytes.into_boxed_slice());
+    let flash_start = leaked_flash.as_ptr() as usize;
+    let flash_end = flash_start + leaked_flash.len();
+
+    let xip_archive = MappedCasArchive::from_static_bytes(leaked_flash).unwrap();
+    let xip_entry = xip_archive.entrypoint_blob().unwrap();
+    let bc_slice = xip_archive.get_bytecode_slice(xip_entry);
+    assert_eq!(bc_slice, b"FAKE_BYTECODE_PAYLOAD_XIP");
+    // Verify the bytecode slice points directly inside the static flash slice (0-copy).
+    let bc_ptr = bc_slice.as_ptr() as usize;
+    assert!(
+        bc_ptr >= flash_start && bc_ptr + bc_slice.len() <= flash_end,
+        "expected bytecode slice to point directly inside &'static [u8] XIP backing"
+    );
+
+    let table = StaticAssetTable::from_cas_archive(&xip_archive);
+    let root_asset = table.resolve("/").expect("Expected /index.html at /");
+    assert_eq!(&root_asset.payload[..], b"<h1>XIP Flash Asset</h1>");
+    let asset_ptr = root_asset.payload.as_ptr() as usize;
+    assert!(
+        asset_ptr >= flash_start && asset_ptr + root_asset.payload.len() <= flash_end,
+        "expected static asset payload to point directly inside &'static [u8] XIP backing"
+    );
+    assert!(matches!(
+        root_asset.payload,
+        StaticAssetPayload::Mapped {
+            backing: CasBacking::StaticSlice(_),
+            ..
+        }
+    ));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

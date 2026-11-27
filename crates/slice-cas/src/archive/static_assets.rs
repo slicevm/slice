@@ -1,6 +1,6 @@
 //! Zero-Stat Static Web Asset Table & Cryptographic BLAKE3 `ETag` Indexer (`--static`).
 
-use crate::archive::{MappedCasArchive, walk_sorted_non_symlink_files};
+use crate::archive::{CasBacking, MappedCasArchive, walk_sorted_non_symlink_files};
 use anyhow::{Result, bail};
 use rustc_hash::FxHashMap;
 use std::path::Path;
@@ -39,7 +39,7 @@ pub fn detect_static_mime_type(path: &Path) -> &'static str {
 pub enum StaticAssetPayload {
     Owned(Arc<Vec<u8>>),
     Mapped {
-        mmap: Arc<memmap2::Mmap>,
+        backing: CasBacking,
         start: usize,
         end: usize,
     },
@@ -52,7 +52,11 @@ impl std::ops::Deref for StaticAssetPayload {
     fn deref(&self) -> &[u8] {
         match self {
             Self::Owned(v) => v.as_slice(),
-            Self::Mapped { mmap, start, end } => &mmap[*start..*end],
+            Self::Mapped {
+                backing,
+                start,
+                end,
+            } => &backing.as_bytes()[*start..*end],
         }
     }
 }
@@ -177,12 +181,16 @@ impl StaticAssetTable {
                 } else {
                     blob.hash_hex.as_str()
                 };
-                if let Some((mmap, start, end)) = archive.get_shared_bytecode_view(blob) {
+                if let Some((backing, start, end)) = archive.get_shared_bytecode_view(blob) {
                     table.insert_asset_payload(
                         url_path,
                         mime,
                         etag_prefix,
-                        StaticAssetPayload::Mapped { mmap, start, end },
+                        StaticAssetPayload::Mapped {
+                            backing,
+                            start,
+                            end,
+                        },
                     );
                 }
             }

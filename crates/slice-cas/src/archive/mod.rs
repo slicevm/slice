@@ -5,13 +5,16 @@
 //! - [`reader`]: [`MappedCasArchive`] zero-copy `mmap` reader and `SLICEEXE` standalone binary packer.
 //! - [`static_assets`]: [`StaticAssetTable`], [`StaticAssetEntry`], and BLAKE3 `ETag` negotiation.
 
+#[cfg(feature = "compiler")]
 pub mod builder;
 pub mod reader;
 pub mod static_assets;
 
+#[cfg(feature = "compiler")]
 pub use builder::CasBuilder;
 pub use reader::{
-    MappedCasArchive, MappedCasInner, embed_cas_into_executable, inspect_sliceexe_trailer,
+    CasBacking, MappedCasArchive, MappedCasInner, embed_cas_into_executable,
+    inspect_sliceexe_trailer,
 };
 pub use static_assets::{
     StaticAssetEntry, StaticAssetPayload, StaticAssetTable, detect_static_mime_type,
@@ -23,6 +26,16 @@ use serde::{Deserialize, Serialize};
 pub const CAS_MAGIC: &[u8; 8] = b"SLICECAS";
 pub const CAS_VERSION: u32 = 1;
 pub const CACHE_LINE_ALIGN: usize = 64;
+
+#[inline]
+pub(super) fn strip_single_module_ext(spec: &str) -> &str {
+    for ext in [".tsx", ".mts", ".cts", ".ts", ".jsx", ".mjs", ".cjs", ".js"] {
+        if let Some(stem) = spec.strip_suffix(ext) {
+            return stem;
+        }
+    }
+    spec
+}
 
 /// Walks `root_dir` recursively in deterministic filename-sorted order while skipping symbolic
 /// links via `entry.file_type()` (`lstat`, `CAS-SEC-04`) and any directories rejected by

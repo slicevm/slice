@@ -16,20 +16,27 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod archive;
+#[cfg(feature = "compiler")]
 pub mod bundler;
+#[cfg(feature = "compiler")]
 pub mod compiler;
+#[cfg(feature = "compiler")]
 pub mod linker;
 
+#[cfg(feature = "compiler")]
+pub use archive::CasBuilder;
 pub use archive::{
-    CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION, CasBlobEntry, CasBuilder, CasIndexHeader,
+    CACHE_LINE_ALIGN, CAS_MAGIC, CAS_VERSION, CasBacking, CasBlobEntry, CasIndexHeader,
     MappedCasArchive, MappedCasInner, StaticAssetEntry, StaticAssetPayload, StaticAssetTable,
     detect_static_mime_type, embed_cas_into_executable, inspect_sliceexe_trailer,
 };
+#[cfg(feature = "compiler")]
 pub use bundler::{
     bundle_entrypoint_with_deps, compact_js_for_boa_bytecode, extract_slice_rc_key,
     map_bundled_error_location, map_bundled_error_location_with_offset, map_bundled_stack_trace,
     map_bundled_stack_trace_with_offset, resolve_project_entrypoint,
 };
+#[cfg(feature = "compiler")]
 pub use compiler::{
     SyntaxErrorDiagnostic, TypeDirectedHints, analyze_typescript_semantics,
     byte_offset_to_line_col, check_syntax_source, check_syntax_source_detailed,
@@ -38,6 +45,7 @@ pub use compiler::{
     strip_typescript_and_normalize, strip_typescript_and_normalize_with_ext, strip_typescript_raw,
     strip_typescript_raw_with_ext,
 };
+#[cfg(feature = "compiler")]
 pub use linker::{
     has_top_level_await, is_builtin_module, is_jsx_runtime_builtin, program_has_top_level_return,
     wrap_top_level_await_script, wrap_top_level_return_script,

@@ -238,3 +238,89 @@ impl ExtensionRegistry {
         self.extensions.is_empty()
     }
 }
+
+/// Thin synchronous byte-slice host extension bridge for 32-bit MCU and embedded wrappers (`#144`).
+///
+/// Keeps upstream `slice` completely agnostic of hardware peripherals (GPIO, SPI/I2C, Wi-Fi, BLE)
+/// while letting embedded hosts expose OCap-gated peripheral ops via [`HostExtensionAdapter`].
+pub trait SliceHostExtension: Send + Sync + 'static {
+    fn invoke(
+        &self,
+        target: &str,
+        op: u32,
+        input: &[u8],
+        output: &mut Vec<u8>,
+    ) -> Result<u32, String>;
+}
+
+const HOST_EXT_ADAPTER_METHODS: &[ExtMethod] = &[ExtMethod::sync("invoke")];
+
+/// Adapts any [`SliceHostExtension`] into a capability-gated [`SliceExtension`] registered under
+/// `Slice.ext.<namespace>.invoke({ target, op, data })` or binary `Slice.ext.<namespace>.invoke(u8)`.
+pub struct HostExtensionAdapter<H: SliceHostExtension> {
+    namespace: &'static str,
+    inner: H,
+}
+
+impl<H: SliceHostExtension> HostExtensionAdapter<H> {
+    pub const fn new(namespace: &'static str, inner: H) -> Self {
+        Self { namespace, inner }
+    }
+}
+
+impl<H: SliceHostExtension> SliceExtension for HostExtensionAdapter<H> {
+    fn name(&self) -> &'static str {
+        self.namespace
+    }
+
+    fn methods(&self) -> &'static [ExtMethod] {
+        HOST_EXT_ADAPTER_METHODS
+    }
+
+    fn call(&self, _ctx: &ExtCallCtx, method: &str, arg: ExtValue) -> ExtResult {
+        if method != "invoke" {
+            return Err(ExtError::Denied(format!("{}.{method}", self.namespace)));
+        }
+        let mut output = Vec::new();
+        match arg {
+            ExtValue::Bytes(raw) => {
+                // Binary framing: first 4 bytes LE op code (or 0 if shorter), rest is payload.
+                let (op, payload) = if raw.len() >= 4 {
+                    (
+                        u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+                        &raw[4..],
+                    )
+                } else {
+                    (0u32, raw.as_slice())
+                };
+                self.inner
+                    .invoke(self.namespace, op, payload, &mut output)
+                    .map_err(ExtError::Message)?;
+                Ok(ExtValue::Bytes(output))
+            }
+            ExtValue::Json(v) => {
+                let target = v
+                    .get("target")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or(self.namespace);
+                let op = v.get("op").and_then(|o| o.as_u64()).unwrap_or(0) as u32;
+                let input_bytes: Vec<u8> = match v.get("data") {
+                    Some(serde_json::Value::String(s)) => s.as_bytes().to_vec(),
+                    Some(serde_json::Value::Array(arr)) => arr
+                        .iter()
+                        .filter_map(|x| x.as_u64().map(|n| n as u8))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let status = self
+                    .inner
+                    .invoke(target, op, &input_bytes, &mut output)
+                    .map_err(ExtError::Message)?;
+                Ok(ExtValue::Json(serde_json::json!({
+                    "status": status,
+                    "bytes": output,
+                })))
+            }
+        }
+    }
+}

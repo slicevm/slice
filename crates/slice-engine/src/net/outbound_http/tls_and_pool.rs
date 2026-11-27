@@ -5,7 +5,7 @@ use rustc_hash::FxHashMap;
 use std::cell::{Cell, RefCell};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -155,7 +155,7 @@ struct PooledOutboundConn {
 static SHARED_OUTBOUND_CONN_POOL: OnceLock<Mutex<FxHashMap<String, Vec<PooledOutboundConn>>>> =
     OnceLock::new();
 static FETCH_SLAB_IN_USE: AtomicUsize = AtomicUsize::new(0);
-static FETCH_SLAB_ACQUIRE_COUNT: AtomicU64 = AtomicU64::new(0);
+static FETCH_SLAB_ACQUIRE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     static OUTBOUND_POOL_REUSE_COUNT: Cell<u64> = const { Cell::new(0) };
@@ -165,7 +165,7 @@ thread_local! {
 
 /// Returns the total number of times a fixed 64 KB slab slot was acquired across outbound HTTP `fetch()` operations.
 pub fn fetch_reactor_slab_acquire_count() -> u64 {
-    FETCH_SLAB_ACQUIRE_COUNT.load(Ordering::Relaxed)
+    FETCH_SLAB_ACQUIRE_COUNT.load(Ordering::Relaxed) as u64
 }
 
 /// Returns the number of 64 KB fetch slab slots currently in use.

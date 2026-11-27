@@ -33,7 +33,7 @@ mod values;
 use crate::boa_realm::BOA_FUEL_BUDGET;
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use wasmi::{CompilationMode, Config, Engine, ExternType, Module};
 
@@ -66,7 +66,7 @@ const MAX_CACHED_WASM_MODULES: usize = 512;
 
 static GLOBAL_WASM_ENGINE: OnceLock<Engine> = OnceLock::new();
 static GLOBAL_WASM_MODULE_CACHE: OnceLock<RwLock<GlobalModuleCacheState>> = OnceLock::new();
-static WASM_MODULE_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static WASM_MODULE_CACHE_HITS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Default)]
 struct GlobalModuleCacheState {
@@ -92,7 +92,7 @@ fn global_wasm_module_cache() -> &'static RwLock<GlobalModuleCacheState> {
 
 /// Returns the number of process-wide `GLOBAL_WASM_MODULE_CACHE` hits.
 pub fn wasm_module_cache_hits() -> u64 {
-    WASM_MODULE_CACHE_HITS.load(Ordering::Relaxed)
+    WASM_MODULE_CACHE_HITS.load(Ordering::Relaxed) as u64
 }
 
 /// Resets the `WASM_MODULE_CACHE_HITS` telemetry counter.
