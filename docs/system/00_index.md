@@ -1,4 +1,4 @@
-# SliceVM Runtime: System Architecture & Internal Specification Index (`v0.15.0`)
+# SliceVM Runtime: System Architecture & Internal Specification Index (`v0.15.1`)
 
 Welcome to the **SliceVM Runtime** System Architecture and Internal Specification (`docs/system/`). Engineered in pure Rust (`edition = 2024`, `rust-version = "1.98.0"`, `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`), Slice replaces the legacy POSIX + monolithic V8/JSC assumptions of Node.js, Deno, and Bun with four orthogonal, tightly integrated Rust crates:
 
@@ -32,7 +32,7 @@ For user-facing documentation and guides, see **[`docs/README.md`](../README.md)
 
 ```
 +---------------------------------------------------------------------------------------------------+
-|                                   Slice (Nexus-JS) v0.15.0 Host                                    |
+|                                   Slice (Nexus-JS) v0.15.1 Host                                    |
 |                                                                                                   |
 |  +---------------------------------------------------------------------------------------------+  |
 |  |                    slice-sandbox: Zero-Trust OCap, SES & Hardware Boundary                  |  |
